@@ -276,17 +276,12 @@ func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, 
 	}
 }
 
-// startAgentWorkingAck marks an admitted turn as in-progress and reports whether a
-// reaction add was attempted and must be cleared when the turn exits.
-func (h *Handler) startAgentWorkingAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
-	if env.Event.ChannelType == slackChannelTypeIM {
-		if h.cfg.AgentSurfaceExclusiveAcks {
-			h.setAgentThinkingStatus(ctx, log, env, true)
-			return false
-		}
-		h.addAgentAck(ctx, log, env)
-		h.setAgentThinkingStatus(ctx, log, env, false)
-		return true
+// startAgentReactionAck marks an admitted turn with the reaction indicator when
+// this surface still uses one, and reports whether a reaction add was attempted
+// and must be cleared when the turn exits.
+func (h *Handler) startAgentReactionAck(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
+	if env.Event.ChannelType == slackChannelTypeIM && h.cfg.AgentSurfaceExclusiveAcks {
+		return false
 	}
 	h.addAgentAck(ctx, log, env)
 	return true
@@ -693,8 +688,13 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// Working-on-it ack: before the pane rollout flag flips, pane turns keep the
 	// reaction fallback plus best-effort native status; after it flips, pane turns use
 	// only Slack's native assistant status. Channel turns always use the 👀 reaction.
-	if h.startAgentWorkingAck(ctx, log, env) {
+	// Register reaction cleanup before attempting native status so a status-path panic
+	// cannot strand the fallback reaction.
+	if h.startAgentReactionAck(ctx, log, env) {
 		defer h.clearAgentAck(log, env)
+	}
+	if env.Event.ChannelType == slackChannelTypeIM {
+		h.setAgentThinkingStatus(ctx, log, env, h.cfg.AgentSurfaceExclusiveAcks)
 	}
 
 	threadKey := agentEventThreadKey(env)

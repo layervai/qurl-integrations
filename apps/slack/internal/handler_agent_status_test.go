@@ -106,13 +106,18 @@ func TestAgentStatus_BestEffortDoesNotFailTurn(t *testing.T) {
 	// setStatus is still cosmetic: a failure must be visible at Warn without failing
 	// the turn or dropping its reply.
 	fake := &fakeAssistantThreads{statusErr: errors.New("no assistant thread")}
-	h, posts, mu := newStatusHandler(t, fake, nil, fakeAgentLLM{reply: testAgentStillWorksReply}, true)
+	rec := &recordingReactions{}
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentStillWorksReply}, true)
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	h.processAgentEvent(context.Background(), logger,
 		env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?"))
 
+	adds, removes := rec.snapshot()
+	if len(adds) != 0 || len(removes) != 0 {
+		t.Fatalf("exclusive pane status failure must not fall back to reactions, got adds=%+v removes=%+v", adds, removes)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
@@ -152,5 +157,21 @@ func TestAgentStatus_DefaultPaneTurnKeepsReactionFallback(t *testing.T) {
 	logs := logBuf.String()
 	if !strings.Contains(logs, "level=DEBUG") || strings.Contains(logs, "level=WARN") {
 		t.Fatalf("default pane setStatus failure must stay Debug-only; log = %s", logs)
+	}
+}
+
+func TestAgentStatus_DefaultPaneReactionClearedOnStatusPanic(t *testing.T) {
+	// Default/pre-pane mode adds the reaction fallback before attempting native status.
+	// If that later status path panics, the reaction cleanup must already be registered.
+	fake := &fakeAssistantThreads{panicOnSetStatus: true}
+	rec := &recordingReactions{}
+	h, _, _ := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentStillWorksReply}, false)
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?"))
+
+	adds, removes := rec.snapshot()
+	if len(adds) != 1 || len(removes) != 1 {
+		t.Fatalf("a panicking default pane status path must still add then clear the reaction fallback, got adds=%d removes=%d", len(adds), len(removes))
 	}
 }

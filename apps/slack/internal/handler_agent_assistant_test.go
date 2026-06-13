@@ -12,11 +12,12 @@ import (
 // fakeAssistantThreads records SetTitle / SetSuggestedPrompts / SetStatus calls.
 // statusErr, when set, makes SetStatus fail (to prove the turn is best-effort).
 type fakeAssistantThreads struct {
-	mu        sync.Mutex
-	titles    []assistantTitleCall
-	prompts   []assistantPromptsCall
-	statuses  []assistantStatusCall
-	statusErr error
+	mu               sync.Mutex
+	titles           []assistantTitleCall
+	prompts          []assistantPromptsCall
+	statuses         []assistantStatusCall
+	statusErr        error
+	panicOnSetStatus bool
 }
 
 type assistantTitleCall struct{ channelID, threadTS, title string }
@@ -41,6 +42,9 @@ func (f *fakeAssistantThreads) SetSuggestedPrompts(_ context.Context, _, _, chan
 }
 
 func (f *fakeAssistantThreads) SetStatus(_ context.Context, _, _, channelID, threadTS, status string) error {
+	if f.panicOnSetStatus {
+		panic("assistant status panic")
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statuses = append(f.statuses, assistantStatusCall{channelID, threadTS, status})
