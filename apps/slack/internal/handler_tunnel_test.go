@@ -448,7 +448,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
 	}
-	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now)
+	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapTypedAttemptID(testSlackTriggerID, now))
 	if idempotencyKey != wantIdempotencyKey {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
@@ -1283,7 +1283,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if (*dmPosts)[0].enterpriseID != testEnterpriseID {
 		t.Fatalf("bootstrap DM enterpriseID = %q, want %q", (*dmPosts)[0].enterpriseID, testEnterpriseID)
 	}
-	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, modalCreatedAt)
+	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapModalAttemptID("V_test_tunnel", modalCreatedAt))
 	if idempotencyKey != wantIdempotencyKey {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
@@ -2751,14 +2751,20 @@ func TestTunnelBootstrapIdempotencyKeyUsesExactAttemptTime(t *testing.T) {
 	t.Parallel()
 
 	setupStartedAt := fixedNow
-	first := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
-	sameAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
+	attemptID := tunnelBootstrapTimeAttemptID("test-attempt", setupStartedAt)
+	first := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, attemptID)
+	sameAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, attemptID)
 	if first == "" || first != sameAttempt {
 		t.Fatalf("first key = %q, same-attempt key = %q, want same non-empty key", first, sameAttempt)
 	}
-	nextAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt.Add(time.Second))
+	nextAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapTimeAttemptID("test-attempt", setupStartedAt.Add(time.Second)))
 	if nextAttempt == first {
 		t.Fatalf("next-attempt key matched first key %q", first)
+	}
+	triggerAttempt := tunnelBootstrapTypedAttemptID(testSlackTriggerID, setupStartedAt)
+	triggerRetry := tunnelBootstrapTypedAttemptID(testSlackTriggerID, setupStartedAt.Add(time.Second))
+	if triggerAttempt != triggerRetry {
+		t.Fatalf("same trigger attempt IDs differed: %q vs %q", triggerAttempt, triggerRetry)
 	}
 }
 
@@ -2817,7 +2823,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v, want same non-empty retry key", idempotencyKeys)
 	}
-	nextAttemptKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now.Add(time.Second))
+	nextAttemptKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapTimeAttemptID("started", now.Add(time.Second)))
 	if nextAttemptKey == idempotencyKeys[0] {
 		t.Fatal("next-attempt tunnel bootstrap idempotency key matched current-attempt key")
 	}

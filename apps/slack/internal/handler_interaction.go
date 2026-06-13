@@ -296,8 +296,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		"view_id", payload.View.ID,
 	)
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
+	attemptID := tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, meta.TeamID, meta.EnterpriseID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, setupStartedAt)
+		h.processTunnelInstallWithAttempt(ctx, log, meta.TeamID, meta.EnterpriseID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, attemptID)
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
 		return

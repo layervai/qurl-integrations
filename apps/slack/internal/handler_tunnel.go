@@ -251,8 +251,9 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 	}
 
 	setupStartedAt := h.now()
+	attemptID := tunnelBootstrapTypedAttemptID(values.Get(fieldTriggerID), setupStartedAt)
 	h.runAsync(w, "tunnel_install", values, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, teamID, enterpriseID, channelID, userID, values.Get(fieldResponseURL), args, setupStartedAt)
+		h.processTunnelInstallWithAttempt(ctx, log, teamID, enterpriseID, channelID, userID, values.Get(fieldResponseURL), args, attemptID)
 	})
 }
 
@@ -490,7 +491,7 @@ type tunnelInstallBuild struct {
 // block never rendered doesn't stay live). On success the caller delivers
 // build.message and, if delivery is not confirmed, revokes build.key via
 // [revokeBootstrapKeyAfterInstallFailure].
-func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, setupStartedAt time.Time) (*tunnelInstallBuild, string, error) {
+func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, attemptID string) (*tunnelInstallBuild, string, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
@@ -539,7 +540,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		Purpose:        client.APIKeyPurposeTunnelBootstrap,
 		TunnelSlug:     args.Slug,
 		ExpiresIn:      tunnelBootstrapTTL,
-		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, setupStartedAt),
+		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
 	if err != nil {
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
@@ -579,12 +580,16 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 // later install-instructions delivery fails, the key is revoked and the admin gets
 // a best-effort discard notice.
 func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
+	h.processTunnelInstallWithAttempt(ctx, log, teamID, enterpriseID, channelID, userID, responseURL, args, tunnelBootstrapTimeAttemptID("started", setupStartedAt))
+}
+
+func (h *Handler) processTunnelInstallWithAttempt(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, attemptID string) {
 	if h.cfg.PostDM == nil {
 		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
 		_ = h.postResponse(log, responseURL, "qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
 		return
 	}
-	build, failMsg, err := h.buildTunnelInstall(ctx, log, teamID, channelID, userID, args, setupStartedAt)
+	build, failMsg, err := h.buildTunnelInstall(ctx, log, teamID, channelID, userID, args, attemptID)
 	if err != nil {
 		_ = h.postResponse(log, responseURL, failMsg)
 		return
@@ -661,13 +666,38 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
 }
 
-func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, attemptStartedAt time.Time) string {
-	// Key on the exact install attempt instead of a broad modal-TTL bucket. A
-	// retried typed command after a DM-delivery revoke must not replay the
-	// just-revoked key, while duplicate submissions from the same modal still
-	// share the modal-created timestamp that handleTunnelInstallSubmission passes.
-	attemptID := attemptStartedAt.UTC().Format(time.RFC3339Nano)
+func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug, attemptID string) string {
+	// Key on the exact Slack attempt instead of a broad modal-TTL bucket. Typed
+	// commands use Slack trigger_id when available, so Slack HTTP retries dedupe
+	// while a human re-run after a DM-delivery revoke gets a fresh key. Modal
+	// submissions use view.id, deliberately deduping same-modal resubmissions to
+	// avoid double-minting on Slack retries; processTunnelInstall revokes any key
+	// whose delivery is not confirmed.
+	attemptID = strings.TrimSpace(attemptID)
+	if attemptID == "" {
+		attemptID = "attempt:unknown"
+	}
 	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%s", slug, attemptID))
+}
+
+func tunnelBootstrapTypedAttemptID(triggerID string, startedAt time.Time) string {
+	triggerID = strings.TrimSpace(triggerID)
+	if triggerID != "" {
+		return "typed-trigger:" + triggerID
+	}
+	return tunnelBootstrapTimeAttemptID("typed-started", startedAt)
+}
+
+func tunnelBootstrapModalAttemptID(viewID string, createdAt time.Time) string {
+	viewID = strings.TrimSpace(viewID)
+	if viewID != "" {
+		return "modal-view:" + viewID
+	}
+	return tunnelBootstrapTimeAttemptID("modal-created", createdAt)
+}
+
+func tunnelBootstrapTimeAttemptID(prefix string, at time.Time) string {
+	return prefix + ":" + at.UTC().Format(time.RFC3339Nano)
 }
 
 func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) (string, error) {
