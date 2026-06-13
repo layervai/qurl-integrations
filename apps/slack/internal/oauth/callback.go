@@ -55,10 +55,21 @@ const (
 	// Same fresh-context rationale as persistTimeout: TimeoutHandler
 	// canceling mid-mint would orphan a key the bot can no longer revoke
 	// (no keyID to DELETE against).
-	mintTimeout         = 15 * time.Second
-	existingKeyTimeout  = 5 * time.Second
-	dmTimeout           = 5 * time.Second
-	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	mintTimeout                              = 15 * time.Second
+	existingKeyTimeout                       = 5 * time.Second
+	dmTimeout                                = 5 * time.Second
+	auth0TokenBodyLimit                      = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	setupBindingPersistFailureEvent          = "setup_binding_backed_persist_failure"
+	setupBindingPersistFailureOperatorAction = "rerun_setup_within_retry_window_then_cleanup_after_window"
+	// TODO(upstream-contract): mirrors qurl-service's
+	// QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT, which is the source of truth for
+	// binding replay lifetime. This is best-effort lockstep only; this repo has
+	// no shared or generated source for the upstream value. Source:
+	// layervai/qurl-service#904.
+	setupBindingRetryWindowHours = 24
+	// Cleanup starts when the same replay window closes; keep this aliased to
+	// the retry window unless qurl-service introduces a separate cleanup TTL.
+	setupBindingCleanupAfterWindowHours = setupBindingRetryWindowHours
 	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
 	// plus four non-secret characters. The reuse path derives this
 	// from stored plaintext because workspace_state stores api_key
@@ -680,7 +691,13 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
 		if minted.BindingBacked {
 			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-				"error", perr, "team_id", teamID, "key_id", keyID)
+				"event", setupBindingPersistFailureEvent,
+				"error", perr,
+				"team_id", teamID,
+				"key_id", keyID,
+				"retry_window_hours", setupBindingRetryWindowHours,
+				"cleanup_after_window_hours", setupBindingCleanupAfterWindowHours,
+				"operator_action", setupBindingPersistFailureOperatorAction)
 		} else {
 			slog.Error("oauth/callback persist failed — revoking legacy fallback key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 				"error", perr, "team_id", teamID, "key_id", keyID)
