@@ -646,12 +646,13 @@ func isDirectMessageChannel(channelID string) bool {
 //     top-level post would land out of sight. Intentional tradeoff: unlike an ephemeral
 //     this persists in that user's DM history; acceptable for a one-time-use credential
 //     scoped to the same user (it burns on first redemption regardless).
-//   - channel / group DM: a NORMAL post would leak the link to other members, so it stays
-//     an ephemeral scoped to the clicker (ephemerals render in multi-party conversations;
-//     the 1:1 IM above is the degenerate case where they don't). A group DM where the
-//     ephemeral somehow didn't render would hide the link there, not leak it — a known,
-//     rarely-reached boundary tracked in #725.
-func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, responseURL, text string) bool {
+//   - channel / group DM: a NORMAL post would leak the link to other members, so it goes
+//     out as a STANDALONE ephemeral scoped to the clicker via chat.postEphemeral (NOT the
+//     click's response_url, which the card-replace overwrites). Ephemerals render in
+//     multi-party conversations; the 1:1 IM above is the degenerate case where they don't.
+//     A group DM where the ephemeral somehow didn't render would hide the link there, not
+//     leak it — a known, rarely-reached boundary tracked in #725.
+func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, text string) bool {
 	if isDirectMessageChannel(payload.Channel.ID) {
 		if h.cfg.PostMessage == nil {
 			log.Warn("agent confirm: PostMessage seam is nil — cannot deliver the get result in a DM")
@@ -663,7 +664,17 @@ func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, p
 		}
 		return true
 	}
-	return h.postResponse(log, responseURL, text)
+	// channel / group DM: a standalone ephemeral via chat.postEphemeral (decoupled from the
+	// click's response_url, so the card-replace can't overwrite it), threaded to the card.
+	if h.cfg.PostEphemeral == nil {
+		log.Warn("agent confirm: PostEphemeral seam is nil — cannot deliver the get result in a channel")
+		return false
+	}
+	if err := h.cfg.PostEphemeral(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, pa.ThreadTS, payload.User.ID, text); err != nil {
+		log.Warn("agent confirm: channel ephemeral get delivery failed", "error", err)
+		return false
+	}
+	return true
 }
 
 // finalizeConfirmedAction executes a claimed action, delivers any sensitive get output
@@ -679,7 +690,7 @@ func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger,
 	// delivered stays true and the card is used as-is.
 	delivered := true
 	if res.ephemeralText != "" {
-		delivered = h.deliverConfirmPrivate(ctx, log, pa, payload, responseURL, res.ephemeralText)
+		delivered = h.deliverConfirmPrivate(ctx, log, pa, payload, res.ephemeralText)
 	}
 	_ = h.replaceOriginalResponse(log, responseURL, composeConfirmCard(res, delivered, pa.Asker, payload.User.ID))
 

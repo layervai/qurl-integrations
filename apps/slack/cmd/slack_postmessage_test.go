@@ -442,3 +442,68 @@ func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 		t.Fatalf("body %q should omit thread_ts when empty", rawBody)
 	}
 }
+
+// chat.postEphemeral shares the poster (token lookup + Grid fallback + rate-limit/oversized
+// handling) with chat.postMessage above, so these focus on the ephemeral-specific shape:
+// the `user` scoping field, thread omitempty, and ok:false surfacing (so the confirm flow's
+// delivered=false card-downgrade fires).
+
+func TestSlackPostEphemeralFuncPostsScopedThreadedPayload(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Channel  string `json:"channel"`
+		User     string `json:"user"`
+		ThreadTS string `json:"thread_ts"`
+		Text     string `json:"text"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	if err := post(context.Background(), "T1", "E1", mdTestChannel, "1700.0001", "U_clicker", "your link"); err != nil {
+		t.Fatalf("chat.postEphemeral: %v", err)
+	}
+	if gotBody.Channel != mdTestChannel || gotBody.User != "U_clicker" || gotBody.ThreadTS != "1700.0001" || gotBody.Text != "your link" {
+		t.Fatalf("body = %+v, want channel/user/thread_ts/text populated", gotBody)
+	}
+}
+
+func TestSlackPostEphemeralFuncOmitsEmptyThreadTS(t *testing.T) {
+	t.Parallel()
+	var rawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	if err := post(context.Background(), "T1", "", mdTestChannel, "", "U_clicker", "top-level"); err != nil {
+		t.Fatalf("chat.postEphemeral: %v", err)
+	}
+	if strings.Contains(rawBody, "thread_ts") {
+		t.Fatalf("body %q should omit thread_ts when empty", rawBody)
+	}
+}
+
+func TestSlackPostEphemeralFuncSurfacesSlackError(t *testing.T) {
+	t.Parallel()
+	// 200 + ok:false (e.g. user_not_in_channel) must surface as an error so the caller
+	// downgrades the card rather than claiming a delivery that didn't happen.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"user_not_in_channel"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostEphemeralFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	err := post(context.Background(), "T1", "", mdTestChannel, "", "U_clicker", "x")
+	if err == nil || !strings.Contains(err.Error(), "user_not_in_channel") {
+		t.Fatalf("error = %v, want user_not_in_channel surfaced", err)
+	}
+}

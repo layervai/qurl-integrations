@@ -114,6 +114,7 @@ type confirmHarness struct {
 	mem     *memAgentDDB
 	blocks  *blocksRecorder
 	posts   *[]capturedReply
+	eph     *[]capturedEphemeral
 	respURL string
 	bodies  *capturedResponseURL
 }
@@ -145,6 +146,7 @@ func newConfirmHarness(t *testing.T, adminUserID string) *confirmHarness {
 	qurlSrv := qurlBackendServer(t)
 
 	postText, posts, _ := capturingPostMessage()
+	postEph, eph, _ := capturingPostEphemeral()
 	blocks := &blocksRecorder{}
 	h := NewHandler(Config{
 		AgentLLM:            fakeAgentLLM{reply: "x"},
@@ -153,6 +155,7 @@ func newConfirmHarness(t *testing.T, adminUserID string) *confirmHarness {
 		AuthProvider:        &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
 		NewClient:           func(apiKey string) *client.Client { return client.New(qurlSrv.URL, apiKey, client.WithRetry(0)) },
 		PostMessage:         postText,
+		PostEphemeral:       postEph,
 		PostMessageBlocks:   blocks.fn(),
 		AgentConfirmEnabled: true,
 		// Per-workspace toggle defaults ON in the harness (conversation mode is
@@ -171,7 +174,7 @@ func newConfirmHarness(t *testing.T, adminUserID string) *confirmHarness {
 	}))
 	t.Cleanup(srv.Close)
 
-	return &confirmHarness{h: h, store: store, mem: mem, blocks: blocks, posts: posts, respURL: srv.URL, bodies: bodies}
+	return &confirmHarness{h: h, store: store, mem: mem, blocks: blocks, posts: posts, eph: eph, respURL: srv.URL, bodies: bodies}
 }
 
 func (hc *confirmHarness) seedPending(t *testing.T, pa *pendingAction) string {
@@ -309,34 +312,42 @@ func TestConfirm_GetApproveByAskerIsEphemeral(t *testing.T) {
 	// Approve their own get, and its result is a one-time-use credential delivered
 	// PRIVATELY to the clicker (== asker), never broadcast on the public card.
 	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the asker/clicker is Uother
-	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", Asker: "Uother", ChannelID: "C1"})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "on-call", Asker: "Uother", ChannelID: "C1", ThreadTS: "111.2"})
 	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
 
 	// The asker (a non-admin) reaching execute proves get isn't admin-gated (it claimed).
 	if !hc.claimed(id) {
 		t.Fatal("the asker (non-admin) must be able to approve+execute their own get")
 	}
-	// Two posts: the result ephemerally (replace_original false) + the neutral public
-	// card (replace_original true).
-	var ephemeral, card string
-	for _, b := range hc.waitForN(t, 2) {
-		if ro, text := parseResponse(t, b); ro {
-			card = text
-		} else {
-			ephemeral = text
-		}
+	// In a channel the token-bearing detail goes to the clicker via a STANDALONE
+	// chat.postEphemeral (scoped to them, threaded to the card) — NOT the response_url,
+	// which the card-replace would overwrite.
+	eph := *hc.eph
+	if len(eph) != 1 {
+		t.Fatalf("want exactly one channel ephemeral delivery, got %d: %+v", len(eph), eph)
 	}
-	if ephemeral == "" {
-		t.Fatal("the get detail must be delivered ephemerally to the clicker")
+	if eph[0].channel != "C1" || eph[0].userID != "Uother" || eph[0].threadTS != "111.2" || eph[0].text == "" {
+		t.Fatalf("channel ephemeral must target the channel/clicker/thread with the detail, got %+v", eph[0])
 	}
-	// This get FAILS (empty-channel resolve), so the public card is the neutral FAILURE
-	// copy — never the old unconditional "sent privately" (which claimed success on every
-	// failure), and never an echo of the token-bearing detail.
+	// Exactly one response_url POST — the neutral public card (replace_original true). This
+	// get FAILS (empty-channel resolve), so the card is the FAILURE copy: never the old
+	// unconditional "sent privately", and never an echo of the token-bearing detail.
+	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro {
+		t.Fatalf("the public card must replace the original, got ephemeral %q", card)
+	}
 	if !strings.Contains(card, agentConfirmGetFailedReply) {
 		t.Fatalf("a failed get must show the neutral failure card, got %q", card)
 	}
-	if strings.Contains(card, "staging") || strings.Contains(card, ephemeral) {
+	if strings.Contains(card, "staging") || strings.Contains(card, eph[0].text) {
 		t.Fatalf("public card leaked the get detail: %q", card)
+	}
+	hc.bodies.mu.Lock()
+	n := len(hc.bodies.bodies)
+	hc.bodies.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("a channel get must POST only the card to response_url, got %d bodies", n)
 	}
 }
 
@@ -425,21 +436,25 @@ func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 
 func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 	// The success payload (a one-time link) routes by surface: a normal in-thread message
-	// in a 1:1 DM, an ephemeral via response_url in a channel — never both, so a one-time
-	// link never lands in a channel's shared history.
+	// in a 1:1 DM (PostMessage), a STANDALONE ephemeral in a channel (chat.postEphemeral,
+	// NOT the click's response_url) — never both, so a one-time link never lands in shared
+	// history and the card-replace can't overwrite it.
 	const link = ":link: *qURL ready:* https://qurl.link/abc123 (one-time use)"
 
 	t.Run("1:1 DM posts the link as a normal in-thread message", func(t *testing.T) {
 		hc := newConfirmHarness(t, "")
 		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "D1", ThreadTS: "1700.9"}
 		payload := confirmPayload("T1", "D1", "Uasker", hc.respURL, "id")
-		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, hc.respURL, link) {
+		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("DM delivery should report success")
 		}
 		hc.h.Wait()
 		posts := *hc.posts
 		if len(posts) != 1 || posts[0].channel != "D1" || posts[0].threadTS != "1700.9" || posts[0].text != link {
 			t.Fatalf("the link must post to the DM channel+thread verbatim, got %+v", posts)
+		}
+		if len(*hc.eph) != 0 {
+			t.Fatalf("a DM delivery must not use chat.postEphemeral, got %+v", *hc.eph)
 		}
 		hc.bodies.mu.Lock()
 		n := len(hc.bodies.bodies)
@@ -449,19 +464,26 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 		}
 	})
 
-	t.Run("channel delivers the link as an ephemeral via response_url", func(t *testing.T) {
+	t.Run("channel delivers the link as a standalone ephemeral scoped to the clicker", func(t *testing.T) {
 		hc := newConfirmHarness(t, "")
-		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "C1"}
+		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "C1", ThreadTS: "1700.7"}
 		payload := confirmPayload("T1", "C1", "Uasker", hc.respURL, "id")
-		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, hc.respURL, link) {
+		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("channel delivery should report success")
 		}
-		ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
-		if ro || text != link {
-			t.Fatalf("channel delivery must be an ephemeral (replace_original false) carrying the link, got ro=%v text=%q", ro, text)
+		hc.h.Wait()
+		eph := *hc.eph
+		if len(eph) != 1 || eph[0].channel != "C1" || eph[0].userID != "Uasker" || eph[0].threadTS != "1700.7" || eph[0].text != link {
+			t.Fatalf("the link must post via chat.postEphemeral to the channel/clicker/thread verbatim, got %+v", eph)
 		}
 		if len(*hc.posts) != 0 {
 			t.Fatalf("channel delivery must not use PostMessage, got %+v", *hc.posts)
+		}
+		hc.bodies.mu.Lock()
+		n := len(hc.bodies.bodies)
+		hc.bodies.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("channel delivery must NOT touch the response_url (the card-replace would overwrite it), got %d bodies", n)
 		}
 	})
 
@@ -471,7 +493,7 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 		}})
 		pa := &pendingAction{ChannelID: "D1", ThreadTS: "t"}
 		payload := confirmPayload("T1", "D1", "Uasker", "", "id")
-		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, "", link) {
+		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("a failing in-DM PostMessage must report delivery failure so the card stops claiming success")
 		}
 	})
@@ -480,8 +502,28 @@ func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
 		h := NewHandler(Config{})
 		pa := &pendingAction{ChannelID: "D1"}
 		payload := confirmPayload("T1", "D1", "Uasker", "", "id")
-		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, "", link) {
+		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
 			t.Fatal("a nil PostMessage seam must report delivery failure")
+		}
+	})
+
+	t.Run("channel reports failure when chat.postEphemeral errors", func(t *testing.T) {
+		h := NewHandler(Config{PostEphemeral: func(context.Context, string, string, string, string, string, string) error {
+			return errors.New("user_not_in_channel")
+		}})
+		pa := &pendingAction{ChannelID: "C1", ThreadTS: "t"}
+		payload := confirmPayload("T1", "C1", "Uasker", "", "id")
+		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
+			t.Fatal("a failing chat.postEphemeral must report delivery failure")
+		}
+	})
+
+	t.Run("channel reports failure when the PostEphemeral seam is nil", func(t *testing.T) {
+		h := NewHandler(Config{})
+		pa := &pendingAction{ChannelID: "C1"}
+		payload := confirmPayload("T1", "C1", "Uasker", "", "id")
+		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, link) {
+			t.Fatal("a nil PostEphemeral seam must report delivery failure")
 		}
 	})
 }
