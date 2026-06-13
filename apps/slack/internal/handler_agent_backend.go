@@ -58,6 +58,16 @@ type agentBackend struct {
 	resourcesOnce sync.Once
 	resources     []client.Resource
 	resourcesErr  error
+
+	// Per-turn memo of the channel's alias bindings (GetChannelPolicy), shared by
+	// list_aliases and list_resources. list_resources joins it (rid -> $channelAlias) to
+	// name resources that carry no intrinsic alias/slug — e.g. an agent-protected URL,
+	// whose handle lives here, not on the qURL resource. Mirrors allowedOnce: same
+	// channel_policies row, a different projection (one extra GetItem/turn, negligible
+	// against the workspace resource scan).
+	policyOnce    sync.Once
+	policyEntries []slackdata.PolicyEntry
+	policyErr     error
 }
 
 // newAgentBackend builds the backend from the handler's authenticated-client
@@ -90,6 +100,16 @@ func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, a
 		b.resources, b.resourcesErr = collectChannelResources(ctx, c, allowed)
 	})
 	return b.resources, b.resourcesErr
+}
+
+// channelPolicy returns the channel's alias bindings, fetched once and memoized for the
+// turn (mirrors channelAllowed). Shared by list_aliases (the binding list) and
+// list_resources (the rid -> $channelAlias label join).
+func (b *agentBackend) channelPolicy(ctx context.Context, tc *agent.TurnContext) ([]slackdata.PolicyEntry, error) {
+	b.policyOnce.Do(func() {
+		b.policyEntries, b.policyErr = b.store.GetChannelPolicy(ctx, tc.TeamID, tc.ChannelID)
+	})
+	return b.policyEntries, b.policyErr
 }
 
 // fail logs a backend read error for operators and returns it wrapped with op
@@ -128,9 +148,21 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 	if len(resources) == 0 {
 		return "No resources are protected in this channel yet.", nil
 	}
+	// Channel alias bindings name resources that carry no intrinsic alias/slug (e.g.
+	// agent-protected URLs). Build rid -> first bound channel alias.
+	entries, err := b.channelPolicy(ctx, tc)
+	if err != nil {
+		return b.fail("list resources: aliases", err)
+	}
+	channelAlias := make(map[string]string, len(entries))
+	for i := range entries {
+		if _, ok := channelAlias[entries[i].ResourceID]; !ok {
+			channelAlias[entries[i].ResourceID] = entries[i].Alias
+		}
+	}
 	lines := make([]string, 0, len(resources))
 	for i := range resources {
-		lines = append(lines, formatResourceLine(&resources[i]))
+		lines = append(lines, formatResourceLine(&resources[i], channelAlias[resources[i].ResourceID]))
 	}
 	sort.Strings(lines)
 	return "Resources reachable in this channel:\n" + strings.Join(lines, "\n"), nil
@@ -180,7 +212,7 @@ func (b *agentBackend) ListAliases(ctx context.Context, tc *agent.TurnContext) (
 	if b.store == nil {
 		return agentBackendUnconfigured, nil
 	}
-	entries, err := b.store.GetChannelPolicy(ctx, tc.TeamID, tc.ChannelID)
+	entries, err := b.channelPolicy(ctx, tc)
 	if err != nil {
 		return b.fail("list aliases", err)
 	}
@@ -270,14 +302,20 @@ func (b *agentBackend) Quota(ctx context.Context, tc *agent.TurnContext) (string
 // that collectChannelResources pages through to find the channel's reachable set.
 const listResourcesPageLimit = 100
 
-// formatResourceLine renders one resource for the model: alias-or-slug, display
-// name, and type. The internal resource id is deliberately OMITTED — it's opaque
-// plumbing customers don't care about, and the model echoes tool output verbatim, so
-// the only reliable way to keep `r_…` out of a user-facing reply is to keep it out of
-// the model's context. Resources are addressed by $alias/$slug everywhere else. Kept
-// compact so several fit the context cheaply.
-func formatResourceLine(r *client.Resource) string {
-	label := r.Alias
+// formatResourceLine renders one resource for the model: a $handle (channel alias,
+// else the resource's intrinsic alias, else its slug), display name, and type. The
+// internal resource id is deliberately OMITTED — it's opaque plumbing customers don't
+// care about, and the model echoes tool output verbatim, so the only reliable way to
+// keep `r_…` out of a user-facing reply is to keep it out of the model's context.
+// channelAlias is the in-channel binding and wins: it's the handle members type after
+// /qurl get, and the ONLY handle for an agent-protected URL (no intrinsic alias, no
+// slug). Pass "" when the channel doesn't bind this resource. Kept compact so several
+// fit the context cheaply.
+func formatResourceLine(r *client.Resource, channelAlias string) string {
+	label := channelAlias
+	if label == "" {
+		label = r.Alias
+	}
 	if label == "" {
 		label = r.Slug
 	}
