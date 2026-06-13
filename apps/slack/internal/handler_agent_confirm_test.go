@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -326,15 +327,16 @@ func TestConfirm_GetApproveByAskerIsEphemeral(t *testing.T) {
 		}
 	}
 	if ephemeral == "" {
-		t.Fatal("the get result must be delivered ephemerally to the clicker")
+		t.Fatal("the get detail must be delivered ephemerally to the clicker")
 	}
-	if !strings.Contains(card, "privately") {
-		t.Fatalf("public card must be the neutral 'sent privately' message, got %q", card)
+	// This get FAILS (empty-channel resolve), so the public card is the neutral FAILURE
+	// copy — never the old unconditional "sent privately" (which claimed success on every
+	// failure), and never an echo of the token-bearing detail.
+	if !strings.Contains(card, agentConfirmGetFailedReply) {
+		t.Fatalf("a failed get must show the neutral failure card, got %q", card)
 	}
-	// The public card must not leak the get result (a link on success, token details
-	// on failure — here the empty-channel resolve error, which names the token).
 	if strings.Contains(card, "staging") || strings.Contains(card, ephemeral) {
-		t.Fatalf("public card leaked the get result: %q", card)
+		t.Fatalf("public card leaked the get detail: %q", card)
 	}
 }
 
@@ -381,13 +383,185 @@ func TestConfirm_GetNonAskerRejectDenied(t *testing.T) {
 	}
 }
 
+func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
+	// In a 1:1 DM the get's sensitive output (here the failure detail; a link on success)
+	// must be delivered as a NORMAL message via PostMessage — ephemerals don't render in a
+	// DM — and into the CARD'S OWN THREAD (pa.ThreadTS): the assistant pane is a threaded
+	// view, so a top-level post would land out of sight (the original "I never saw the
+	// link" bug). The public response_url carries only the neutral card; the token-bearing
+	// detail never touches it.
+	hc := newConfirmHarness(t, "Uadmin")
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "r", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	// The sensitive detail went via PostMessage, into the card's channel+thread.
+	posts := *hc.posts
+	if len(posts) != 1 {
+		t.Fatalf("want exactly one in-DM PostMessage delivery, got %d: %+v", len(posts), posts)
+	}
+	if posts[0].channel != "D1" || posts[0].threadTS != "1700000000.5" {
+		t.Fatalf("in-DM delivery must target the card's channel+thread, got channel=%q thread=%q", posts[0].channel, posts[0].threadTS)
+	}
+	if posts[0].text == "" {
+		t.Fatal("in-DM delivery carried no detail text")
+	}
+	// Exactly one response_url POST — the card — and NO ephemeral (a DM ephemeral would
+	// silently not render; that was the bug).
+	hc.bodies.mu.Lock()
+	n := len(hc.bodies.bodies)
+	hc.bodies.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("a DM get must POST only the card to response_url (no ephemeral), got %d bodies", n)
+	}
+	ro, card := parseResponse(t, hc.waitForN(t, 1)[0])
+	if !ro {
+		t.Fatalf("the DM card must replace the original, got ephemeral %q", card)
+	}
+	if strings.Contains(card, "staging") || strings.Contains(card, posts[0].text) {
+		t.Fatalf("public card leaked the get detail: %q", card)
+	}
+}
+
+func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
+	// The success payload (a one-time link) routes by surface: a normal in-thread message
+	// in a 1:1 DM, an ephemeral via response_url in a channel — never both, so a one-time
+	// link never lands in a channel's shared history.
+	const link = ":link: *qURL ready:* https://qurl.link/abc123 (one-time use)"
+
+	t.Run("1:1 DM posts the link as a normal in-thread message", func(t *testing.T) {
+		hc := newConfirmHarness(t, "")
+		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "D1", ThreadTS: "1700.9"}
+		payload := confirmPayload("T1", "D1", "Uasker", hc.respURL, "id")
+		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, hc.respURL, link) {
+			t.Fatal("DM delivery should report success")
+		}
+		hc.h.Wait()
+		posts := *hc.posts
+		if len(posts) != 1 || posts[0].channel != "D1" || posts[0].threadTS != "1700.9" || posts[0].text != link {
+			t.Fatalf("the link must post to the DM channel+thread verbatim, got %+v", posts)
+		}
+		hc.bodies.mu.Lock()
+		n := len(hc.bodies.bodies)
+		hc.bodies.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("a DM delivery must not POST to response_url, got %d", n)
+		}
+	})
+
+	t.Run("channel delivers the link as an ephemeral via response_url", func(t *testing.T) {
+		hc := newConfirmHarness(t, "")
+		pa := &pendingAction{Action: agent.ActionGet, ChannelID: "C1"}
+		payload := confirmPayload("T1", "C1", "Uasker", hc.respURL, "id")
+		if !hc.h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, hc.respURL, link) {
+			t.Fatal("channel delivery should report success")
+		}
+		ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+		if ro || text != link {
+			t.Fatalf("channel delivery must be an ephemeral (replace_original false) carrying the link, got ro=%v text=%q", ro, text)
+		}
+		if len(*hc.posts) != 0 {
+			t.Fatalf("channel delivery must not use PostMessage, got %+v", *hc.posts)
+		}
+	})
+
+	t.Run("DM reports failure when PostMessage errors", func(t *testing.T) {
+		h := NewHandler(Config{PostMessage: func(context.Context, string, string, string, string, string) error {
+			return errors.New("boom")
+		}})
+		pa := &pendingAction{ChannelID: "D1", ThreadTS: "t"}
+		payload := confirmPayload("T1", "D1", "Uasker", "", "id")
+		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, "", link) {
+			t.Fatal("a failing in-DM PostMessage must report delivery failure so the card stops claiming success")
+		}
+	})
+
+	t.Run("DM reports failure when the PostMessage seam is nil", func(t *testing.T) {
+		h := NewHandler(Config{})
+		pa := &pendingAction{ChannelID: "D1"}
+		payload := confirmPayload("T1", "D1", "Uasker", "", "id")
+		if h.deliverConfirmPrivate(context.Background(), slog.Default(), pa, payload, "", link) {
+			t.Fatal("a nil PostMessage seam must report delivery failure")
+		}
+	})
+}
+
+func TestComposeConfirmCard(t *testing.T) {
+	const (
+		asker    = "Uasker"
+		approver = "Uapprover"
+		link     = ":link: qURL ready: https://qurl.link/abc"
+	)
+	cases := []struct {
+		name      string
+		res       actionResult
+		delivered bool
+		wantCard  string // the card must contain this
+		notText   string // the card must NOT contain this (no leak)
+	}{
+		{
+			// The central guarantee: mint succeeded (DeliveredReply + link) but the private
+			// delivery failed → the card must stop claiming success and never echo the link.
+			name:      "successful get whose delivery failed downgrades to delivery-failed",
+			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			delivered: false,
+			wantCard:  agentConfirmGetDeliveryFailedReply,
+			notText:   link,
+		},
+		{
+			name:      "successful get delivered keeps the success card and never echoes the link",
+			res:       actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
+			delivered: true,
+			wantCard:  agentConfirmGetDeliveredReply,
+			notText:   link,
+		},
+		{
+			name:      "failed get keeps the failure card even when its detail was not delivered",
+			res:       actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: ":warning: staging", attributed: true},
+			delivered: false,
+			wantCard:  agentConfirmGetFailedReply,
+			notText:   "staging",
+		},
+		{
+			name:      "non-get executed action is untouched by the delivery flag",
+			res:       actionResult{cardText: "revoked $staging", attributed: true},
+			delivered: true,
+			wantCard:  "revoked $staging",
+		},
+		{
+			name:      "pre-execution rejection stays byte-exact (unattributed)",
+			res:       actionResult{cardText: agentConfirmInvalidAliasReply},
+			delivered: true,
+			wantCard:  agentConfirmInvalidAliasReply,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := composeConfirmCard(c.res, c.delivered, asker, approver)
+			if !strings.Contains(got, c.wantCard) {
+				t.Fatalf("card = %q, want to contain %q", got, c.wantCard)
+			}
+			if c.notText != "" && strings.Contains(got, c.notText) {
+				t.Fatalf("card leaked %q: %q", c.notText, got)
+			}
+			if c.res.attributed && !strings.Contains(got, asker) {
+				t.Fatalf("an executed (attributed) card must carry the attribution footer, got %q", got)
+			}
+			if !c.res.attributed && got != c.wantCard {
+				t.Fatalf("an unattributed card must stay byte-exact, got %q want %q", got, c.wantCard)
+			}
+		})
+	}
+}
+
 func TestPostAgentConfirm_SnapshotsAsker(t *testing.T) {
 	// The pending snapshot must carry the asker (env.Event.User) so the click can
 	// enforce asker-only for a get.
 	hc := newConfirmHarness(t, "")
 	prop := &agent.Proposal{Action: agent.ActionGet, Token: "staging", Reason: "r", Summary: "Get a link to $staging."}
-	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "Uasker", TS: "100.1"}}
-	hc.h.postAgentConfirm(slog.Default(), env, "100.1", prop)
+	const threadTS = "100.1"
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", User: "Uasker", TS: threadTS}}
+	hc.h.postAgentConfirm(slog.Default(), env, threadTS, prop)
 
 	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", hc.pendingID(t, "T1"))
 	if err != nil || !found {
@@ -399,6 +573,11 @@ func TestPostAgentConfirm_SnapshotsAsker(t *testing.T) {
 	}
 	if pa.Asker != "Uasker" {
 		t.Fatalf("snapshot Asker = %q, want Uasker", pa.Asker)
+	}
+	// The thread the card is posted into is snapshotted too, so the get's link can be
+	// delivered back into that exact thread (the assistant pane is a threaded view).
+	if pa.ThreadTS != threadTS {
+		t.Fatalf("snapshot ThreadTS = %q, want %q", pa.ThreadTS, threadTS)
 	}
 }
 
