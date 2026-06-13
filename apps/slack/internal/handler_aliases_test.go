@@ -53,7 +53,7 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: testResourceIDFix, testKeyTargetURL: "https://prod.example.com"},
+			{testKeyResourceID: testResourceIDFix, testKeyTargetURL: "https://prod.example.com/?mention=<@U123>&mode=raw"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
@@ -64,9 +64,13 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 		t.Errorf("async reply missing header: %q", async)
 	}
 	// Legacy URL binding: the resource has a target_url and no slug, so the
-	// line reads "<url> (legacy URL) → `$<alias>`".
-	if !strings.Contains(async, "https://prod.example.com (legacy URL) → `$prod-db`") {
+	// line reads "<url> (legacy URL) → `$<alias>`" with the target escaped for
+	// Slack mrkdwn.
+	if !strings.Contains(async, "https://prod.example.com/?mention=&lt;@U123&gt;&amp;mode=raw (legacy URL) → `$prod-db`") {
 		t.Errorf("async reply missing prod-db line: %q", async)
+	}
+	if strings.Contains(async, "<@U123>") {
+		t.Errorf("async reply rendered raw Slack control sequence: %q", async)
 	}
 }
 
@@ -168,15 +172,18 @@ func TestHandleAliases_ShowsDisplayName(t *testing.T) {
 	})
 	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		writeResourceListFixture(t, w, []map[string]any{
-			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops jump host"},
+			{testKeyResourceID: resID, testKeyType: client.ResourceTypeTunnel, testKeySlug: "ops-bastion", testKeyDescription: "Ops <!channel> <@U123> & *jump* host"},
 		}, "", false)
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "`$ops-bastion` — Ops jump host → `$bastion`") {
+	if !strings.Contains(async, "`$ops-bastion` — Ops &lt;!channel&gt; &lt;@U123&gt; &amp; ∗jump∗ host → `$bastion`") {
 		t.Errorf("aliases reply missing id + Display Name + alias mapping: %q", async)
+	}
+	if strings.Contains(async, "<!channel>") || strings.Contains(async, "<@U123>") {
+		t.Errorf("aliases reply rendered raw Slack control sequence: %q", async)
 	}
 }
 

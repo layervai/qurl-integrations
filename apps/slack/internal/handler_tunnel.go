@@ -716,7 +716,7 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	// description shouldn't dangle an em-dash).
 	if tunnelDisplayName != "" {
 		b.WriteString(" — ")
-		b.WriteString(tunnelDisplayName)
+		b.WriteString(escapeMrkdwnText(tunnelDisplayName))
 	}
 	b.WriteString(" is ready to install.\n")
 	b.WriteString(aliasStatus)
