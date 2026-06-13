@@ -319,6 +319,9 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if workspaceID == "" {
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	for {
 		now := p.nowOrDefault()

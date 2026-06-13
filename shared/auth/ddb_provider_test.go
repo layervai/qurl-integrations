@@ -318,7 +318,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
-	t.Run("cache hit ignores canceled context", func(t *testing.T) {
+	t.Run("cache hit honors canceled context without extra DDB", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_cached_after_cancel")},
 		}
@@ -339,11 +339,11 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		got, err = p.APIKey(ctx, testTeamID)
-		if err != nil {
-			t.Fatalf("cached APIKey with canceled context: %v", err)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cached APIKey with canceled context err = %v, want context.Canceled", err)
 		}
-		if got != "lv_live_cached_after_cancel" {
-			t.Fatalf("cached got %q want %q", got, "lv_live_cached_after_cancel")
+		if got != "" {
+			t.Fatalf("cached APIKey with canceled context got %q want empty", got)
 		}
 		if ddb.getCalls != 1 {
 			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
