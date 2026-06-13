@@ -140,13 +140,13 @@ type DDBProvider struct {
 	TableName string
 	Encryptor FieldEncryptor
 
-	// Cache successful APIKey lookups at the DDB/decrypt boundary, following
-	// the Slack bot-token cache pattern: per-workspace in-flight fills,
-	// generation-guarded invalidation, and inline expiry sweeps. The cache is
-	// process-local, so sibling instances can keep a decrypted key, including a
-	// revoked key, until the five-minute TTL from #263 expires; stricter
-	// cross-instance invalidation is tracked in #766. The decrypted key remains
-	// in heap memory for that TTL as the accepted KMS/latency trade-off.
+	// Cache successful APIKey lookups at the DDB/decrypt boundary with
+	// per-workspace in-flight fills, generation-guarded invalidation, and inline
+	// expiry sweeps. The cache is process-local, so sibling instances can keep a
+	// decrypted key, including a revoked key, until the five-minute TTL from #263
+	// expires; stricter cross-instance invalidation is tracked in #766. The
+	// decrypted key remains in heap memory for that TTL as the accepted
+	// KMS/latency trade-off.
 	// SetAPIKey seeds this process after a successful write. DeleteAPIKey evicts
 	// this process and forces strongly-consistent refills for one TTL so a
 	// same-process eventually-consistent post-delete read cannot re-cache the
@@ -157,8 +157,8 @@ type DDBProvider struct {
 	// generations. Generation entries are retained after invalidation even after
 	// an in-flight slot is deleted: that slot deletion detaches the old owner,
 	// which may still finish later, so resetting the generation to zero could let
-	// it cache an old key. The map only grows for workspaces that rotate or
-	// disconnect in this process, matching the sibling Slack token lookup.
+	// it cache an old key. The map grows for each workspace seeded or
+	// invalidated in this process and is retained for the process lifetime.
 	apiKeyCacheMu         sync.Mutex
 	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
 	apiKeyCacheGeneration map[string]uint64
@@ -461,6 +461,9 @@ func (p *DDBProvider) finishAPIKeyLookup(workspaceID string, call *apiKeyLookupC
 	if result.err == nil && p.apiKeyCacheGeneration[workspaceID] == generation {
 		p.cacheAPIKey(workspaceID, result.apiKey, now)
 	}
+	// Waiters already attached to this fill receive its result even if a
+	// concurrent SetAPIKey/DeleteAPIKey invalidated the generation. The stale
+	// value is not cached, so only those already in-flight callers can observe it.
 	call.apiKeyLookupResult = result
 	if p.apiKeyLookupInFlight[workspaceID] == call {
 		delete(p.apiKeyLookupInFlight, workspaceID)
