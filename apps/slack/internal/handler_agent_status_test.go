@@ -70,7 +70,7 @@ func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 
 func TestAgentStatus_NotSetForAppMention(t *testing.T) {
 	// app_mention is a channel message, not an assistant thread — setStatus has nothing
-	// to scope to there, so the channel @-mention path keeps the 👀 ack and sets no status.
+	// to scope to there, so the channel @-mention path keeps the eyes ack and sets no status.
 	fake := &fakeAssistantThreads{}
 	rec := &recordingReactions{}
 	h, _, _ := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: "ok"}, true)

@@ -273,6 +273,7 @@ func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, 
 			return
 		}
 		log.Warn("agent: set assistant pane status failed in exclusive mode", "error", err)
+		return
 	}
 }
 
@@ -687,7 +688,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 
 	// Working-on-it ack: before the pane rollout flag flips, pane turns keep the
 	// reaction fallback plus best-effort native status; after it flips, pane turns use
-	// only Slack's native assistant status. Channel turns always use the 👀 reaction.
+	// only Slack's native assistant status. Channel turns always use the eyes reaction.
 	// Register reaction cleanup before attempting native status so a status-path panic
 	// cannot strand the fallback reaction.
 	if h.startAgentReactionAck(ctx, log, env) {
