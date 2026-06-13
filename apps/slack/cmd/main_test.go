@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -354,10 +355,11 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 	cases := []struct {
 		name        string
 		raw         string
+		unset       bool
 		want        int
 		wantErrText string
 	}{
-		{name: "unset defaults to upstream contract", want: oauth.DefaultSetupBindingReplayWindowHours},
+		{name: "unset defaults to upstream contract", unset: true, want: oauth.DefaultSetupBindingReplayWindowHours},
 		{name: "whole hour override", raw: "12h", want: 12},
 		{name: "trimmed whole hour override", raw: " 48h ", want: 48},
 		{name: "malformed", raw: "24", wantErrText: "canonical Nh form"},
@@ -370,7 +372,25 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envQURLBindingTTLContract, tc.raw)
+			if tc.unset {
+				oldValue, hadOldValue := os.LookupEnv(envQURLBindingTTLContract)
+				if err := os.Unsetenv(envQURLBindingTTLContract); err != nil {
+					t.Fatalf("unset %s: %v", envQURLBindingTTLContract, err)
+				}
+				t.Cleanup(func() {
+					if hadOldValue {
+						if err := os.Setenv(envQURLBindingTTLContract, oldValue); err != nil {
+							t.Fatalf("restore %s: %v", envQURLBindingTTLContract, err)
+						}
+						return
+					}
+					if err := os.Unsetenv(envQURLBindingTTLContract); err != nil {
+						t.Fatalf("restore unset %s: %v", envQURLBindingTTLContract, err)
+					}
+				})
+			} else {
+				t.Setenv(envQURLBindingTTLContract, tc.raw)
+			}
 			got, err := readSetupBindingReplayWindowHours()
 			if tc.wantErrText != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {

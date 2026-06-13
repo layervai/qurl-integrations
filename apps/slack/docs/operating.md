@@ -53,12 +53,13 @@ at the OAuth-callback bind layer.
   rerun `/qurl setup <email>` for the same workspace and qURL account within
   qurl-service's configured external-binding idempotency window. qurl-service
   currently owns a 24-hour default (`QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT`,
-  source: layervai/qurl-service#904); Slack emits the same default unless
-  `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` is set to a canonical positive
-  whole-hour duration such as `24h` at startup. qURL can replay the setup key during that
-  window. After the window expires, if the stored Slack key is lost/revoked, or
-  if the admin abandons setup, use qURL account/API-key management or operator
-  tooling to revoke the unused workspace key before retrying; self-service
+  source: layervai/qurl-service#904). The Slack task emits the same default
+  unless its own `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` environment variable is
+  set to a canonical positive whole-hour duration such as `24h` at startup.
+  qURL can replay the setup key during that window. After the window expires,
+  if the stored Slack key is lost/revoked, or if the admin abandons setup, use
+  qURL account/API-key management or operator tooling to revoke the unused
+  workspace key before retrying; self-service
   rotation/recovery for that path is tracked in layervai/qurl-service#910.
   Rerunning setup is intentionally not a healthy-key rotation or qURL-account
   switch command; use the qURL dashboard / API-key management surface or
