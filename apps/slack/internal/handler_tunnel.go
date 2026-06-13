@@ -916,13 +916,14 @@ func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunn
 	if req == nil || req.agentAudit == nil {
 		return
 	}
-	// Rejected modal submits are still on Slack's view_submission ack path. Keep
-	// the best-effort, 5s-capped audit out of band with h.Go instead of the
-	// saturated worker pool, so a slow audit store cannot consume Slack's short
-	// modal response window. This path is deliberately not pool-bounded: it is
-	// behind Slack request signing plus modal metadata/admin gates, and only
-	// rejection branches use it. Its peak concurrency is therefore however many
-	// signed rejections arrive within the audit write timeout window.
+	// Modal-submit audits are best-effort, 5s-capped, and intentionally run with
+	// h.Go instead of the saturated worker pool: rejection paths must preserve
+	// Slack's short modal response window, while accepted paths add the audit
+	// before the worker returns so shutdown cannot miss it and then let the
+	// worker slot release while the audit write completes. This path is
+	// deliberately not pool-bounded; it is behind Slack request signing plus
+	// modal metadata/admin gates, so peak concurrency is signed agent-origin
+	// submits within the audit write timeout window.
 	h.Go(func() {
 		h.recordTunnelInstallAgentAudit(log, req, result)
 	})
