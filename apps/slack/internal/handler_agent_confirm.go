@@ -35,7 +35,14 @@ const (
 	agentConfirmCanceledReply       = "Canceled — nothing was changed."
 	agentConfirmUnsupportedReply    = "I can't apply that kind of change yet."
 	agentConfirmGetDeliveredReply   = "Handled — the access link was sent privately to the approver."
-	agentConfirmFailedReply         = "Something went wrong applying that. Please try again, or use a `/qurl` command."
+	// agentConfirmGetFailedReply is the get's neutral FAILURE card (mint/resolve failed).
+	// It must NOT echo the LLM-distilled token onto the public card and must NOT claim
+	// "sent privately" — the detailed reason is delivered privately instead.
+	agentConfirmGetFailedReply = "Couldn't generate the access link. Check the details I sent you, or ask me again."
+	// agentConfirmGetDeliveryFailedReply covers a SUCCESSFUL mint whose private delivery
+	// failed: the card must not claim success when the user received nothing.
+	agentConfirmGetDeliveryFailedReply = "Generated the access link, but couldn't deliver it here. Ask me again."
+	agentConfirmFailedReply            = "Something went wrong applying that. Please try again, or use a `/qurl` command."
 	// agentAttributionAgentName names the actor in an executed action's attribution
 	// footer — the product's user-facing agent name, never "bot".
 	agentAttributionAgentName = "qURL Secure Access Agent"
@@ -75,6 +82,11 @@ type pendingAction struct {
 	URL       string           `json:"url,omitempty"`    // target URL for protect-url
 	Asker     string           `json:"asker,omitempty"`  // Slack user who requested the turn; get is asker-only (see processAgentConfirm)
 	ChannelID string           `json:"channel_id"`
+	// ThreadTS is the thread the confirm card was posted into (empty for a top-level
+	// card). The get's private delivery posts the link back into THIS thread so it
+	// lands where the user is looking — the assistant pane is a threaded view, so a
+	// top-level post would miss it. See deliverConfirmPrivate.
+	ThreadTS string `json:"thread_ts,omitempty"`
 }
 
 // confirmValidAliasBind validates a bare (no leading "$") alias + target — as the
@@ -273,6 +285,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		URL:       prop.URL,
 		Asker:     env.Event.User, // the user who requested this turn — get is asker-only
 		ChannelID: env.Event.Channel,
+		ThreadTS:  threadTS, // deliver the get's link back into the card's own thread
 	})
 	if err != nil {
 		log.Error("agent confirm: marshal pending action failed", "error", err)
@@ -469,34 +482,7 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		h.openAgentConnectorModal(ctx, log, payload, triggerReceivedAt)
 		return
 	}
-	res := h.executeAgentAction(ctx, log, &pa, payload)
-	if res.ephemeralText != "" {
-		// Sensitive output (a one-time link) goes PRIVATELY to the clicker — an
-		// ephemeral on the same response_url — never on the public card. No
-		// attribution footer here: it's a self-delivered credential, and the public
-		// card already carries the attribution.
-		_ = h.postResponse(log, responseURL, res.ephemeralText)
-	}
-	// The public terminal card for an EXECUTED action carries the on-behalf
-	// attribution: who requested the change, who approved it, and that the agent
-	// performed it (#662). Pre-execution rejections aren't attributed (res.attributed
-	// is false), so their generic copy stays byte-exact.
-	card := res.cardText
-	if res.attributed {
-		card = agentConfirmAttributedCard(res.cardText, pa.Asker, payload.User.ID)
-	}
-	_ = h.replaceOriginalResponse(log, responseURL, card)
-
-	// Best-effort: record the EXECUTED mutation for the App Home review surface, keyed
-	// to the approver who ran it. Done AFTER the user-visible card swap so the audit
-	// PutItem adds no latency to it. Only attributed results invoked a mutation core (a
-	// pre-execution rejection records nothing); a store failure never affects the
-	// already-delivered outcome. NOTE: protect-connector never reaches here — it routes
-	// to the modal (confirmModalRouted, above) and its execution + audit are deferred to
-	// the modal-submit path; tracked in #701.
-	if res.attributed {
-		h.recordAgentAudit(ctx, log, payload, &pa, res.cardText)
-	}
+	h.finalizeConfirmedAction(ctx, log, &pa, payload, responseURL)
 }
 
 // agentConfirmAttributedCard appends an attribution footer to an executed
@@ -635,6 +621,80 @@ type actionResult struct {
 	attributed bool
 }
 
+// isDirectMessageChannel reports whether a Slack conversation ID is a 1:1 direct
+// message. Slack prefixes conversation IDs by type: D = 1:1 IM, C = channel, G =
+// private channel / group DM. A 1:1 DM is the only surface where a plain message is
+// inherently private (just the user and the app) AND where Slack won't render an
+// ephemeral — so it's the one place the confirm flow delivers the sensitive get output
+// as a normal message instead of an ephemeral. The events path detects an IM by the
+// typed ChannelType (slackChannelTypeIM), but a block_actions payload carries only
+// channel.id, so the interaction layer keys off the ID prefix instead.
+func isDirectMessageChannel(channelID string) bool {
+	return strings.HasPrefix(channelID, "D")
+}
+
+// deliverConfirmPrivate delivers a get's sensitive output (the one-time link on success,
+// the failure detail otherwise) PRIVATELY and in the SAME conversation the user approved
+// in — no context switch. In a 1:1 DM the conversation is already private (just the user
+// and the app) and ephemerals don't render there, so it posts a normal message into the
+// card's own thread (pa.ThreadTS) — the assistant pane is a threaded view, so a top-level
+// post would land out of sight. In a channel or group DM it stays an ephemeral scoped to
+// the clicker, so a one-time link never enters shared history. Reports whether delivery
+// succeeded, so the caller can stop a success card from claiming an undelivered result.
+func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, responseURL, text string) bool {
+	if isDirectMessageChannel(payload.Channel.ID) {
+		if h.cfg.PostMessage == nil {
+			log.Warn("agent confirm: PostMessage seam is nil — cannot deliver the get result in a DM")
+			return false
+		}
+		if err := h.cfg.PostMessage(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, pa.ThreadTS, text); err != nil {
+			log.Warn("agent confirm: in-DM get delivery failed", "error", err)
+			return false
+		}
+		return true
+	}
+	return h.postResponse(log, responseURL, text)
+}
+
+// finalizeConfirmedAction executes a claimed action, delivers any sensitive get output
+// privately and in-thread, swaps the public card for the terminal outcome, and records
+// the executed mutation for the audit surface. It is split out of processAgentConfirm so
+// the click orchestration stays under the complexity budget.
+func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, responseURL string) {
+	res := h.executeAgentAction(ctx, log, pa, payload)
+	card := res.cardText
+	if res.ephemeralText != "" {
+		// Sensitive get output (the one-time link on success, the failure detail
+		// otherwise) goes PRIVATELY, in the SAME conversation and thread the user approved
+		// in — never on the public card. deliverConfirmPrivate picks the surface-correct
+		// channel (an in-thread DM message vs an in-channel ephemeral). No attribution on
+		// the private payload — it's a self-delivered credential and the public card
+		// already carries the attribution. If a SUCCESSFUL mint can't be delivered, the
+		// card must stop claiming success.
+		if !h.deliverConfirmPrivate(ctx, log, pa, payload, responseURL, res.ephemeralText) && card == agentConfirmGetDeliveredReply {
+			card = agentConfirmGetDeliveryFailedReply
+		}
+	}
+	// The public terminal card for an EXECUTED action carries the on-behalf attribution:
+	// who requested the change, who approved it, and that the agent performed it (#662).
+	// Pre-execution rejections aren't attributed (res.attributed is false), so their
+	// generic copy stays byte-exact.
+	if res.attributed {
+		card = agentConfirmAttributedCard(card, pa.Asker, payload.User.ID)
+	}
+	_ = h.replaceOriginalResponse(log, responseURL, card)
+
+	// Best-effort: record the EXECUTED mutation for the App Home review surface, keyed to
+	// the approver who ran it. Done AFTER the card swap so the audit PutItem adds no latency
+	// to it. Only attributed results invoked a mutation core (a pre-execution rejection
+	// records nothing); a store failure never affects the already-delivered outcome.
+	// protect-connector never reaches here — it routes to the modal (confirmModalRouted) and
+	// its execution + audit are deferred to the modal-submit path (#701).
+	if res.attributed {
+		h.recordAgentAudit(ctx, log, payload, pa, res.cardText)
+	}
+}
+
 // executeAgentAction runs the mapped mutation core for a claimed action and returns
 // the terminal outcome (see actionResult). Every core re-resolves its token against
 // the CLICK's channel, so channel scope is enforced at execute exactly as a typed
@@ -662,15 +722,18 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			// async path (the consume-once claim is the real double-execute guard).
 			triggerID: payload.TriggerID,
 		})
-		result := text
 		if err != nil {
-			result = mapCoreError(log, err, commonGetMintFailedMessage)
+			// Mint/resolve failed: the detail (which may name the LLM-distilled token)
+			// goes PRIVATELY to the clicker; the public card stays a neutral failure with
+			// no token echo — and, crucially, does NOT claim "sent privately", the old
+			// unconditional success copy that masked every mint failure.
+			return actionResult{cardText: agentConfirmGetFailedReply, ephemeralText: mapCoreError(log, err, commonGetMintFailedMessage), attributed: true}
 		}
-		// A get result is a one-time-use credential — deliver it PRIVATELY to the
-		// clicker and keep the public card neutral, exactly as a typed /qurl get stays
-		// ephemeral to its requester. The asker-only gate (processAgentConfirm) ensures
-		// the clicker IS the asker, so ephemeral-to-clicker delivers to the right person.
-		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: result, attributed: true}
+		// Success: the one-time link is a credential — deliver it PRIVATELY, in the SAME
+		// conversation and thread the user approved in (see deliverConfirmPrivate), and
+		// keep the public card neutral. The asker-only gate (processAgentConfirm) ensures
+		// the clicker IS the asker, so the private delivery reaches the right person.
+		return actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: text, attributed: true}
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {
