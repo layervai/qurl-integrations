@@ -171,6 +171,24 @@ func TestAgentAck_AddIsAsyncAndClearWaitsBeforeRemove(t *testing.T) {
 	}
 }
 
+func TestAgentAck_ClearAbandonsRemoveWhenJoinContextDone(t *testing.T) {
+	rec := &recordingReactions{}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	h := NewHandler(Config{BaseContext: baseCtx, Reactions: rec})
+	cancel()
+
+	neverAdded := make(chan struct{})
+	h.clearAgentAck(slogTestLogger(t), &slackEventEnvelope{
+		TeamID: "T1",
+		Event:  slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}, neverAdded)
+
+	_, removes := rec.snapshot()
+	if len(removes) != 0 {
+		t.Fatalf("remove should be skipped when the add join is abandoned, got %d removes", len(removes))
+	}
+}
+
 func TestAgentAck_ClearedOnTurnError(t *testing.T) {
 	rec := &recordingReactions{}
 	h, _, _ := newAckHandler(t, rec, fakeAgentLLM{err: errors.New("model 500")})
