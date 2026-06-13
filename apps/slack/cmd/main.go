@@ -1050,24 +1050,22 @@ func readMaxConcurrentFollowupGateAsync() int {
 
 // readSetupBindingReplayWindowHours mirrors qurl-service's binding
 // idempotency TTL for operator-facing setup retry logs. Empty preserves the
-// upstream default; an explicit value must be a positive whole-hour Go
-// duration because the emitted event fields are named *_hours.
+// upstream default; an explicit value must use the canonical Nh form because
+// the emitted event fields are named *_hours.
 func readSetupBindingReplayWindowHours() (int, error) {
 	raw := strings.TrimSpace(os.Getenv(envQURLBindingTTLContract))
 	if raw == "" {
 		return oauth.DefaultSetupBindingReplayWindowHours, nil
 	}
-	ttl, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0, fmt.Errorf("%s=%q must be a positive whole-hour duration such as 24h: %w", envQURLBindingTTLContract, raw, err)
+	hoursText, ok := strings.CutSuffix(raw, "h")
+	if !ok || hoursText == "" || strings.HasPrefix(hoursText, "0") {
+		return 0, fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)
 	}
-	if ttl <= 0 {
-		return 0, fmt.Errorf("%s=%q must be positive", envQURLBindingTTLContract, raw)
+	hours, err := strconv.Atoi(hoursText)
+	if err != nil || hours <= 0 {
+		return 0, fmt.Errorf("%s=%q must be a positive whole-hour duration in canonical Nh form such as 24h", envQURLBindingTTLContract, raw)
 	}
-	if ttl%time.Hour != 0 {
-		return 0, fmt.Errorf("%s=%q must be a whole number of hours because setup retry logs emit *_hours fields", envQURLBindingTTLContract, raw)
-	}
-	return int(ttl / time.Hour), nil
+	return hours, nil
 }
 
 // readTunnelImageConfig makes the fallback policy explicit at startup. The

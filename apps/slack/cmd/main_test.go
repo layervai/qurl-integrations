@@ -343,10 +343,10 @@ func TestBuildOAuthConfigRejectsInvalidSetupBindingReplayWindow(t *testing.T) {
 	applyEnv(t, env)
 	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if ok {
-		t.Fatal("expected ok=false with non-whole-hour binding TTL contract")
+		t.Fatal("expected ok=false with non-canonical binding TTL contract")
 	}
-	if err == nil || !strings.Contains(err.Error(), "whole number of hours") {
-		t.Fatalf("buildOAuthConfig() err = %v, want whole-hour validation error", err)
+	if err == nil || !strings.Contains(err.Error(), "canonical Nh form") {
+		t.Fatalf("buildOAuthConfig() err = %v, want canonical-duration validation error", err)
 	}
 }
 
@@ -360,10 +360,12 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 		{name: "unset defaults to upstream contract", want: oauth.DefaultSetupBindingReplayWindowHours},
 		{name: "whole hour override", raw: "12h", want: 12},
 		{name: "trimmed whole hour override", raw: " 48h ", want: 48},
-		{name: "malformed", raw: "24", wantErrText: "must be a positive whole-hour duration"},
-		{name: "zero", raw: "0h", wantErrText: "must be positive"},
-		{name: "negative", raw: "-1h", wantErrText: "must be positive"},
-		{name: "fractional hour", raw: "90m", wantErrText: "whole number of hours"},
+		{name: "malformed", raw: "24", wantErrText: "canonical Nh form"},
+		{name: "zero", raw: "0h", wantErrText: "canonical Nh form"},
+		{name: "leading zero", raw: "01h", wantErrText: "canonical Nh form"},
+		{name: "negative", raw: "-1h", wantErrText: "canonical Nh form"},
+		{name: "minutes unit rejected", raw: "90m", wantErrText: "canonical Nh form"},
+		{name: "compound duration rejected", raw: "2h0m0s", wantErrText: "canonical Nh form"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
