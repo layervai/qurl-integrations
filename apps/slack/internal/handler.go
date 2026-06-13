@@ -347,6 +347,15 @@ type Config struct {
 	// Nil disables conversation mode.
 	PostMessage PostMessageFunc
 
+	// PostEphemeral posts a chat.postEphemeral message visible only to userID in a
+	// channel/group conversation. The confirm flow delivers a get's one-time link this
+	// way in a (multi-party) channel: a STANDALONE ephemeral, independent of the click's
+	// response_url, so the card-replace can't overwrite it. (The 1:1-DM branch uses
+	// PostMessage instead — ephemerals don't render in a DM.) Nil → the channel get
+	// delivery reports failure and the card downgrades; it is NOT part of the agentEnabled
+	// gate.
+	PostEphemeral PostEphemeralFunc
+
 	// PostMarkdownMessage posts a chat.postMessage reply whose body is the
 	// markdown_text field — standard Markdown that Slack's own parser renders,
 	// rather than the text field's mrkdwn dialect. It carries the agent's
@@ -465,6 +474,13 @@ type Config struct {
 // per-workspace bot token. threadTS threads the reply (empty posts top-level).
 // enterpriseID is passed for Enterprise Grid token resolution.
 type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error
+
+// PostEphemeralFunc posts a chat.postEphemeral message (visible only to userID) on the
+// per-workspace bot token. threadTS threads it into the card's conversation (empty posts
+// at channel root). Unlike a response_url ephemeral it's a standalone message, so a
+// same-response_url card-replace can't clobber it. Returns an error on a non-ok response
+// so the caller can downgrade the card.
+type PostEphemeralFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID, text string) error
 
 // PostMessageBlocksFunc posts an interactive Block Kit message via
 // chat.postMessage on the per-workspace bot token. blocks is a slice of Block Kit

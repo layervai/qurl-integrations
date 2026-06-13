@@ -154,6 +154,9 @@ func run() error {
 	// Both PostMessage seams share the per-workspace token lookup + Grid fallback with
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
+	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
+	postEphemeral := newSlackPostEphemeralFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
 	// markdown_text seam for the agent's free-text answer, so a channel reply renders
 	// standard Markdown the same way the streaming pane does (see PostMarkdownMessage).
 	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
@@ -253,6 +256,7 @@ func run() error {
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
 		PostMessage:                 postMessage,
+		PostEphemeral:               postEphemeral,
 		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,

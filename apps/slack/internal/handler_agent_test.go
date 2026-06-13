@@ -441,6 +441,24 @@ func capturingPostMessage() (PostMessageFunc, *[]capturedReply, *sync.Mutex) {
 	return fn, &posts, &mu
 }
 
+type capturedEphemeral struct {
+	channel, threadTS, userID, text string
+}
+
+// capturingPostEphemeral returns a PostEphemeralFunc that records every ephemeral, plus
+// the slice + mutex to read them after the async workers drain.
+func capturingPostEphemeral() (PostEphemeralFunc, *[]capturedEphemeral, *sync.Mutex) {
+	var mu sync.Mutex
+	var posts []capturedEphemeral
+	fn := func(_ context.Context, _, _, channel, threadTS, userID, text string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		posts = append(posts, capturedEphemeral{channel: channel, threadTS: threadTS, userID: userID, text: text})
+		return nil
+	}
+	return fn, &posts, &mu
+}
+
 // capturingPostMarkdownMessage records markdown_text replies into the SAME slice
 // (tagged markdown:true), so a test can assert which seam delivered a reply.
 func capturingPostMarkdownMessage(posts *[]capturedReply, mu *sync.Mutex) PostMessageFunc {

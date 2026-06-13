@@ -217,6 +217,8 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 
 const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 
+const slackChatPostEphemeralURL = "https://slack.com/api/chat.postEphemeral"
+
 const (
 	slackReactionsAddURL    = "https://slack.com/api/reactions.add"
 	slackReactionsRemoveURL = "https://slack.com/api/reactions.remove"
@@ -380,6 +382,28 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 		}{Channel: channelID, ThreadTS: threadTS, Text: text})
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
+		}
+		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
+// newSlackPostEphemeralFuncWithTokenLookup builds the [internal.PostEphemeralFunc] seam:
+// a threaded chat.postEphemeral visible only to userID — used to deliver a get's one-time
+// link privately in a (multi-party) channel, as a standalone message the click's
+// response_url card-replace can't overwrite. Shares the poster (token lookup + Grid
+// fallback + ok:false parse) with the text seams; only the JSON body (which adds `user`)
+// differs.
+func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postEphemeralURL string, httpClient *http.Client) internal.PostEphemeralFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postEphemeralURL, "chat.postEphemeral", slackChatPostEphemeralResponseError, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID, text string) error {
+		body, err := json.Marshal(struct {
+			Channel  string `json:"channel"`
+			User     string `json:"user"`
+			ThreadTS string `json:"thread_ts,omitempty"`
+			Text     string `json:"text"`
+		}{Channel: channelID, User: userID, ThreadTS: threadTS, Text: text})
+		if err != nil {
+			return fmt.Errorf("chat.postEphemeral request marshal: %w", err)
 		}
 		return poster.post(ctx, teamID, enterpriseID, body)
 	}
@@ -886,6 +910,10 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 // worker must surface).
 func slackChatPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
 	return slackWebAPIResponseError("chat.postMessage", nil, statusCode, header, raw)
+}
+
+func slackChatPostEphemeralResponseError(statusCode int, header http.Header, raw []byte) error {
+	return slackWebAPIResponseError("chat.postEphemeral", nil, statusCode, header, raw)
 }
 
 // slackReactionAddBenign / slackReactionRemoveBenign are the idempotent no-op ok:false
