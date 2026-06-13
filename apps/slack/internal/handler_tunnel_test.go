@@ -2280,6 +2280,8 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 	ts.seedAdmin(t)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h.cfg.AgentStore = agentStore
 	freezeTunnelBootstrapNow(t, h, now)
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
@@ -2289,6 +2291,10 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 		UserID:        testAdminUserID,
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: now.Add(tunnelBootstrapSkew + time.Minute).Unix(),
+		Agent: &TunnelInstallAgentMetadata{
+			Action: string(agent.ActionProtectConnector),
+			Reason: testTunnelAgentReason,
+		},
 	}
 	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
@@ -2300,6 +2306,14 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 	}
 	if !strings.Contains(w.Body.String(), "modal expired") {
 		t.Fatalf("modal response = %s, want future modal rejection", w.Body.String())
+	}
+	h.Wait()
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditModalRejectedOutcome {
+		t.Fatalf("audit entries = %+v, want modal-rejected outcome", got)
 	}
 }
 
@@ -3182,6 +3196,35 @@ func TestTunnelInstallAgentAuditIgnoresCanceledBaseContext(t *testing.T) {
 	}
 }
 
+func TestTunnelInstallAgentAuditUnknownResultHasNilSuccess(t *testing.T) {
+	now := fixedNow
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	h := &Handler{cfg: Config{AgentStore: agentStore}}
+	h.recordTunnelInstallAgentAudit(slog.Default(), &tunnelInstallRequest{
+		teamID:    testAdminTeamID,
+		channelID: testTunnelChannelID,
+		userID:    testAdminUserID,
+		agentAudit: &tunnelInstallAgentAudit{
+			target: testTunnelSlug,
+			reason: testTunnelAgentReason,
+		},
+	}, agentProtectConnectorAuditResultInvalid)
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(got))
+	}
+	if got[0].Outcome != agentProtectConnectorAuditUnknownOutcome || got[0].Result != agentProtectConnectorAuditUnknownOutcome {
+		t.Fatalf("audit entry = %+v, want unknown outcome/result", got[0])
+	}
+	if got[0].ResultSuccess != nil {
+		t.Fatalf("audit result success = %v, want nil for unknown result", got[0].ResultSuccess)
+	}
+}
+
 func TestTunnelInstallAgentAuditResultsAreKnown(t *testing.T) {
 	if len(agentProtectConnectorAuditResults) != int(agentProtectConnectorAuditResultCount)-1 {
 		t.Fatalf("audit result cases = %d, want %d", len(agentProtectConnectorAuditResults), agentProtectConnectorAuditResultCount-1)
@@ -3280,6 +3323,78 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	}
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1 after panic", revokeHits)
+	}
+	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditUnexpectedFailureOutcome {
+		t.Fatalf("audit entries = %+v, want unexpected-failure outcome", got)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want unexpected-failure notice: %v", len(responseBodies), responseBodies)
+	}
+	notice := parseSlackText(t, []byte(responseBodies[0]))
+	if !strings.Contains(notice, "stopped unexpectedly") || !strings.Contains(notice, "discard it") {
+		t.Fatalf("unexpected-failure notice = %q, want retry/discard copy", notice)
+	}
+}
+
+func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
+	now := fixedNow
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable, Now: func() time.Time { return now }}
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AgentStore = agentStore
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		t.Fatal("PostDM must not run after a build panic")
+		return nil
+	}
+	h.now = func() time.Time {
+		panic("test build panic after bootstrap key mint")
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testTunnelInstallRequest(responseURL.URL, now, testTunnelInstallAgentAudit()))
+
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1 after build panic", revokeHits)
 	}
 	if len(got) != 1 || got[0].Outcome != agentProtectConnectorAuditUnexpectedFailureOutcome {
 		t.Fatalf("audit entries = %+v, want unexpected-failure outcome", got)

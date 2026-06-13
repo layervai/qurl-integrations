@@ -610,10 +610,23 @@ type tunnelInstallBuild struct {
 // path; a CheckAdmin re-check on the confirm path). On failure it returns the
 // user-facing message to post plus the error, revoking any bootstrap key it
 // minted if key validation or the final render fails (so a key whose install
-// block never rendered doesn't stay live). On success the caller delivers
-// build.message and, if delivery is not confirmed, revokes build.key via
-// [revokeBootstrapKeyAfterInstallFailure].
+// block never rendered doesn't stay live). The same revoke-on-build-failure
+// invariant is protected across panics between key mint and the successful
+// return. On success the caller delivers build.message and, if delivery is not
+// confirmed, revokes build.key via [revokeBootstrapKeyAfterInstallFailure].
 func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, attemptID string) (*tunnelInstallBuild, string, error) {
+	var c *client.Client
+	var mintedKey *client.APIKey
+	buildComplete := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if mintedKey != nil && !buildComplete {
+				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, mintedKey, "build_panic")
+			}
+			panic(rec)
+		}
+	}()
+
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
@@ -668,6 +681,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
 		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"), err
 	}
+	mintedKey = key
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "missing_plaintext")
@@ -692,6 +706,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, "qURL Connector setup could not render the bootstrap-key DM. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
 
+	buildComplete = true
 	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, secretMessage: secretMsg}, "", nil
 }
 
@@ -712,21 +727,17 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	var panicCleanup *tunnelInstallBuild
 	defer func() {
 		if rec := recover(); rec != nil {
+			result = agentProtectConnectorAuditUnexpectedFailureResult
 			log.Error("tunnel install: panic in setup worker", "recover", rec, "stack", string(debug.Stack()))
 			if panicCleanup != nil {
-				revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "unexpected_panic")
+				safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, panicCleanup.client, panicCleanup.key, "unexpected_panic")
 			}
-			if req != nil && strings.TrimSpace(req.responseURL) != "" {
-				_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
-			}
-			result = agentProtectConnectorAuditUnexpectedFailureResult
+			h.postTunnelInstallUnexpectedFailureNotice(log, req)
 		}
 	}()
 	if req == nil || req.args == nil {
 		log.Error("tunnel install: setup worker missing parsed modal args")
-		if req != nil && strings.TrimSpace(req.responseURL) != "" {
-			_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
-		}
+		h.postTunnelInstallUnexpectedFailureNotice(log, req)
 		return agentProtectConnectorAuditUnexpectedFailureResult
 	}
 	args := req.args
@@ -793,6 +804,21 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 }
 
+func (h *Handler) postTunnelInstallUnexpectedFailureNotice(log *slog.Logger, req *tunnelInstallRequest) {
+	if req == nil || strings.TrimSpace(req.responseURL) == "" {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("tunnel install: panic posting unexpected-failure notice", "recover", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	_ = h.postResponse(log, req.responseURL, tunnelInstallUnexpectedFailureNotice)
+}
+
 func tunnelInstallAgentAuditFromMetadata(log *slog.Logger, meta *TunnelInstallModalMetadata, args *tunnelInstallArgs) *tunnelInstallAgentAudit {
 	if meta == nil || meta.Agent == nil || args == nil {
 		return nil
@@ -848,12 +874,16 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 	if !known {
 		log.Warn("tunnel install agent audit result unknown; using unknown outcome", "result", uint8(result))
 	}
-	resultSuccess := result.success()
+	var resultSuccess *bool
+	if known {
+		success := result.success()
+		resultSuccess = &success
+	}
 	// Modal-submit audits have no public confirm card, so the legacy Outcome
 	// and structured App Home Result intentionally share the same neutral text.
-	// success=false on delivery failure reflects that the setup did not reach a
-	// usable user-visible state; the Result text preserves that the resource was
-	// generated before the bootstrap key was revoked.
+	// success=false on known delivery failure reflects that the setup did not
+	// reach a usable user-visible state; unknown results keep ResultSuccess nil
+	// so App Home does not render them as a definite failure.
 	h.recordAgentAuditEntry(auditCtx, log, &agentAuditEntry{
 		teamID:        req.teamID,
 		actorID:       req.userID,
@@ -863,7 +893,7 @@ func (h *Handler) recordTunnelInstallAgentAudit(log *slog.Logger, req *tunnelIns
 		reason:        audit.reason,
 		outcome:       resultOutcome,
 		result:        resultOutcome,
-		resultSuccess: &resultSuccess,
+		resultSuccess: resultSuccess,
 	})
 }
 
@@ -890,6 +920,9 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
 	if key == nil || strings.TrimSpace(key.KeyID) == "" {
 		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "event", "tunnel_bootstrap_cleanup_skipped", "reason", reason)
 		return
@@ -917,6 +950,18 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 		return
 	}
 	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
+}
+
+func safeRevokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
+	if log == nil {
+		log = slog.Default()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("tunnel install: panic revoking bootstrap key after failure", "recover", rec, "reason", reason, "stack", string(debug.Stack()))
+		}
+	}()
+	revokeBootstrapKeyAfterInstallFailure(parent, log, c, key, reason)
 }
 
 func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug, attemptID string) string {

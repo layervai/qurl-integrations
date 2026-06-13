@@ -339,6 +339,7 @@ func buildAgentConfirmBlocks(summary, reason, id string) []any {
 func agentConfirmFallbackText(summary, reason string) string {
 	text := escapeMrkdwnText(summary)
 	if reason = strings.TrimSpace(reason); reason != "" {
+		// The label is fixed product copy; the untrusted reason is the mrkdwn input.
 		text += "\nReason: " + escapeMrkdwnText(reason)
 	}
 	return text

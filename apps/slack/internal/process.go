@@ -167,6 +167,7 @@ func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout
 		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
 		var tail func()
 		func() {
+			defer cancel()
 			defer func() {
 				if rec := recover(); rec != nil {
 					log.Error("panic in async worker", "recover", rec, "stack", string(debug.Stack()))
@@ -174,11 +175,11 @@ func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout
 			}()
 			tail = work(ctx, log)
 		}()
-		cancel()
 		// Release the bounded worker slot before the tail runs, but keep the tail
 		// in the same wg-tracked goroutine so shutdown waits for best-effort cleanup
-		// such as audit writes. Tails intentionally run outside the semaphore and
-		// must stay cheap or separately bounded.
+		// such as audit writes. Tails intentionally run outside the semaphore: a
+		// saturated pool can have cap(sem) bodies plus cap(sem) tails in flight, so
+		// tails must stay cheap or separately bounded.
 		<-sem
 
 		if tail == nil {
