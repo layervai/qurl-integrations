@@ -533,6 +533,15 @@ func TestSlackPostMarkdownMessageFuncPostsMarkdownBlockAndFallback(t *testing.T)
 	}
 }
 
+func TestSlackMarkdownFallbackTextCleansCommonMarkdown(t *testing.T) {
+	t.Parallel()
+	in := "# Heading\n- Use **bold** text\n* Check `code` and *italic*\n\nDone"
+	want := "Heading Use bold text Check code and italic Done"
+	if got := slackMarkdownFallbackText(in); got != want {
+		t.Fatalf("fallback text = %q, want %q", got, want)
+	}
+}
+
 func TestSlackPostMarkdownMessageFuncOmitsEmptyThreadTS(t *testing.T) {
 	t.Parallel()
 	var rawBody string
