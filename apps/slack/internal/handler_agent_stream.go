@@ -46,6 +46,8 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 }
 
 func agentStreamRecipientTeamID(env *slackEventEnvelope) string {
+	// Pane DMs keep the pre-channel-streaming routing: the recipient team is the
+	// installed event team. Shared-channel team hints are only for app_mention.
 	if env.Event.ChannelType == slackChannelTypeIM {
 		return env.TeamID
 	}

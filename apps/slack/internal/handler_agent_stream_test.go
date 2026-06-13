@@ -283,12 +283,16 @@ func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 	}
 }
 
-func TestNewAgentReplyStreamer_ChannelMentionRecipientTeamFallbacks(t *testing.T) {
-	h := NewHandler(Config{AgentStream: &recordingStreamPort{}})
-
+func TestAgentStreamRecipientTeamID_Fallbacks(t *testing.T) {
 	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
 	e.TeamID = testAgentStreamInstalledTeam
+	e.Event.UserTeam = testAgentStreamRemoteTeam
 	e.Event.SourceTeam = "T_source"
+	if got := agentStreamRecipientTeamID(e); got != testAgentStreamRemoteTeam {
+		t.Fatalf("user_team should take precedence over source_team, got %q", got)
+	}
+
+	e.Event.UserTeam = ""
 	if got := agentStreamRecipientTeamID(e); got != "T_source" {
 		t.Fatalf("source_team should be the second-choice recipient team, got %q", got)
 	}
@@ -297,7 +301,11 @@ func TestNewAgentReplyStreamer_ChannelMentionRecipientTeamFallbacks(t *testing.T
 	if got := agentStreamRecipientTeamID(e); got != testAgentStreamInstalledTeam {
 		t.Fatalf("team_id should be the same-workspace recipient-team fallback, got %q", got)
 	}
+}
 
+func TestNewAgentReplyStreamer_ChannelMentionMissingRecipientTeamFallsBack(t *testing.T) {
+	h := NewHandler(Config{AgentStream: &recordingStreamPort{}})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
 	e.TeamID = ""
 	if s := h.newAgentReplyStreamer(context.Background(), slog.Default(), e, agentEventRootTS(&e.Event)); s != nil {
 		t.Fatal("a channel stream without any recipient team must fall back to the posted path")
