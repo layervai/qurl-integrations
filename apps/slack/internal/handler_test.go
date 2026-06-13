@@ -100,6 +100,20 @@ func (p *recordingAuthProvider) DeleteAPIKey(_ context.Context, workspaceID stri
 	return p.deleteErr
 }
 
+func newUninstallAdminTestHandler(t *testing.T, provider *recordingAuthProvider) *Handler {
+	t.Helper()
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+	return h
+}
+
+func slashUninstallAsAdmin(t *testing.T, h *Handler) map[string]string {
+	t.Helper()
+	return slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+}
+
 // signSlackBody returns the pair of headers Slack would send to authenticate
 // `body` at `fixedNow`. Using the same algorithm as the handler means any
 // drift between them gets caught by the verification tests themselves.
@@ -452,16 +466,15 @@ func TestDispatchSplit_NonProdCommandNamesRouteBySuffix(t *testing.T) {
 
 func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
-	h := newTestHandler(t, noopQURLServer(t))
-	h.cfg.AuthProvider = provider
+	h := newUninstallAdminTestHandler(t, provider)
 
-	resp := slashResponse(t, h, commandUser, uninstallVerb)
+	resp := slashUninstallAsAdmin(t, h)
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
-	if provider.deleteWorkspaceID != "T123ABCDEF" {
-		t.Fatalf("DeleteAPIKey workspaceID = %q, want T123ABCDEF", provider.deleteWorkspaceID)
+	if provider.deleteWorkspaceID != testAdminTeamID {
+		t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
 	}
 	if resp[respFieldResponseType] != respTypeEphemeral {
 		t.Fatalf("response_type = %q, want %q", resp[respFieldResponseType], respTypeEphemeral)
@@ -476,10 +489,9 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 		apiKey:    "test-key",
 		deleteErr: auth.ErrWorkspaceNotConfigured,
 	}
-	h := newTestHandler(t, noopQURLServer(t))
-	h.cfg.AuthProvider = provider
+	h := newUninstallAdminTestHandler(t, provider)
 
-	resp := slashResponse(t, h, commandUser, uninstallVerb)
+	resp := slashUninstallAsAdmin(t, h)
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -497,10 +509,9 @@ func TestSlashCommandUninstallUnsupportedProvider(t *testing.T) {
 		apiKey:    "test-key",
 		deleteErr: auth.ErrWorkspaceAPIKeyDeleteUnsupported,
 	}
-	h := newTestHandler(t, noopQURLServer(t))
-	h.cfg.AuthProvider = provider
+	h := newUninstallAdminTestHandler(t, provider)
 
-	resp := slashResponse(t, h, commandUser, uninstallVerb)
+	resp := slashUninstallAsAdmin(t, h)
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -515,10 +526,9 @@ func TestSlashCommandUninstallDeleteFailure(t *testing.T) {
 		apiKey:    "test-key",
 		deleteErr: errors.New("delete failed"),
 	}
-	h := newTestHandler(t, noopQURLServer(t))
-	h.cfg.AuthProvider = provider
+	h := newUninstallAdminTestHandler(t, provider)
 
-	resp := slashResponse(t, h, commandUser, uninstallVerb)
+	resp := slashUninstallAsAdmin(t, h)
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -539,6 +549,32 @@ func TestSlashCommandUninstallAuthProviderNotConfigured(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallRequiresOwnerStoreForMutableProvider(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "owner verification is not configured") {
+		t.Fatalf("missing-owner-store reply missing fail-closed hint: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallEnvProviderWithoutOwnerStore(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "test-key")
+	h := newTestHandler(t, noopQURLServer(t))
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
+		t.Fatalf("env-provider reply missing unsupported hint: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	h := newTestHandler(t, noopQURLServer(t))
@@ -551,6 +587,24 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall`.") {
 		t.Fatalf("uninstall args reply missing usage: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallFailsClosedWhenOwnerCheckErrors(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.ddb.SetGetItemErr(ts.tableNames.workspace, errors.New("workspace mapping read failed"))
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "Try again in a moment") {
+		t.Fatalf("owner-check-error reply missing retry hint: %q", resp[respFieldText])
 	}
 }
 
@@ -588,24 +642,32 @@ func TestSlashCommandUninstallFailsClosedForShapeBadOwner(t *testing.T) {
 	}
 }
 
-func TestSlashCommandUninstallRequiresWorkspaceOwner(t *testing.T) {
+func TestSlashCommandUninstallAllowsWorkspaceAdminOrOwner(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AuthProvider = provider
 
-	nonOwner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+	stranger := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "USTRANGER000")
 	if provider.deleteCalls != 0 {
-		t.Fatalf("non-owner DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+		t.Fatalf("stranger DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
 	}
-	if !strings.Contains(nonOwner[respFieldText], "can only be run by the person who connected qURL") {
-		t.Fatalf("non-owner reply missing owner-only message: %q", nonOwner[respFieldText])
+	if !strings.Contains(stranger[respFieldText], "qURL workspace admin") {
+		t.Fatalf("stranger reply missing admin-or-owner message: %q", stranger[respFieldText])
+	}
+
+	admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+	if provider.deleteCalls != 1 {
+		t.Fatalf("admin DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(admin[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("admin reply missing confirmation: %q", admin[respFieldText])
 	}
 
 	owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
-	if provider.deleteCalls != 1 {
-		t.Fatalf("owner DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	if provider.deleteCalls != 2 {
+		t.Fatalf("owner DeleteAPIKey calls = %d, want 2", provider.deleteCalls)
 	}
 	if provider.deleteWorkspaceID != testAdminTeamID {
 		t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)

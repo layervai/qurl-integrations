@@ -1629,11 +1629,16 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
-	// AdminStore==nil mirrors setup's sandbox/no-DDB path; production wires
-	// the owner store and gates uninstall to the recorded workspace owner.
+	// EnvProvider can report "not configured" / "unsupported" without
+	// mutating anything. Any provider that can delete must have AdminStore
+	// wired so this destructive command is owner/admin-gated.
 	if h.cfg.AdminStore == nil {
-		slog.Warn("/qurl uninstall: owner gate skipped because AdminStore is not configured", "team_id", teamID, "caller_user_id", userID)
-	} else if !h.requireUninstallOwner(w, teamID, userID) {
+		if !isEnvBackedAuthProvider(h.cfg.AuthProvider) {
+			slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
+			respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+			return
+		}
+	} else if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
 		return
 	}
 
@@ -1656,33 +1661,46 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. Run `/qurl setup <email>` to reconnect it.")
 }
 
-func (h *Handler) requireUninstallOwner(w http.ResponseWriter, teamID, userID string) bool {
+func isEnvBackedAuthProvider(provider auth.Provider) bool {
+	switch provider.(type) {
+	case auth.EnvProvider, *auth.EnvProvider:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, userID string) bool {
 	if userID == "" {
 		respondSlack(w, ":warning: missing user_id in slash command payload")
 		return false
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
 	defer cancel()
-	_, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	isAdmin, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
 	if err != nil {
 		slog.Error("/qurl uninstall: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
-		respondSlack(w, ":warning: failed to verify who connected qURL to this workspace (upstream error; see logs).")
+		respondSlack(w, ":warning: failed to verify who connected qURL to this workspace (upstream error; see logs). Try again in a moment.")
 		return false
 	}
-	if ownerID == userID {
-		return true
-	}
+	// CheckAdmin is eventually consistent and uninstall has no later
+	// consistent backstop, so every ambiguous owner shape fails closed. A
+	// positive admin/owner result only grants deletion after the workspace has
+	// a non-empty, Slack-shaped owner record.
 	if ownerID == "" {
 		respondSlack(w, "qURL isn't connected to a workspace owner yet. Run `/qurl setup <email>` before uninstalling.")
 		return false
 	}
-	if looksLikeSlackUserID(ownerID) {
-		slog.Warn("/qurl uninstall: non-owner denied", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
-		respondSlack(w, fmt.Sprintf("`/qurl uninstall` can only be run by the person who connected qURL to this workspace (<@%s>).", ownerID))
+	if !looksLikeSlackUserID(ownerID) {
+		slog.Warn("/qurl uninstall: stored owner_id is shape-bad", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
+		respondSlack(w, ":warning: could not verify who connected qURL to this workspace. Ask the owner to run `/qurl setup <email>`, then retry.")
 		return false
 	}
-	slog.Warn("/qurl uninstall: stored owner_id is shape-bad", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
-	respondSlack(w, ":warning: could not verify who connected qURL to this workspace. Ask the owner to run `/qurl setup <email>`, then retry.")
+	if ownerID == userID || isAdmin {
+		return true
+	}
+	slog.Warn("/qurl uninstall: non-admin denied", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
+	respondSlack(w, fmt.Sprintf("`/qurl uninstall` can only be run by a qURL workspace admin or by the person who connected qURL to this workspace (<@%s>).", ownerID))
 	return false
 }
 
