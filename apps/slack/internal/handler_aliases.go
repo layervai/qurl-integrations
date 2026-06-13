@@ -180,7 +180,7 @@ func groupsNeedResolution(groups []aliasGroup) bool {
 // (see the call site for why the list path, not the per-id path, is the
 // reliable slug source). Every resource on the page is indexed —
 // intentionally NOT filtered to type=tunnel like /qurl list — so a
-// legacy URL binding still resolves its target_url and renders the
+// legacy URL binding still resolves its target_url and renders the escaped
 // "<url> (legacy URL) → $alias" line.
 //
 // Best-effort: a fetch failure yields (nil, false) — a nil-map lookup
@@ -304,7 +304,7 @@ func formatAliasGroupLine(target, slug, description string, aliases []string) st
 			left += " — " + escapeMrkdwnText(description)
 		}
 	case target != "":
-		left = target + " (legacy URL)"
+		left = escapeMrkdwnText(target) + " (legacy URL)"
 	default:
 		// No slug resolved — never fall back to the opaque resource_id.
 		// Show the channel aliases alone so the row still renders and
