@@ -65,8 +65,12 @@ gh pr create --title "feat(slack): add thread replies"
 All of these must pass before merge:
 
 - **PR title** follows [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): description`
-  - Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
-  - Scopes: `slack`, `teams`, `discord`, `cli`, `zapier`, `shared`
+  - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
+    `build`, `ci`, `chore`, `revert`
+  - Scopes: `slack`, `teams`, `discord`, `cli`, `zapier`,
+    `chrome-extension`, `shared`, `ci`
+    (`.github/workflows/pr-title.yml` also accepts repository-maintenance
+    scopes `infra` and `deps`, tracked in #463.)
 - **Linting** passes (golangci-lint with 28+ linters — see `.golangci.yml`)
 - **Tests** pass with `-race`
 - **Build** succeeds (Lambda binary)
@@ -91,15 +95,29 @@ All of these must pass before merge:
 `main` protection requires strict status checks, so required checks must be
 green for the current `main` merge result before a PR can merge. If `main`
 moves after checks turn green, update the PR branch or rerun checks against the
-new merge result before merging.
+new merge result before merging. When required contexts change in GitHub
+settings, update this section in the same operational change.
 
-App- and shared-impacting PRs are gated by always-present aggregate checks:
-`slack / required`, `discord / required`, `chrome-extension / required`, and
-`shared / required`. Each workflow's `changes` filter is the source of truth
-for which paths need validation. When that filter matches, the aggregate
-validates every quality gate listed in its workflow `needs:` set. Branch
-protection should require only these aggregate checks for path-gated app/shared
-workflows, not the internally skipped expensive jobs.
+App- and shared-impacting PRs report always-present aggregate checks that can be
+required by branch protection: `slack / required`, `discord / required`,
+`chrome-extension / required`, and `shared / required`. Each workflow's
+`changes` filter is the source of truth for which paths need validation. When
+that filter matches, the aggregate validates every quality gate listed in its
+workflow `needs:` set. When branch protection requires path-gated app/shared
+workflows, it should require only these aggregate checks, not the internally
+skipped expensive jobs.
+
+Every PR is gated by the always-present `Validate GitHub Actions pins` check.
+The job re-scans all workflow and composite-action files, checks external
+`uses:` refs against the GitHub Actions refs rule above, skips local `./` refs,
+and also gates on the validator self-test. The validator reports violations for
+missing `@` refs, non-SHA refs, missing or malformed version comments, and
+`docker://` actions. A defensive guard exits non-zero if no files are scanned.
+Any job failure blocks the PR until fixed, even when the PR did not introduce
+it. Branch protection requires the exact `Validate GitHub Actions pins`
+context. It is separate from the existing
+`age-check / Check GitHub Actions pin ages` context, even though both contexts
+are produced by the same workflow file.
 
 ## Code Conventions
 
