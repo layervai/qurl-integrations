@@ -1638,10 +1638,10 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
-	// Providers that cannot delete can report "not configured" / "unsupported"
-	// without owner/user checks because no mutation can occur.
+	// Providers that cannot delete are structurally non-mutating. Return the
+	// unsupported reply before any owner/user checks or delete context setup.
 	if !h.cfg.AuthProvider.SupportsDeleteAPIKey() {
-		h.deleteWorkspaceAPIKey(w, teamID, userID)
+		respondUninstallUnsupported(w)
 		return
 	}
 	// Any provider that can delete must have AdminStore wired so this
@@ -1668,7 +1668,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			return
 		}
 		if errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported) {
-			respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
+			respondUninstallUnsupported(w)
 			return
 		}
 		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)
@@ -1676,7 +1676,11 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		return
 	}
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID)
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. This does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed. The recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+}
+
+func respondUninstallUnsupported(w http.ResponseWriter) {
+	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
 }
 
 func (h *Handler) canAdvertiseUninstall() bool {

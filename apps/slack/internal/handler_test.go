@@ -83,6 +83,7 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 type recordingAuthProvider struct {
 	apiKey            string
 	deleteErr         error
+	deleteUnsupported bool
 	deleteCalls       int
 	deleteWorkspaceID string
 }
@@ -95,7 +96,7 @@ func (p *recordingAuthProvider) APIKey(_ context.Context, _ string) (string, err
 }
 
 func (p *recordingAuthProvider) SupportsDeleteAPIKey() bool {
-	return true
+	return !p.deleteUnsupported
 }
 
 func (p *recordingAuthProvider) DeleteAPIKey(_ context.Context, workspaceID string) error {
@@ -536,6 +537,23 @@ func TestSlashCommandUninstallRepeatReportsNotConnected(t *testing.T) {
 
 func TestSlashCommandUninstallUnsupportedProvider(t *testing.T) {
 	provider := &recordingAuthProvider{
+		apiKey:            "test-key",
+		deleteUnsupported: true,
+	}
+	h := newUninstallAdminTestHandler(t, provider)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "isn't supported on this Secure Access Agent deployment") {
+		t.Fatalf("unsupported-provider reply missing unsupported hint: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallMutableProviderCanReturnUnsupported(t *testing.T) {
+	provider := &recordingAuthProvider{
 		apiKey:    "test-key",
 		deleteErr: auth.ErrWorkspaceAPIKeyDeleteUnsupported,
 	}
@@ -547,7 +565,7 @@ func TestSlashCommandUninstallUnsupportedProvider(t *testing.T) {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
 	if !strings.Contains(resp[respFieldText], "isn't supported on this Secure Access Agent deployment") {
-		t.Fatalf("unsupported-provider reply missing unsupported hint: %q", resp[respFieldText])
+		t.Fatalf("mutable unsupported reply missing unsupported hint: %q", resp[respFieldText])
 	}
 }
 
