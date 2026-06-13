@@ -1670,6 +1670,10 @@ func isEnvBackedAuthProvider(provider auth.Provider) bool {
 	}
 }
 
+func (h *Handler) canAdvertiseUninstall() bool {
+	return h.cfg.AdminStore != nil && h.cfg.AuthProvider != nil && !isEnvBackedAuthProvider(h.cfg.AuthProvider)
+}
+
 func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, userID string) bool {
 	if userID == "" {
 		respondSlack(w, ":warning: missing user_id in slash command payload")
@@ -1760,10 +1764,10 @@ func (h *Handler) userHelpMessage(command string) string {
 	if h.cfg.AdminStore != nil {
 		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
 	}
-	lines = append(lines,
-		setupLine,
-		"• `/qurl uninstall` — Disconnect qURL from this Slack workspace",
-	)
+	lines = append(lines, setupLine)
+	if h.canAdvertiseUninstall() {
+		lines = append(lines, "• `/qurl uninstall` — Disconnect qURL from this Slack workspace")
+	}
 	if h.cfg.AdminStore != nil {
 		// Glossary so the `$slug` / `$alias` tokens in the verbs and in
 		// `/qurl list` aren't unexplained. Only shown when AdminStore is

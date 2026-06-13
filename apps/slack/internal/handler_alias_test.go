@@ -154,7 +154,7 @@ func newAliasTestHandler(t *testing.T) (*Handler, *fakeAliasStore) {
 	//
 	// Note this wires AdminStore unconditionally, so a test that needs the
 	// AdminStore-nil path must build the handler directly rather than through
-	// this helper (see TestUserHelpGatesGetAndAliasesOnAdminStore and
+	// this helper (see TestUserHelpGatesGetAliasesAndUninstall and
 	// TestHelpListsAliasVerbsWhenAliasStoreWired).
 	seedAliasAdminGate(t, h, testAliasTeamID)
 	return h, store
@@ -985,7 +985,7 @@ func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
 	// newAliasTestHandler wires an AdminStore, which would advertise tunnel
 	// install and flip that assertion — so construct the handler directly.
 	// (The user-help `/qurl get` and `/qurl aliases` gates are fenced by
-	// TestUserHelpGatesGetAndAliasesOnAdminStore, not here — admin help
+	// TestUserHelpGatesGetAliasesAndUninstall, not here — admin help
 	// never renders those user-verb lines.)
 	h := newTestHandler(t, noopQURLServer(t))
 	h.aliasStore = newFakeAliasStore()
@@ -1006,15 +1006,16 @@ func TestHelpListsAliasVerbsWhenAliasStoreWired(t *testing.T) {
 	}
 }
 
-// TestUserHelpGatesGetAndAliasesOnAdminStore fences the AdminStore gate on
-// the `/qurl get` and `/qurl aliases` lines in the USER help: both resolve
-// through the AdminStore (get via resolveTokenForGet, aliases via
-// processAliases) and fail closed when it's nil post-tunnels-only, so
-// userHelpMessage must advertise them only when AdminStore is wired.
+// TestUserHelpGatesGetAliasesAndUninstall fences the AdminStore gate on
+// `/qurl get`, `/qurl aliases`, and `/qurl uninstall` in the USER help.
+// The read verbs resolve through AdminStore (get via resolveTokenForGet,
+// aliases via processAliases), and uninstall additionally needs mutable
+// credential storage plus owner/admin verification, so userHelpMessage must
+// advertise them only when the matching runtime wiring is present.
 // Exercises userHelpMessage directly because `help` routes to the admin
 // surface in the dispatch split, so the slash-command path can't reach
 // user help.
-func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
+func TestUserHelpGatesGetAliasesAndUninstall(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	noStore := h.userHelpMessage(commandUser)
 	if strings.Contains(noStore, "/qurl aliases`") {
@@ -1022,6 +1023,9 @@ func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	}
 	if strings.Contains(noStore, "/qurl get") {
 		t.Errorf("user help advertised /qurl get with no AdminStore: %q", noStore)
+	}
+	if strings.Contains(noStore, "/qurl uninstall") {
+		t.Errorf("user help advertised /qurl uninstall with no AdminStore: %q", noStore)
 	}
 	if strings.Contains(strings.ToLower(noStore), "tunnel") {
 		t.Errorf("user help leaked tunnel terminology with no AdminStore: %q", noStore)
@@ -1033,6 +1037,14 @@ func TestUserHelpGatesGetAndAliasesOnAdminStore(t *testing.T) {
 	}
 	if !strings.Contains(withStore, "/qurl get") {
 		t.Errorf("user help omitted /qurl get with AdminStore wired: %q", withStore)
+	}
+	if strings.Contains(withStore, "/qurl uninstall") {
+		t.Errorf("user help advertised /qurl uninstall for env-backed provider: %q", withStore)
+	}
+	h.cfg.AuthProvider = &recordingAuthProvider{apiKey: "test-key"}
+	withMutableStore := h.userHelpMessage(commandUser)
+	if !strings.Contains(withMutableStore, "/qurl uninstall") {
+		t.Errorf("user help omitted /qurl uninstall with mutable provider and AdminStore wired: %q", withMutableStore)
 	}
 	if strings.Contains(strings.ToLower(withStore), "tunnel") {
 		t.Errorf("user help leaked tunnel terminology with AdminStore wired: %q", withStore)

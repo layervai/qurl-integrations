@@ -249,9 +249,9 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 
 	userHelp := slashReply(t, h, commandUser, "help")
-	// `/qurl list` is an unconditional user verb; `/qurl get` and `/qurl
-	// aliases` gate on AdminStore (not wired here) — their gating is fenced
-	// by TestUserHelpGatesGetAndAliasesOnAdminStore.
+	// `/qurl list` is an unconditional user verb; `/qurl get`, `/qurl
+	// aliases`, and `/qurl uninstall` gate on wired storage/owner state —
+	// their gating is fenced by TestUserHelpGatesGetAliasesAndUninstall.
 	if !strings.Contains(userHelp, "/qurl list") {
 		t.Errorf("/qurl help missing user verbs: %q", userHelp)
 	}
@@ -261,8 +261,8 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	if !strings.Contains(userHelp, "/qurl setup <email>") {
 		t.Errorf("/qurl help missing setup verb: %q", userHelp)
 	}
-	if !strings.Contains(userHelp, "/qurl uninstall") {
-		t.Errorf("/qurl help missing uninstall verb: %q", userHelp)
+	if strings.Contains(userHelp, "/qurl uninstall") {
+		t.Errorf("/qurl help advertised uninstall without AdminStore: %q", userHelp)
 	}
 	if !strings.Contains(userHelp, "/qurl-admin help") {
 		t.Errorf("/qurl help should route admins to /qurl-admin help: %q", userHelp)
