@@ -5,6 +5,9 @@
 - **Never push directly to `main`.** Branch protection enforces PRs.
 - **All commits must be GPG/SSH signed.** Unsigned commits are rejected.
 - **`golangci-lint` must pass clean.** Config is strict by design (see `.golangci.yml`); fix the code, not the rules.
+- **GitHub Actions refs must be pinned.** Follow the source-of-truth policy in
+  [CONTRIBUTING.md](CONTRIBUTING.md#pr-requirements): full commit SHA, exact
+  upstream version comment, no `docker://`, and human tag/SHA verification.
 
 ## Layout
 

@@ -22,6 +22,19 @@ permissions:
   contents: read
 
 jobs:
+  validate-pins:
+    name: Validate GitHub Actions pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Validate SHA pins
+        run: scripts/validate-github-actions-pins.sh
+      - name: Test SHA pin validator
+        run: scripts/test-validate-github-actions-pins.sh
+
   age-check:
     # No outer `if:` for `age-check-bypass`. The required status check
     # is `age-check / Check GitHub Actions pin ages` (caller-job / reusable-inner-job).
