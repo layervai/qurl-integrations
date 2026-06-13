@@ -140,27 +140,17 @@ type DDBProvider struct {
 	TableName string
 	Encryptor FieldEncryptor
 
-	// Cache successful APIKey lookups at the DDB/decrypt boundary so every
-	// long-lived consumer avoids repeat KMS Decrypt calls during normal slash
-	// command bursts. This mirrors the Slack bot-token cache pattern:
-	// per-workspace in-flight fills, generation-guarded invalidation, and inline
-	// expiry sweeps using Now instead of a background janitor. The cache is
-	// process-local: rotation or disconnect on one serving instance cannot evict
-	// sibling instances, so they may continue using a previously decrypted key,
-	// including a revoked key, until this TTL expires. The hot slash-command path
-	// sends that key directly to qurl-service, so sibling-process staleness can
-	// surface as a user-visible 401 until the TTL rolls over. Issue #263
-	// explicitly accepts five minutes as the starting cross-instance staleness
-	// window; that stays human-perceptible while collapsing the common
-	// multi-command session. Slack bot-token caching stays shorter because it
-	// gates reinstall detection rather than qURL API retry pressure. The cache
-	// also keeps the decrypted key in heap memory for the TTL; that plaintext
-	// residency is the accepted KMS/latency trade-off. SetAPIKey seeds this
-	// process with the new key after a successful write. DeleteAPIKey evicts this
-	// process and forces strongly-consistent refills for one TTL, so a
+	// Cache successful APIKey lookups at the DDB/decrypt boundary, following
+	// the Slack bot-token cache pattern: per-workspace in-flight fills,
+	// generation-guarded invalidation, and inline expiry sweeps. The cache is
+	// process-local, so sibling instances can keep a decrypted key, including a
+	// revoked key, until the five-minute TTL from #263 expires; stricter
+	// cross-instance invalidation is tracked in #766. The decrypted key remains
+	// in heap memory for that TTL as the accepted KMS/latency trade-off.
+	// SetAPIKey seeds this process after a successful write. DeleteAPIKey evicts
+	// this process and forces strongly-consistent refills for one TTL so a
 	// same-process eventually-consistent post-delete read cannot re-cache the
-	// revoked key. Stricter cross-instance invalidation is tracked separately in
-	// #766.
+	// revoked key.
 	apiKeyCache map[string]*cachedAPIKey
 
 	// The mutex coordinates the cache with in-flight fills and invalidation
