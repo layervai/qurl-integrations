@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,12 +16,14 @@ const (
 	testTeamID        = "T123ABCDEF"
 	testSlackBotToken = "xoxb-123456789012345678901234567890"
 	testOldAPIKey     = "lv_live_old"
+	testNewAPIKey     = "lv_live_new"
 )
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
 // predetermined results. Captures Put/Delete inputs for assertion.
 type fakeDDBClient struct {
 	getOutput    *dynamodb.GetItemOutput
+	getFunc      func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
 	getErr       error
 	getCalls     int
 	putInput     *dynamodb.PutItemInput
@@ -32,8 +35,11 @@ type fakeDDBClient struct {
 	delErr       error
 }
 
-func (f *fakeDDBClient) GetItem(_ context.Context, _ *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+func (f *fakeDDBClient) GetItem(ctx context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
 	f.getCalls++
+	if f.getFunc != nil {
+		return f.getFunc(ctx, in)
+	}
 	return f.getOutput, f.getErr
 }
 func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
@@ -325,7 +331,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			t.Fatalf("got %q want %q", got, testOldAPIKey)
 		}
 
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_new")}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
 		now = now.Add(apiKeyCacheTTL - time.Second)
 		got, err = p.APIKey(context.Background(), testTeamID)
 		if err != nil {
@@ -340,11 +346,66 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expired APIKey: %v", err)
 		}
-		if got != "lv_live_new" {
-			t.Fatalf("expired call got %q want %q", got, "lv_live_new")
+		if got != testNewAPIKey {
+			t.Fatalf("expired call got %q want %q", got, testNewAPIKey)
 		}
 		if ddb.getCalls != 2 {
 			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+
+	t.Run("concurrent miss shares one DDB and decrypt fill", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				close(getStarted)
+				<-releaseGet
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_shared_fill")}, nil
+			},
+		}
+		encryptor := &passthroughEncryptor{}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		results := make(chan string, 2)
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got, err := p.APIKey(context.Background(), testTeamID)
+				if err != nil {
+					errs <- err
+					return
+				}
+				results <- got
+			}()
+		}
+		<-getStarted
+		close(releaseGet)
+		wg.Wait()
+		close(results)
+		close(errs)
+
+		for err := range errs {
+			t.Fatalf("APIKey: %v", err)
+		}
+		for got := range results {
+			if got != "lv_live_shared_fill" {
+				t.Fatalf("got %q want %q", got, "lv_live_shared_fill")
+			}
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
 		}
 	})
 }
@@ -376,16 +437,16 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			t.Fatalf("got %q want %q", got, testOldAPIKey)
 		}
 
-		if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_new", "U_ADMIN"); err != nil {
+		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
 			t.Fatalf("SetAPIKey: %v", err)
 		}
-		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_new")}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
 		got, err = p.APIKey(context.Background(), testTeamID)
 		if err != nil {
 			t.Fatalf("APIKey after SetAPIKey: %v", err)
 		}
-		if got != "lv_live_new" {
-			t.Fatalf("got %q want %q", got, "lv_live_new")
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
 		}
 		if ddb.getCalls != 2 {
 			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
@@ -416,6 +477,63 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		}
 		if ddb.getCalls != 2 {
 			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
+		}
+	})
+
+	t.Run("SetAPIKey prevents in-flight stale read from repopulating cache", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				close(getStarted)
+				<-releaseGet
+				return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+			},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		result := make(chan string, 1)
+		errc := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				errc <- err
+				return
+			}
+			result <- got
+		}()
+		<-getStarted
+		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
+			t.Fatalf("SetAPIKey: %v", err)
+		}
+		close(releaseGet)
+
+		select {
+		case err := <-errc:
+			t.Fatalf("in-flight APIKey: %v", err)
+		case got := <-result:
+			if got != testOldAPIKey {
+				t.Fatalf("in-flight call got %q want %q", got, testOldAPIKey)
+			}
+		}
+
+		ddb.getFunc = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after SetAPIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 because stale in-flight fill must not cache", ddb.getCalls)
 		}
 	})
 }

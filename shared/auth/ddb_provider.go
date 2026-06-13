@@ -146,6 +146,10 @@ type DDBProvider struct {
 	// gates reinstall detection rather than qURL API retry pressure.
 	apiKeyCache sync.Map // map[string]*cachedAPIKey
 
+	apiKeyCacheMu         sync.Mutex
+	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
+	apiKeyCacheGeneration map[string]uint64
+
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
 	// to time.Now.
@@ -155,6 +159,24 @@ type DDBProvider struct {
 type cachedAPIKey struct {
 	apiKey    string
 	expiresAt time.Time
+}
+
+type apiKeyLookupResult struct {
+	apiKey string
+	err    error
+}
+
+type apiKeyLookupCall struct {
+	done chan struct{}
+	apiKeyLookupResult
+}
+
+type apiKeyLookupStart struct {
+	apiKey     string
+	hit        bool
+	call       *apiKeyLookupCall
+	owner      bool
+	generation uint64
 }
 
 // SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
@@ -274,13 +296,69 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	}
 
 	now := p.nowOrDefault()
-	if cached, ok := p.apiKeyCache.Load(workspaceID); ok {
-		entry, ok := cached.(*cachedAPIKey)
-		if ok && now.Before(entry.expiresAt) {
-			return entry.apiKey, nil
+	start := p.getOrStartAPIKeyLookup(workspaceID, now)
+	if start.hit {
+		return start.apiKey, nil
+	}
+	if !start.owner {
+		select {
+		case <-start.call.done:
+			return start.call.apiKey, start.call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
 		}
 	}
 
+	return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, now, start.generation)
+}
+
+func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	if cached, ok := p.apiKeyCache.Load(workspaceID); ok {
+		entry, ok := cached.(*cachedAPIKey)
+		if ok && now.Before(entry.expiresAt) {
+			return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
+		}
+	}
+
+	if p.apiKeyCacheGeneration == nil {
+		p.apiKeyCacheGeneration = map[string]uint64{}
+	}
+	generation := p.apiKeyCacheGeneration[workspaceID]
+	if p.apiKeyLookupInFlight == nil {
+		p.apiKeyLookupInFlight = map[string]*apiKeyLookupCall{}
+	}
+	if call, ok := p.apiKeyLookupInFlight[workspaceID]; ok {
+		return apiKeyLookupStart{call: call}
+	}
+	call := &apiKeyLookupCall{done: make(chan struct{})}
+	p.apiKeyLookupInFlight[workspaceID] = call
+	return apiKeyLookupStart{call: call, owner: true, generation: generation}
+}
+
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, now time.Time, generation uint64) (string, error) {
+	result := apiKeyLookupResult{}
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				result = apiKeyLookupResult{err: errors.New("DDBProvider.APIKey: lookup panicked")}
+				p.finishAPIKeyLookup(workspaceID, call, result, now, generation)
+			}
+			panic(rec)
+		}
+	}()
+
+	apiKey, err := p.fetchAPIKey(ctx, workspaceID)
+	result = apiKeyLookupResult{apiKey: apiKey, err: err}
+	p.finishAPIKeyLookup(workspaceID, call, result, now, generation)
+	finished = true
+	return apiKey, err
+}
+
+func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string) (string, error) {
 	// Eventually-consistent read is correct here: the per-workspace key
 	// only changes on (re-)install, and the few-ms propagation delay is
 	// inside the same "click the setup link" window. Strong reads would
@@ -318,9 +396,21 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if len(pt) == 0 {
 		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
 	}
-	apiKey := string(pt)
-	p.cacheAPIKey(workspaceID, apiKey, now)
-	return apiKey, nil
+	return string(pt), nil
+}
+
+func (p *DDBProvider) finishAPIKeyLookup(workspaceID string, call *apiKeyLookupCall, result apiKeyLookupResult, now time.Time, generation uint64) {
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	if result.err == nil && p.apiKeyCacheGeneration[workspaceID] == generation {
+		p.cacheAPIKey(workspaceID, result.apiKey, now)
+	}
+	call.apiKeyLookupResult = result
+	if p.apiKeyLookupInFlight[workspaceID] == call {
+		delete(p.apiKeyLookupInFlight, workspaceID)
+	}
+	close(call.done)
 }
 
 func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
@@ -335,6 +425,20 @@ func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
 			p.apiKeyCache.Delete(workspaceID)
 		}
 	})
+}
+
+func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string) {
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	p.apiKeyCache.Delete(workspaceID)
+	if p.apiKeyLookupInFlight != nil {
+		delete(p.apiKeyLookupInFlight, workspaceID)
+	}
+	if p.apiKeyCacheGeneration == nil {
+		p.apiKeyCacheGeneration = map[string]uint64{}
+	}
+	p.apiKeyCacheGeneration[workspaceID]++
 }
 
 // SlackBotToken looks up the per-workspace Slack bot token captured during
@@ -428,7 +532,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
-	p.apiKeyCache.Delete(workspaceID)
+	p.invalidateAPIKeyCache(workspaceID)
 	return nil
 }
 
@@ -548,7 +652,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
 	}
-	p.apiKeyCache.Delete(workspaceID)
+	p.invalidateAPIKeyCache(workspaceID)
 	return nil
 }
 
