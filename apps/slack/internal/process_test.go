@@ -685,6 +685,8 @@ func (panickingProvider) APIKey(_ context.Context, _ string) (string, error) {
 }
 
 func (panickingProvider) SupportsDeleteAPIKey() bool {
+	// True is deliberate: this fake should stay on mutable-provider code paths
+	// if a test reaches uninstall, while still panicking for panic-recovery tests.
 	return true
 }
 

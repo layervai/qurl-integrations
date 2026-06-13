@@ -1875,7 +1875,11 @@ func TestEnvProviderDeleteAPIKey(t *testing.T) {
 
 	t.Run("missing key maps to unsupported", func(t *testing.T) {
 		t.Setenv(envVar, "")
-		err := EnvProvider{EnvVar: envVar}.DeleteAPIKey(context.Background(), testTeamID)
+		provider := EnvProvider{EnvVar: envVar}
+		if provider.SupportsDeleteAPIKey() {
+			t.Fatal("EnvProvider must not advertise DeleteAPIKey support")
+		}
+		err := provider.DeleteAPIKey(context.Background(), testTeamID)
 		if !errors.Is(err, ErrWorkspaceAPIKeyDeleteUnsupported) {
 			t.Fatalf("want ErrWorkspaceAPIKeyDeleteUnsupported, got %v", err)
 		}
@@ -1883,7 +1887,11 @@ func TestEnvProviderDeleteAPIKey(t *testing.T) {
 
 	t.Run("configured key maps to unsupported", func(t *testing.T) {
 		t.Setenv(envVar, "lv_live_test")
-		err := EnvProvider{EnvVar: envVar}.DeleteAPIKey(context.Background(), testTeamID)
+		provider := EnvProvider{EnvVar: envVar}
+		if provider.SupportsDeleteAPIKey() {
+			t.Fatal("EnvProvider must not advertise DeleteAPIKey support")
+		}
+		err := provider.DeleteAPIKey(context.Background(), testTeamID)
 		if !errors.Is(err, ErrWorkspaceAPIKeyDeleteUnsupported) {
 			t.Fatalf("want ErrWorkspaceAPIKeyDeleteUnsupported, got %v", err)
 		}
