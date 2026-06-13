@@ -91,8 +91,9 @@ const (
 )
 
 const (
-	apiKeyCacheTTL        = 5 * time.Minute
-	apiKeyCacheSweepEvery = time.Minute
+	apiKeyCacheTTL                         = 5 * time.Minute
+	apiKeyCacheSweepEvery                  = time.Minute
+	apiKeySharedContextErrorRetryLimit int = 1
 )
 
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
@@ -314,6 +315,7 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", err
 	}
 
+	sharedContextErrorRetries := 0
 	for {
 		now := p.nowOrDefault()
 		start := p.getOrStartAPIKeyLookup(workspaceID, now)
@@ -323,7 +325,8 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		if !start.owner {
 			select {
 			case <-start.call.done:
-				if shouldRetryAPIKeyLookupAfterSharedError(ctx, start.call.err) {
+				if shouldRetryAPIKeyLookupAfterSharedError(ctx, start.call.err, sharedContextErrorRetries) {
+					sharedContextErrorRetries++
 					continue
 				}
 				return start.call.apiKey, start.call.err
@@ -336,15 +339,16 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	}
 }
 
-func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error) bool {
-	if err == nil || ctx.Err() != nil {
+func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, retries int) bool {
+	if err == nil || ctx.Err() != nil || retries >= apiKeySharedContextErrorRetryLimit {
 		return false
 	}
 	// We cannot distinguish the owner's caller being canceled from a lower
 	// layer surfacing the same context error during a DDB brownout. Retrying
 	// keeps healthy waiters from inheriting a dead owner's context, and each
 	// retry re-enters singleflight as a new owner so extra DDB pressure is
-	// sequential rather than a fan-out spike.
+	// sequential rather than a fan-out spike. Keep the retry count tiny so a
+	// persistent context-like lower-layer error cannot spin on a healthy caller.
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 

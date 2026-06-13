@@ -664,7 +664,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("waiter err = %v, want context.Canceled", err)
 			}
-			if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), err) {
+			if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), err, 0) {
 				t.Fatal("healthy waiter should retry after shared owner cancellation")
 			}
 		case <-time.After(time.Second):
@@ -688,13 +688,16 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 	})
 
 	t.Run("shared deadline asks healthy waiter to retry", func(t *testing.T) {
-		if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), context.DeadlineExceeded) {
+		if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), context.DeadlineExceeded, 0) {
 			t.Fatal("healthy waiter should retry after shared deadline")
+		}
+		if shouldRetryAPIKeyLookupAfterSharedError(context.Background(), context.DeadlineExceeded, apiKeySharedContextErrorRetryLimit) {
+			t.Fatal("healthy waiter should not retry after reaching the retry limit")
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if shouldRetryAPIKeyLookupAfterSharedError(ctx, context.DeadlineExceeded) {
+		if shouldRetryAPIKeyLookupAfterSharedError(ctx, context.DeadlineExceeded, 0) {
 			t.Fatal("canceled waiter should not retry after shared deadline")
 		}
 	})
