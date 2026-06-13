@@ -475,6 +475,37 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 	}
 }
 
+func TestConfirm_GetApproveInDMMintDeliveryFailureAuditsFailure(t *testing.T) {
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {
+			seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID}),
+		},
+	})
+	hc.h.cfg.PostMessage = func(context.Context, string, string, string, string, string) error {
+		return errors.New("delivery unavailable")
+	}
+
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	ro, card := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if !ro {
+		t.Fatalf("the DM failure card must replace the original, got ephemeral %q", card)
+	}
+	if !strings.Contains(card, agentConfirmGetDeliveryFailedReply) {
+		t.Fatalf("delivery failure must show the delivery-failed card, got %q", card)
+	}
+	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	if entry.Result != agentConfirmGetDeliveryFailedAudit {
+		t.Fatalf("get delivery failure Result = %q", entry.Result)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("get delivery failure ResultSuccess = %v, want false", entry.ResultSuccess)
+	}
+}
+
 func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 	// In a 1:1 DM the get's sensitive output (here the failure detail; a link on success)
 	// must be delivered as a NORMAL message via PostMessage — ephemerals don't render in a
@@ -616,7 +647,6 @@ func TestConfirmResultForDelivery(t *testing.T) {
 		res           actionResult
 		delivered     bool
 		wantCard      string
-		wantAuditSet  bool
 		wantAuditText string
 		wantSuccess   bool
 	}{
@@ -625,8 +655,7 @@ func TestConfirmResultForDelivery(t *testing.T) {
 			res:           actionResult{cardText: agentConfirmGetDeliveredReply, ephemeralText: link, attributed: true},
 			delivered:     false,
 			wantCard:      agentConfirmGetDeliveryFailedReply,
-			wantAuditSet:  true,
-			wantAuditText: "Access link was generated, but could not be delivered.",
+			wantAuditText: agentConfirmGetDeliveryFailedAudit,
 			wantSuccess:   false,
 		},
 		{
@@ -654,10 +683,7 @@ func TestConfirmResultForDelivery(t *testing.T) {
 			if got.cardText != c.wantCard {
 				t.Fatalf("cardText = %q, want %q", got.cardText, c.wantCard)
 			}
-			if got.auditSet != c.wantAuditSet {
-				t.Fatalf("auditSet = %v, want %v", got.auditSet, c.wantAuditSet)
-			}
-			if c.wantAuditSet {
+			if c.wantAuditText != "" {
 				if got.audit.display != c.wantAuditText {
 					t.Fatalf("audit.display = %q, want %q", got.audit.display, c.wantAuditText)
 				}

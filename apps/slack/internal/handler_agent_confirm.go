@@ -44,6 +44,7 @@ const (
 	// agentConfirmGetDeliveryFailedReply covers a SUCCESSFUL mint whose private delivery
 	// failed: the card must not claim success when the user received nothing.
 	agentConfirmGetDeliveryFailedReply = "Generated the access link, but couldn't deliver it here. Ask me again."
+	agentConfirmGetDeliveryFailedAudit = "Access link was generated, but could not be delivered."
 	agentConfirmFailedReply            = "Something went wrong applying that. Please try again, or use a `/qurl` command."
 	// agentAttributionAgentName names the actor in an executed action's attribution
 	// footer — the product's user-facing agent name, never "bot".
@@ -629,7 +630,7 @@ func newActionCoreResult(success bool, cardText, auditDisplay string) actionCore
 }
 
 func (r actionCoreResult) actionResult() actionResult {
-	return actionResult{cardText: r.cardText, attributed: true, audit: r.audit, auditSet: true}
+	return actionResult{cardText: r.cardText, attributed: true, audit: r.audit}
 }
 
 func newAttributedActionResult(success bool, cardText, auditDisplay string) actionResult {
@@ -659,10 +660,6 @@ type actionResult struct {
 	// byte-exact for the no-echo security checks.
 	attributed bool
 	audit      actionAuditResult
-	// auditSet is intentionally separate from attributed: attribution says the
-	// action reached execution; auditSet says that branch produced a clean,
-	// structured App Home result. New executed branches usually set both.
-	auditSet bool
 }
 
 // isDirectMessageChannel reports whether a Slack conversation ID is a 1:1 direct
@@ -754,8 +751,7 @@ func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger,
 func confirmResultForDelivery(res actionResult, delivered bool) actionResult {
 	if !delivered && res.cardText == agentConfirmGetDeliveredReply {
 		res.cardText = agentConfirmGetDeliveryFailedReply
-		res.audit = actionAuditResult{display: "Access link was generated, but could not be delivered.", success: false}
-		res.auditSet = true
+		res.audit = actionAuditResult{display: agentConfirmGetDeliveryFailedAudit, success: false}
 	}
 	return res
 }
@@ -883,10 +879,10 @@ func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payloa
 	if h.cfg.AgentStore == nil {
 		return
 	}
-	result, resultSuccess := "", (*bool)(nil)
-	if res.auditSet {
+	result, resultSuccess := res.audit.display, (*bool)(nil)
+	if result != "" {
 		success := res.audit.success
-		result, resultSuccess = res.audit.display, &success
+		resultSuccess = &success
 	}
 	if err := h.cfg.AgentStore.PutAuditEntry(ctx, payload.Team.ID, &slackdata.AuditEntry{
 		Actor:         payload.User.ID,
