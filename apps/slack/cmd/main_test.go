@@ -33,8 +33,18 @@ func newFakeProvider() *auth.DDBProvider {
 	return &auth.DDBProvider{}
 }
 
-const validStateSecret = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
-const defaultSlackBotScopesCSV = "commands,chat:write,im:write"
+const (
+	validStateSecret            = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
+	defaultSlackBotScopesCSV    = "commands,chat:write,im:write"
+	testConnectorVersionImage   = "ghcr.io/layervai/qurl-connector:v1.2.3"
+	testConnectorLatestImage    = "ghcr.io/layervai/qurl-connector:latest"
+	wantNonPinnedImageErr       = "must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest"
+	wantLatestDigestImageErr    = "digest pins must not include a latest tag"
+	wantDigestLowercaseImageErr = "digest must use 64 lowercase hex characters after sha256:"
+	wantMalformedRefImageErr    = "image references must use a full lowercase image name with a single non-empty, non-latest tag"
+	wantAmbiguousRefImageErr    = "slashless registry references must include a repository path"
+	wantMalformedDigestImageErr = "digest references must use image@sha256:<64 lowercase hex> with a full image name"
+)
 
 var oauthEnvKeys = []string{
 	"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET", "AUTH0_AUDIENCE",
@@ -100,6 +110,223 @@ func TestValidateSlackBotToken(t *testing.T) {
 			err := auth.ValidateSlackBotTokenShape(tc.token)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadTunnelImageConfig(t *testing.T) {
+	cases := []struct {
+		name        string
+		image       string
+		fallback    string
+		wantImage   string
+		wantErrText string
+	}{
+		{
+			name:        "unset fails closed",
+			wantErrText: envQURLConnectorImage + " is required",
+		},
+		{
+			name:      "explicit dev sandbox fallback",
+			fallback:  connectorImageFallbackSandbox,
+			wantImage: "",
+		},
+		{
+			name:      "explicit fallback is case insensitive",
+			fallback:  "DEV-SANDBOX",
+			wantImage: "",
+		},
+		{
+			name:      "whitespace image uses explicit fallback",
+			image:     " \t ",
+			fallback:  connectorImageFallbackSandbox,
+			wantImage: "",
+		},
+		{
+			name:      "version-tagged image wins",
+			image:     testConnectorVersionImage,
+			fallback:  "unexpected",
+			wantImage: testConnectorVersionImage,
+		},
+		{
+			name:      "digest-pinned image wins",
+			image:     "localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
+			wantImage: "localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
+		},
+		{
+			name:        "invalid image rejected",
+			image:       "ghcr.io/layervai/qurl-connector:bad tag",
+			wantErrText: envQURLConnectorImage + ":",
+		},
+		{
+			name:        "implicit latest routes to non-pinned message",
+			image:       "ghcr.io/layervai/qurl-connector",
+			wantErrText: wantNonPinnedImageErr,
+		},
+		{
+			name:        "explicit latest image rejected even with fallback opt in",
+			image:       testConnectorLatestImage,
+			fallback:    connectorImageFallbackSandbox,
+			wantErrText: wantNonPinnedImageErr,
+		},
+		{
+			name:        "latest tag with digest routes to latest-digest message",
+			image:       testConnectorLatestImage + "@sha256:" + strings.Repeat("a", 64),
+			wantErrText: wantLatestDigestImageErr,
+		},
+		{
+			name:        "uppercase sha256 digest routes to lowercase-digest message",
+			image:       "ghcr.io/layervai/qurl-connector@sha256:" + strings.Repeat("A", 64),
+			wantErrText: wantDigestLowercaseImageErr,
+		},
+		{
+			name:        "malformed reference routes to malformed-reference message",
+			image:       "ghcr.io//qurl-connector:v1",
+			wantErrText: wantMalformedRefImageErr,
+		},
+		{
+			name:        "uppercase repository path routes to malformed-reference message",
+			image:       "ghcr.io/LayerV/qurl-connector:v1",
+			wantErrText: wantMalformedRefImageErr,
+		},
+		{
+			name:        "slashless registry-looking ref routes to ambiguous-reference message",
+			image:       "gcr.io:v1",
+			wantErrText: wantAmbiguousRefImageErr,
+		},
+		{
+			name:        "mixed-case localhost ref routes to ambiguous-reference message",
+			image:       "Localhost:5000",
+			wantErrText: wantAmbiguousRefImageErr,
+		},
+		{
+			name:        "uppercase localhost ref routes to ambiguous-reference message",
+			image:       "LOCALHOST:5000",
+			wantErrText: wantAmbiguousRefImageErr,
+		},
+		{
+			name:        "malformed digest routes to malformed-digest message",
+			image:       "ghcr.io/layervai/qurl-connector@notadigest",
+			wantErrText: wantMalformedDigestImageErr,
+		},
+		{
+			name:        "uppercase bare sha256 digest routes to malformed-digest message",
+			image:       "SHA256:" + strings.Repeat("a", 64),
+			wantErrText: wantMalformedDigestImageErr,
+		},
+		{
+			name:        "unknown fallback rejected",
+			fallback:    "Latest",
+			wantErrText: envQURLConnectorImageFallback + "=\"Latest\"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envQURLConnectorImage, tc.image)
+			t.Setenv(envQURLConnectorImageFallback, tc.fallback)
+
+			got, err := readTunnelImageConfig()
+
+			if tc.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("readTunnelImageConfig() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readTunnelImageConfig() err = %v", err)
+			}
+			if got != tc.wantImage {
+				t.Fatalf("readTunnelImageConfig() = %q, want %q", got, tc.wantImage)
+			}
+		})
+	}
+}
+
+func TestRunFailsClosedWhenTunnelImageUnset(t *testing.T) {
+	// run() validates the customer-rendered connector image after only the
+	// prerequisite public endpoint/signing-secret checks and before infra or
+	// other env setup, so this asserts the process-level startup error without
+	// AWS stubs.
+	t.Setenv("QURL_ENDPOINT", "https://api.qurl.invalid")
+	t.Setenv("SLACK_SIGNING_SECRET", "signing-secret")
+	t.Setenv(envQURLConnectorImage, "")
+	t.Setenv(envQURLConnectorImageFallback, "")
+
+	err := run()
+
+	if err == nil || !strings.Contains(err.Error(), envQURLConnectorImage+" is required") {
+		t.Fatalf("run() err = %v, want %s fail-closed error", err, envQURLConnectorImage)
+	}
+}
+
+func TestClassifyTunnelImagePin(t *testing.T) {
+	t.Parallel()
+	validDigest := "sha256:" + strings.Repeat("a", 64)
+	cases := []struct {
+		name  string
+		image string
+		want  tunnelImagePinStatus
+	}{
+		{name: "version tag", image: testConnectorVersionImage, want: tunnelImagePinned},
+		{name: "registry host with port and tag", image: "registry.example.com:5000/layervai/qurl-connector:v1.2.3", want: tunnelImagePinned},
+		{name: "uppercase non-latest tag", image: "ghcr.io/layervai/qurl-connector:V1", want: tunnelImagePinned},
+		{name: "uppercase non-latest tag with digest", image: "ghcr.io/layervai/qurl-connector:V1@" + validDigest, want: tunnelImagePinned},
+		{name: "digest", image: "ghcr.io/layervai/qurl-connector@" + validDigest, want: tunnelImagePinned},
+		{name: "single segment image digest", image: "qurl-connector@" + validDigest, want: tunnelImagePinned},
+		{name: "version tag with digest", image: testConnectorVersionImage + "@" + validDigest, want: tunnelImagePinned},
+		{name: "latest tag with digest", image: testConnectorLatestImage + "@" + validDigest, want: tunnelImageLatestDigest},
+		{name: "uppercase latest tag with digest", image: "ghcr.io/layervai/qurl-connector:LATEST@" + validDigest, want: tunnelImageLatestDigest},
+		{name: "multi-colon latest tag with digest", image: "ghcr.io/layervai/qurl-connector:latest:v1@" + validDigest, want: tunnelImageLatestDigest},
+		{name: "path component latest tag with digest", image: "ghcr.io/foo:latest/qurl-connector@" + validDigest, want: tunnelImageLatestDigest},
+		{name: "blank image", want: tunnelImageFloating},
+		{name: "implicit latest", image: "ghcr.io/layervai/qurl-connector", want: tunnelImageFloating},
+		{name: "explicit latest", image: testConnectorLatestImage, want: tunnelImageFloating},
+		{name: "uppercase latest", image: "ghcr.io/layervai/qurl-connector:LATEST", want: tunnelImageFloating},
+		{name: "path component latest tag", image: "ghcr.io/foo:latest/qurl-connector:v1", want: tunnelImageFloating},
+		{name: "path component uppercase latest tag", image: "ghcr.io/foo:LATEST/qurl-connector:v1", want: tunnelImageFloating},
+		{name: "multi-colon latest tag", image: "ghcr.io/layervai/qurl-connector:latest:v1", want: tunnelImageMalformedReference},
+		{name: "multi-colon non-latest tag", image: "ghcr.io/layervai/qurl-connector:v1:v2", want: tunnelImageMalformedReference},
+		{name: "slashless multi-colon non-latest tag", image: "repo:v1:v2", want: tunnelImageMalformedReference},
+		{name: "empty tag", image: "ghcr.io/layervai/qurl-connector:", want: tunnelImageMalformedReference},
+		{name: "non-numeric registry port", image: "host:abc/qurl-connector:v1", want: tunnelImageMalformedReference},
+		{name: "empty path component with tag", image: "ghcr.io//qurl-connector:v1", want: tunnelImageMalformedReference},
+		{name: "uppercase repository namespace", image: "ghcr.io/LayerV/qurl-connector:v1", want: tunnelImageMalformedReference},
+		{name: "uppercase registry host", image: "GHCR.IO/layervai/qurl-connector:v1", want: tunnelImageMalformedReference},
+		{name: "uppercase registry host with digest", image: "GHCR.IO/layervai/qurl-connector@" + validDigest, want: tunnelImageMalformedReference},
+		{name: "empty name with tag", image: ":v1", want: tunnelImageMalformedReference},
+		{name: "empty name with latest digest", image: ":latest@" + validDigest, want: tunnelImageMalformedReference},
+		{name: "registry port without tag", image: "localhost:5000/layervai/qurl-connector", want: tunnelImageFloating},
+		{name: "bare localhost port", image: "localhost:5000", want: tunnelImageAmbiguousReference},
+		{name: "mixed-case localhost port", image: "Localhost:5000", want: tunnelImageAmbiguousReference},
+		{name: "uppercase localhost port", image: "LOCALHOST:5000", want: tunnelImageAmbiguousReference},
+		{name: "bare dotted registry port", image: "registry.example.com:5000", want: tunnelImageAmbiguousReference},
+		{name: "dotted slashless name with tag", image: "gcr.io:v1", want: tunnelImageAmbiguousReference},
+		{name: "numeric tag without registry host", image: "qurl-connector:5000", want: tunnelImagePinned},
+		{name: "multi-colon non-latest tag with digest", image: "ghcr.io/layervai/qurl-connector:v1:v2@" + validDigest, want: tunnelImageMalformedReference},
+		{name: "empty tag with digest", image: "ghcr.io/layervai/qurl-connector:@" + validDigest, want: tunnelImageMalformedReference},
+		{name: "malformed digest", image: "ghcr.io/layervai/qurl-connector@notadigest", want: tunnelImageMalformedDigest},
+		{name: "tagged malformed digest", image: testConnectorVersionImage + "@sha256:abc123", want: tunnelImageMalformedDigest},
+		{name: "short sha256 digest", image: "ghcr.io/layervai/qurl-connector@sha256:abc123", want: tunnelImageMalformedDigest},
+		{name: "uppercase sha256 digest", image: "ghcr.io/layervai/qurl-connector@sha256:" + strings.Repeat("A", 64), want: tunnelImageUppercaseDigest},
+		{name: "nameless digest", image: "@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "digest with sha256 image name", image: "sha256@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "bare registry digest", image: "localhost:5000@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "non-numeric registry port with digest", image: "host:abc/qurl-connector@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "trailing slash digest", image: "localhost:5000/@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "leading slash digest", image: "/@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "bare dotted registry digest", image: "registry.example.com@" + validDigest, want: tunnelImageMalformedDigest},
+		{name: "bare sha256 digest", image: validDigest, want: tunnelImageMalformedDigest},
+		{name: "uppercase bare sha256 digest", image: "SHA256:" + strings.Repeat("a", 64), want: tunnelImageMalformedDigest},
+		{name: "short bare sha256 digest", image: "sha256:abc123", want: tunnelImageMalformedDigest},
+		{name: "at sign in non-digest suffix", image: "ghcr.io/layervai/qurl-connector:weird@tag", want: tunnelImageMalformedDigest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := classifyTunnelImagePin(tc.image); got != tc.want {
+				t.Fatalf("classifyTunnelImagePin(%q) = %v, want %v", tc.image, got, tc.want)
 			}
 		})
 	}

@@ -2066,17 +2066,25 @@ func firstSlackCodeBlock(t *testing.T, body string) string {
 	return body[start : start+end]
 }
 
-func TestValidateTunnelImageRefRejectsBackticks(t *testing.T) {
+func TestValidateTunnelImageRefAllowsBoringImageRefs(t *testing.T) {
 	t.Parallel()
 
-	err := ValidateTunnelImageRef("ghcr.io/layervai/qurl```bad")
-
-	if err == nil || !strings.Contains(err.Error(), "backticks") {
-		t.Fatalf("ValidateTunnelImageRef error = %v, want backtick rejection", err)
+	for _, image := range []string{
+		"",
+		"ghcr.io/layervai/qurl-connector:v1.2.3",
+		"ghcr.io/layervai/qurl_connector:build_2026-06-13",
+		"localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
+	} {
+		t.Run(image, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateTunnelImageRef(image); err != nil {
+				t.Fatalf("ValidateTunnelImageRef(%q) err = %v, want nil", image, err)
+			}
+		})
 	}
 }
 
-func TestValidateTunnelImageRefRejectsShellSyntaxBytes(t *testing.T) {
+func TestValidateTunnelImageRefRejectsNonAllowlistedBytes(t *testing.T) {
 	t.Parallel()
 	badTag := "ghcr.io/layervai/qurl-connector:bad"
 	for i, image := range []string{
@@ -2084,6 +2092,24 @@ func TestValidateTunnelImageRefRejectsShellSyntaxBytes(t *testing.T) {
 		badTag + "$tag",
 		badTag + "'tag",
 		badTag + "\"tag",
+		badTag + ";tag",
+		badTag + "&tag",
+		badTag + "|tag",
+		badTag + "<tag",
+		badTag + ">tag",
+		badTag + "(tag",
+		badTag + ")tag",
+		badTag + "`tag",
+		badTag + "\\tag",
+		badTag + "*tag",
+		badTag + "?tag",
+		badTag + "{tag",
+		badTag + "}tag",
+		badTag + "!tag",
+		badTag + "#tag",
+		badTag + "~tag",
+		badTag + ",tag",
+		badTag + "+build",
 		badTag + "\ntag",
 		badTag + "\x00tag",
 	} {

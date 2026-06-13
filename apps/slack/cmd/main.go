@@ -31,7 +31,12 @@ import (
 )
 
 const (
-	listenAddr = ":8080"
+	listenAddr                    = ":8080"
+	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
+	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
+	connectorImageFallbackSandbox = "dev-sandbox"
+	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
+	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving it empty and setting " + connectorImageFallbackOptIn
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
 	// and reap the process. This is the cap on the drain *as a whole*, not
@@ -113,6 +118,12 @@ func run() error {
 	if slackSigningSecret == "" {
 		return errors.New("SLACK_SIGNING_SECRET is required")
 	}
+	// Validate the customer-rendered connector image before infra clients so
+	// manifest mistakes fail with the image-specific startup error.
+	tunnelImage, err := readTunnelImageConfig()
+	if err != nil {
+		return err
+	}
 
 	// DDBProvider reads the workspace_state table populated by
 	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails
@@ -134,10 +145,6 @@ func run() error {
 	maxConcurrentFollowupAsync := readMaxConcurrentFollowupAsync()
 	maxConcurrentFollowupGateAsync := readMaxConcurrentFollowupGateAsync()
 	adminStore := buildAdminStore(signalCtx)
-	tunnelImage := strings.TrimSpace(os.Getenv("QURL_CONNECTOR_IMAGE"))
-	if err := internal.ValidateTunnelImageRef(tunnelImage); err != nil {
-		return fmt.Errorf("QURL_CONNECTOR_IMAGE: %w", err)
-	}
 	slackBotToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
 	if err := auth.ValidateSlackBotTokenShape(slackBotToken); err != nil {
 		return fmt.Errorf("invalid SLACK_BOT_TOKEN: %w", err)
@@ -1016,6 +1023,289 @@ func readMaxConcurrentFollowupAsync() int {
 // from QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC.
 func readMaxConcurrentFollowupGateAsync() int {
 	return readPoolSizeEnv("QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC")
+}
+
+// readTunnelImageConfig makes the fallback policy explicit at startup. The
+// handler still treats an empty TunnelImage as "render the dev/sandbox fallback"
+// so focused tests can exercise that branch, but production cmd/main.go only
+// passes empty after an operator opt-in.
+func readTunnelImageConfig() (string, error) {
+	image := strings.TrimSpace(os.Getenv(envQURLConnectorImage))
+	if err := internal.ValidateTunnelImageRef(image); err != nil {
+		return "", fmt.Errorf("%s: %w", envQURLConnectorImage, err)
+	}
+	if image != "" {
+		switch classifyTunnelImagePin(image) {
+		case tunnelImagePinned:
+			return image, nil
+		case tunnelImageLatestDigest:
+			return "", fmt.Errorf(
+				"%s digest pins must not include a latest tag; use an image@sha256:<64 lowercase hex> digest without :latest, or a specific non-latest release tag before the digest; %s",
+				envQURLConnectorImage, connectorImageFallbackHint,
+			)
+		case tunnelImageUppercaseDigest:
+			return "", fmt.Errorf(
+				"%s digest must use 64 lowercase hex characters after sha256:; %s",
+				envQURLConnectorImage, connectorImageFallbackHint,
+			)
+		case tunnelImageMalformedReference:
+			return "", fmt.Errorf(
+				"%s image references must use a full lowercase image name with a single non-empty, non-latest tag, or image@sha256:<64 lowercase hex> digest; %s",
+				envQURLConnectorImage, connectorImageFallbackHint,
+			)
+		case tunnelImageAmbiguousReference:
+			return "", fmt.Errorf(
+				"%s slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest; %s",
+				envQURLConnectorImage, connectorImageFallbackHint,
+			)
+		case tunnelImageMalformedDigest:
+			return "", fmt.Errorf(
+				"%s digest references must use image@sha256:<64 lowercase hex> with a full image name; %s",
+				envQURLConnectorImage, connectorImageFallbackHint,
+			)
+		case tunnelImageFloating:
+			return "", fmt.Errorf(
+				"%s must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest; %s",
+				envQURLConnectorImage, connectorImageFallbackHint,
+			)
+		}
+		// Future tunnelImagePinStatus values must fail closed.
+		return "", fmt.Errorf("%s could not validate image pinning; %s", envQURLConnectorImage, connectorImageFallbackHint)
+	}
+
+	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))
+	fallback := strings.ToLower(rawFallback)
+	switch fallback {
+	case connectorImageFallbackSandbox:
+		return "", nil
+	case "":
+		return "", fmt.Errorf("%s is required unless %s explicitly opts into the dev/sandbox fallback", envQURLConnectorImage, connectorImageFallbackOptIn)
+	default:
+		return "", fmt.Errorf("%s=%q is unsupported; set %s only for dev/sandbox, or set %s to a specific non-latest tag or digest", envQURLConnectorImageFallback, rawFallback, connectorImageFallbackOptIn, envQURLConnectorImage)
+	}
+}
+
+type tunnelImagePinStatus int
+
+const (
+	tunnelImagePinned tunnelImagePinStatus = iota
+	tunnelImageFloating
+	tunnelImageLatestDigest
+	tunnelImageUppercaseDigest
+	tunnelImageMalformedReference
+	tunnelImageAmbiguousReference
+	tunnelImageMalformedDigest
+)
+
+// classifyTunnelImagePin decides whether an operator-provided image ref is
+// pinned enough for production startup and, if not, which startup error should
+// explain it. It is intentionally narrower than Docker's full reference grammar
+// because startup only needs to reject the floating forms that would otherwise
+// render into customer-facing install snippets. We avoid adding the full
+// github.com/distribution/reference parser here because the bot controls one
+// connector image family, already allowlists boring snippet characters, and
+// deliberately rejects ambiguous Docker-valid forms instead of broadening
+// operator input. TestClassifyTunnelImagePin pins those ambiguous forms, such
+// as gcr.io:v1 and localhost:5000. It does not validate repository-path or tag
+// grammar beyond the small set of ambiguous forms that would otherwise look
+// pinned while still lacking a usable image name.
+func classifyTunnelImagePin(image string) tunnelImagePinStatus {
+	name, digest, hasDigest := strings.Cut(image, "@")
+	lastSlash := strings.LastIndex(name, "/")
+	lastColon := strings.LastIndex(name, ":")
+	nameSuffix := name[lastSlash+1:]
+	repositoryName := imageRepositoryName(name, lastSlash, lastColon)
+	hasEmptyNameBeforeTag := lastColon == lastSlash+1
+	hasEmptyTag := strings.HasSuffix(nameSuffix, ":")
+	hasMultiColonTag := strings.Count(nameSuffix, ":") > 1
+	hasLatestTag := imageNameHasLatestTag(name)
+	if hasDigest {
+		if name == "" {
+			return tunnelImageMalformedDigest
+		}
+		if hasEmptyNameBeforeTag {
+			return tunnelImageMalformedReference
+		}
+		if status := classifyDigestRepositoryName(repositoryName); status != tunnelImagePinned {
+			return status
+		}
+		// The digest controls image resolution, but reject
+		// repo:latest@sha256:<hex> anyway so customer-facing snippets never
+		// visibly advertise the floating latest tag.
+		if hasLatestTag {
+			return tunnelImageLatestDigest
+		}
+		if hasEmptyTag || hasMultiColonTag {
+			return tunnelImageMalformedReference
+		}
+		switch classifySHA256ImageDigest(digest) {
+		case sha256DigestValid:
+			return tunnelImagePinned
+		case sha256DigestUppercaseHex:
+			return tunnelImageUppercaseDigest
+		case sha256DigestInvalid:
+			return tunnelImageMalformedDigest
+		}
+		// Future sha256DigestStatus values must fail closed.
+		return tunnelImageMalformedDigest
+	}
+	if lastColon <= lastSlash {
+		return tunnelImageFloating
+	}
+	if hasMultiColonTag {
+		return tunnelImageMalformedReference
+	}
+	if lastSlash < 0 && looksLikeRegistryHost(name[:lastColon]) {
+		return tunnelImageAmbiguousReference
+	}
+	tag := name[lastColon+1:]
+	// Without a digest, malformed tag syntax is more useful operator guidance
+	// than the latest-specific digest warning above.
+	if tag == "" {
+		return tunnelImageMalformedReference
+	}
+	if hasLatestTag {
+		return tunnelImageFloating
+	}
+	// Avoid treating bare digest-looking sha256:<hex> input as an image named
+	// "sha256" with a tag.
+	if strings.EqualFold(repositoryName, "sha256") {
+		return tunnelImageMalformedDigest
+	}
+	if hasEmptyNameBeforeTag || !imageNameHasRepository(repositoryName) {
+		return tunnelImageMalformedReference
+	}
+	// Non-latest tags are trusted release labels by operator convention; use
+	// image@sha256:<digest> when byte-for-byte image immutability is required.
+	return tunnelImagePinned
+}
+
+type sha256DigestStatus int
+
+const (
+	sha256DigestValid sha256DigestStatus = iota
+	sha256DigestUppercaseHex
+	sha256DigestInvalid
+)
+
+func classifySHA256ImageDigest(digest string) sha256DigestStatus {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(digest, prefix) {
+		return sha256DigestInvalid
+	}
+	hex := strings.TrimPrefix(digest, prefix)
+	if len(hex) != 64 {
+		return sha256DigestInvalid
+	}
+	hasUpper := false
+	for _, r := range hex {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+			hasUpper = true
+		default:
+			return sha256DigestInvalid
+		}
+	}
+	// Image digests produced by GHCR/Docker for this connector are sha256.
+	// Reject other OCI digest algorithms until we have a concrete need for
+	// them, rather than silently widening the accepted operator input.
+	// Require canonical lowercase rather than normalizing so operator config
+	// stays byte-for-byte identical to the pinned digest shown to customers.
+	if hasUpper {
+		return sha256DigestUppercaseHex
+	}
+	return sha256DigestValid
+}
+
+func imageNameHasLatestTag(name string) bool {
+	for _, component := range strings.Split(name, "/") {
+		for _, tag := range strings.Split(component, ":")[1:] {
+			if strings.EqualFold(tag, "latest") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func imageRepositoryName(name string, lastSlash, lastColon int) string {
+	if lastColon > lastSlash {
+		return name[:lastColon]
+	}
+	return name
+}
+
+func classifyDigestRepositoryName(repositoryName string) tunnelImagePinStatus {
+	if imageNameHasUppercase(repositoryName) {
+		return tunnelImageMalformedReference
+	}
+	if !imageNameHasRepository(repositoryName) {
+		return tunnelImageMalformedDigest
+	}
+	return tunnelImagePinned
+}
+
+func imageNameHasRepository(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.EqualFold(name, "sha256") {
+		return false
+	}
+	if imageNameHasUppercase(name) {
+		return false
+	}
+	if strings.Contains(name, "/") {
+		for i, component := range strings.Split(name, "/") {
+			if component == "" {
+				return false
+			}
+			if i == 0 && !firstPathComponentHasValidPort(component) {
+				return false
+			}
+		}
+		return true
+	}
+	lastColon := strings.LastIndex(name, ":")
+	if lastColon == 0 {
+		return false
+	}
+	if lastColon >= 0 {
+		return !looksLikeRegistryHost(name[:lastColon])
+	}
+	return !looksLikeRegistryHost(name)
+}
+
+func imageNameHasUppercase(name string) bool {
+	for _, r := range name {
+		if r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func firstPathComponentHasValidPort(component string) bool {
+	lastColon := strings.LastIndex(component, ":")
+	if lastColon < 0 {
+		return true
+	}
+	port := component[lastColon+1:]
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeRegistryHost(host string) bool {
+	return strings.EqualFold(host, "localhost") || strings.ContainsAny(host, ".:")
 }
 
 // readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;

@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	// Production deploys should set QURL_CONNECTOR_IMAGE to an immutable
-	// release tag or digest. The floating fallback is for dev/sandbox
-	// onboarding where the latest sidecar build is intentional.
+	// Production deploys must set QURL_CONNECTOR_IMAGE to a specific non-latest
+	// release tag or digest. cmd/main.go requires an explicit dev/sandbox opt-in
+	// before allowing this floating fallback to render.
 	defaultTunnelImage            = "ghcr.io/layervai/qurl-connector:latest"
 	defaultTunnelLocalPort        = 8080
 	tunnelBootstrapTTL            = "1h"
@@ -847,7 +847,7 @@ func tunnelImageNote(usingDefaultImage bool) string {
 	if !usingDefaultImage {
 		return ""
 	}
-	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Set `QURL_CONNECTOR_IMAGE` to an immutable release tag or digest before production rollout, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`."
+	return ":warning: Image: using the dev/sandbox fallback `" + defaultTunnelImage + "`. Production must set `QURL_CONNECTOR_IMAGE` to a specific non-latest release tag or digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`."
 }
 
 func tunnelInstallRateLimitMessage(err error) string {
@@ -1055,20 +1055,31 @@ func yamlSingleQuoted(s string) (string, error) {
 }
 
 // ValidateTunnelImageRef checks the operator-provided image reference shown in
-// install snippets. Empty is valid and means the handler will use its fallback.
+// install snippets. Empty is valid here and means the handler will use its
+// fallback; cmd/main.go separately requires an explicit dev/sandbox fallback
+// opt-in before passing an empty image in a real deployment.
 // This is intentionally stricter than Docker's full reference grammar: the bot
-// controls the image source, and rejecting shell/YAML syntax-bearing bytes
-// keeps generated Slack install blocks inspectable and boring.
+// controls the image source, and the allowlist keeps generated Slack install
+// blocks inspectable and boring. It is still only a character allowlist, not a
+// full Docker parser; uppercase remains allowed here because tags may use it,
+// while cmd/main.go applies the startup pinning and lowercase-repository policy.
 func ValidateTunnelImageRef(image string) error {
 	if image == "" {
 		return nil
 	}
 	for _, r := range image {
-		if r <= ' ' || r == 0x7f || r == '\'' || r == '"' || r == '`' || r == '$' {
-			return errors.New("tunnel image reference contains quotes, dollar signs, backticks, whitespace, or control characters")
+		if !isTunnelImageRefRune(r) {
+			return errors.New("tunnel image reference must use only letters, numbers, dots, slashes, colons, at signs, underscores, or hyphens; Docker tags do not support '+' build metadata")
 		}
 	}
 	return nil
+}
+
+func isTunnelImageRefRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		strings.ContainsRune("./:@_-", r)
 }
 
 func slackCodeBlock(body string) (string, error) {
