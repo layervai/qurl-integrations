@@ -104,14 +104,6 @@ func (h *Handler) startAsyncWorkerWithTimeout(log *slog.Logger, timeout time.Dur
 	return false
 }
 
-func (h *Handler) startAsyncWorkerWithTail(log *slog.Logger, work func(ctx context.Context, log *slog.Logger) func()) bool {
-	if h.runOnPoolWithTail(h.sem, log, asyncWorkTimeout, work) {
-		return true
-	}
-	log.Warn("async pool saturated — dropping request")
-	return false
-}
-
 // runOnPool acquires a non-blocking slot on sem and runs work in a wg-tracked,
 // panic-recovered, timeout-bounded goroutine off h.baseCtx. It returns false WITHOUT
 // running if sem is full, leaving the saturation log to the caller so each pool reports
@@ -149,56 +141,6 @@ func (h *Handler) runOnPool(sem chan struct{}, log *slog.Logger, timeout time.Du
 		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
 		defer cancel()
 		work(ctx, log)
-	}()
-	return true
-}
-
-// runOnPoolWithTail runs a bounded worker body and then, if returned, a
-// wg-tracked tail after the worker slot is released. That means peak goroutines
-// can be cap(sem) bodies plus cap(sem) tails; only use this helper for cheap,
-// independently bounded tails, or add a separate bound for the tail work. The
-// body ctx is canceled before the tail runs, so tails must derive their own
-// context. If cleanup/audit must happen after a body failure, the body must
-// recover internally and still return a tail; a panic before returning the
-// closure is logged by this helper and leaves no tail to run.
-func (h *Handler) runOnPoolWithTail(sem chan struct{}, log *slog.Logger, timeout time.Duration, work func(ctx context.Context, log *slog.Logger) func()) bool {
-	select {
-	case sem <- struct{}{}:
-	default:
-		return false
-	}
-
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-
-		ctx, cancel := context.WithTimeout(h.baseCtx, timeout)
-		var tail func()
-		func() {
-			defer cancel()
-			defer func() {
-				if rec := recover(); rec != nil {
-					log.Error("panic in async worker", "recover", rec, "stack", string(debug.Stack()))
-				}
-			}()
-			tail = work(ctx, log)
-		}()
-		// Release the bounded worker slot before the tail runs, but keep the tail
-		// in the same wg-tracked goroutine so shutdown waits for best-effort cleanup
-		// such as audit writes.
-		<-sem
-
-		if tail == nil {
-			return
-		}
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					log.Error("panic in async worker tail", "recover", rec, "stack", string(debug.Stack()))
-				}
-			}()
-			tail()
-		}()
 	}()
 	return true
 }

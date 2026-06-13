@@ -269,7 +269,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentReply(log, env, threadTS, agentErrorReply)
 		return
 	}
-	reason := agentConfirmVisibleReason(prop)
+	reason := protectConnectorConfirmReason(prop)
 	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
 	// the card fallback below and agentReplyText).
 	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
@@ -345,7 +345,7 @@ func agentConfirmFallbackText(summary, reason string) string {
 	return text
 }
 
-func agentConfirmVisibleReason(prop *agent.Proposal) string {
+func protectConnectorConfirmReason(prop *agent.Proposal) string {
 	// Scope this display to protect-connector: this PR newly persists that
 	// modal provenance after an additional submit step. Other reason-bearing
 	// actions audit directly from the confirm click, but this flow needs the

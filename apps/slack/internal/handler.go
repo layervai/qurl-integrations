@@ -828,7 +828,7 @@ func (h *Handler) Go(fn func()) {
 		defer h.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in OAuth async goroutine",
+				slog.Error("panic in tracked async goroutine",
 					"recover", r,
 					"stack", string(debug.Stack()))
 			}

@@ -344,11 +344,14 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
 	req.attemptID = tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
-	if !h.startAsyncWorkerWithTail(log, func(ctx context.Context, log *slog.Logger) func() {
+	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		result := h.processTunnelInstallCore(ctx, log, req)
-		return func() {
+		// The accepted modal audit is wg-tracked but intentionally not pool-bound:
+		// add it before this worker returns so shutdown cannot miss it, then let
+		// the worker slot release before the bounded 5s audit write completes.
+		h.Go(func() {
 			h.recordTunnelInstallAgentAudit(log, req, result)
-		}
+		})
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditWorkerUnavailableResult)
