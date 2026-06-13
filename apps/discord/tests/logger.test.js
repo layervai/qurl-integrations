@@ -427,6 +427,21 @@ describe('logger', () => {
 
     // Other canonical content-hash names share `hash`'s exact-match treatment
     // so a future caller using a different name doesn't slip through.
+    it('pins the canonical content-hash exact-match key set', () => {
+      const { __testExports } = require('../src/logger');
+
+      const got = [...__testExports.REDACT_EXACT_KEYS]
+        .filter(k => k !== 'private_key')
+        .sort();
+      const want = [
+        'hash',
+        'md5', 'sha1', 'sha256', 'sha512',
+        'digest', 'checksum',
+        'content_hash', 'body_hash',
+      ].sort();
+      expect(got).toEqual(want);
+    });
+
     it.each([
       'md5', 'sha1', 'sha256', 'sha512',
       'digest', 'checksum',

@@ -28,6 +28,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackinstall"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -89,7 +90,9 @@ func main() {
 	// gosec suppressions in apps/slack/internal/handler.go assume slog's
 	// JSON output escapes control characters in tainted attribute
 	// values. Don't swap to TextHandler without revisiting those sites.
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Redaction mirrors Discord: matched keys blank string/byte values, while
+	// containers under matched keys are walked by their inner field names.
+	logger := slog.New(observability.NewRedactingJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
 	if err := run(); err != nil {
