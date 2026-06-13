@@ -23,7 +23,7 @@ const (
 )
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
-// predetermined results. Captures Put/Delete inputs for assertion.
+// predetermined results. Captures write inputs for assertion.
 type fakeDDBClient struct {
 	getOutput    *dynamodb.GetItemOutput
 	getFunc      func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
@@ -35,8 +35,6 @@ type fakeDDBClient struct {
 	updateInput  *dynamodb.UpdateItemInput
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
-	delInput     *dynamodb.DeleteItemInput
-	delErr       error
 }
 
 func (f *fakeDDBClient) GetItem(ctx context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -57,10 +55,6 @@ func (f *fakeDDBClient) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInp
 		return f.updateOutput, f.updateErr
 	}
 	return &dynamodb.UpdateItemOutput{}, f.updateErr
-}
-func (f *fakeDDBClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	f.delInput = in
-	return &dynamodb.DeleteItemOutput{}, f.delErr
 }
 
 // emptyPlaintextEncryptor decrypts any ciphertext to zero bytes. Used
@@ -1789,17 +1783,46 @@ func TestDDBProviderSetSlackBotTokenRejectsMalformedToken(t *testing.T) {
 }
 
 func TestDDBProviderDeleteAPIKey(t *testing.T) {
-	ddb := &fakeDDBClient{}
-	p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
-	if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
-		t.Fatalf("DeleteAPIKey: %v", err)
-	}
-	if ddb.delInput == nil {
-		t.Fatal("expected DeleteItem called")
-	}
-	if v, ok := ddb.delInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
-		t.Errorf("delete key wrong: %v", ddb.delInput.Key)
-	}
+	t.Run("removes qURL key columns", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteAPIKey: %v", err)
+		}
+		if ddb.updateInput == nil {
+			t.Fatal("expected UpdateItem called")
+		}
+		if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
+			t.Errorf("delete key wrong: %v", ddb.updateInput.Key)
+		}
+		if got, want := *ddb.updateInput.UpdateExpression, "REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at, #updated_at"; got != want {
+			t.Errorf("UpdateExpression = %q, want %q", got, want)
+		}
+		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key)"; got != want {
+			t.Errorf("ConditionExpression = %q, want %q", got, want)
+		}
+		wantNames := map[string]string{
+			"#qurl_api_key":    attrQURLAPIKey,
+			"#qurl_api_key_dk": attrDataKeyCT,
+			"#configured_by":   attrConfiguredBy,
+			"#configured_at":   attrConfiguredAt,
+			"#updated_at":      attrUpdatedAt,
+		}
+		for name, want := range wantNames {
+			if got := ddb.updateInput.ExpressionAttributeNames[name]; got != want {
+				t.Errorf("ExpressionAttributeNames[%q] = %q, want %q", name, got, want)
+			}
+		}
+	})
+
+	t.Run("missing qURL key maps to not configured", func(t *testing.T) {
+		ddb := &fakeDDBClient{updateErr: &ddbtypes.ConditionalCheckFailedException{}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		err := p.DeleteAPIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		}
+	})
 }
 
 // KMSEncryptor itself is covered by a round-trip test that exercises

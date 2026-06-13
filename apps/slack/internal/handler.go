@@ -122,6 +122,7 @@ const (
 	headerSlackSignature = "X-Slack-Signature"
 	headerSlackTimestamp = "X-Slack-Request-Timestamp"
 	setupVerb            = "setup"
+	uninstallVerb        = "uninstall"
 )
 
 const (
@@ -1126,7 +1127,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup", "feedback"}
+var userVerbs = []string{"get", "list", "aliases", "create", "setup", uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1310,6 +1311,11 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
 		// see handleSetup for why it lives on the open user surface.
 		h.handleSetup(w, values, setupEmail)
+	case text == uninstallVerb:
+		// uninstall intentionally stays on the user command for now: Slack
+		// signatures authenticate the workspace payload, while Slack role checks
+		// are not available in this slash payload without a separate API lookup.
+		h.handleUninstall(w, values)
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel
@@ -1611,6 +1617,31 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 	respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
+func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
+	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	if teamID == "" {
+		respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
+		return
+	}
+	if h.cfg.AuthProvider == nil {
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	defer cancel()
+	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
+		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+			respondSlack(w, "qURL isn't currently connected to this workspace. Run `/qurl setup <email>` to connect it.")
+			return
+		}
+		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)
+		respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
+		return
+	}
+	respondSlack(w, "qURL has been disconnected from this workspace. Run `/qurl setup <email>` to reconnect it.")
+}
+
 // authenticatedClient resolves an API key for the team and returns a configured client.
 func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*client.Client, error) {
 	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, teamID)
@@ -1692,6 +1723,7 @@ func (h *Handler) userHelpMessage(command string) string {
 		)
 	}
 	lines = append(lines,
+		"• `/qurl uninstall` — Disconnect qURL from this Slack workspace",
 		"• `/qurl list` — List the resources available to you",
 	)
 	if h.cfg.AdminStore != nil {

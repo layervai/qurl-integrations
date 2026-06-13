@@ -79,6 +79,26 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 	return h
 }
 
+type recordingAuthProvider struct {
+	apiKey            string
+	deleteErr         error
+	deleteCalls       int
+	deleteWorkspaceID string
+}
+
+func (p *recordingAuthProvider) APIKey(_ context.Context, _ string) (string, error) {
+	if p.apiKey == "" {
+		return "", auth.ErrWorkspaceNotConfigured
+	}
+	return p.apiKey, nil
+}
+
+func (p *recordingAuthProvider) DeleteAPIKey(_ context.Context, workspaceID string) error {
+	p.deleteCalls++
+	p.deleteWorkspaceID = workspaceID
+	return p.deleteErr
+}
+
 // signSlackBody returns the pair of headers Slack would send to authenticate
 // `body` at `fixedNow`. Using the same algorithm as the handler means any
 // drift between them gets caught by the verification tests themselves.
@@ -168,11 +188,9 @@ func TestSlashCommandHelp(t *testing.T) {
 	}
 }
 
-// slashReply drives a signed slash-command request for (command, text)
-// and returns the ephemeral reply text. Used by the dispatch-split tests
-// below to assert that `command` (/qurl vs /qurl-admin) routes each verb
-// to the right surface.
-func slashReply(t *testing.T, h *Handler, command, text string) string {
+// slashResponse drives a signed slash-command request for (command, text)
+// and returns the JSON response envelope.
+func slashResponse(t *testing.T, h *Handler, command, text string) map[string]string {
 	t.Helper()
 	body := url.Values{
 		fieldCommand:   {command},
@@ -191,7 +209,15 @@ func slashReply(t *testing.T, h *Handler, command, text string) string {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	return result["text"]
+	return result
+}
+
+// slashReply returns only the Slack response text. Used by the dispatch-split
+// tests below to assert that `command` (/qurl vs /qurl-admin) routes each verb
+// to the right surface.
+func slashReply(t *testing.T, h *Handler, command, text string) string {
+	t.Helper()
+	return slashResponse(t, h, command, text)[respFieldText]
 }
 
 // TestDispatchSplit_HelpPerCommand fences the help-text split: `/qurl
@@ -214,6 +240,9 @@ func TestDispatchSplit_HelpPerCommand(t *testing.T) {
 	// it.
 	if !strings.Contains(userHelp, "/qurl setup <email>") {
 		t.Errorf("/qurl help missing setup verb: %q", userHelp)
+	}
+	if !strings.Contains(userHelp, "/qurl uninstall") {
+		t.Errorf("/qurl help missing uninstall verb: %q", userHelp)
 	}
 	if !strings.Contains(userHelp, "/qurl-admin help") {
 		t.Errorf("/qurl help should route admins to /qurl-admin help: %q", userHelp)
@@ -270,7 +299,7 @@ func TestDispatchSplit_WrongSurfaceRedirects(t *testing.T) {
 	}
 
 	// User verbs on /qurl-admin → redirect to /qurl.
-	for _, text := range []string{string(SubcmdGet) + " $prod-db", string(SubcmdList), string(SubcmdAliases), setupAdminExampleText} {
+	for _, text := range []string{string(SubcmdGet) + " $prod-db", string(SubcmdList), string(SubcmdAliases), setupAdminExampleText, uninstallVerb} {
 		reply := slashReply(t, h, commandAdmin, text)
 		if !strings.Contains(reply, "belongs on `/qurl`") || !strings.Contains(reply, "/qurl ") {
 			t.Errorf("/qurl-admin %q: want /qurl-command redirect, got %q", text, reply)
@@ -412,6 +441,48 @@ func TestDispatchSplit_NonProdCommandNamesRouteBySuffix(t *testing.T) {
 	}
 	if adminHelp := slashReply(t, h, "/qurl-sandbox-admin", "help"); !strings.Contains(adminHelp, "/qurl-sandbox-admin help") {
 		t.Errorf("/qurl-sandbox-admin help should render the sandbox command name, got %q", adminHelp)
+	}
+}
+
+func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if provider.deleteWorkspaceID != "T123ABCDEF" {
+		t.Fatalf("DeleteAPIKey workspaceID = %q, want T123ABCDEF", provider.deleteWorkspaceID)
+	}
+	if resp[respFieldResponseType] != respTypeEphemeral {
+		t.Fatalf("response_type = %q, want %q", resp[respFieldResponseType], respTypeEphemeral)
+	}
+	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallNotConfigured(t *testing.T) {
+	provider := &recordingAuthProvider{
+		apiKey:    "test-key",
+		deleteErr: auth.ErrWorkspaceNotConfigured,
+	}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb)
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if resp[respFieldResponseType] != respTypeEphemeral {
+		t.Fatalf("response_type = %q, want %q", resp[respFieldResponseType], respTypeEphemeral)
+	}
+	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
+		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
 }
 

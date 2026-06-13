@@ -684,6 +684,10 @@ func (panickingProvider) APIKey(_ context.Context, _ string) (string, error) {
 	panic("provider panic for test")
 }
 
+func (panickingProvider) DeleteAPIKey(_ context.Context, _ string) error {
+	panic("provider panic for test")
+}
+
 // TestValidateResponseURL fences the production validator: only HTTPS
 // to hooks.slack.com is accepted. Anything else is a refusal — even a
 // signature-passing request can't pivot the bot into an SSRF emitter.

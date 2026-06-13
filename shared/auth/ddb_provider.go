@@ -125,7 +125,6 @@ type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
-	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 // FieldEncryptor seals/opens an attribute's plaintext using a customer-
@@ -919,20 +918,36 @@ func normalizedStringSet(values []string) []string {
 	return out
 }
 
-// DeleteAPIKey removes the per-workspace row. Used by the uninstall /
-// disconnect flow (not implemented yet — left here so the next PR can
-// wire `/qurl uninstall` to it without re-opening this file).
+// DeleteAPIKey removes the qURL API key columns while preserving Slack app
+// install metadata in the same row. It returns [ErrWorkspaceNotConfigured] when
+// the workspace has no stored qURL key.
 func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.DeleteAPIKey: workspaceID is empty")
 	}
-	if _, err := p.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+	_, err := p.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-	}); err != nil {
-		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
+		UpdateExpression: aws.String("REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at, #updated_at"),
+		ConditionExpression: aws.String(
+			"attribute_exists(#qurl_api_key)",
+		),
+		ExpressionAttributeNames: map[string]string{
+			"#qurl_api_key":    attrQURLAPIKey,
+			"#qurl_api_key_dk": attrDataKeyCT,
+			"#configured_by":   attrConfiguredBy,
+			"#configured_at":   attrConfiguredAt,
+			"#updated_at":      attrUpdatedAt,
+		},
+	})
+	if err != nil {
+		var missing *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &missing) {
+			return fmt.Errorf("DDBProvider.DeleteAPIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+		}
+		return fmt.Errorf("DDBProvider.DeleteAPIKey: UpdateItem: %w", err)
 	}
 	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
 	return nil
