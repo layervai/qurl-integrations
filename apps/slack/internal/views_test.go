@@ -177,7 +177,7 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 
 func TestTunnelInstallModal_Shape(t *testing.T) {
 	t.Parallel()
-	raw, err := TunnelInstallModal(TunnelInstallModalMetadata{
+	raw, err := TunnelInstallModal(&TunnelInstallModalMetadata{
 		TeamID:      testAdminTeamID,
 		ChannelID:   testTunnelChannelID,
 		UserID:      testAdminUserID,
@@ -235,7 +235,7 @@ func TestTunnelInstallModal_Shape(t *testing.T) {
 
 func TestTunnelInstallModalRejectsOversizedPrivateMetadata(t *testing.T) {
 	t.Parallel()
-	_, err := TunnelInstallModal(TunnelInstallModalMetadata{
+	_, err := TunnelInstallModal(&TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,

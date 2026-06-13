@@ -1119,8 +1119,8 @@ func TestConfirm_ProtectConnectorOpensModalOnApprove(t *testing.T) {
 		t.Fatal("protect-connector approve must claim (consume-once before open)")
 	}
 	// Key-delivery privacy: meta.UserID must be the approving admin so the modal's
-	// same-user-submit gate aligns the ephemeral key target to the approver; the
-	// channel must be the (mismatch-guarded) proposing channel.
+	// same-user-submit gate aligns the DM target to the approver; the channel must
+	// be the (mismatch-guarded) proposing channel.
 	meta := modalMeta(t, ov.view)
 	if meta.UserID != "Uadmin" || meta.ChannelID != "C1" || meta.ResponseURL != hc.respURL {
 		t.Fatalf("modal metadata = %+v, want UserID=Uadmin ChannelID=C1 ResponseURL=card", meta)
@@ -1213,8 +1213,10 @@ func TestConfirm_ProtectConnectorGridFallback(t *testing.T) {
 	hc := newConfirmHarness(t, "Uadmin")
 	hc.h.now = func() time.Time { return fixedNow }
 	var owners []string
-	hc.h.cfg.OpenView = func(_ context.Context, teamID, _ string, _ []byte) error {
+	var openedView []byte
+	hc.h.cfg.OpenView = func(_ context.Context, teamID, _ string, viewJSON []byte) error {
 		owners = append(owners, teamID)
+		openedView = append(openedView[:0], viewJSON...)
 		if teamID == "T1" {
 			return auth.ErrSlackBotTokenNotConfigured // workspace token missing → retry org
 		}
@@ -1231,6 +1233,9 @@ func TestConfirm_ProtectConnectorGridFallback(t *testing.T) {
 	}
 	if !ro || text != agentConfirmConnectorOpenedReply {
 		t.Fatalf("the fallback open should succeed and post the opened reply; replace=%v text=%q", ro, text)
+	}
+	if meta := modalMeta(t, openedView); meta.EnterpriseID != "E1" {
+		t.Fatalf("modal EnterpriseID = %q, want E1", meta.EnterpriseID)
 	}
 }
 

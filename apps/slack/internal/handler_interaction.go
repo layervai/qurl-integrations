@@ -156,7 +156,7 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 		Raw:        "get $" + token,
 	}
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processButtonGet(ctx, log, responseURL, payload.Team.ID, payload.Channel.ID, payload.User.ID, payload.TriggerID, cmd)
+		h.processButtonGet(ctx, log, responseURL, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, payload.User.ID, payload.TriggerID, cmd)
 	}) {
 		// Pool saturated — don't let the click be a silent no-op. h.Go is
 		// wg-tracked but does NOT consume an async slot, so reporting the
@@ -173,7 +173,7 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 // → resolve token + channel-authorize → rate-limit → mint) and posts the
 // outcome to the interaction's response_url. The cmd carries no dm/reason
 // flags — the button is the plain one-time-use mint.
-func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, responseURL, teamID, channelID, userID, triggerID string, cmd *Command) {
+func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, responseURL, teamID, enterpriseID, channelID, userID, triggerID string, cmd *Command) {
 	if channelID == "" {
 		// Channel-scope guard mirrors processGet: the resolve path is
 		// channel-scoped, so a channel-less interaction can't authorize.
@@ -181,12 +181,13 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
-	text, err := h.getWork(ctx, log, getWorkArgs{
-		cmd:       cmd,
-		teamID:    teamID,
-		channelID: channelID,
-		userID:    userID,
-		triggerID: triggerID,
+	text, err := h.getWork(ctx, log, &getWorkArgs{
+		cmd:          cmd,
+		teamID:       teamID,
+		enterpriseID: enterpriseID,
+		channelID:    channelID,
+		userID:       userID,
+		triggerID:    triggerID,
 	})
 	h.finishGet(log, responseURL, text, err)
 }
@@ -295,8 +296,9 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		"view_id", payload.View.ID,
 	)
 	setupStartedAt := time.Unix(meta.CreatedAtUnix, 0)
+	attemptID := tunnelBootstrapModalAttemptID(payload.View.ID, setupStartedAt)
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, meta.TeamID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, setupStartedAt)
+		h.processTunnelInstallWithAttempt(ctx, log, meta.TeamID, meta.EnterpriseID, meta.ChannelID, meta.UserID, meta.ResponseURL, args, attemptID)
 	}) {
 		respondTunnelInstallModalError(w, modalBusyMsg)
 		return

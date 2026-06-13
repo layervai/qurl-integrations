@@ -239,6 +239,7 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	enterpriseID := strings.TrimSpace(values.Get(fieldEnterpriseID))
 	userID := strings.TrimSpace(values.Get(fieldUserID))
 	channelID := strings.TrimSpace(values.Get(fieldChannelID))
 	if channelID == "" {
@@ -250,8 +251,9 @@ func (h *Handler) handleExposeConnector(w http.ResponseWriter, values url.Values
 	}
 
 	setupStartedAt := h.now()
+	attemptID := tunnelBootstrapTypedAttemptID(values.Get(fieldTriggerID), setupStartedAt)
 	h.runAsync(w, "tunnel_install", values, func(ctx context.Context, log *slog.Logger) {
-		h.processTunnelInstall(ctx, log, teamID, channelID, userID, values.Get(fieldResponseURL), args, setupStartedAt)
+		h.processTunnelInstallWithAttempt(ctx, log, teamID, enterpriseID, channelID, userID, values.Get(fieldResponseURL), args, attemptID)
 	})
 }
 
@@ -357,8 +359,9 @@ func (h *Handler) openTunnelInstallWizard(ctx context.Context, log *slog.Logger,
 		_ = h.postErrorResponse(log, responseURL, "This command is admin-only.", true)
 		return
 	}
-	view, err := TunnelInstallModal(TunnelInstallModalMetadata{
+	view, err := TunnelInstallModal(&TunnelInstallModalMetadata{
 		TeamID:        teamID,
+		EnterpriseID:  enterpriseID,
 		ChannelID:     channelID,
 		UserID:        userID,
 		ResponseURL:   responseURL,
@@ -427,11 +430,21 @@ func (h *Handler) openViewWithGridFallback(ctx context.Context, log *slog.Logger
 }
 
 func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
+	return h.latestSlackAppInstallMessage("Guided qURL Connector setup", "run `/qurl-admin protect-connector` again")
+}
+
+func (h *Handler) tunnelBootstrapDMSlackAppInstallMessage() string {
+	return h.latestSlackAppInstallMessage("qURL Connector bootstrap-key DM delivery", "run `/qurl-admin protect-connector` again")
+}
+
+func (h *Handler) latestSlackAppInstallMessage(subject, retryInstruction string) string {
+	subject = strings.TrimSpace(subject)
+	retryInstruction = strings.TrimSpace(retryInstruction)
 	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
 	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
-		return "Guided qURL Connector setup needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then run `/qurl-admin protect-connector` again."
+		return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then " + retryInstruction + "."
 	}
-	return "Guided qURL Connector setup needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then run `/qurl-admin protect-connector` again."
+	return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open <" + installURL + "|the qURL Slack install link>, then " + retryInstruction + "."
 }
 
 func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Duration {
@@ -453,14 +466,15 @@ func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Dura
 var errMissingBootstrapPlaintext = errors.New("bootstrap key response missing plaintext")
 
 // tunnelInstallBuild is the successful result of [Handler.buildTunnelInstall]:
-// the created resource, the minted bootstrap key, and the rendered install
-// instructions (which already include the channel-alias status line). client is
-// retained so the caller can revoke key if delivery of message is never confirmed.
+// the created resource, the minted bootstrap key, key-free install instructions,
+// and the secret-bearing DM body. client is retained so the caller can revoke key
+// if either delivery step is never confirmed.
 type tunnelInstallBuild struct {
-	client   *client.Client
-	resource *client.Resource
-	key      *client.APIKey
-	message  string
+	client        *client.Client
+	resource      *client.Resource
+	key           *client.APIKey
+	message       string
+	secretMessage string
 }
 
 // buildTunnelInstall is the qURL Connector mutation core, decoupled from how the
@@ -477,7 +491,7 @@ type tunnelInstallBuild struct {
 // block never rendered doesn't stay live). On success the caller delivers
 // build.message and, if delivery is not confirmed, revokes build.key via
 // [revokeBootstrapKeyAfterInstallFailure].
-func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, setupStartedAt time.Time) (*tunnelInstallBuild, string, error) {
+func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID string, args *tunnelInstallArgs, attemptID string) (*tunnelInstallBuild, string, error) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("tunnel install: failed to get API key", "error", err)
@@ -526,7 +540,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		Purpose:        client.APIKeyPurposeTunnelBootstrap,
 		TunnelSlug:     args.Slug,
 		ExpiresIn:      tunnelBootstrapTTL,
-		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, setupStartedAt),
+		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
 	if err != nil {
 		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
@@ -549,23 +563,51 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
 		return nil, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
+	secretMsg, err := renderTunnelBootstrapSecretMessage(args, key, h.now())
+	if err != nil {
+		log.Error("tunnel install: secret message render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "secret_message_render_failed")
+		return nil, "qURL Connector setup could not render the bootstrap-key DM. The temporary bootstrap key was revoked. Please retry or contact support.", err
+	}
 
-	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg}, "", nil
+	return &tunnelInstallBuild{client: c, resource: resource, key: key, message: msg, secretMessage: secretMsg}, "", nil
 }
 
 // processTunnelInstall is the async-worker body for `/qurl-admin
 // protect-connector`. It runs the shared mutation core and delivers the result
-// to the slash command's response_url, revoking the bootstrap key if Slack never
-// confirms delivery (so a key whose install block may never have reached the
-// admin doesn't stay live).
-func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
-	build, failMsg, err := h.buildTunnelInstall(ctx, log, teamID, channelID, userID, args, setupStartedAt)
+// to Slack. The secret DM is delivered first so DM failure can stop before
+// publishing install instructions that reference an unavailable secret; if the
+// later install-instructions delivery fails, the key is revoked and the admin gets
+// a best-effort discard notice.
+func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, setupStartedAt time.Time) {
+	h.processTunnelInstallWithAttempt(ctx, log, teamID, enterpriseID, channelID, userID, responseURL, args, tunnelBootstrapTimeAttemptID("started", setupStartedAt))
+}
+
+func (h *Handler) processTunnelInstallWithAttempt(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID, userID, responseURL string, args *tunnelInstallArgs, attemptID string) {
+	if h.cfg.PostDM == nil {
+		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
+		_ = h.postResponse(log, responseURL, "qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
+		return
+	}
+	build, failMsg, err := h.buildTunnelInstall(ctx, log, teamID, channelID, userID, args, attemptID)
 	if err != nil {
 		_ = h.postResponse(log, responseURL, failMsg)
 		return
 	}
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
+	if err := h.postTunnelInstallDM(ctx, teamID, enterpriseID, userID, build.secretMessage); err != nil {
+		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
+		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
+		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
+		if errors.Is(err, ErrSlackMissingScope) {
+			message += " " + h.tunnelBootstrapDMSlackAppInstallMessage()
+		} else {
+			message += " Re-run `/qurl-admin protect-connector` after DM delivery is available."
+		}
+		_ = h.postResponse(log, responseURL, message)
+		return
+	}
 	if !h.postInstallInstructions(log, responseURL, build.message) {
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
@@ -574,10 +616,24 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, te
 		// operators investigating a disappeared install attempt.
 		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
+		// Intentionally notify both places: the DM reaches admins who saw the key
+		// first, while response_url covers the command surface if DM delivery fails.
+		if err := h.postTunnelInstallDM(h.baseCtx, teamID, enterpriseID, userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again."); err != nil {
+			log.Error("tunnel install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_dm_delivery_failed")
+		}
 		if !h.postResponse(log, responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 	}
+}
+
+func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID, userID, msg string) error {
+	// processTunnelInstall checks this before minting; keep the helper guard so
+	// any future standalone call still fails closed instead of panicking.
+	if h.cfg.PostDM == nil {
+		return errors.New("tunnel install DM delivery is not configured")
+	}
+	return h.cfg.PostDM(ctx, teamID, enterpriseID, userID, msg)
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
@@ -610,26 +666,45 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
 }
 
-func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug string, now time.Time) string {
-	// Bucket every install path on the modal TTL window, not the API key TTL.
-	// Modal submissions pass the modal creation timestamp so duplicate submits
-	// for one still-valid modal cannot shift buckets just because the async
-	// worker runs later. Typed slash-command retries pass the command time; if a
-	// typed retry crosses the same 25-minute bucket boundary it may mint a fresh
-	// key, which is acceptable because no Slack modal replay contract exists for
-	// that path.
-	// User-visible consequence: two submissions for the same still-valid modal
-	// collapse onto one bootstrap key, while retries after the bucket boundary
-	// intentionally receive a fresh key.
-	// qurl-service must replay the plaintext key on same-key idempotent
+func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug, attemptID string) string {
+	// Key on the exact Slack attempt instead of a broad modal-TTL bucket. Typed
+	// commands use Slack trigger_id when available, so Slack HTTP retries dedupe
+	// while a human re-run after a DM-delivery revoke gets a fresh key. Modal
+	// submissions use view.id, deliberately deduping same-modal resubmissions to
+	// avoid double-minting on Slack retries; processTunnelInstall revokes any key
+	// whose delivery is not confirmed.
+	//
+	// qurl-service must replay the plaintext key for same-key idempotent
 	// bootstrap creates; upstream integration coverage is tracked in
-	// layervai/qurl-service#775.
-	windowSeconds := int64(tunnelInstallModalTTL / time.Second)
-	if windowSeconds <= 0 {
-		windowSeconds = 1
+	// layervai/qurl-service#775. If Slack retries a same-modal submission after a
+	// DM-failure revoke, this can replay already-revoked plaintext for that view,
+	// but the key remains dead and a fresh human retry opens a new modal with a
+	// fresh view.id.
+	attemptID = strings.TrimSpace(attemptID)
+	if attemptID == "" {
+		attemptID = "attempt:unknown"
 	}
-	bucket := now.Unix() / windowSeconds
-	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%d", slug, bucket))
+	return IdempotencyKey(teamID, channelID, userID, fmt.Sprintf("tunnel-bootstrap:%s:%s", slug, attemptID))
+}
+
+func tunnelBootstrapTypedAttemptID(triggerID string, startedAt time.Time) string {
+	triggerID = strings.TrimSpace(triggerID)
+	if triggerID != "" {
+		return "typed-trigger:" + triggerID
+	}
+	return tunnelBootstrapTimeAttemptID("typed-started", startedAt)
+}
+
+func tunnelBootstrapModalAttemptID(viewID string, createdAt time.Time) string {
+	viewID = strings.TrimSpace(viewID)
+	if viewID != "" {
+		return "modal-view:" + viewID
+	}
+	return tunnelBootstrapTimeAttemptID("modal-created", createdAt)
+}
+
+func tunnelBootstrapTimeAttemptID(prefix string, at time.Time) string {
+	return prefix + ":" + at.UTC().Format(time.RFC3339Nano)
 }
 
 func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) (string, error) {
@@ -698,10 +773,6 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		return "", err
 	}
-	keyBlock, err := slackCodeBlock(key.APIKey)
-	if err != nil {
-		return "", err
-	}
 	var b strings.Builder
 	b.WriteString("qURL Connector `")
 	b.WriteString(args.Slug)
@@ -717,10 +788,9 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	}
 	b.WriteString(" is ready to install.\n")
 	b.WriteString(aliasStatus)
-	b.WriteString("\n\nBootstrap key ")
+	b.WriteString("\n\nInstall instructions are below. The temporary bootstrap key ")
 	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
-	b.WriteString(". The shell block below prompts for it; do not add the key to the shell text itself. Paste it only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.\n\n")
-	b.WriteString(keyBlock)
+	b.WriteString(" and was sent separately by DM. The install instructions below either prompt for it or reference your platform secret manager; do not add the key to the instruction text itself. Paste the DM key only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.")
 	b.WriteString(p.imageNote)
 	b.WriteString("\n\n")
 	b.WriteString(p.imageLine)
@@ -728,10 +798,32 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	b.WriteString(p.environmentLabel)
 	b.WriteString(".\n\n")
 	b.WriteString(p.instructions)
-	b.WriteString("\n\nTreat this ephemeral Slack message as a secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
+	b.WriteString("\n\nTreat the separate bootstrap-key DM as secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
 	b.WriteString("Then users can run `/qurl get $")
 	b.WriteString(args.Alias)
 	b.WriteString("`.")
+	return b.String(), nil
+}
+
+func renderTunnelBootstrapSecretMessage(args *tunnelInstallArgs, key *client.APIKey, now time.Time) (string, error) {
+	if key == nil {
+		return "", errors.New("bootstrap api key is missing")
+	}
+	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
+		return "", err
+	}
+	keyBlock, err := slackCodeBlock(key.APIKey)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("Temporary qURL Connector bootstrap key for `")
+	b.WriteString(args.Slug)
+	b.WriteString("` ")
+	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
+	b.WriteString(".\n\nPaste this secret only when the install instructions prompt for it, or store it in the target platform's secret manager. The install instructions were sent separately and intentionally do not include this key.\n\n")
+	b.WriteString(keyBlock)
+	b.WriteString("\n\nAfter the qURL Connector connects, remove this bootstrap key from the runtime. Delete this DM from Slack history when your workspace retention policy allows.")
 	return b.String(), nil
 }
 
@@ -769,8 +861,8 @@ func tunnelInstallRateLimitMessage(err error) string {
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image string) (string, error) {
 	// Instructions deliberately do not receive the plaintext bootstrap key:
 	// prepareTunnelInstallMessage can preflight all environment-specific
-	// rendering before CreateAPIKey, and the final message adds the secret in
-	// one audited code block after the key shape is validated.
+	// rendering before CreateAPIKey, and processTunnelInstall delivers the
+	// validated key through a separate DM.
 	switch args.Environment {
 	case tunnelEnvECSFargate:
 		return renderECSFargateTunnelInstructions(args, image)
@@ -1100,9 +1192,10 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // caller treats delivery as failed.
 //
 // If Slack actually persists the blocks post but the client reports failure
-// (e.g. a timeout), the text retry posts a second copy. Both carry the same
-// still-valid key and the key is not revoked, so this is benign — at worst the
-// operator sees two ephemeral install messages, never a leaked or stale key.
+// (e.g. a timeout), the text retry posts a second copy. Neither copy carries the
+// bootstrap key, and the already-DM'd key is not revoked, so this is benign: at
+// worst the operator sees two ephemeral install messages, never a leaked or
+// stale key.
 func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) bool {
 	if blocks, ok := installMessageBlocks(msg); ok {
 		if h.postResponseBlocks(log, responseURL, msg, blocks) {

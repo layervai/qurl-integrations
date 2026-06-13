@@ -155,6 +155,9 @@ func run() error {
 	// Both PostMessage seams share the per-workspace token lookup + Grid fallback with
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	// DM seam for secret-bearing user deliveries (`/qurl get dm:true` and qURL
+	// Connector bootstrap keys). Same token lookup + Grid fallback as channel posts.
+	postDM := newSlackPostDMFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
 	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
 	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
 	postEphemeral := newSlackPostEphemeralFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
@@ -260,6 +263,7 @@ func run() error {
 		},
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
+		PostDM:                      postDM,
 		PostMessage:                 postMessage,
 		PostEphemeral:               postEphemeral,
 		PostMarkdownMessage:         postMarkdownMessage,
@@ -880,16 +884,17 @@ func buildSlackInstallConfig(provider *auth.DDBProvider) (slackinstall.Config, b
 
 	scopes := slackinstall.DefaultBotScopes()
 	if raw := strings.TrimSpace(os.Getenv(envSlackBotScopes)); raw != "" {
-		scopes = slackinstall.NormalizeScopes([]string{raw})
+		extraScopes := slackinstall.NormalizeScopes([]string{raw})
 		// Strip unsupported scopes (see slackinstall.DropUnsupportedScopes) from
 		// operator overrides before Validate: a stale SLACK_BOT_SCOPES with
-		// surviving valid scopes then warns instead of aborting startup. (An
-		// override of only unsupported scopes strips to empty and Validate still
-		// rejects it.)
-		if kept, dropped := slackinstall.DropUnsupportedScopes(scopes); len(dropped) > 0 {
-			scopes = kept
-			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. SLACK_BOT_SCOPES must still include commands.")
+		// surviving valid scopes then warns instead of aborting startup. Required
+		// defaults are always unioned back in, so legacy overrides such as
+		// SLACK_BOT_SCOPES=commands stay deployable after new required scopes land.
+		if kept, dropped := slackinstall.DropUnsupportedScopes(extraScopes); len(dropped) > 0 {
+			extraScopes = kept
+			slog.Warn("SLACK_BOT_SCOPES included views:write, which is not a real Slack scope; dropped it. Required qURL Slack scopes are still included automatically.")
 		}
+		scopes = slackinstall.NormalizeScopes(append(scopes, extraScopes...))
 	}
 	cfg := slackinstall.Config{
 		ClientID:     clientID,

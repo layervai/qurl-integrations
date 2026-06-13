@@ -226,6 +226,7 @@ const (
 
 const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
 const slackConversationsMembersURL = "https://slack.com/api/conversations.members"
+const slackConversationsOpenURL = "https://slack.com/api/conversations.open"
 
 const (
 	// maxMembershipPages bounds the conversations.members page scan for one membership check.
@@ -384,6 +385,32 @@ func newSlackPostMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgen
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
 		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
+// newSlackPostDMFuncWithTokenLookup builds the [internal.PostDMFunc] seam: open
+// or resume a 1:1 IM with conversations.open, then post into that DM channel.
+// Both calls use the same per-workspace token lookup and Enterprise Grid
+// fallback as channel posts.
+func newSlackPostDMFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsOpenURL, postMessageURL string, httpClient *http.Client) internal.PostDMFunc {
+	open := newSlackWebAPIPoster(lookup, userAgent, conversationsOpenURL, "conversations.open", slackConversationsOpenResponseError, httpClient)
+	post := newSlackPostMessageFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, slackUserID, text string) error {
+		body, err := json.Marshal(struct {
+			Users string `json:"users"`
+		}{Users: slackUserID})
+		if err != nil {
+			return fmt.Errorf("conversations.open request marshal: %w", err)
+		}
+		raw, err := open.gridPost(ctx, teamID, enterpriseID, body)
+		if err != nil {
+			return err
+		}
+		channelID, err := slackConversationsOpenChannelID(raw)
+		if err != nil {
+			return err
+		}
+		return post(ctx, teamID, enterpriseID, channelID, "", text)
 	}
 }
 
@@ -906,6 +933,9 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 	if code == "" {
 		code = "not_ok"
 	}
+	if code == "missing_scope" {
+		return fmt.Errorf("%s: %w", op, internal.ErrSlackMissingScope)
+	}
 	return fmt.Errorf("%s: %s", op, code)
 }
 
@@ -914,6 +944,29 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 // worker must surface).
 func slackChatPostMessageResponseError(statusCode int, header http.Header, raw []byte) error {
 	return slackWebAPIResponseError("chat.postMessage", nil, statusCode, header, raw)
+}
+
+func slackConversationsOpenResponseError(statusCode int, header http.Header, raw []byte) error {
+	return slackWebAPIResponseError("conversations.open", nil, statusCode, header, raw)
+}
+
+func slackConversationsOpenChannelID(raw []byte) (string, error) {
+	var out struct {
+		Channel struct {
+			ID string `json:"id"`
+		} `json:"channel"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
+			return "", fmt.Errorf("conversations.open response JSON: %w: %s", err, snippet)
+		}
+		return "", fmt.Errorf("conversations.open response JSON: %w", err)
+	}
+	channelID := strings.TrimSpace(out.Channel.ID)
+	if channelID == "" {
+		return "", errors.New("conversations.open response missing channel.id")
+	}
+	return channelID, nil
 }
 
 func slackChatPostEphemeralResponseError(statusCode int, header http.Header, raw []byte) error {

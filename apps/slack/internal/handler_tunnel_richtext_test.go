@@ -92,11 +92,11 @@ func sectionTexts(t *testing.T, blocks []any) []string {
 }
 
 // TestInstallMessageBlocks_AllEnvironments fences that every real install
-// message renders as Block Kit (no plain-text fallback), the bootstrap key
-// lands in a copyable rich_text_preformatted block and never leaks into a
-// prose section, and every code segment is within the per-block cap. This
-// doubles as the size measurement: an oversize real snippet would flip ok to
-// false and fail here, surfacing the need to bump slackRichTextMaxBytes.
+// message renders as Block Kit (no plain-text fallback), never carries the
+// plaintext bootstrap key, and keeps every code segment within the per-block
+// cap. This doubles as the size measurement: an oversize real snippet would
+// flip ok to false and fail here, surfacing the need to bump
+// slackRichTextMaxBytes.
 func TestInstallMessageBlocks_AllEnvironments(t *testing.T) {
 	for _, env := range []tunnelInstallEnvironment{
 		tunnelEnvDocker,
@@ -117,17 +117,13 @@ func TestInstallMessageBlocks_AllEnvironments(t *testing.T) {
 				t.Fatalf("%s: want both section and rich_text blocks, got sections=%d code=%d", env, len(sections), len(codes))
 			}
 
-			keyInCode := false
 			for _, c := range codes {
 				if strings.Contains(c, testTunnelAPIKey) {
-					keyInCode = true
+					t.Errorf("%s: bootstrap key leaked into an install code block", env)
 				}
 				if len(c) > slackRichTextMaxBytes {
 					t.Errorf("%s: code block exceeds cap (%d > %d)", env, len(c), slackRichTextMaxBytes)
 				}
-			}
-			if !keyInCode {
-				t.Errorf("%s: bootstrap key not found in any rich_text_preformatted block", env)
 			}
 			for _, s := range sections {
 				if strings.Contains(s, testTunnelAPIKey) {
@@ -135,6 +131,34 @@ func TestInstallMessageBlocks_AllEnvironments(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBootstrapSecretMessageBlocks_CarriesKeyInCodeOnly(t *testing.T) {
+	now := fixedNow
+	expiresAt := now.Add(time.Hour)
+	msg, err := renderTunnelBootstrapSecretMessage(&tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, now)
+	if err != nil {
+		t.Fatalf("renderTunnelBootstrapSecretMessage: %v", err)
+	}
+	blocks, ok := installMessageBlocks(msg)
+	if !ok {
+		t.Fatalf("installMessageBlocks ok=false for bootstrap secret DM; msg len=%d", len(msg))
+	}
+	codes := richTextCodeTexts(t, blocks)
+	sections := sectionTexts(t, blocks)
+	if len(codes) != 1 || !strings.Contains(codes[0], testTunnelAPIKey) {
+		t.Fatalf("bootstrap secret code blocks = %#v, want one containing key", codes)
+	}
+	for _, s := range sections {
+		if strings.Contains(s, testTunnelAPIKey) {
+			t.Fatalf("bootstrap key leaked into DM prose section: %q", s)
+		}
 	}
 }
 

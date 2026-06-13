@@ -45,6 +45,8 @@ const (
 	slackOAuthBodyLimit         = 16 << 10
 	slackInstallFlow            = "slack-install"
 	botScopeCommands            = "commands"
+	botScopeChatWrite           = "chat:write"
+	botScopeIMWrite             = "im:write"
 	slackOAuthErrorBadRedirect  = "bad_redirect_uri"
 	slackOAuthErrorUnrecognized = "unrecognized"
 )
@@ -98,14 +100,13 @@ type TokenStore interface {
 }
 
 // DefaultBotScopes returns the minimum Slack bot scopes the install flow
-// requests. Only `commands` is needed: the captured per-workspace token is
-// used solely for views.open (see apps/slack/cmd/main.go), which requires no
-// scope (https://docs.slack.dev/reference/methods/views.open), and `commands`
-// is the minimal scope to install this slash-command app into a workspace.
+// requests. `commands` installs the slash-command surface. `chat:write` lets the
+// bot post replies. `im:write` lets the bot open or resume 1:1 DMs before
+// delivering `dm:true` links and qURL Connector bootstrap keys.
 // Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
 // at the authorize step with `invalid_scope`.
 func DefaultBotScopes() []string {
-	return []string{botScopeCommands}
+	return []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite}
 }
 
 // DropUnsupportedScopes removes scope strings that are not real Slack OAuth

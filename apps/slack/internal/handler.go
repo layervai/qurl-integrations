@@ -38,6 +38,10 @@ var ErrSlackTriggerExpired = errors.New("slack trigger_id expired")
 // retry-shaped action instead of a generic setup failure.
 var ErrSlackRateLimited = errors.New("slack views.open rate limited")
 
+// ErrSlackMissingScope lets Slack Web API adapters surface `missing_scope` as
+// a reauthorization problem instead of a generic delivery failure.
+var ErrSlackMissingScope = errors.New("slack missing_scope")
+
 var errSetupUsage = errors.New("setup usage")
 
 // SlackRateLimitError preserves Slack's Retry-After hint while still matching
@@ -323,12 +327,12 @@ type Config struct {
 	// operator-only reinstall prompt.
 	SlackInstallURL string
 
-	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
-	// on `/qurl get`. Production wires this in cmd/main.go; tests
-	// inject a stub. Empty (nil) on the production path until
-	// cmd/main.go ships the bot-token plumbing; `/qurl get dm:true`
-	// surfaces a friendly fallback in that case.
-	PostDM func(ctx context.Context, slackUserID, text string) error
+	// PostDM posts a direct message via chat.postMessage on the
+	// per-workspace bot token, with the same Enterprise Grid fallback as
+	// OpenView/PostMessage. `/qurl get dm:true` and qURL Connector
+	// bootstrap-secret delivery both rely on this privacy seam; nil keeps
+	// those secret-bearing flows fail-closed before minting.
+	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
 	// Empty falls back to the public client image with the `latest` tag for
@@ -498,6 +502,11 @@ type Config struct {
 // per-workspace bot token. threadTS threads the reply (empty posts top-level).
 // enterpriseID is passed for Enterprise Grid token resolution.
 type PostMessageFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, text string) error
+
+// PostDMFunc posts a direct message to slackUserID via chat.postMessage on the
+// per-workspace bot token. enterpriseID is passed for Enterprise Grid token
+// resolution, matching PostMessageFunc.
+type PostDMFunc func(ctx context.Context, teamID, enterpriseID, slackUserID, text string) error
 
 // PostEphemeralFunc posts a chat.postEphemeral message (visible only to userID) on the
 // per-workspace bot token. threadTS threads it into the card's conversation (empty posts

@@ -34,6 +34,7 @@ func newFakeProvider() *auth.DDBProvider {
 }
 
 const validStateSecret = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
+const defaultSlackBotScopesCSV = "commands,chat:write,im:write"
 
 var oauthEnvKeys = []string{
 	"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET", "AUTH0_AUDIENCE",
@@ -503,7 +504,7 @@ func TestBuildSlackInstallConfigHappyPath(t *testing.T) {
 	if string(cfg.StateSecret) != validStateSecret {
 		t.Fatalf("StateSecret not threaded through")
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands" {
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
 		t.Fatalf("default bot scopes = %v", cfg.BotScopes)
 	}
 	if cfg.TokenStore == nil {
@@ -547,14 +548,27 @@ func TestBuildSlackInstallConfigMissingVar(t *testing.T) {
 
 func TestBuildSlackInstallConfigCustomScopes(t *testing.T) {
 	env := validSlackInstallEnv()
-	env[envSlackBotScopes] = "commands chat:write,im:write"
+	env[envSlackBotScopes] = "commands,channels:read"
 	applySlackInstallEnv(t, env)
 	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands,chat:write,im:write" {
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV+",channels:read" {
 		t.Fatalf("custom scopes = %v", cfg.BotScopes)
+	}
+}
+
+func TestBuildSlackInstallConfigUnionsRequiredScopesIntoLegacyOverride(t *testing.T) {
+	env := validSlackInstallEnv()
+	env[envSlackBotScopes] = "commands"
+	applySlackInstallEnv(t, env)
+	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want legacy override to keep required defaults", ok, err)
+	}
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
+		t.Fatalf("scopes = %v, want required defaults unioned into legacy override", cfg.BotScopes)
 	}
 }
 
@@ -572,24 +586,23 @@ func TestBuildSlackInstallConfigStripsViewsWriteOverride(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v, want config load to succeed", ok, err)
 	}
-	if strings.Join(cfg.BotScopes, ",") != "commands" {
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
 		t.Fatalf("scopes = %v, want views:write stripped", cfg.BotScopes)
 	}
 }
 
 // If a SLACK_BOT_SCOPES override strips to nothing (only views:write), config
-// load surfaces the "at least one bot scope" error rather than silently falling
-// back to the defaults — so the operator must fix the override.
-func TestBuildSlackInstallConfigRejectsOverrideThatStripsToEmpty(t *testing.T) {
+// load keeps the required defaults rather than aborting startup.
+func TestBuildSlackInstallConfigUsesDefaultsWhenOverrideStripsToEmpty(t *testing.T) {
 	env := validSlackInstallEnv()
 	env[envSlackBotScopes] = "views:write"
 	applySlackInstallEnv(t, env)
 	cfg, ok, err := buildSlackInstallConfig(newFakeProvider())
-	if ok || err == nil || !strings.Contains(err.Error(), "at least one bot scope") {
-		t.Fatalf("ok=%v err=%v, want config load to fail on empty scope set", ok, err)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want config load to succeed with defaults", ok, err)
 	}
-	if len(cfg.BotScopes) != 0 {
-		t.Fatalf("BotScopes = %v, want empty config on failure", cfg.BotScopes)
+	if strings.Join(cfg.BotScopes, ",") != defaultSlackBotScopesCSV {
+		t.Fatalf("scopes = %v, want required defaults", cfg.BotScopes)
 	}
 }
 

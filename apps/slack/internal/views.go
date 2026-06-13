@@ -2,6 +2,7 @@ package internal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -177,6 +178,7 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // resource or minting a bootstrap key; Slack response URLs are time-limited.
 type TunnelInstallModalMetadata struct {
 	TeamID        string `json:"team_id"`
+	EnterpriseID  string `json:"enterprise_id,omitempty"`
 	ChannelID     string `json:"channel_id"`
 	UserID        string `json:"user_id"`
 	ResponseURL   string `json:"response_url"`
@@ -187,7 +189,10 @@ type TunnelInstallModalMetadata struct {
 // only customer-facing choices: the stable slug, optional channel shortcut,
 // local service port, target environment, and an optional Docker/Compose target
 // name used only by the Docker and Docker Compose renderers.
-func TunnelInstallModal(meta TunnelInstallModalMetadata) ([]byte, error) {
+func TunnelInstallModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
+	if meta == nil {
+		return nil, errors.New("tunnel install modal metadata is missing")
+	}
 	privateMeta, err := json.Marshal(meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal private_metadata: %w", err)

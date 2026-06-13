@@ -61,6 +61,27 @@ func freezeTunnelBootstrapNow(t *testing.T, h *Handler, now time.Time) {
 	t.Cleanup(func() { h.now = previous })
 }
 
+type tunnelDMPost struct {
+	teamID       string
+	enterpriseID string
+	userID       string
+	text         string
+}
+
+func captureTunnelPostDMSuccess(h *Handler) *[]tunnelDMPost {
+	posts := []tunnelDMPost{}
+	h.cfg.PostDM = func(_ context.Context, teamID, enterpriseID, userID, text string) error {
+		posts = append(posts, tunnelDMPost{
+			teamID:       teamID,
+			enterpriseID: enterpriseID,
+			userID:       userID,
+			text:         text,
+		})
+		return nil
+	}
+	return &posts
+}
+
 func mustRenderDockerTunnelInstructions(t *testing.T, args *tunnelInstallArgs, image string) string {
 	t.Helper()
 	got, err := renderDockerTunnelInstructions(args, image)
@@ -386,6 +407,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
 	h.cfg.TunnelImage = testTunnelImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
 	status, ack := inv.invokeAdmin(testTunnelInstallCmd+" port:9090", testAdminTeamID, testAdminUserID)
@@ -426,18 +448,19 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
 	}
-	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now)
+	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapTypedAttemptID(testSlackTriggerID, now))
 	if idempotencyKey != wantIdempotencyKey {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
 	for _, want := range []string{
 		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$" + testTunnelSlug + "` is ready in this channel.",
-		"The shell block below prompts for it",
+		"temporary bootstrap key expires in 1 hour and was sent separately by DM",
+		"The install instructions below either prompt for it or reference your platform secret manager",
+		"Paste the DM key only when prompted or into your secret manager",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
 		"set -eu",
-		testTunnelAPIKey,
 		"Sidecar image: `" + testTunnelImageRef + "`.",
 		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
@@ -450,8 +473,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelAgentDirFragment,
 		testTunnelImageRef,
-		"Bootstrap key expires in 1 hour.",
-		"Treat this ephemeral Slack message as a secret",
+		"Treat the separate bootstrap-key DM as secret",
 		"Keep the qURL agent-state directory, volume, or PVC",
 		"/qurl get $" + testTunnelSlug,
 	} {
@@ -459,9 +481,26 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", "QURL_CONNECTOR_SLUG"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
+		}
+	}
+	if len(*dmPosts) != 1 {
+		t.Fatalf("PostDM calls = %d, want 1", len(*dmPosts))
+	}
+	dm := (*dmPosts)[0]
+	if dm.teamID != testAdminTeamID || dm.userID != testAdminUserID {
+		t.Fatalf("PostDM target = team %q user %q, want %q/%q", dm.teamID, dm.userID, testAdminTeamID, testAdminUserID)
+	}
+	for _, want := range []string{
+		"Temporary qURL Connector bootstrap key for `" + testTunnelSlug + "` expires in 1 hour.",
+		"install instructions were sent separately",
+		"Delete this DM from Slack history",
+		testTunnelAPIKey,
+	} {
+		if !strings.Contains(dm.text, want) {
+			t.Errorf("bootstrap DM missing %q:\n%s", want, dm.text)
 		}
 	}
 	gotRID, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, testTunnelSlug)
@@ -516,6 +555,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
 	h.cfg.TunnelImage = testTunnelImageRef
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 
 	inv := newAdminSlashInvoker(t, h)
@@ -1196,16 +1236,18 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
 	h.cfg.TunnelImage = testTunnelImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
+		EnterpriseID:  testEnterpriseID,
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
 		ResponseURL:   inv.responseU.URL,
 		CreatedAtUnix: modalCreatedAt.Unix(),
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, map[string]map[string]interactionStateValue{
+	body := tunnelInstallViewSubmissionBody(t, &meta, map[string]map[string]interactionStateValue{
 		tunnelInstallBlockSlug: {
 			tunnelInstallActionSlug: {Value: "$" + testTunnelSlug},
 		},
@@ -1235,7 +1277,13 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
 		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
 	}
-	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, modalCreatedAt)
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
+		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
+	}
+	if (*dmPosts)[0].enterpriseID != testEnterpriseID {
+		t.Fatalf("bootstrap DM enterpriseID = %q, want %q", (*dmPosts)[0].enterpriseID, testEnterpriseID)
+	}
+	wantIdempotencyKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapModalAttemptID("V_test_tunnel", modalCreatedAt))
 	if idempotencyKey != wantIdempotencyKey {
 		t.Fatalf("Idempotency-Key = %q, want %q", idempotencyKey, wantIdempotencyKey)
 	}
@@ -1243,7 +1291,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$team-dash` is ready in this channel.",
 		"Target environment: Kubernetes.",
-		"The shell block below prompts for it",
+		"The install instructions below either prompt for it or reference your platform secret manager",
 		"QURL_BOOTSTRAP_SECRET='qurl-connector-" + testTunnelSlug + "'",
 		testTunnelPipefailLine,
 		testTunnelKeyPromptLine,
@@ -1266,7 +1314,6 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"defaultMode: 0440",
 		"QURL_CONNECTOR_ID",
 		"value: '" + testTunnelSlug + "'",
-		testTunnelModalKey,
 		testTunnelLocalPort9090Line,
 		testTunnelImageRef,
 		"/qurl get $team-dash",
@@ -1275,7 +1322,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", "QURL_CONNECTOR_SLUG"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1358,6 +1405,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			h := newAdminTestHandler(t, ts)
 			freezeTunnelBootstrapNow(t, h, now)
 			h.cfg.TunnelImage = testTunnelImageRef
+			captureTunnelPostDMSuccess(h)
 			h.SetAliasStore(h.cfg.AdminStore)
 			inv := newAdminSlashInvoker(t, h)
 			meta := TunnelInstallModalMetadata{
@@ -1367,7 +1415,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 				ResponseURL:   inv.responseU.URL,
 				CreatedAtUnix: now.Unix(),
 			}
-			body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tc.env), "9090", tc.web))
+			body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tc.env), "9090", tc.web))
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
 
@@ -1390,7 +1438,7 @@ func TestTunnelInstallModalRejectsUnsafeWebRefBeforeMintingKey(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
-	body := tunnelInstallViewSubmissionBody(t, TunnelInstallModalMetadata{
+	body := tunnelInstallViewSubmissionBody(t, &TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
 		ChannelID:     testTunnelChannelID,
 		UserID:        testAdminUserID,
@@ -1422,7 +1470,7 @@ func TestTunnelInstallModalRejectsEmptyPayloadIdentity(t *testing.T) {
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
 	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, "", "", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, "", "", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1448,7 +1496,7 @@ func TestTunnelInstallModalRejectsDifferentSubmitterWithRetryCopy(t *testing.T) 
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
 	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, "U_other_admin", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, "U_other_admin", tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1477,7 +1525,7 @@ func TestTunnelInstallModalRejectsMissingAdminStore(t *testing.T) {
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1502,7 +1550,7 @@ func TestTunnelInstallModalRejectsMissingAliasStore(t *testing.T) {
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1529,7 +1577,7 @@ func TestTunnelInstallModalRejectsNonAdminSubmitter(t *testing.T) {
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: fixedNow.Unix(),
 	}
-	body := tunnelInstallViewSubmissionBodyWithIdentity(t, meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBodyWithIdentity(t, &meta, testAdminTeamID, nonAdminUserID, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1550,6 +1598,7 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
@@ -1558,7 +1607,7 @@ func TestTunnelInstallModalRejectsStaleSubmissionBeforeMintingKey(t *testing.T) 
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: now.Add(-tunnelInstallModalTTL - time.Minute).Unix(),
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1579,6 +1628,7 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	meta := TunnelInstallModalMetadata{
 		TeamID:        testAdminTeamID,
@@ -1587,7 +1637,7 @@ func TestTunnelInstallModalRejectsFarFutureSubmissionBeforeMintingKey(t *testing
 		ResponseURL:   testSlackResponseURL,
 		CreatedAtUnix: now.Add(tunnelBootstrapSkew + time.Minute).Unix(),
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -1612,7 +1662,7 @@ func TestTunnelInstallModalRejectsMissingCreatedAtBeforeMintingKey(t *testing.T)
 		UserID:      testAdminUserID,
 		ResponseURL: testSlackResponseURL,
 	}
-	body := tunnelInstallViewSubmissionBody(t, meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
+	body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
@@ -2072,6 +2122,7 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	})
 
 	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
@@ -2080,6 +2131,31 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	}
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+}
+
+func TestTunnelInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var resourceHits, apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "Slack DM delivery") {
+		t.Fatalf("async reply = %q, want DM-unwired pre-mint refusal", async)
+	}
+	if resourceHits != 0 || apiKeyHits != 0 {
+		t.Fatalf("resource/api-key hits = %d/%d, want 0/0 before DM wiring", resourceHits, apiKeyHits)
 	}
 }
 
@@ -2199,6 +2275,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 	})
 
 	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
@@ -2248,8 +2325,9 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
@@ -2259,20 +2337,28 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
-	// When Slack rejects every post, the delivery sequence is: the Block Kit
-	// install post, the plain-text fallback, the plain-text retry, then the
-	// revoked-key discard notice. The key is revoked because none were
-	// confirmed; the first post still carries the bootstrap key and the last is
-	// the discard notice.
+	// When Slack rejects every response_url post, the delivery sequence is: the
+	// Block Kit install post, the plain-text fallback, the plain-text retry, then
+	// the revoked-key discard notice. The bootstrap key was delivered only by DM
+	// and is revoked because the install instructions were never confirmed.
 	if len(responseBodies) != 4 {
 		t.Fatalf("response_url posts = %d, want 4 (blocks attempt, text fallback, text retry, discard notice): %v", len(responseBodies), responseBodies)
 	}
-	if !strings.Contains(responseBodies[0], testTunnelAPIKey) {
-		t.Fatalf("first response_url body = %v, want original install body with bootstrap key", responseBodies[0])
+	if strings.Contains(strings.Join(responseBodies, "\n"), testTunnelAPIKey) {
+		t.Fatalf("response_url bodies leaked bootstrap key: %v", responseBodies)
 	}
 	last := responseBodies[len(responseBodies)-1]
 	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard it") {
 		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
+	}
+	if len(*dmPosts) != 2 {
+		t.Fatalf("bootstrap DM posts = %d, want key DM and discard notice: %+v", len(*dmPosts), *dmPosts)
+	}
+	if !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
+		t.Fatalf("first DM = %q, want bootstrap key", (*dmPosts)[0].text)
+	}
+	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
+		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
 	}
 }
 
@@ -2330,8 +2416,9 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
@@ -2350,8 +2437,228 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 	if bodyHasBlocks(posts[1]) || bodyHasBlocks(posts[2]) {
 		t.Errorf("text fallback and retry should not carry blocks: posts=%v", posts)
 	}
-	if !strings.Contains(posts[2], testTunnelAPIKey) {
-		t.Errorf("delivered text retry should carry the bootstrap key: %s", posts[2])
+	if strings.Contains(strings.Join(posts, "\n"), testTunnelAPIKey) {
+		t.Errorf("response_url posts leaked the bootstrap key: posts=%v", posts)
+	}
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
+		t.Fatalf("bootstrap-key DM posts = %+v, want one post carrying the key", *dmPosts)
+	}
+}
+
+func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		return errors.New("dm unavailable")
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, h.now())
+
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want 1 failure notice: %v", len(responseBodies), responseBodies)
+	}
+	failure := parseSlackText(t, []byte(responseBodies[0]))
+	for _, forbidden := range []string{testTunnelAPIKey, "Run this whole block", "docker run -d"} {
+		if strings.Contains(failure, forbidden) {
+			t.Fatalf("DM-failure notice leaked install secret/details %q: %s", forbidden, failure)
+		}
+	}
+	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
+		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
+	}
+}
+
+func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelAPIKey,
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	var responseBodies []string
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read response_url body: %v", err)
+		}
+		responseBodies = append(responseBodies, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, h.now())
+
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(responseBodies) != 1 {
+		t.Fatalf("response_url posts = %d, want 1 failure notice: %v", len(responseBodies), responseBodies)
+	}
+	failure := parseSlackText(t, []byte(responseBodies[0]))
+	for _, want := range []string{
+		"temporary key was revoked",
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"/qurl-admin protect-connector",
+	} {
+		if !strings.Contains(failure, want) {
+			t.Fatalf("failure notice = %s, missing %q", failure, want)
+		}
+	}
+	for _, forbidden := range []string{testTunnelAPIKey, "Run this whole block", "docker run -d"} {
+		if strings.Contains(failure, forbidden) {
+			t.Fatalf("missing-scope notice leaked install secret/details %q: %s", forbidden, failure)
+		}
+	}
+}
+
+func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits, revokeHits int
+	var idempotencyKeys []string
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+		apiKeyHits++
+		idempotencyKeys = append(idempotencyKeys, r.Header.Get(client.HeaderIdempotencyKey))
+		keyID := fmt.Sprintf("key_retry_%d", apiKeyHits)
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      keyID,
+			testKeyAPIKey:     fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
+			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_retry_1", func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	responseURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(responseURL.Close)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.TunnelImage = testTunnelImageRef
+	var dmCalls int
+	var dmTexts []string
+	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
+		dmCalls++
+		if dmCalls == 1 {
+			return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+		}
+		dmTexts = append(dmTexts, text)
+		return nil
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+
+	firstAttempt := fixedNow
+	secondAttempt := firstAttempt.Add(time.Second)
+	args := &tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, args, firstAttempt)
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, args, secondAttempt)
+
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[1] == "" {
+		t.Fatalf("idempotency keys = %v, want two non-empty keys", idempotencyKeys)
+	}
+	if idempotencyKeys[0] == idempotencyKeys[1] {
+		t.Fatalf("retry reused revoked-key idempotency key %q", idempotencyKeys[0])
+	}
+	if len(dmTexts) != 1 || !strings.Contains(dmTexts[0], "lv_live_retry_bootstrap_2") {
+		t.Fatalf("successful retry DMs = %+v, want fresh second bootstrap key", dmTexts)
 	}
 }
 
@@ -2414,8 +2721,9 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	h.cfg.TunnelImage = testTunnelImageRef
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
-	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
+	h.processTunnelInstall(context.Background(), slog.Default(), testAdminTeamID, "", testTunnelChannelID, testAdminUserID, responseURL.URL, &tunnelInstallArgs{
 		Slug:        testTunnelSlug,
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
@@ -2434,19 +2742,29 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	if bodyHasBlocks(posts[1]) {
 		t.Errorf("second post (text retry) should not carry blocks: %s", posts[1])
 	}
-	if !strings.Contains(posts[1], testTunnelAPIKey) {
-		t.Errorf("text retry should carry the bootstrap key: %s", posts[1])
+	if strings.Contains(posts[1], testTunnelAPIKey) {
+		t.Errorf("text retry leaked the bootstrap key: %s", posts[1])
 	}
 }
 
-func TestTunnelBootstrapIdempotencyKeyMatchesTypedAndModalPaths(t *testing.T) {
+func TestTunnelBootstrapIdempotencyKeyUsesExactAttemptTime(t *testing.T) {
 	t.Parallel()
 
 	setupStartedAt := fixedNow
-	typedPathKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
-	modalPathKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, setupStartedAt)
-	if typedPathKey == "" || typedPathKey != modalPathKey {
-		t.Fatalf("typed key = %q, modal key = %q, want same non-empty key for same setup start", typedPathKey, modalPathKey)
+	attemptID := tunnelBootstrapTimeAttemptID("test-attempt", setupStartedAt)
+	first := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, attemptID)
+	sameAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, attemptID)
+	if first == "" || first != sameAttempt {
+		t.Fatalf("first key = %q, same-attempt key = %q, want same non-empty key", first, sameAttempt)
+	}
+	nextAttempt := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapTimeAttemptID("test-attempt", setupStartedAt.Add(time.Second)))
+	if nextAttempt == first {
+		t.Fatalf("next-attempt key matched first key %q", first)
+	}
+	triggerAttempt := tunnelBootstrapTypedAttemptID(testSlackTriggerID, setupStartedAt)
+	triggerRetry := tunnelBootstrapTypedAttemptID(testSlackTriggerID, setupStartedAt.Add(time.Second))
+	if triggerAttempt != triggerRetry {
+		t.Fatalf("same trigger attempt IDs differed: %q vs %q", triggerAttempt, triggerRetry)
 	}
 }
 
@@ -2485,6 +2803,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
+	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 
 	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
@@ -2492,8 +2811,11 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 		t.Fatalf("first async reply = %q, want mint failure", first)
 	}
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "qURL alias `$"+testTunnelSlug+"` is ready in this channel.") {
+	if strings.Contains(second, "lv_live_retry_bootstrap") || !strings.Contains(second, "qURL alias `$"+testTunnelSlug+"` is ready in this channel.") {
 		t.Fatalf("second async reply = %q, want successful remint against existing alias", second)
+	}
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, "lv_live_retry_bootstrap") {
+		t.Fatalf("bootstrap DM posts = %+v, want one containing reminted key", *dmPosts)
 	}
 	if apiKeyHits != 2 {
 		t.Fatalf("api key hits = %d, want 2", apiKeyHits)
@@ -2501,9 +2823,9 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	if len(idempotencyKeys) != 2 || idempotencyKeys[0] == "" || idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v, want same non-empty retry key", idempotencyKeys)
 	}
-	nextWindowKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, now.Add(tunnelInstallModalTTL))
-	if nextWindowKey == idempotencyKeys[0] {
-		t.Fatal("next-window tunnel bootstrap idempotency key matched current-window key")
+	nextAttemptKey := tunnelBootstrapIdempotencyKey(testAdminTeamID, testTunnelChannelID, testAdminUserID, testTunnelSlug, tunnelBootstrapTimeAttemptID("started", now.Add(time.Second)))
+	if nextAttemptKey == idempotencyKeys[0] {
+		t.Fatal("next-attempt tunnel bootstrap idempotency key matched current-attempt key")
 	}
 }
 
@@ -2575,6 +2897,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			h := newAdminTestHandler(t, ts)
 			freezeTunnelBootstrapNow(t, h, now)
 			h.cfg.TunnelImage = testTunnelImageRef
+			captureTunnelPostDMSuccess(h)
 			h.SetAliasStore(h.cfg.AdminStore)
 
 			status, ack, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd+" env:"+tc.env, testAdminTeamID, testAdminUserID)
@@ -2587,7 +2910,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 					t.Fatalf("%s async reply missing %q:\n%s", tc.name, want, async)
 				}
 			}
-			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelResourceID) {
+			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelResourceID) || strings.Contains(async, testTunnelAPIKey) {
 				t.Fatalf("%s async reply leaked resource details:\n%s", tc.name, async)
 			}
 		})
@@ -2614,6 +2937,7 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	})
 
 	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
@@ -2788,12 +3112,12 @@ func tunnelInstallModalValues(slug, shortcut, env, port, webContainer string) ma
 	return values
 }
 
-func tunnelInstallViewSubmissionBody(t *testing.T, meta TunnelInstallModalMetadata, values map[string]map[string]interactionStateValue) string {
+func tunnelInstallViewSubmissionBody(t *testing.T, meta *TunnelInstallModalMetadata, values map[string]map[string]interactionStateValue) string {
 	t.Helper()
 	return tunnelInstallViewSubmissionBodyWithIdentity(t, meta, meta.TeamID, meta.UserID, values)
 }
 
-func tunnelInstallViewSubmissionBodyWithIdentity(t *testing.T, meta TunnelInstallModalMetadata, payloadTeamID, payloadUserID string, values map[string]map[string]interactionStateValue) string {
+func tunnelInstallViewSubmissionBodyWithIdentity(t *testing.T, meta *TunnelInstallModalMetadata, payloadTeamID, payloadUserID string, values map[string]map[string]interactionStateValue) string {
 	t.Helper()
 	pm, err := json.Marshal(meta)
 	if err != nil {

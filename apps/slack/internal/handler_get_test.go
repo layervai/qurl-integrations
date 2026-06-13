@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -782,7 +783,7 @@ func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 		channelID: "C1",
 		userID:    "U1",
 	}
-	reply, err := h.getWork(context.Background(), slogTestLogger(t), args)
+	reply, err := h.getWork(context.Background(), slogTestLogger(t), &args)
 	if reply != "" {
 		t.Errorf("reply = %q, want empty on the refuse-to-mint path", reply)
 	}
@@ -838,7 +839,7 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	var dmCalls atomic.Int32
 	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
 		dmCalls.Add(1)
 		dmText = text
 		return nil
@@ -857,6 +858,36 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 	}
 	if strings.Contains(async, "https://qurl.link/dm-secret") {
 		t.Errorf("link leaked to channel ephemeral on dm:true: %q", async)
+	}
+}
+
+func TestHandleGet_DMVariantMissingScopeMentionsSlackReinstall(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/dm-scope", testResourceIDFix)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
+	for _, want := range []string{
+		"Could not DM you the link",
+		"latest qURL Slack app install",
+		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
+		"re-run the command",
+	} {
+		if !strings.Contains(async, want) {
+			t.Fatalf("async reply = %q, missing %q", async, want)
+		}
+	}
+	if strings.Contains(async, "https://qurl.link/dm-scope") {
+		t.Fatalf("async reply leaked dm:true link after DM failure: %q", async)
 	}
 }
 
@@ -888,7 +919,7 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, text string) error {
+	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
 		dmText = text
 		return nil
 	}

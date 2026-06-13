@@ -223,7 +223,7 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands` (the captured token is used only for `views.open`, which requires no scope); any override must still include `commands`. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
@@ -268,8 +268,10 @@ For customer Slack installs, configure the Slack app with:
 - Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: `commands` (the captured token is used only for `views.open`,
-  which requires no scope of its own)
+- Bot scopes: `commands,chat:write,im:write` plus any extra scopes from
+  `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
+  `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
+  `dm:true` and qURL Connector bootstrap-key delivery)
 - Installation mode: workspace-level installs or Enterprise Grid org-level
   installs. Org-level bot tokens are stored under Slack `enterprise_id`; qURL
   workspace setup and admin checks still use workspace `team_id`.
@@ -280,10 +282,13 @@ For customer Slack installs, configure the Slack app with:
 
 With per-workspace token storage in place, existing customer workspaces must
 reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
-token. New installs through `/oauth/slack/install` store that token
-automatically, and guided `/qurl-admin protect-connector` uses it for
-`views.open`. If Slack tells a customer guided connector setup needs the
-latest qURL Slack app install, send them through this reinstall link.
+token. Before deploying a build that depends on newly required Slack scopes,
+send affected workspaces through the reinstall link so guided connector setup
+does not fail closed on day one. New installs through `/oauth/slack/install`
+store that token automatically, and guided `/qurl-admin protect-connector` uses
+it for `views.open` plus bootstrap-key DM delivery. If Slack tells a customer
+guided connector setup needs the latest qURL Slack app install, send them
+through this reinstall link.
 Monitor the guided setup open path after deploys: the synchronous admin gate is
 budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either

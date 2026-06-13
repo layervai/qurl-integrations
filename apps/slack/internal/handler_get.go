@@ -259,6 +259,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
 func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.Values, cmd *Command) {
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
+	enterpriseID := strings.TrimSpace(values.Get(fieldEnterpriseID))
 	channelID := values.Get(fieldChannelID)
 	userID := values.Get(fieldUserID)
 	triggerID := values.Get(fieldTriggerID)
@@ -271,12 +272,13 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		return
 	}
 
-	text, err := h.getWork(ctx, log, getWorkArgs{
-		cmd:       cmd,
-		teamID:    teamID,
-		channelID: channelID,
-		userID:    userID,
-		triggerID: triggerID,
+	text, err := h.getWork(ctx, log, &getWorkArgs{
+		cmd:          cmd,
+		teamID:       teamID,
+		enterpriseID: enterpriseID,
+		channelID:    channelID,
+		userID:       userID,
+		triggerID:    triggerID,
 	})
 	h.finishGet(log, responseURL, text, err)
 }
@@ -312,18 +314,19 @@ func mapCoreError(log *slog.Logger, err error, generic string) string {
 
 // getWorkArgs bundles the closure inputs for [Handler.getWork].
 type getWorkArgs struct {
-	cmd       *Command
-	teamID    string
-	channelID string
-	userID    string
-	triggerID string
+	cmd          *Command
+	teamID       string
+	enterpriseID string
+	channelID    string
+	userID       string
+	triggerID    string
 }
 
 // getWork runs the inner resolve→rate-limit→mint pipeline for the token form
 // (`/qurl get $id` or `/qurl get $alias`). Raw URLs and `$r_<id>` resource IDs
 // are rejected at parse time. Returns the rendered reply text (without leading
 // `:warning:`) on success, or a [*userError] whose msg routes to the user.
-func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArgs) (string, error) {
+func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkArgs) (string, error) {
 	alias := args.cmd.Alias
 
 	// Refuse `dm:true` early when PostDM is not wired — the user's
@@ -414,7 +417,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args getWorkArg
 	// the suffix tells them why.
 	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + resourceLinkExpiryHuman + ")"
 	if args.cmd.DM() {
-		return h.deliverGetDM(ctx, log, args.userID, message), nil
+		return h.deliverGetDM(ctx, log, args.teamID, args.enterpriseID, args.userID, message), nil
 	}
 	return message, nil
 }
@@ -672,9 +675,12 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 // call itself fails, we surface the failure without re-posting the
 // link (the user can retry without dm:true if they want it
 // in-channel).
-func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, userID, message string) string {
-	if err := h.cfg.PostDM(ctx, userID, message); err != nil {
+func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, teamID, enterpriseID, userID, message string) string {
+	if err := h.cfg.PostDM(ctx, teamID, enterpriseID, userID, message); err != nil {
 		log.Warn("get: DM post failed", "error", err)
+		if errors.Is(err, ErrSlackMissingScope) {
+			return ":warning: Could not DM you the link. " + h.latestSlackAppInstallMessage("Private qURL DM delivery", "re-run the command")
+		}
 		return ":warning: Could not DM you the link. Please re-run the command without `dm:true` to receive it in-channel."
 	}
 	return ":incoming_envelope: Sent to your DM."
