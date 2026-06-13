@@ -746,6 +746,9 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	if image == "" {
 		image = defaultTunnelImage
 	}
+	if err := ValidateTunnelImageRef(image); err != nil {
+		return preparedTunnelInstallMessage{}, fmt.Errorf("tunnel image reference: %w", err)
+	}
 	environmentLabel, err := args.Environment.label()
 	if err != nil {
 		return preparedTunnelInstallMessage{}, err

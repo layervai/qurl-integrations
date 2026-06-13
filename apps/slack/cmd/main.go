@@ -44,7 +44,7 @@ const (
 	connectorImageErrDigestLowercase = "digest must use 64 lowercase hex characters after sha256"
 	connectorImageErrMalformedRef    = "image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag"
 	connectorImageErrAmbiguousRef    = "slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest"
-	connectorImageErrMalformedDigest = "digest references must use image@sha256:<64 lowercase hex> with a full image name"
+	connectorImageErrMalformedDigest = "digest references must use a full image name followed by @sha256:<64 lowercase hex>; bare sha256:<digest> values are not image references"
 
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL

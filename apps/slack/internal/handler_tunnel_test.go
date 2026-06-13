@@ -1932,6 +1932,21 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	}
 }
 
+func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
+	t.Parallel()
+	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
+
+	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(&tunnelInstallArgs{
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: tunnelEnvDocker,
+	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	if err == nil || !strings.Contains(err.Error(), "tunnel image reference must use only") {
+		t.Fatalf("renderTunnelInstallMessage err = %v, want tunnel image rejection", err)
+	}
+}
+
 // TestRenderTunnelInstall_ShowsDisplayNameOnReinstall fences the install
 // confirmation's id line: it shows the tunnel's Display Name (resource
 // description, always set in production) next to the id; the empty-guard
