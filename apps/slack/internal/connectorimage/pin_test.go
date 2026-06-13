@@ -1,6 +1,7 @@
 package connectorimage
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -10,6 +11,8 @@ const (
 	testConnectorVersionImage = testConnectorImageRepo + ":v1.2.3"
 	testConnectorLatestImage  = testConnectorImageRepo + ":latest"
 )
+
+var testDockerTagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 
 func TestClassifyPin(t *testing.T) {
 	t.Parallel()
@@ -118,7 +121,7 @@ func FuzzClassifyPinKeepsKnownGoodPins(f *testing.F) {
 	}
 	validDigest := "sha256:" + strings.Repeat("a", 64)
 	f.Fuzz(func(t *testing.T, tag string) {
-		if strings.ContainsAny(tag, ":/@") || tag == "" || strings.EqualFold(tag, "latest") {
+		if !testDockerTagPattern.MatchString(tag) || strings.EqualFold(tag, "latest") {
 			return
 		}
 		cases := []string{
