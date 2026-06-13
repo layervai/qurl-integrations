@@ -136,6 +136,24 @@ func TestAgentStreamer_MaskedLinkSplitAcrossDeltas_RevealsDestination(t *testing
 	}
 }
 
+func TestAgentStreamer_BufferedLinkPrefixDoesNotOpenStream(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("[Click")
+	if port.startCalls != 0 {
+		t.Fatalf("incomplete link prefix should not open stream, got starts=%d", port.startCalls)
+	}
+	s.onDelta(" here](https://evil.example/login)")
+
+	if !s.finalizeReply(&agent.Result{Reply: "[Click here](https://evil.example/login)"}) {
+		t.Fatal("completed link should stream once destination is known")
+	}
+	want := "Click here (https://evil.example/login)"
+	if port.appended() != want {
+		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
+	}
+}
+
 func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)

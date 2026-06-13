@@ -136,7 +136,7 @@ func (h *agentMarkdownLinkHarden) startLink(image bool) {
 // as a normal byte after flushing the pending non-link text.
 func (h *agentMarkdownLinkHarden) consumeLinkByte(out *strings.Builder, c byte) bool {
 	if h.link.original.Len() > maxAgentMarkdownLinkBytes {
-		out.WriteString(h.link.original.String())
+		out.WriteString(escapeMarkdownLinkOriginal(h.link.original.String()))
 		h.link = markdownLinkPending{}
 		return false
 	}
@@ -326,7 +326,7 @@ func (e *markdownReferenceDefinitionEscaper) startReferenceDefinition() {
 
 func (e *markdownReferenceDefinitionEscaper) consumeReferenceDefinitionByte(out *strings.Builder, c byte) bool {
 	if e.pending.original.Len() > maxAgentMarkdownLinkBytes {
-		out.WriteString(e.pending.original.String())
+		out.WriteString(escapeMarkdownLinkOriginal(e.pending.original.String()))
 		e.pending = markdownReferenceDefinitionPending{}
 		return false
 	}
@@ -392,4 +392,15 @@ func visibleMarkdownLinkDestination(destination string) string {
 		return destination
 	}
 	return fields[0]
+}
+
+func escapeMarkdownLinkOriginal(original string) string {
+	switch {
+	case strings.HasPrefix(original, "!["):
+		return "!\\[" + strings.TrimPrefix(original, "![")
+	case strings.HasPrefix(original, "["):
+		return "\\" + original
+	default:
+		return original
+	}
 }

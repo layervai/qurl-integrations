@@ -586,6 +586,29 @@ func TestSlackPostMarkdownMessageFuncFallsBackToMarkdownTextWhenBlocksRejected(t
 	}
 }
 
+func TestSlackPostMarkdownMessageFuncSurfacesMarkdownTextRetryError(t *testing.T) {
+	t.Parallel()
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"invalid_blocks"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":false,"error":"channel_not_found"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostMarkdownMessageFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "", srv.URL, nil)
+	err := post(context.Background(), "T_test", "", mdTestChannel, "", "Use **bold**")
+	if err == nil || !strings.Contains(err.Error(), "channel_not_found") {
+		t.Fatalf("error = %v, want markdown_text retry failure", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want block attempt plus markdown_text retry", requests)
+	}
+}
+
 func TestSlackChatPostMessageErrorCodeUsesTypedError(t *testing.T) {
 	t.Parallel()
 	err := fmt.Errorf("wrapped: %w", &slackWebAPIError{op: "chat.postMessage", code: slackAPIInvalidBlockType})

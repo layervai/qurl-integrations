@@ -1,6 +1,9 @@
 package internal
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHardenAgentMarkdown_RevealsMaskedLinks(t *testing.T) {
 	t.Parallel()
@@ -79,6 +82,30 @@ func TestAgentMarkdownLinkHarden_HandlesChunkSplitReferenceDefinitions(t *testin
 	want := "Use [the billing link][1].\n\n\\[1]: https://evil.example/login\nDone."
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesOversizedBufferedLinks(t *testing.T) {
+	t.Parallel()
+	label := strings.Repeat("a", maxAgentMarkdownLinkBytes+1)
+	got := hardenAgentMarkdown("[" + label + "](https://evil.example/login)")
+	if !strings.HasPrefix(got, `\[`) {
+		t.Fatalf("oversized link should be escaped, got prefix %q", got[:2])
+	}
+	if !strings.Contains(got, "https://evil.example/login") {
+		t.Fatalf("oversized link should still expose destination, got %q", got)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesOversizedReferenceDefinitions(t *testing.T) {
+	t.Parallel()
+	ref := strings.Repeat("a", maxAgentMarkdownLinkBytes+1)
+	got := hardenAgentMarkdown("[" + ref + "]: https://evil.example/login")
+	if !strings.HasPrefix(got, `\[`) {
+		t.Fatalf("oversized reference definition should be escaped, got prefix %q", got[:2])
+	}
+	if !strings.Contains(got, "https://evil.example/login") {
+		t.Fatalf("oversized reference definition should still expose destination, got %q", got)
 	}
 }
 
