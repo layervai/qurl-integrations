@@ -496,6 +496,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"Temporary qURL Connector bootstrap key for `" + testTunnelSlug + "` expires in 1 hour.",
 		"install instructions were sent separately",
+		"Delete this DM from Slack history",
 		testTunnelAPIKey,
 	} {
 		if !strings.Contains(dm.text, want) {

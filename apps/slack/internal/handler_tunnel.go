@@ -438,13 +438,7 @@ func (h *Handler) tunnelBootstrapDMSlackAppInstallMessage() string {
 
 func (h *Handler) latestSlackAppInstallMessage(subject, retryInstruction string) string {
 	subject = strings.TrimSpace(subject)
-	if subject == "" {
-		subject = "qURL Slack app access"
-	}
 	retryInstruction = strings.TrimSpace(retryInstruction)
-	if retryInstruction == "" {
-		retryInstruction = "retry"
-	}
 	installURL := strings.TrimSpace(h.cfg.SlackInstallURL)
 	if installURL == "" || strings.ContainsAny(installURL, "<>|") {
 		return subject + " needs the latest qURL Slack app install. Ask a workspace admin to open the qURL Slack install link your operator provided, then " + retryInstruction + "."
@@ -805,7 +799,7 @@ func renderTunnelBootstrapSecretMessage(args *tunnelInstallArgs, key *client.API
 	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
 	b.WriteString(".\n\nPaste this secret only when the install instructions prompt for it, or store it in the target platform's secret manager. The install instructions were sent separately and intentionally do not include this key.\n\n")
 	b.WriteString(keyBlock)
-	b.WriteString("\n\nAfter the qURL Connector connects, remove this bootstrap key from the runtime.")
+	b.WriteString("\n\nAfter the qURL Connector connects, remove this bootstrap key from the runtime. Delete this DM from Slack history when your workspace retention policy allows.")
 	return b.String(), nil
 }
 
