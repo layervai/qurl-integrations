@@ -354,6 +354,44 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
+	t.Run("sweeps expired entries during lookup", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		p.apiKeyCache.Store("T_expired", &cachedAPIKey{
+			apiKey:    testOldAPIKey,
+			expiresAt: now.Add(-time.Second),
+		})
+		p.apiKeyCache.Store("T_fresh", &cachedAPIKey{
+			apiKey:    testOldAPIKey,
+			expiresAt: now.Add(time.Minute),
+		})
+
+		got, err := p.APIKey(context.Background(), "T_new")
+		if err != nil {
+			t.Fatalf("APIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if _, ok := p.apiKeyCache.Load("T_expired"); ok {
+			t.Fatal("expired cache entry was not swept")
+		}
+		if _, ok := p.apiKeyCache.Load("T_fresh"); !ok {
+			t.Fatal("fresh cache entry was swept")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+	})
+
 	t.Run("concurrent miss shares one DDB and decrypt fill", func(t *testing.T) {
 		releaseGet := make(chan struct{})
 		getStarted := make(chan struct{})

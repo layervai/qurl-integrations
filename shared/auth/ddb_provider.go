@@ -90,7 +90,10 @@ const (
 	EnvWorkspaceStateKMSKeyARN = "WORKSPACE_STATE_KMS_KEY_ARN"
 )
 
-const apiKeyCacheTTL = 5 * time.Minute
+const (
+	apiKeyCacheTTL        = 5 * time.Minute
+	apiKeyCacheSweepEvery = time.Minute
+)
 
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
 // workspace has no row in the workspace_state table (i.e. the admin has
@@ -138,17 +141,26 @@ type DDBProvider struct {
 
 	// Cache successful APIKey lookups at the DDB/decrypt boundary so every
 	// long-lived consumer avoids repeat KMS Decrypt calls during normal slash
-	// command bursts. The cache is process-local: rotation or disconnect on one
-	// serving instance cannot evict sibling instances, so they may continue using
-	// a previously decrypted key until this TTL expires. Five minutes keeps that
+	// command bursts. This mirrors newWorkspaceSlackTokenLookupWithInvalidation:
+	// per-workspace in-flight fills, generation-guarded invalidation, and inline
+	// expiry sweeps using Now instead of a background janitor. The cache is
+	// process-local: rotation or disconnect on one serving instance cannot evict
+	// sibling instances, so they may continue using a previously decrypted key,
+	// including a revoked key, until this TTL expires. Five minutes keeps that
 	// cross-instance staleness bounded while still collapsing the common
 	// multi-command session; Slack bot-token caching stays shorter because it
 	// gates reinstall detection rather than qURL API retry pressure.
-	apiKeyCache sync.Map // map[string]*cachedAPIKey
+	apiKeyCache sync.Map // map[string]*cachedAPIKey, per issue #263
 
+	// The mutex coordinates the sync.Map with in-flight fills and invalidation
+	// generations. Generation entries are retained after invalidation so a
+	// detached stale fill cannot observe a reset-to-zero generation and cache an
+	// old key; the map only grows for workspaces that rotate or disconnect in
+	// this process, matching the sibling Slack token lookup.
 	apiKeyCacheMu         sync.Mutex
 	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
 	apiKeyCacheGeneration map[string]uint64
+	apiKeyCacheLastSweep  time.Time
 
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
@@ -301,6 +313,9 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return start.apiKey, nil
 	}
 	if !start.owner {
+		// Waiters share the owner result, including an owner context
+		// cancellation. That matches the sibling Slack token cache and keeps
+		// coalescing simple; the next request retries normally.
 		select {
 		case <-start.call.done:
 			return start.call.apiKey, start.call.err
@@ -316,6 +331,7 @@ func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) 
 	p.apiKeyCacheMu.Lock()
 	defer p.apiKeyCacheMu.Unlock()
 
+	p.sweepExpiredAPIKeyCacheLocked(now)
 	if cached, ok := p.apiKeyCache.Load(workspaceID); ok {
 		entry, ok := cached.(*cachedAPIKey)
 		if ok && now.Before(entry.expiresAt) {
@@ -419,12 +435,22 @@ func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
 		expiresAt: now.Add(apiKeyCacheTTL),
 	}
 	p.apiKeyCache.Store(workspaceID, entry)
-	time.AfterFunc(apiKeyCacheTTL, func() {
-		cached, ok := p.apiKeyCache.Load(workspaceID)
-		if ok && cached == entry {
-			p.apiKeyCache.Delete(workspaceID)
+}
+
+func (p *DDBProvider) sweepExpiredAPIKeyCacheLocked(now time.Time) {
+	if !p.apiKeyCacheLastSweep.IsZero() && now.Sub(p.apiKeyCacheLastSweep) < apiKeyCacheSweepEvery {
+		return
+	}
+	// Minute-gated O(workspaces seen by this process), matching the Slack token
+	// cache without adding a background goroutine or real-clock timer to tests.
+	p.apiKeyCache.Range(func(key, value any) bool {
+		entry, ok := value.(*cachedAPIKey)
+		if !ok || !now.Before(entry.expiresAt) {
+			p.apiKeyCache.Delete(key)
 		}
+		return true
 	})
+	p.apiKeyCacheLastSweep = now
 }
 
 func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string) {
