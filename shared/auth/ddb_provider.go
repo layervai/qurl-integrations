@@ -927,7 +927,8 @@ func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 // install metadata in the same row. It returns [ErrWorkspaceNotConfigured] when
 // the workspace has no stored qURL key metadata. Workspace ownership/admin
 // gates live outside this auth row, so removing configured_by/configured_at
-// does not change who can reconnect.
+// does not change who can reconnect. Removing configured_at lets a reconnect
+// stamp fresh setup metadata while rotations still preserve it via SetAPIKey.
 //
 // TODO(#792): this local disconnect cannot revoke the upstream qURL key until
 // setup persists the qurl-service key_id for workspace keys.
