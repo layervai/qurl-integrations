@@ -309,15 +309,14 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 	turn := func(ctx context.Context, log *slog.Logger) {
 		h.processAgentEvent(ctx, log, &envCopy)
 	}
-	// Channel thread follow-ups ride a SEPARATE bounded pool (h.followupSem) so a busy
-	// channel's message.channels firehose — every delivery does a gate read before the
-	// non-agent-thread ones are dropped — can't saturate the main pool that @mention/DM,
-	// slash commands, and interactions share. @mention/DM stay on the main pool. The
-	// follow-up pool's saturation is logged distinctly so it can be watched separately
-	// during the staged enablement (#712).
+	// Channel thread follow-ups first pass through a short SEPARATE gate pool before
+	// admitted turns move to h.followupSem. That keeps a message.channels firehose from
+	// spending long-running turn slots on "is this our thread?" DDB reads, while both
+	// stages stay isolated from the main pool that @mention/DM/slash/interaction work
+	// shares (#712/#719).
 	if isAgentChannelFollowup(&envCopy.Event) {
-		if !h.runOnPool(h.followupSem, log, agentTurnTimeout, turn) {
-			log.Warn("agent: follow-up admission pool saturated — dropping channel reply")
+		if !h.runAgentFollowupPipeline(log, &envCopy) {
+			log.Warn("agent: follow-up gate pool saturated — dropping channel reply")
 		}
 		return
 	}
@@ -330,12 +329,71 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 	}
 }
 
+// runAgentFollowupPipeline runs the channel-follow-up admission gate and, only when the
+// thread is one the agent already joined, the full follow-up turn. It is intentionally a
+// single wg-tracked goroutine: wg.Add happens on the request goroutine before spawn, while
+// the short gate semaphore is released before the long follow-up turn starts.
+func (h *Handler) runAgentFollowupPipeline(log *slog.Logger, env *slackEventEnvelope) bool {
+	select {
+	case h.followupGateSem <- struct{}{}:
+	default:
+		return false
+	}
+
+	h.wg.Add(1)
+	go func() {
+		gateHeld := true
+		defer h.wg.Done()
+		defer func() {
+			if gateHeld {
+				<-h.followupGateSem
+			}
+		}()
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("panic in agent follow-up pipeline", "recover", rec, "stack", string(debug.Stack()))
+			}
+		}()
+
+		partition := agentEventPartition(env)
+		admitted, pre := func() (bool, *loadedHistory) {
+			gateCtx, cancelGate := context.WithTimeout(h.baseCtx, agentFollowupGateTimeout)
+			defer cancelGate()
+			return h.admitAgentChannelFollowup(gateCtx, log, env, partition)
+		}()
+
+		<-h.followupGateSem
+		gateHeld = false
+		if !admitted {
+			return
+		}
+
+		select {
+		case h.followupSem <- struct{}{}:
+		default:
+			log.Warn("agent: follow-up turn pool saturated — dropping admitted channel reply")
+			return
+		}
+		defer func() { <-h.followupSem }()
+
+		turnCtx, cancelTurn := context.WithTimeout(h.baseCtx, agentTurnTimeout)
+		defer cancelTurn()
+		h.processAdmittedAgentEvent(turnCtx, log, env, partition, pre)
+	}()
+	return true
+}
+
 // agentTurnTimeout bounds one conversation turn. A turn makes up to
 // defaultMaxIterations Anthropic round-trips plus channel-scoped reads, so it
 // needs more than the 25s slash-command budget — 25s could cancel a legitimate
 // multi-tool-call turn mid-flight and surface a spurious error to the user. The
 // iteration cap and (later) per-user rate limiting bound how long a slot is held.
 const agentTurnTimeout = 90 * time.Second
+
+// agentFollowupGateTimeout bounds the pre-turn DDB reads for a channel follow-up
+// admission decision. A slow gate fails closed silently because the message may be
+// unrelated channel chatter; admitted turns get the larger agentTurnTimeout budget.
+const agentFollowupGateTimeout = 5 * time.Second
 
 // agentDeliveryBudget bounds each post-turn delivery step — the transcript save
 // and the reply post each derive their own context with this budget off
@@ -355,10 +413,10 @@ const agentDeliveryBudget = 15 * time.Second
 // When channelFollowupsEnabled is true, a channel message that is a thread REPLY is
 // also admitted — so a follow-up in a thread the agent is already in continues the
 // conversation without a re-@mention. Slack's thread_broadcast subtype follows that
-// same path when a user also sends the thread reply to the channel. processAgentEvent
-// then confirms it's the agent's OWN thread (it has saved history) before answering;
-// a top-level channel message is never admitted, so we never respond to un-addressed
-// channel chatter.
+// same path when a user also sends the thread reply to the channel.
+// runAgentFollowupPipeline then confirms it's the agent's OWN thread (it has saved
+// history) before answering; a top-level channel message is never admitted, so we never
+// respond to un-addressed channel chatter.
 func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) bool {
 	e := &env.Event
 	// Drop bot posts and the agent's own messages before considering event shape.
@@ -382,9 +440,9 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			if e.Subtype != "" && e.Subtype != slackMessageSubtypeThreadBroadcast {
 				return false
 			}
-			// A channel message is admitted only when channel follow-ups are enabled AND
-			// it's a thread reply (the "is it the agent's thread?" check is in
-			// processAgentEvent, which has store access).
+			// A channel message reaches the follow-up pipeline only when channel
+			// follow-ups are enabled AND it's a thread reply. The pipeline then checks
+			// whether this is already an agent thread, using store access.
 			if !channelFollowupsEnabled || e.ThreadTS == "" {
 				return false
 			}
@@ -397,8 +455,8 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 
 // isAgentChannelFollowup reports whether this event is a non-@mention reply in a
 // channel thread (vs an app_mention or a DM). When shouldDispatchAgentEvent admits a
-// channel message it is, by construction, a thread reply — so processAgentEvent uses
-// this to apply the extra "must be the agent's own thread" gate that DMs and
+// channel message it is, by construction, a thread reply — so the follow-up pipeline
+// uses this to apply the extra "must be the agent's own thread" gate that DMs and
 // @mentions skip.
 func isAgentChannelFollowup(e *slackInnerEvent) bool {
 	return e.Type == slackEventTypeMessage && e.ChannelType != slackChannelTypeIM && e.ThreadTS != ""
@@ -416,6 +474,21 @@ type loadedHistory struct {
 	version int64
 }
 
+// admitAgentChannelFollowup performs the short pre-turn checks for a channel follow-up:
+// workspace toggle plus "is this already an agent thread?" transcript lookup. Accepted
+// replies carry the loaded transcript forward so the turn does not repeat the read.
+func (h *Handler) admitAgentChannelFollowup(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) (admitted bool, pre *loadedHistory) {
+	// Per-workspace toggle stays before the transcript gate so a disabled workspace
+	// consumes no dedupe marker and performs no agent turn. This gate runs off the
+	// request path, so the extra read does not threaten Slack's ack deadline.
+	if !h.workspaceAgentEnabled(ctx, log, env.TeamID) {
+		log.Info("agent: conversation mode disabled for this workspace; ignoring channel follow-up")
+		return false, nil
+	}
+	dropped, pre := h.agentChannelFollowupDropped(ctx, log, env, partition)
+	return !dropped, pre
+}
+
 // agentChannelFollowupDropped reports whether this event is a channel thread reply
 // the agent should NOT answer: a reply with no readable transcript for the thread — one
 // it never joined, or joined but whose blob is empty or undecodable (loadAgentHistory
@@ -424,10 +497,9 @@ type loadedHistory struct {
 // and DMs are always deliberate addresses. Called before dedupe/ack so a reply that isn't
 // ours consumes no dedupe marker and gets no 👀, and (when the lookup fails) we stay
 // SILENT rather than posting an error into what may be unrelated channel chatter. On an
-// ADMITTED follow-up it returns the loaded transcript so processAgentEvent reuses it
-// instead of re-reading — one DynamoDB read per accepted follow-up, not two. The firehose
-// admission load this read sits on is isolated to a separate pool in handleAgentEvent
-// (both halves of #712).
+// ADMITTED follow-up it returns the loaded transcript so the turn reuses it instead of
+// re-reading — one DynamoDB read per accepted follow-up, not two. The firehose admission
+// load this read sits on is isolated to the short gate pool in runAgentFollowupPipeline.
 func (h *Handler) agentChannelFollowupDropped(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) (dropped bool, pre *loadedHistory) {
 	if !isAgentChannelFollowup(&env.Event) {
 		return false, nil
@@ -519,9 +591,20 @@ func agentEventDedupeKey(env *slackEventEnvelope) string {
 	return env.Event.Channel + ":" + env.Event.TS
 }
 
-// processAgentEvent runs one conversation turn on the async pool: dedupe, load
-// history, run the agent, persist, and post the reply.
+// processAgentEvent runs one deliberate @mention/DM conversation turn on the async
+// pool: workspace gate, dedupe, load history, run the agent, persist, and post the reply.
 func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+	h.processAgentEventWithAdmission(ctx, log, env, "", nil, false)
+}
+
+// processAdmittedAgentEvent runs a channel follow-up after runAgentFollowupPipeline has
+// already checked the workspace toggle and loaded the thread transcript under the short
+// admission gate.
+func (h *Handler) processAdmittedAgentEvent(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string, pre *loadedHistory) {
+	h.processAgentEventWithAdmission(ctx, log, env, partition, pre, true)
+}
+
+func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, admittedPartition string, pre *loadedHistory, preadmitted bool) {
 	// Panic safety-net: we've already acked 200 and may have committed the dedupe
 	// marker, so Slack won't retry. If the turn panics, startAsyncWorker's recover
 	// would log+swallow but post nothing, leaving the @-mention silently
@@ -535,21 +618,8 @@ func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *
 		}
 	}()
 
-	// Per-workspace toggle, BEFORE the dedupe marker so a disabled workspace consumes
-	// nothing. A workspace that hasn't opted in (or opted out) gets no reply — the
-	// same silent behavior as the org-level dark surface; members use slash commands.
-	if !h.workspaceAgentEnabled(ctx, log, env.TeamID) {
-		log.Info("agent: conversation mode disabled for this workspace; ignoring @mention/DM")
-		return
-	}
-
-	partition := agentEventPartition(env)
-
-	// Channel thread-reply continuity gate — BEFORE dedupe/ack so a reply that isn't
-	// ours consumes nothing and is never acked (see agentChannelFollowupDropped). On an
-	// admitted follow-up it returns the loaded transcript so the turn below reuses it.
-	dropped, pre := h.agentChannelFollowupDropped(ctx, log, env, partition)
-	if dropped {
+	partition, pre, ok := h.prepareAgentEventAdmission(ctx, log, env, admittedPartition, pre, preadmitted)
+	if !ok {
 		return
 	}
 
@@ -819,6 +889,32 @@ func (h *Handler) saveAgentHistory(log *slog.Logger, partition, threadKey string
 	if err := h.persistBoundedHistory(ctx, log, partition, threadKey, merged, reVersion); errors.Is(err, slackdata.ErrConversationConflict) {
 		log.Info("agent: conversation version conflict persisted again after one retry; dropping turn")
 	}
+}
+
+func (h *Handler) prepareAgentEventAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string, pre *loadedHistory, preadmitted bool) (string, *loadedHistory, bool) {
+	if partition == "" {
+		partition = agentEventPartition(env)
+	}
+	if preadmitted {
+		return partition, pre, true
+	}
+
+	// Per-workspace toggle, BEFORE the dedupe marker so a disabled workspace consumes
+	// nothing. A workspace that hasn't opted in (or opted out) gets no reply — the
+	// same silent behavior as the org-level dark surface; members use slash commands.
+	if !h.workspaceAgentEnabled(ctx, log, env.TeamID) {
+		log.Info("agent: conversation mode disabled for this workspace; ignoring @mention/DM")
+		return partition, nil, false
+	}
+
+	// Channel thread-reply continuity gate — BEFORE dedupe/ack so a reply that isn't
+	// ours consumes nothing and is never acked (see agentChannelFollowupDropped). On an
+	// admitted follow-up it returns the loaded transcript so the turn below reuses it.
+	dropped, loaded := h.agentChannelFollowupDropped(ctx, log, env, partition)
+	if dropped {
+		return partition, nil, false
+	}
+	return partition, loaded, true
 }
 
 // persistBoundedHistory trims history to the message-count and byte caps, marshals

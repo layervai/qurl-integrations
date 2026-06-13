@@ -206,14 +206,19 @@ const (
 	// >1 click/sec across the whole workspace.
 	defaultMaxConcurrentAsync = 50
 
-	// defaultMaxConcurrentFollowupAsync sizes the SEPARATE pool that channel thread
-	// follow-ups (the message.channels firehose) run on, so a busy channel's chatter
-	// can't saturate the main pool that @mention/DM/slash/interaction work shares
-	// (#712). Main-pool isolation holds at ANY size, so this is sized generously
-	// (mirrors the main default) to avoid head-of-line between the pool's fast gate
-	// reads and its 90s turns; tune via QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC at
-	// enablement from real saturation metrics, not a guess.
+	// defaultMaxConcurrentFollowupAsync sizes the SEPARATE pool that admitted channel
+	// thread follow-up turns run on, so a busy channel's follow-up work can't saturate
+	// the main pool that @mention/DM/slash/interaction work shares (#712). Main-pool
+	// isolation holds at ANY size; tune via QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC
+	// at enablement from real saturation metrics, not a guess.
 	defaultMaxConcurrentFollowupAsync = defaultMaxConcurrentAsync
+
+	// defaultMaxConcurrentFollowupGateAsync bounds the short DDB admission check for
+	// channel thread follow-ups separately from the long-running follow-up turn pool.
+	// This keeps unrelated channel chatter from spending all follow-up turn slots on
+	// "is this our thread?" reads, while still capping the read fan-out against the
+	// agent-state table during message.channels bursts (#719).
+	defaultMaxConcurrentFollowupGateAsync = 10
 
 	// asyncWorkTimeout caps how long a single async job may run. Slack's
 	// response_url is valid for 30 minutes, but in practice qURL API calls
@@ -279,6 +284,10 @@ type Config struct {
 	// MaxConcurrentFollowupAsync sizes the separate channel-follow-up pool (#712). Zero or
 	// negative falls back to defaultMaxConcurrentFollowupAsync.
 	MaxConcurrentFollowupAsync int
+
+	// MaxConcurrentFollowupGateAsync sizes the short channel-follow-up admission gate
+	// pool (#719). Zero or negative falls back to defaultMaxConcurrentFollowupGateAsync.
+	MaxConcurrentFollowupGateAsync int
 
 	// ResponseURLClient is the HTTP client used to POST follow-up
 	// messages to Slack's response_url. Nil means "use a default *http.Client
@@ -605,9 +614,13 @@ type Handler struct {
 	sem chan struct{}
 	// followupSem is the SEPARATE bounded pool for channel thread follow-ups (#712).
 	// Routing the message.channels firehose here keeps a busy channel's chatter from
-	// saturating h.sem, which @mention/DM/slash/interaction work shares. It shares h.wg
-	// with the main pool (runOnPool), so shutdown drains both.
+	// saturating h.sem, which @mention/DM/slash/interaction work shares. It is held only
+	// after the short followupGateSem admission check passes, and the combined pipeline is
+	// wg-tracked so shutdown drains it.
 	followupSem chan struct{}
+	// followupGateSem bounds the short "is this thread ours?" DDB gate before an
+	// admitted channel follow-up takes a long-running followupSem slot (#719).
+	followupGateSem chan struct{}
 	// responseURLClient is owned per-Handler so tests can inject a
 	// transport and so the lifetime is tied to the handler (not the
 	// per-request goroutine).
@@ -714,6 +727,10 @@ func NewHandler(cfg Config) *Handler {
 	if maxFollowupAsync <= 0 {
 		maxFollowupAsync = defaultMaxConcurrentFollowupAsync
 	}
+	maxFollowupGateAsync := cfg.MaxConcurrentFollowupGateAsync
+	if maxFollowupGateAsync <= 0 {
+		maxFollowupGateAsync = defaultMaxConcurrentFollowupGateAsync
+	}
 	respClient := cfg.ResponseURLClient
 	if respClient == nil {
 		respClient = defaultResponseURLClient()
@@ -724,6 +741,7 @@ func NewHandler(cfg Config) *Handler {
 		baseCtx:               baseCtx,
 		sem:                   make(chan struct{}, maxAsync),
 		followupSem:           make(chan struct{}, maxFollowupAsync),
+		followupGateSem:       make(chan struct{}, maxFollowupGateAsync),
 		responseURLClient:     respClient,
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),
