@@ -801,6 +801,7 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	}
 	// Unreachable with today's enum; keeps the function total if a future delivery
 	// state is added before the exhaustive linter catches the missing case.
+	panicCleanup = nil
 	return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 }
 
@@ -904,7 +905,9 @@ func (h *Handler) recordTunnelInstallAgentAuditAsync(log *slog.Logger, req *tunn
 	// Rejected modal submits are still on Slack's view_submission ack path. Keep
 	// the best-effort, 5s-capped audit out of band with h.Go instead of the
 	// saturated worker pool, so a slow audit store cannot consume Slack's short
-	// modal response window.
+	// modal response window. This path is deliberately not pool-bounded: it is
+	// behind Slack request signing plus modal metadata/admin gates, and only
+	// rejection branches use it.
 	h.Go(func() {
 		h.recordTunnelInstallAgentAudit(log, req, result)
 	})

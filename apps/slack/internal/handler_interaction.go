@@ -219,17 +219,26 @@ func blockActionIDs(actions []interactionAction) []string {
 func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
 	args, fieldErrors := parseTunnelInstallModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
+		// Field validation keeps Slack's modal open for correction and is not a
+		// terminal setup attempt. Wait to audit agent-origin submits until the
+		// submitted form has a trusted target and the modal is actually rejected
+		// or handed to the install worker.
 		respondViewErrors(w, fieldErrors)
 		return
 	}
 
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
+		// Without parseable modal metadata from the signed Slack request, there is
+		// no trusted approver/target pair to attach to an App Home row; keep this
+		// as structured logs only.
 		slog.Warn("tunnel install modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
+		// Same as the JSON parse failure: incomplete metadata cannot name a
+		// durable approver-scoped audit row without risking misleading output.
 		slog.Warn("tunnel install modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
