@@ -105,12 +105,6 @@ func GetOrStartWith[V any, D any](c *Cache[V], key string, at time.Time, underLo
 
 	c.initLocked()
 	c.sweepExpiredLocked(at)
-
-	if underLock != nil {
-		data = underLock()
-	}
-
-	generation := c.generation[key]
 	if cached, ok := c.entries[key]; ok {
 		if at.Before(cached.expiresAt) {
 			return Start[V]{Result: cached.result, Hit: true}, data
@@ -118,6 +112,11 @@ func GetOrStartWith[V any, D any](c *Cache[V], key string, at time.Time, underLo
 		c.evictLocked(key, cached)
 	}
 
+	if underLock != nil {
+		data = underLock()
+	}
+
+	generation := c.generation[key]
 	if call, ok := c.inFlight[key]; ok {
 		return Start[V]{Call: call}, data
 	}
@@ -127,21 +126,24 @@ func GetOrStartWith[V any, D any](c *Cache[V], key string, at time.Time, underLo
 	return Start[V]{Call: call, Owner: true, Generation: generation}, data
 }
 
-// Finish publishes an in-flight fill result, releases waiters, and optionally
-// caches the result when ttl is positive and the generation still matches.
-func (c *Cache[V]) Finish(key string, call *Call[V], result Result[V], ttl time.Duration, at time.Time, generation uint64) {
+// Finish publishes an in-flight fill result, releases waiters, and returns
+// whether the result was cached. Results are cached only when ttl is positive
+// and the generation still matches.
+func (c *Cache[V]) Finish(key string, call *Call[V], result Result[V], ttl time.Duration, at time.Time, generation uint64) (cached bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.initLocked()
 	if ttl > 0 && c.generation[key] == generation {
 		c.storeLocked(key, result, at.Add(ttl))
+		cached = true
 	}
 	call.result = result
 	if c.inFlight[key] == call {
 		delete(c.inFlight, key)
 	}
 	close(call.done)
+	return cached
 }
 
 // Invalidate removes cached and in-flight state for key and advances its

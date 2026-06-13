@@ -417,6 +417,33 @@ func TestWorkspaceSlackTokenLookupCacheSweepsExpiredEntries(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSlackTokenLookupStaleNegativeFillDoesNotMarkFallbackWarned(t *testing.T) {
+	at := time.Unix(1800000000, 0)
+	cache := newWorkspaceSlackTokenLookupCache()
+	start := cache.getOrStart("T_legacy", at)
+	if !start.Owner {
+		t.Fatal("first lookup should own the fill")
+	}
+
+	cache.purge("T_legacy")
+	result := ttlcache.Result[workspaceSlackTokenCacheValue]{
+		Value: workspaceSlackTokenCacheValue{
+			token:    "xoxb-fallback",
+			negative: true,
+		},
+	}
+	if cached := cache.tokens.Finish("T_legacy", start.Call, result, slackWorkspaceTokenNegativeCacheTTL, at, start.Generation); cached {
+		t.Fatal("purged stale negative fill must not be cached")
+	}
+
+	if _, ok := cache.fallbackWarned["T_legacy"]; ok {
+		t.Fatal("purged stale negative fill should not leave fallback warning state")
+	}
+	if !cache.markLegacySlackBotTokenFallbackWarned("T_legacy") {
+		t.Fatal("missing warning state should allow the next fallback warning")
+	}
+}
+
 func TestSlackOpenViewFuncLookupErrorSkipsRequest(t *testing.T) {
 	t.Parallel()
 	var called atomic.Bool

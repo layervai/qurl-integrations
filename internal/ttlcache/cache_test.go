@@ -53,7 +53,9 @@ func TestCacheCoalescesAndReleasesWaiters(t *testing.T) {
 		t.Fatalf("second start = %#v, want waiter on owner call", waiter)
 	}
 
-	cache.Finish("k", owner.Call, Result[string]{Value: filledValue}, time.Minute, at, owner.Generation)
+	if cached := cache.Finish("k", owner.Call, Result[string]{Value: filledValue}, time.Minute, at, owner.Generation); !cached {
+		t.Fatal("successful fill should be cached")
+	}
 	select {
 	case <-waiter.Call.Done():
 	default:
@@ -76,7 +78,9 @@ func TestCacheInvalidationDetachesStaleOwner(t *testing.T) {
 	owner := cache.GetOrStart("k", at)
 	waiter := cache.GetOrStart("k", at)
 	cache.Invalidate("k")
-	cache.Finish("k", owner.Call, Result[string]{Value: staleValue}, time.Minute, at, owner.Generation)
+	if cached := cache.Finish("k", owner.Call, Result[string]{Value: staleValue}, time.Minute, at, owner.Generation); cached {
+		t.Fatal("stale owner result must not be cached after invalidation")
+	}
 
 	<-waiter.Call.Done()
 	if got := waiter.Call.Result(); got.Value != staleValue || got.Err != nil {
@@ -94,7 +98,9 @@ func TestCacheSeedDetachesInFlightAndCachesSeed(t *testing.T) {
 
 	owner := cache.GetOrStart("k", at)
 	cache.Seed("k", Result[string]{Value: "seeded"}, time.Minute, at)
-	cache.Finish("k", owner.Call, Result[string]{Value: staleValue}, time.Minute, at, owner.Generation)
+	if cached := cache.Finish("k", owner.Call, Result[string]{Value: staleValue}, time.Minute, at, owner.Generation); cached {
+		t.Fatal("stale owner result must not be cached after seed")
+	}
 
 	hit := cache.GetOrStart("k", at.Add(time.Second))
 	if !hit.Hit || hit.Result.Value != "seeded" {
@@ -108,7 +114,9 @@ func TestCacheFinishWithErrorReleasesInFlightWithoutCaching(t *testing.T) {
 	lookupErr := errors.New("lookup panicked")
 
 	owner := cache.GetOrStart("k", at)
-	cache.Finish("k", owner.Call, Result[string]{Err: lookupErr}, 0, at, owner.Generation)
+	if cached := cache.Finish("k", owner.Call, Result[string]{Err: lookupErr}, 0, at, owner.Generation); cached {
+		t.Fatal("zero-TTL error result must not be cached")
+	}
 	<-owner.Call.Done()
 	if !errors.Is(owner.Call.Result().Err, lookupErr) {
 		t.Fatalf("owner result err = %v, want %v", owner.Call.Result().Err, lookupErr)

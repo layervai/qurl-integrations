@@ -512,6 +512,8 @@ func newWorkspaceSlackTokenLookupCache() *workspaceSlackTokenLookupCache {
 	cache.tokens = ttlcache.New[workspaceSlackTokenCacheValue](ttlcache.Options[workspaceSlackTokenCacheValue]{
 		SweepEvery: slackWorkspaceTokenCacheSweepEvery,
 		OnEvict: func(key string, result ttlcache.Result[workspaceSlackTokenCacheValue]) {
+			// OnEvict runs under the ttlcache lock; keep this hook
+			// non-reentrant and limited to fallback warning sidecar cleanup.
 			if result.Value.negative {
 				delete(cache.fallbackWarned, key)
 			}
@@ -577,9 +579,6 @@ func fetchAndFinishWorkspaceSlackToken(
 		},
 		Err: err,
 	}
-	if cacheNegative && err == nil && fallbackToken != "" {
-		cache.warnLegacySlackBotTokenFallback(teamID)
-	}
 	cacheTTL := time.Duration(0)
 	if cachePositive {
 		cacheTTL = ttl
@@ -587,7 +586,10 @@ func fetchAndFinishWorkspaceSlackToken(
 	if cacheNegative {
 		cacheTTL = slackWorkspaceTokenNegativeCacheTTL
 	}
-	cache.tokens.Finish(teamID, call, result, cacheTTL, now(), generation)
+	cached := cache.tokens.Finish(teamID, call, result, cacheTTL, now(), generation)
+	if cached && cacheNegative && err == nil && fallbackToken != "" {
+		cache.warnLegacySlackBotTokenFallback(teamID)
+	}
 	finished = true
 	return token, err
 }
@@ -602,6 +604,8 @@ func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
 		return
 	}
 	ttlcache.InvalidateWith[workspaceSlackTokenCacheValue](c.tokens, teamID, func() {
+		// InvalidateWith runs under the ttlcache lock; keep this hook
+		// non-reentrant and limited to fallback warning sidecar cleanup.
 		delete(c.fallbackWarned, teamID)
 	})
 }
@@ -617,6 +621,8 @@ func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID 
 func (c *workspaceSlackTokenLookupCache) markLegacySlackBotTokenFallbackWarned(teamID string) bool {
 	warn := false
 	ttlcache.WithLock(c.tokens, func() {
+		// WithLock holds the ttlcache mutex; keep this hook non-reentrant and
+		// limited to fallback warning sidecar mutation.
 		if c.fallbackWarned == nil {
 			c.fallbackWarned = map[string]struct{}{}
 		}

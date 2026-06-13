@@ -15,8 +15,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# `shared/` is copied before `apps/slack/` so an app-only edit doesn't
-# invalidate the `shared/` layer's cache. Most PRs touch one app.
+# `internal/` and `shared/` are copied before `apps/slack/` so an app-only edit
+# doesn't invalidate shared-code layers. Most PRs touch one app.
+COPY internal/ ./internal/
 COPY shared/ ./shared/
 COPY apps/slack/ ./apps/slack/
 

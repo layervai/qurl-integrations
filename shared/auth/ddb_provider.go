@@ -157,7 +157,7 @@ type DDBProvider struct {
 	// this process and forces strongly-consistent refills for one TTL so a
 	// same-process eventually-consistent post-delete read cannot re-cache the
 	// revoked key.
-	apiKeyCacheInitMu sync.Mutex
+	apiKeyCacheOnce   sync.Once
 	apiKeyLookupCache *ttlcache.Cache[string]
 
 	// Protected by apiKeyLookupCache's mutex through ttlcache hooks. Generation
@@ -210,13 +210,12 @@ func (p *DDBProvider) nowOrDefault() time.Time {
 }
 
 func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[string] {
-	p.apiKeyCacheInitMu.Lock()
-	defer p.apiKeyCacheInitMu.Unlock()
-
-	if p.apiKeyLookupCache == nil {
+	p.apiKeyCacheOnce.Do(func() {
 		p.apiKeyLookupCache = ttlcache.New[string](ttlcache.Options[string]{
 			SweepEvery: apiKeyCacheSweepEvery,
 			OnSweep: func(at time.Time) {
+				// OnSweep runs under the ttlcache lock; keep this hook
+				// non-reentrant and limited to the strong-read sidecar.
 				for workspaceID, until := range p.apiKeyStrongReadUntil {
 					if !at.Before(until) {
 						delete(p.apiKeyStrongReadUntil, workspaceID)
@@ -224,7 +223,7 @@ func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[string] {
 				}
 			},
 		})
-	}
+	})
 	return p.apiKeyLookupCache
 }
 
@@ -363,6 +362,8 @@ func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, ret
 
 func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
 	start, consistentRead := ttlcache.GetOrStartWith[string, bool](p.apiKeyCache(), workspaceID, now, func() bool {
+		// GetOrStartWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
 		if p.apiKeyStrongReadUntil == nil {
 			return false
 		}
@@ -460,6 +461,8 @@ func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil 
 		return
 	}
 	ttlcache.InvalidateWith[string](p.apiKeyCache(), workspaceID, func() {
+		// InvalidateWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
 		if !strongReadUntil.IsZero() {
 			if p.apiKeyStrongReadUntil == nil {
 				p.apiKeyStrongReadUntil = map[string]time.Time{}
@@ -474,6 +477,8 @@ func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time)
 		return
 	}
 	ttlcache.SeedWith[string](p.apiKeyCache(), workspaceID, ttlcache.Result[string]{Value: apiKey}, apiKeyCacheTTL, now, func() {
+		// SeedWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
 		if p.apiKeyStrongReadUntil != nil {
 			delete(p.apiKeyStrongReadUntil, workspaceID)
 		}
