@@ -466,7 +466,7 @@ func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil 
 	if strings.TrimSpace(workspaceID) == "" {
 		return
 	}
-	ttlcache.InvalidateWith[string](p.apiKeyCache(), workspaceID, func() {
+	p.apiKeyCache().InvalidateWith(workspaceID, func() {
 		// InvalidateWith runs this hook under the ttlcache lock; keep it
 		// non-reentrant and limited to the strong-read sidecar.
 		if !strongReadUntil.IsZero() {
@@ -482,7 +482,7 @@ func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time)
 	if strings.TrimSpace(workspaceID) == "" {
 		return
 	}
-	ttlcache.SeedWith[string](p.apiKeyCache(), workspaceID, ttlcache.Result[string]{Value: apiKey}, apiKeyCacheTTL, now, func() {
+	p.apiKeyCache().SeedWith(workspaceID, ttlcache.Result[string]{Value: apiKey}, apiKeyCacheTTL, now, func() {
 		// SeedWith runs this hook under the ttlcache lock; keep it
 		// non-reentrant and limited to the strong-read sidecar.
 		if p.apiKeyStrongReadUntil != nil {

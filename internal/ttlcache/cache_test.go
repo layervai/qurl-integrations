@@ -193,7 +193,7 @@ func TestCacheWithLockHooksShareSidecarSynchronization(t *testing.T) {
 	})
 
 	cache.Seed("k", Result[string]{Value: "old"}, time.Minute, at)
-	WithLock(cache, func() {
+	cache.WithLock(func() {
 		sidecar["k"] = true
 	})
 	cache.Seed("k", Result[string]{Value: "new"}, time.Minute, at.Add(time.Second))
@@ -202,7 +202,7 @@ func TestCacheWithLockHooksShareSidecarSynchronization(t *testing.T) {
 		t.Fatal("overwriting a cached entry should run sidecar eviction")
 	}
 
-	InvalidateWith(cache, "k", func() {
+	cache.InvalidateWith("k", func() {
 		sidecar["k"] = false
 	})
 	if sidecar["k"] {

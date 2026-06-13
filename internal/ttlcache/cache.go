@@ -149,11 +149,11 @@ func (c *Cache[V]) Finish(key string, call *Call[V], result Result[V], ttl time.
 // Invalidate removes cached and in-flight state for key and advances its
 // generation so detached fill owners cannot repopulate stale data.
 func (c *Cache[V]) Invalidate(key string) {
-	InvalidateWith(c, key, nil)
+	c.InvalidateWith(key, nil)
 }
 
 // InvalidateWith is Invalidate plus an under-lock hook for sidecar state.
-func InvalidateWith[V any](c *Cache[V], key string, underLock func()) {
+func (c *Cache[V]) InvalidateWith(key string, underLock func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -170,11 +170,11 @@ func InvalidateWith[V any](c *Cache[V], key string, underLock func()) {
 
 // Seed replaces key with a cached result and detaches any in-flight owner.
 func (c *Cache[V]) Seed(key string, result Result[V], ttl time.Duration, at time.Time) {
-	SeedWith(c, key, result, ttl, at, nil)
+	c.SeedWith(key, result, ttl, at, nil)
 }
 
 // SeedWith is Seed plus an under-lock hook for sidecar state.
-func SeedWith[V any](c *Cache[V], key string, result Result[V], ttl time.Duration, at time.Time, underLock func()) {
+func (c *Cache[V]) SeedWith(key string, result Result[V], ttl time.Duration, at time.Time, underLock func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -194,7 +194,7 @@ func SeedWith[V any](c *Cache[V], key string, result Result[V], ttl time.Duratio
 
 // WithLock runs fn while holding the cache mutex. It is for cache-adjacent
 // sidecars that must share this cache's synchronization.
-func WithLock[V any](c *Cache[V], fn func()) {
+func (c *Cache[V]) WithLock(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

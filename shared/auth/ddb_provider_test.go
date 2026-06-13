@@ -465,6 +465,22 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
 			t.Fatal("want DDB error, got nil")
 		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls after expired miss = %d, want 1", ddb.getCalls)
+		}
+
+		ddb.getErr = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after expired miss recovery: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls after recovery = %d, want 2", ddb.getCalls)
+		}
 	})
 
 	t.Run("sweeps expired entries during lookup", func(t *testing.T) {
@@ -1096,7 +1112,7 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 			Now:       func() time.Time { return now },
 		}
 		p.seedAPIKeyCache(testTeamID, testOldAPIKey, now)
-		ttlcache.WithLock(p.apiKeyCache(), func() {
+		p.apiKeyCache().WithLock(func() {
 			p.apiKeyStrongReadUntil = map[string]time.Time{
 				testTeamID: now.Add(apiKeyCacheTTL),
 			}

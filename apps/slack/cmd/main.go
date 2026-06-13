@@ -606,7 +606,7 @@ func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
 	if teamID == "" {
 		return
 	}
-	ttlcache.InvalidateWith[workspaceSlackTokenCacheValue](c.tokens, teamID, func() {
+	c.tokens.InvalidateWith(teamID, func() {
 		// InvalidateWith runs under the ttlcache lock; keep this hook
 		// non-reentrant and limited to fallback warning sidecar cleanup.
 		delete(c.fallbackWarned, teamID)
@@ -623,7 +623,7 @@ func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID 
 
 func (c *workspaceSlackTokenLookupCache) markLegacySlackBotTokenFallbackWarned(teamID string) bool {
 	warn := false
-	ttlcache.WithLock(c.tokens, func() {
+	c.tokens.WithLock(func() {
 		// WithLock holds the ttlcache mutex; keep this hook non-reentrant and
 		// limited to fallback warning sidecar mutation.
 		if c.fallbackWarned == nil {

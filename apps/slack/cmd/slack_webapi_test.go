@@ -380,7 +380,7 @@ func TestWorkspaceSlackTokenLookupCacheSweepsExpiredEntries(t *testing.T) {
 		Value: workspaceSlackTokenCacheValue{negative: true},
 		Err:   auth.ErrSlackBotTokenNotConfigured,
 	}, time.Minute, at)
-	ttlcache.WithLock(cache.tokens, func() {
+	cache.tokens.WithLock(func() {
 		cache.fallbackWarned = map[string]struct{}{
 			"T_negative_expired": {},
 			"T_negative_fresh":   {},
