@@ -13,6 +13,10 @@ tag_re='^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.+-]+)?$'
 # reviewers still need to verify that tag comments match their pinned SHAs. It
 # intentionally enforces this repo's exact vX.Y.Z comment convention.
 action_files=(.github/workflows/*.yml .github/workflows/*.yaml .github/actions/*/action.yml .github/actions/*/action.yaml)
+if (( ${#action_files[@]} == 0 )); then
+  printf 'no workflow or composite-action files found\n' >&2
+  exit 2
+fi
 
 fail() {
   printf '%s:%s: %s\n' "$1" "$2" "$3" >&2

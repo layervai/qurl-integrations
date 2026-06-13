@@ -88,7 +88,7 @@ check-discord: test-discord
 
 ## Full check (CI parity)
 
-check: check-actions-pins fmt vet lint test-race
+check: fmt vet check-actions-pins lint test-race
 
 ## Cleanup
 
