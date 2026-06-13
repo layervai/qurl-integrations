@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -313,6 +314,18 @@ func assertSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
+func assertOAuthErrorPage(t *testing.T, rec *httptest.ResponseRecorder, heading string) {
+	t.Helper()
+	assertSecurityHeaders(t, rec)
+	body := rec.Body.String()
+	if !strings.Contains(body, "<title>qURL setup</title>") {
+		t.Errorf("body should render the styled qURL setup page; got: %s", body)
+	}
+	if escapedHeading := html.EscapeString(heading); !strings.Contains(body, escapedHeading) {
+		t.Errorf("body missing heading %q; got: %s", heading, body)
+	}
+}
+
 func TestCallbackHappyPath(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 
@@ -372,6 +385,7 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -395,6 +409,7 @@ func TestCallbackEmailSetupRequiresNonEmptyVerifiedEmail(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -488,6 +503,21 @@ func TestOAuthErrorPageHTMLEscapesInterpolations(t *testing.T) {
 	}
 }
 
+func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish",
+		"First paragraph with <b>unsafe</b> markup.",
+		"Second paragraph keeps the next action scannable.")
+	body := rec.Body.String()
+	if strings.Count(body, "<p>") != 2 {
+		t.Errorf("expected two message paragraphs, got body:\n%s", body)
+	}
+	if strings.Contains(body, "<b>unsafe</b>") || !strings.Contains(body, "&lt;b&gt;unsafe&lt;/b&gt;") {
+		t.Errorf("message paragraphs must still be escaped; got:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
 func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
 	// Regression: configuredBy used to be read from ?admin_user=…
 	// which let an attacker pick the DM target. Now the value is
@@ -528,6 +558,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Continue setup in the same browser")
 	// On reject, the cookie should be cleared so a refresh isn't stuck
 	// looping on the same mismatch.
 	var clearedCookie *http.Cookie
@@ -558,6 +589,7 @@ func TestCallbackRejectsMissingCookie(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Continue setup in the same browser")
 }
 
 func TestCallbackRejectsExpiredState(t *testing.T) {
@@ -573,6 +605,7 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Setup link expired")
 }
 
 // TestCallbackMintFailureDoesNotRevoke locks the contract: when the
@@ -599,7 +632,7 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "Couldn&#39;t connect qURL") {
 		t.Errorf("502 body should render the styled error page heading; got: %q", body)
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	tracker.wg.Wait()
 	tracker.mu.Lock()
 	used := tracker.used
@@ -635,7 +668,7 @@ func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
 		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", rec.Body.String())
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "qURL key limit reached")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -659,7 +692,7 @@ func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.
 	if !strings.Contains(body, "already connected") || !strings.Contains(body, "administrator") {
 		t.Errorf("body should explain the existing connection and recovery path; got: %q", rec.Body.String())
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "qURL already connected")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -682,6 +715,7 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
 	// Binding-backed keys must stay in qurl-service so the admin can retry
 	// setup and replay the binding idempotency record into Slack storage.
 	tracker.wg.Wait()
@@ -762,6 +796,7 @@ func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
 	// Legacy fallback has no qurl-service binding replay path, so the
 	// unstored key is an orphan and should still be revoked asynchronously.
 	deadline := time.Now().Add(time.Second)
@@ -786,6 +821,7 @@ func TestCallbackRejectsMissingCode(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is incomplete")
 }
 
 // TestCallbackRejectsNonGET locks the method-allow contract: a POST
@@ -801,6 +837,7 @@ func TestCallbackRejectsNonGET(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("got %d want 405", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Use the Slack setup link")
 	if got := rec.Header().Get("Allow"); got != "GET" {
 		t.Errorf("Allow header: got %q want GET", got)
 	}
@@ -816,6 +853,7 @@ func TestCallbackHandlesAuth0Error(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Authorization was canceled")
 }
 
 // TestCallbackRendersSuccessWhenVerifierFails locks the documented
@@ -859,6 +897,7 @@ func TestCallbackAuth0TokenFailure(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502 (auth0 5xx surfaces as 502)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 }
 
 // TestExchangeAuth0CodeAcceptsExactCapBody locks the off-by-one fix on
@@ -922,6 +961,7 @@ func TestCallbackAuth0EmptyAccessToken(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 }
 
 // countingTracker satisfies AsyncTracker by tracking how many fn
@@ -1080,6 +1120,7 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't bind this Slack workspace")
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1210,6 +1251,7 @@ func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d want 502 (transient validation failure, body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
 		t.Fatal("SetAPIKey must not run when stored-key validation had a transient failure")
@@ -1234,6 +1276,7 @@ func TestCallbackStoredKeyForbiddenDoesNotMint(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d want 502 (403 validation failure must not mint, body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
 		t.Fatal("SetAPIKey must not run when stored-key validation returned 403")
@@ -1257,6 +1300,7 @@ func TestCallbackStoredKeyLookupFailureDoesNotMint(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500 (stored-key lookup failure, body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
 		t.Fatal("SetAPIKey must not run when stored-key lookup failed")
@@ -1369,6 +1413,7 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500 (cannot bind without sub)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't confirm your qURL account")
 	admin.mu.Lock()
 	if admin.calls != 0 {
 		t.Errorf("BindWorkspace must not be called with empty OwnerID; got %d calls", admin.calls)
@@ -1406,6 +1451,7 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("first attempt status: got %d want 502 (mint failure)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	admin.mu.Lock()
 	if admin.calls != 1 || admin.gotSeed != testUserID {
 		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d seed=%q)", admin.calls, admin.gotSeed)
