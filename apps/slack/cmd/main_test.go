@@ -158,13 +158,13 @@ func TestReadTunnelImageConfig(t *testing.T) {
 		{
 			name:        "implicit latest routes to non-pinned message",
 			image:       testConnectorImageRepo,
-			wantErrText: connectorImageErrNonPinned,
+			wantErrText: connectorImageErrFloating,
 		},
 		{
 			name:        "explicit latest image rejected even with fallback opt in",
 			image:       testConnectorLatestImage,
 			fallback:    connectorImageFallbackSandbox,
-			wantErrText: connectorImageErrNonPinned,
+			wantErrText: connectorImageErrFloating,
 		},
 		{
 			name:        "latest tag with digest routes to latest-digest message",

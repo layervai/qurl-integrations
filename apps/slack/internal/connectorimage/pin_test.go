@@ -22,14 +22,14 @@ func TestClassifyPin(t *testing.T) {
 		image string
 		want  PinStatus
 	}{
-		{name: "version tag", image: testConnectorVersionImage, want: Pinned},
-		{name: "registry host with port and tag", image: "registry.example.com:5000/layervai/qurl-connector:v1.2.3", want: Pinned},
-		{name: "uppercase non-latest tag", image: testConnectorImageRepo + ":V1", want: Pinned},
-		{name: "uppercase non-latest tag with digest", image: testConnectorImageRepo + ":V1@" + validDigest, want: Pinned},
-		{name: "digest", image: testConnectorImageRepo + "@" + validDigest, want: Pinned},
-		{name: "registry host with port and digest", image: "registry.example.com:5000/layervai/qurl-connector@" + validDigest, want: Pinned},
-		{name: "single segment image digest", image: "qurl-connector@" + validDigest, want: Pinned},
-		{name: "version tag with digest", image: testConnectorVersionImage + "@" + validDigest, want: Pinned},
+		{name: "version tag", image: testConnectorVersionImage, want: Accepted},
+		{name: "registry host with port and tag", image: "registry.example.com:5000/layervai/qurl-connector:v1.2.3", want: Accepted},
+		{name: "uppercase non-latest tag", image: testConnectorImageRepo + ":V1", want: Accepted},
+		{name: "uppercase non-latest tag with digest", image: testConnectorImageRepo + ":V1@" + validDigest, want: Accepted},
+		{name: "digest", image: testConnectorImageRepo + "@" + validDigest, want: Accepted},
+		{name: "registry host with port and digest", image: "registry.example.com:5000/layervai/qurl-connector@" + validDigest, want: Accepted},
+		{name: "single segment image digest", image: "qurl-connector@" + validDigest, want: Accepted},
+		{name: "version tag with digest", image: testConnectorVersionImage + "@" + validDigest, want: Accepted},
 		{name: "latest tag with digest", image: testConnectorLatestImage + "@" + validDigest, want: LatestDigest},
 		{name: "uppercase latest tag with digest", image: testConnectorImageRepo + ":LATEST@" + validDigest, want: LatestDigest},
 		{name: "multi-colon latest tag with digest", image: testConnectorImageRepo + ":latest:v1@" + validDigest, want: LatestDigest},
@@ -58,7 +58,7 @@ func TestClassifyPin(t *testing.T) {
 		{name: "uppercase localhost port", image: "LOCALHOST:5000", want: AmbiguousReference},
 		{name: "bare dotted registry port", image: "registry.example.com:5000", want: AmbiguousReference},
 		{name: "dotted slashless name with tag", image: "gcr.io:v1", want: AmbiguousReference},
-		{name: "numeric tag without registry host", image: "qurl-connector:5000", want: Pinned},
+		{name: "numeric tag without registry host", image: "qurl-connector:5000", want: Accepted},
 		{name: "multi-colon non-latest tag with digest", image: testConnectorImageRepo + ":v1:v2@" + validDigest, want: MalformedReference},
 		{name: "empty tag with digest", image: testConnectorImageRepo + ":@" + validDigest, want: MalformedReference},
 		{name: "malformed digest", image: testConnectorImageRepo + "@notadigest", want: MalformedDigest},
@@ -111,8 +111,8 @@ func FuzzClassifyPinRejectsLatest(f *testing.F) {
 			"ghcr.io/foo:LATEST/" + fragment + "@" + validDigest,
 		}
 		for _, image := range cases {
-			if got := ClassifyPin(image); got == Pinned {
-				t.Fatalf("ClassifyPin(%q) = Pinned, want latest-tagged refs rejected", image)
+			if got := ClassifyPin(image); got == Accepted {
+				t.Fatalf("ClassifyPin(%q) = Accepted, want latest-tagged refs rejected", image)
 			}
 		}
 	})
@@ -133,8 +133,8 @@ func FuzzClassifyPinKeepsKnownGoodPins(f *testing.F) {
 			testConnectorImageRepo + "@" + validDigest,
 		}
 		for _, image := range cases {
-			if got := ClassifyPin(image); got != Pinned {
-				t.Fatalf("ClassifyPin(%q) = %v, want Pinned", image, got)
+			if got := ClassifyPin(image); got != Accepted {
+				t.Fatalf("ClassifyPin(%q) = %v, want Accepted", image, got)
 			}
 		}
 	})

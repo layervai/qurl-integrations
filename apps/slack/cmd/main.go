@@ -39,12 +39,12 @@ const (
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
 
-	connectorImageErrNonPinned       = "must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest"
-	connectorImageErrLatestDigest    = "digest pins must not include a latest tag; use an image@sha256:<64 lowercase hex> digest without :latest, or a specific non-latest release tag before the digest"
-	connectorImageErrDigestLowercase = "digest must use 64 lowercase hex characters after sha256"
-	connectorImageErrMalformedRef    = "image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag"
-	connectorImageErrAmbiguousRef    = "slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest"
-	connectorImageErrMalformedDigest = "digest references must use a full image name followed by @sha256:<64 lowercase hex>; bare sha256:<digest> values are not image references"
+	connectorImageErrFloating        = "missing or latest tag; use a specific non-latest tag or image@sha256:<64 lowercase hex>"
+	connectorImageErrLatestDigest    = "latest tag is not allowed with digest pins; drop :latest or use a specific non-latest tag before the digest"
+	connectorImageErrDigestLowercase = "digest must be sha256:<64 lowercase hex>"
+	connectorImageErrMalformedRef    = "invalid image reference; use lowercase image:tag or lowercase image@sha256:<64 lowercase hex>"
+	connectorImageErrAmbiguousRef    = "ambiguous slashless registry ref; include a repository path such as gcr.io/<org>/<image>:v1"
+	connectorImageErrMalformedDigest = "invalid digest ref; use image@sha256:<64 lowercase hex> with a full image name, not bare sha256:<digest>"
 
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
@@ -1051,7 +1051,7 @@ func readTunnelImageConfig() (string, error) {
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
 		switch connectorimage.ClassifyPin(image) {
-		case connectorimage.Pinned:
+		case connectorimage.Accepted:
 			return image, nil
 		case connectorimage.LatestDigest:
 			return "", fmt.Errorf(
@@ -1081,7 +1081,7 @@ func readTunnelImageConfig() (string, error) {
 		case connectorimage.Floating:
 			return "", fmt.Errorf(
 				"%s %s; %s",
-				envQURLConnectorImage, connectorImageErrNonPinned, connectorImageFallbackHint,
+				envQURLConnectorImage, connectorImageErrFloating, connectorImageFallbackHint,
 			)
 		}
 		// Future connectorimage.PinStatus values must fail closed.

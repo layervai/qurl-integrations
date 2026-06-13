@@ -13,14 +13,14 @@ import (
 
 // PinStatus describes whether an operator-provided image ref is accepted by
 // the production startup policy and, if not, which startup error should explain
-// it. Pinned means "specific enough for qURL startup policy": non-latest tags
+// it. Accepted means "specific enough for qURL startup policy": non-latest tags
 // are trusted release labels by operator convention, while digest refs are the
 // immutable byte-for-byte pins.
 type PinStatus int
 
 // PinStatus values returned by ClassifyPin.
 const (
-	Pinned PinStatus = iota
+	Accepted PinStatus = iota
 	Floating
 	LatestDigest
 	UppercaseDigest
@@ -91,7 +91,7 @@ func classifyDigestImagePin(image, name, digest string) PinStatus {
 	if strings.EqualFold(repositoryName, "sha256") || slashlessRegistryReference(repositoryName) {
 		return MalformedDigest
 	}
-	return Pinned
+	return Accepted
 }
 
 func classifyTaggedImagePin(image, name string) PinStatus {
@@ -131,7 +131,7 @@ func classifyTaggedImagePin(image, name string) PinStatus {
 	}
 	// Non-latest tags are trusted release labels by operator convention; use
 	// image@sha256:<digest> when byte-for-byte image immutability is required.
-	return Pinned
+	return Accepted
 }
 
 type sha256DigestStatus int
