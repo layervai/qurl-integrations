@@ -149,15 +149,19 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 		return "No resources are protected in this channel yet.", nil
 	}
 	// Channel alias bindings name resources that carry no intrinsic alias/slug (e.g.
-	// agent-protected URLs). Build rid -> first bound channel alias.
+	// agent-protected URLs). Build rid -> channel alias. alias_bindings is map[alias]rid,
+	// so a resource can have several; GetChannelPolicy ranges that Go map (randomized
+	// order), so pick the lexicographically smallest deterministically — otherwise the
+	// label for a multi-bound resource would flip turn-to-turn.
 	entries, err := b.channelPolicy(ctx, tc)
 	if err != nil {
 		return b.fail("list resources: aliases", err)
 	}
 	channelAlias := make(map[string]string, len(entries))
 	for i := range entries {
-		if _, ok := channelAlias[entries[i].ResourceID]; !ok {
-			channelAlias[entries[i].ResourceID] = entries[i].Alias
+		rid, alias := entries[i].ResourceID, entries[i].Alias
+		if cur, ok := channelAlias[rid]; !ok || alias < cur {
+			channelAlias[rid] = alias
 		}
 	}
 	lines := make([]string, 0, len(resources))

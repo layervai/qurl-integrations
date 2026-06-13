@@ -224,6 +224,45 @@ func TestAgentBackend_ListResources_ShowsChannelAliasForUnaliasedResource(t *tes
 	}
 }
 
+func TestAgentBackend_ListResources_PicksSmallestAliasOnMultipleBindings(t *testing.T) {
+	// alias_bindings is map[alias]rid, so several aliases can bind one resource.
+	// GetChannelPolicy builds its slice by ranging that Go map (randomized order), so the
+	// label must be chosen deterministically — the lexicographically smallest — or it would
+	// flip turn-to-turn for a multi-bound resource.
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"zzz": &ddbtypes.AttributeValueMemberS{Value: "r_url2"},
+			"aaa": &ddbtypes.AttributeValueMemberS{Value: "r_url2"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_url2"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	b := &agentBackend{store: store, log: slog.Default()}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_url2","type":"url","description":"Deploy dashboard","target_url":"https://deploy.example.com"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	out, err := b.ListResources(context.Background(), backendTC())
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if !strings.Contains(out, "$aaa") || strings.Contains(out, "$zzz") {
+		t.Fatalf("multi-bound resource must take the smallest alias ($aaa), got %q", out)
+	}
+}
+
 func TestAgentBackend_ResolveToken(t *testing.T) {
 	b, _ := newBackendUnderTest(t, true)
 	ctx := context.Background()
