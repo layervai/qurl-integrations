@@ -1223,7 +1223,11 @@ func classifySHA256ImageDigest(digest string) sha256DigestStatus {
 }
 
 func imageNameHasLatestTag(name string) bool {
-	for _, component := range strings.Split(name, "/") {
+	components := strings.Split(name, "/")
+	for i, component := range components {
+		if i == 0 && len(components) > 1 && !firstPathComponentHasValidPort(component) {
+			continue
+		}
 		for _, tag := range strings.Split(component, ":")[1:] {
 			if strings.EqualFold(tag, "latest") {
 				return true
