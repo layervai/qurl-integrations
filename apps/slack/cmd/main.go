@@ -1035,6 +1035,8 @@ func readTunnelImageConfig() (string, error) {
 		return "", fmt.Errorf("%s: %w", envQURLConnectorImage, err)
 	}
 	if image != "" {
+		// Keep startup errors explicit: they land in operator logs, and each
+		// branch carries the remediation so bad image config cannot be masked.
 		switch classifyTunnelImagePin(image) {
 		case tunnelImagePinned:
 			return image, nil
@@ -1152,6 +1154,9 @@ func classifyTunnelImagePin(image string) tunnelImagePinStatus {
 	if lastColon <= lastSlash {
 		return tunnelImageFloating
 	}
+	// Non-digest refs surface malformed tag syntax before latest-specific
+	// guidance. Digest refs check latest first so repo:latest@sha256:... never
+	// renders a customer snippet that visibly advertises :latest.
 	if hasMultiColonTag {
 		return tunnelImageMalformedReference
 	}
@@ -1159,8 +1164,6 @@ func classifyTunnelImagePin(image string) tunnelImagePinStatus {
 		return tunnelImageAmbiguousReference
 	}
 	tag := name[lastColon+1:]
-	// Without a digest, malformed tag syntax is more useful operator guidance
-	// than the latest-specific digest warning above.
 	if tag == "" {
 		return tunnelImageMalformedReference
 	}
@@ -1239,6 +1242,9 @@ func imageRepositoryName(name string, lastSlash, lastColon int) string {
 
 func classifyDigestRepositoryName(repositoryName string) tunnelImagePinStatus {
 	if imageNameHasUppercase(repositoryName) {
+		// Route uppercase repository paths to the reference-shape error.
+		// imageNameHasRepository would reject them too, but with digest-shape
+		// error text.
 		return tunnelImageMalformedReference
 	}
 	if !imageNameHasRepository(repositoryName) {
