@@ -63,7 +63,9 @@ func classifyDigestImagePin(image, name, digest string) PinStatus {
 	}
 	// The digest controls image resolution, but reject
 	// repo:latest@sha256:<hex> anyway so customer-facing snippets never
-	// visibly advertise the floating latest tag.
+	// visibly advertise the floating latest tag. This intentionally reports
+	// LatestDigest before validating the digest bytes; if both are wrong, the
+	// operator fixes the visible latest tag first.
 	if imageNameHasLatestTag(name) {
 		return LatestDigest
 	}

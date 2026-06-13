@@ -1055,32 +1055,32 @@ func readTunnelImageConfig() (string, error) {
 			return image, nil
 		case connectorimage.LatestDigest:
 			return "", fmt.Errorf(
-				"%s %s",
+				"%s: %s",
 				envQURLConnectorImage, connectorImageErrLatestDigest,
 			)
 		case connectorimage.UppercaseDigest:
 			return "", fmt.Errorf(
-				"%s %s",
+				"%s: %s",
 				envQURLConnectorImage, connectorImageErrDigestLowercase,
 			)
 		case connectorimage.MalformedReference:
 			return "", fmt.Errorf(
-				"%s %s",
+				"%s: %s",
 				envQURLConnectorImage, connectorImageErrMalformedRef,
 			)
 		case connectorimage.AmbiguousReference:
 			return "", fmt.Errorf(
-				"%s %s",
+				"%s: %s",
 				envQURLConnectorImage, connectorImageErrAmbiguousRef,
 			)
 		case connectorimage.MalformedDigest:
 			return "", fmt.Errorf(
-				"%s %s",
+				"%s: %s",
 				envQURLConnectorImage, connectorImageErrMalformedDigest,
 			)
 		case connectorimage.Floating:
 			return "", fmt.Errorf(
-				"%s %s; %s",
+				"%s: %s; %s",
 				envQURLConnectorImage, connectorImageErrFloating, connectorImageFallbackHint,
 			)
 		}
