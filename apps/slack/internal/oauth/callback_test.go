@@ -30,8 +30,8 @@ const (
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
 	t.Helper()
-	// Mutates process-global slog state; keep this package serial while this
-	// helper exists, because any sibling t.Parallel test can race the swap.
+	// Mutates process-global slog state; adding t.Parallel anywhere in this
+	// package requires replacing this helper with non-global log capture.
 	var buf lockedLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
