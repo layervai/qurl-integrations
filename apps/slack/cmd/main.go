@@ -1047,28 +1047,28 @@ func readTunnelImageConfig() (string, error) {
 			return image, nil
 		case connectorimage.LatestDigest:
 			return "", fmt.Errorf(
-				"%s digest pins must not include a latest tag; use an image@sha256:<64 lowercase hex> digest without :latest, or a specific non-latest release tag before the digest; %s",
-				envQURLConnectorImage, connectorImageFallbackHint,
+				"%s digest pins must not include a latest tag; use an image@sha256:<64 lowercase hex> digest without :latest, or a specific non-latest release tag before the digest",
+				envQURLConnectorImage,
 			)
 		case connectorimage.UppercaseDigest:
 			return "", fmt.Errorf(
-				"%s digest must use 64 lowercase hex characters after sha256:; %s",
-				envQURLConnectorImage, connectorImageFallbackHint,
+				"%s digest must use 64 lowercase hex characters after sha256",
+				envQURLConnectorImage,
 			)
 		case connectorimage.MalformedReference:
 			return "", fmt.Errorf(
-				"%s image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag; %s",
-				envQURLConnectorImage, connectorImageFallbackHint,
+				"%s image references must use image@sha256:<64 lowercase hex> with a full lowercase image name, or a full lowercase image name with a single non-empty, non-latest tag",
+				envQURLConnectorImage,
 			)
 		case connectorimage.AmbiguousReference:
 			return "", fmt.Errorf(
-				"%s slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest; %s",
-				envQURLConnectorImage, connectorImageFallbackHint,
+				"%s slashless registry references must include a repository path, for example gcr.io/<org>/<image>:v1, or use image@sha256:<64 lowercase hex> digest",
+				envQURLConnectorImage,
 			)
 		case connectorimage.MalformedDigest:
 			return "", fmt.Errorf(
-				"%s digest references must use image@sha256:<64 lowercase hex> with a full image name; %s",
-				envQURLConnectorImage, connectorImageFallbackHint,
+				"%s digest references must use image@sha256:<64 lowercase hex> with a full image name",
+				envQURLConnectorImage,
 			)
 		case connectorimage.Floating:
 			return "", fmt.Errorf(
@@ -1077,7 +1077,7 @@ func readTunnelImageConfig() (string, error) {
 			)
 		}
 		// Future connectorimage.PinStatus values must fail closed.
-		return "", fmt.Errorf("%s could not validate image pinning; %s", envQURLConnectorImage, connectorImageFallbackHint)
+		return "", fmt.Errorf("%s could not validate image pinning", envQURLConnectorImage)
 	}
 
 	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))

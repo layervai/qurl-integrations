@@ -41,7 +41,7 @@ const (
 	testConnectorLatestImage    = testConnectorImageRepo + ":latest"
 	wantNonPinnedImageErr       = "must be pinned: use a non-latest tag or image@sha256:<64 lowercase hex> digest"
 	wantLatestDigestImageErr    = "digest pins must not include a latest tag"
-	wantDigestLowercaseImageErr = "digest must use 64 lowercase hex characters after sha256:"
+	wantDigestLowercaseImageErr = "digest must use 64 lowercase hex characters after sha256"
 	wantMalformedRefImageErr    = "image references must use image@sha256:<64 lowercase hex> with a full lowercase image name"
 	wantAmbiguousRefImageErr    = "slashless registry references must include a repository path"
 	wantMalformedDigestImageErr = "digest references must use image@sha256:<64 lowercase hex> with a full image name"
@@ -118,11 +118,12 @@ func TestValidateSlackBotToken(t *testing.T) {
 
 func TestReadTunnelImageConfig(t *testing.T) {
 	cases := []struct {
-		name        string
-		image       string
-		fallback    string
-		wantImage   string
-		wantErrText string
+		name              string
+		image             string
+		fallback          string
+		wantImage         string
+		wantErrText       string
+		wantErrAbsentText string
 	}{
 		{
 			name:        "unset fails closed",
@@ -182,9 +183,10 @@ func TestReadTunnelImageConfig(t *testing.T) {
 			wantErrText: wantDigestLowercaseImageErr,
 		},
 		{
-			name:        "malformed reference routes to malformed-reference message",
-			image:       "ghcr.io//qurl-connector:v1",
-			wantErrText: wantMalformedRefImageErr,
+			name:              "malformed reference routes to malformed-reference message",
+			image:             "ghcr.io//qurl-connector:v1",
+			wantErrText:       wantMalformedRefImageErr,
+			wantErrAbsentText: connectorImageFallbackHint,
 		},
 		{
 			name:        "uppercase repository path routes to malformed-reference message",
@@ -207,9 +209,10 @@ func TestReadTunnelImageConfig(t *testing.T) {
 			wantErrText: wantAmbiguousRefImageErr,
 		},
 		{
-			name:        "malformed digest routes to malformed-digest message",
-			image:       testConnectorImageRepo + "@notadigest",
-			wantErrText: wantMalformedDigestImageErr,
+			name:              "malformed digest routes to malformed-digest message",
+			image:             testConnectorImageRepo + "@notadigest",
+			wantErrText:       wantMalformedDigestImageErr,
+			wantErrAbsentText: connectorImageFallbackHint,
 		},
 		{
 			name:        "uppercase bare sha256 digest routes to malformed-digest message",
@@ -232,6 +235,9 @@ func TestReadTunnelImageConfig(t *testing.T) {
 			if tc.wantErrText != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
 					t.Fatalf("readTunnelImageConfig() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				if tc.wantErrAbsentText != "" && strings.Contains(err.Error(), tc.wantErrAbsentText) {
+					t.Fatalf("readTunnelImageConfig() err = %v, want no substring %q", err, tc.wantErrAbsentText)
 				}
 				return
 			}
