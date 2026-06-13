@@ -229,10 +229,13 @@ For customer Slack installs, configure the Slack app with:
 
 With per-workspace token storage in place, existing customer workspaces must
 reinstall or reauthorize the Slack app so Slack issues a per-workspace bot
-token. New installs through `/oauth/slack/install` store that token
-automatically, and guided `/qurl-admin protect-connector` uses it for
-`views.open` plus bootstrap-key DM delivery. If Slack tells a customer guided connector setup needs the
-latest qURL Slack app install, send them through this reinstall link.
+token. Before deploying a build that depends on newly required Slack scopes,
+send affected workspaces through the reinstall link so guided connector setup
+does not fail closed on day one. New installs through `/oauth/slack/install`
+store that token automatically, and guided `/qurl-admin protect-connector` uses
+it for `views.open` plus bootstrap-key DM delivery. If Slack tells a customer
+guided connector setup needs the latest qURL Slack app install, send them
+through this reinstall link.
 Monitor the guided setup open path after deploys: the synchronous admin gate is
 budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
 Slack's roughly three-second trigger window. Sustained p99 latency near either
