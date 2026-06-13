@@ -1239,7 +1239,11 @@ func imageNameHasLatestTag(name string) bool {
 
 func imageRepositoryName(name string, lastSlash, lastColon int) string {
 	if lastColon > lastSlash {
-		return name[:lastColon]
+		taglessName := name[:lastColon]
+		if lastSlash < 0 && looksLikeRegistryHost(taglessName) {
+			return name
+		}
+		return taglessName
 	}
 	return name
 }
