@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.18
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.4
 	github.com/aws/aws-sdk-go-v2/service/kms v1.52.0
+	github.com/distribution/reference v0.6.0
 	github.com/fatih/color v1.19.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/spf13/cobra v1.10.2
@@ -44,6 +45,7 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	_ "crypto/sha256" // register sha256 for github.com/distribution/reference digest parsing
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	dockerref "github.com/distribution/reference"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
@@ -1103,16 +1106,10 @@ const (
 
 // classifyTunnelImagePin decides whether an operator-provided image ref is
 // pinned enough for production startup and, if not, which startup error should
-// explain it. It is intentionally narrower than Docker's full reference grammar
-// because startup only needs to reject the floating forms that would otherwise
-// render into customer-facing install snippets. We avoid adding the full
-// github.com/distribution/reference parser here because the bot controls one
-// connector image family, already allowlists boring snippet characters, and
-// deliberately rejects ambiguous Docker-valid forms instead of broadening
-// operator input. TestClassifyTunnelImagePin pins those ambiguous forms, such
-// as gcr.io:v1 and localhost:5000. It does not validate repository-path or tag
-// grammar beyond the small set of ambiguous forms that would otherwise look
-// pinned while still lacking a usable image name.
+// explain it. Docker reference grammar comes from github.com/distribution/reference;
+// the local guards are qURL policy: reject floating/latest forms, reject
+// slashless registry-looking names that Docker would normalize to Hub library
+// images, and keep digest/tag remediation messages specific.
 func classifyTunnelImagePin(image string) tunnelImagePinStatus {
 	name, digest, hasDigest := strings.Cut(image, "@")
 	if hasDigest {
@@ -1126,18 +1123,15 @@ func classifyDigestImagePin(name, digest string) tunnelImagePinStatus {
 	lastColon := strings.LastIndex(name, ":")
 	nameSuffix := name[lastSlash+1:]
 	repositoryName := imageRepositoryName(name, lastSlash, lastColon)
-	hasEmptyNameBeforeTag := lastColon == lastSlash+1
-	hasEmptyTag := strings.HasSuffix(nameSuffix, ":")
-	hasMultiColonTag := strings.Count(nameSuffix, ":") > 1
 
 	if name == "" {
 		return tunnelImageMalformedDigest
 	}
-	if hasEmptyNameBeforeTag {
+	if lastColon == lastSlash+1 {
 		return tunnelImageMalformedReference
 	}
-	if status := classifyDigestRepositoryName(repositoryName); status != tunnelImagePinned {
-		return status
+	if imageNameHasUppercase(repositoryName) {
+		return tunnelImageMalformedReference
 	}
 	// The digest controls image resolution, but reject
 	// repo:latest@sha256:<hex> anyway so customer-facing snippets never
@@ -1145,19 +1139,28 @@ func classifyDigestImagePin(name, digest string) tunnelImagePinStatus {
 	if imageNameHasLatestTag(name) {
 		return tunnelImageLatestDigest
 	}
-	if hasEmptyTag || hasMultiColonTag {
+	if strings.HasSuffix(nameSuffix, ":") || strings.Count(nameSuffix, ":") > 1 {
 		return tunnelImageMalformedReference
 	}
-	switch classifySHA256ImageDigest(digest) {
-	case sha256DigestValid:
-		return tunnelImagePinned
+	digestStatus := classifySHA256ImageDigest(digest)
+	switch digestStatus {
 	case sha256DigestUppercaseHex:
 		return tunnelImageUppercaseDigest
 	case sha256DigestInvalid:
 		return tunnelImageMalformedDigest
+	case sha256DigestValid:
+		// Continue into the Docker reference parser below.
+	default:
+		// Future sha256DigestStatus values must fail closed.
+		return tunnelImageMalformedDigest
 	}
-	// Future sha256DigestStatus values must fail closed.
-	return tunnelImageMalformedDigest
+	if strings.EqualFold(repositoryName, "sha256") || slashlessRegistryReference(name, lastSlash, lastColon) {
+		return tunnelImageMalformedDigest
+	}
+	if !isParsedDockerReferencePinned(name + "@" + digest) {
+		return tunnelImageMalformedDigest
+	}
+	return tunnelImagePinned
 }
 
 func classifyTaggedImagePin(name string) tunnelImagePinStatus {
@@ -1190,7 +1193,7 @@ func classifyTaggedImagePin(name string) tunnelImagePinStatus {
 	if strings.EqualFold(repositoryName, "sha256") {
 		return tunnelImageMalformedDigest
 	}
-	if lastColon == lastSlash+1 || !imageNameHasRepository(repositoryName) {
+	if lastColon == lastSlash+1 || imageNameHasUppercase(repositoryName) || !isParsedDockerReferencePinned(name) {
 		return tunnelImageMalformedReference
 	}
 	// Non-latest tags are trusted release labels by operator convention; use
@@ -1263,50 +1266,29 @@ func imageRepositoryName(name string, lastSlash, lastColon int) string {
 	return name
 }
 
-func classifyDigestRepositoryName(repositoryName string) tunnelImagePinStatus {
-	if imageNameHasUppercase(repositoryName) {
-		// Route uppercase repository paths to the reference-shape error.
-		// imageNameHasRepository would reject them too, but with digest-shape
-		// error text.
-		return tunnelImageMalformedReference
+func slashlessRegistryReference(name string, lastSlash, lastColon int) bool {
+	if lastSlash >= 0 {
+		return false
 	}
-	if !imageNameHasRepository(repositoryName) {
-		return tunnelImageMalformedDigest
+	if lastColon > lastSlash {
+		return looksLikeRegistryHost(name[:lastColon])
 	}
-	return tunnelImagePinned
+	return looksLikeRegistryHost(name)
 }
 
-func imageNameHasRepository(name string) bool {
-	if name == "" {
+func isParsedDockerReferencePinned(image string) bool {
+	parsed, err := dockerref.ParseAnyReference(image)
+	if err != nil {
 		return false
 	}
-	if strings.EqualFold(name, "sha256") {
+	if _, ok := parsed.(dockerref.Named); !ok {
 		return false
 	}
-	if imageNameHasUppercase(name) {
-		return false
-	}
-	if strings.Contains(name, "/") {
-		for i, component := range strings.Split(name, "/") {
-			if component == "" {
-				return false
-			}
-			if i == 0 && !firstPathComponentHasValidPort(component) {
-				return false
-			}
-		}
+	if _, ok := parsed.(dockerref.Tagged); ok {
 		return true
 	}
-	lastColon := strings.LastIndex(name, ":")
-	if lastColon == 0 {
-		return false
-	}
-	if lastColon >= 0 {
-		// Non-digest refs reject slashless host:port earlier as ambiguous, but
-		// digest refs reach this helper directly and still need the same guard.
-		return !looksLikeRegistryHost(name[:lastColon])
-	}
-	return !looksLikeRegistryHost(name)
+	_, ok := parsed.(dockerref.Digested)
+	return ok
 }
 
 func imageNameHasUppercase(name string) bool {

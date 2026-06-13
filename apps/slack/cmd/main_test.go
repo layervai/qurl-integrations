@@ -245,7 +245,7 @@ func TestReadTunnelImageConfig(t *testing.T) {
 	}
 }
 
-func TestRunFailsClosedWhenTunnelImageUnset(t *testing.T) {
+func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 	// run() validates the customer-rendered connector image after only the
 	// prerequisite public endpoint/signing-secret checks and before infra or
 	// other env setup, so this asserts the process-level startup error without
@@ -258,7 +258,7 @@ func TestRunFailsClosedWhenTunnelImageUnset(t *testing.T) {
 	err := run()
 
 	if err == nil || !strings.Contains(err.Error(), envQURLConnectorImage+" is required") {
-		t.Fatalf("run() err = %v, want %s fail-closed error", err, envQURLConnectorImage)
+		t.Fatalf("run() err = %v, want %s fail-closed error before infra/env setup", err, envQURLConnectorImage)
 	}
 }
 
