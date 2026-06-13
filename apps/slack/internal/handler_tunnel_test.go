@@ -1780,8 +1780,8 @@ func TestTunnelInstallModalRejectsUnexpectedAgentActionBeforeMintingKey(t *testi
 	if entry.Reason != testTunnelAgentReason {
 		t.Fatalf("audit reason = %q, want modal provenance reason", entry.Reason)
 	}
-	if entry.Outcome != agentProtectConnectorAuditModalRejectedOutcome || entry.Result != agentProtectConnectorAuditModalRejectedOutcome {
-		t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditModalRejectedOutcome)
+	if entry.Outcome != agentProtectConnectorAuditActionMismatchOutcome || entry.Result != agentProtectConnectorAuditActionMismatchOutcome {
+		t.Fatalf("audit outcome/result = %q/%q, want %q", entry.Outcome, entry.Result, agentProtectConnectorAuditActionMismatchOutcome)
 	}
 	if entry.ResultSuccess == nil || *entry.ResultSuccess {
 		t.Fatalf("audit result success = %v, want false", entry.ResultSuccess)

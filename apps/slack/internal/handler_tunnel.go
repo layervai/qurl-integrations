@@ -98,6 +98,7 @@ const (
 	agentProtectConnectorAuditAdminDeniedOutcome                = "qURL Connector setup was not started because the modal submitter is not a qURL admin."
 	agentProtectConnectorAuditWorkerUnavailableOutcome          = "qURL Connector setup was not started because qURL was busy."
 	agentProtectConnectorAuditModalRejectedOutcome              = "qURL Connector setup was not started because the modal submission could not be verified."
+	agentProtectConnectorAuditActionMismatchOutcome             = "qURL Connector setup was not started because the agent request did not match the connector modal."
 	agentProtectConnectorAuditConfigurationUnavailableOutcome   = "qURL Connector setup was not started because qURL admin configuration was unavailable."
 	agentProtectConnectorAuditUnexpectedFailureOutcome          = "qURL Connector setup stopped unexpectedly before the outcome was recorded."
 	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome could not be determined."
@@ -117,6 +118,7 @@ const (
 	agentProtectConnectorAuditAdminDeniedResult
 	agentProtectConnectorAuditWorkerUnavailableResult
 	agentProtectConnectorAuditModalRejectedResult
+	agentProtectConnectorAuditActionMismatchResult
 	agentProtectConnectorAuditConfigurationUnavailableResult
 	agentProtectConnectorAuditUnexpectedFailureResult
 	agentProtectConnectorAuditResultCount
@@ -188,6 +190,9 @@ var agentProtectConnectorAuditResults = map[tunnelInstallAgentAuditResult]tunnel
 	},
 	agentProtectConnectorAuditModalRejectedResult: {
 		outcome: agentProtectConnectorAuditModalRejectedOutcome,
+	},
+	agentProtectConnectorAuditActionMismatchResult: {
+		outcome: agentProtectConnectorAuditActionMismatchOutcome,
 	},
 	agentProtectConnectorAuditConfigurationUnavailableResult: {
 		outcome: agentProtectConnectorAuditConfigurationUnavailableOutcome,

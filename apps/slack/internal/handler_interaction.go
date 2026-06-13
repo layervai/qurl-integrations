@@ -299,7 +299,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		// The same-workspace/same-user checks above run first so this durable row
 		// is still scoped to the verified modal opener.
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
-		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
+		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditActionMismatchResult)
 		return
 	}
 	if h.cfg.AdminStore == nil {
