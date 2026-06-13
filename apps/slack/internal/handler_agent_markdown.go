@@ -13,7 +13,9 @@ const maxAgentMarkdownLinkBytes = 4096
 // visible autolinks such as <https://example.com> stay untouched. This stays
 // local instead of using a full CommonMark library because streaming deltas must
 // be hardened before Slack sees them, even when syntax is split across chunk
-// boundaries. Keep new syntax support pinned by tests.
+// boundaries. The pinned masked-link surface is inline/image links, reference
+// definitions, Slack <url|label> angle links, and raw HTML tag starts; keep new
+// renderer syntax support pinned by tests.
 func hardenAgentMarkdown(markdown string) string {
 	var h agentMarkdownLinkHarden
 	return h.write(markdown) + h.flush()

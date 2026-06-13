@@ -472,7 +472,7 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		if !isSlackMarkdownBlockFallbackError(err) {
 			return err
 		}
-		slog.Info("Slack rejected markdown block; retrying with markdown_text", "error", err)
+		slog.Info("Slack rejected markdown block; retrying with markdown_text", "error_code", slackChatPostMessageErrorCode(err), "error", err)
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
@@ -487,7 +487,8 @@ func slackMarkdownBlockMessageBody(channelID, threadTS, markdownText string) ([]
 		ThreadTS string               `json:"thread_ts,omitempty"`
 		Text     string               `json:"text"`
 		Blocks   []slackMarkdownBlock `json:"blocks"`
-		Mrkdwn   bool                 `json:"mrkdwn"`
+		// Keep Slack from reparsing the notification/screen-reader fallback as mrkdwn.
+		Mrkdwn bool `json:"mrkdwn"`
 	}{Channel: channelID, ThreadTS: threadTS, Text: slackMarkdownFallbackText(markdownText), Blocks: []slackMarkdownBlock{{Type: "markdown", Text: markdownText}}, Mrkdwn: false})
 }
 
@@ -496,8 +497,10 @@ type slackMarkdownBlock struct {
 	Text string `json:"text"`
 }
 
-// slackMarkdownFallbackText is a lossy notification/screen-reader fallback,
-// not a second Markdown renderer; the markdown block remains the visible body.
+// slackMarkdownFallbackText is a lossy notification/screen-reader fallback, not
+// a second Markdown renderer; the markdown block remains the visible body.
+// Escaped hardening artifacts may remain here so the fallback never hides text
+// that was made literal for safety.
 func slackMarkdownFallbackText(markdownText string) string {
 	var lines []string
 	for _, line := range strings.Split(markdownText, "\n") {
