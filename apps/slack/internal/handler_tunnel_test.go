@@ -52,6 +52,71 @@ func (p failingAuthProvider) APIKey(context.Context, string) (string, error) {
 	return "", p.err
 }
 
+type protectConnectorProposalLLM struct{}
+
+func (protectConnectorProposalLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+	input, err := json.Marshal(map[string]any{
+		"alias":  testTunnelAliasDash,
+		"env":    string(tunnelEnvDocker),
+		"port":   8080,
+		"reason": testTunnelAgentReason,
+	})
+	if err != nil {
+		return agent.Response{}, err
+	}
+	return agent.Response{
+		ToolCalls: []agent.ToolCall{{
+			ID:    "tool_protect_connector",
+			Name:  "propose_protect_connector",
+			Input: input,
+		}},
+		StopReason: "tool_use",
+	}, nil
+}
+
+type unusedAgentReadBackend struct{}
+
+func (unusedAgentReadBackend) ListResources(context.Context, *agent.TurnContext) (string, error) {
+	return "", nil
+}
+
+func (unusedAgentReadBackend) ListAliases(context.Context, *agent.TurnContext) (string, error) {
+	return "", nil
+}
+
+func (unusedAgentReadBackend) ResolveToken(context.Context, *agent.TurnContext, string) (string, error) {
+	return "", nil
+}
+
+func (unusedAgentReadBackend) Quota(context.Context, *agent.TurnContext) (string, error) {
+	return "", nil
+}
+
+func protectConnectorAgentMetadataFromToolCall(t *testing.T) *TunnelInstallAgentMetadata {
+	t.Helper()
+
+	res, _, err := agent.New(protectConnectorProposalLLM{}, unusedAgentReadBackend{}).Run(context.Background(), &agent.TurnContext{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		CallerIsAdmin: true,
+	}, nil, "protect the prod connector for customer setup")
+	if err != nil {
+		t.Fatalf("agent Run: %v", err)
+	}
+	if res.Proposal == nil {
+		t.Fatalf("expected protect-connector proposal, got reply %q", res.Reply)
+	}
+	prop := res.Proposal
+	if prop.Action != agent.ActionProtectConnector || prop.Reason != testTunnelAgentReason {
+		t.Fatalf("proposal = %+v, want protect-connector reason %q", prop, testTunnelAgentReason)
+	}
+	return tunnelInstallAgentMetadata(&pendingAction{
+		Action: prop.Action,
+		Reason: prop.Reason,
+	})
+}
+
 const (
 	testForbiddenResourceLabel   = "Resource:"
 	testForbiddenSlackYAMLFence  = "```yaml"
@@ -1446,20 +1511,17 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 	cases := []struct {
 		name      string
-		agentMeta *TunnelInstallAgentMetadata
+		agentMeta func(*testing.T) *TunnelInstallAgentMetadata
 		wantAudit bool
 	}{
 		{
-			name: "agent initiated",
-			agentMeta: &TunnelInstallAgentMetadata{
-				Action: string(agent.ActionProtectConnector),
-				Reason: testTunnelAgentReason,
-			},
+			name:      "agent initiated from tool call",
+			agentMeta: protectConnectorAgentMetadataFromToolCall,
 			wantAudit: true,
 		},
 		{
 			name:      "slash initiated",
-			agentMeta: nil,
+			agentMeta: func(*testing.T) *TunnelInstallAgentMetadata { return nil },
 			wantAudit: false,
 		},
 	}
@@ -1502,7 +1564,7 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 				UserID:        testAdminUserID,
 				ResponseURL:   inv.responseU.URL,
 				CreatedAtUnix: now.Unix(),
-				Agent:         tc.agentMeta,
+				Agent:         tc.agentMeta(t),
 			}
 			body := tunnelInstallViewSubmissionBody(t, &meta, tunnelInstallModalValues(testTunnelSlug, testTunnelSlug, string(tunnelEnvDocker), "8080", ""))
 			w := httptest.NewRecorder()

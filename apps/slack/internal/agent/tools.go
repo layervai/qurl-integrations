@@ -106,11 +106,12 @@ func toolSpecs() []ToolSpec {
 		},
 		{
 			Name:        toolProposeProtectConnector,
-			Description: "Propose protecting a connector (an FRP-backed reverse tunnel for something running in your own environment, e.g. a Docker container or Kubernetes service). Admin-gated. Does NOT execute — the user must confirm. Ask the user for any missing environment or port first.",
+			Description: "Propose protecting a connector (an FRP-backed reverse tunnel for something running in your own environment, e.g. a Docker container or Kubernetes service). Admin-gated. Does NOT execute — the user must confirm. Ask the user for any missing environment or port first. Capture the reason for the audit trail.",
 			Schema: map[string]any{
-				fieldAlias: stringProp("Suggested channel alias for the new connector (often derived from the channel name)."),
-				fieldEnv:   stringProp("Target environment, e.g. 'docker', 'ecs', or 'kubernetes'."),
-				fieldPort:  stringProp("The local port the connector should expose."),
+				fieldAlias:  stringProp("Suggested channel alias for the new connector (often derived from the channel name)."),
+				fieldEnv:    stringProp("Target environment, e.g. 'docker', 'ecs', or 'kubernetes'."),
+				fieldPort:   stringProp("The local port the connector should expose."),
+				fieldReason: stringProp("Short reason distilled from the request, for the audit trail (e.g. 'incident #412')."),
 			},
 		},
 		{
@@ -322,6 +323,7 @@ func proposalProtectConnector(f map[string]string) (*Proposal, error) {
 		Alias:      alias,
 		Env:        env,
 		Port:       strings.TrimSpace(f[fieldPort]),
+		Reason:     strings.TrimSpace(f[fieldReason]),
 		Summary:    protectConnectorSummary(alias, env),
 		AdminGated: true,
 	}, nil

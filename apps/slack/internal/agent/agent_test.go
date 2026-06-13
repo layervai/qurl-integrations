@@ -70,6 +70,7 @@ func textResp(s string) Response {
 // Shared test literals, hoisted to satisfy goconst (it counts test files too).
 const (
 	testChannel   = "oncall"
+	testReason    = "incident 412"
 	testSlug      = "staging"
 	testSlugSigil = "$" + testSlug
 )
@@ -236,6 +237,33 @@ func TestRun_ProposeRevoke_AdminGated(t *testing.T) {
 	if res.Proposal == nil || res.Proposal.Action != ActionRevoke || !res.Proposal.AdminGated {
 		t.Fatalf("expected an admin-gated revoke proposal, got %+v", res.Proposal)
 	}
+}
+
+func TestRun_ProposeProtectConnector_CarriesReason(t *testing.T) {
+	llm := &scriptedLLM{responses: []Response{
+		toolResp(toolProposeProtectConnector, map[string]any{
+			fieldAlias:  "prod",
+			fieldEnv:    "kubernetes",
+			fieldPort:   8443,
+			fieldReason: testReason,
+		}),
+	}}
+	ctx, tc := testCtx()
+	res, history, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "protect the prod connector for "+testReason)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Proposal == nil {
+		t.Fatalf("expected a proposal, got reply %q", res.Reply)
+	}
+	p := res.Proposal
+	if p.Action != ActionProtectConnector || p.Alias != "prod" || p.Env != "kubernetes" || p.Port != "8443" || p.Reason != testReason {
+		t.Fatalf("proposal = %+v", p)
+	}
+	if !p.AdminGated {
+		t.Fatalf("protect-connector must be admin-gated")
+	}
+	assertWellFormed(t, history)
 }
 
 func TestRun_AccumulatesUsageAcrossRoundTrips(t *testing.T) {
