@@ -374,6 +374,9 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.unset {
+				// t.Setenv cannot express a genuinely absent variable.
+				// Keep this subtest non-parallel while it restores the
+				// process env manually.
 				oldValue, hadOldValue := os.LookupEnv(envQURLBindingTTLContract)
 				if err := os.Unsetenv(envQURLBindingTTLContract); err != nil {
 					t.Fatalf("unset %s: %v", envQURLBindingTTLContract, err)
