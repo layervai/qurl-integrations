@@ -673,6 +673,7 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	cfg.AsyncTracker = tracker
 	store.setErr = errors.New("ddb down")
 	state := mintTestState(t, &cfg)
+	// Start capture after state minting so setup logs cannot satisfy the event assertions.
 	logs := captureDefaultSlogJSON(t)
 
 	h := Callback(cfg)
