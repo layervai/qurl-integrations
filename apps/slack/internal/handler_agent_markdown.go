@@ -21,6 +21,8 @@ const (
 // boundaries. The pinned masked-link surface is inline/image links, reference
 // definitions, Slack <url|label> angle links, Slack control-angle sequences,
 // and raw HTML tag starts; keep new renderer syntax support pinned by tests.
+// Slack <!...> controls intentionally overlap raw-HTML declaration escaping so
+// that the broadcast-like surface stays explicit even if HTML handling changes.
 func hardenAgentMarkdown(markdown string) string {
 	return hardenAgentMarkdownWithOptions(markdown, false, 0)
 }
@@ -634,9 +636,7 @@ func isSlackControlAngleStart(s string) bool {
 		return false
 	}
 	switch s[1] {
-	case '@', '#':
-		return isASCIILetter(s[2])
-	case '!':
+	case '@', '#', '!':
 		return isASCIILetter(s[2])
 	default:
 		return false
