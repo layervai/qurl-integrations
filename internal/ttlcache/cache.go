@@ -99,6 +99,7 @@ func (c *Cache[V]) GetOrStart(key string, at time.Time) Start[V] {
 
 // GetOrStartWith is GetOrStart plus an under-lock hook for callers with
 // cache-adjacent side state that must be observed atomically with cache lookup.
+// The hook runs only after a cache miss; cache hits return before invoking it.
 func GetOrStartWith[V any, D any](c *Cache[V], key string, at time.Time, underLock func() D) (start Start[V], data D) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
