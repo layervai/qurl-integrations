@@ -20,7 +20,11 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-const testAgentCreatedURLResourceID = "r_agent_url"
+const (
+	testAgentCreatedURLResourceID = "r_agent_url"
+	testAgentGetResourceID        = "r_2"
+	testAgentGetQURLLink          = "https://qurl.link/agent-confirm-get"
+)
 
 // qurlBackendServer is an httptest qURL API returning canned resources + quota.
 // /v1/resources honors the ?slug= filter so the ResolveToken slug branch can be
@@ -30,6 +34,32 @@ func qurlBackendServer(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/"+testAgentGetResourceID+"/qurls":
+			// Agent-confirm get success-path tests need the same resource-scoped mint
+			// endpoint getWork calls after resolveTokenForGet authorizes `$staging`.
+			var input map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Errorf("decode resource mint body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if got, _ := input["one_time_use"].(bool); !got {
+				t.Errorf("one_time_use = %v, want true", input["one_time_use"])
+			}
+			if got, _ := input["expires_in"].(string); got != resourceLinkExpiry {
+				t.Errorf("expires_in = %q, want %q", input["expires_in"], resourceLinkExpiry)
+			}
+			if got, _ := input["session_duration"].(string); got != resourceSessionDuration {
+				t.Errorf("session_duration = %q, want %q", input["session_duration"], resourceSessionDuration)
+			}
+			if got, _ := input["max_sessions"].(float64); int(got) != resourceMaxSessions {
+				t.Errorf("max_sessions = %v, want %d", input["max_sessions"], resourceMaxSessions)
+			}
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: testAgentGetResourceID,
+				"qurl_link":       testAgentGetQURLLink,
+				"qurl_site":       "https://" + testAgentGetResourceID + ".qurl.site",
+			})
 		case r.Method == http.MethodPost && r.URL.Path == testResourcesPath:
 			// Agent-confirm tests use this server to pin the URL upsert shape:
 			// qurl-service owns target-URL idempotency, while Slack binds the
@@ -56,7 +86,7 @@ func qurlBackendServer(t *testing.T) *httptest.Server {
 				testKeyStatus:     client.StatusActive,
 			})
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "staging":
-			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_2","slug":"staging","type":"tunnel","description":"Staging dashboard"}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_2","slug":"staging","type":"tunnel","status":"active","description":"Staging dashboard"}]}`))
 		case r.URL.Path == testResourcesPath && r.URL.Query().Get("slug") == "ghost":
 			_, _ = w.Write([]byte(`{"data":[]}`))
 		case r.URL.Path == testResourcesPath:
