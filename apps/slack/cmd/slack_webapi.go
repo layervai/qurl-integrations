@@ -510,10 +510,26 @@ func slackMarkdownFallbackText(markdownText string) string {
 	}
 	text := strings.Join(lines, " ")
 	text = slackMarkdownFallbackReplacer.Replace(text)
-	return strings.Join(strings.Fields(text), " ")
+	fields := strings.Fields(text)
+	for i := range fields {
+		fields[i] = trimMarkdownFallbackUnderscoreEmphasis(fields[i])
+	}
+	return strings.Join(fields, " ")
 }
 
 var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "", "*", "")
+
+func trimMarkdownFallbackUnderscoreEmphasis(field string) string {
+	if !strings.HasPrefix(field, "_") || strings.Contains(field, "://") {
+		return field
+	}
+	last := strings.LastIndexByte(field[1:], '_')
+	if last < 0 {
+		return field
+	}
+	last++
+	return field[1:last] + field[last+1:]
+}
 
 func trimMarkdownFallbackOrderedListMarker(line string) string {
 	i := 0

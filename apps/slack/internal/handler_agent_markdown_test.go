@@ -14,6 +14,15 @@ func TestHardenAgentMarkdown_RevealsMaskedLinks(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_HardensNestedLinksInLabels(t *testing.T) {
+	t.Parallel()
+	in := "Use [outer [inner](https://evil.example) text](https://safe.example) and [outer ![shot](https://evil.example/i.png)](https://safe.example/img)."
+	want := "Use outer inner (https://evil.example) text (https://safe.example) and outer shot (https://evil.example/i.png) (https://safe.example/img)."
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestHardenAgentMarkdown_EscapesReferenceDefinitions(t *testing.T) {
 	t.Parallel()
 	in := "Use [the billing link][1].\n\n[1]: https://evil.example/login\nDone."
@@ -98,6 +107,18 @@ func TestAgentMarkdownLinkHarden_HandlesChunkSplitReferenceDefinitions(t *testin
 		h.write("\nDone.") +
 		h.flush()
 	want := "Use [the billing link][1].\n\n\\[1]: https://evil.example/login\nDone."
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesReferenceDefinitionAtChunkBoundary(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Use [the billing link][evil]. ") +
+		h.write("[evil]: https://evil.example/login") +
+		h.flush()
+	want := "Use [the billing link][evil]. \\[evil]: https://evil.example/login"
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
 	}

@@ -171,6 +171,26 @@ func TestAgentStreamer_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_RoundBoundaryReferenceDefinitionEscaped(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("Use [click here][evil].")
+	s.flush(context.Background())
+	const reply = "[evil]: https://evil.example/login"
+	s.onDelta(reply)
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Use [click here][evil].\\[evil]: https://evil.example/login"
+	if got := port.appended(); got != want {
+		t.Fatalf("streamed markdown = %q, want %q", got, want)
+	}
+	if strings.Count(port.appended(), "\\[evil]:") != 1 {
+		t.Fatalf("terminal reply should be escaped exactly once, got %q", port.appended())
+	}
+}
+
 func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)

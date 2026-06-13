@@ -241,7 +241,7 @@ func (h *agentMarkdownLinkHarden) consumeLinkDestinationByte(out *strings.Builde
 }
 
 func (h *agentMarkdownLinkHarden) emitNeutralizedLink(out *strings.Builder) {
-	label := strings.TrimSpace(h.link.label.String())
+	label := strings.TrimSpace(hardenAgentMarkdown(h.link.label.String()))
 	destination := visibleMarkdownLinkDestination(h.link.destination.String())
 	switch {
 	case label != "" && destination != "":
@@ -319,22 +319,31 @@ const (
 
 func (e *markdownReferenceDefinitionEscaper) write(markdown string) string {
 	var out strings.Builder
+	// Streaming appends may be parsed as separate Markdown chunks, so a new
+	// write boundary can behave like a line start even if prior narration did
+	// not end with "\n".
+	var chunkColumn int
+	var chunkHasContent bool
 	for i := 0; i < len(markdown); i++ {
 		c := markdown[i]
 
 	reprocess:
 		if e.pending.state != markdownReferenceDefinitionNone {
-			if !e.consumeReferenceDefinitionByte(&out, c) {
+			consumed := e.consumeReferenceDefinitionByte(&out, c)
+			if !consumed {
 				goto reprocess
 			}
+			advanceMarkdownLineState(&chunkColumn, &chunkHasContent, c)
 			continue
 		}
-		if c == '[' && !e.lineHasContent && e.lineColumn <= 3 {
+		if c == '[' && ((!e.lineHasContent && e.lineColumn <= 3) || (!chunkHasContent && chunkColumn <= 3)) {
 			e.startReferenceDefinition()
+			advanceMarkdownLineState(&chunkColumn, &chunkHasContent, c)
 			continue
 		}
 		out.WriteByte(c)
 		e.advanceLine(c)
+		advanceMarkdownLineState(&chunkColumn, &chunkHasContent, c)
 	}
 	return out.String()
 }
@@ -399,15 +408,19 @@ func (e *markdownReferenceDefinitionEscaper) consumeReferenceDefinitionByte(out 
 }
 
 func (e *markdownReferenceDefinitionEscaper) advanceLine(c byte) {
+	advanceMarkdownLineState(&e.lineColumn, &e.lineHasContent, c)
+}
+
+func advanceMarkdownLineState(column *int, hasContent *bool, c byte) {
 	if c == '\n' {
-		e.lineColumn = 0
-		e.lineHasContent = false
+		*column = 0
+		*hasContent = false
 		return
 	}
-	if c != ' ' || e.lineColumn >= 3 {
-		e.lineHasContent = true
+	if c != ' ' || *column >= 3 {
+		*hasContent = true
 	}
-	e.lineColumn++
+	*column++
 }
 
 func visibleMarkdownLinkDestination(destination string) string {
