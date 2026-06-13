@@ -97,7 +97,7 @@ func TestHardenAgentMarkdown_EscapesRawHTMLTagStarts(t *testing.T) {
 
 func TestHardenAgentMarkdown_PreservesVisibleAutolinks(t *testing.T) {
 	t.Parallel()
-	in := `Use <https://docs.example/setup> or <MAILTO:security@example.com>.`
+	in := `Use <https://docs.example/setup>, <MAILTO:security@example.com>, <user@example.com>, or <tel:+15551234567>.`
 	if got := hardenAgentMarkdown(in); got != in {
 		t.Fatalf("hardened markdown = %q, want %q", got, in)
 	}
@@ -136,6 +136,18 @@ func TestAgentMarkdownLinkHarden_EscapesReferenceDefinitionAtChunkBoundary(t *te
 		h.write("[evil]: https://evil.example/login") +
 		h.flush()
 	want := "Use [the billing link][evil]. \\[evil]: https://evil.example/login"
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesChunkSplitRawHTMLTagStarts(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Read <") +
+		h.write(`a href="https://evil.example/login">billing</a>`) +
+		h.flush()
+	want := `Read \<a href="https://evil.example/login">billing\</a>`
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
 	}

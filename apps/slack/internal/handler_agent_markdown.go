@@ -34,6 +34,7 @@ type agentMarkdownLinkHarden struct {
 	codeBuffer   strings.Builder
 
 	pendingBang bool
+	pendingLess bool
 	link        markdownLinkPending
 }
 
@@ -104,9 +105,23 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 		}
 		out.WriteByte('!')
 	}
+	if h.pendingLess {
+		h.pendingLess = false
+		if isRawHTMLTagStartAfterLess(remaining) {
+			out.WriteByte('\\')
+			out.WriteByte('<')
+			out.WriteByte(c)
+			return
+		}
+		out.WriteByte('<')
+	}
 	if c == '\\' {
 		out.WriteByte(c)
 		h.escaped = true
+		return
+	}
+	if c == '<' && len(remaining) == 1 {
+		h.pendingLess = true
 		return
 	}
 	if c == '<' && isRawHTMLTagStart(remaining) {
@@ -141,6 +156,10 @@ func (h *agentMarkdownLinkHarden) flush() string {
 	if h.pendingBang {
 		out.WriteByte('!')
 		h.pendingBang = false
+	}
+	if h.pendingLess {
+		out.WriteByte('<')
+		h.pendingLess = false
 	}
 	if h.link.state != markdownLinkNone {
 		out.WriteString(h.link.original.String())
@@ -459,20 +478,45 @@ func isRawHTMLTagStart(s string) bool {
 	if len(s) < 2 || s[0] != '<' {
 		return false
 	}
-	switch s[1] {
+	return isRawHTMLTagStartAfterLess(s[1:])
+}
+
+func isRawHTMLTagStartAfterLess(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
 	case '!', '?':
 		return true
 	case '/':
-		return len(s) > 2 && isASCIILetter(s[2])
+		return len(s) > 1 && isASCIILetter(s[1])
 	default:
-		return isASCIILetter(s[1]) && !hasVisibleAutolinkScheme(s[1:])
+		return isASCIILetter(s[0]) && !hasVisibleAutolinkScheme(s) && !looksLikeVisibleEmailAutolink(s)
 	}
 }
 
 func hasVisibleAutolinkScheme(s string) bool {
 	return hasASCIIPrefixFold(s, "http://") ||
 		hasASCIIPrefixFold(s, "https://") ||
-		hasASCIIPrefixFold(s, "mailto:")
+		hasASCIIPrefixFold(s, "mailto:") ||
+		hasASCIIPrefixFold(s, "tel:")
+}
+
+func looksLikeVisibleEmailAutolink(s string) bool {
+	var at, dotAfterAt bool
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '>':
+			return at && dotAfterAt
+		case c == ' ' || c == '\t' || c == '\n':
+			return false
+		case c == '@':
+			at = i > 0
+		case c == '.' && at:
+			dotAfterAt = true
+		}
+	}
+	return false
 }
 
 func isASCIILetter(c byte) bool {
