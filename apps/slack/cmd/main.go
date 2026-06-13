@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -99,15 +100,19 @@ const (
 // failure to a specific bot release.
 var version = "dev"
 
-func main() {
-	// JSON handler is load-bearing for log-injection safety: the G706
-	// gosec suppressions in apps/slack/internal/handler.go assume slog's
-	// JSON output escapes control characters in tainted attribute
-	// values. Don't swap to TextHandler without revisiting those sites.
+func newAppLogger(w io.Writer) *slog.Logger {
+	// JSON handler is load-bearing for log-injection safety and operational log
+	// metrics: the G706 gosec suppressions in apps/slack/internal/handler.go
+	// assume slog's JSON output escapes control characters in tainted attribute
+	// values, and alert filters match the JSON "msg" field. Don't swap to
+	// TextHandler without revisiting those sites.
 	// Redaction mirrors Discord: matched keys blank string/byte values, while
 	// containers under matched keys are walked by their inner field names.
-	logger := slog.New(observability.NewRedactingJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
+	return slog.New(observability.NewRedactingJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+func main() {
+	slog.SetDefault(newAppLogger(os.Stdout))
 
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)

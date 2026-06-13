@@ -7,7 +7,11 @@ package internal
 // in-memory fake so the counter actually increments across turns.
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -16,6 +20,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 // rateLimitTurnReply is the fake LLM's reply, distinct from agentRateLimitedReply so
@@ -131,6 +136,47 @@ func TestAgentTurnLimit_FailsOpenOnCounterError(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != rateLimitTurnReply {
 		t.Fatalf("a counter error must fail OPEN (turn runs), got %+v", *posts)
+	}
+}
+
+func TestAgentTurnLimit_FailOpenLogContract(t *testing.T) {
+	// qurl-integrations-infra#1065 filters this exact msg key/value for the
+	// fail-open path introduced by qurl-integrations-infra#1055.
+	const infraFilterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
+
+	if agentTurnRateCounterFailOpenMsg != infraFilterFailOpenMsg {
+		t.Fatalf("agentTurnRateCounterFailOpenMsg = %q, want %q", agentTurnRateCounterFailOpenMsg, infraFilterFailOpenMsg)
+	}
+
+	mem := newMemAgentDDB()
+	mem.updateErr = errors.New("ddb down")
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
+	h := &Handler{cfg: Config{AgentStore: store}}
+
+	var buf bytes.Buffer
+	log := slog.New(observability.NewRedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	if limited := h.overTurnLimit(context.Background(), log, "T1", "team", 1); limited {
+		t.Fatal("counter errors must fail open")
+	}
+
+	var rec map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil {
+		t.Fatalf("unmarshal fail-open log %q: %v", buf.String(), err)
+	}
+	if rec["msg"] != infraFilterFailOpenMsg {
+		t.Fatalf("msg = %v, want %q", rec["msg"], infraFilterFailOpenMsg)
+	}
+	if rec["level"] != "WARN" {
+		t.Fatalf("level = %v, want WARN", rec["level"])
+	}
+	if rec["scope"] != "team" {
+		t.Fatalf("scope = %v, want team", rec["scope"])
+	}
+	if rec["team_id"] != "T1" {
+		t.Fatalf("team_id = %v, want T1", rec["team_id"])
+	}
+	if got, _ := rec["error"].(string); !strings.Contains(got, "ddb down") {
+		t.Fatalf("error = %v, want ddb down", rec["error"])
 	}
 }
 
