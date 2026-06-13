@@ -44,8 +44,5 @@ func (p EnvProvider) SupportsDeleteAPIKey() bool {
 
 // DeleteAPIKey cannot mutate an environment-backed API key.
 func (p EnvProvider) DeleteAPIKey(_ context.Context, _ string) error {
-	if os.Getenv(p.EnvVar) == "" {
-		return ErrWorkspaceNotConfigured
-	}
 	return fmt.Errorf("EnvProvider.DeleteAPIKey: %w", ErrWorkspaceAPIKeyDeleteUnsupported)
 }

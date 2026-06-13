@@ -1837,11 +1837,11 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 func TestEnvProviderDeleteAPIKey(t *testing.T) {
 	const envVar = "TEST_QURL_API_KEY"
 
-	t.Run("missing key maps to not configured", func(t *testing.T) {
+	t.Run("missing key maps to unsupported", func(t *testing.T) {
 		t.Setenv(envVar, "")
 		err := EnvProvider{EnvVar: envVar}.DeleteAPIKey(context.Background(), testTeamID)
-		if !errors.Is(err, ErrWorkspaceNotConfigured) {
-			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		if !errors.Is(err, ErrWorkspaceAPIKeyDeleteUnsupported) {
+			t.Fatalf("want ErrWorkspaceAPIKeyDeleteUnsupported, got %v", err)
 		}
 	})
 

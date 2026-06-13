@@ -592,13 +592,26 @@ func TestSlashCommandUninstallRequiresOwnerStoreForMutableProvider(t *testing.T)
 }
 
 func TestSlashCommandUninstallEnvProviderWithoutOwnerStore(t *testing.T) {
-	t.Setenv("QURL_API_KEY", "test-key")
-	h := newTestHandler(t, noopQURLServer(t))
+	for _, tc := range []struct {
+		name     string
+		envValue string
+	}{
+		{name: "empty_env", envValue: ""},
+		{name: "configured_env", envValue: "test-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QURL_API_KEY", tc.envValue)
+			h := newTestHandler(t, noopQURLServer(t))
 
-	resp := slashResponse(t, h, commandUser, uninstallVerb)
+			resp := slashResponse(t, h, commandUser, uninstallVerb)
 
-	if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
-		t.Fatalf("env-provider reply missing unsupported hint: %q", resp[respFieldText])
+			if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
+				t.Fatalf("env-provider reply missing unsupported hint: %q", resp[respFieldText])
+			}
+			if strings.Contains(resp[respFieldText], "/qurl setup") {
+				t.Fatalf("env-provider reply should not suggest setup reconnect: %q", resp[respFieldText])
+			}
+		})
 	}
 }
 
