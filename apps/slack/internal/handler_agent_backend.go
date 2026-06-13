@@ -237,9 +237,10 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	for i := range out.Resources {
 		r := &out.Resources[i]
 		if _, ok := allowed[r.ResourceID]; ok {
-			// Strip formatResourceLine's leading "- " list bullet — it reads awkwardly
-			// embedded mid-sentence here.
-			return fmt.Sprintf("`$%s` is a connector in this channel: %s.", token, strings.TrimPrefix(formatResourceLine(r), "- ")), nil
+			// Symmetric with the alias branch above: confirm it resolves without echoing
+			// the token twice (embedding formatResourceLine would repeat `$token`) or
+			// coupling to that helper's bullet format. "connector" already conveys the type.
+			return fmt.Sprintf("`$%s` is a connector in this channel.", token), nil
 		}
 	}
 	return fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", token), nil
