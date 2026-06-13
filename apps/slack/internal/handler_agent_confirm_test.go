@@ -127,15 +127,20 @@ type confirmHarness struct {
 // the only workspace admin for team T1.
 func newConfirmHarness(t *testing.T, adminUserID string) *confirmHarness {
 	t.Helper()
+	return newConfirmHarnessWithSeed(t, adminUserID, nil)
+}
+
+func newConfirmHarnessWithSeed(t *testing.T, adminUserID string, seed map[string][]map[string]ddbtypes.AttributeValue) *confirmHarness {
+	t.Helper()
 	mem := newMemAgentDDB()
 	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
 
 	names := defaultTestTableNames()
-	var seed map[string][]map[string]ddbtypes.AttributeValue
 	if adminUserID != "" {
-		seed = map[string][]map[string]ddbtypes.AttributeValue{
-			names.workspace: {seedWorkspaceAdmin("T1", "Uowner", adminUserID, fixedNow)},
+		if seed == nil {
+			seed = map[string][]map[string]ddbtypes.AttributeValue{}
 		}
+		seed[names.workspace] = append(seed[names.workspace], seedWorkspaceAdmin("T1", "Uowner", adminUserID, fixedNow))
 	}
 	adminStore := newStoreFromFake(t, newFakeDDB(t, names, seed), names, nil)
 
@@ -391,6 +396,63 @@ func TestConfirm_GetNonAskerRejectDenied(t *testing.T) {
 	}
 	if hc.claimed(id) {
 		t.Fatal("a non-asker Reject must not claim")
+	}
+}
+
+func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
+	// This is the end-to-end success path #726 wanted: resolve `$staging`, mint a
+	// resource-scoped qURL, deliver the resulting link via the in-DM PostMessage path
+	// (not response_url, not chat.postEphemeral), and replace the public card with
+	// neutral success copy that never echoes the credential.
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {
+			// No alias binding: this forces resolveTokenForGet through the tunnel-slug
+			// fallback and then the qURL mint endpoint, rather than returning before the
+			// client call.
+			seedChannelPolicySet("T1", "D1", "", []string{testAgentGetResourceID}),
+		},
+	})
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionGet, Token: "staging", Reason: "incident follow-up", Asker: "Uasker", ChannelID: "D1", ThreadTS: "1700000000.5"})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", "Uasker", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if !hc.claimed(id) {
+		t.Fatal("the asker must claim and execute their own get")
+	}
+	posts := *hc.posts
+	if len(posts) != 1 {
+		t.Fatalf("want exactly one in-DM PostMessage delivery, got %d: %+v", len(posts), posts)
+	}
+	if posts[0].channel != "D1" || posts[0].threadTS != "1700000000.5" {
+		t.Fatalf("in-DM link delivery must target the card's channel+thread, got channel=%q thread=%q", posts[0].channel, posts[0].threadTS)
+	}
+	if !strings.Contains(posts[0].text, testAgentGetQURLLink) {
+		t.Fatalf("in-DM delivery missing minted link %q: %q", testAgentGetQURLLink, posts[0].text)
+	}
+	if !strings.Contains(posts[0].text, "one-time use") || !strings.Contains(posts[0].text, "link expires in "+resourceLinkExpiryHuman) {
+		t.Fatalf("in-DM delivery missing one-time-use/expiry copy: %q", posts[0].text)
+	}
+	if len(*hc.eph) != 0 {
+		t.Fatalf("a 1:1 DM success must not use chat.postEphemeral, got %+v", *hc.eph)
+	}
+
+	bodies := hc.waitForN(t, 1)
+	hc.bodies.mu.Lock()
+	bodyCount := len(hc.bodies.bodies)
+	hc.bodies.mu.Unlock()
+	if bodyCount != 1 {
+		t.Fatalf("a DM success must POST only the public card to response_url, got %d bodies", bodyCount)
+	}
+	ro, card := parseResponse(t, bodies[0])
+	if !ro {
+		t.Fatalf("the DM success card must replace the original, got ephemeral %q", card)
+	}
+	if !strings.Contains(card, agentConfirmGetDeliveredReply) {
+		t.Fatalf("public card must show neutral delivery success, got %q", card)
+	}
+	if strings.Contains(card, testAgentGetQURLLink) || strings.Contains(card, "staging") {
+		t.Fatalf("public card leaked the minted link or token: %q", card)
 	}
 }
 
