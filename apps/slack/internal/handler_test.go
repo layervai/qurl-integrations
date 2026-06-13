@@ -94,6 +94,10 @@ func (p *recordingAuthProvider) APIKey(_ context.Context, _ string) (string, err
 	return p.apiKey, nil
 }
 
+func (p *recordingAuthProvider) SupportsDeleteAPIKey() bool {
+	return true
+}
+
 func (p *recordingAuthProvider) DeleteAPIKey(_ context.Context, workspaceID string) error {
 	p.deleteCalls++
 	p.deleteWorkspaceID = workspaceID

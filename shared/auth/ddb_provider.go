@@ -918,6 +918,11 @@ func normalizedStringSet(values []string) []string {
 	return out
 }
 
+// SupportsDeleteAPIKey reports that DDBProvider can mutate workspace key state.
+func (p *DDBProvider) SupportsDeleteAPIKey() bool {
+	return true
+}
+
 // DeleteAPIKey removes the qURL API key columns while preserving Slack app
 // install metadata in the same row. It returns [ErrWorkspaceNotConfigured] when
 // the workspace has no stored qURL key.

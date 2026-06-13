@@ -55,6 +55,10 @@ func (p failingAuthProvider) APIKey(context.Context, string) (string, error) {
 	return "", p.err
 }
 
+func (p failingAuthProvider) SupportsDeleteAPIKey() bool {
+	return true
+}
+
 func (p failingAuthProvider) DeleteAPIKey(context.Context, string) error {
 	return p.err
 }

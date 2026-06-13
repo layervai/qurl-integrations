@@ -12,6 +12,8 @@ import (
 type Provider interface {
 	// APIKey returns the qURL API key for the given workspace ID.
 	APIKey(ctx context.Context, workspaceID string) (string, error)
+	// SupportsDeleteAPIKey reports whether DeleteAPIKey can remove a stored key.
+	SupportsDeleteAPIKey() bool
 	// DeleteAPIKey removes the qURL API key for the given workspace ID.
 	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
@@ -33,6 +35,11 @@ func (p EnvProvider) APIKey(_ context.Context, _ string) (string, error) {
 		return "", fmt.Errorf("env var %s not set", p.EnvVar)
 	}
 	return key, nil
+}
+
+// SupportsDeleteAPIKey reports that EnvProvider cannot mutate environment state.
+func (p EnvProvider) SupportsDeleteAPIKey() bool {
+	return false
 }
 
 // DeleteAPIKey cannot mutate an environment-backed API key.

@@ -1629,9 +1629,9 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
-	// EnvProvider can report "not configured" / "unsupported" without
-	// mutating anything, so it does not need the owner gate.
-	if isEnvBackedAuthProvider(h.cfg.AuthProvider) {
+	// Providers that cannot delete can report "not configured" / "unsupported"
+	// without owner/user checks because no mutation can occur.
+	if !h.cfg.AuthProvider.SupportsDeleteAPIKey() {
 		h.deleteWorkspaceAPIKey(w, teamID, userID)
 		return
 	}
@@ -1668,17 +1668,8 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. This does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed. Run `/qurl setup <email>` to reconnect it.")
 }
 
-func isEnvBackedAuthProvider(provider auth.Provider) bool {
-	switch provider.(type) {
-	case auth.EnvProvider, *auth.EnvProvider:
-		return true
-	default:
-		return false
-	}
-}
-
 func (h *Handler) canAdvertiseUninstall() bool {
-	return h.cfg.AdminStore != nil && h.cfg.AuthProvider != nil && !isEnvBackedAuthProvider(h.cfg.AuthProvider)
+	return h.cfg.AdminStore != nil && h.cfg.AuthProvider != nil && h.cfg.AuthProvider.SupportsDeleteAPIKey()
 }
 
 func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, userID string) bool {

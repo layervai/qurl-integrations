@@ -684,6 +684,10 @@ func (panickingProvider) APIKey(_ context.Context, _ string) (string, error) {
 	panic("provider panic for test")
 }
 
+func (panickingProvider) SupportsDeleteAPIKey() bool {
+	return true
+}
+
 func (panickingProvider) DeleteAPIKey(_ context.Context, _ string) error {
 	panic("provider panic for test")
 }
