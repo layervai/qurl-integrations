@@ -109,8 +109,18 @@ at the OAuth-callback bind layer.
   - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
     fallback because AWS injects task secrets as environment variables; Docker,
     Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.
+    Non-interactive operators should inject `QURL_BOOTSTRAP_KEY` from their
+    secret manager before running a pasted block; interactive runs prompt for
+    the bootstrap key with terminal echo disabled when possible.
   - **Constraint** — do not share one agent state volume across concurrently
     running sidecars.
+  - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
+    a bootstrap key, it retries the final text post once, revokes the key, and
+    posts a discard notice when possible. Cleanup uses the handler's base
+    context so request cancellation does not strand a key, but process shutdown
+    can still interrupt the five-second cleanup window. If that happens, the
+    bootstrap key remains bounded by its one-hour TTL; revoke it manually if
+    logs show `tunnel_bootstrap_cleanup_failed`.
 
 ## Endpoints
 
@@ -221,3 +231,8 @@ token. New installs through `/oauth/slack/install` store that token
 automatically, and guided `/qurl-admin protect-connector` uses it for
 `views.open`. If Slack tells a customer guided connector setup needs the
 latest qURL Slack app install, send them through this reinstall link.
+Monitor the guided setup open path after deploys: the synchronous admin gate is
+budgeted at 800 ms and the `views.open` call at 1500 ms, leaving headroom inside
+Slack's roughly three-second trigger window. Sustained p99 latency near either
+budget should be treated as an operator action item before customers see setup
+window-expired prompts.
