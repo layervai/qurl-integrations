@@ -205,6 +205,10 @@ func TestAgentAck_ClearAbandonsRemoveWhenJoinContextDone(t *testing.T) {
 }
 
 func TestAgentAck_ClearAbandonsRemoveWhenJoinTimeoutExpires(t *testing.T) {
+	oldTimeout := agentAckTimeout
+	agentAckTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { agentAckTimeout = oldTimeout })
+
 	rec := &recordingReactions{}
 	h := NewHandler(Config{Reactions: rec})
 

@@ -72,7 +72,9 @@ const agentAckReaction = "eyes"
 // occupied until the deferred clear returns. In that slow-reaction/fast-reply case,
 // the reaction may briefly appear after the reply before clear removes it; preserving
 // add-before-remove ordering is the no-stale-reaction priority.
-const agentAckTimeout = 2 * time.Second
+// agentAckTimeout is a var so tests can shrink the bounded-join path without
+// spending the production budget in wall-clock time.
+var agentAckTimeout = 2 * time.Second
 
 // agentThinkingStatus is the native assistant-pane status text shown while a DM (pane)
 // turn runs (assistant.threads.setStatus); Slack renders it as "<app> is thinking…".
