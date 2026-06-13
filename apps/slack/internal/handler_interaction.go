@@ -278,6 +278,8 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
 		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
+		// Keep the App Home row scoped to the legitimate modal opener/approver
+		// from signed metadata; the mismatched submitter stays in the warning log.
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}

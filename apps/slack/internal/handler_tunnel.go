@@ -761,7 +761,15 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		return agentProtectConnectorAuditBootstrapDMDeliveryFailedResult
 	}
 	delivery := h.postInstallInstructions(log, req.responseURL, build.message)
-	if delivery == tunnelInstallInstructionsDeliveryFailed {
+
+	switch delivery {
+	case tunnelInstallInstructionsDeliverySucceeded:
+		panicCleanup = nil
+		return agentProtectConnectorAuditSuccessResult
+	case tunnelInstallInstructionsDeliveryDegraded:
+		panicCleanup = nil
+		return agentProtectConnectorAuditDegradedResult
+	case tunnelInstallInstructionsDeliveryFailed:
 		// This second post is best-effort too: if Slack never accepts either
 		// response_url call, the admin may see neither the install nor the
 		// revoke notice. The key is still revoked because delivery was not
@@ -778,16 +786,6 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 		panicCleanup = nil
-	}
-
-	switch delivery {
-	case tunnelInstallInstructionsDeliverySucceeded:
-		panicCleanup = nil
-		return agentProtectConnectorAuditSuccessResult
-	case tunnelInstallInstructionsDeliveryDegraded:
-		panicCleanup = nil
-		return agentProtectConnectorAuditDegradedResult
-	case tunnelInstallInstructionsDeliveryFailed:
 		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
 	// Unreachable with today's enum; keeps the function total if a future delivery
