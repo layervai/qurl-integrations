@@ -174,6 +174,64 @@ func TestReadAgentConfirmEnabled(t *testing.T) {
 	}
 }
 
+func TestLogAgentSurfaceState_ExclusiveAcksWarnsWhenAssistantThreadsUnwired(t *testing.T) {
+	wired := agentSurfaceState{llmWired: true, storeWired: true, postWired: true, assistantThreadsWired: true, exclusiveAcksFlag: true}
+	cases := []struct {
+		name     string
+		state    agentSurfaceState
+		wantWarn bool
+	}{
+		{name: "exclusive with assistant threads", state: wired},
+		{name: "exclusive without assistant threads", state: with(wired, func(s *agentSurfaceState) { s.assistantThreadsWired = false }), wantWarn: true},
+		{name: "default without assistant threads", state: with(wired, func(s *agentSurfaceState) { s.exclusiveAcksFlag = false; s.assistantThreadsWired = false })},
+		{name: "killed suppresses exclusive warning", state: with(wired, func(s *agentSurfaceState) { s.killed = true; s.assistantThreadsWired = false })},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureSlog(t)
+			logAgentSurfaceState(tc.state)
+			var found bool
+			for _, rec := range logs() {
+				msg, _ := rec["msg"].(string)
+				if strings.Contains(msg, "QURL_AGENT_SURFACE_EXCLUSIVE_ACKS is set but AssistantThreads is not wired") {
+					found = true
+					if rec["level"] != "WARN" {
+						t.Fatalf("warning level = %v, want WARN", rec["level"])
+					}
+				}
+			}
+			if found != tc.wantWarn {
+				t.Fatalf("exclusive ack wiring warning found = %v, want %v; records=%v", found, tc.wantWarn, logs())
+			}
+		})
+	}
+}
+
+func TestReadAgentSurfaceExclusiveAcks(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "unset is off until pane smoke", val: "", want: false},
+		{name: "true enables", val: "true", want: true},
+		{name: "1 enables", val: "1", want: true},
+		{name: "false stays off", val: "false", want: false},
+		{name: "0 stays off", val: "0", want: false},
+		// Fail-safe: a typo must keep the pre-pane reaction fallback, not remove it.
+		{name: "garbage fails safe to off", val: "enable", want: false},
+		{name: "yes fails safe to off", val: "yes", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS", tc.val)
+			if got := readAgentSurfaceExclusiveAcks(); got != tc.want {
+				t.Fatalf("readAgentSurfaceExclusiveAcks(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReadAgentDefaultEnabled(t *testing.T) {
 	cases := []struct {
 		name string

@@ -194,6 +194,7 @@ func run() error {
 	agentDisabled := readAgentKillSwitch()
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
+	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
@@ -217,12 +218,14 @@ func run() error {
 		agentStore = buildAgentStore(signalCtx)
 	}
 	logAgentSurfaceState(agentSurfaceState{
-		llmWired:    agentLLM != nil,
-		storeWired:  agentStore != nil,
-		postWired:   postMessage != nil,
-		blocksWired: postMessageBlocks != nil,
-		confirmFlag: agentConfirmEnabled,
-		killed:      agentDisabled,
+		llmWired:              agentLLM != nil,
+		storeWired:            agentStore != nil,
+		postWired:             postMessage != nil,
+		blocksWired:           postMessageBlocks != nil,
+		assistantThreadsWired: agentAssistantThreads != nil,
+		confirmFlag:           agentConfirmEnabled,
+		exclusiveAcksFlag:     agentSurfaceExclusiveAcks,
+		killed:                agentDisabled,
 	})
 
 	// signalCtx is hoisted above so the DDB-provider constructor can
@@ -264,6 +267,7 @@ func run() error {
 		PostMessageBlocks:           postMessageBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,
 		AgentChannelFollowups:       agentChannelFollowups,
+		AgentSurfaceExclusiveAcks:   agentSurfaceExclusiveAcks,
 		AgentDefaultEnabled:         agentDefaultEnabled,
 		AgentMaxTurnsPerUserPerHour: agentMaxTurnsPerUser,
 		AgentMaxTurnsPerTeamPerHour: agentMaxTurnsPerTeam,
@@ -1109,6 +1113,16 @@ func readAgentChannelFollowups() bool {
 	return readBoolEnvFailSafe("QURL_AGENT_CHANNEL_FOLLOWUPS", false, false)
 }
 
+// readAgentSurfaceExclusiveAcks reads QURL_AGENT_SURFACE_EXCLUSIVE_ACKS — the flag
+// that swaps pane (message.im) turns from the staged additive fallback (reaction +
+// Debug-level setStatus attempt) to the post-pane exclusive ack path (native status
+// only, Warn on setStatus failure). Absent → off until the #1004 manifest/smoke gate
+// confirms the assistant pane is live. FAILS SAFE to off: a typo must never remove
+// the pre-enable reaction cue from ordinary DMs or create Warn-per-turn noise.
+func readAgentSurfaceExclusiveAcks() bool {
+	return readBoolEnvFailSafe("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS", false, false)
+}
+
 // readAgentDefaultEnabled reads QURL_AGENT_DEFAULT_ENABLED — the per-workspace
 // conversation-mode default for a workspace that hasn't set its own toggle. Absent →
 // off (the staged opt-in rollout; each workspace opts in via `/qurl-admin agent on`).
@@ -1159,12 +1173,14 @@ func readIntEnvFailSafe(name string, def int) int {
 // does — a struct so logAgentSurfaceState's growing set of seam booleans can't be
 // transposed at the call site.
 type agentSurfaceState struct {
-	llmWired    bool
-	storeWired  bool
-	postWired   bool
-	blocksWired bool
-	confirmFlag bool // QURL_AGENT_CONFIRM_ENABLED
-	killed      bool
+	llmWired              bool
+	storeWired            bool
+	postWired             bool
+	blocksWired           bool
+	assistantThreadsWired bool
+	confirmFlag           bool // QURL_AGENT_CONFIRM_ENABLED
+	exclusiveAcksFlag     bool // QURL_AGENT_SURFACE_EXCLUSIVE_ACKS
+	killed                bool
 }
 
 // logAgentSurfaceState emits startup lines describing what conversation mode will
@@ -1218,6 +1234,10 @@ func logAgentSurfaceState(s agentSurfaceState) {
 		// the kill-switch line stand alone (the un-kill restart re-reports confirm state).
 		slog.Warn("QURL_AGENT_CONFIRM_ENABLED is set but confirm mode is DARK; mutations will NOT execute until the read-only surface is live and PostMessageBlocks is wired",
 			"read_only_live", readOnlyLive, "blocks_wired", s.blocksWired)
+	}
+
+	if !s.killed && s.exclusiveAcksFlag && !s.assistantThreadsWired {
+		slog.Warn("QURL_AGENT_SURFACE_EXCLUSIVE_ACKS is set but AssistantThreads is not wired; pane turns will not have a working-on-it indicator")
 	}
 }
 

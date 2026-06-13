@@ -408,6 +408,15 @@ type Config struct {
 	// data-handling expansion: enable only after the review + a workspace re-OAuth.
 	AgentChannelFollowups bool
 
+	// AgentSurfaceExclusiveAcks switches pane (message.im) turns from the pre-pane
+	// additive ack fallback (reaction + best-effort Debug setStatus) to the post-pane
+	// exclusive ack path (native status only, Warn on setStatus failure). False by
+	// default so deploying app code before the Slack manifest/pane smoke gate cannot
+	// leave ordinary DMs indicator-less or Warn-spammy; flip true with the #1004
+	// enablement once pane status behavior is confirmed. Exclusive mode assumes
+	// AssistantThreads is wired, because there is intentionally no reaction fallback.
+	AgentSurfaceExclusiveAcks bool
+
 	// AgentDefaultEnabled is the per-workspace conversation-mode default for a
 	// workspace that hasn't set the toggle (`/qurl-admin agent on|off`, stored in
 	// workspace_mappings via AdminStore). False during the staged per-workspace
