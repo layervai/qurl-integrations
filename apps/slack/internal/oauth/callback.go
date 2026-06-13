@@ -807,7 +807,8 @@ func renderRebindRefused(w http.ResponseWriter, teamID string) {
 // renderOAuthErrorPage writes a styled error page with the given status.
 // Replaces bare http.Error callback failures with human-readable, actionable
 // guidance instead of a blank page with raw text. Same defense-in-depth
-// headers as renderRebindRefused.
+// headers as renderRebindRefused. Each message argument renders as one
+// escaped paragraph; pass separate arguments instead of newline-joining copy.
 func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string, rest ...string) {
 	messages := append([]string{message}, rest...)
 	setOAuthPageSecurityHeaders(w)
