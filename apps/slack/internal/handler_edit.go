@@ -186,7 +186,7 @@ func (h *Handler) exposedChannelsForEdit(ctx context.Context, log *slog.Logger, 
 // response_url. Mirrors handleTunnelInstallSubmission's posture: per-field
 // validation surfaces inline (response_action:errors); structural/auth
 // failures replace the modal with an error notice.
-func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *interactionPayload) {
+func (h *Handler) handleTunnelEditSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	var meta TunnelEditModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
 		slog.Warn("tunnel edit modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)

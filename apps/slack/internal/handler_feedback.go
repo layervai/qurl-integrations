@@ -97,7 +97,7 @@ func parseFeedbackModalArgs(values map[string]map[string]interactionStateValue) 
 	return &feedbackArgs{Type: typeValue, Summary: summary, Details: details}, nil
 }
 
-func (h *Handler) handleFeedbackSubmission(w http.ResponseWriter, payload *interactionPayload) {
+func (h *Handler) handleFeedbackSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	args, fieldErrors := parseFeedbackModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)

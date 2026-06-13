@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+const (
+	interactionTypeBlockActions   = "block_actions"
+	interactionTypeViewSubmission = "view_submission"
+)
+
 // handleInteraction routes Slack interaction POSTs (button clicks,
 // modal submissions) to the right inner handler. Unknown interactions
 // still ack 200 with an empty body because Slack requires a prompt 200
@@ -31,31 +36,26 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	slog.Info("interaction received",
-		"type", payload.Type,
-		"callback_id", payload.View.CallbackID,
-		"team_id", payload.Team.ID,
-		"user_id", payload.User.ID,
-		"view_id", payload.View.ID,
-	)
-
 	switch payload.Type {
-	case "block_actions":
+	case interactionTypeBlockActions:
+		logInteractionReceived(payload)
 		// Button clicks in messages — currently the per-row "Create qURL"
 		// button on `/qurl list`. handleBlockActions acks and dispatches.
 		h.handleBlockActions(w, payload)
-	case "view_submission":
+	case interactionTypeViewSubmission:
+		submission := payload.asViewSubmission()
+		LogViewSubmission(slog.Default(), &submission)
 		switch payload.View.CallbackID {
 		case callbackIDTunnelInstall:
-			h.handleTunnelInstallSubmission(w, payload)
+			h.handleTunnelInstallSubmission(w, &submission)
 		case callbackIDTunnelEdit:
-			h.handleTunnelEditSubmission(w, payload)
+			h.handleTunnelEditSubmission(w, &submission)
 		case callbackIDExposeURL:
-			h.handleExposeURLSubmission(w, payload)
+			h.handleExposeURLSubmission(w, &submission)
 		case callbackIDExposeURLCreate:
-			h.handleExposeURLCreateSubmission(w, payload)
+			h.handleExposeURLCreateSubmission(w, &submission)
 		case callbackIDFeedback:
-			h.handleFeedbackSubmission(w, payload)
+			h.handleFeedbackSubmission(w, &submission)
 		default:
 			// Unknown callback_id — ack 200 (Slack hangs the modal
 			// otherwise) and log so a future view drift is visible.
@@ -63,10 +63,21 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 			respondJSON(w, http.StatusOK, map[string]any{})
 		}
 	default:
+		logInteractionReceived(payload)
 		// Select menus, shortcuts, and any other interaction type we
 		// don't wire yet. Ack 200 with an empty body and ignore.
 		respondJSON(w, http.StatusOK, map[string]any{})
 	}
+}
+
+func logInteractionReceived(payload *interactionPayload) {
+	slog.Info("interaction received",
+		"type", payload.Type,
+		"callback_id", payload.View.CallbackID,
+		"team_id", payload.Team.ID,
+		"user_id", payload.User.ID,
+		"view_id", payload.View.ID,
+	)
 }
 
 // handleBlockActions routes Slack block_actions interactions (button clicks in
@@ -216,7 +227,7 @@ func blockActionIDs(actions []interactionAction) []string {
 	return ids
 }
 
-func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
+func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	args, fieldErrors := parseTunnelInstallModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
 		// Field validation keeps Slack's modal open for correction and is not a
@@ -534,38 +545,60 @@ func validateTunnelInstallArgs(args *tunnelInstallArgs) string {
 	return tunnelWebRefKindValidationMessage(args.Environment, args.WebRefKind)
 }
 
-// interactionPayload is the subset of Slack's view_submission and
-// block_actions payloads we read. Fields we don't touch are intentionally
-// elided so the JSON unmarshal is forgiving to upstream additions.
+// ViewSubmission is the subset of Slack's view_submission payload we read.
+// Fields we don't touch are intentionally elided so the JSON unmarshal is
+// forgiving to upstream additions.
+type ViewSubmission struct {
+	Type string          `json:"type"`
+	Team interactionID   `json:"team"`
+	User interactionID   `json:"user"`
+	View interactionView `json:"view"`
+}
+
+type interactionID struct {
+	ID string `json:"id"`
+}
+
+type interactionView struct {
+	ID              string `json:"id"`
+	CallbackID      string `json:"callback_id"`
+	PrivateMetadata string `json:"private_metadata"`
+	State           struct {
+		Values map[string]map[string]interactionStateValue `json:"values"`
+	} `json:"state"`
+}
+
+// interactionPayload is the union of Slack interaction payload fields we read.
+// View submissions are projected into [ViewSubmission] before dispatch, while
+// block actions keep using this wider interaction shape.
 type interactionPayload struct {
-	Type string `json:"type"`
-	Team struct {
-		ID string `json:"id"`
-	} `json:"team"`
-	Enterprise struct {
-		ID string `json:"id"`
-	} `json:"enterprise"`
-	User struct {
-		ID string `json:"id"`
-	} `json:"user"`
-	View struct {
-		ID              string `json:"id"`
-		CallbackID      string `json:"callback_id"`
-		PrivateMetadata string `json:"private_metadata"`
-		State           struct {
-			Values map[string]map[string]interactionStateValue `json:"values"`
-		} `json:"state"`
-	} `json:"view"`
-	TriggerID string `json:"trigger_id"`
+	Type       string          `json:"type"`
+	Team       interactionID   `json:"team"`
+	Enterprise interactionID   `json:"enterprise"`
+	User       interactionID   `json:"user"`
+	View       interactionView `json:"view"`
+	TriggerID  string          `json:"trigger_id"`
 	// Channel, ResponseURL, and Actions are populated on block_actions
 	// (button click) payloads. Channel is the conversation the button was
 	// clicked in (the mint authorizes against it); ResponseURL is where
 	// the minted link is delivered; Actions carries the clicked element(s).
-	Channel struct {
-		ID string `json:"id"`
-	} `json:"channel"`
+	Channel     interactionID       `json:"channel"`
 	ResponseURL string              `json:"response_url"`
 	Actions     []interactionAction `json:"actions"`
+}
+
+func (p *interactionPayload) asViewSubmission() ViewSubmission {
+	if p == nil {
+		return ViewSubmission{}
+	}
+	// Read-only projection: View.State.Values intentionally shares the parsed
+	// map with the interaction envelope.
+	return ViewSubmission{
+		Type: p.Type,
+		Team: p.Team,
+		User: p.User,
+		View: p.View,
+	}
 }
 
 // interactionAction is one entry of a block_actions payload's `actions`
@@ -616,19 +649,74 @@ var interactionStateLogAllowlist = map[string]map[string]struct{}{
 	},
 }
 
-func interactionStateLogValues(values map[string]map[string]interactionStateValue) map[string]map[string]string {
-	logValues := make(map[string]map[string]string, len(values))
+// viewSubmissionStateLogAllowlist contains submitted values that are useful
+// diagnostics and safe to emit. It inherits the tunnel-install fields already
+// considered safe for interaction logging: operator-entered resource aliases,
+// ports, and target-environment hints rather than credentials. Feedback keeps
+// only the category select because summary/details are free-form user text.
+var viewSubmissionStateLogAllowlist = func() map[string]map[string]struct{} {
+	allowlist := cloneStateLogAllowlist(interactionStateLogAllowlist)
+	allowlist[feedbackBlockType] = map[string]struct{}{
+		feedbackActionType: {},
+	}
+	return allowlist
+}()
+
+// viewSubmissionBlockIDs is the package-owned classification registry for
+// submitted view state blocks. Add new modal blocks here when they are rendered,
+// then classify them through viewSubmissionStateLogAllowlist or
+// redactedSubmissionBlockIDs. claimCodeBlockID is included even though no
+// current modal renders it because issue #432 tracks it as a must-redact
+// compatibility contract. This registry is a review/test reminder rather than
+// the runtime safety boundary; unregistered future blocks still redact by
+// default in sanitizedViewSubmissionStateValues.
+var viewSubmissionBlockIDs = []string{
+	claimCodeBlockID,
+	tunnelInstallBlockSlug,
+	tunnelInstallBlockShortcut,
+	tunnelInstallBlockEnvironment,
+	tunnelInstallBlockLocalPort,
+	tunnelInstallBlockWebRef,
+	tunnelEditBlockDisplayName,
+	tunnelEditBlockAliases,
+	tunnelEditBlockChannels,
+	exposeURLBlockResource,
+	exposeURLBlockAlias,
+	exposeURLBlockTarget,
+	feedbackBlockType,
+	feedbackBlockSummary,
+	feedbackBlockDetails,
+}
+
+func cloneStateLogAllowlist(in map[string]map[string]struct{}) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{}, len(in))
+	for blockID, actions := range in {
+		actionCopy := make(map[string]struct{}, len(actions))
+		for actionID := range actions {
+			actionCopy[actionID] = struct{}{}
+		}
+		out[blockID] = actionCopy
+	}
+	return out
+}
+
+func interactionStateLogValues(values map[string]map[string]interactionStateValue) map[string]map[string]any {
+	// Block-action diagnostics keep the historical allowlist-and-drop shape.
+	// View submissions carry richer user state and use
+	// sanitizedViewSubmissionStateValues, which emits sentinels for redacted or
+	// unclassified blocks instead.
+	logValues := make(map[string]map[string]any, len(values))
 	for blockID, actions := range values {
 		allowedActions, ok := interactionStateLogAllowlist[blockID]
 		if !ok {
 			continue
 		}
-		inner := make(map[string]string, len(actions))
+		inner := make(map[string]any, len(actions))
 		for actionID, v := range actions {
 			if _, ok := allowedActions[actionID]; !ok {
 				continue
 			}
-			inner[actionID] = v.text()
+			inner[actionID] = v.logValue()
 		}
 		if len(inner) > 0 {
 			logValues[blockID] = inner
@@ -641,11 +729,25 @@ type interactionSelectedOption struct {
 	Value string `json:"value"`
 }
 
+func (v interactionStateValue) logValue() any {
+	if text := v.text(); text != "" {
+		return text
+	}
+	if len(v.SelectedConversations) > 0 {
+		return append([]string(nil), v.SelectedConversations...)
+	}
+	return ""
+}
+
 // LogValue implements [slog.LogValuer] so a `slog` call that takes
 // the payload as a value (`slog.Info("interaction", "payload", p)`)
 // emits a stable group shape. State values are emitted only for known
 // non-secret tunnel-install blocks; future secret-bearing blocks are redacted
 // by default unless explicitly added to interactionStateLogAllowlist.
+//
+// The pointer receiver is intentional for this private wide envelope: it keeps
+// nil *interactionPayload logs safe. Use ViewSubmission for the value-safe
+// view-submission logging shape.
 func (p *interactionPayload) LogValue() slog.Value {
 	if p == nil {
 		return slog.AnyValue(nil)
@@ -659,6 +761,92 @@ func (p *interactionPayload) LogValue() slog.Value {
 		slog.String("callback_id", p.View.CallbackID),
 		slog.Any("state_values", interactionStateLogValues(p.View.State.Values)),
 	)
+}
+
+// LogViewSubmission emits the supported view-submission diagnostic shape.
+// Submitted state is sanitized through [IsRedactedSubmissionBlock] before it
+// reaches slog so a future diagnostic call site does not need to remember the
+// redaction contract. It keeps the generic "interaction received" message used
+// by other interaction logs; view submissions intentionally add sanitized
+// state_values for richer modal diagnostics.
+func LogViewSubmission(log *slog.Logger, payload *ViewSubmission) {
+	if log == nil {
+		log = slog.Default()
+	}
+	if payload == nil {
+		return
+	}
+	log.Info("interaction received", viewSubmissionLogArgs(payload)...)
+}
+
+// LogValue implements [slog.LogValuer] for the narrower view-submission type,
+// so direct `slog.Any("submission", payload)` calls use the same redacted
+// representation as [LogViewSubmission] for both pointer and value payloads.
+//
+//nolint:gocritic // Value receiver keeps non-pointer slog.Any calls from reflect-logging raw State.Values.
+func (p ViewSubmission) LogValue() slog.Value {
+	return slog.GroupValue(viewSubmissionLogAttrs(&p)...)
+}
+
+func viewSubmissionLogAttrs(p *ViewSubmission) []slog.Attr {
+	return []slog.Attr{
+		slog.String("type", p.Type),
+		slog.String("team_id", p.Team.ID),
+		slog.String("user_id", p.User.ID),
+		slog.String("view_id", p.View.ID),
+		slog.String("callback_id", p.View.CallbackID),
+		slog.Any("state_values", sanitizedViewSubmissionStateValues(p.View.State.Values)),
+	}
+}
+
+func viewSubmissionLogArgs(p *ViewSubmission) []any {
+	attrs := viewSubmissionLogAttrs(p)
+	args := make([]any, len(attrs))
+	for i, attr := range attrs {
+		args[i] = attr
+	}
+	return args
+}
+
+// sanitizedViewSubmissionStateValues is safe by default: only explicitly
+// allowlisted block/action pairs emit values. Registered sensitive blocks and
+// unknown future blocks are represented by a whole-block sentinel so a new modal
+// cannot silently leak submitted state before its fields are classified.
+func sanitizedViewSubmissionStateValues(values map[string]map[string]interactionStateValue) map[string]any {
+	logValues := make(map[string]any, len(values))
+	for blockID, actions := range values {
+		if IsRedactedSubmissionBlock(blockID) {
+			logValues[blockID] = redactedSubmissionBlockValue(blockID)
+			continue
+		}
+		allowedActions, ok := viewSubmissionStateLogAllowlist[blockID]
+		if !ok {
+			logValues[blockID] = redactedSubmissionBlockValue(blockID)
+			continue
+		}
+		inner := make(map[string]any, len(actions))
+		for actionID, value := range actions {
+			if _, ok := allowedActions[actionID]; !ok {
+				continue
+			}
+			// Preserve empty allowlisted fields: validation diagnostics can need
+			// to distinguish present-but-blank input from a missing block/action.
+			inner[actionID] = value.logValue()
+		}
+		if len(inner) > 0 {
+			logValues[blockID] = inner
+			continue
+		}
+		// If an allowlisted block only carried unexpected sibling actions, drop
+		// it instead of emitting a sentinel. The block is known non-secret, and
+		// the unexpected values should stay invisible rather than become log
+		// noise.
+	}
+	return logValues
+}
+
+func redactedSubmissionBlockValue(blockID string) string {
+	return fmt.Sprintf("<redacted: %s>", blockID)
 }
 
 // parseInteractionPayload decodes the `payload=` form field Slack

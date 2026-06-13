@@ -111,6 +111,33 @@ const (
 	tunnelEditActionChannels    = "edit_channels_select"
 )
 
+// claimCodeBlockID is the legacy/anticipated workspace-claim code block from
+// issue #432. No current modal renders it, but submissions carrying this block
+// must never emit their code values to diagnostics.
+const claimCodeBlockID = "claim_code_block"
+
+var redactedSubmissionBlockIDs = map[string]struct{}{
+	// Edit/expose aliases and names are redacted even when install aliases are
+	// visible diagnostics: edit/expose submissions can carry existing resource
+	// labels, URL targets, or broad free-form edits from an established setup.
+	claimCodeBlockID:           {},
+	tunnelEditBlockDisplayName: {},
+	tunnelEditBlockAliases:     {},
+	tunnelEditBlockChannels:    {},
+	exposeURLBlockResource:     {},
+	exposeURLBlockAlias:        {},
+	exposeURLBlockTarget:       {},
+	feedbackBlockSummary:       {},
+	feedbackBlockDetails:       {},
+}
+
+// IsRedactedSubmissionBlock reports whether a submitted Slack view state block
+// must be replaced wholesale before it is emitted to logs.
+func IsRedactedSubmissionBlock(blockID string) bool {
+	_, ok := redactedSubmissionBlockIDs[blockID]
+	return ok
+}
+
 // SetAliasRebindMetadata is the typed shape the rebind modal stores
 // in `private_metadata`. JSON-encoded so the view-submission handler
 // (PR-3c.3+) can `json.Unmarshal` into a known struct rather than
