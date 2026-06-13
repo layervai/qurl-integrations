@@ -136,11 +136,15 @@ type DDBProvider struct {
 	TableName string
 	Encryptor FieldEncryptor
 
-	// Cache successful APIKey lookups for a short window so steady-state slash
-	// commands do not spend one DDB read plus one KMS Decrypt each time. Five
-	// minutes smooths normal command sessions while still letting key rotations
-	// propagate within a human "try again" interval.
-	apiKeyCache sync.Map // map[string]cachedAPIKey
+	// Cache successful APIKey lookups at the DDB/decrypt boundary so every
+	// long-lived consumer avoids repeat KMS Decrypt calls during normal slash
+	// command bursts. The cache is process-local: rotation or disconnect on one
+	// serving instance cannot evict sibling instances, so they may continue using
+	// a previously decrypted key until this TTL expires. Five minutes keeps that
+	// cross-instance staleness bounded while still collapsing the common
+	// multi-command session; Slack bot-token caching stays shorter because it
+	// gates reinstall detection rather than qURL API retry pressure.
+	apiKeyCache sync.Map // map[string]*cachedAPIKey
 
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
@@ -271,11 +275,10 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 
 	now := p.nowOrDefault()
 	if cached, ok := p.apiKeyCache.Load(workspaceID); ok {
-		entry, ok := cached.(cachedAPIKey)
+		entry, ok := cached.(*cachedAPIKey)
 		if ok && now.Before(entry.expiresAt) {
 			return entry.apiKey, nil
 		}
-		p.apiKeyCache.Delete(workspaceID)
 	}
 
 	// Eventually-consistent read is correct here: the per-workspace key
@@ -316,11 +319,22 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
 	}
 	apiKey := string(pt)
-	p.apiKeyCache.Store(workspaceID, cachedAPIKey{
+	p.cacheAPIKey(workspaceID, apiKey, now)
+	return apiKey, nil
+}
+
+func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
+	entry := &cachedAPIKey{
 		apiKey:    apiKey,
 		expiresAt: now.Add(apiKeyCacheTTL),
+	}
+	p.apiKeyCache.Store(workspaceID, entry)
+	time.AfterFunc(apiKeyCacheTTL, func() {
+		cached, ok := p.apiKeyCache.Load(workspaceID)
+		if ok && cached == entry {
+			p.apiKeyCache.Delete(workspaceID)
+		}
 	})
-	return apiKey, nil
 }
 
 // SlackBotToken looks up the per-workspace Slack bot token captured during
