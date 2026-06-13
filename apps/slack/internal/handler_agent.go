@@ -219,15 +219,17 @@ func (h *Handler) effectiveAgentAckTimeout() time.Duration {
 	if h.agentAckTimeout > 0 {
 		return h.agentAckTimeout
 	}
-	// Most handlers go through NewHandler, which normalizes this field. The fallback
-	// keeps package-local bare Handler literals in focused unit tests from using a
-	// zero-duration timeout if they call an ack helper directly.
+	// NewHandler normalizes this for production. This fallback, like the nil-base
+	// fallback in agentAckContext, only protects package-local bare Handler literals in
+	// focused unit tests that call ack helpers directly.
 	return defaultAgentAckTimeout
 }
 
 func (h *Handler) agentAckContext() (context.Context, context.CancelFunc) {
 	baseCtx := h.baseCtx
 	if baseCtx == nil {
+		// NewHandler normalizes this for production; this is the matching bare-test-literal
+		// fallback for direct ack-helper tests.
 		baseCtx = context.Background()
 	}
 	return context.WithTimeout(baseCtx, h.effectiveAgentAckTimeout())
@@ -283,7 +285,9 @@ func (h *Handler) addAgentAck(log *slog.Logger, env *slackEventEnvelope) agentAc
 // honors ctx, no late 👀 lands; if it ignores ctx, the operator-facing Warn still says
 // the ack may remain. The remove uses a FRESH ctx off baseCtx: by defer time the turn
 // ctx is spent (agentTurnTimeout elapsed, or shutdown), so removing on it would fail
-// instantly and strand the 👀 — the same spent-ctx lesson as postAgentReply.
+// instantly and strand the 👀 — the same spent-ctx lesson as postAgentReply. It gets
+// a full fresh ack budget rather than the leftover join budget so a slow add that
+// finally settled does not starve the cleanup call.
 func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, add agentAckAdd) {
 	if h.cfg.Reactions == nil || add.done == nil {
 		return
