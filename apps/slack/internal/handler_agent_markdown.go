@@ -164,6 +164,11 @@ func (h *agentMarkdownLinkHarden) consumeMarkdownByte(out *strings.Builder, c by
 		h.pendingLess = remaining
 		return false
 	}
+	if c == '<' && isSlackControlAngleStart(remaining) {
+		out.WriteByte('\\')
+		out.WriteByte(c)
+		return true
+	}
 	if c == '<' && isRawHTMLTagStart(remaining) {
 		out.WriteByte('\\')
 		out.WriteByte(c)
@@ -622,6 +627,10 @@ func isRawHTMLTagStart(s string) bool {
 
 func isVisibleAngleLinkStart(s string) bool {
 	return len(s) >= 2 && s[0] == '<' && isVisibleAngleLinkStartAfterLess(s[1:])
+}
+
+func isSlackControlAngleStart(s string) bool {
+	return len(s) >= 2 && s[0] == '<' && strings.ContainsRune("@#!", rune(s[1]))
 }
 
 func shouldDeferAngleAutolinkStart(s string) bool {
