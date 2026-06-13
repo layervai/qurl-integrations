@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,9 +16,69 @@ import (
 
 const slackQualityGateCondition = "needs.changes.outputs.slack == 'true'"
 
-// Slack check names with this prefix are quality gates unless explicitly
-// excluded by depending on the aggregate.
-const slackCheckNamePrefix = "slack / "
+type requiredWorkflowSpec struct {
+	name                 string
+	path                 string
+	checkNamePrefix      string
+	changeOutput         string
+	changedEnv           string
+	qualityGateCondition string
+	detectChangesName    string
+	requiredName         string
+	verifierStepName     string
+	unchangedOutput      string
+}
+
+var requiredWorkflowSpecs = []requiredWorkflowSpec{
+	{
+		name:                 "slack",
+		path:                 "slack.yml",
+		checkNamePrefix:      "slack / ",
+		changeOutput:         "slack",
+		changedEnv:           "SLACK_CHANGED",
+		qualityGateCondition: slackQualityGateCondition,
+		detectChangesName:    "slack / detect changes",
+		requiredName:         "slack / required",
+		verifierStepName:     "Verify Slack CI result",
+		unchangedOutput:      "No Slack-impacting changes detected",
+	},
+	{
+		name:                 "discord",
+		path:                 "discord.yml",
+		checkNamePrefix:      "discord / ",
+		changeOutput:         "discord",
+		changedEnv:           "DISCORD_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.discord == 'true'",
+		detectChangesName:    "discord / detect changes",
+		requiredName:         "discord / required",
+		verifierStepName:     "Verify Discord CI result",
+		unchangedOutput:      "No Discord-impacting changes detected",
+	},
+	{
+		name:                 "chrome-extension",
+		path:                 "chrome-extension.yml",
+		checkNamePrefix:      "chrome-extension / ",
+		changeOutput:         "chrome_extension",
+		changedEnv:           "CHROME_EXTENSION_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.chrome_extension == 'true'",
+		detectChangesName:    "chrome-extension / detect changes",
+		requiredName:         "chrome-extension / required",
+		verifierStepName:     "Verify Chrome extension CI result",
+		unchangedOutput:      "No Chrome extension-impacting changes detected",
+	},
+	{
+		name:                 "shared",
+		path:                 "shared-test.yml",
+		checkNamePrefix:      "shared / ",
+		changeOutput:         "shared",
+		changedEnv:           "SHARED_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.shared == 'true'",
+		detectChangesName:    "shared / detect changes",
+		requiredName:         "shared / required",
+		verifierStepName:     "Verify shared CI result",
+		unchangedOutput:      "No shared-impacting changes detected",
+	},
+}
 
 type githubWorkflow struct {
 	Jobs map[string]githubJob `yaml:"jobs"`
@@ -36,163 +97,180 @@ type step struct {
 	Shell string `yaml:"shell"`
 }
 
-func TestSlackRequiredNeedsAllSlackQualityGates(t *testing.T) {
-	workflow := readSlackWorkflow(t)
+func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		t.Run(spec.name, func(t *testing.T) {
+			workflow := readWorkflow(t, spec.path)
 
-	required, ok := workflow.Jobs["required"]
-	if !ok {
-		t.Fatal("slack workflow is missing required aggregate job")
-	}
-
-	requiredNeeds := stringSet(parseWorkflowNeeds(t, "required", required.Needs))
-	qualityGates := slackQualityGates(t, workflow)
-
-	if len(qualityGates) == 0 {
-		t.Fatalf("no Slack quality gates found with if containing %q", slackQualityGateCondition)
-	}
-	for id := range qualityGates {
-		if !requiredNeeds[id] {
-			t.Errorf("Slack quality gate %q is missing from required.needs", id)
-		}
-	}
-
-	for need := range requiredNeeds {
-		if need == "changes" {
-			continue
-		}
-		if !qualityGates[need] {
-			t.Errorf("required.needs includes %q, but no Slack quality gate with that job id exists", need)
-		}
-	}
-}
-
-func TestSlackRequiredVerifierDisplayNamesCoverQualityGates(t *testing.T) {
-	workflow := readSlackWorkflow(t)
-	script := requiredVerifierScript(t, workflow)
-
-	for id := range slackQualityGates(t, workflow) {
-		if !strings.Contains(script, id+")") {
-			t.Errorf("Verify Slack CI result is missing a display_name case for %q", id)
-		}
-	}
-}
-
-func TestSlackRequiredVerifierScript(t *testing.T) {
-	requireCommand(t, "bash")
-	requireCommand(t, "jq")
-
-	script := requiredVerifierScript(t, readSlackWorkflow(t))
-
-	cases := []struct {
-		name         string
-		changes      string
-		slackChanged string
-		needs        map[string]string
-		wantExit     bool
-		wantOutput   string
-	}{
-		{
-			name:         "no Slack changes",
-			changes:      "success",
-			slackChanged: "false",
-			needs: map[string]string{
-				"changes":            "success",
-				"lint":               "skipped",
-				"test":               "skipped",
-				"vulnerability-scan": "skipped",
-				"docker-check":       "skipped",
-			},
-			wantOutput: "No Slack-impacting changes detected",
-		},
-		{
-			name:         "all Slack gates pass",
-			changes:      "success",
-			slackChanged: "true",
-			needs: map[string]string{
-				"changes":            "success",
-				"lint":               "success",
-				"test":               "success",
-				"vulnerability-scan": "success",
-				"docker-check":       "success",
-			},
-		},
-		{
-			name:         "detector fails closed",
-			changes:      "failure",
-			slackChanged: "",
-			needs: map[string]string{
-				"changes": "failure",
-			},
-			wantExit:   true,
-			wantOutput: "slack / detect changes concluded failure",
-		},
-		{
-			name:         "unexpected detector output fails closed",
-			changes:      "success",
-			slackChanged: "",
-			needs: map[string]string{
-				"changes": "success",
-			},
-			wantExit:   true,
-			wantOutput: "unexpected slack output: <empty>",
-		},
-		{
-			name:         "skipped Slack gate fails",
-			changes:      "success",
-			slackChanged: "true",
-			needs: map[string]string{
-				"changes":            "success",
-				"lint":               "success",
-				"test":               "skipped",
-				"vulnerability-scan": "success",
-				"docker-check":       "success",
-			},
-			wantExit:   true,
-			wantOutput: "slack / test concluded skipped",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			output, err := runVerifierScript(t, script, tc.changes, tc.slackChanged, tc.needs)
-			if tc.wantExit && err == nil {
-				t.Fatalf("verifier succeeded, want failure\noutput:\n%s", output)
+			required, ok := workflow.Jobs["required"]
+			if !ok {
+				t.Fatalf("%s workflow is missing required aggregate job", spec.name)
 			}
-			if !tc.wantExit && err != nil {
-				t.Fatalf("verifier failed: %v\noutput:\n%s", err, output)
+			if required.Name != spec.requiredName {
+				t.Fatalf("required job name = %q, want %q", required.Name, spec.requiredName)
 			}
-			if tc.wantOutput != "" && !strings.Contains(output, tc.wantOutput) {
-				t.Fatalf("verifier output = %q, want substring %q", output, tc.wantOutput)
+
+			requiredNeeds := stringSet(parseWorkflowNeeds(t, "required", required.Needs))
+			if !requiredNeeds["changes"] {
+				t.Fatal("required.needs is missing changes detector")
+			}
+
+			qualityGates := requiredWorkflowQualityGates(t, spec, workflow)
+			if len(qualityGates) == 0 {
+				t.Fatalf("no %s quality gates found with if containing %q", spec.name, spec.qualityGateCondition)
+			}
+			for id := range qualityGates {
+				if !requiredNeeds[id] {
+					t.Errorf("%s quality gate %q is missing from required.needs", spec.name, id)
+				}
+			}
+
+			for need := range requiredNeeds {
+				if need == "changes" {
+					continue
+				}
+				if !qualityGates[need] {
+					t.Errorf("required.needs includes %q, but no %s quality gate with that job id exists", need, spec.name)
+				}
 			}
 		})
 	}
 }
 
-func looksLikeSlackQualityGate(job githubJob, needs []string) bool {
-	if !strings.HasPrefix(job.Name, slackCheckNamePrefix) {
-		return false
+func TestRequiredWorkflowVerifierDisplayNamesCoverQualityGates(t *testing.T) {
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		t.Run(spec.name, func(t *testing.T) {
+			workflow := readWorkflow(t, spec.path)
+			script := requiredVerifierScriptNamed(t, workflow, spec.verifierStepName)
+
+			for id := range requiredWorkflowQualityGates(t, spec, workflow) {
+				if !strings.Contains(script, id+")") {
+					t.Errorf("%s is missing a display_name case for %q", spec.verifierStepName, id)
+				}
+			}
+		})
 	}
-	if job.Name == "slack / detect changes" || job.Name == "slack / required" {
-		return false
-	}
-	return !containsString(needs, "required")
 }
 
-func slackQualityGates(t *testing.T, workflow githubWorkflow) map[string]bool {
+func TestRequiredWorkflowVerifierScripts(t *testing.T) {
+	requireCommand(t, "bash")
+	requireCommand(t, "jq")
+
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		t.Run(spec.name, func(t *testing.T) {
+			workflow := readWorkflow(t, spec.path)
+			script := requiredVerifierScriptNamed(t, workflow, spec.verifierStepName)
+			qualityGates := sortedQualityGateIDs(requiredWorkflowQualityGates(t, spec, workflow))
+			if len(qualityGates) == 0 {
+				t.Fatal("no quality gates found")
+			}
+
+			needs := map[string]string{"changes": "success"}
+			for _, id := range qualityGates {
+				needs[id] = "success"
+			}
+
+			unchangedNeeds := map[string]string{"changes": "success"}
+			for _, id := range qualityGates {
+				unchangedNeeds[id] = "skipped"
+			}
+			output, err := runVerifierScriptWithEnv(t, script, map[string]string{
+				"CHANGES_RESULT": "success",
+				spec.changedEnv:  "false",
+				"NEEDS_JSON":     needsJSON(t, unchangedNeeds),
+			})
+			if err != nil {
+				t.Fatalf("unchanged verifier failed: %v\noutput:\n%s", err, output)
+			}
+			if !strings.Contains(output, spec.unchangedOutput) {
+				t.Fatalf("unchanged verifier output = %q, want substring %q", output, spec.unchangedOutput)
+			}
+
+			output, err = runVerifierScriptWithEnv(t, script, map[string]string{
+				"CHANGES_RESULT": "success",
+				spec.changedEnv:  "true",
+				"NEEDS_JSON":     needsJSON(t, needs),
+			})
+			if err != nil {
+				t.Fatalf("changed verifier failed: %v\noutput:\n%s", err, output)
+			}
+
+			output, err = runVerifierScriptWithEnv(t, script, map[string]string{
+				"CHANGES_RESULT": "failure",
+				spec.changedEnv:  "",
+				"NEEDS_JSON":     needsJSON(t, map[string]string{"changes": "failure"}),
+			})
+			if err == nil {
+				t.Fatalf("detector failure verifier succeeded, want failure\noutput:\n%s", output)
+			}
+			if !strings.Contains(output, spec.detectChangesName+" concluded failure") {
+				t.Fatalf("detector failure output = %q, want %q", output, spec.detectChangesName+" concluded failure")
+			}
+
+			output, err = runVerifierScriptWithEnv(t, script, map[string]string{
+				"CHANGES_RESULT": "success",
+				spec.changedEnv:  "",
+				"NEEDS_JSON":     needsJSON(t, map[string]string{"changes": "success"}),
+			})
+			if err == nil {
+				t.Fatalf("unexpected output verifier succeeded, want failure\noutput:\n%s", output)
+			}
+			if !strings.Contains(output, "unexpected "+spec.changeOutput+" output: <empty>") {
+				t.Fatalf("unexpected output message = %q, want unexpected %s output", output, spec.changeOutput)
+			}
+
+			skippedGate := qualityGates[0]
+			needs[skippedGate] = "skipped"
+			output, err = runVerifierScriptWithEnv(t, script, map[string]string{
+				"CHANGES_RESULT": "success",
+				spec.changedEnv:  "true",
+				"NEEDS_JSON":     needsJSON(t, needs),
+			})
+			if err == nil {
+				t.Fatalf("skipped gate verifier succeeded, want failure\noutput:\n%s", output)
+			}
+			wantGateOutput := workflow.Jobs[skippedGate].Name + " concluded skipped"
+			if !strings.Contains(output, wantGateOutput) {
+				t.Fatalf("skipped gate output = %q, want substring %q", output, wantGateOutput)
+			}
+		})
+	}
+}
+
+func readWorkflow(t *testing.T, name string) githubWorkflow {
+	t.Helper()
+
+	// #nosec G304 -- callers pass checked-in workflow names from requiredWorkflowSpecs.
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name))
+	if err != nil {
+		t.Fatalf("read %s workflow: %v", name, err)
+	}
+
+	var workflow githubWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse %s workflow: %v", name, err)
+	}
+	return workflow
+}
+
+func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) map[string]bool {
 	t.Helper()
 
 	qualityGates := map[string]bool{}
 	for id, job := range workflow.Jobs {
 		needs := parseWorkflowNeeds(t, id, job.Needs)
-		if !looksLikeSlackQualityGate(job, needs) {
+		if !looksLikeRequiredWorkflowQualityGate(spec, job, needs) {
 			continue
 		}
 		if !containsString(needs, "changes") {
-			t.Errorf("Slack quality gate %q must include changes in needs", id)
+			t.Errorf("%s quality gate %q must include changes in needs", spec.name, id)
 			continue
 		}
-		if !strings.Contains(job.If, slackQualityGateCondition) {
-			t.Errorf("Slack quality gate %q must include if condition %q", id, slackQualityGateCondition)
+		if !strings.Contains(job.If, spec.qualityGateCondition) {
+			t.Errorf("%s quality gate %q must include if condition %q", spec.name, id, spec.qualityGateCondition)
 			continue
 		}
 		qualityGates[id] = true
@@ -200,19 +278,23 @@ func slackQualityGates(t *testing.T, workflow githubWorkflow) map[string]bool {
 	return qualityGates
 }
 
-func readSlackWorkflow(t *testing.T) githubWorkflow {
-	t.Helper()
-
-	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "slack.yml"))
-	if err != nil {
-		t.Fatalf("read slack workflow: %v", err)
+func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job githubJob, needs []string) bool {
+	if !strings.HasPrefix(job.Name, spec.checkNamePrefix) {
+		return false
 	}
-
-	var workflow githubWorkflow
-	if err := yaml.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse slack workflow: %v", err)
+	if job.Name == spec.detectChangesName || job.Name == spec.requiredName {
+		return false
 	}
-	return workflow
+	return !containsString(needs, "required")
+}
+
+func sortedQualityGateIDs(qualityGates map[string]bool) []string {
+	ids := make([]string, 0, len(qualityGates))
+	for id := range qualityGates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func parseWorkflowNeeds(t *testing.T, jobID string, needs any) []string {
@@ -258,7 +340,7 @@ func stringSet(values []string) map[string]bool {
 	return set
 }
 
-func requiredVerifierScript(t *testing.T, workflow githubWorkflow) string {
+func requiredVerifierScriptNamed(t *testing.T, workflow githubWorkflow, stepName string) string {
 	t.Helper()
 
 	required, ok := workflow.Jobs["required"]
@@ -266,25 +348,25 @@ func requiredVerifierScript(t *testing.T, workflow githubWorkflow) string {
 		t.Fatal("slack workflow is missing required aggregate job")
 	}
 	for _, step := range required.Steps {
-		if step.Name != "Verify Slack CI result" {
+		if step.Name != stepName {
 			continue
 		}
 		if step.Shell != "bash" {
-			t.Fatalf("Verify Slack CI result shell = %q, want bash", step.Shell)
+			t.Fatalf("%s shell = %q, want bash", stepName, step.Shell)
 		}
 		if strings.TrimSpace(step.Run) == "" {
-			t.Fatal("Verify Slack CI result step has empty run script")
+			t.Fatalf("%s step has empty run script", stepName)
 		}
 		return step.Run
 	}
-	t.Fatal("required job is missing Verify Slack CI result step")
+	t.Fatalf("required job is missing %s step", stepName)
 	return ""
 }
 
-func runVerifierScript(t *testing.T, script, changesResult, slackChanged string, needs map[string]string) (string, error) {
+func runVerifierScriptWithEnv(t *testing.T, script string, env map[string]string) (string, error) {
 	t.Helper()
 
-	scriptPath := filepath.Join(t.TempDir(), "verify-slack-ci-result.sh")
+	scriptPath := filepath.Join(t.TempDir(), "verify-required-ci-result.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 		t.Fatalf("write verifier script: %v", err)
 	}
@@ -294,11 +376,10 @@ func runVerifierScript(t *testing.T, script, changesResult, slackChanged string,
 
 	// #nosec G204 -- scriptPath is a test-created file containing the checked-in workflow step.
 	cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-e", "-o", "pipefail", scriptPath)
-	cmd.Env = append(os.Environ(),
-		"CHANGES_RESULT="+changesResult,
-		"SLACK_CHANGED="+slackChanged,
-		"NEEDS_JSON="+needsJSON(t, needs),
-	)
+	cmd.Env = os.Environ()
+	for key, value := range env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
