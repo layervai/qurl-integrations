@@ -624,7 +624,7 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 	})
 
-	t.Run("owner cancellation is shared with coalesced waiter", func(t *testing.T) {
+	t.Run("owner cancellation asks healthy waiter to retry", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getFunc: func(ctx context.Context, _ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 				return nil, ctx.Err()
@@ -664,6 +664,9 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("waiter err = %v, want context.Canceled", err)
 			}
+			if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), err) {
+				t.Fatal("healthy waiter should retry after shared owner cancellation")
+			}
 		case <-time.After(time.Second):
 			t.Fatal("waiter did not receive owner cancellation")
 		}
@@ -672,6 +675,84 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 		if _, ok := p.apiKeyCache[testTeamID]; ok {
 			t.Fatal("owner cancellation should not populate the cache")
+		}
+		ddb.getFunc = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_owner_cancel")}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("retry APIKey after owner cancellation: %v", err)
+		}
+		if got != "lv_live_after_owner_cancel" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_owner_cancel")
+		}
+	})
+
+	t.Run("APIKey waiter retries after owner cancellation", func(t *testing.T) {
+		firstGetStarted := make(chan struct{})
+		var callMu sync.Mutex
+		getCall := 0
+		ddb := &fakeDDBClient{
+			getFunc: func(ctx context.Context, _ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				callMu.Lock()
+				getCall++
+				call := getCall
+				callMu.Unlock()
+				if call == 1 {
+					close(firstGetStarted)
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_waiter_retry")}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		ownerCtx, cancelOwner := context.WithCancel(context.Background())
+		ownerErr := make(chan error, 1)
+		go func() {
+			_, err := p.APIKey(ownerCtx, testTeamID)
+			ownerErr <- err
+		}()
+		<-firstGetStarted
+
+		waiterResult := make(chan string, 1)
+		waiterErr := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				waiterErr <- err
+				return
+			}
+			waiterResult <- got
+		}()
+
+		time.Sleep(10 * time.Millisecond)
+		cancelOwner()
+		select {
+		case err := <-ownerErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("owner err = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("owner did not observe cancellation")
+		}
+		select {
+		case err := <-waiterErr:
+			t.Fatalf("waiter should retry after owner cancellation, got err %v", err)
+		case got := <-waiterResult:
+			if got != "lv_live_waiter_retry" {
+				t.Fatalf("waiter got %q want %q", got, "lv_live_waiter_retry")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not retry after owner cancellation")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
 		}
 	})
 

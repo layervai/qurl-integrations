@@ -320,24 +320,33 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
 
-	now := p.nowOrDefault()
-	start := p.getOrStartAPIKeyLookup(workspaceID, now)
-	if start.hit {
-		return start.apiKey, nil
-	}
-	if !start.owner {
-		// Waiters share the owner result, including an owner context
-		// cancellation. That matches the sibling Slack token cache and keeps
-		// coalescing simple; the next request retries normally.
-		select {
-		case <-start.call.done:
-			return start.call.apiKey, start.call.err
-		case <-ctx.Done():
-			return "", ctx.Err()
+	for {
+		now := p.nowOrDefault()
+		start := p.getOrStartAPIKeyLookup(workspaceID, now)
+		if start.hit {
+			return start.apiKey, nil
 		}
-	}
+		if !start.owner {
+			select {
+			case <-start.call.done:
+				if shouldRetryAPIKeyLookupAfterSharedError(ctx, start.call.err) {
+					continue
+				}
+				return start.call.apiKey, start.call.err
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
 
-	return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, now, start.generation, start.consistentRead)
+		return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, now, start.generation, start.consistentRead)
+	}
+}
+
+func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
