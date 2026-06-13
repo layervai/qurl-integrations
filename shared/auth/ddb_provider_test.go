@@ -1785,7 +1785,13 @@ func TestDDBProviderSetSlackBotTokenRejectsMalformedToken(t *testing.T) {
 func TestDDBProviderDeleteAPIKey(t *testing.T) {
 	t.Run("removes qURL key columns", func(t *testing.T) {
 		ddb := &fakeDDBClient{}
-		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		now := time.Date(2026, 6, 13, 12, 34, 56, 0, time.UTC)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
 		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
 			t.Fatalf("DeleteAPIKey: %v", err)
 		}
@@ -1795,11 +1801,14 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
 			t.Errorf("delete key wrong: %v", ddb.updateInput.Key)
 		}
-		if got, want := *ddb.updateInput.UpdateExpression, "REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at, #updated_at"; got != want {
+		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at"; got != want {
 			t.Errorf("UpdateExpression = %q, want %q", got, want)
 		}
 		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key)"; got != want {
 			t.Errorf("ConditionExpression = %q, want %q", got, want)
+		}
+		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "2026-06-13T12:34:56Z" {
+			t.Errorf("ExpressionAttributeValues[:now] = %v, want timestamp", ddb.updateInput.ExpressionAttributeValues[":now"])
 		}
 		wantNames := map[string]string{
 			"#qurl_api_key":    attrQURLAPIKey,

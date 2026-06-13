@@ -491,6 +491,21 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newTestHandler(t, noopQURLServer(t))
+	h.cfg.AuthProvider = provider
+
+	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "Usage: `/qurl uninstall`.") {
+		t.Fatalf("uninstall args reply missing usage: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallRequiresWorkspaceOwner(t *testing.T) {
 	provider := &recordingAuthProvider{apiKey: "test-key"}
 	ts := newAdminTestServers(t)

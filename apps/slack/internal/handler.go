@@ -1315,6 +1315,8 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// uninstall stays on the user command as a lifecycle sibling of setup,
 		// but gates to the recorded workspace owner before removing the key.
 		h.handleUninstall(w, values)
+	case slashSubcommand(text, uninstallVerb):
+		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel
@@ -1623,8 +1625,12 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	userID := strings.TrimSpace(values.Get(fieldUserID))
-	if h.cfg.AdminStore != nil && !h.requireUninstallOwner(w, teamID, userID) {
-		return
+	// AdminStore==nil mirrors setup's sandbox/no-DDB path; production wires
+	// the owner store and gates uninstall to the recorded workspace owner.
+	if h.cfg.AdminStore != nil {
+		if !h.requireUninstallOwner(w, teamID, userID) {
+			return
+		}
 	}
 	if h.cfg.AuthProvider == nil {
 		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
@@ -1646,8 +1652,8 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 }
 
 func (h *Handler) requireUninstallOwner(w http.ResponseWriter, teamID, userID string) bool {
-	if teamID == "" || userID == "" {
-		respondSlack(w, ":warning: missing team_id or user_id in slash command payload")
+	if userID == "" {
+		respondSlack(w, ":warning: missing user_id in slash command payload")
 		return false
 	}
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
