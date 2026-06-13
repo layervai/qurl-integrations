@@ -1038,6 +1038,8 @@ func readTunnelImageConfig() (string, error) {
 		return "", fmt.Errorf("%s: %w", envQURLConnectorImage, err)
 	}
 	if image != "" {
+		// An explicit image wins over QURL_CONNECTOR_IMAGE_FALLBACK so stale
+		// dev/sandbox env cannot break a correctly pinned production image.
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
 		switch connectorimage.ClassifyPin(image) {

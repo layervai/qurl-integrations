@@ -111,3 +111,25 @@ func FuzzClassifyPinRejectsLatest(f *testing.F) {
 		}
 	})
 }
+
+func FuzzClassifyPinKeepsKnownGoodPins(f *testing.F) {
+	for _, seed := range []string{"v1.2.3", "V1", "release_2026-06-13"} {
+		f.Add(seed)
+	}
+	validDigest := "sha256:" + strings.Repeat("a", 64)
+	f.Fuzz(func(t *testing.T, tag string) {
+		if strings.ContainsAny(tag, ":/@") || tag == "" || strings.EqualFold(tag, "latest") {
+			return
+		}
+		cases := []string{
+			testConnectorImageRepo + ":" + tag,
+			testConnectorImageRepo + ":" + tag + "@" + validDigest,
+			testConnectorImageRepo + "@" + validDigest,
+		}
+		for _, image := range cases {
+			if got := ClassifyPin(image); got != Pinned {
+				t.Fatalf("ClassifyPin(%q) = %v, want Pinned", image, got)
+			}
+		}
+	})
+}

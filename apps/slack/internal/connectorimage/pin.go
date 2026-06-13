@@ -98,39 +98,39 @@ func classifyTaggedImagePin(name string, parsed dockerref.Reference, parseErr er
 	if lastColon <= lastSlash {
 		return Floating
 	}
-	// Non-digest refs surface malformed tag syntax before latest-specific
-	// guidance. Digest refs check latest first so repo:latest@sha256:... never
-	// renders a customer snippet that visibly advertises :latest.
-	nameSuffix := name[lastSlash+1:]
-	if strings.Count(nameSuffix, ":") > 1 {
+	if lastComponentHasMultiColon(name) {
 		return MalformedReference
 	}
 	if lastSlash < 0 && looksLikeRegistryHost(name[:lastColon]) {
 		return AmbiguousReference
 	}
-	tag := name[lastColon+1:]
-	if tag == "" {
+	if name[lastColon+1:] == "" {
 		return MalformedReference
+	}
+	repositoryName := imageRepositoryName(name, lastSlash, lastColon)
+	if strings.EqualFold(repositoryName, "sha256") {
+		return MalformedDigest
 	}
 	if imageNameHasLatestTag(name) {
 		return Floating
 	}
-	repositoryName := imageRepositoryName(name, lastSlash, lastColon)
-	// Avoid treating bare digest-looking sha256:<hex> input as an image named
-	// "sha256" with a tag.
-	if strings.EqualFold(repositoryName, "sha256") {
-		return MalformedDigest
+	if imageNameHasUppercase(repositoryName) {
+		return MalformedReference
 	}
 	named, ok := parsed.(dockerref.Named)
 	if parseErr != nil || !ok {
 		return MalformedReference
 	}
-	if _, ok := parsed.(dockerref.Tagged); !ok {
+	tagged, ok := parsed.(dockerref.Tagged)
+	if !ok {
 		return Floating
 	}
 	repositoryName = named.Name()
-	if lastColon == lastSlash+1 || imageNameHasUppercase(repositoryName) {
-		return MalformedReference
+	if slashlessRegistryReference(repositoryName) {
+		return AmbiguousReference
+	}
+	if strings.EqualFold(tagged.Tag(), "latest") || imageNameHasLatestTag(name) {
+		return Floating
 	}
 	// Non-latest tags are trusted release labels by operator convention; use
 	// image@sha256:<digest> when byte-for-byte image immutability is required.
@@ -200,6 +200,11 @@ func imageRepositoryName(name string, lastSlash, lastColon int) string {
 		return taglessName
 	}
 	return name
+}
+
+func lastComponentHasMultiColon(name string) bool {
+	lastSlash := strings.LastIndex(name, "/")
+	return strings.Count(name[lastSlash+1:], ":") > 1
 }
 
 func slashlessRegistryReference(name string) bool {
