@@ -21,7 +21,7 @@ const testStateSecret = "0123456789abcdef0123456789abcdef"
 const (
 	testClientID        = "111.222"
 	testClientSecret    = "secret"
-	testScopeCSV        = "commands,chat:write,im:write"
+	testScopeCSV        = botScopeCommands + "," + botScopeChatWrite + "," + botScopeIMWrite
 	testWorkspaceID     = "T_WORKSPACE"
 	testEnterpriseID    = "E_GRID"
 	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
@@ -108,9 +108,9 @@ func TestDropUnsupportedScopes(t *testing.T) {
 		wantKept    string
 		wantDropped string
 	}{
-		{"nothing unsupported", []string{"commands", "chat:write", "im:write"}, "commands,chat:write,im:write", ""},
-		{"strips views:write", []string{"commands", "views:write"}, "commands", "views:write"},
-		{"case-insensitive", []string{"commands", "Views:Write"}, "commands", "Views:Write"},
+		{"nothing unsupported", []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite}, testScopeCSV, ""},
+		{"strips views:write", []string{botScopeCommands, "views:write"}, botScopeCommands, "views:write"},
+		{"case-insensitive", []string{botScopeCommands, "Views:Write"}, botScopeCommands, "Views:Write"},
 		{"only views:write leaves empty", []string{"views:write"}, "", "views:write"},
 	}
 	for _, tt := range tests {
@@ -595,7 +595,7 @@ func TestCallbackRejectsMissingRequiredSlackScopes(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":                 true,
 			testAccessTokenKey:   testWorkspaceToken,
-			testResponseKeyScope: "chat:write",
+			testResponseKeyScope: botScopeChatWrite,
 			testResponseKeyTeam: map[string]string{
 				"id": testWorkspaceID,
 			},

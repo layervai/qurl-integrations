@@ -100,7 +100,7 @@ func TestProcessAgentEvent_OptOutGatedBeforeDedupe(t *testing.T) {
 	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{
-		AgentLLM:    fakeAgentLLM{reply: "You can reach staging."},
+		AgentLLM:    fakeAgentLLM{reply: testAgentReachStagingReply},
 		AgentStore:  agentStore,
 		PostMessage: post,
 		AdminStore:  store,

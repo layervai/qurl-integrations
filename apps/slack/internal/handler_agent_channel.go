@@ -16,11 +16,13 @@ const (
 	// channels:read / groups:read scope falls back to the id for the TTL rather than
 	// re-hitting Slack every turn.
 	channelNameTTL = 30 * time.Minute
-	// channelNameResolveTimeout bounds a single conversations.info lookup so a slow
-	// Slack response can't eat the turn budget. On timeout the turn proceeds with the
-	// id (the failure is negative-cached). This 3s ctx is the BINDING deadline — the
-	// seam's HTTP client carries a looser 4s timeout, so the ctx fires first.
-	channelNameResolveTimeout = 3 * time.Second
+	// conversationsInfoResolveTimeout bounds a single conversations.info lookup so a slow
+	// Slack response can't eat the turn budget. The channel-name path proceeds with the
+	// id and negative-caches definitive failures; the confirm-surface path proceeds
+	// with clicker-scoped ephemeral delivery and does not cache. This 3s ctx is the
+	// BINDING deadline — the seam's HTTP client carries a looser 4s timeout, so the
+	// ctx fires first.
+	conversationsInfoResolveTimeout = 3 * time.Second
 	// maxChannelNameLen bounds the resolved name before it lands in the system
 	// prompt. Slack channel names are workspace-trusted and charset-constrained
 	// (lowercase letters/digits/hyphens/underscores, no spaces, currently <=80
@@ -96,7 +98,7 @@ func truncateChannelName(name string) string {
 // when it can't be resolved (no seam wired, missing scope, DM, or transport error)
 // — in which case describeChannel falls back to the channel id. The result is
 // memoized per channel for channelNameTTL; failures are negative-cached too. The
-// lookup is bounded by channelNameResolveTimeout so it can't stall the turn, and a
+// lookup is bounded by conversationsInfoResolveTimeout so it can't stall the turn, and a
 // resolve error is logged at debug and swallowed (best-effort, never fails the turn).
 func (h *Handler) resolveChannelName(ctx context.Context, log *slog.Logger, teamID, enterpriseID, channelID string) string {
 	if h.cfg.ResolveChannelName == nil || channelID == "" {
@@ -106,7 +108,7 @@ func (h *Handler) resolveChannelName(ctx context.Context, log *slog.Logger, team
 	if name, ok := h.channelNames.get(key); ok {
 		return name
 	}
-	rctx, cancel := context.WithTimeout(ctx, channelNameResolveTimeout)
+	rctx, cancel := context.WithTimeout(ctx, conversationsInfoResolveTimeout)
 	defer cancel()
 	name, err := h.cfg.ResolveChannelName(rctx, teamID, enterpriseID, channelID)
 	if err != nil {

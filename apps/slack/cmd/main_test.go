@@ -33,8 +33,13 @@ func newFakeProvider() *auth.DDBProvider {
 	return &auth.DDBProvider{}
 }
 
-const validStateSecret = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
-const defaultSlackBotScopesCSV = "commands,chat:write,im:write"
+const (
+	validStateSecret          = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
+	defaultSlackBotScopesCSV  = "commands,chat:write,im:write"
+	testConnectorImageRepo    = "ghcr.io/layervai/qurl-connector"
+	testConnectorVersionImage = testConnectorImageRepo + ":v1.2.3"
+	testConnectorLatestImage  = testConnectorImageRepo + ":latest"
+)
 
 var oauthEnvKeys = []string{
 	"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET", "AUTH0_AUDIENCE",
@@ -102,6 +107,158 @@ func TestValidateSlackBotToken(t *testing.T) {
 				t.Fatalf("ValidateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestReadTunnelImageConfig(t *testing.T) {
+	cases := []struct {
+		name              string
+		image             string
+		fallback          string
+		wantImage         string
+		wantErrText       string
+		wantErrAbsentText string
+	}{
+		{
+			name:        "unset fails closed",
+			wantErrText: envQURLConnectorImage + " is required",
+		},
+		{
+			name:      "explicit dev sandbox fallback",
+			fallback:  connectorImageFallbackSandbox,
+			wantImage: "",
+		},
+		{
+			name:      "explicit fallback is case insensitive",
+			fallback:  "DEV-SANDBOX",
+			wantImage: "",
+		},
+		{
+			name:      "whitespace image uses explicit fallback",
+			image:     " \t ",
+			fallback:  connectorImageFallbackSandbox,
+			wantImage: "",
+		},
+		{
+			name:      "version-tagged image wins",
+			image:     testConnectorVersionImage,
+			fallback:  "unexpected",
+			wantImage: testConnectorVersionImage,
+		},
+		{
+			name:      "digest-pinned image wins",
+			image:     "localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
+			wantImage: "localhost:5000/layervai/qurl-connector@sha256:" + strings.Repeat("a", 64),
+		},
+		{
+			name:        "invalid image rejected",
+			image:       testConnectorImageRepo + ":bad tag",
+			wantErrText: envQURLConnectorImage + ":",
+		},
+		{
+			name:        "implicit latest routes to non-pinned message",
+			image:       testConnectorImageRepo,
+			wantErrText: connectorImageErrFloating,
+		},
+		{
+			name:        "explicit latest image rejected even with fallback opt in",
+			image:       testConnectorLatestImage,
+			fallback:    connectorImageFallbackSandbox,
+			wantErrText: connectorImageErrFloating,
+		},
+		{
+			name:        "latest tag with digest routes to latest-digest message",
+			image:       testConnectorLatestImage + "@sha256:" + strings.Repeat("a", 64),
+			wantErrText: connectorImageErrLatestDigest,
+		},
+		{
+			name:        "uppercase sha256 digest routes to lowercase-digest message",
+			image:       testConnectorImageRepo + "@sha256:" + strings.Repeat("A", 64),
+			wantErrText: connectorImageErrDigestLowercase,
+		},
+		{
+			name:              "malformed reference routes to malformed-reference message",
+			image:             "ghcr.io//qurl-connector:v1",
+			wantErrText:       connectorImageErrMalformedRef,
+			wantErrAbsentText: connectorImageFallbackHint,
+		},
+		{
+			name:        "uppercase repository path routes to malformed-reference message",
+			image:       "ghcr.io/LayerV/qurl-connector:v1",
+			wantErrText: connectorImageErrMalformedRef,
+		},
+		{
+			name:        "slashless registry-looking ref routes to ambiguous-reference message",
+			image:       "gcr.io:v1",
+			wantErrText: connectorImageErrAmbiguousRef,
+		},
+		{
+			name:        "mixed-case localhost ref routes to ambiguous-reference message",
+			image:       "Localhost:5000",
+			wantErrText: connectorImageErrAmbiguousRef,
+		},
+		{
+			name:        "uppercase localhost ref routes to ambiguous-reference message",
+			image:       "LOCALHOST:5000",
+			wantErrText: connectorImageErrAmbiguousRef,
+		},
+		{
+			name:              "malformed digest routes to malformed-digest message",
+			image:             testConnectorImageRepo + "@notadigest",
+			wantErrText:       connectorImageErrMalformedDigest,
+			wantErrAbsentText: connectorImageFallbackHint,
+		},
+		{
+			name:        "uppercase bare sha256 digest routes to malformed-digest message",
+			image:       "SHA256:" + strings.Repeat("a", 64),
+			wantErrText: connectorImageErrMalformedDigest,
+		},
+		{
+			name:        "unknown fallback rejected",
+			fallback:    "Latest",
+			wantErrText: envQURLConnectorImageFallback + "=\"Latest\"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envQURLConnectorImage, tc.image)
+			t.Setenv(envQURLConnectorImageFallback, tc.fallback)
+
+			got, err := readTunnelImageConfig()
+
+			if tc.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("readTunnelImageConfig() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				if tc.wantErrAbsentText != "" && strings.Contains(err.Error(), tc.wantErrAbsentText) {
+					t.Fatalf("readTunnelImageConfig() err = %v, want no substring %q", err, tc.wantErrAbsentText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readTunnelImageConfig() err = %v", err)
+			}
+			if got != tc.wantImage {
+				t.Fatalf("readTunnelImageConfig() = %q, want %q", got, tc.wantImage)
+			}
+		})
+	}
+}
+
+func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
+	// run() validates the customer-rendered connector image after only the
+	// prerequisite public endpoint/signing-secret checks and before infra or
+	// other env setup, so this asserts the process-level startup error without
+	// AWS stubs.
+	t.Setenv("QURL_ENDPOINT", "https://api.qurl.invalid")
+	t.Setenv("SLACK_SIGNING_SECRET", "signing-secret")
+	t.Setenv(envQURLConnectorImage, "")
+	t.Setenv(envQURLConnectorImageFallback, "")
+
+	err := run()
+
+	if err == nil || !strings.Contains(err.Error(), envQURLConnectorImage+" is required") {
+		t.Fatalf("run() err = %v, want %s fail-closed error before infra/env setup", err, envQURLConnectorImage)
 	}
 }
 

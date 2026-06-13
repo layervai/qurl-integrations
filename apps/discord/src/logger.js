@@ -27,7 +27,8 @@ const REDACT_SUBSTRINGS = [
 // Exact-match keys (not substring) — content-hash names where substring
 // would catch `commitHash` / `md5_prefix`, plus `private_key` which has
 // no broad-safe substring rule. Mirrored in AUDIT_SECRET_KEYS below;
-// drift-guarded by tests, consolidation tracked in #221.
+// drift-guarded by tests, consolidation tracked in #221. Go's shared
+// observability test parses this literal until the keys are consolidated.
 const REDACT_EXACT_KEYS = new Set([
   'hash',
   'md5', 'sha1', 'sha256', 'sha512',

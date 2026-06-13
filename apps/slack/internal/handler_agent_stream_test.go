@@ -118,6 +118,102 @@ func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_MaskedLinkSplitAcrossDeltas_RevealsDestination(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	const reply = "Use [Click here](https://evil.example/login) now."
+	s.onDelta("Use ")
+	s.onDelta("[Click")
+	s.onDelta(" here](https://evil.example/login)")
+	s.onDelta(" now.")
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Use Click here (https://evil.example/login) now."
+	if port.appended() != want {
+		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
+	}
+}
+
+func TestAgentStreamer_BufferedLinkPrefixDoesNotOpenStream(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("[Click")
+	if port.startCalls != 0 {
+		t.Fatalf("incomplete link prefix should not open stream, got starts=%d", port.startCalls)
+	}
+	s.onDelta(" here](https://evil.example/login)")
+
+	if !s.finalizeReply(&agent.Result{Reply: "[Click here](https://evil.example/login)"}) {
+		t.Fatal("completed link should stream once destination is known")
+	}
+	want := "Click here (https://evil.example/login)"
+	if port.appended() != want {
+		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
+	}
+}
+
+func TestAgentStreamer_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	const reply = "Intro: ` then [click me](https://evil.example/phish)"
+	s.onDelta("Intro: ")
+	s.onDelta("` then ")
+	s.onDelta("[click me](https://evil.example/phish)")
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Intro: ` then click me (https://evil.example/phish)"
+	if port.appended() != want {
+		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
+	}
+}
+
+func TestAgentStreamer_RoundBoundaryReferenceDefinitionEscaped(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("Use [click here][evil].")
+	s.flush(context.Background())
+	const reply = "[evil]: https://evil.example/login"
+	s.onDelta(reply)
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Use [click here][evil].\\[evil]: https://evil.example/login"
+	if got := port.appended(); got != want {
+		t.Fatalf("streamed markdown = %q, want %q", got, want)
+	}
+	if strings.Count(port.appended(), "\\[evil]:") != 1 {
+		t.Fatalf("terminal reply should be escaped exactly once, got %q", port.appended())
+	}
+}
+
+func TestAgentStreamer_ReconcileAcceptsChunkBoundaryEscapedReply(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("Use [click here][evil]. ")
+	s.flush(context.Background())
+	s.onDelta("[evil]: https://evil.example/login")
+	const reply = "Use [click here][evil]. [evil]: https://evil.example/login"
+	if oneShot, streamReconcile := hardenAgentMarkdown(reply), hardenAgentMarkdownForStreamReconcile(reply); oneShot == streamReconcile {
+		t.Fatalf("test must exercise stricter stream reconciliation, both forms were %q", oneShot)
+	}
+
+	if !s.finalizeReply(&agent.Result{Reply: reply}) {
+		t.Fatal("a streamed reply must be delivered by the stream")
+	}
+	want := "Use [click here][evil]. \\[evil]: https://evil.example/login"
+	if got := port.appended(); got != want {
+		t.Fatalf("streamed markdown = %q, want %q", got, want)
+	}
+	if strings.Count(port.appended(), "https://evil.example/login") != 1 {
+		t.Fatalf("stream must not append an under-escaped one-shot reply, got %q", port.appended())
+	}
+}
+
 func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)

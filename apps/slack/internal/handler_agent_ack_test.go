@@ -137,11 +137,9 @@ func newAckHandler(t *testing.T, rec ReactionPort, llm agent.LLM) (*Handler, *[]
 // team T1, no enterprise, channel C1, message ts 100.1, emoji "eyes".
 var wantAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "C1", timestamp: "100.1", name: agentAckReaction}
 
-const testAgentStillWorksReply = "still works"
-
 func TestAgentAck_AddedAndClearedOnSuccess(t *testing.T) {
 	rec := &recordingReactions{}
-	h, _, _ := newAckHandler(t, rec, fakeAgentLLM{reply: "You can reach staging."})
+	h, _, _ := newAckHandler(t, rec, fakeAgentLLM{reply: testAgentReachStagingReply})
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("Ev1")))
 	h.Wait()
 

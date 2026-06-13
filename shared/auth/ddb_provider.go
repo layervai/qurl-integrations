@@ -38,6 +38,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -89,6 +90,12 @@ const (
 	EnvWorkspaceStateKMSKeyARN = "WORKSPACE_STATE_KMS_KEY_ARN"
 )
 
+const (
+	apiKeyCacheTTL                         = 5 * time.Minute
+	apiKeyCacheSweepEvery                  = time.Minute
+	apiKeySharedContextErrorRetryLimit int = 1
+)
+
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
 // workspace has no row in the workspace_state table (i.e. the admin has
 // not yet completed /oauth/qurl/start → /callback). The Slack handler
@@ -127,16 +134,66 @@ type FieldEncryptor interface {
 
 // DDBProvider implements Provider by reading per-workspace API keys from
 // a DynamoDB table, with field-level envelope encryption on the key
-// column.
+// column. It owns mutex-protected cache state and must not be copied after
+// first use; construct and share it as *DDBProvider.
 type DDBProvider struct {
 	Client    DynamoDBClient
 	TableName string
 	Encryptor FieldEncryptor
 
+	// Cache successful APIKey lookups at the DDB/decrypt boundary with
+	// per-workspace in-flight fills, generation-guarded invalidation, and inline
+	// expiry sweeps. The cache is process-local, so sibling instances can keep a
+	// decrypted key, including a revoked key, until the five-minute TTL from #263
+	// expires; stricter cross-instance invalidation is tracked in #766. The
+	// decrypted key remains in heap memory for that TTL as the accepted
+	// KMS/latency trade-off.
+	// SetAPIKey seeds this process after a successful write. DeleteAPIKey evicts
+	// this process and forces strongly-consistent refills for one TTL so a
+	// same-process eventually-consistent post-delete read cannot re-cache the
+	// revoked key.
+	apiKeyCache map[string]*cachedAPIKey
+
+	// The mutex coordinates the cache with in-flight fills and invalidation
+	// generations. Generation entries are retained after invalidation even after
+	// an in-flight slot is deleted: that slot deletion detaches the old owner,
+	// which may still finish later, so resetting the generation to zero could let
+	// it cache an old key. The map grows for each workspace seeded or
+	// invalidated in this process and is retained for the process lifetime.
+	apiKeyCacheMu         sync.Mutex
+	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
+	apiKeyCacheGeneration map[string]uint64
+	apiKeyStrongReadUntil map[string]time.Time
+	apiKeyCacheLastSweep  time.Time
+
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
 	// to time.Now.
 	Now func() time.Time
+}
+
+type cachedAPIKey struct {
+	apiKey    string
+	expiresAt time.Time
+}
+
+type apiKeyLookupResult struct {
+	apiKey string
+	err    error
+}
+
+type apiKeyLookupCall struct {
+	done chan struct{}
+	apiKeyLookupResult
+}
+
+type apiKeyLookupStart struct {
+	apiKey         string
+	hit            bool
+	call           *apiKeyLookupCall
+	owner          bool
+	generation     uint64
+	consistentRead bool
 }
 
 // SlackBotTokenInstall is the workspace-scoped Slack OAuth material persisted
@@ -254,17 +311,123 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if workspaceID == "" {
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("DDBProvider.APIKey: %w", err)
+	}
 
+	sharedContextErrorRetries := 0
+	for {
+		now := p.nowOrDefault()
+		start := p.getOrStartAPIKeyLookup(workspaceID, now)
+		if start.hit {
+			return start.apiKey, nil
+		}
+		if !start.owner {
+			select {
+			case <-start.call.done:
+				if shouldRetryAPIKeyLookupAfterSharedError(ctx, start.call.err, sharedContextErrorRetries) {
+					sharedContextErrorRetries++
+					continue
+				}
+				return start.call.apiKey, start.call.err
+			case <-ctx.Done():
+				return "", fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
+			}
+		}
+
+		return p.fetchAndFinishAPIKeyLookup(ctx, workspaceID, start.call, start.generation, start.consistentRead)
+	}
+}
+
+func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, retries int) bool {
+	if err == nil || ctx.Err() != nil || retries >= apiKeySharedContextErrorRetryLimit {
+		return false
+	}
+	// We cannot distinguish the owner's caller being canceled from a lower
+	// layer surfacing the same context error during a DDB brownout. Retrying
+	// keeps healthy waiters from inheriting a dead owner's context, and each
+	// retry re-enters singleflight as a new owner so extra DDB pressure is
+	// sequential rather than a fan-out spike. Keep the retry count tiny so a
+	// persistent context-like lower-layer error cannot spin on a healthy caller.
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	if p.apiKeyCache == nil {
+		p.apiKeyCache = map[string]*cachedAPIKey{}
+	}
+	p.sweepExpiredAPIKeyCacheLocked(now)
+	if entry, ok := p.apiKeyCache[workspaceID]; ok {
+		if now.Before(entry.expiresAt) {
+			return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
+		}
+		delete(p.apiKeyCache, workspaceID)
+	}
+
+	if p.apiKeyCacheGeneration == nil {
+		p.apiKeyCacheGeneration = map[string]uint64{}
+	}
+	generation := p.apiKeyCacheGeneration[workspaceID]
+	consistentRead := false
+	if p.apiKeyStrongReadUntil != nil {
+		if until, ok := p.apiKeyStrongReadUntil[workspaceID]; ok {
+			if now.Before(until) {
+				consistentRead = true
+			} else {
+				delete(p.apiKeyStrongReadUntil, workspaceID)
+			}
+		}
+	}
+	if p.apiKeyLookupInFlight == nil {
+		p.apiKeyLookupInFlight = map[string]*apiKeyLookupCall{}
+	}
+	if call, ok := p.apiKeyLookupInFlight[workspaceID]; ok {
+		return apiKeyLookupStart{call: call}
+	}
+	call := &apiKeyLookupCall{done: make(chan struct{})}
+	p.apiKeyLookupInFlight[workspaceID] = call
+	return apiKeyLookupStart{call: call, owner: true, generation: generation, consistentRead: consistentRead}
+}
+
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, generation uint64, consistentRead bool) (string, error) {
+	result := apiKeyLookupResult{}
+	finished := false
+	defer func() {
+		if rec := recover(); rec != nil {
+			if !finished {
+				result = apiKeyLookupResult{err: errors.New("DDBProvider.APIKey: lookup panicked")}
+				p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
+			}
+			panic(rec)
+		}
+	}()
+
+	apiKey, err := p.fetchAPIKey(ctx, workspaceID, consistentRead)
+	result = apiKeyLookupResult{apiKey: apiKey, err: err}
+	finished = true
+	p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
+	return apiKey, err
+}
+
+func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consistentRead bool) (string, error) {
 	// Eventually-consistent read is correct here: the per-workspace key
 	// only changes on (re-)install, and the few-ms propagation delay is
-	// inside the same "click the setup link" window. Strong reads would
-	// double RCU cost without changing the failure modes that matter.
-	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	// inside the same "click the setup link" window. DeleteAPIKey temporarily
+	// asks for a strong read so this process cannot re-cache a just-deleted key
+	// from an eventually-consistent replica.
+	input := &dynamodb.GetItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-	})
+	}
+	if consistentRead {
+		input.ConsistentRead = aws.Bool(true)
+	}
+	out, err := p.Client.GetItem(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
 	}
@@ -293,6 +456,95 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
 	}
 	return string(pt), nil
+}
+
+func (p *DDBProvider) finishAPIKeyLookup(workspaceID string, call *apiKeyLookupCall, result apiKeyLookupResult, now time.Time, generation uint64) {
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	if result.err == nil && p.apiKeyCacheGeneration[workspaceID] == generation {
+		p.cacheAPIKey(workspaceID, result.apiKey, now)
+	}
+	// Waiters already attached to this fill receive its result even if a
+	// concurrent SetAPIKey/DeleteAPIKey invalidated the generation. The stale
+	// value is not cached, so only those already in-flight callers can observe it.
+	call.apiKeyLookupResult = result
+	if p.apiKeyLookupInFlight[workspaceID] == call {
+		delete(p.apiKeyLookupInFlight, workspaceID)
+	}
+	close(call.done)
+}
+
+func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
+	if p.apiKeyCache == nil {
+		p.apiKeyCache = map[string]*cachedAPIKey{}
+	}
+	p.apiKeyCache[workspaceID] = &cachedAPIKey{
+		apiKey:    apiKey,
+		expiresAt: now.Add(apiKeyCacheTTL),
+	}
+}
+
+func (p *DDBProvider) sweepExpiredAPIKeyCacheLocked(now time.Time) {
+	if !p.apiKeyCacheLastSweep.IsZero() && now.Sub(p.apiKeyCacheLastSweep) < apiKeyCacheSweepEvery {
+		return
+	}
+	// Minute-gated O(workspaces seen by this process), matching the Slack token
+	// cache without adding a background goroutine or real-clock timer to tests.
+	for workspaceID, entry := range p.apiKeyCache {
+		if !now.Before(entry.expiresAt) {
+			delete(p.apiKeyCache, workspaceID)
+		}
+	}
+	for workspaceID, until := range p.apiKeyStrongReadUntil {
+		if !now.Before(until) {
+			delete(p.apiKeyStrongReadUntil, workspaceID)
+		}
+	}
+	p.apiKeyCacheLastSweep = now
+}
+
+func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	delete(p.apiKeyCache, workspaceID)
+	if p.apiKeyLookupInFlight != nil {
+		delete(p.apiKeyLookupInFlight, workspaceID)
+	}
+	if p.apiKeyCacheGeneration == nil {
+		p.apiKeyCacheGeneration = map[string]uint64{}
+	}
+	p.apiKeyCacheGeneration[workspaceID]++
+	if !strongReadUntil.IsZero() {
+		if p.apiKeyStrongReadUntil == nil {
+			p.apiKeyStrongReadUntil = map[string]time.Time{}
+		}
+		p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
+	}
+}
+
+func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	p.apiKeyCacheMu.Lock()
+	defer p.apiKeyCacheMu.Unlock()
+
+	if p.apiKeyLookupInFlight != nil {
+		delete(p.apiKeyLookupInFlight, workspaceID)
+	}
+	if p.apiKeyCacheGeneration == nil {
+		p.apiKeyCacheGeneration = map[string]uint64{}
+	}
+	p.apiKeyCacheGeneration[workspaceID]++
+	if p.apiKeyStrongReadUntil != nil {
+		delete(p.apiKeyStrongReadUntil, workspaceID)
+	}
+	p.cacheAPIKey(workspaceID, apiKey, now)
 }
 
 // SlackBotToken looks up the per-workspace Slack bot token captured during
@@ -340,7 +592,9 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 // SetAPIKey upserts the per-workspace qURL API key. The configuredBy field
 // is informational (the Slack user_id of the admin who completed
 // /oauth/qurl/callback) and is persisted plaintext. UpdateItem is used instead
-// of PutItem so Slack app install metadata in the same row is preserved.
+// of PutItem so Slack app install metadata in the same row is preserved. The
+// apiKey value is stored exactly as minted by qurl-service; APIKey returns the
+// same plaintext without trimming.
 func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetAPIKey: workspaceID is empty")
@@ -354,7 +608,8 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
 	}
 
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	now := p.nowOrDefault()
+	nowString := now.UTC().Format(time.RFC3339)
 	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
 		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
 	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
@@ -372,7 +627,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 			":key": &ddbtypes.AttributeValueMemberB{Value: ct},
 			":dk":  &ddbtypes.AttributeValueMemberB{Value: wrapped},
 			":by":  &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-			":now": &ddbtypes.AttributeValueMemberS{Value: now},
+			":now": &ddbtypes.AttributeValueMemberS{Value: nowString},
 		},
 		ReturnValues: ddbtypes.ReturnValueUpdatedOld,
 	})
@@ -386,6 +641,7 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 				"configured_by", configuredBy)
 		}
 	}
+	p.seedAPIKeyCache(workspaceID, apiKey, now)
 	return nil
 }
 
@@ -505,6 +761,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
 	}
+	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
 	return nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -204,6 +205,22 @@ func slackAPIErrorCode(code string) string {
 	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
 }
 
+const (
+	slackAPIInvalidArguments    = "invalid_arguments"
+	slackAPIInvalidBlockType    = "invalid_block_type"
+	slackAPIInvalidBlocks       = "invalid_blocks"
+	slackAPIInvalidBlocksFormat = "invalid_blocks_format"
+)
+
+type slackWebAPIError struct {
+	op   string
+	code string
+}
+
+func (e *slackWebAPIError) Error() string {
+	return e.op + ": " + e.code
+}
+
 func slackOpenViewAPIError(code, retryAfter string) error {
 	switch code {
 	case "invalid_trigger", "trigger_expired":
@@ -218,6 +235,8 @@ func slackOpenViewAPIError(code, retryAfter string) error {
 const slackChatPostMessageURL = "https://slack.com/api/chat.postMessage"
 
 const slackChatPostEphemeralURL = "https://slack.com/api/chat.postEphemeral"
+const maxSlackMarkdownFallbackLogKeys = 1024
+const slackMarkdownBlockType = "markdown"
 
 const (
 	slackReactionsAddURL    = "https://slack.com/api/reactions.add"
@@ -437,26 +456,171 @@ func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAg
 }
 
 // newSlackPostMarkdownMessageFuncWithTokenLookup builds the
-// [internal.PostMarkdownMessage] seam: a threaded chat.postMessage whose body is
-// the markdown_text field, so Slack renders standard Markdown (the dialect the
-// streaming pane's chat.appendStream also takes) instead of the text field's
-// mrkdwn. markdown_text must not be combined with text/blocks, so the body carries
-// markdown_text alone. Shares the poster (token lookup + Grid fallback) with the
-// text seam — only the JSON body field differs.
+// [internal.PostMarkdownMessage] seam: a threaded chat.postMessage whose visible
+// body is a Slack markdown block, so Slack renders standard Markdown (the dialect
+// the streaming pane's chat.appendStream also takes) instead of the text field's
+// mrkdwn. The top-level text is a literal notification/screen-reader fallback; Slack
+// rejects text alongside markdown_text, so the normal path uses blocks. If Slack
+// rejects the markdown block shape in an older/limited surface, retry once with the
+// older markdown_text-only body so the answer still delivers.
 func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postMessageURL string, httpClient *http.Client) internal.PostMessageFunc {
 	poster := newSlackWebAPIPoster(lookup, userAgent, postMessageURL, "chat.postMessage", slackChatPostMessageResponseError, httpClient)
+	var fallbackLogMu sync.Mutex
+	fallbackLogSeen := make(map[string]struct{})
 	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, markdownText string) error {
 		// Marshal once: the payload is owner-independent, so the Grid retry reuses it.
-		body, err := json.Marshal(struct {
-			Channel      string `json:"channel"`
-			ThreadTS     string `json:"thread_ts,omitempty"`
-			MarkdownText string `json:"markdown_text"`
-		}{Channel: channelID, ThreadTS: threadTS, MarkdownText: markdownText})
+		body, err := slackMarkdownBlockMessageBody(channelID, threadTS, markdownText)
+		if err != nil {
+			return fmt.Errorf("chat.postMessage request marshal: %w", err)
+		}
+		err = poster.post(ctx, teamID, enterpriseID, body)
+		if !isSlackMarkdownBlockFallbackError(err) {
+			return err
+		}
+		errorCode := slackChatPostMessageErrorCode(err)
+		fallbackLogKey := teamID + "\x00" + enterpriseID + "\x00" + errorCode
+		fallbackLogMu.Lock()
+		_, fallbackLogAlreadySeen := fallbackLogSeen[fallbackLogKey]
+		if !fallbackLogAlreadySeen {
+			if len(fallbackLogSeen) >= maxSlackMarkdownFallbackLogKeys {
+				clear(fallbackLogSeen)
+			}
+			fallbackLogSeen[fallbackLogKey] = struct{}{}
+		}
+		fallbackLogMu.Unlock()
+		logArgs := []any{"team_id", teamID, "enterprise_id", enterpriseID, "error_code", errorCode, "error", err}
+		if fallbackLogAlreadySeen {
+			slog.Debug("Slack rejected markdown block; retrying with markdown_text", logArgs...)
+		} else {
+			slog.Info("Slack rejected markdown block; retrying with markdown_text", logArgs...)
+		}
+		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
 		return poster.post(ctx, teamID, enterpriseID, body)
 	}
+}
+
+func slackMarkdownBlockMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
+	markdownText = internal.HardenAgentMarkdown(markdownText)
+	return json.Marshal(struct {
+		Channel  string               `json:"channel"`
+		ThreadTS string               `json:"thread_ts,omitempty"`
+		Text     string               `json:"text"`
+		Blocks   []slackMarkdownBlock `json:"blocks"`
+		// Keep Slack from reparsing the notification/screen-reader fallback as mrkdwn.
+		Mrkdwn bool `json:"mrkdwn"`
+	}{Channel: channelID, ThreadTS: threadTS, Text: slackMarkdownFallbackText(markdownText), Blocks: []slackMarkdownBlock{{Type: slackMarkdownBlockType, Text: markdownText}}, Mrkdwn: false})
+}
+
+type slackMarkdownBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// slackMarkdownFallbackText is a lossy notification/screen-reader fallback, not
+// a second Markdown renderer; the markdown block remains the visible body.
+// It reuses the agent markdown hardener as defense-in-depth in case a future
+// caller passes raw Markdown rather than the already-hardened agent reply.
+// Escaped hardening artifacts may remain here so the fallback never hides text
+// that was made literal for safety.
+func slackMarkdownFallbackText(markdownText string) string {
+	markdownText = internal.HardenAgentMarkdown(markdownText)
+	var lines []string
+	for _, line := range strings.Split(markdownText, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(strings.TrimPrefix(line, ">"))
+		line = strings.TrimLeft(line, "#")
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* "))
+		line = strings.TrimSpace(trimMarkdownFallbackOrderedListMarker(line))
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	text := strings.Join(lines, " ")
+	if slackMarkdownFallbackMarkerOnly(text) {
+		return strings.TrimSpace(markdownText)
+	}
+	text = slackMarkdownFallbackReplacer.Replace(text)
+	fields := strings.Fields(text)
+	for i := range fields {
+		fields[i] = trimMarkdownFallbackEmphasis(fieldMarkdownFallbackEmphasisStar, fields[i])
+		fields[i] = trimMarkdownFallbackEmphasis(fieldMarkdownFallbackEmphasisUnderscore, fields[i])
+	}
+	if fallback := strings.Join(fields, " "); fallback != "" {
+		return fallback
+	}
+	return strings.TrimSpace(markdownText)
+}
+
+var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "")
+
+const (
+	fieldMarkdownFallbackEmphasisStar       = "*"
+	fieldMarkdownFallbackEmphasisUnderscore = "_"
+)
+
+func slackMarkdownFallbackMarkerOnly(text string) bool {
+	text = strings.TrimSpace(text)
+	return text != "" && strings.Trim(text, "*_~` ") == ""
+}
+
+func trimMarkdownFallbackEmphasis(marker, field string) string {
+	if !strings.HasPrefix(field, marker) || strings.Contains(field, "://") {
+		return field
+	}
+	if strings.Trim(field, marker) == "" {
+		return field
+	}
+	last := strings.LastIndex(field[len(marker):], marker)
+	if last < 0 {
+		return field
+	}
+	last += len(marker)
+	return field[len(marker):last] + field[last+len(marker):]
+}
+
+func trimMarkdownFallbackOrderedListMarker(line string) string {
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 0 || i+1 >= len(line) || line[i] != '.' || line[i+1] != ' ' {
+		return line
+	}
+	return line[i+2:]
+}
+
+// Slack rejects markdown_text paired with text/blocks, so this compatibility
+// retry intentionally omits the literal notification/screen-reader fallback.
+func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
+	markdownText = internal.HardenAgentMarkdown(markdownText)
+	return json.Marshal(struct {
+		Channel      string `json:"channel"`
+		ThreadTS     string `json:"thread_ts,omitempty"`
+		MarkdownText string `json:"markdown_text"`
+	}{Channel: channelID, ThreadTS: threadTS, MarkdownText: markdownText})
+}
+
+func isSlackMarkdownBlockFallbackError(err error) bool {
+	switch slackChatPostMessageErrorCode(err) {
+	// invalid_arguments is broader than the block-specific codes, but this helper
+	// only runs after the markdown-block attempt. A real argument error costs one
+	// doomed markdown_text retry, while older Slack surfaces still get delivery.
+	case slackAPIInvalidArguments, slackAPIInvalidBlockType, slackAPIInvalidBlocks, slackAPIInvalidBlocksFormat:
+		return true
+	default:
+		return false
+	}
+}
+
+func slackChatPostMessageErrorCode(err error) string {
+	var apiErr *slackWebAPIError
+	if !errors.As(err, &apiErr) || apiErr.op != "chat.postMessage" {
+		return ""
+	}
+	return apiErr.code
 }
 
 // newSlackPostMessageBlocksFuncWithTokenLookup builds the
@@ -611,14 +775,25 @@ func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpris
 	return p.stop.post(ctx, teamID, enterpriseID, body)
 }
 
-// newSlackResolveChannelNameFuncWithTokenLookup builds the
-// [internal.ResolveChannelNameFunc] seam: a conversations.info read on the
-// per-workspace bot token returning the channel's name. Unlike the POST seams
-// (which discard the body), this parses the response, so it doesn't use the shared
-// poster; it replicates the same token lookup + Enterprise Grid org-token fallback.
-// Requires the channels:read / groups:read scopes — without them Slack answers
-// missing_scope and the agent falls back to the channel id.
-func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveChannelNameFunc {
+// slackResolveChannelNameFromConversationInfo projects the conversations.info seam
+// to the legacy channel-name seam, preserving the previous empty-name-on-error shape.
+func slackResolveChannelNameFromConversationInfo(resolveInfo internal.ResolveConversationInfoFunc) internal.ResolveChannelNameFunc {
+	return func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error) {
+		info, err := resolveInfo(ctx, teamID, enterpriseID, channelID)
+		if err != nil {
+			return "", err
+		}
+		return info.Name, nil
+	}
+}
+
+// newSlackResolveConversationInfoFuncWithTokenLookup builds the
+// [internal.ResolveConversationInfoFunc] seam: a conversations.info read on the
+// per-workspace bot token returning the small metadata slice the handler needs (name
+// and is_mpim). Unlike the POST seams (which discard the body), this parses the
+// response, so it doesn't use the shared poster; it replicates the same token lookup +
+// Enterprise Grid org-token fallback.
+func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveConversationInfoFunc {
 	if httpClient == nil {
 		httpClient = defaultSlackPostMessageClient()
 	}
@@ -629,13 +804,13 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 	// get resolves one owner's token and reads conversations.info. A token-lookup
 	// failure is wrapped with %w so the caller's errors.Is(ErrSlackBotTokenNotConfigured)
 	// Grid fallback fires, mirroring slackWebAPIPoster.post.
-	get := func(ctx context.Context, ownerID, channelID string) (string, error) {
+	get := func(ctx context.Context, ownerID, channelID string) (internal.ConversationInfo, error) {
 		token, err := lookup(ctx, ownerID)
 		if err != nil {
-			return "", fmt.Errorf("conversations.info token lookup: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info token lookup: %w", err)
 		}
 		if token = strings.TrimSpace(token); token == "" {
-			return "", errors.New("conversations.info token lookup: empty token")
+			return internal.ConversationInfo{}, errors.New("conversations.info token lookup: empty token")
 		}
 		// The channel id is a Slack object id (C/G/D + base32) from the
 		// signature-verified Events payload; its charset can't contain a query-reserved
@@ -643,49 +818,50 @@ func newSlackResolveChannelNameFuncWithTokenLookup(lookup slackBotTokenLookup, u
 		// caller passes that trusted id — a future untrusted source would need escaping.)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, conversationsInfoURL+"?channel="+channelID, http.NoBody)
 		if err != nil {
-			return "", fmt.Errorf("conversations.info request build: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info request build: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("User-Agent", userAgent)
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			return "", fmt.Errorf("conversations.info request: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info request: %w", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
 		if err != nil {
-			return "", fmt.Errorf("conversations.info response read: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info response read: %w", err)
 		}
 		if len(raw) > slackWebAPIResponseBodyLimit {
 			_, _ = io.Copy(io.Discard, resp.Body)
-			return "", fmt.Errorf("conversations.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
 		}
 		var out struct {
 			OK      bool   `json:"ok"`
 			Error   string `json:"error"`
 			Channel struct {
-				Name string `json:"name"`
+				Name   string `json:"name"`
+				IsMPIM bool   `json:"is_mpim"`
 			} `json:"channel"`
 		}
 		if err := json.Unmarshal(raw, &out); err != nil {
-			return "", fmt.Errorf("conversations.info decode: %w", err)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info decode: %w", err)
 		}
 		if !out.OK {
 			slackErr := out.Error
 			if slackErr == "" {
 				slackErr = fmt.Sprintf("status %d", resp.StatusCode)
 			}
-			return "", fmt.Errorf("conversations.info: %s", slackErr)
+			return internal.ConversationInfo{}, fmt.Errorf("conversations.info: %s", slackErr)
 		}
-		return out.Channel.Name, nil
+		return internal.ConversationInfo{Name: out.Channel.Name, IsMPIM: out.Channel.IsMPIM}, nil
 	}
-	return func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error) {
-		name, err := get(ctx, teamID, channelID)
+	return func(ctx context.Context, teamID, enterpriseID, channelID string) (internal.ConversationInfo, error) {
+		info, err := get(ctx, teamID, channelID)
 		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
-			return name, err
+			return info, err
 		}
 		if enterpriseID == "" || enterpriseID == teamID {
-			return name, err
+			return info, err
 		}
 		return get(ctx, enterpriseID, channelID)
 	}
@@ -936,7 +1112,7 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 	if code == "missing_scope" {
 		return fmt.Errorf("%s: %w", op, internal.ErrSlackMissingScope)
 	}
-	return fmt.Errorf("%s: %s", op, code)
+	return &slackWebAPIError{op: op, code: code}
 }
 
 // slackChatPostMessageResponseError preserves the chat.postMessage error shape: no

@@ -22,7 +22,10 @@ const (
 	slackEventTypeAssistantThreadStarted        = "assistant_thread_started"
 	slackEventTypeAssistantThreadContextChanged = "assistant_thread_context_changed"
 	slackEventTypeAppHomeOpened                 = "app_home_opened"
+	slackChannelTypeChannel                     = "channel"
+	slackChannelTypeGroup                       = "group"
 	slackChannelTypeIM                          = "im"
+	slackChannelTypeMPIM                        = "mpim"
 	slackMessageSubtypeThreadBroadcast          = "thread_broadcast"
 )
 
@@ -1147,7 +1150,7 @@ func (h *Handler) callerIsAdmin(log *slog.Logger, teamID, userID string) bool {
 // agentReplyText renders the mrkdwn text-seam reply for a turn: the escaped
 // proposal preview while conversation mode is read-only, else the generic error
 // reply. The agent's own free-text answer does NOT come through here — it posts as
-// markdown_text (see deliverAgentResult), which intercepts a non-blank answer
+// standard Markdown (see deliverAgentResult), which intercepts a non-blank answer
 // before the fallback reaches this function. So a non-proposal result arriving here
 // is the blank-answer case, and renders the error reply.
 func agentReplyText(result *agent.Result) string {
@@ -1172,11 +1175,12 @@ func (h *Handler) postAgentReply(log *slog.Logger, env *slackEventEnvelope, thre
 	h.deliverAgentText(log, env, threadTS, text, h.cfg.PostMessage)
 }
 
-// postAgentMarkdownReply delivers the agent's free-text answer as markdown_text
-// (standard Markdown rendered by Slack, parity with the streaming pane). When the
-// markdown seam is unwired (PostMarkdownMessage nil) it falls back to the mrkdwn
-// PostMessage seam — the pre-fix rendering, but still a delivered answer rather
-// than a dropped one.
+// postAgentMarkdownReply delivers the agent's free-text answer as standard
+// Markdown rendered by Slack, with masked links already neutralized by the caller.
+// When the markdown seam is unwired (PostMarkdownMessage nil) it falls back to the
+// mrkdwn PostMessage seam: degraded rendering, and not a full defense for Slack's
+// own <url|label> mrkdwn masking syntax, but still a delivered pre-enablement
+// answer rather than a dropped one. The production seam wires PostMarkdownMessage.
 func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelope, threadTS, markdown string) {
 	post := h.cfg.PostMarkdownMessage
 	if post == nil {

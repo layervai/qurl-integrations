@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,13 +15,18 @@ import (
 const (
 	testTeamID        = "T123ABCDEF"
 	testSlackBotToken = "xoxb-123456789012345678901234567890"
+	testOldAPIKey     = "lv_live_old"
+	testNewAPIKey     = "lv_live_new"
 )
 
 // fakeDDBClient is a hand-rolled stub the table tests configure with
 // predetermined results. Captures Put/Delete inputs for assertion.
 type fakeDDBClient struct {
 	getOutput    *dynamodb.GetItemOutput
+	getFunc      func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
 	getErr       error
+	getCalls     int
+	getInputs    []*dynamodb.GetItemInput
 	putInput     *dynamodb.PutItemInput
 	putErr       error
 	updateInput  *dynamodb.UpdateItemInput
@@ -30,7 +36,12 @@ type fakeDDBClient struct {
 	delErr       error
 }
 
-func (f *fakeDDBClient) GetItem(_ context.Context, _ *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+func (f *fakeDDBClient) GetItem(ctx context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.getCalls++
+	f.getInputs = append(f.getInputs, in)
+	if f.getFunc != nil {
+		return f.getFunc(ctx, in)
+	}
 	return f.getOutput, f.getErr
 }
 func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
@@ -67,17 +78,22 @@ func (emptyPlaintextEncryptor) Open(_ context.Context, _, _, _ []byte) ([]byte, 
 type passthroughEncryptor struct {
 	sealErr error
 	openErr error
+
+	sealCalls int
+	openCalls int
 }
 
 const passthroughWrappedKey = "DK"
 
 func (p *passthroughEncryptor) Seal(_ context.Context, plaintext, _ []byte) (ciphertext, wrappedKey []byte, err error) {
+	p.sealCalls++
 	if p.sealErr != nil {
 		return nil, nil, p.sealErr
 	}
 	return append([]byte(nil), plaintext...), []byte(passthroughWrappedKey), nil
 }
 func (p *passthroughEncryptor) Open(_ context.Context, ciphertext, wrappedKey, _ []byte) ([]byte, error) {
+	p.openCalls++
 	if p.openErr != nil {
 		return nil, p.openErr
 	}
@@ -85,6 +101,10 @@ func (p *passthroughEncryptor) Open(_ context.Context, ciphertext, wrappedKey, _
 		return nil, errors.New("wrong wrapped key")
 	}
 	return append([]byte(nil), ciphertext...), nil
+}
+
+func getItemConsistentRead(in *dynamodb.GetItemInput) bool {
+	return in != nil && in.ConsistentRead != nil && *in.ConsistentRead
 }
 
 func TestDDBProviderAPIKey(t *testing.T) {
@@ -229,6 +249,901 @@ func TestDDBProviderAPIKey(t *testing.T) {
 		_, err := p.APIKey(context.Background(), testTeamID)
 		if !errors.Is(err, ErrWorkspaceNotConfigured) {
 			t.Fatalf("want ErrWorkspaceNotConfigured for Slack-installed but qURL-unconfigured row, got %v", err)
+		}
+	})
+
+	t.Run("does not cache workspace not configured", func(t *testing.T) {
+		ddb := &fakeDDBClient{getOutput: &dynamodb.GetItemOutput{Item: nil}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
+		}
+
+		ddb.getOutput = &dynamodb.GetItemOutput{
+			Item: map[string]ddbtypes.AttributeValue{
+				attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+				attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte("lv_live_after_install")},
+				attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+			},
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after install: %v", err)
+		}
+		if got != "lv_live_after_install" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_install")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("missing workspace should not be cached: GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+}
+
+func TestDDBProviderAPIKeyCache(t *testing.T) {
+	itemForKey := func(apiKey string) map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{
+			attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+			attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+			attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+		}
+	}
+
+	t.Run("hit skips DDB and decrypt", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_cached")},
+		}
+		encryptor := &passthroughEncryptor{}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		for i := 0; i < 2; i++ {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				t.Fatalf("APIKey call %d: %v", i+1, err)
+			}
+			if got != "lv_live_cached" {
+				t.Fatalf("call %d got %q want %q", i+1, got, "lv_live_cached")
+			}
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
+		}
+	})
+
+	t.Run("cache hit honors canceled context without extra DDB", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_cached_after_cancel")},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+		if got != "lv_live_cached_after_cancel" {
+			t.Fatalf("prime got %q want %q", got, "lv_live_cached_after_cancel")
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		got, err = p.APIKey(ctx, testTeamID)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cached APIKey with canceled context err = %v, want context.Canceled", err)
+		}
+		if got != "" {
+			t.Fatalf("cached APIKey with canceled context got %q want empty", got)
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+	})
+
+	t.Run("does not cache DDB transport errors", func(t *testing.T) {
+		ddb := &fakeDDBClient{getErr: errors.New("ddb down")}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
+			t.Fatal("want DDB error, got nil")
+		}
+
+		ddb.getErr = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_ddb_error")}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after DDB recovery: %v", err)
+		}
+		if got != "lv_live_after_ddb_error" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_ddb_error")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+
+	t.Run("does not cache decrypt errors", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_decrypt_error")},
+		}
+		encryptor := &passthroughEncryptor{openErr: errors.New("kms down")}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
+			t.Fatal("want decrypt error, got nil")
+		}
+
+		encryptor.openErr = nil
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after decrypt recovery: %v", err)
+		}
+		if got != "lv_live_after_decrypt_error" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_decrypt_error")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+		if encryptor.openCalls != 2 {
+			t.Fatalf("Open calls = %d, want 2", encryptor.openCalls)
+		}
+	})
+
+	t.Run("expired entry refreshes from DDB", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("first APIKey: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want %q", got, testOldAPIKey)
+		}
+
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		now = now.Add(apiKeyCacheTTL - time.Second)
+		got, err = p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("cached APIKey: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("cached call got %q want %q", got, testOldAPIKey)
+		}
+
+		now = now.Add(2 * time.Second)
+		got, err = p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("expired APIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("expired call got %q want %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+
+	t.Run("expired entry is deleted on read miss", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		ddb := &fakeDDBClient{getErr: errors.New("ddb down")}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		p.apiKeyCache = map[string]*cachedAPIKey{
+			testTeamID: {
+				apiKey:    testOldAPIKey,
+				expiresAt: now.Add(-time.Second),
+			},
+		}
+
+		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
+			t.Fatal("want DDB error, got nil")
+		}
+		if _, ok := p.apiKeyCache[testTeamID]; ok {
+			t.Fatal("expired cache entry should be deleted before the refill")
+		}
+	})
+
+	t.Run("sweeps expired entries during lookup", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+		p.apiKeyCache = map[string]*cachedAPIKey{
+			"T_expired": {
+				apiKey:    testOldAPIKey,
+				expiresAt: now.Add(-time.Second),
+			},
+			"T_fresh": {
+				apiKey:    testOldAPIKey,
+				expiresAt: now.Add(time.Minute),
+			},
+		}
+		p.apiKeyStrongReadUntil = map[string]time.Time{
+			"T_expired": now.Add(-time.Second),
+			"T_fresh":   now.Add(time.Minute),
+		}
+
+		got, err := p.APIKey(context.Background(), "T_new")
+		if err != nil {
+			t.Fatalf("APIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if _, ok := p.apiKeyCache["T_expired"]; ok {
+			t.Fatal("expired cache entry was not swept")
+		}
+		if _, ok := p.apiKeyCache["T_fresh"]; !ok {
+			t.Fatal("fresh cache entry was swept")
+		}
+		if _, ok := p.apiKeyStrongReadUntil["T_expired"]; ok {
+			t.Fatal("expired strong-read marker was not swept")
+		}
+		if _, ok := p.apiKeyStrongReadUntil["T_fresh"]; !ok {
+			t.Fatal("fresh strong-read marker was swept")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+	})
+
+	t.Run("concurrent miss shares one DDB and decrypt fill", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				close(getStarted)
+				<-releaseGet
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_shared_fill")}, nil
+			},
+		}
+		encryptor := &passthroughEncryptor{}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		results := make(chan string, 2)
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got, err := p.APIKey(context.Background(), testTeamID)
+				if err != nil {
+					errs <- err
+					return
+				}
+				results <- got
+			}()
+		}
+		<-getStarted
+		close(releaseGet)
+		wg.Wait()
+		close(results)
+		close(errs)
+
+		for err := range errs {
+			t.Fatalf("APIKey: %v", err)
+		}
+		for got := range results {
+			if got != "lv_live_shared_fill" {
+				t.Fatalf("got %q want %q", got, "lv_live_shared_fill")
+			}
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1", encryptor.openCalls)
+		}
+	})
+
+	t.Run("owner error is shared with coalesced waiter", func(t *testing.T) {
+		ownerErr := errors.New("ddb down")
+		ddb := &fakeDDBClient{getErr: ownerErr}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		owner := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if !owner.owner {
+			t.Fatal("first lookup should own the fill")
+		}
+		waiter := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if waiter.owner || waiter.call != owner.call {
+			t.Fatal("second lookup should wait on the owner fill")
+		}
+
+		waiterErr := make(chan error, 1)
+		go func() {
+			<-waiter.call.done
+			waiterErr <- waiter.call.err
+		}()
+
+		_, err := p.fetchAndFinishAPIKeyLookup(context.Background(), testTeamID, owner.call, owner.generation, false)
+		if !errors.Is(err, ownerErr) {
+			t.Fatalf("owner err = %v, want %v", err, ownerErr)
+		}
+		select {
+		case err := <-waiterErr:
+			if !errors.Is(err, ownerErr) {
+				t.Fatalf("waiter err = %v, want %v", err, ownerErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not receive owner error")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if _, ok := p.apiKeyCache[testTeamID]; ok {
+			t.Fatal("owner error should not populate the cache")
+		}
+	})
+
+	t.Run("owner cancellation asks healthy waiter to retry", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getFunc: func(ctx context.Context, _ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return nil, ctx.Err()
+			},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		owner := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if !owner.owner {
+			t.Fatal("first lookup should own the fill")
+		}
+		waiter := p.getOrStartAPIKeyLookup(testTeamID, now)
+		if waiter.owner || waiter.call != owner.call {
+			t.Fatal("second lookup should wait on the owner fill")
+		}
+
+		waiterErr := make(chan error, 1)
+		go func() {
+			<-waiter.call.done
+			waiterErr <- waiter.call.err
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := p.fetchAndFinishAPIKeyLookup(ctx, testTeamID, owner.call, owner.generation, false)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner err = %v, want context.Canceled", err)
+		}
+		select {
+		case err := <-waiterErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("waiter err = %v, want context.Canceled", err)
+			}
+			if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), err, 0) {
+				t.Fatal("healthy waiter should retry after shared owner cancellation")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not receive owner cancellation")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+		if _, ok := p.apiKeyCache[testTeamID]; ok {
+			t.Fatal("owner cancellation should not populate the cache")
+		}
+		ddb.getFunc = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_owner_cancel")}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("retry APIKey after owner cancellation: %v", err)
+		}
+		if got != "lv_live_after_owner_cancel" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_owner_cancel")
+		}
+	})
+
+	t.Run("shared deadline asks healthy waiter to retry", func(t *testing.T) {
+		if !shouldRetryAPIKeyLookupAfterSharedError(context.Background(), context.DeadlineExceeded, 0) {
+			t.Fatal("healthy waiter should retry after shared deadline")
+		}
+		if shouldRetryAPIKeyLookupAfterSharedError(context.Background(), context.DeadlineExceeded, apiKeySharedContextErrorRetryLimit) {
+			t.Fatal("healthy waiter should not retry after reaching the retry limit")
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if shouldRetryAPIKeyLookupAfterSharedError(ctx, context.DeadlineExceeded, 0) {
+			t.Fatal("canceled waiter should not retry after shared deadline")
+		}
+	})
+
+	t.Run("APIKey waiter retries after owner cancellation", func(t *testing.T) {
+		firstGetStarted := make(chan struct{})
+		var callMu sync.Mutex
+		getCall := 0
+		ddb := &fakeDDBClient{
+			getFunc: func(ctx context.Context, _ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				callMu.Lock()
+				getCall++
+				call := getCall
+				callMu.Unlock()
+				if call == 1 {
+					close(firstGetStarted)
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_waiter_retry")}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		ownerCtx, cancelOwner := context.WithCancel(context.Background())
+		ownerErr := make(chan error, 1)
+		go func() {
+			_, err := p.APIKey(ownerCtx, testTeamID)
+			ownerErr <- err
+		}()
+		<-firstGetStarted
+
+		waiterResult := make(chan string, 1)
+		waiterErr := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				waiterErr <- err
+				return
+			}
+			waiterResult <- got
+		}()
+
+		cancelOwner()
+		select {
+		case err := <-ownerErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("owner err = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("owner did not observe cancellation")
+		}
+		select {
+		case err := <-waiterErr:
+			t.Fatalf("waiter should retry after owner cancellation, got err %v", err)
+		case got := <-waiterResult:
+			if got != "lv_live_waiter_retry" {
+				t.Fatalf("waiter got %q want %q", got, "lv_live_waiter_retry")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not retry after owner cancellation")
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+	})
+
+	t.Run("waiter cancellation leaves owner fill active", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				close(getStarted)
+				<-releaseGet
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_owner_fill")}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		ownerResult := make(chan string, 1)
+		ownerErr := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				ownerErr <- err
+				return
+			}
+			ownerResult <- got
+		}()
+		<-getStarted
+
+		waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+		waiterErr := make(chan error, 1)
+		go func() {
+			_, err := p.APIKey(waiterCtx, testTeamID)
+			waiterErr <- err
+		}()
+		cancelWaiter()
+		select {
+		case err := <-waiterErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("waiter err = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("waiter did not observe its own cancellation")
+		}
+
+		close(releaseGet)
+		select {
+		case err := <-ownerErr:
+			t.Fatalf("owner APIKey: %v", err)
+		case got := <-ownerResult:
+			if got != "lv_live_owner_fill" {
+				t.Fatalf("owner got %q want %q", got, "lv_live_owner_fill")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("owner did not finish after release")
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("cached APIKey after owner fill: %v", err)
+		}
+		if got != "lv_live_owner_fill" {
+			t.Fatalf("cached got %q want %q", got, "lv_live_owner_fill")
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
+		}
+	})
+
+	t.Run("panic releases in-flight lookup", func(t *testing.T) {
+		calls := 0
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				calls++
+				if calls == 1 {
+					panic("simulated APIKey lookup panic")
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_panic")}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("first APIKey should panic")
+				}
+			}()
+			_, _ = p.APIKey(context.Background(), testTeamID)
+		}()
+
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("second APIKey should start after panic cleanup: %v", err)
+		}
+		if got != "lv_live_after_panic" {
+			t.Fatalf("got %q want %q", got, "lv_live_after_panic")
+		}
+		if calls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", calls)
+		}
+	})
+}
+
+func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
+	itemForKey := func(apiKey string) map[string]ddbtypes.AttributeValue {
+		return map[string]ddbtypes.AttributeValue{
+			attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+			attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+			attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+		}
+	}
+
+	t.Run("SetAPIKey seeds new cached value", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want %q", got, testOldAPIKey)
+		}
+
+		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
+			t.Fatalf("SetAPIKey: %v", err)
+		}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}
+		got, err = p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after SetAPIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1 because SetAPIKey seeds the cache", ddb.getCalls)
+		}
+	})
+
+	t.Run("DeleteAPIKey evicts stale cached value", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Unix(1700000000, 0) },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteAPIKey: %v", err)
+		}
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: nil}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after delete, got %v", err)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2 after cache eviction", ddb.getCalls)
+		}
+	})
+
+	t.Run("DeleteAPIKey forces strong refill after local invalidation", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteAPIKey: %v", err)
+		}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemConsistentRead(in) {
+				return &dynamodb.GetItemOutput{Item: nil}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
+
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after delete, got %v", err)
+		}
+		if len(ddb.getInputs) != 2 || !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatalf("post-delete refill should use a strongly consistent read, inputs=%v", ddb.getInputs)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1; stale post-delete row must not be decrypted", encryptor.openCalls)
+		}
+	})
+
+	t.Run("SetAPIKey prevents in-flight stale read from repopulating cache", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		ddb := &fakeDDBClient{
+			getFunc: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				close(getStarted)
+				<-releaseGet
+				return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+			},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		result := make(chan string, 1)
+		errc := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				errc <- err
+				return
+			}
+			result <- got
+		}()
+		<-getStarted
+		if err := p.SetAPIKey(context.Background(), testTeamID, testNewAPIKey, "U_ADMIN"); err != nil {
+			t.Fatalf("SetAPIKey: %v", err)
+		}
+		close(releaseGet)
+
+		select {
+		case err := <-errc:
+			t.Fatalf("in-flight APIKey: %v", err)
+		case got := <-result:
+			if got != testOldAPIKey {
+				t.Fatalf("in-flight call got %q want %q", got, testOldAPIKey)
+			}
+		}
+
+		ddb.getFunc = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after SetAPIKey: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls = %d, want 1 because SetAPIKey seeds the cache", ddb.getCalls)
+		}
+	})
+
+	t.Run("DeleteAPIKey prevents in-flight stale read from repopulating cache", func(t *testing.T) {
+		releaseGet := make(chan struct{})
+		getStarted := make(chan struct{})
+		firstGet := true
+		ddb := &fakeDDBClient{
+			getFunc: func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				if firstGet && !getItemConsistentRead(in) {
+					firstGet = false
+					close(getStarted)
+					<-releaseGet
+					return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+				}
+				if getItemConsistentRead(in) {
+					return &dynamodb.GetItemOutput{Item: nil}, nil
+				}
+				return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+			},
+		}
+		now := time.Unix(1700000000, 0)
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
+		}
+
+		result := make(chan string, 1)
+		errc := make(chan error, 1)
+		go func() {
+			got, err := p.APIKey(context.Background(), testTeamID)
+			if err != nil {
+				errc <- err
+				return
+			}
+			result <- got
+		}()
+		<-getStarted
+		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteAPIKey: %v", err)
+		}
+		close(releaseGet)
+
+		select {
+		case err := <-errc:
+			t.Fatalf("in-flight APIKey: %v", err)
+		case got := <-result:
+			if got != testOldAPIKey {
+				t.Fatalf("in-flight call got %q want %q", got, testOldAPIKey)
+			}
+		}
+
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after DeleteAPIKey, got %v", err)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls = %d, want 2", ddb.getCalls)
+		}
+		if !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatal("post-delete refill should use a strongly consistent read")
+		}
+		if _, ok := p.apiKeyCache[testTeamID]; ok {
+			t.Fatal("in-flight stale read should not populate the cache after DeleteAPIKey")
+		}
+	})
+
+	t.Run("blank private cache mutation guards are no-ops", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		call := &apiKeyLookupCall{done: make(chan struct{})}
+		p := &DDBProvider{
+			apiKeyCache: map[string]*cachedAPIKey{
+				testTeamID: {
+					apiKey:    testOldAPIKey,
+					expiresAt: now.Add(apiKeyCacheTTL),
+				},
+			},
+			apiKeyLookupInFlight: map[string]*apiKeyLookupCall{
+				testTeamID: call,
+			},
+			apiKeyCacheGeneration: map[string]uint64{
+				testTeamID: 7,
+			},
+			apiKeyStrongReadUntil: map[string]time.Time{
+				testTeamID: now.Add(apiKeyCacheTTL),
+			},
+		}
+
+		p.invalidateAPIKeyCache(" \t ", now.Add(apiKeyCacheTTL))
+		p.seedAPIKeyCache("\n", testNewAPIKey, now)
+
+		if len(p.apiKeyCache) != 1 || p.apiKeyCache[testTeamID].apiKey != testOldAPIKey {
+			t.Fatalf("blank mutation changed cache: %#v", p.apiKeyCache)
+		}
+		if len(p.apiKeyLookupInFlight) != 1 || p.apiKeyLookupInFlight[testTeamID] != call {
+			t.Fatalf("blank mutation changed in-flight map: %#v", p.apiKeyLookupInFlight)
+		}
+		if len(p.apiKeyCacheGeneration) != 1 || p.apiKeyCacheGeneration[testTeamID] != 7 {
+			t.Fatalf("blank mutation changed generation map: %#v", p.apiKeyCacheGeneration)
+		}
+		if len(p.apiKeyStrongReadUntil) != 1 || !p.apiKeyStrongReadUntil[testTeamID].Equal(now.Add(apiKeyCacheTTL)) {
+			t.Fatalf("blank mutation changed strong-read markers: %#v", p.apiKeyStrongReadUntil)
 		}
 	})
 }

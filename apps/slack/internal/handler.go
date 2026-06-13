@@ -335,9 +335,14 @@ type Config struct {
 	PostDM PostDMFunc
 
 	// TunnelImage is the Docker image shown by `/qurl-admin protect-connector`.
-	// Empty falls back to the public client image with the `latest` tag for
-	// dev/sandbox installs; production deploys should set an immutable tag or
-	// digest so Slack never instructs customers to run a floating image.
+	// The public env var is QURL_CONNECTOR_IMAGE; this field keeps the
+	// historical tunnel naming used by the install-rendering code.
+	// Empty falls back to the public client image with the `latest` tag only for
+	// explicit dev/sandbox installs; production cmd/main.go fails closed unless
+	// the operator sets a specific non-latest tag or digest.
+	// Tag/digest policy is enforced by cmd/main.go, not by the renderer, so tests
+	// that construct Config directly must pass a pinned image unless they
+	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
 
 	// PostFeedback delivers a `/qurl feedback` submission to the internal
@@ -368,22 +373,21 @@ type Config struct {
 
 	// PostEphemeral posts a chat.postEphemeral message visible only to userID in a
 	// channel/group conversation. The confirm flow delivers a get's one-time link this
-	// way in a (multi-party) channel: a STANDALONE ephemeral, independent of the click's
-	// response_url, so the card-replace can't overwrite it. (The 1:1-DM branch uses
-	// PostMessage instead — ephemerals don't render in a DM.) Nil → the channel get
-	// delivery reports failure and the card downgrades; it is NOT part of the agentEnabled
-	// gate.
+	// way in a channel/private channel after the mpim boundary check: a STANDALONE
+	// ephemeral, independent of the click's response_url, so the card-replace can't
+	// overwrite it. (The 1:1-DM branch uses PostMessage instead — ephemerals don't
+	// render in a DM.) Nil → the channel get delivery reports failure and the card
+	// downgrades; it is NOT part of the agentEnabled gate.
 	PostEphemeral PostEphemeralFunc
 
-	// PostMarkdownMessage posts a chat.postMessage reply whose body is the
-	// markdown_text field — standard Markdown that Slack's own parser renders,
-	// rather than the text field's mrkdwn dialect. It carries the agent's
-	// free-text answer so a channel reply renders identically to the streaming
-	// pane (chat.appendStream also takes markdown_text), without a hand-rolled
-	// mrkdwn converter. Only the agent's own answer routes here; an escaped
-	// proposal preview / error reply stays on PostMessage (see deliverAgentResult).
-	// Nil falls back to PostMessage (mrkdwn), so a turn still delivers even if this
-	// seam is unwired — it is NOT part of the agentEnabled gate.
+	// PostMarkdownMessage posts a chat.postMessage reply whose visible body is
+	// standard Markdown rendered by Slack, rather than the text field's mrkdwn
+	// dialect. It carries the agent's free-text answer so a channel reply renders
+	// like the streaming pane, without a hand-rolled mrkdwn converter. Only the
+	// agent's own answer routes here; an escaped proposal preview / error reply
+	// stays on PostMessage (see deliverAgentResult). Nil falls back to PostMessage
+	// (mrkdwn), so a turn still delivers even if this seam is unwired — it is NOT
+	// part of the agentEnabled gate.
 	PostMarkdownMessage PostMessageFunc
 
 	// AgentDisabled is the org-level kill switch. True forces conversation mode
@@ -461,6 +465,15 @@ type Config struct {
 	// the id for the TTL instead of re-hitting Slack every turn. Best-effort: a
 	// resolve error never fails the turn.
 	ResolveChannelName ResolveChannelNameFunc
+
+	// ResolveConversationInfo resolves Slack conversation metadata for snapshot-less
+	// confirm delivery decisions. Current cards use the snapshotted Events API
+	// channel_type first, but legacy/snapshot-less G-prefixed gets can still use
+	// is_mpim to avoid minting an access link into a group DM until that surface is
+	// explicitly proven safe. Nil or lookup errors preserve the existing G-prefixed
+	// ephemeral path so private-channel approvals do not regress in installs without
+	// mpim:read; ordinary channels and 1:1 DMs do not need this lookup.
+	ResolveConversationInfo ResolveConversationInfoFunc
 
 	// ChannelMembership reports whether a user is a member of a channel
 	// (conversations.members on the per-workspace bot token, Grid-aware). It gates whether
@@ -566,6 +579,20 @@ type AgentStreamPort interface {
 // transport failure — the caller treats any error as "no name" and falls back to
 // the channel id.
 type ResolveChannelNameFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (string, error)
+
+// ConversationInfo is the small, Slack-sourced conversation metadata slice the
+// handler needs beyond the human-readable name. Keep it intentionally narrow so
+// conversations.info response growth does not become app surface area by accident.
+type ConversationInfo struct {
+	Name   string
+	IsMPIM bool
+}
+
+// ResolveConversationInfoFunc resolves Slack conversation metadata via
+// conversations.info on the per-workspace bot token (enterpriseID for Grid token
+// resolution). It returns an error on a missing scope, unknown conversation, or
+// transport/decode failure; callers choose whether that is best-effort or fail-closed.
+type ResolveConversationInfoFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (ConversationInfo, error)
 
 // ChannelMembershipFunc reports whether userID is a member of channelID via
 // conversations.members on the per-workspace bot token (enterpriseID for Grid token
