@@ -673,6 +673,13 @@ func tunnelBootstrapIdempotencyKey(teamID, channelID, userID, slug, attemptID st
 	// submissions use view.id, deliberately deduping same-modal resubmissions to
 	// avoid double-minting on Slack retries; processTunnelInstall revokes any key
 	// whose delivery is not confirmed.
+	//
+	// qurl-service must replay the plaintext key for same-key idempotent
+	// bootstrap creates; upstream integration coverage is tracked in
+	// layervai/qurl-service#775. If Slack retries a same-modal submission after a
+	// DM-failure revoke, this can replay already-revoked plaintext for that view,
+	// but the key remains dead and a fresh human retry opens a new modal with a
+	// fresh view.id.
 	attemptID = strings.TrimSpace(attemptID)
 	if attemptID == "" {
 		attemptID = "attempt:unknown"
