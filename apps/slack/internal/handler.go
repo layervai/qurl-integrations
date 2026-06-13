@@ -1657,7 +1657,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			return
 		}
 		if errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported) {
-			respondSlack(w, "This Secure Access Agent deployment uses an environment-backed qURL key, so `/qurl uninstall` isn't supported here. Contact the operator.")
+			respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
 			return
 		}
 		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)

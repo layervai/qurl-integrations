@@ -543,8 +543,8 @@ func TestSlashCommandUninstallUnsupportedProvider(t *testing.T) {
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
-	if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
-		t.Fatalf("unsupported-provider reply missing deployment hint: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "isn't supported on this Secure Access Agent deployment") {
+		t.Fatalf("unsupported-provider reply missing unsupported hint: %q", resp[respFieldText])
 	}
 }
 
@@ -605,8 +605,11 @@ func TestSlashCommandUninstallEnvProviderWithoutOwnerStore(t *testing.T) {
 
 			resp := slashResponse(t, h, commandUser, uninstallVerb)
 
-			if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
+			if !strings.Contains(resp[respFieldText], "isn't supported on this Secure Access Agent deployment") {
 				t.Fatalf("env-provider reply missing unsupported hint: %q", resp[respFieldText])
+			}
+			if strings.Contains(resp[respFieldText], "environment-backed") {
+				t.Fatalf("env-provider reply should not disclose backing type: %q", resp[respFieldText])
 			}
 			if strings.Contains(resp[respFieldText], "/qurl setup") {
 				t.Fatalf("env-provider reply should not suggest setup reconnect: %q", resp[respFieldText])
@@ -624,7 +627,7 @@ func TestSlashCommandUninstallEnvProviderWithOwnerStoreSkipsOwnerGate(t *testing
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(resp[respFieldText], "environment-backed qURL key") {
+	if !strings.Contains(resp[respFieldText], "isn't supported on this Secure Access Agent deployment") {
 		t.Fatalf("env-provider reply missing unsupported hint: %q", resp[respFieldText])
 	}
 }
