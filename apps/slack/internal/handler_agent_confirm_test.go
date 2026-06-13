@@ -544,6 +544,13 @@ func TestConfirm_GetApproveInDMDeliversInThread(t *testing.T) {
 	if strings.Contains(card, "staging") || strings.Contains(card, posts[0].text) {
 		t.Fatalf("public card leaked the get detail: %q", card)
 	}
+	entry := requireSingleAuditEntry(t, hc, "Uasker")
+	if entry.Result != "Access link could not be generated." {
+		t.Fatalf("get mint failure Result = %q", entry.Result)
+	}
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("get mint failure ResultSuccess = %v, want false", entry.ResultSuccess)
+	}
 }
 
 func TestDeliverConfirmPrivate_RoutesBySurface(t *testing.T) {
