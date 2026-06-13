@@ -677,14 +677,14 @@ func TestSlashCommandUninstallRejectsUnexpectedArgs(t *testing.T) {
 	}
 }
 
-func TestSlashCommandUninstallUnexpectedArgsUnsupportedDeploymentUnknown(t *testing.T) {
+func TestSlashCommandUninstallUnexpectedArgsUnsupportedDeployment(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	h := newTestHandler(t, noopQURLServer(t))
 
 	resp := slashResponse(t, h, commandUser, uninstallVerb+" now")
 
-	if !strings.Contains(resp[respFieldText], "Unknown subcommand") {
-		t.Fatalf("unsupported uninstall args reply should fall through to unknown: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "isn't supported on this Secure Access Agent deployment") {
+		t.Fatalf("unsupported uninstall args reply missing unsupported hint: %q", resp[respFieldText])
 	}
 }
 

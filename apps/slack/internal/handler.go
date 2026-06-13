@@ -1319,12 +1319,12 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 	case slashSubcommand(text, uninstallVerb):
 		// Bare `/qurl uninstall` is handled above so unsupported deployments can
 		// explain that operator-managed installs are not self-service. Argument
-		// variants land here: advertise usage only when uninstall is live.
+		// variants land here: advertise usage when uninstall is live, otherwise
+		// keep the same unsupported-deployment message as the bare verb.
 		if h.canAdvertiseUninstall() {
 			respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 		} else {
-			slog.Info("unknown slash subcommand", "command", command, "text", text)
-			respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `%s help`.", echoText(text), command))
+			respondUninstallUnsupported(w)
 		}
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
