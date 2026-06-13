@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -902,6 +904,62 @@ func TestPrintableLogSnippetNormalizesUnicodeLineSeparators(t *testing.T) {
 
 	if got != "alpha beta gamma" {
 		t.Fatalf("printableLogSnippet = %q, want Unicode separators normalized", got)
+	}
+}
+
+func TestSlackOwnerLogIDKeepsStructuredSlackOwnerIDs(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{"T123ABCDEF", "E123ABCDEF", ""}
+	for _, tc := range cases {
+		if got := slackOwnerLogID(tc); got != tc {
+			t.Fatalf("slackOwnerLogID(%q) = %q, want %q", tc, got, tc)
+		}
+	}
+}
+
+func TestSlackOwnerLogIDRejectsMalformedOwnerIDs(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{"T123\nINJECT", "T123-ABC", "T123_ABC", "T123abc", strings.Repeat("T", slackOwnerLogIDMaxBytes+1)}
+	for _, tc := range cases {
+		want := fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(tc))
+		if got := slackOwnerLogID(tc); got != want {
+			t.Fatalf("slackOwnerLogID(%q) = %q, want %q", tc, got, want)
+		}
+	}
+}
+
+func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	teamID := "T123\nINJECT"
+	enterpriseID := "E123-ABC"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"1700000000.000100"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	poster := newSlackWebAPIPoster(func(_ context.Context, ownerID string) (string, error) {
+		if ownerID == enterpriseID {
+			return testSlackValidationToken, nil
+		}
+		return "", auth.ErrSlackBotTokenNotConfigured
+	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, srv.Client())
+
+	if _, err := poster.gridPost(context.Background(), teamID, enterpriseID, []byte(`{"channel":"C123","text":"hello"}`)); err != nil {
+		t.Fatalf("gridPost: %v", err)
+	}
+	got := logs.String()
+	if strings.Contains(got, "INJECT") || strings.Contains(got, enterpriseID) {
+		t.Fatalf("fallback warning logged raw owner IDs: %s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(teamID))) ||
+		!strings.Contains(got, fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(enterpriseID))) {
+		t.Fatalf("fallback warning did not log sanitized owner markers: %s", got)
 	}
 }
 

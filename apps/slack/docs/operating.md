@@ -221,6 +221,85 @@ docker buildx build --platform linux/arm64 \
   -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
 ```
 
+## Slack Markdown Renderer Validation
+
+Before enabling the Slack agent standard-Markdown reply surface broadly, run the
+live renderer validation in a real Slack workspace and attach the JSON output to
+the GA enablement issue or to
+[`qurl-integrations#767`](https://github.com/layervai/qurl-integrations/issues/767).
+Run it in a dedicated validation channel or thread: the command intentionally
+leaves the posted Slack messages in place as review evidence and has no dry-run
+or cleanup mode.
+The command posts the hardened Markdown output for the exact renderer-risk cases
+that CI cannot prove: formatting, inline masked links, reference-style links,
+Slack angle links, raw HTML tag starts, image syntax, the
+notification/screen-reader fallback text, and the `markdown_text` compatibility
+body used when Slack rejects `markdown` blocks.
+It is compiled into the same bot binary intentionally so it exercises the same
+wire helpers as production; it only runs when invoked with the explicit
+`validate-slack-markdown-renderer` subcommand and a validation bot token/channel.
+Keeping it in the shipped binary lets on-call rerun the exact production
+transport path during GA validation instead of rebuilding a tagged diagnostic
+variant.
+Treat the validation bot token as permission to post persistent evidence
+messages to the configured validation channel; run it only with a token and
+channel approved for GA validation evidence.
+The overall run timeout defaults to 5 minutes; set
+`SLACK_MARKDOWN_VALIDATION_TIMEOUT` or `--timeout` for slower workspaces.
+
+```bash
+SLACK_MARKDOWN_VALIDATION_BOT_TOKEN=xoxb-... \
+SLACK_MARKDOWN_VALIDATION_CHANNEL=C0123456789 \
+SLACK_MARKDOWN_VALIDATION_TEAM_ID=T0123456789 \
+  go run ./apps/slack/cmd/ validate-slack-markdown-renderer \
+  > slack-markdown-renderer-validation.json
+```
+
+To validate the assistant-pane streaming surface in the same run, start from a
+workspace where the Slack app has the Agents & AI Apps feature and
+`assistant:write` scope enabled, then include the pane thread identifiers:
+The streamed validation body is one `chat.appendStream` append hardened with the
+same stream hardener used by production replies; production streaming also keeps
+that hardener's state across multiple deltas. This artifact validates Slack's
+rendering of the delivered single-append output and the per-delta stream
+hardener, not chunk-boundary coalescing or the `anywhere=true` reconcile fallback;
+keep those covered by unit tests.
+If all assistant-pane identifiers are omitted, the JSON report marks that surface
+as `skipped` and exits 0 after validating channel replies. If only some
+assistant-pane identifiers are set, the command treats that as a config error
+and exits before writing JSON or posting messages, so a misconfigured assistant
+validation cannot look like a complete run.
+
+```bash
+SLACK_MARKDOWN_VALIDATION_BOT_TOKEN=xoxb-... \
+SLACK_MARKDOWN_VALIDATION_CHANNEL=C0123456789 \
+SLACK_MARKDOWN_VALIDATION_TEAM_ID=T0123456789 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_CHANNEL=D0123456789 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_THREAD_TS=1700000000.000100 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_TEAM_ID=T0123456789 \
+SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_USER_ID=U0123456789 \
+  go run ./apps/slack/cmd/ validate-slack-markdown-renderer \
+  > slack-markdown-renderer-validation.json
+```
+
+The JSON evidence records the delivery `status`, `renderer_verdict`,
+`review_instructions`, each case's original Markdown, the hardened Markdown sent
+to Slack, the fallback text for notification/screen-reader previews, Slack
+timestamps, request shape, and any `error_code` observed when a `markdown` block
+is rejected and the compatibility retry runs. A `status` of `delivered` only
+means Slack accepted the validation messages; `renderer_verdict:
+operator_review_required` means an operator must still check the posted messages
+in Slack against each case's `operator_check`.
+Delivery/API failures still write the partial JSON report with `status:
+delivery_failed`, `renderer_verdict: delivery_incomplete`, and `error` before
+exiting nonzero, so attach that artifact when investigating a renderer or Slack
+API failure, then fix the delivery error and rerun before renderer review.
+Config and usage errors exit
+before writing JSON. Slack rate limits abort the current run as a delivery
+failure rather than sleeping and retrying; rerun in the dedicated validation
+channel after the `Retry-After` window. If any Slack-rendered form still hides a
+destination, add code and tests before enablement.
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -231,6 +310,15 @@ docker buildx build --platform linux/arm64 \
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
 | `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
+| `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
+| `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
+| `SLACK_MARKDOWN_VALIDATION_TEAM_ID` | Validation | Slack team id recorded in the JSON artifact and used for validation request metadata. |
+| `SLACK_MARKDOWN_VALIDATION_ENTERPRISE_ID` | Validation | Optional Slack Enterprise Grid id recorded in the JSON artifact and used for validation request metadata. |
+| `SLACK_MARKDOWN_VALIDATION_TIMEOUT` | Validation | Optional Go duration for the overall validation run timeout. Defaults to `5m`; can also be set with `--timeout`. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_CHANNEL` | Validation | Assistant-pane channel id for optional `chat.startStream`/`chat.appendStream` validation. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_THREAD_TS` | Validation | Assistant-pane thread timestamp for optional streaming validation. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_TEAM_ID` | Validation | Recipient team id for optional streaming validation. |
+| `SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_USER_ID` | Validation | Recipient user id for optional streaming validation. |
 | `QURL_ENDPOINT` | Yes | qURL API base URL (e.g. `https://api.layerv.ai`) |
 | `WORKSPACE_STATE_TABLE` | Yes | DynamoDB table holding per-workspace API keys (provisioned by `qurl-integrations-infra`) |
 | `WORKSPACE_STATE_KMS_KEY_ARN` | Yes | KMS CMK ARN used to envelope-encrypt workspace API keys and Slack bot tokens |

@@ -77,6 +77,24 @@ func TestNewAppLoggerEmitsJSONMsgKey(t *testing.T) {
 	}
 }
 
+func TestRunOperatorSubcommandHandlesSlackMarkdownValidation(t *testing.T) {
+	t.Setenv(envSlackMarkdownValidationToken, "")
+	t.Setenv(envSlackMarkdownValidationChannel, "")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	handled, err := runOperatorSubcommand([]string{"qurl-bot-slack", slackMarkdownValidationSubcommand}, &stdout, &stderr)
+	if !handled {
+		t.Fatal("operator subcommand was not handled")
+	}
+	if err == nil || !strings.Contains(err.Error(), envSlackMarkdownValidationToken) {
+		t.Fatalf("err = %v, want validation token requirement", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("operator config error wrote stdout JSON: %q", stdout.String())
+	}
+}
+
 func validEnv() map[string]string {
 	return map[string]string{
 		"AUTH0_DOMAIN":        "example.auth0.com",

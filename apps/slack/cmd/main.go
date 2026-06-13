@@ -128,12 +128,30 @@ func newAppLogger(w io.Writer) *slog.Logger {
 }
 
 func main() {
+	if handled, err := runOperatorSubcommand(os.Args, os.Stdout, os.Stderr); handled {
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	slog.SetDefault(newAppLogger(os.Stdout))
 
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runOperatorSubcommand(args []string, stdout, stderr io.Writer) (bool, error) {
+	if len(args) <= 1 || args[1] != slackMarkdownValidationSubcommand {
+		return false, nil
+	}
+	// Operator-only validation mode shares the bot binary so it exercises the
+	// same Slack wire helpers as production while keeping the JSON evidence on stdout.
+	slog.SetDefault(newAppLogger(stderr))
+	return true, runSlackMarkdownRendererValidationCLI(args[2:], stdout)
 }
 
 // run holds the full server lifecycle so `defer stop()` releases the
@@ -780,7 +798,12 @@ func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID 
 	if teamID == "" || !c.markLegacySlackBotTokenFallbackWarned(teamID) {
 		return
 	}
-	slog.Warn("legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token", "team_id", teamID) // #nosec G706 -- Slack team IDs are structured slog attributes; JSON handlers escape control bytes.
+	slog.LogAttrs(
+		context.Background(),
+		slog.LevelWarn,
+		"legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token",
+		slog.String("team_id", slackOwnerLogID(teamID)),
+	)
 }
 
 func (c *workspaceSlackTokenLookupCache) markLegacySlackBotTokenFallbackWarned(teamID string) bool {

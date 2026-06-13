@@ -34,6 +34,8 @@ const slackViewsOpenTimeout = 2 * time.Second
 const slackViewsOpenResponseBodyLimit = 64 * 1024
 const slackAPIMaxErrorSnippetBytes = 200
 const slackAPITruncationSuffix = "..."
+const slackOwnerLogIDMaxBytes = 64
+const slackOwnerLogIDInvalidFormat = "invalid-slack-owner-id-len-%d"
 
 func newSlackOpenViewFunc(token, userAgent, viewsOpenURL string) func(context.Context, string, string, []byte) error {
 	return newSlackOpenViewFuncWithClient(token, userAgent, viewsOpenURL, nil)
@@ -205,6 +207,30 @@ func slackAPIErrorCode(code string) string {
 	return printableLogSnippet(strings.ToValidUTF8(strings.TrimSpace(code), "?"))
 }
 
+func slackOwnerLogID(id string) string {
+	if id == "" {
+		return ""
+	}
+	// Belt-and-suspenders for cmd-layer log sites that can receive operator-
+	// supplied owner IDs before Slack signature verification. The app logger still
+	// emits structured JSON, so internal request logs rely on that escaping plus
+	// Slack signature verification rather than this helper.
+	// Slack owner IDs are uppercase alphanumeric today; fail closed if that shape
+	// changes so logs don't accept arbitrary caller-controlled strings.
+	// TODO(upstream-contract): if Slack broadens the owner-ID alphabet, update this
+	// allowlist and the sanitizer tests in lockstep.
+	if len(id) > slackOwnerLogIDMaxBytes {
+		return fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(id))
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return fmt.Sprintf(slackOwnerLogIDInvalidFormat, len(id))
+		}
+	}
+	return id
+}
+
 const (
 	slackAPIInvalidArguments    = "invalid_arguments"
 	slackAPIInvalidBlockType    = "invalid_block_type"
@@ -374,9 +400,18 @@ func (p *slackWebAPIPoster) gridPost(ctx context.Context, teamID, enterpriseID s
 	}
 	// Parity with openViewWithGridFallback's warn: a breadcrumb so an operator
 	// debugging "why is the bot posting as the org install?" can see the workspace
-	// token was missing. No *slog.Logger is threaded into this seam; use the default.
-	slog.Warn("workspace Slack bot token missing; retrying with Enterprise Grid install token",
-		"op", p.op, "team_id", teamID, "enterprise_id", enterpriseID)
+	// token was missing.
+	// Keep exact Slack owner IDs for diagnostics when they match Slack's owner ID
+	// alphabet; malformed IDs are replaced so this shared warning does not log
+	// arbitrary caller-controlled strings.
+	slog.LogAttrs(
+		ctx,
+		slog.LevelWarn,
+		"workspace Slack bot token missing; retrying with Enterprise Grid install token",
+		slog.String("op", p.op),
+		slog.String("team_id", slackOwnerLogID(teamID)),
+		slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
+	)
 	return p.postOnce(ctx, enterpriseID, body)
 }
 
@@ -488,11 +523,16 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			fallbackLogSeen[fallbackLogKey] = struct{}{}
 		}
 		fallbackLogMu.Unlock()
-		logArgs := []any{"team_id", teamID, "enterprise_id", enterpriseID, "error_code", errorCode, "error", err}
+		logAttrs := []slog.Attr{
+			slog.String("team_id", slackOwnerLogID(teamID)),
+			slog.String("enterprise_id", slackOwnerLogID(enterpriseID)),
+			slog.String("error_code", errorCode),
+			slog.Any("error", err),
+		}
 		if fallbackLogAlreadySeen {
-			slog.Debug("Slack rejected markdown block; retrying with markdown_text", logArgs...)
+			slog.LogAttrs(ctx, slog.LevelDebug, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		} else {
-			slog.Info("Slack rejected markdown block; retrying with markdown_text", logArgs...)
+			slog.LogAttrs(ctx, slog.LevelInfo, "Slack rejected markdown block; retrying with markdown_text", logAttrs...)
 		}
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
