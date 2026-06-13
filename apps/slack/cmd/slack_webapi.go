@@ -527,21 +527,25 @@ func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	}
 }
 
-func (p *slackAgentStreamPort) StartStream(ctx context.Context, teamID, enterpriseID, channelID, threadTS, recipientUserID string) (string, error) {
-	// RecipientTeamID is the caller's workspace team — correct for the pane (DM) turns this
-	// serves today, where the recipient and the owning workspace are the same. The channel /
-	// Enterprise-Grid streaming follow-up (#706) can stream to a recipient in a DIFFERENT team,
-	// where recipient_team_id must be the recipient's team, not teamID — revisit this there.
+func (p *slackAgentStreamPort) StartStream(ctx context.Context, start *internal.AgentStreamStart) (string, error) {
+	if start == nil {
+		return "", errors.New("chat.startStream: missing start request")
+	}
 	body, err := json.Marshal(struct {
 		Channel         string `json:"channel"`
 		ThreadTS        string `json:"thread_ts,omitempty"`
 		RecipientTeamID string `json:"recipient_team_id,omitempty"`
 		RecipientUserID string `json:"recipient_user_id,omitempty"`
-	}{Channel: channelID, ThreadTS: threadTS, RecipientTeamID: teamID, RecipientUserID: recipientUserID})
+	}{
+		Channel:         start.ChannelID,
+		ThreadTS:        start.ThreadTS,
+		RecipientTeamID: start.RecipientTeamID,
+		RecipientUserID: start.RecipientUserID,
+	})
 	if err != nil {
 		return "", fmt.Errorf("chat.startStream request marshal: %w", err)
 	}
-	raw, err := p.start.gridPost(ctx, teamID, enterpriseID, body)
+	raw, err := p.start.gridPost(ctx, start.TeamID, start.EnterpriseID, body)
 	if err != nil {
 		return "", err
 	}

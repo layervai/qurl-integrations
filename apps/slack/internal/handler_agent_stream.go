@@ -15,37 +15,51 @@ import (
 // a reply shorter than the threshold still lands.
 const agentStreamFlushBytes = 48
 
-// newAgentReplyStreamer builds the per-turn streamer for a PANE (DM) turn, or nil to keep
-// the agent on the non-streaming post path. Pane-only, mirroring setAgentThinkingStatus: an
-// app_mention is a channel, not an assistant thread, and native streaming targets the pane.
-// A nil AgentStream seam (pre-enablement) also yields nil. (Streaming to public channels via
-// recipient_* is a follow-up — see #706.)
+// newAgentReplyStreamer builds the per-turn streamer for a streamable agent reply, or nil
+// to keep the agent on the non-streaming post path. Pane DMs stream as before. Channel
+// app_mention turns also stream now: chat.startStream requires recipient_* there, and
+// recipient_team_id must be the triggering user's team when Slack provides it (shared
+// channel/Grid), falling back to the event's workspace team for the normal same-team case.
 func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, replyTS string) *agentReplyStreamer {
-	if h.cfg.AgentStream == nil || env.Event.ChannelType != slackChannelTypeIM {
+	if h.cfg.AgentStream == nil {
+		return nil
+	}
+	switch {
+	case env.Event.ChannelType == slackChannelTypeIM:
+	case env.Event.Type == slackEventTypeAppMention:
+	default:
+		return nil
+	}
+	recipientTeamID := env.Event.UserTeam
+	if recipientTeamID == "" {
+		recipientTeamID = env.TeamID
+	}
+	if recipientTeamID == "" || env.Event.User == "" {
 		return nil
 	}
 	return &agentReplyStreamer{
-		ctx:        ctx,
-		baseCtx:    h.baseCtx,
-		log:        log,
-		port:       h.cfg.AgentStream,
-		teamID:     env.TeamID,
-		enterprise: env.EnterpriseID,
-		channelID:  env.Event.Channel,
-		threadTS:   replyTS,
-		userID:     env.Event.User,
+		ctx:             ctx,
+		baseCtx:         h.baseCtx,
+		log:             log,
+		port:            h.cfg.AgentStream,
+		teamID:          env.TeamID,
+		enterprise:      env.EnterpriseID,
+		channelID:       env.Event.Channel,
+		threadTS:        replyTS,
+		recipientTeamID: recipientTeamID,
+		userID:          env.Event.User,
 	}
 }
 
-// agentReplyStreamer drives one pane turn's native reply streaming: it lazily opens a Slack
+// agentReplyStreamer drives one agent turn's native reply streaming: it lazily opens a Slack
 // stream on the first non-empty delta, coalesces deltas to bound appendStream calls, and
 // finalizes exactly once. NOT safe for concurrent use — the agent loop calls onDelta
 // synchronously, in order, from one goroutine, and finalize runs after the loop returns.
 //
-// The "thinking…" pane status (setAgentThinkingStatus) is cleared the same way the
-// non-streaming reply clears it: Slack auto-clears on a reply landing on the SAME thread,
-// and the streamed message lands on replyTS (the status's thread), so no explicit clear is
-// needed (consistent with the non-streaming path's deliberate reliance on auto-clear).
+// On pane turns, the "thinking…" status (setAgentThinkingStatus) is cleared the same way
+// the non-streaming reply clears it: Slack auto-clears on a reply landing on the SAME
+// thread, and the streamed message lands on replyTS (the status's thread), so no explicit
+// clear is needed (consistent with the non-streaming path's deliberate reliance on auto-clear).
 //
 // Rendering dialect: chat.appendStream takes markdown_text (standard Markdown), and the
 // non-streaming reply now posts the agent's own answer through markdown_text too
@@ -65,7 +79,10 @@ type agentReplyStreamer struct {
 	enterprise string
 	channelID  string
 	threadTS   string
-	userID     string
+	// recipientTeamID is the human recipient's team, not necessarily the bot-token
+	// lookup team above. They differ for Enterprise Grid/shared-channel mentions.
+	recipientTeamID string
+	userID          string
 
 	pending  strings.Builder // coalescer: delta text not yet flushed
 	streamed strings.Builder // everything sent to the stream, to reconcile a synthetic reply
@@ -94,7 +111,14 @@ func (s *agentReplyStreamer) onDelta(delta string) {
 		return
 	}
 	if s.streamTS == "" {
-		ts, err := s.port.StartStream(s.ctx, s.teamID, s.enterprise, s.channelID, s.threadTS, s.userID)
+		ts, err := s.port.StartStream(s.ctx, &AgentStreamStart{
+			TeamID:          s.teamID,
+			EnterpriseID:    s.enterprise,
+			ChannelID:       s.channelID,
+			ThreadTS:        s.threadTS,
+			RecipientTeamID: s.recipientTeamID,
+			RecipientUserID: s.userID,
+		})
 		if err != nil {
 			s.log.Warn("agent: startStream failed; falling back to a posted reply", "error", err)
 			s.broken = true
@@ -138,7 +162,7 @@ func (s *agentReplyStreamer) stop(ctx context.Context) {
 // deliveryCtx derives the bounded context the finalize steps run on. It hangs off baseCtx,
 // NOT the turn ctx, because by finalize time the turn ctx may be spent (agentTurnTimeout
 // elapsed) or canceled (SIGTERM) — a stopStream on a dead ctx fails instantly and leaves the
-// pane spinner lingering. Mirrors saveAgentHistory / postAgentReply, which deliver off
+// stream unfinished. Mirrors saveAgentHistory / postAgentReply, which deliver off
 // h.baseCtx with the same agentDeliveryBudget.
 func (s *agentReplyStreamer) deliveryCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(s.baseCtx, agentDeliveryBudget)

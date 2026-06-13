@@ -1,6 +1,6 @@
 package internal
 
-// Tests for the pane reply streamer (streaming delivery PR2): the finalization contracts
+// Tests for the agent reply streamer (streaming delivery PR2): the finalization contracts
 // the turn path depends on — lazy-start, coalescing, the no-double-post invariant (a streamed
 // reply is delivered by the stream, a proposal still posts its card, an error finalizes the
 // partial), and the synthetic-reply reconcile. The streaming LLM path itself is exercised in
@@ -9,24 +9,40 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+)
+
+const (
+	testAgentStreamThreadTS      = "100.1"
+	testChannelMentionStreamTS   = "200.1"
+	testAgentStreamStateTable    = "agent_state"
+	testAgentStreamEndTurn       = "end_turn"
+	testAgentStreamToolUse       = "tool_use"
+	testAgentStreamProposeRevoke = "propose_revoke"
 )
 
 type recordingStreamPort struct {
 	startErr   error
 	appendErr  error
 	startCalls int
+	starts     []AgentStreamStart
 	appends    []string
 	stops      int
 }
 
-func (r *recordingStreamPort) StartStream(context.Context, string, string, string, string, string) (string, error) {
+func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamStart) (string, error) {
 	r.startCalls++
+	if start != nil {
+		r.starts = append(r.starts, *start)
+	}
 	if r.startErr != nil {
 		return "", r.startErr
 	}
@@ -51,7 +67,7 @@ func (r *recordingStreamPort) appended() string { return strings.Join(r.appends,
 func newTestStreamer(port AgentStreamPort) *agentReplyStreamer {
 	return &agentReplyStreamer{
 		ctx: context.Background(), baseCtx: context.Background(), log: slog.Default(), port: port,
-		teamID: "T1", channelID: "D1", threadTS: "100.1", userID: "U1",
+		teamID: "T1", channelID: "D1", threadTS: testAgentStreamThreadTS, recipientTeamID: "T1", userID: "U1",
 	}
 }
 
@@ -230,5 +246,166 @@ func TestAgentStreamer_AppendFailureAtFinalize_FallsBackToPost(t *testing.T) {
 	}
 	if len(port.appends) != 0 {
 		t.Fatalf("the only (failing) append records nothing, got %v", port.appends)
+	}
+}
+
+func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
+	port := &recordingStreamPort{}
+	h := NewHandler(Config{AgentStream: port})
+	e := env(slackEventTypeAppMention, "channel", "U_remote", "", "", "<@U12345678> hi")
+	e.TeamID = "T_installed"
+	e.EnterpriseID = "E_grid"
+	e.Event.UserTeam = "T_remote"
+	e.Event.Channel = "C_shared"
+	e.Event.TS = testChannelMentionStreamTS
+
+	s := h.newAgentReplyStreamer(context.Background(), slog.Default(), e, agentEventRootTS(&e.Event))
+	if s == nil {
+		t.Fatal("channel app_mention should create a streamer")
+	}
+	s.onDelta("hello channel")
+	if port.startCalls != 1 {
+		t.Fatalf("startStream calls = %d, want 1", port.startCalls)
+	}
+	got := port.starts[0]
+	want := AgentStreamStart{
+		TeamID:          "T_installed",
+		EnterpriseID:    "E_grid",
+		ChannelID:       "C_shared",
+		ThreadTS:        testChannelMentionStreamTS,
+		RecipientTeamID: "T_remote",
+		RecipientUserID: "U_remote",
+	}
+	if got != want {
+		t.Fatalf("startStream target = %+v, want %+v", got, want)
+	}
+}
+
+func TestNewAgentReplyStreamer_KeepsPanePathAndSkipsChannelFollowups(t *testing.T) {
+	h := NewHandler(Config{AgentStream: &recordingStreamPort{}})
+	dm := env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi")
+	dm.TeamID = "T1"
+	if s := h.newAgentReplyStreamer(context.Background(), slog.Default(), dm, agentEventRootTS(&dm.Event)); s == nil {
+		t.Fatal("message.im pane turns must still stream")
+	}
+	followup := env(slackEventTypeMessage, "channel", "U2", "", "", "follow-up")
+	followup.TeamID = "T1"
+	followup.Event.ThreadTS = "100.0"
+	if s := h.newAgentReplyStreamer(context.Background(), slog.Default(), followup, agentEventRootTS(&followup.Event)); s != nil {
+		t.Fatal("non-mention channel follow-ups are outside #706 and should keep the post path")
+	}
+}
+
+type handlerStreamingLLM struct {
+	responses []agent.Response
+	err       error
+	partial   string
+	idx       int
+}
+
+func (s *handlerStreamingLLM) Complete(context.Context, *agent.Request) (agent.Response, error) {
+	return agent.Response{}, errors.New("streaming test must use StreamComplete")
+}
+
+func (s *handlerStreamingLLM) StreamComplete(_ context.Context, _ *agent.Request, onText func(string)) (agent.Response, error) {
+	if s.err != nil {
+		if onText != nil && s.partial != "" {
+			onText(s.partial)
+		}
+		return agent.Response{}, s.err
+	}
+	if s.idx >= len(s.responses) {
+		return agent.Response{}, errors.New("handlerStreamingLLM: no more responses")
+	}
+	r := s.responses[s.idx]
+	s.idx++
+	if onText != nil {
+		for _, ch := range chunkStr(r.Text, 8) {
+			onText(ch)
+		}
+	}
+	return r, nil
+}
+
+func newStreamingAgentHandler(llm agent.LLM, port AgentStreamPort, blocks PostMessageBlocksFunc) (*Handler, *[]capturedReply, *sync.Mutex) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentStreamStateTable}
+	post, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	return NewHandler(Config{
+		AgentLLM:            llm,
+		AgentStore:          store,
+		PostMessage:         post,
+		PostMarkdownMessage: mdPost,
+		PostMessageBlocks:   blocks,
+		AgentStream:         port,
+		AgentDefaultEnabled: true,
+	}), posts, mu
+}
+
+func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
+	const reply = "You can reach staging from this channel."
+	port := &recordingStreamPort{}
+	llm := &handlerStreamingLLM{responses: []agent.Response{{Text: reply, StopReason: testAgentStreamEndTurn}}}
+	h, posts, mu := newStreamingAgentHandler(llm, port, nil)
+
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> what can I reach?")
+	e.TeamID = "T1"
+	e.Event.UserTeam = "T_user"
+	h.processAgentEvent(context.Background(), slog.Default(), e)
+
+	if port.startCalls != 1 || port.stops != 1 || port.appended() != reply {
+		t.Fatalf("channel mention should stream and stop once, got start=%d stop=%d appended=%q", port.startCalls, port.stops, port.appended())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 0 {
+		t.Fatalf("streamed reply must not also post, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *testing.T) {
+	port := &recordingStreamPort{}
+	blocks := &blocksRecorder{}
+	llm := &handlerStreamingLLM{responses: []agent.Response{{
+		Text:       "I can revoke that token; confirm below.",
+		ToolCalls:  []agent.ToolCall{{ID: "p1", Name: testAgentStreamProposeRevoke, Input: json.RawMessage(`{"token":"staging"}`)}},
+		StopReason: testAgentStreamToolUse,
+	}}}
+	h, posts, mu := newStreamingAgentHandler(llm, port, blocks.fn())
+	h.cfg.AgentConfirmEnabled = true
+
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> revoke staging")
+	e.TeamID = "T1"
+	h.processAgentEvent(context.Background(), slog.Default(), e)
+
+	if port.startCalls != 1 || port.stops != 1 {
+		t.Fatalf("proposal narration should stream and stop once, got start=%d stop=%d", port.startCalls, port.stops)
+	}
+	if len(blocks.calls) != 1 {
+		t.Fatalf("proposal must still post one confirm card, got %d", len(blocks.calls))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 0 {
+		t.Fatalf("confirm-card proposal should not post a text fallback, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_ChannelMentionStreamingPartialErrorNoDoublePost(t *testing.T) {
+	port := &recordingStreamPort{}
+	llm := &handlerStreamingLLM{partial: "partial answer", err: errors.New("model stream failed")}
+	h, posts, mu := newStreamingAgentHandler(llm, port, nil)
+
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> what can I reach?")
+	e.TeamID = "T1"
+	h.processAgentEvent(context.Background(), slog.Default(), e)
+
+	if port.startCalls != 1 || port.stops != 1 || port.appended() != "partial answer" {
+		t.Fatalf("partial error should finalize the live stream, got start=%d stop=%d appended=%q", port.startCalls, port.stops, port.appended())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 0 {
+		t.Fatalf("healthy partial stream owns the error outcome; got posted fallback %+v", *posts)
 	}
 }

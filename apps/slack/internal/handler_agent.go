@@ -91,6 +91,7 @@ type slackEventEnvelope struct {
 type slackInnerEvent struct {
 	Type        string `json:"type"`
 	User        string `json:"user"`
+	UserTeam    string `json:"user_team,omitempty"`
 	BotID       string `json:"bot_id"`
 	Subtype     string `json:"subtype"`
 	Text        string `json:"text"`
