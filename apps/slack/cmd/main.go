@@ -18,9 +18,10 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+
+	"github.com/layervai/qurl-integrations/internal/ttlcache"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
@@ -463,80 +464,67 @@ type slackBotTokenProvider interface {
 	SlackBotToken(ctx context.Context, workspaceID string) (string, error)
 }
 
-type cachedSlackBotToken struct {
-	token     string
-	expiresAt time.Time
-}
-
-type workspaceSlackTokenLookupResult struct {
-	token string
-	err   error
-}
-
-type workspaceSlackTokenLookupCall struct {
-	done chan struct{}
-	workspaceSlackTokenLookupResult
-}
-
-type workspaceSlackTokenLookupStart struct {
-	token       string
-	positiveHit bool
-	negativeHit bool
-	call        *workspaceSlackTokenLookupCall
-	owner       bool
-	generation  uint64
+type workspaceSlackTokenCacheValue struct {
+	token    string
+	negative bool
 }
 
 type workspaceSlackTokenLookupCache struct {
-	mu sync.Mutex
 	// Cache keys are Slack token owners: workspace team_id values for
 	// workspace installs, and enterprise_id values for Enterprise Grid org
 	// installs. The ID spaces are disjoint, so one cache can hold both.
-	positive       map[string]cachedSlackBotToken
-	negative       map[string]time.Time
-	inFlight       map[string]*workspaceSlackTokenLookupCall
-	generation     map[string]uint64
+	tokens         *ttlcache.Cache[workspaceSlackTokenCacheValue]
 	fallbackWarned map[string]struct{}
-	lastSweep      time.Time
 }
 
 func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider, fallbackToken string, ttl time.Duration, now func() time.Time) (lookup slackBotTokenLookup, purge func(string)) {
 	if now == nil {
 		now = time.Now
 	}
-	cache := &workspaceSlackTokenLookupCache{
-		positive:       map[string]cachedSlackBotToken{},
-		negative:       map[string]time.Time{},
-		inFlight:       map[string]*workspaceSlackTokenLookupCall{},
-		generation:     map[string]uint64{},
-		fallbackWarned: map[string]struct{}{},
-	}
+	cache := newWorkspaceSlackTokenLookupCache()
 	return func(ctx context.Context, teamID string) (string, error) {
 		teamID = strings.TrimSpace(teamID)
 		if teamID != "" {
-			start := cache.getOrStart(teamID, ttl, now())
+			start := cache.getOrStart(teamID, now())
 			switch {
-			case start.positiveHit:
-				return start.token, nil
-			case start.negativeHit && fallbackToken != "":
-				cache.warnLegacySlackBotTokenFallback(teamID)
-				return fallbackToken, nil
-			case start.negativeHit:
-				return "", auth.ErrSlackBotTokenNotConfigured
-			case !start.owner:
+			case start.Hit:
+				value := start.Result.Value
+				if value.negative && fallbackToken != "" {
+					cache.warnLegacySlackBotTokenFallback(teamID)
+				}
+				return value.token, start.Result.Err
+			case !start.Owner:
 				select {
-				case <-start.call.done:
-					return start.call.token, start.call.err
+				case <-start.Call.Done():
+					result := start.Call.Result()
+					return result.Value.token, result.Err
 				case <-ctx.Done():
 					return "", ctx.Err()
 				}
 			}
-			return fetchAndFinishWorkspaceSlackToken(ctx, provider, cache, start.call, teamID, fallbackToken, ttl, now, start.generation)
+			return fetchAndFinishWorkspaceSlackToken(ctx, provider, cache, start.Call, teamID, fallbackToken, ttl, now, start.Generation)
 		}
 
 		token, _, _, err := fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
 		return token, err
 	}, cache.purge
+}
+
+func newWorkspaceSlackTokenLookupCache() *workspaceSlackTokenLookupCache {
+	cache := &workspaceSlackTokenLookupCache{
+		fallbackWarned: map[string]struct{}{},
+	}
+	cache.tokens = ttlcache.New[workspaceSlackTokenCacheValue](ttlcache.Options[workspaceSlackTokenCacheValue]{
+		SweepEvery: slackWorkspaceTokenCacheSweepEvery,
+		OnEvict: func(key string, result ttlcache.Result[workspaceSlackTokenCacheValue]) {
+			// OnEvict runs under the ttlcache lock; keep this hook
+			// non-reentrant and limited to fallback warning sidecar cleanup.
+			if result.Value.negative {
+				delete(cache.fallbackWarned, key)
+			}
+		},
+	})
+	return cache
 }
 
 func fetchWorkspaceSlackToken(ctx context.Context, provider slackBotTokenProvider, teamID, fallbackToken string) (token string, cachePositive, cacheNegative bool, err error) {
@@ -568,7 +556,7 @@ func fetchAndFinishWorkspaceSlackToken(
 	ctx context.Context,
 	provider slackBotTokenProvider,
 	cache *workspaceSlackTokenLookupCache,
-	call *workspaceSlackTokenLookupCall,
+	call *ttlcache.Call[workspaceSlackTokenCacheValue],
 	teamID string,
 	fallbackToken string,
 	ttl time.Duration,
@@ -577,88 +565,45 @@ func fetchAndFinishWorkspaceSlackToken(
 ) (token string, err error) {
 	var cachePositive bool
 	var cacheNegative bool
-	result := workspaceSlackTokenLookupResult{}
+	result := ttlcache.Result[workspaceSlackTokenCacheValue]{}
 	finished := false
 	defer func() {
 		if rec := recover(); rec != nil {
 			if !finished {
-				result = workspaceSlackTokenLookupResult{err: errors.New("workspace Slack bot token lookup panicked")}
-				cache.finish(teamID, call, result, false, false, ttl, 0, now(), generation)
+				result = ttlcache.Result[workspaceSlackTokenCacheValue]{Err: errors.New("workspace Slack bot token lookup panicked")}
+				cache.tokens.Finish(teamID, call, result, 0, now(), generation)
 			}
 			panic(rec)
 		}
 	}()
 	token, cachePositive, cacheNegative, err = fetchWorkspaceSlackToken(ctx, provider, teamID, fallbackToken)
-	result = workspaceSlackTokenLookupResult{token: token, err: err}
-	if cacheNegative && err == nil && fallbackToken != "" {
+	result = ttlcache.Result[workspaceSlackTokenCacheValue]{
+		Value: workspaceSlackTokenCacheValue{
+			token:    token,
+			negative: cacheNegative,
+		},
+		Err: err,
+	}
+	cacheTTL := time.Duration(0)
+	if cachePositive {
+		cacheTTL = ttl
+	}
+	if cacheNegative {
+		cacheTTL = slackWorkspaceTokenNegativeCacheTTL
+	}
+	cached := cache.tokens.Finish(teamID, call, result, cacheTTL, now(), generation)
+	// Warn only when the negative fill was actually cached. If a concurrent
+	// purge detached this fill, marking fallbackWarned would leave sidecar
+	// state with no cache entry to evict and clear it later.
+	finished = true
+	if cached && cacheNegative && err == nil && fallbackToken != "" {
 		cache.warnLegacySlackBotTokenFallback(teamID)
 	}
-	cache.finish(teamID, call, result, cachePositive, cacheNegative, ttl, slackWorkspaceTokenNegativeCacheTTL, now(), generation)
-	finished = true
 	return token, err
 }
 
-func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, ttl time.Duration, at time.Time) workspaceSlackTokenLookupStart {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sweepExpiredLocked(at)
-	generation := c.generation[teamID]
-	if ttl > 0 {
-		cached, ok := c.positive[teamID]
-		if ok && at.Before(cached.expiresAt) {
-			return workspaceSlackTokenLookupStart{token: cached.token, positiveHit: true}
-		}
-		if ok {
-			delete(c.positive, teamID)
-		}
-	}
-
-	expiresAt, ok := c.negative[teamID]
-	if ok && at.Before(expiresAt) {
-		return workspaceSlackTokenLookupStart{negativeHit: true}
-	}
-	if ok {
-		delete(c.negative, teamID)
-	}
-
-	if call, ok := c.inFlight[teamID]; ok {
-		return workspaceSlackTokenLookupStart{call: call}
-	}
-	call := &workspaceSlackTokenLookupCall{done: make(chan struct{})}
-	c.inFlight[teamID] = call
-	return workspaceSlackTokenLookupStart{call: call, owner: true, generation: generation}
-}
-
-func (c *workspaceSlackTokenLookupCache) finish(
-	teamID string,
-	call *workspaceSlackTokenLookupCall,
-	result workspaceSlackTokenLookupResult,
-	cachePositive bool,
-	cacheNegative bool,
-	positiveTTL time.Duration,
-	negativeTTL time.Duration,
-	at time.Time,
-	generation uint64,
-) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	canCache := generation == c.generation[teamID]
-	if cachePositive && positiveTTL > 0 && canCache {
-		c.positive[teamID] = cachedSlackBotToken{
-			token:     result.token,
-			expiresAt: at.Add(positiveTTL),
-		}
-		delete(c.negative, teamID)
-		delete(c.fallbackWarned, teamID)
-	}
-	if cacheNegative && negativeTTL > 0 && canCache {
-		c.negative[teamID] = at.Add(negativeTTL)
-	}
-	call.workspaceSlackTokenLookupResult = result
-	if c.inFlight[teamID] == call {
-		delete(c.inFlight, teamID)
-	}
-	close(call.done)
+func (c *workspaceSlackTokenLookupCache) getOrStart(teamID string, at time.Time) ttlcache.Start[workspaceSlackTokenCacheValue] {
+	return c.tokens.GetOrStart(teamID, at)
 }
 
 func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
@@ -666,13 +611,11 @@ func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
 	if teamID == "" {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.positive, teamID)
-	delete(c.negative, teamID)
-	delete(c.inFlight, teamID)
-	delete(c.fallbackWarned, teamID)
-	c.generation[teamID]++
+	c.tokens.InvalidateWith(teamID, func() {
+		// InvalidateWith runs under the ttlcache lock; keep this hook
+		// non-reentrant and limited to fallback warning sidecar cleanup.
+		delete(c.fallbackWarned, teamID)
+	})
 }
 
 func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID string) {
@@ -684,37 +627,20 @@ func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID 
 }
 
 func (c *workspaceSlackTokenLookupCache) markLegacySlackBotTokenFallbackWarned(teamID string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.fallbackWarned == nil {
-		c.fallbackWarned = map[string]struct{}{}
-	}
-	if _, ok := c.fallbackWarned[teamID]; ok {
-		return false
-	}
-	c.fallbackWarned[teamID] = struct{}{}
-	return true
-}
-
-func (c *workspaceSlackTokenLookupCache) sweepExpiredLocked(at time.Time) {
-	if !c.lastSweep.IsZero() && at.Sub(c.lastSweep) < slackWorkspaceTokenCacheSweepEvery {
-		return
-	}
-	// The sweep is intentionally minute-gated: it is O(workspaces seen by this
-	// process), but the current customer cardinality keeps that below the Slack
-	// trigger budget while avoiding a background janitor goroutine.
-	for teamID, cached := range c.positive {
-		if !at.Before(cached.expiresAt) {
-			delete(c.positive, teamID)
+	warn := false
+	c.tokens.WithLock(func() {
+		// WithLock holds the ttlcache mutex; keep this hook non-reentrant and
+		// limited to fallback warning sidecar mutation.
+		if c.fallbackWarned == nil {
+			c.fallbackWarned = map[string]struct{}{}
 		}
-	}
-	for teamID, expiresAt := range c.negative {
-		if !at.Before(expiresAt) {
-			delete(c.negative, teamID)
-			delete(c.fallbackWarned, teamID)
+		if _, ok := c.fallbackWarned[teamID]; ok {
+			return
 		}
-	}
-	c.lastSweep = at
+		c.fallbackWarned[teamID] = struct{}{}
+		warn = true
+	})
+	return warn
 }
 
 // minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.

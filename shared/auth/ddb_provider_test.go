@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/internal/ttlcache"
+
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -458,18 +460,26 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			Encryptor: &passthroughEncryptor{},
 			Now:       func() time.Time { return now },
 		}
-		p.apiKeyCache = map[string]*cachedAPIKey{
-			testTeamID: {
-				apiKey:    testOldAPIKey,
-				expiresAt: now.Add(-time.Second),
-			},
-		}
+		p.apiKeyCache().Seed(testTeamID, ttlcache.Result[string]{Value: testOldAPIKey}, apiKeyCacheTTL, now.Add(-apiKeyCacheTTL-time.Second))
 
 		if _, err := p.APIKey(context.Background(), testTeamID); err == nil {
 			t.Fatal("want DDB error, got nil")
 		}
-		if _, ok := p.apiKeyCache[testTeamID]; ok {
-			t.Fatal("expired cache entry should be deleted before the refill")
+		if ddb.getCalls != 1 {
+			t.Fatalf("GetItem calls after expired miss = %d, want 1", ddb.getCalls)
+		}
+
+		ddb.getErr = nil
+		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey(testNewAPIKey)}
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("APIKey after expired miss recovery: %v", err)
+		}
+		if got != testNewAPIKey {
+			t.Fatalf("got %q want %q", got, testNewAPIKey)
+		}
+		if ddb.getCalls != 2 {
+			t.Fatalf("GetItem calls after recovery = %d, want 2", ddb.getCalls)
 		}
 	})
 
@@ -484,16 +494,8 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 			Encryptor: &passthroughEncryptor{},
 			Now:       func() time.Time { return now },
 		}
-		p.apiKeyCache = map[string]*cachedAPIKey{
-			"T_expired": {
-				apiKey:    testOldAPIKey,
-				expiresAt: now.Add(-time.Second),
-			},
-			"T_fresh": {
-				apiKey:    testOldAPIKey,
-				expiresAt: now.Add(time.Minute),
-			},
-		}
+		p.apiKeyCache().Seed("T_expired", ttlcache.Result[string]{Value: testOldAPIKey}, apiKeyCacheTTL, now.Add(-apiKeyCacheTTL-time.Second))
+		p.apiKeyCache().Seed("T_fresh", ttlcache.Result[string]{Value: testOldAPIKey}, apiKeyCacheTTL, now)
 		p.apiKeyStrongReadUntil = map[string]time.Time{
 			"T_expired": now.Add(-time.Second),
 			"T_fresh":   now.Add(time.Minute),
@@ -506,17 +508,18 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		if got != testNewAPIKey {
 			t.Fatalf("got %q want %q", got, testNewAPIKey)
 		}
-		if _, ok := p.apiKeyCache["T_expired"]; ok {
-			t.Fatal("expired cache entry was not swept")
-		}
-		if _, ok := p.apiKeyCache["T_fresh"]; !ok {
-			t.Fatal("fresh cache entry was swept")
-		}
 		if _, ok := p.apiKeyStrongReadUntil["T_expired"]; ok {
 			t.Fatal("expired strong-read marker was not swept")
 		}
 		if _, ok := p.apiKeyStrongReadUntil["T_fresh"]; !ok {
 			t.Fatal("fresh strong-read marker was swept")
+		}
+		got, err = p.APIKey(context.Background(), "T_fresh")
+		if err != nil {
+			t.Fatalf("fresh cached APIKey: %v", err)
+		}
+		if got != testOldAPIKey {
+			t.Fatalf("fresh cached got %q want %q", got, testOldAPIKey)
 		}
 		if ddb.getCalls != 1 {
 			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
@@ -600,8 +603,8 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 
 		waiterErr := make(chan error, 1)
 		go func() {
-			<-waiter.call.done
-			waiterErr <- waiter.call.err
+			<-waiter.call.Done()
+			waiterErr <- waiter.call.Result().Err
 		}()
 
 		_, err := p.fetchAndFinishAPIKeyLookup(context.Background(), testTeamID, owner.call, owner.generation, false)
@@ -618,9 +621,6 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 		if ddb.getCalls != 1 {
 			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
-		}
-		if _, ok := p.apiKeyCache[testTeamID]; ok {
-			t.Fatal("owner error should not populate the cache")
 		}
 	})
 
@@ -649,8 +649,8 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 
 		waiterErr := make(chan error, 1)
 		go func() {
-			<-waiter.call.done
-			waiterErr <- waiter.call.err
+			<-waiter.call.Done()
+			waiterErr <- waiter.call.Result().Err
 		}()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -672,9 +672,6 @@ func TestDDBProviderAPIKeyCache(t *testing.T) {
 		}
 		if ddb.getCalls != 1 {
 			t.Fatalf("GetItem calls = %d, want 1", ddb.getCalls)
-		}
-		if _, ok := p.apiKeyCache[testTeamID]; ok {
-			t.Fatal("owner cancellation should not populate the cache")
 		}
 		ddb.getFunc = nil
 		ddb.getOutput = &dynamodb.GetItemOutput{Item: itemForKey("lv_live_after_owner_cancel")}
@@ -1104,43 +1101,32 @@ func TestDDBProviderAPIKeyCacheInvalidation(t *testing.T) {
 		if !getItemConsistentRead(ddb.getInputs[1]) {
 			t.Fatal("post-delete refill should use a strongly consistent read")
 		}
-		if _, ok := p.apiKeyCache[testTeamID]; ok {
-			t.Fatal("in-flight stale read should not populate the cache after DeleteAPIKey")
-		}
 	})
 
 	t.Run("blank private cache mutation guards are no-ops", func(t *testing.T) {
 		now := time.Unix(1700000000, 0)
-		call := &apiKeyLookupCall{done: make(chan struct{})}
 		p := &DDBProvider{
-			apiKeyCache: map[string]*cachedAPIKey{
-				testTeamID: {
-					apiKey:    testOldAPIKey,
-					expiresAt: now.Add(apiKeyCacheTTL),
-				},
-			},
-			apiKeyLookupInFlight: map[string]*apiKeyLookupCall{
-				testTeamID: call,
-			},
-			apiKeyCacheGeneration: map[string]uint64{
-				testTeamID: 7,
-			},
-			apiKeyStrongReadUntil: map[string]time.Time{
-				testTeamID: now.Add(apiKeyCacheTTL),
-			},
+			Client:    &fakeDDBClient{},
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return now },
 		}
+		p.seedAPIKeyCache(testTeamID, testOldAPIKey, now)
+		p.apiKeyCache().WithLock(func() {
+			p.apiKeyStrongReadUntil = map[string]time.Time{
+				testTeamID: now.Add(apiKeyCacheTTL),
+			}
+		})
 
 		p.invalidateAPIKeyCache(" \t ", now.Add(apiKeyCacheTTL))
 		p.seedAPIKeyCache("\n", testNewAPIKey, now)
 
-		if len(p.apiKeyCache) != 1 || p.apiKeyCache[testTeamID].apiKey != testOldAPIKey {
-			t.Fatalf("blank mutation changed cache: %#v", p.apiKeyCache)
+		got, err := p.APIKey(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("cached APIKey after blank mutation: %v", err)
 		}
-		if len(p.apiKeyLookupInFlight) != 1 || p.apiKeyLookupInFlight[testTeamID] != call {
-			t.Fatalf("blank mutation changed in-flight map: %#v", p.apiKeyLookupInFlight)
-		}
-		if len(p.apiKeyCacheGeneration) != 1 || p.apiKeyCacheGeneration[testTeamID] != 7 {
-			t.Fatalf("blank mutation changed generation map: %#v", p.apiKeyCacheGeneration)
+		if got != testOldAPIKey {
+			t.Fatalf("got %q want %q", got, testOldAPIKey)
 		}
 		if len(p.apiKeyStrongReadUntil) != 1 || !p.apiKeyStrongReadUntil[testTeamID].Equal(now.Add(apiKeyCacheTTL)) {
 			t.Fatalf("blank mutation changed strong-read markers: %#v", p.apiKeyStrongReadUntil)

@@ -41,6 +41,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/layervai/qurl-integrations/internal/ttlcache"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -141,30 +143,31 @@ type DDBProvider struct {
 	TableName string
 	Encryptor FieldEncryptor
 
-	// Cache successful APIKey lookups at the DDB/decrypt boundary with
-	// per-workspace in-flight fills, generation-guarded invalidation, and inline
-	// expiry sweeps. The cache is process-local, so sibling instances can keep a
-	// decrypted key, including a revoked key, until the five-minute TTL from #263
-	// expires; stricter cross-instance invalidation is tracked in #766. The
-	// decrypted key remains in heap memory for that TTL as the accepted
-	// KMS/latency trade-off.
+	// Cache successful APIKey lookups at the DDB/decrypt boundary with the
+	// shared TTL singleflight helper. The helper intentionally uses one mutex
+	// for cache maps, in-flight fills, generation invalidation, and the
+	// strong-read sidecar below: fills run outside the lock, so unrelated
+	// workspaces only serialize the short map operations instead of DDB/KMS.
+	//
+	// The cache is process-local, so sibling instances can keep a decrypted key,
+	// including a revoked key, until the five-minute TTL from #263 expires;
+	// stricter cross-instance invalidation is tracked in #766. The decrypted key
+	// remains in heap memory for that TTL as the accepted KMS/latency trade-off.
 	// SetAPIKey seeds this process after a successful write. DeleteAPIKey evicts
 	// this process and forces strongly-consistent refills for one TTL so a
 	// same-process eventually-consistent post-delete read cannot re-cache the
 	// revoked key.
-	apiKeyCache map[string]*cachedAPIKey
+	apiKeyCacheOnce   sync.Once
+	apiKeyLookupCache *ttlcache.Cache[string]
 
-	// The mutex coordinates the cache with in-flight fills and invalidation
-	// generations. Generation entries are retained after invalidation even after
-	// an in-flight slot is deleted: that slot deletion detaches the old owner,
-	// which may still finish later, so resetting the generation to zero could let
-	// it cache an old key. The map grows for each workspace seeded or
-	// invalidated in this process and is retained for the process lifetime.
-	apiKeyCacheMu         sync.Mutex
-	apiKeyLookupInFlight  map[string]*apiKeyLookupCall
-	apiKeyCacheGeneration map[string]uint64
+	// Protected by apiKeyLookupCache's mutex through ttlcache hooks. Generation
+	// entries are retained by the helper after invalidation even after an
+	// in-flight slot is deleted: that slot deletion detaches the old owner,
+	// which may still finish later, so resetting the generation to zero could
+	// let it cache an old key. The generation map grows for each workspace
+	// seeded or invalidated in this process and is retained for the process
+	// lifetime.
 	apiKeyStrongReadUntil map[string]time.Time
-	apiKeyCacheLastSweep  time.Time
 
 	// Now is injected so tests can pin the wall clock for configured_at /
 	// updated_at assertions without poking package-global state. Defaults
@@ -172,25 +175,14 @@ type DDBProvider struct {
 	Now func() time.Time
 }
 
-type cachedAPIKey struct {
-	apiKey    string
-	expiresAt time.Time
-}
-
-type apiKeyLookupResult struct {
-	apiKey string
-	err    error
-}
-
-type apiKeyLookupCall struct {
-	done chan struct{}
-	apiKeyLookupResult
-}
-
 type apiKeyLookupStart struct {
-	apiKey         string
+	apiKey string
+	// Cached API-key hits only store successful lookups, so err is expected
+	// to be nil. Keeping the Result shape here mirrors ttlcache and makes
+	// that contract explicit at the call site.
+	err            error
 	hit            bool
-	call           *apiKeyLookupCall
+	call           *ttlcache.Call[string]
 	owner          bool
 	generation     uint64
 	consistentRead bool
@@ -218,6 +210,24 @@ func (p *DDBProvider) nowOrDefault() time.Time {
 		return p.Now()
 	}
 	return time.Now()
+}
+
+func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[string] {
+	p.apiKeyCacheOnce.Do(func() {
+		p.apiKeyLookupCache = ttlcache.New[string](ttlcache.Options[string]{
+			SweepEvery: apiKeyCacheSweepEvery,
+			OnSweep: func(at time.Time) {
+				// OnSweep runs under the ttlcache lock; keep this hook
+				// non-reentrant and limited to the strong-read sidecar.
+				for workspaceID, until := range p.apiKeyStrongReadUntil {
+					if !at.Before(until) {
+						delete(p.apiKeyStrongReadUntil, workspaceID)
+					}
+				}
+			},
+		})
+	})
+	return p.apiKeyLookupCache
 }
 
 // DDBProviderOption configures NewDDBProvider.
@@ -320,16 +330,17 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		now := p.nowOrDefault()
 		start := p.getOrStartAPIKeyLookup(workspaceID, now)
 		if start.hit {
-			return start.apiKey, nil
+			return start.apiKey, start.err
 		}
 		if !start.owner {
 			select {
-			case <-start.call.done:
-				if shouldRetryAPIKeyLookupAfterSharedError(ctx, start.call.err, sharedContextErrorRetries) {
+			case <-start.call.Done():
+				result := start.call.Result()
+				if shouldRetryAPIKeyLookupAfterSharedError(ctx, result.Err, sharedContextErrorRetries) {
 					sharedContextErrorRetries++
 					continue
 				}
-				return start.call.apiKey, start.call.err
+				return result.Value, result.Err
 			case <-ctx.Done():
 				return "", fmt.Errorf("DDBProvider.APIKey: %w", ctx.Err())
 			}
@@ -353,62 +364,55 @@ func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, ret
 }
 
 func (p *DDBProvider) getOrStartAPIKeyLookup(workspaceID string, now time.Time) apiKeyLookupStart {
-	p.apiKeyCacheMu.Lock()
-	defer p.apiKeyCacheMu.Unlock()
-
-	if p.apiKeyCache == nil {
-		p.apiKeyCache = map[string]*cachedAPIKey{}
-	}
-	p.sweepExpiredAPIKeyCacheLocked(now)
-	if entry, ok := p.apiKeyCache[workspaceID]; ok {
-		if now.Before(entry.expiresAt) {
-			return apiKeyLookupStart{apiKey: entry.apiKey, hit: true}
+	start, consistentRead := ttlcache.GetOrStartWith[string, bool](p.apiKeyCache(), workspaceID, now, func() bool {
+		// GetOrStartWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
+		// The hook also runs for waiters so all callers observe and clean up
+		// strong-read sidecar state under the same lock, even though only a
+		// fill owner passes the flag into DDB.
+		if p.apiKeyStrongReadUntil == nil {
+			return false
 		}
-		delete(p.apiKeyCache, workspaceID)
-	}
-
-	if p.apiKeyCacheGeneration == nil {
-		p.apiKeyCacheGeneration = map[string]uint64{}
-	}
-	generation := p.apiKeyCacheGeneration[workspaceID]
-	consistentRead := false
-	if p.apiKeyStrongReadUntil != nil {
-		if until, ok := p.apiKeyStrongReadUntil[workspaceID]; ok {
-			if now.Before(until) {
-				consistentRead = true
-			} else {
-				delete(p.apiKeyStrongReadUntil, workspaceID)
-			}
+		until, ok := p.apiKeyStrongReadUntil[workspaceID]
+		if !ok {
+			return false
 		}
+		if now.Before(until) {
+			return true
+		}
+		delete(p.apiKeyStrongReadUntil, workspaceID)
+		return false
+	})
+	if start.Hit {
+		return apiKeyLookupStart{apiKey: start.Result.Value, err: start.Result.Err, hit: true}
 	}
-	if p.apiKeyLookupInFlight == nil {
-		p.apiKeyLookupInFlight = map[string]*apiKeyLookupCall{}
+	if !start.Owner {
+		return apiKeyLookupStart{call: start.Call}
 	}
-	if call, ok := p.apiKeyLookupInFlight[workspaceID]; ok {
-		return apiKeyLookupStart{call: call}
-	}
-	call := &apiKeyLookupCall{done: make(chan struct{})}
-	p.apiKeyLookupInFlight[workspaceID] = call
-	return apiKeyLookupStart{call: call, owner: true, generation: generation, consistentRead: consistentRead}
+	return apiKeyLookupStart{call: start.Call, owner: true, generation: start.Generation, consistentRead: consistentRead}
 }
 
-func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *apiKeyLookupCall, generation uint64, consistentRead bool) (string, error) {
-	result := apiKeyLookupResult{}
+func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceID string, call *ttlcache.Call[string], generation uint64, consistentRead bool) (string, error) {
+	result := ttlcache.Result[string]{}
 	finished := false
 	defer func() {
 		if rec := recover(); rec != nil {
 			if !finished {
-				result = apiKeyLookupResult{err: errors.New("DDBProvider.APIKey: lookup panicked")}
-				p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
+				result = ttlcache.Result[string]{Err: errors.New("DDBProvider.APIKey: lookup panicked")}
+				p.apiKeyCache().Finish(workspaceID, call, result, 0, p.nowOrDefault(), generation)
 			}
 			panic(rec)
 		}
 	}()
 
 	apiKey, err := p.fetchAPIKey(ctx, workspaceID, consistentRead)
-	result = apiKeyLookupResult{apiKey: apiKey, err: err}
+	result = ttlcache.Result[string]{Value: apiKey, Err: err}
 	finished = true
-	p.finishAPIKeyLookup(workspaceID, call, result, p.nowOrDefault(), generation)
+	cacheTTL := time.Duration(0)
+	if err == nil {
+		cacheTTL = apiKeyCacheTTL
+	}
+	p.apiKeyCache().Finish(workspaceID, call, result, cacheTTL, p.nowOrDefault(), generation)
 	return apiKey, err
 }
 
@@ -458,93 +462,33 @@ func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consi
 	return string(pt), nil
 }
 
-func (p *DDBProvider) finishAPIKeyLookup(workspaceID string, call *apiKeyLookupCall, result apiKeyLookupResult, now time.Time, generation uint64) {
-	p.apiKeyCacheMu.Lock()
-	defer p.apiKeyCacheMu.Unlock()
-
-	if result.err == nil && p.apiKeyCacheGeneration[workspaceID] == generation {
-		p.cacheAPIKey(workspaceID, result.apiKey, now)
-	}
-	// Waiters already attached to this fill receive its result even if a
-	// concurrent SetAPIKey/DeleteAPIKey invalidated the generation. The stale
-	// value is not cached, so only those already in-flight callers can observe it.
-	call.apiKeyLookupResult = result
-	if p.apiKeyLookupInFlight[workspaceID] == call {
-		delete(p.apiKeyLookupInFlight, workspaceID)
-	}
-	close(call.done)
-}
-
-func (p *DDBProvider) cacheAPIKey(workspaceID, apiKey string, now time.Time) {
-	if p.apiKeyCache == nil {
-		p.apiKeyCache = map[string]*cachedAPIKey{}
-	}
-	p.apiKeyCache[workspaceID] = &cachedAPIKey{
-		apiKey:    apiKey,
-		expiresAt: now.Add(apiKeyCacheTTL),
-	}
-}
-
-func (p *DDBProvider) sweepExpiredAPIKeyCacheLocked(now time.Time) {
-	if !p.apiKeyCacheLastSweep.IsZero() && now.Sub(p.apiKeyCacheLastSweep) < apiKeyCacheSweepEvery {
-		return
-	}
-	// Minute-gated O(workspaces seen by this process), matching the Slack token
-	// cache without adding a background goroutine or real-clock timer to tests.
-	for workspaceID, entry := range p.apiKeyCache {
-		if !now.Before(entry.expiresAt) {
-			delete(p.apiKeyCache, workspaceID)
-		}
-	}
-	for workspaceID, until := range p.apiKeyStrongReadUntil {
-		if !now.Before(until) {
-			delete(p.apiKeyStrongReadUntil, workspaceID)
-		}
-	}
-	p.apiKeyCacheLastSweep = now
-}
-
 func (p *DDBProvider) invalidateAPIKeyCache(workspaceID string, strongReadUntil time.Time) {
 	if strings.TrimSpace(workspaceID) == "" {
 		return
 	}
-	p.apiKeyCacheMu.Lock()
-	defer p.apiKeyCacheMu.Unlock()
-
-	delete(p.apiKeyCache, workspaceID)
-	if p.apiKeyLookupInFlight != nil {
-		delete(p.apiKeyLookupInFlight, workspaceID)
-	}
-	if p.apiKeyCacheGeneration == nil {
-		p.apiKeyCacheGeneration = map[string]uint64{}
-	}
-	p.apiKeyCacheGeneration[workspaceID]++
-	if !strongReadUntil.IsZero() {
-		if p.apiKeyStrongReadUntil == nil {
-			p.apiKeyStrongReadUntil = map[string]time.Time{}
+	p.apiKeyCache().InvalidateWith(workspaceID, func() {
+		// InvalidateWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
+		if !strongReadUntil.IsZero() {
+			if p.apiKeyStrongReadUntil == nil {
+				p.apiKeyStrongReadUntil = map[string]time.Time{}
+			}
+			p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
 		}
-		p.apiKeyStrongReadUntil[workspaceID] = strongReadUntil
-	}
+	})
 }
 
 func (p *DDBProvider) seedAPIKeyCache(workspaceID, apiKey string, now time.Time) {
 	if strings.TrimSpace(workspaceID) == "" {
 		return
 	}
-	p.apiKeyCacheMu.Lock()
-	defer p.apiKeyCacheMu.Unlock()
-
-	if p.apiKeyLookupInFlight != nil {
-		delete(p.apiKeyLookupInFlight, workspaceID)
-	}
-	if p.apiKeyCacheGeneration == nil {
-		p.apiKeyCacheGeneration = map[string]uint64{}
-	}
-	p.apiKeyCacheGeneration[workspaceID]++
-	if p.apiKeyStrongReadUntil != nil {
-		delete(p.apiKeyStrongReadUntil, workspaceID)
-	}
-	p.cacheAPIKey(workspaceID, apiKey, now)
+	p.apiKeyCache().SeedWith(workspaceID, ttlcache.Result[string]{Value: apiKey}, apiKeyCacheTTL, now, func() {
+		// SeedWith runs this hook under the ttlcache lock; keep it
+		// non-reentrant and limited to the strong-read sidecar.
+		if p.apiKeyStrongReadUntil != nil {
+			delete(p.apiKeyStrongReadUntil, workspaceID)
+		}
+	})
 }
 
 // SlackBotToken looks up the per-workspace Slack bot token captured during
