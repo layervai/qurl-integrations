@@ -19,8 +19,8 @@ const (
 // local instead of using a full CommonMark library because streaming deltas must
 // be hardened before Slack sees them, even when syntax is split across chunk
 // boundaries. The pinned masked-link surface is inline/image links, reference
-// definitions, Slack <url|label> angle links, and raw HTML tag starts; keep new
-// renderer syntax support pinned by tests.
+// definitions, Slack <url|label> angle links, Slack control-angle sequences,
+// and raw HTML tag starts; keep new renderer syntax support pinned by tests.
 func hardenAgentMarkdown(markdown string) string {
 	return hardenAgentMarkdownWithOptions(markdown, false, 0)
 }
@@ -208,7 +208,7 @@ func (h *agentMarkdownLinkHarden) flush() string {
 		h.pendingBang = false
 	}
 	if h.pendingLess != "" {
-		out.WriteString(h.pendingLess)
+		out.WriteString(safePendingLessOriginal(h.pendingLess))
 		h.pendingLess = ""
 	}
 	if h.link.state != markdownLinkNone {
@@ -634,14 +634,21 @@ func isSlackControlAngleStart(s string) bool {
 		return false
 	}
 	switch s[1] {
-	case '@':
-		return s[2] == 'U' || s[2] == 'W'
-	case '#':
-		return s[2] == 'C' || s[2] == 'G'
+	case '@', '#':
+		return isASCIILetter(s[2])
 	case '!':
 		return isASCIILetter(s[2])
 	default:
 		return false
+	}
+}
+
+func safePendingLessOriginal(pending string) string {
+	switch pending {
+	case "<@", "<#", "<!":
+		return "\\" + pending
+	default:
+		return pending
 	}
 }
 

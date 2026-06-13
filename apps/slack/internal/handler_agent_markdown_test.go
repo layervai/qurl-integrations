@@ -138,6 +138,15 @@ func TestHardenAgentMarkdown_EscapesSlackControlAngles(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_EscapesFutureSlackControlLetterPrefixes(t *testing.T) {
+	t.Parallel()
+	in := `Notify <@B12345678> and <#D12345678|direct>.`
+	want := `Notify \<@B12345678> and \<#D12345678|direct>.`
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestHardenAgentMarkdown_PreservesBenignAngleControlsLookalikes(t *testing.T) {
 	t.Parallel()
 	in := `Keep prose like 5 <# 7 and temp <@ home unchanged.`
@@ -378,6 +387,21 @@ func TestAgentMarkdownLinkHarden_PreservesTwoByteChunkSplitSlackLookalikes(t *te
 	want := `Keep temp <@ home and 5 <# 7 unchanged`
 	if got != want {
 		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_EscapesDeferredSlackControlPrefixesOnFlush(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"<@", "<#", "<!"} {
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			var h agentMarkdownLinkHarden
+			got := h.write("prefix "+in) + h.flush()
+			want := `prefix \` + in
+			if got != want {
+				t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
