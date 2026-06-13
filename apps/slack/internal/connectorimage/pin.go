@@ -3,7 +3,9 @@
 package connectorimage
 
 import (
-	_ "crypto/sha256" // register sha256 for github.com/distribution/reference digest parsing
+	// Load-bearing: without this registration, dockerref.Parse rejects every
+	// sha256 digest and valid digest-pinned inputs become MalformedDigest.
+	_ "crypto/sha256"
 	"strings"
 
 	dockerref "github.com/distribution/reference"
@@ -81,9 +83,6 @@ func classifyDigestImagePin(name, digest string, parsed dockerref.Reference, par
 	if parseErr != nil || !ok {
 		return MalformedDigest
 	}
-	if _, ok := parsed.(dockerref.Digested); !ok {
-		return MalformedDigest
-	}
 	repositoryName = named.Name()
 	if strings.EqualFold(repositoryName, "sha256") || slashlessRegistryReference(repositoryName) {
 		return MalformedDigest
@@ -120,9 +119,6 @@ func classifyTaggedImagePin(name string, parsed dockerref.Reference, parseErr er
 	named, ok := parsed.(dockerref.Named)
 	if parseErr != nil || !ok {
 		return MalformedReference
-	}
-	if _, ok := parsed.(dockerref.Tagged); !ok {
-		return Floating
 	}
 	repositoryName = named.Name()
 	if slashlessRegistryReference(repositoryName) {
