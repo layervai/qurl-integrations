@@ -2606,11 +2606,11 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("agent-initiated delivery failure should record one audit entry, got %d: %+v", len(got), got)
 	}
-	if got[0].Outcome != agentProtectConnectorAuditDeliveryFailedOutcome {
-		t.Fatalf("audit outcome = %q, want %q", got[0].Outcome, agentProtectConnectorAuditDeliveryFailedOutcome)
+	if got[0].Outcome != agentProtectConnectorAuditInstructionsDeliveryFailedOutcome {
+		t.Fatalf("audit outcome = %q, want %q", got[0].Outcome, agentProtectConnectorAuditInstructionsDeliveryFailedOutcome)
 	}
-	if got[0].Result != agentProtectConnectorAuditDeliveryFailedOutcome {
-		t.Fatalf("audit result = %q, want %q", got[0].Result, agentProtectConnectorAuditDeliveryFailedOutcome)
+	if got[0].Result != agentProtectConnectorAuditInstructionsDeliveryFailedOutcome {
+		t.Fatalf("audit result = %q, want %q", got[0].Result, agentProtectConnectorAuditInstructionsDeliveryFailedOutcome)
 	}
 	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
 		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
@@ -2963,6 +2963,8 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	t.Cleanup(responseURL.Close)
 
 	h := newAdminTestHandler(t, ts)
+	agentStore := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: testAgentAuditTable}
+	h.cfg.AgentStore = agentStore
 	h.cfg.TunnelImage = testTunnelImageRef
 	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
 		return errors.New("dm unavailable")
@@ -2981,6 +2983,10 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 			Environment: tunnelEnvDocker,
 		},
 		attemptID: tunnelBootstrapTimeAttemptID("test-attempt", h.now()),
+		agentAudit: &tunnelInstallAgentAudit{
+			target: testTunnelSlug,
+			reason: testTunnelAgentReason,
+		},
 	})
 
 	if revokeHits != 1 {
@@ -2997,6 +3003,22 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	}
 	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
 		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
+	}
+	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
+	if err != nil {
+		t.Fatalf("list audit entries: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("agent-initiated DM failure should record one audit entry, got %d: %+v", len(got), got)
+	}
+	if got[0].Outcome != agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome {
+		t.Fatalf("audit outcome = %q, want %q", got[0].Outcome, agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome)
+	}
+	if got[0].Result != agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome {
+		t.Fatalf("audit result = %q, want %q", got[0].Result, agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome)
+	}
+	if got[0].ResultSuccess == nil || *got[0].ResultSuccess {
+		t.Fatalf("audit result success = %v, want false", got[0].ResultSuccess)
 	}
 }
 

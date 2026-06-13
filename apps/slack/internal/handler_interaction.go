@@ -218,9 +218,9 @@ func blockActionIDs(actions []interactionAction) []string {
 
 func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *interactionPayload) {
 	// Rejections before startAsyncWorker are pre-execution validation or
-	// authorization failures. Like confirm-card pre-execution rejections, they
-	// do not write agent audit rows; accepted submissions that reach the setup
-	// worker are recorded below.
+	// authorization failures, including the modal admin re-check below. Like
+	// confirm-card pre-execution rejections, they do not write agent audit rows;
+	// accepted submissions that reach the setup worker are recorded below.
 	args, fieldErrors := parseTunnelInstallModalArgs(payload.View.State.Values)
 	if len(fieldErrors) > 0 {
 		respondViewErrors(w, fieldErrors)

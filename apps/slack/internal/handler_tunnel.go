@@ -85,11 +85,12 @@ const (
 	// Connector reasons round-trip through Slack private_metadata, unlike the
 	// confirm-card audit path; keep this cap path-specific so metadata stays
 	// bounded without changing other agent audit reasons.
-	agentConnectorAuditReasonMaxRunes               = 240
-	agentConnectorAuditWriteTimeout                 = 5 * time.Second
-	agentProtectConnectorAuditOutcome               = "qURL Connector setup generated."
-	agentProtectConnectorAuditDeliveryFailedOutcome = "qURL Connector setup generated, but Slack delivery was not confirmed and the bootstrap key was revoked."
-	agentProtectConnectorAuditBuildFailedOutcome    = "qURL Connector setup failed before install instructions were delivered."
+	agentConnectorAuditReasonMaxRunes                           = 240
+	agentConnectorAuditWriteTimeout                             = 5 * time.Second
+	agentProtectConnectorAuditOutcome                           = "qURL Connector setup generated."
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome  = "qURL Connector setup generated, but Slack could not deliver the bootstrap-key DM and the bootstrap key was revoked."
+	agentProtectConnectorAuditInstructionsDeliveryFailedOutcome = "qURL Connector setup generated, but Slack could not confirm install-instructions delivery and the bootstrap key was revoked."
+	agentProtectConnectorAuditBuildFailedOutcome                = "qURL Connector setup failed before install instructions were delivered."
 )
 
 type tunnelInstallArgs struct {
@@ -646,7 +647,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, re
 			message += " Re-run `/qurl-admin protect-connector` after DM delivery is available."
 		}
 		_ = h.postResponse(log, req.responseURL, message)
-		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditDeliveryFailedOutcome, false)
+		h.recordTunnelInstallAgentAudit(log, req, agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome, false)
 		return
 	}
 	delivered := h.postInstallInstructions(log, req.responseURL, build.message)
@@ -670,7 +671,7 @@ func (h *Handler) processTunnelInstall(ctx context.Context, log *slog.Logger, re
 
 	outcome := agentProtectConnectorAuditOutcome
 	if !delivered {
-		outcome = agentProtectConnectorAuditDeliveryFailedOutcome
+		outcome = agentProtectConnectorAuditInstructionsDeliveryFailedOutcome
 	}
 	h.recordTunnelInstallAgentAudit(log, req, outcome, delivered)
 }
