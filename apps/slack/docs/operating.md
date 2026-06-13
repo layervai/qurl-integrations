@@ -57,8 +57,7 @@ at the OAuth-callback bind layer.
   window. After the window expires, if the stored Slack key is lost/revoked, or
   if the admin abandons setup, use qURL account/API-key management or operator
   tooling to revoke the unused workspace key before retrying; self-service
-  rotation/recovery for that path is tracked in layervai/qurl-service#910 and
-  abandoned binding-backed setup visibility is tracked in #710.
+  rotation/recovery for that path is tracked in layervai/qurl-service#910.
   Rerunning setup is intentionally not a healthy-key rotation or qURL-account
   switch command; use the qURL dashboard / API-key management surface or
   operator tooling for rotation and admin hand-off. Keys are field-level
@@ -121,6 +120,48 @@ at the OAuth-callback bind layer.
     can still interrupt the five-second cleanup window. If that happens, the
     bootstrap key remains bounded by its one-hour TTL; revoke it manually if
     logs show `tunnel_bootstrap_cleanup_failed`.
+
+## Binding-backed setup visibility
+
+`event="slack_setup_binding_backed_persist_failure"` means qURL provisioned a
+binding-backed workspace key, but the Slack app failed to store it locally. Treat
+every event as actionable: the admin can recover by rerunning `/qurl setup
+<email>` with the same qURL account only during the 24-hour replay window. The
+event timestamp starts the operator clock.
+
+Run this CloudWatch Logs Insights query against the Slack app log group with the
+time range set to the last 24 hours:
+
+```sql
+fields @timestamp, team_id, key_id, retry_window_hours, error
+| filter event = "slack_setup_binding_backed_persist_failure"
+| sort @timestamp desc
+| limit 50
+```
+
+Threshold: any result (`count >= 1` in a 5-minute evaluation period) opens an
+on-call ticket to help the workspace admin rerun setup before the replay window
+expires. If the admin reruns setup and the Slack storage write succeeds, close
+the ticket.
+
+For post-window cleanup, run the same event query over the older incident window
+(for example, the previous seven days with the end time set to 24 hours ago):
+
+```sql
+fields @timestamp, team_id, key_id, cleanup_after_window_hours, error
+| filter event = "slack_setup_binding_backed_persist_failure"
+| sort @timestamp asc
+| limit 100
+```
+
+Threshold: any unresolved row after 24 hours is a cleanup candidate. Use qURL
+account/API-key management or operator tooling to revoke or recover the unused
+workspace key before asking the admin to retry. Customer self-service recovery
+for revoked or stale external-identity bindings is tracked in
+[layervai/qurl-service#910](https://github.com/layervai/qurl-service/issues/910).
+The setup-binding rollout notes live in
+[qurl-integrations PR #703](https://github.com/layervai/qurl-integrations/pull/703),
+paired with [qurl-service PR #904](https://github.com/layervai/qurl-service/pull/904).
 
 ## Endpoints
 

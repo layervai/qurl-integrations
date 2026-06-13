@@ -55,10 +55,12 @@ const (
 	// Same fresh-context rationale as persistTimeout: TimeoutHandler
 	// canceling mid-mint would orphan a key the bot can no longer revoke
 	// (no keyID to DELETE against).
-	mintTimeout         = 15 * time.Second
-	existingKeyTimeout  = 5 * time.Second
-	dmTimeout           = 5 * time.Second
-	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	mintTimeout                     = 15 * time.Second
+	existingKeyTimeout              = 5 * time.Second
+	dmTimeout                       = 5 * time.Second
+	auth0TokenBodyLimit             = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
+	setupBindingPersistFailureEvent = "slack_setup_binding_backed_persist_failure"
+	setupBindingRetryWindowHours    = 24
 	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
 	// plus four non-secret characters. The reuse path derives this
 	// from stored plaintext because workspace_state stores api_key
@@ -680,7 +682,13 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
 		if minted.BindingBacked {
 			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry", //nolint:gosec // G706: slog escapes control bytes in attribute values.
-				"error", perr, "team_id", teamID, "key_id", keyID)
+				"event", setupBindingPersistFailureEvent,
+				"error", perr,
+				"team_id", teamID,
+				"key_id", keyID,
+				"retry_window_hours", setupBindingRetryWindowHours,
+				"cleanup_after_window_hours", setupBindingRetryWindowHours,
+				"operator_action", "rerun_setup_within_retry_window_then_cleanup_after_window")
 		} else {
 			slog.Error("oauth/callback persist failed — revoking legacy fallback key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 				"error", perr, "team_id", teamID, "key_id", keyID)

@@ -1,10 +1,12 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +27,29 @@ const (
 	testAPIKey        = "lv_live_abcd1234"
 	testAdminEmail    = "admin@example.com"
 )
+
+func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []map[string]any {
+		t.Helper()
+		var records []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			var rec map[string]any
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				t.Fatalf("unmarshal log line %q: %v", line, err)
+			}
+			records = append(records, rec)
+		}
+		return records
+	}
+}
 
 // fakeWorkspaceStore captures SetAPIKey calls.
 type fakeWorkspaceStore struct {
@@ -629,6 +654,7 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	cfg.AsyncTracker = tracker
 	store.setErr = errors.New("ddb down")
 	state := mintTestState(t, &cfg)
+	logs := captureDefaultSlogJSON(t)
 
 	h := Callback(cfg)
 	rec := httptest.NewRecorder()
@@ -650,6 +676,33 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	if minter.revoked {
 		t.Error("binding-backed persist failure must not revoke; retry needs the binding record")
 	}
+	assertSetupBindingPersistFailureLogged(t, logs())
+}
+
+func assertSetupBindingPersistFailureLogged(t *testing.T, records []map[string]any) {
+	t.Helper()
+	for _, rec := range records {
+		if rec["event"] != setupBindingPersistFailureEvent {
+			continue
+		}
+		if rec["team_id"] != testTeamID {
+			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
+		}
+		if rec["key_id"] != testKeyID {
+			t.Errorf("key_id = %v, want %q", rec["key_id"], testKeyID)
+		}
+		if rec["retry_window_hours"] != float64(setupBindingRetryWindowHours) {
+			t.Errorf("retry_window_hours = %v, want %d", rec["retry_window_hours"], setupBindingRetryWindowHours)
+		}
+		if rec["cleanup_after_window_hours"] != float64(setupBindingRetryWindowHours) {
+			t.Errorf("cleanup_after_window_hours = %v, want %d", rec["cleanup_after_window_hours"], setupBindingRetryWindowHours)
+		}
+		if rec["operator_action"] != "rerun_setup_within_retry_window_then_cleanup_after_window" {
+			t.Errorf("operator_action = %v", rec["operator_action"])
+		}
+		return
+	}
+	t.Fatalf("missing %q log event in records: %#v", setupBindingPersistFailureEvent, records)
 }
 
 func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
