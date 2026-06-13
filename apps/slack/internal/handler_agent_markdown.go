@@ -18,6 +18,7 @@ type agentMarkdownLinkHarden struct {
 	inCode       bool
 	codeTicks    int
 	pendingTicks int
+	escaped      bool
 
 	pendingBang bool
 	link        markdownLinkPending
@@ -63,6 +64,11 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 		if c != '`' && h.pendingTicks > 0 {
 			h.emitBacktickRun(&out)
 		}
+		if h.escaped {
+			out.WriteByte(c)
+			h.escaped = false
+			continue
+		}
 		if h.pendingBang {
 			h.pendingBang = false
 			if c == '[' && !h.inCode {
@@ -73,6 +79,11 @@ func (h *agentMarkdownLinkHarden) writeLinks(markdown string) string {
 		}
 		if c == '`' {
 			h.pendingTicks++
+			continue
+		}
+		if !h.inCode && c == '\\' {
+			out.WriteByte(c)
+			h.escaped = true
 			continue
 		}
 		if !h.inCode {
@@ -98,6 +109,9 @@ func (h *agentMarkdownLinkHarden) flush() string {
 	if h.pendingTicks > 0 {
 		h.emitBacktickRun(&out)
 	}
+	h.escaped = false
+	h.inCode = false
+	h.codeTicks = 0
 	if h.pendingBang {
 		out.WriteByte('!')
 		h.pendingBang = false

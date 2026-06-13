@@ -468,9 +468,11 @@ func newSlackPostMarkdownMessageFuncWithTokenLookup(lookup slackBotTokenLookup, 
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
-		if err := poster.post(ctx, teamID, enterpriseID, body); !isSlackMarkdownBlockFallbackError(err) {
+		err = poster.post(ctx, teamID, enterpriseID, body)
+		if !isSlackMarkdownBlockFallbackError(err) {
 			return err
 		}
+		slog.Debug("Slack rejected markdown block; retrying with markdown_text", "error", err)
 		body, err = slackMarkdownTextMessageBody(channelID, threadTS, markdownText)
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
@@ -495,8 +497,21 @@ type slackMarkdownBlock struct {
 }
 
 func slackMarkdownFallbackText(markdownText string) string {
-	return strings.TrimSpace(markdownText)
+	var lines []string
+	for _, line := range strings.Split(markdownText, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimLeft(line, "#")
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* "))
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	text := strings.Join(lines, " ")
+	text = slackMarkdownFallbackReplacer.Replace(text)
+	return strings.Join(strings.Fields(text), " ")
 }
+
+var slackMarkdownFallbackReplacer = strings.NewReplacer("**", "", "__", "", "`", "")
 
 func slackMarkdownTextMessageBody(channelID, threadTS, markdownText string) ([]byte, error) {
 	return json.Marshal(struct {

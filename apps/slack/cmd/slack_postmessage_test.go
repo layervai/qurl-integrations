@@ -519,8 +519,8 @@ func TestSlackPostMarkdownMessageFuncPostsMarkdownBlockAndFallback(t *testing.T)
 	if gotBody.Channel != mdTestChannel || gotBody.ThreadTS != "1700000000.000100" {
 		t.Fatalf("body = %+v, want channel/thread_ts populated", gotBody)
 	}
-	if gotBody.Text != "Use **bold** and `code`" {
-		t.Fatalf("fallback text = %q, want the answer text", gotBody.Text)
+	if gotBody.Text != "Use bold and code" {
+		t.Fatalf("fallback text = %q, want plain notification text", gotBody.Text)
 	}
 	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0].Type != "markdown" || gotBody.Blocks[0].Text != "Use **bold** and `code`" {
 		t.Fatalf("blocks = %+v, want one standard-Markdown block", gotBody.Blocks)

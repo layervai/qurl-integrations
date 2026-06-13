@@ -1175,8 +1175,9 @@ func (h *Handler) postAgentReply(log *slog.Logger, env *slackEventEnvelope, thre
 // postAgentMarkdownReply delivers the agent's free-text answer as standard
 // Markdown rendered by Slack, with masked links already neutralized by the caller.
 // When the markdown seam is unwired (PostMarkdownMessage nil) it falls back to the
-// mrkdwn PostMessage seam — degraded rendering, but still a delivered answer
-// rather than a dropped one.
+// mrkdwn PostMessage seam: degraded rendering, and not a full defense for Slack's
+// own <url|label> mrkdwn masking syntax, but still a delivered pre-enablement
+// answer rather than a dropped one. The production seam wires PostMarkdownMessage.
 func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelope, threadTS, markdown string) {
 	post := h.cfg.PostMarkdownMessage
 	if post == nil {
