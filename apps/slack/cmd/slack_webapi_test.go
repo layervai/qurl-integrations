@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/internal/ttlcache"
+
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
@@ -363,43 +365,55 @@ func TestWorkspaceSlackTokenLookupReleasesInFlightOnPanic(t *testing.T) {
 
 func TestWorkspaceSlackTokenLookupCacheSweepsExpiredEntries(t *testing.T) {
 	at := time.Unix(1800000000, 0)
-	cache := &workspaceSlackTokenLookupCache{
-		positive: map[string]cachedSlackBotToken{
-			"T_expired": {token: testWorkspaceSlackBotToken, expiresAt: at.Add(-time.Second)},
-			"T_fresh":   {token: testWorkspaceSlackBotToken, expiresAt: at.Add(time.Minute)},
-		},
-		negative: map[string]time.Time{
-			"T_negative_expired": at.Add(-time.Second),
-			"T_negative_fresh":   at.Add(time.Minute),
-		},
-		inFlight: map[string]*workspaceSlackTokenLookupCall{},
-		fallbackWarned: map[string]struct{}{
+	cache := newWorkspaceSlackTokenLookupCache()
+	cache.tokens.Seed("T_expired", ttlcache.Result[workspaceSlackTokenCacheValue]{
+		Value: workspaceSlackTokenCacheValue{token: testWorkspaceSlackBotToken},
+	}, time.Minute, at.Add(-time.Minute-time.Second))
+	cache.tokens.Seed("T_fresh", ttlcache.Result[workspaceSlackTokenCacheValue]{
+		Value: workspaceSlackTokenCacheValue{token: testWorkspaceSlackBotToken},
+	}, time.Minute, at)
+	cache.tokens.Seed("T_negative_expired", ttlcache.Result[workspaceSlackTokenCacheValue]{
+		Value: workspaceSlackTokenCacheValue{negative: true},
+		Err:   auth.ErrSlackBotTokenNotConfigured,
+	}, time.Minute, at.Add(-time.Minute-time.Second))
+	cache.tokens.Seed("T_negative_fresh", ttlcache.Result[workspaceSlackTokenCacheValue]{
+		Value: workspaceSlackTokenCacheValue{negative: true},
+		Err:   auth.ErrSlackBotTokenNotConfigured,
+	}, time.Minute, at)
+	ttlcache.WithLock(cache.tokens, func() {
+		cache.fallbackWarned = map[string]struct{}{
 			"T_negative_expired": {},
 			"T_negative_fresh":   {},
-		},
-	}
+		}
+	})
 
-	start := cache.getOrStart("T_new", time.Minute, at)
-	if !start.owner {
+	start := cache.getOrStart("T_new", at)
+	if !start.Owner {
 		t.Fatal("new team should start a provider lookup")
 	}
-	if _, ok := cache.positive["T_expired"]; ok {
-		t.Fatal("expired positive cache entry was not swept")
+
+	start = cache.getOrStart("T_expired", at)
+	if !start.Owner {
+		t.Fatal("expired positive cache entry should start a provider lookup")
 	}
-	if _, ok := cache.negative["T_negative_expired"]; ok {
-		t.Fatal("expired negative cache entry was not swept")
+	start = cache.getOrStart("T_fresh", at)
+	if !start.Hit || start.Result.Value.token != testWorkspaceSlackBotToken {
+		t.Fatalf("fresh positive start = %#v, want cached workspace token", start)
 	}
-	if _, ok := cache.positive["T_fresh"]; !ok {
-		t.Fatal("fresh positive cache entry should remain")
+	start = cache.getOrStart("T_negative_expired", at)
+	if !start.Owner {
+		t.Fatal("expired negative cache entry should start a provider lookup")
 	}
-	if _, ok := cache.negative["T_negative_fresh"]; !ok {
-		t.Fatal("fresh negative cache entry should remain")
+	start = cache.getOrStart("T_negative_fresh", at)
+	if !start.Hit || !start.Result.Value.negative || !errors.Is(start.Result.Err, auth.ErrSlackBotTokenNotConfigured) {
+		t.Fatalf("fresh negative start = %#v, want cached reinstall-needed result", start)
+	}
+
+	if _, ok := cache.fallbackWarned["T_negative_fresh"]; !ok {
+		t.Fatal("fresh negative cache entry should keep fallback warning state")
 	}
 	if _, ok := cache.fallbackWarned["T_negative_expired"]; ok {
 		t.Fatal("expired negative cache entry should clear fallback warning state")
-	}
-	if _, ok := cache.fallbackWarned["T_negative_fresh"]; !ok {
-		t.Fatal("fresh negative cache entry should keep fallback warning state")
 	}
 }
 
