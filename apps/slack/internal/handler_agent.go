@@ -261,18 +261,18 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope) {
 // at Warn while keeping the turn best-effort. Pre-enable additive mode still logs at
 // Debug because setStatus may fail on every ordinary DM until the pane is live and the
 // reaction remains the working cue.
-func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, warnOnFailure bool) {
+func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
 	if h.cfg.AssistantThreads == nil || env.Event.ChannelType != slackChannelTypeIM {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, agentAckTimeout)
 	defer cancel()
 	if err := h.cfg.AssistantThreads.SetStatus(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, agentEventRootTS(&env.Event), agentThinkingStatus); err != nil {
-		if !warnOnFailure {
+		if !h.cfg.AgentSurfaceExclusiveAcks {
 			log.Debug("agent: set assistant pane status failed (best-effort)", "error", err)
 			return
 		}
-		log.Warn("agent: set assistant pane status failed (best-effort)", "error", err)
+		log.Warn("agent: set assistant pane status failed in exclusive mode", "error", err)
 	}
 }
 
@@ -693,7 +693,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	if h.startAgentReactionAck(ctx, log, env) {
 		defer h.clearAgentAck(log, env)
 	}
-	h.setAgentThinkingStatus(ctx, log, env, h.cfg.AgentSurfaceExclusiveAcks)
+	h.setAgentThinkingStatus(ctx, log, env)
 
 	threadKey := agentEventThreadKey(env)
 	history, version, ok := h.resolveTurnHistory(ctx, log, env, partition, threadKey, pre)

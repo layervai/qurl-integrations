@@ -165,7 +165,7 @@ func TestAgentStatus_DefaultPaneReactionClearedOnStatusPanic(t *testing.T) {
 	// If that later status path panics, the reaction cleanup must already be registered.
 	fake := &fakeAssistantThreads{panicOnSetStatus: true}
 	rec := &recordingReactions{}
-	h, _, _ := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentStillWorksReply}, false)
+	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentStillWorksReply}, false)
 
 	h.processAgentEvent(context.Background(), slog.Default(),
 		env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?"))
@@ -173,5 +173,10 @@ func TestAgentStatus_DefaultPaneReactionClearedOnStatusPanic(t *testing.T) {
 	adds, removes := rec.snapshot()
 	if len(adds) != 1 || len(removes) != 1 {
 		t.Fatalf("a panicking default pane status path must still add then clear the reaction fallback, got adds=%d removes=%d", len(adds), len(removes))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
+		t.Fatalf("a panicking default pane status path must post the error reply; reply = %+v", *posts)
 	}
 }

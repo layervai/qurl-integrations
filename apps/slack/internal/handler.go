@@ -413,7 +413,8 @@ type Config struct {
 	// exclusive ack path (native status only, Warn on setStatus failure). False by
 	// default so deploying app code before the Slack manifest/pane smoke gate cannot
 	// leave ordinary DMs indicator-less or Warn-spammy; flip true with the #1004
-	// enablement once pane status behavior is confirmed.
+	// enablement once pane status behavior is confirmed. Exclusive mode assumes
+	// AssistantThreads is wired, because there is intentionally no reaction fallback.
 	AgentSurfaceExclusiveAcks bool
 
 	// AgentDefaultEnabled is the per-workspace conversation-mode default for a
