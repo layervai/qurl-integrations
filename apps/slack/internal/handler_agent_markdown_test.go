@@ -138,6 +138,14 @@ func TestHardenAgentMarkdown_EscapesSlackControlAngles(t *testing.T) {
 	}
 }
 
+func TestHardenAgentMarkdown_PreservesBenignAngleControlsLookalikes(t *testing.T) {
+	t.Parallel()
+	in := `Keep prose like 5 <# 7 and temp <@ home unchanged.`
+	if got := hardenAgentMarkdown(in); got != in {
+		t.Fatalf("hardened markdown = %q, want %q", got, in)
+	}
+}
+
 func TestHardenAgentMarkdown_PreservesVisibleAutolinks(t *testing.T) {
 	t.Parallel()
 	in := `Use <https://docs.example/setup>, <MAILTO:security@example.com>, <user@example.com>, or <tel:+15551234567>.`

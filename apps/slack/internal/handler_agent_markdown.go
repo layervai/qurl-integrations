@@ -630,7 +630,19 @@ func isVisibleAngleLinkStart(s string) bool {
 }
 
 func isSlackControlAngleStart(s string) bool {
-	return len(s) >= 2 && s[0] == '<' && strings.ContainsRune("@#!", rune(s[1]))
+	if len(s) < 3 || s[0] != '<' {
+		return false
+	}
+	switch s[1] {
+	case '@':
+		return s[2] == 'U' || s[2] == 'W'
+	case '#':
+		return s[2] == 'C' || s[2] == 'G'
+	case '!':
+		return isASCIILetter(s[2])
+	default:
+		return false
+	}
 }
 
 func shouldDeferAngleAutolinkStart(s string) bool {
