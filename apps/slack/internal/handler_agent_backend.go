@@ -237,7 +237,9 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	for i := range out.Resources {
 		r := &out.Resources[i]
 		if _, ok := allowed[r.ResourceID]; ok {
-			return fmt.Sprintf("`$%s` is a connector in this channel: %s.", token, formatResourceLine(r)), nil
+			// Strip formatResourceLine's leading "- " list bullet — it reads awkwardly
+			// embedded mid-sentence here.
+			return fmt.Sprintf("`$%s` is a connector in this channel: %s.", token, strings.TrimPrefix(formatResourceLine(r), "- ")), nil
 		}
 	}
 	return fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", token), nil

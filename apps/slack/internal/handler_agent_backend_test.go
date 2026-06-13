@@ -120,8 +120,10 @@ func TestAgentBackend_ListAliases(t *testing.T) {
 	if !strings.Contains(out, "$oncall") {
 		t.Fatalf("aliases output = %q, want $oncall", out)
 	}
-	// The opaque resource id the alias binds to must never reach the model/user.
-	if strings.Contains(out, "r_") {
+	// The opaque resource id the alias binds to ($oncall→r_1) must never reach the
+	// model/user. Match the exact fixture id, not the bare "r_" substring (which collides
+	// with legitimate content like a "user_data" description).
+	if strings.Contains(out, "r_1") {
 		t.Fatalf("aliases output leaked an internal resource id: %q", out)
 	}
 }
@@ -140,7 +142,8 @@ func TestAgentBackend_ListResources_ScopedToChannel(t *testing.T) {
 	if strings.Contains(out, "Other channel") || strings.Contains(out, "$secret") {
 		t.Fatalf("a resource outside the channel scope leaked: %q", out)
 	}
-	if strings.Contains(out, "r_") {
+	// The in-scope resource's id (r_1) must not be rendered. Exact fixture id, not bare "r_".
+	if strings.Contains(out, "r_1") {
 		t.Fatalf("list output leaked an internal resource id: %q", out)
 	}
 }
@@ -173,7 +176,8 @@ func TestAgentBackend_ListResources_PaginatesPastFirstPage(t *testing.T) {
 	if strings.Contains(out, "$sneaky") {
 		t.Fatalf("out-of-scope resource leaked: %q", out)
 	}
-	if strings.Contains(out, "r_") {
+	// Neither reachable resource's id (r_1, r_2) may be rendered. Exact fixture ids.
+	if strings.Contains(out, "r_1") || strings.Contains(out, "r_2") {
 		t.Fatalf("list output leaked an internal resource id: %q", out)
 	}
 }
@@ -182,12 +186,13 @@ func TestAgentBackend_ResolveToken(t *testing.T) {
 	b, _ := newBackendUnderTest(t, true)
 	ctx := context.Background()
 
+	// Match the exact bound fixture ids (alias→r_1, slug→r_2), not the bare "r_" substring.
 	alias, err := b.ResolveToken(ctx, backendTC(), "$oncall")
-	if err != nil || !strings.Contains(alias, "$oncall") || strings.Contains(alias, "r_") {
+	if err != nil || !strings.Contains(alias, "$oncall") || strings.Contains(alias, "r_1") {
 		t.Fatalf("alias resolve must confirm $oncall without leaking a resource id: %q err=%v", alias, err)
 	}
 	slug, err := b.ResolveToken(ctx, backendTC(), "staging")
-	if err != nil || !strings.Contains(slug, "$staging") || strings.Contains(slug, "r_") {
+	if err != nil || !strings.Contains(slug, "$staging") || strings.Contains(slug, "r_2") {
 		t.Fatalf("slug resolve must name $staging without leaking a resource id: %q err=%v", slug, err)
 	}
 	ghost, err := b.ResolveToken(ctx, backendTC(), "ghost")
