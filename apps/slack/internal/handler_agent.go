@@ -271,6 +271,9 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, addDo
 	if h.cfg.Reactions == nil || addDone == nil {
 		return
 	}
+	// A nil addDone is only returned by addAgentAck when Reactions is nil. Because this
+	// seam is immutable after Handler construction, the guard above keeps the selects
+	// below from ever receiving on a nil channel.
 	// Non-blocking peek first: on a turn where the async add already landed, skip the
 	// joinCtx allocation entirely (and avoid the deterministic-shutdown nuance below
 	// where addDone and joinCtx.Done() can be ready simultaneously after a successful
