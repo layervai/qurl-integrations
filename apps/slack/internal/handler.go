@@ -1665,7 +1665,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		return
 	}
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID)
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. Run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands. This does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed. Run `/qurl setup <email>` to reconnect it.")
 }
 
 func isEnvBackedAuthProvider(provider auth.Provider) bool {

@@ -482,6 +482,9 @@ func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
 		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
 	}
+	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+		t.Fatalf("uninstall reply missing revocation caveat: %q", resp[respFieldText])
+	}
 }
 
 func TestSlashCommandUninstallNotConfigured(t *testing.T) {
@@ -501,6 +504,26 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallRepeatReportsNotConnected(t *testing.T) {
+	provider := &recordingAuthProvider{apiKey: "test-key"}
+	h := newUninstallAdminTestHandler(t, provider)
+
+	first := slashUninstallAsAdmin(t, h)
+	if !strings.Contains(first[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("first uninstall reply missing confirmation: %q", first[respFieldText])
+	}
+
+	provider.deleteErr = auth.ErrWorkspaceNotConfigured
+	second := slashUninstallAsAdmin(t, h)
+
+	if provider.deleteCalls != 2 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 2", provider.deleteCalls)
+	}
+	if !strings.Contains(second[respFieldText], "isn't currently connected") {
+		t.Fatalf("repeat uninstall reply missing not-connected message: %q", second[respFieldText])
 	}
 }
 
