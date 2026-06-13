@@ -1313,7 +1313,8 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		h.handleSetup(w, values, setupEmail)
 	case text == uninstallVerb:
 		// uninstall stays on the user command as a lifecycle sibling of setup,
-		// but gates to the recorded workspace owner before removing the key.
+		// but gates to the recorded workspace owner or explicit qURL admins
+		// before removing the key.
 		h.handleUninstall(w, values)
 	case slashSubcommand(text, uninstallVerb):
 		// Bare `/qurl uninstall` is handled above so unsupported deployments can
