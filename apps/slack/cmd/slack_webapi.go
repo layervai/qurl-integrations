@@ -499,6 +499,8 @@ type slackMarkdownBlock struct {
 
 // slackMarkdownFallbackText is a lossy notification/screen-reader fallback, not
 // a second Markdown renderer; the markdown block remains the visible body.
+// Callers must pass already-hardened agent markdown; this helper does not
+// neutralize masked-link syntax by itself.
 // Escaped hardening artifacts may remain here so the fallback never hides text
 // that was made literal for safety.
 func slackMarkdownFallbackText(markdownText string) string {

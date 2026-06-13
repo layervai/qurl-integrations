@@ -52,6 +52,7 @@ const (
 	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
 	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}`
 	testTunnelECSAPIKeyNameLine  = `"name": "QURL_API_KEY"`
+	testForbiddenConnectorSlug   = "QURL_CONNECTOR_SLUG"
 )
 
 func freezeTunnelBootstrapNow(t *testing.T, h *Handler, now time.Time) {
@@ -481,7 +482,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1322,7 +1323,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}

@@ -198,6 +198,9 @@ func TestAgentStreamer_ReconcileAcceptsChunkBoundaryEscapedReply(t *testing.T) {
 	s.flush(context.Background())
 	s.onDelta("[evil]: https://evil.example/login")
 	const reply = "Use [click here][evil]. [evil]: https://evil.example/login"
+	if oneShot, streamReconcile := hardenAgentMarkdown(reply), hardenAgentMarkdownForStreamReconcile(reply); oneShot == streamReconcile {
+		t.Fatalf("test must exercise stricter stream reconciliation, both forms were %q", oneShot)
+	}
 
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")

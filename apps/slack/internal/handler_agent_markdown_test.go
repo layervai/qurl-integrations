@@ -77,6 +77,15 @@ func TestHardenAgentMarkdown_UnclosedCodeSpanHardensFollowingLinks(t *testing.T)
 	}
 }
 
+func TestHardenAgentMarkdown_EscapedBacktickDoesNotLeaveEscapeState(t *testing.T) {
+	t.Parallel()
+	in := `Literal \` + "`" + ` before [click me](https://evil.example/phish)`
+	want := `Literal \` + "`" + ` before click me (https://evil.example/phish)`
+	if got := hardenAgentMarkdown(in); got != want {
+		t.Fatalf("hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestHardenAgentMarkdown_PreservesEscapedBrackets(t *testing.T) {
 	t.Parallel()
 	in := `Literal \[safe label](https://example.invalid) but real [link](https://evil.example).`
@@ -171,6 +180,18 @@ func TestAgentMarkdownLinkHarden_EscapesChunkSplitRawHTMLTagStarts(t *testing.T)
 	}
 }
 
+func TestAgentMarkdownLinkHarden_SubSchemeChunkSplitFailsClosed(t *testing.T) {
+	t.Parallel()
+	var h agentMarkdownLinkHarden
+	got := h.write("Use <htt") +
+		h.write("ps://evil.example/login|billing> now") +
+		h.flush()
+	want := `Use \<https://evil.example/login|billing> now`
+	if got != want {
+		t.Fatalf("stream-hardened markdown = %q, want %q", got, want)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_HandlesChunkSplitSlackAngleLinks(t *testing.T) {
 	t.Parallel()
 	var h agentMarkdownLinkHarden
@@ -218,6 +239,22 @@ func TestAgentMarkdownLinkHarden_EscapesOversizedBufferedLinks(t *testing.T) {
 	}
 }
 
+func TestAgentMarkdownLinkHarden_HardensNestedLinksInOversizedBufferedLinks(t *testing.T) {
+	t.Parallel()
+	nested := "[billing](https://evil.example/login)"
+	label := strings.Repeat("a", maxAgentMarkdownLinkBytes/2) + nested + strings.Repeat("b", maxAgentMarkdownLinkBytes)
+	got := hardenAgentMarkdown("[" + label + "](https://safe.example)")
+	if strings.Contains(got, nested) {
+		t.Fatalf("oversized link should harden nested masked links, got %q", got)
+	}
+	if !strings.Contains(got, "billing (https://evil.example/login)") {
+		t.Fatalf("oversized link should expose nested destination, got %q", got)
+	}
+	if !strings.Contains(got, "https://safe.example") {
+		t.Fatalf("oversized link should preserve trailing destination text, got %q", got)
+	}
+}
+
 func TestAgentMarkdownLinkHarden_EscapesOversizedReferenceDefinitions(t *testing.T) {
 	t.Parallel()
 	ref := strings.Repeat("a", maxAgentMarkdownLinkBytes+1)
@@ -227,6 +264,22 @@ func TestAgentMarkdownLinkHarden_EscapesOversizedReferenceDefinitions(t *testing
 	}
 	if !strings.Contains(got, "https://evil.example/login") {
 		t.Fatalf("oversized reference definition should still expose destination, got %q", got)
+	}
+}
+
+func TestAgentMarkdownLinkHarden_HardensNestedLinksInOversizedReferenceDefinitions(t *testing.T) {
+	t.Parallel()
+	nested := "[billing](https://evil.example/login)"
+	ref := strings.Repeat("a", maxAgentMarkdownLinkBytes/2) + nested + strings.Repeat("b", maxAgentMarkdownLinkBytes)
+	got := hardenAgentMarkdown("[" + ref + "]: https://safe.example")
+	if strings.Contains(got, nested) {
+		t.Fatalf("oversized reference definition should harden nested masked links, got %q", got)
+	}
+	if !strings.Contains(got, "billing (https://evil.example/login)") {
+		t.Fatalf("oversized reference definition should expose nested destination, got %q", got)
+	}
+	if !strings.Contains(got, "https://safe.example") {
+		t.Fatalf("oversized reference definition should preserve destination text, got %q", got)
 	}
 }
 
