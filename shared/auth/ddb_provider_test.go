@@ -33,6 +33,7 @@ type fakeDDBClient struct {
 	putInput     *dynamodb.PutItemInput
 	putErr       error
 	updateInput  *dynamodb.UpdateItemInput
+	updateFunc   func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
 }
@@ -49,8 +50,11 @@ func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ 
 	f.putInput = in
 	return &dynamodb.PutItemOutput{}, f.putErr
 }
-func (f *fakeDDBClient) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	f.updateInput = in
+	if f.updateFunc != nil {
+		return f.updateFunc(ctx, in)
+	}
 	if f.updateOutput != nil {
 		return f.updateOutput, f.updateErr
 	}
@@ -1860,6 +1864,54 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 			if got := ddb.updateInput.ExpressionAttributeNames[name]; got != want {
 				t.Errorf("ExpressionAttributeNames[%q] = %q, want %q", name, got, want)
 			}
+		}
+	})
+
+	t.Run("preserves Slack install metadata", func(t *testing.T) {
+		row := map[string]ddbtypes.AttributeValue{
+			attrTeamID:          &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+			attrQURLAPIKey:      &ddbtypes.AttributeValueMemberB{Value: []byte(testOldAPIKey)},
+			attrDataKeyCT:       &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+			attrConfiguredBy:    &ddbtypes.AttributeValueMemberS{Value: "U_ADMIN"},
+			attrConfiguredAt:    &ddbtypes.AttributeValueMemberS{Value: "2026-06-13T00:00:00Z"},
+			attrSlackBotToken:   &ddbtypes.AttributeValueMemberB{Value: []byte(testSlackBotToken)},
+			attrSlackBotTokenDK: &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+		}
+		ddb := &fakeDDBClient{
+			updateFunc: func(_ context.Context, in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+				parts := strings.SplitN(aws.ToString(in.UpdateExpression), " REMOVE ", 2)
+				if len(parts) != 2 {
+					t.Fatalf("UpdateExpression %q missing REMOVE clause", aws.ToString(in.UpdateExpression))
+				}
+				for _, alias := range strings.Split(parts[1], ",") {
+					attrName := in.ExpressionAttributeNames[strings.TrimSpace(alias)]
+					delete(row, attrName)
+				}
+				row[attrUpdatedAt] = in.ExpressionAttributeValues[":now"]
+				return &dynamodb.UpdateItemOutput{}, nil
+			},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Date(2026, 6, 13, 12, 34, 56, 0, time.UTC) },
+		}
+
+		if err := p.DeleteAPIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteAPIKey: %v", err)
+		}
+		if _, ok := row[attrQURLAPIKey]; ok {
+			t.Fatal("qURL API key column survived DeleteAPIKey")
+		}
+		if _, ok := row[attrDataKeyCT]; ok {
+			t.Fatal("qURL API key data-key column survived DeleteAPIKey")
+		}
+		if got := row[attrSlackBotToken].(*ddbtypes.AttributeValueMemberB).Value; string(got) != testSlackBotToken {
+			t.Fatalf("Slack bot token = %q, want %q", got, testSlackBotToken)
+		}
+		if got := row[attrSlackBotTokenDK].(*ddbtypes.AttributeValueMemberB).Value; string(got) != passthroughWrappedKey {
+			t.Fatalf("Slack bot token data key = %q, want %q", got, passthroughWrappedKey)
 		}
 	})
 

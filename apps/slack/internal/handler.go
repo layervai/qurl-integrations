@@ -1320,7 +1320,9 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// Bare `/qurl uninstall` is handled above so unsupported deployments can
 		// explain that operator-managed installs are not self-service. Argument
 		// variants land here: advertise usage when uninstall is live, otherwise
-		// keep the same unsupported-deployment message as the bare verb.
+		// keep the same unsupported-deployment message as the bare verb. This
+		// deliberately pays the owner/admin read before printing Usage so
+		// unauthorized callers do not get a command-existence oracle.
 		if _, _, ok := h.requireUninstallAvailableAndAuthorized(w, values); !ok {
 			return
 		}
