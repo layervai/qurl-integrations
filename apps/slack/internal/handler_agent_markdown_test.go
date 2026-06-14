@@ -13,6 +13,23 @@ const (
 	testUnclosedCodeMarkdownLink  = "` then [click me](https://evil.example/phish)"
 )
 
+func TestHardenAgentMarkdownStream_MatchesSingleWriteHardening(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"Renderer validation: **bold**, bullets:\n- first item\n- second item\nand inline `code`.",
+		"Inline masked link: [billing portal](https://example.com/billing/login).",
+		"Reference link: [billing portal][billing].\n\n[billing]: https://example.com/billing/login",
+		"Slack angle link: <https://example.com/billing/login|billing portal>.",
+		`HTML tag start: <a href="https://example.com/billing/login">billing portal</a>.`,
+		"Image syntax: ![billing screenshot](https://example.com/billing/screen.png).",
+	}
+	for _, in := range cases {
+		if got, want := HardenAgentMarkdownStream(in), HardenAgentMarkdown(in); got != want {
+			t.Fatalf("stream hardening = %q, want single-write hardening %q for %q", got, want, in)
+		}
+	}
+}
+
 func TestHardenAgentMarkdown_RevealsMaskedLinks(t *testing.T) {
 	t.Parallel()
 	in := "Read [the setup guide](https://docs.example/setup) before clicking [go](<https://evil.example/path>). See [title](https://evil.example/t \"tool)tip\")."

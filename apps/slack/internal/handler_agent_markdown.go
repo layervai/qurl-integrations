@@ -33,6 +33,15 @@ func HardenAgentMarkdown(markdown string) string {
 	return hardenAgentMarkdown(markdown)
 }
 
+// HardenAgentMarkdownStream exposes the stream hardener to cmd-layer validation
+// tools for a single append. The single-write output intentionally matches
+// HardenAgentMarkdown; production streaming also preserves this hardener's state
+// across multiple deltas.
+func HardenAgentMarkdownStream(markdown string) string {
+	h := newAgentMarkdownLinkHarden(false, 0)
+	return h.write(markdown) + h.flush()
+}
+
 func hardenAgentMarkdownForStreamReconcile(markdown string) string {
 	h := newAgentMarkdownLinkHarden(false, 0)
 	h.references.anywhere = true
