@@ -83,6 +83,7 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 
 type recordingAuthProvider struct {
 	apiKey            string
+	apiKeyErr         error
 	deleteErr         error
 	deleteUnsupported bool
 	deleteCalls       int
@@ -90,6 +91,9 @@ type recordingAuthProvider struct {
 }
 
 func (p *recordingAuthProvider) APIKey(_ context.Context, _ string) (string, error) {
+	if p.apiKeyErr != nil {
+		return "", p.apiKeyErr
+	}
 	if p.apiKey == "" {
 		return "", auth.ErrWorkspaceNotConfigured
 	}
@@ -791,6 +795,33 @@ func TestSlashCommandUninstallKeyIDReadErrorAbortsWithoutDelete(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "Nothing was disconnected") {
 		t.Fatalf("key_id-read-error reply missing abort/retry guidance: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallClientBuildErrorAbortsWithoutDelete(t *testing.T) {
+	// A non-ErrWorkspaceNotConfigured failure resolving the API key (e.g. a KMS
+	// decrypt error) must abort before revoke and before local removal so the
+	// stored key_id survives — the one abort path that runs after the key_id read
+	// succeeds but before the upstream DELETE.
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", apiKeyErr: errors.New("kms decrypt failed")},
+		keyID:                 "key_workspace_build_err",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if provider.keyIDCalls != 1 {
+		t.Fatalf("APIKeyID calls = %d, want 1", provider.keyIDCalls)
+	}
+	if calls, _ := rec.snapshot(); calls != 0 {
+		t.Fatalf("client build failure must not call upstream revoke; DELETE calls = %d, want 0", calls)
+	}
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0 (client build failure must preserve local state)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "Nothing was disconnected") {
+		t.Fatalf("client-build-error reply missing abort/retry guidance: %q", resp[respFieldText])
 	}
 }
 

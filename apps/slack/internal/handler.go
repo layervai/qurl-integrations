@@ -1730,8 +1730,9 @@ var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
-	// ack window. The revoke is bounded by this same ctx, so a flapping upstream
-	// aborts (key_id preserved) rather than missing the ack.
+	// ack window. The revoke is best-effort within this ctx — the qURL client may
+	// retry a flapping upstream (WithRetry), but the ctx bound makes a retry storm
+	// abort (key_id preserved) rather than miss the ack.
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 

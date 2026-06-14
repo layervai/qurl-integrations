@@ -380,20 +380,30 @@ Two outcomes need operator follow-up because the upstream key is **not** revoked
 but the workspace was disconnected locally:
 
 - `legacy workspace row has no qURL key id — local-only disconnect`: the
-  workspace connected before `key_id` persistence (issue #792), so Slack cannot
-  identify which key to revoke. Revoke it through qURL account/API-key
-  management if the disconnect was security-motivated.
+  workspace connected before `key_id` persistence (added in #791, which this
+  uninstall revocation builds on), so Slack cannot identify which key to revoke.
+  Revoke it through qURL account/API-key management if the disconnect was
+  security-motivated.
 - `upstream refused workspace key self-revoke — local-only disconnect`
   (`status=401`/`403`): the deployment's qURL service does not permit a
   workspace key to revoke itself. Revoke through operator tooling and confirm
   the self-revoke contract with the qURL service team.
 
 `upstream qURL key revoke failed — aborting to preserve key id` (and the
-`could not read stored qURL key id before revoke` variant) means nothing was
-disconnected: the stored `key_id` is intentionally preserved so the admin can
-retry. A transient failure self-heals on retry because an already-revoked key
-returns 404 and is then treated as revoked. Persistent failures past a few
-retries warrant the same upstream-key verification as the rotation path above.
+`could not read stored qURL key id before revoke` / `could not build client to
+revoke upstream key` variants) means nothing was disconnected: the stored
+`key_id` is intentionally preserved so the admin can retry, and a transient
+failure self-heals on the next uninstall.
+
+One expected intermediate state: if a revoke succeeds but the local removal then
+fails, the workspace keeps pointing at a now-revoked key until the retry, so
+every `/qurl` command in that window returns 401. A short burst of
+workspace-wide 401s between a failed uninstall and its retry is expected, not a
+separate incident. On that retry the already-revoked key's DELETE is treated as
+revoked (404), or — if the service checks auth before existence — lands on the
+401/403 local-only path above; either way the disconnect completes. Persistent
+failures past a few retries warrant the same upstream-key verification as the
+rotation path above.
 
 ## Endpoints
 
