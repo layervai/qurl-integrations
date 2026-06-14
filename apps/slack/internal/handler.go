@@ -1728,8 +1728,10 @@ type workspaceKeyRevoker interface {
 var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
-	// Reuse the sync admin-verb budget: after the owner/admin gate, the optional
-	// upstream revoke plus the DeleteAPIKey write stay inside the 2s ack envelope.
+	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
+	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
+	// ack window. The revoke is bounded by this same ctx, so a flapping upstream
+	// aborts (key_id preserved) rather than missing the ack.
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
@@ -1751,7 +1753,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			respondUninstallUnsupported(w)
 			return
 		}
-		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)
+		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID, "caller_user_id", userID)
 		respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
 		return
 	}
@@ -1785,7 +1787,7 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 		// partial-row-cleanup messaging, so fall through to it.
 		return false, nil
 	case err != nil:
-		slog.Error("/qurl uninstall: could not read stored qURL key id before revoke", "error", err, "team_id", teamID)
+		slog.Error("/qurl uninstall: could not read stored qURL key id before revoke", "error", err, "team_id", teamID, "caller_user_id", userID)
 		return false, err
 	}
 	if keyID == "" {
@@ -1800,11 +1802,11 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 			// not-connected authority.
 			return false, nil
 		}
-		slog.Error("/qurl uninstall: could not build client to revoke upstream key", "error", err, "team_id", teamID)
+		slog.Error("/qurl uninstall: could not build client to revoke upstream key", "error", err, "team_id", teamID, "caller_user_id", userID)
 		return false, err
 	}
 	if err := c.RevokeAPIKey(ctx, keyID); err != nil {
-		return classifyUninstallRevokeError(err, teamID, keyID)
+		return classifyUninstallRevokeError(err, teamID, userID, keyID)
 	}
 	slog.Info("/qurl uninstall: revoked upstream qURL API key", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
 	return true, nil
@@ -1822,21 +1824,21 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 // TODO(upstream-contract): the 401/403 degrade assumes qurl-service permits a
 // qurl:write key to DELETE its own /v1/api-keys/{key_id}. Confirm the
 // self-revoke contract with qurl-service; if self-revoke is unsupported, every
-// uninstall lands on this branch and the path is a no-op local disconnect. See
-// #792.
-func classifyUninstallRevokeError(revokeErr error, teamID, keyID string) (revoked bool, err error) {
+// uninstall lands on this branch and the path is a no-op local disconnect.
+// Tracked in #805.
+func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string) (revoked bool, err error) {
 	var apiErr *client.APIError
 	if errors.As(revokeErr, &apiErr) {
 		switch apiErr.StatusCode {
 		case http.StatusNotFound:
-			slog.Info("/qurl uninstall: upstream qURL key already absent — treating as revoked", "team_id", teamID, "key_id", keyID)
+			slog.Info("/qurl uninstall: upstream qURL key already absent — treating as revoked", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
 			return true, nil
 		case http.StatusUnauthorized, http.StatusForbidden:
-			slog.Error("/qurl uninstall: upstream refused workspace key self-revoke — local-only disconnect", "status", apiErr.StatusCode, "team_id", teamID, "key_id", keyID)
+			slog.Error("/qurl uninstall: upstream refused workspace key self-revoke — local-only disconnect", "status", apiErr.StatusCode, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
 			return false, nil
 		}
 	}
-	slog.Error("/qurl uninstall: upstream qURL key revoke failed — aborting to preserve key id", "error", revokeErr, "team_id", teamID, "key_id", keyID)
+	slog.Error("/qurl uninstall: upstream qURL key revoke failed — aborting to preserve key id", "error", revokeErr, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
 	return false, revokeErr
 }
 
