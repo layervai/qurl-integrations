@@ -11,22 +11,24 @@
  * hard-failed the smoke on the very first response (a false red).
  *
  * What it deliberately does NOT do, so it can never MASK a real outage:
- *   - Retries only statuses where the request provably did NOT reach/complete at
- *     the app: 502/503 (ALB couldn't reach a healthy target — the drain-gap we
- *     target) plus 408/425/429 (rejected/timed-out before processing). This set
- *     is safe to retry even on the non-idempotent `/upload` POST: none of them can
- *     mean "the backend processed it but the response was lost," so a retry can't
- *     duplicate a resource. Deterministic 4xx (400/401/404/409) fail fast — real
- *     failures or test bugs.
- *   - Excludes 500 and 504 on purpose: 500 is an app-level error (a real failure,
- *     not a transient infra blip), and 504 (gateway timeout) can mean the backend
- *     DID process the request before the response was lost — retrying a POST would
- *     then duplicate the resource, and the orphan escapes the tests' afterAll
- *     cleanup (which only tracks the final success). The drain-gap is 502/503.
+ *   - Retries are METHOD-AWARE so a non-idempotent POST (`/upload`) can never be
+ *     retried into a duplicate resource:
+ *       · ANY method retries {408, 425, 429, 503} — statuses where the request
+ *         provably did NOT reach/complete at the app (503 = ALB has no healthy
+ *         target, the drain-gap; 408/425/429 = rejected/timed-out before
+ *         processing), so a retry can't duplicate work even on a POST.
+ *       · IDEMPOTENT methods (GET/HEAD/…, e.g. the `/view` read) ALSO retry
+ *         {502, 504} — transient gateway failures where the backend MAY have
+ *         already processed the request before the response was lost. Retrying
+ *         those is safe on a GET but would risk a duplicate on a POST, so they
+ *         are excluded for non-idempotent methods.
+ *   - Excludes 500 everywhere: an app-level error is a real failure, not a
+ *     transient infra blip — it should fail fast.
  *   - Excludes 403: on this path a 403 is a WAF-layer block (e.g. AWS managed
  *     IP-reputation flagging the CI runner's egress IP), which blocks the runner
  *     run-wide — an intra-run retry (same IP) can't recover it and would only
  *     delay the failure (tracked in qurl-integrations-infra#1091).
+ *   - Deterministic 4xx (400/401/404/409) fail fast — real failures or test bugs.
  *   - Does NOT catch fetch REJECTIONS (DNS / ECONNREFUSED / the sustained
  *     fileviewer.layerv.xyz:443 ConnectTimeout the ticket calls out). Those
  *     propagate immediately so a genuine outage fails fast.
@@ -34,27 +36,46 @@
  *     surfaces: the final Response is returned for the caller's own `!ok` throw.
  */
 
-/**
- * Statuses worth a bounded retry on the connector/fileviewer serving path —
- * limited to ones where the request did NOT reach/complete at the app, so a retry
- * is safe even on a non-idempotent POST. See the module header for why 500/504,
- * 403, and the deterministic 4xx are absent. Module-private — the retry policy is
- * an implementation detail of the helper.
- */
-const RETRYABLE_HTTP_STATUS: ReadonlySet<number> = new Set([
+// Retryable on ANY method — the request provably did not reach/complete at the
+// app, so a retry is safe even on the non-idempotent `/upload` POST.
+const RETRYABLE_ANY_METHOD: ReadonlySet<number> = new Set([
   408, // Request Timeout — request not fully received, so not processed
   425, // Too Early — TLS early-data replay guard; safe to replay
   429, // Too Many Requests — rejected before processing
-  502, // Bad Gateway — ALB couldn't reach a healthy target (drain-gap)
   503, // Service Unavailable — ALB has no healthy target (the drain-gap)
 ]);
 
+// Retryable ONLY for idempotent methods: transient gateway failures where the
+// backend MAY have processed the request before the response was lost — safe to
+// replay on a GET, but would risk a duplicate resource on a POST.
+const RETRYABLE_IDEMPOTENT_ONLY: ReadonlySet<number> = new Set([
+  502, // Bad Gateway — target accepted then closed / returned malformed
+  504, // Gateway Timeout — target may have processed before the timeout
+]);
+
+// Per RFC 9110 §9.2.2: these methods are idempotent (safe to replay); POST and
+// PATCH are not. `fetch()` defaults to GET when no method is given.
+const IDEMPOTENT_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'PUT',
+  'DELETE',
+  'TRACE',
+]);
+
+function isRetryableStatus(status: number, method: string): boolean {
+  if (RETRYABLE_ANY_METHOD.has(status)) return true;
+  return IDEMPOTENT_METHODS.has(method) && RETRYABLE_IDEMPOTENT_ONLY.has(status);
+}
+
 /**
- * `fetch()` with a bounded retry on transient HTTP statuses. Returns the final
- * `Response` (ok, non-retryable, or budget-exhausted) so the caller keeps its
- * own context-rich `!res.ok` error. Network rejections are NOT caught — they
- * propagate. The same `init` is reused across attempts, so any `body` must be
- * re-readable on resend (`FormData`/`Blob` are; a one-shot stream is not).
+ * `fetch()` with a bounded retry on transient HTTP statuses (method-aware — see
+ * the module header). Returns the final `Response` (ok, non-retryable, or
+ * budget-exhausted) so the caller keeps its own context-rich `!res.ok` error.
+ * Network rejections are NOT caught — they propagate. The same `init` is reused
+ * across attempts, so any `body` must be re-readable on resend (`FormData`/`Blob`
+ * are; a one-shot stream is not).
  *
  * @param maxAttempts total attempts including the first (default 3)
  * @param baseDelayMs linear backoff base — waits `baseDelayMs * attempt` between
@@ -65,18 +86,26 @@ export async function fetchWithTransientRetry(
   init?: RequestInit,
   { maxAttempts = 3, baseDelayMs = 1000 }: { maxAttempts?: number; baseDelayMs?: number } = {},
 ): Promise<Response> {
+  const method = (init?.method ?? 'GET').toUpperCase();
   let res = await fetch(input, init);
   for (
     let attempt = 1;
-    attempt < maxAttempts && !res.ok && RETRYABLE_HTTP_STATUS.has(res.status);
+    attempt < maxAttempts && !res.ok && isRetryableStatus(res.status, method);
     attempt++
   ) {
+    const delayMs = baseDelayMs * attempt;
+    // Surface the retry in CI logs so a run that RECOVERED after a blip doesn't
+    // look identical to one that never blipped — the drain-gap signal #1085 wants.
+    console.warn(
+      `[fetchWithTransientRetry] ${method} ${input} -> ${res.status}; ` +
+        `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
+    );
     // Release the discarded response's body so its socket returns to the pool
     // instead of lingering until GC (the 5xx body is never read).
     await res.body?.cancel().catch(() => {});
     // Drain-gaps / rolling deploys resolve in seconds, so a short linear backoff
     // is enough to clear the window without inflating a sustained-outage failure.
-    await new Promise((r) => setTimeout(r, baseDelayMs * attempt));
+    await new Promise((r) => setTimeout(r, delayMs));
     res = await fetch(input, init);
   }
   return res;
