@@ -11,8 +11,18 @@
  * hard-failed the smoke on the very first response (a false red).
  *
  * What it deliberately does NOT do, so it can never MASK a real outage:
- *   - Retries only transient HTTP *statuses* (5xx + 408/425/429). Deterministic
- *     4xx (400/401/404/409) fail fast — those are real failures or test bugs.
+ *   - Retries only statuses where the request provably did NOT reach/complete at
+ *     the app: 502/503 (ALB couldn't reach a healthy target — the drain-gap we
+ *     target) plus 408/425/429 (rejected/timed-out before processing). This set
+ *     is safe to retry even on the non-idempotent `/upload` POST: none of them can
+ *     mean "the backend processed it but the response was lost," so a retry can't
+ *     duplicate a resource. Deterministic 4xx (400/401/404/409) fail fast — real
+ *     failures or test bugs.
+ *   - Excludes 500 and 504 on purpose: 500 is an app-level error (a real failure,
+ *     not a transient infra blip), and 504 (gateway timeout) can mean the backend
+ *     DID process the request before the response was lost — retrying a POST would
+ *     then duplicate the resource, and the orphan escapes the tests' afterAll
+ *     cleanup (which only tracks the final success). The drain-gap is 502/503.
  *   - Excludes 403: on this path a 403 is a WAF-layer block (e.g. AWS managed
  *     IP-reputation flagging the CI runner's egress IP), which blocks the runner
  *     run-wide — an intra-run retry (same IP) can't recover it and would only
@@ -25,18 +35,18 @@
  */
 
 /**
- * Transient HTTP statuses worth a bounded retry on the connector/fileviewer
- * serving path. See the module header for why 403 and the other 4xx are absent.
- * Module-private — the retry policy is an implementation detail of the helper.
+ * Statuses worth a bounded retry on the connector/fileviewer serving path —
+ * limited to ones where the request did NOT reach/complete at the app, so a retry
+ * is safe even on a non-idempotent POST. See the module header for why 500/504,
+ * 403, and the deterministic 4xx are absent. Module-private — the retry policy is
+ * an implementation detail of the helper.
  */
 const RETRYABLE_HTTP_STATUS: ReadonlySet<number> = new Set([
-  408, // Request Timeout
-  425, // Too Early
-  429, // Too Many Requests
-  500, // Internal Server Error
-  502, // Bad Gateway
-  503, // Service Unavailable — an ALB with no healthy target (the drain-gap)
-  504, // Gateway Timeout
+  408, // Request Timeout — request not fully received, so not processed
+  425, // Too Early — TLS early-data replay guard; safe to replay
+  429, // Too Many Requests — rejected before processing
+  502, // Bad Gateway — ALB couldn't reach a healthy target (drain-gap)
+  503, // Service Unavailable — ALB has no healthy target (the drain-gap)
 ]);
 
 /**
