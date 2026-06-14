@@ -669,11 +669,8 @@ func newUninstallRevokeTestHandler(t *testing.T, provider auth.Provider, revokeS
 }
 
 // TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects covers the
-// revoke-success branch (HTTP 204 → upstream_revoked=true). Under the confirmed
-// qurl-service contract a live workspace key cannot self-revoke — it always gets
-// 403 (see classifyUninstallRevokeError) — so this 204 path is not reachable in
-// prod today; it is retained as defensive coverage that would re-activate if an
-// owner/operator-authenticated revoke path lands (#806).
+// revoke-success branch (HTTP 204 → upstream_revoked=true), unreachable for a
+// self-revoke (see classifyUninstallRevokeError) — defensive coverage for #806.
 func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
@@ -700,11 +697,9 @@ func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
 	}
 }
 
-// TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked covers the 404
-// arm. Like the 204 success path, 404 is not reachable for a self-revoke (the
-// credential is the target key, so a missing key 401s at auth before any
-// existence check) — this is defensive coverage retained for the #806 owner-auth
-// revoke path, where the credential and target differ and a 404 can occur.
+// TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked covers the 404 arm.
+// Like the 204 path it's unreachable for a self-revoke (see
+// classifyUninstallRevokeError) — defensive coverage for the #806 owner-auth path.
 func TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
