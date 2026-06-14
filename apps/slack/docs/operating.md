@@ -466,7 +466,11 @@ implications:
   expected path for a live key — qurl-service forbids the self-revoke. The
   upstream key is **still live**, so if the disconnect was security-motivated
   (the key may be exposed), revoke it through qURL account/API-key management or
-  operator tooling.
+  operator tooling. The local disconnect removes `key_id` from the workspace
+  row, so this `WARN` line's `key_id` field is the **only** surviving pointer to
+  the still-live key — capture it promptly and make sure the log group's
+  retention outlives the manual-revoke turnaround. (First-class `key_id`
+  preservation on this specific path is folded into the #806 escape-hatch work.)
 - `upstream qURL key not revoked — local-only disconnect` (`status=401`): the
   workspace key was already revoked or expired upstream (e.g. a prior rotation),
   so qurl-service rejected the credential before the revoke. The key is already

@@ -834,6 +834,37 @@ func TestSlashCommandUninstallKeyIDReadErrorAbortsWithoutDelete(t *testing.T) {
 	}
 }
 
+// TestSlashCommandUninstallKeyIDReadNotConfiguredDisconnectsLocally pins the
+// distinct first switch arm of revokeWorkspaceUpstreamKey: when the APIKeyID read
+// itself reports the workspace not configured (vs a generic read error, which
+// aborts), there is no readable key to revoke, so it falls through to
+// DeleteAPIKey's local-only disconnect — no upstream DELETE. Sibling of
+// KeyVanishedBetweenReads, which exercises the same fall-through from the later
+// APIKey (client-build) read instead.
+func TestSlashCommandUninstallKeyIDReadNotConfiguredDisconnectsLocally(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_notcfg",
+		keyIDErr:              auth.ErrWorkspaceNotConfigured,
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if provider.keyIDCalls != 1 {
+		t.Fatalf("APIKeyID calls = %d, want 1", provider.keyIDCalls)
+	}
+	if calls, _ := rec.snapshot(); calls != 0 {
+		t.Fatalf("not-configured key_id read must not call upstream revoke; DELETE calls = %d, want 0", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1 (not-configured falls through to local-only)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+		t.Fatalf("not-configured local-only reply missing revocation caveat: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallClientBuildErrorAbortsWithoutDelete(t *testing.T) {
 	// A non-ErrWorkspaceNotConfigured failure resolving the API key (e.g. a KMS
 	// decrypt error) must abort before revoke and before local removal so the
