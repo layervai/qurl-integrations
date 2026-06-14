@@ -405,6 +405,15 @@ revoked (404), or — if the service checks auth before existence — lands on t
 failures past a few retries warrant the same upstream-key verification as the
 rotation path above.
 
+The abort is deliberate: it never severs local Slack access while leaving a
+possibly-live upstream key it can no longer identify (that would give false
+security on a compromised workspace, since the leaked key still works via the
+qURL API). If the upstream stays unreachable and Slack access must be cut
+urgently, revoke the key through qURL account/API-key tooling and then clear the
+`workspace_state` row's qURL columns directly — the manual equivalent of the
+local disconnect — rather than waiting on the retry path. A first-class
+admin/operator force/local-only escape hatch is tracked in #806.
+
 ## Endpoints
 
 | Endpoint | Purpose |
