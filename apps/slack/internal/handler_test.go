@@ -825,6 +825,57 @@ func TestSlashCommandUninstallClientBuildErrorAbortsWithoutDelete(t *testing.T) 
 	}
 }
 
+func TestSlashCommandUninstallRevokeSucceedsButLocalRowAlreadyGoneReportsRevoked(t *testing.T) {
+	// Concurrent uninstall / partial-row race: the upstream revoke succeeds but
+	// DeleteAPIKey then reports the row already gone. Because this call did revoke
+	// the key, the reply must confirm the revoke, not contradict it with "isn't
+	// currently connected".
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", deleteErr: auth.ErrWorkspaceNotConfigured},
+		keyID:                 "key_workspace_race",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 1 {
+		t.Fatalf("upstream revoke DELETE calls = %d, want 1", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "API key has been revoked") {
+		t.Fatalf("reply must confirm the revoke that happened: %q", resp[respFieldText])
+	}
+	if strings.Contains(resp[respFieldText], "isn't currently connected") {
+		t.Fatalf("reply must not contradict the revoke with a not-connected message: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallRevokeSucceedsButDeleteFailsReportsRetry(t *testing.T) {
+	// Revoke succeeds but the local removal fails for a generic reason: the
+	// workspace is left pointing at a now-revoked key (the documented 401-burst
+	// window) and the admin is told to retry, which self-heals via the 404/degrade
+	// path on the next uninstall.
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", deleteErr: errors.New("ddb write failed")},
+		keyID:                 "key_workspace_delfail",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 1 {
+		t.Fatalf("upstream revoke DELETE calls = %d, want 1", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "could not disconnect qURL") {
+		t.Fatalf("delete-failure-after-revoke reply missing retry guidance: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallAuthProviderNotConfigured(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	h.cfg.AuthProvider = nil
