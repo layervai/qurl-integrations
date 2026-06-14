@@ -1743,6 +1743,8 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 	// the existing Slack command mapping. CheckAdmin returns true for both the
 	// recorded workspace owner and explicit qURL workspace admins.
 	if isAdmin {
+		// Missing or legacy owner metadata should not strand an explicit admin
+		// from this recoverable local disconnect; log it for operator cleanup.
 		if ownerID == "" {
 			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
 		} else if !looksLikeSlackUserID(ownerID) {

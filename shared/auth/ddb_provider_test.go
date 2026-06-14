@@ -1923,6 +1923,25 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 			t.Fatalf("want ErrWorkspaceNotConfigured, got %v", err)
 		}
 	})
+
+	t.Run("update error is wrapped without not configured sentinel", func(t *testing.T) {
+		updateErr := errors.New("ddb update down")
+		ddb := &fakeDDBClient{updateErr: updateErr}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		err := p.DeleteAPIKey(context.Background(), testTeamID)
+		if err == nil {
+			t.Fatal("want update error, got nil")
+		}
+		if !errors.Is(err, updateErr) {
+			t.Fatalf("want wrapped update error, got %v", err)
+		}
+		if errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("generic update error should not map to ErrWorkspaceNotConfigured: %v", err)
+		}
+		if !strings.Contains(err.Error(), "UpdateItem") {
+			t.Fatalf("wrapped error should name UpdateItem, got %v", err)
+		}
+	})
 }
 
 func TestEnvProviderDeleteAPIKey(t *testing.T) {
