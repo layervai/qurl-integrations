@@ -458,9 +458,12 @@ fields @timestamp, team_id, caller_user_id, key_id, upstream_revoked
 | limit 50
 ```
 
-Because upstream revoke is local-only by design, expect `upstream_revoked=false`
-on essentially every uninstall. The local-only log lines and their operator
-implications:
+Because upstream revoke is local-only by design, `upstream_revoked` is **always
+`false`** today: a self-revoke authenticates with the workspace's own key against
+its own `key_id`, so a live key 403s and a dead key 401s — both before any
+existence check — and the `revoked=true` (204/404) outcomes can't occur until the
+owner-authenticated revoke path (#806) lands. The local-only log lines and their
+operator implications:
 
 - `upstream qURL key not revoked — local-only disconnect` (`status=403`): the
   expected path for a live key — qurl-service forbids the self-revoke. The
@@ -481,9 +484,12 @@ implications:
   Revoke it through qURL account/API-key management if the disconnect was
   security-motivated.
 
-`upstream qURL key already absent — treating as revoked` (`status=404`) is the one
-outcome that reports `upstream_revoked=true`: the key had already been deleted
-upstream (e.g. through operator tooling), so uninstall simply confirms it.
+`upstream qURL key already absent — treating as revoked` (`status=404`) would be
+the one outcome reporting `upstream_revoked=true`, but it **can't fire for a
+self-revoke**: the credential is the target key, so a deleted key surfaces as a
+`401` (bad credential) at the auth layer, never a `404` at the existence check.
+This branch is defensive scaffolding for the #806 owner-authenticated revoke,
+where the credential and target differ and a real `404`/`204` becomes possible.
 
 `upstream qURL key revoke failed — aborting to preserve key id` (and the `could
 not read stored qURL key id before revoke` / `could not build client to revoke

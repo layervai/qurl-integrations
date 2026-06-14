@@ -1766,13 +1766,12 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
-	// Shared reply for the paths that end with the upstream key gone: a clean
-	// revoke+delete, a revoke followed by DeleteAPIKey reporting the row already
-	// gone (concurrent uninstall / partial row), and the 404 path where the key
-	// was already absent upstream. Under the confirmed self-revoke contract a live
-	// key can't actually be revoked here, so in prod this reply is reached via the
-	// 404 (already-gone) path — hence "(or was already revoked upstream)" rather
-	// than asserting this uninstall did the revoking.
+	// Shared reply for the revoked=true paths (a clean revoke+delete, the
+	// revoke-then-row-already-gone race, or a 404 already-absent). All are
+	// unreachable for a self-revoke under the confirmed contract (see
+	// classifyUninstallRevokeError), so in prod this reply is not shown today —
+	// it's defensive for the #806 owner-auth path. The "(or was already revoked
+	// upstream)" hedge keeps it accurate for the 404 case #806 would surface.
 	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
 
 	// revoked reports whether the upstream key was revoked; a non-nil error means
@@ -1780,7 +1779,10 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// stored key_id for a retry rather than orphaning it.
 	revoked, err := h.revokeWorkspaceUpstreamKey(ctx, teamID, userID)
 	if err != nil {
-		respondSlack(w, ":warning: Couldn't revoke this workspace's qURL API key. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.")
+		// Covers all abort arms — a failed revoke, but also the key_id read and
+		// client-build (KMS) failures where no revoke was even attempted — so the
+		// copy says "disconnect", not "revoke".
+		respondSlack(w, ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.")
 		return
 	}
 
@@ -1897,9 +1899,19 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 //     before the existence check. The key is already dead, so degrade too; the
 //     caveat then over-warns, the safe direction. The logged `status` field
 //     distinguishes 401 from 403 for operators.
-//   - 404: the key is already absent upstream → treat as revoked (true, nil).
+//   - 404: treat as revoked (true, nil) — but UNREACHABLE for a self-revoke. The
+//     credential IS the target key, so a present key 403s and an absent/dead key
+//     401s, both before the existence check; there is no "valid credential +
+//     missing target" path. This arm — like the 204 success path in
+//     revokeWorkspaceUpstreamKey — is defensive scaffolding for a future
+//     owner-authenticated revoke (#806), where the credential and target differ
+//     and a 404 (or a real 204) can occur.
 //   - everything else (other 4xx, 5xx, transport, timeout): possibly-still-live —
 //     return the error so the caller aborts and the stored key_id survives.
+//
+// Net for a self-revoke: only 403/401 (→ degrade) and 5xx/transport (→ abort)
+// occur in prod, so `upstream_revoked` is effectively always false and the
+// revoked=true arms never fire until the #806 owner-auth path lands.
 //
 // 401/403 are structural, never transient FOR A LIVE KEY: 403 is a deterministic
 // gate, and qurl-service's auth middleware returns 401 only for a genuinely

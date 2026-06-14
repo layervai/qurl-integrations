@@ -700,6 +700,11 @@ func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
 	}
 }
 
+// TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked covers the 404
+// arm. Like the 204 success path, 404 is not reachable for a self-revoke (the
+// credential is the target key, so a missing key 401s at auth before any
+// existence check) — this is defensive coverage retained for the #806 owner-auth
+// revoke path, where the credential and target differ and a 404 can occur.
 func TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
