@@ -46,6 +46,7 @@ workspace's Secure Access Agent supports.
 | Command | What it does |
 |---------|--------------|
 | `/qurl setup <email>` | Connect qURL to your workspace. The first person to run it becomes the owner and is the only one who can re-run it. |
+| `/qurl setup <email> --rotate` | Owner-only: revoke the stored workspace key and replace it with a new one. `--repoint` is accepted as a same-account alias; cross-account transfer is not supported yet. |
 | `/qurl get <$id\|$alias>` | Mint a one-time qURL link for a resource in this channel. |
 | `/qurl get <$id\|$alias> dm:true` | Mint the link and DM it to you instead of posting it in the channel. |
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
@@ -139,6 +140,21 @@ note why you minted it in the audit log.
 connected qURL — can re-run setup. This stops the workspace from being
 re-pointed at a different qURL account. Ask the owner, or use the
 `/qurl-admin` commands for everyday admin tasks.
+
+**How do I rotate the workspace key?** The owner runs
+`/qurl setup <email> --rotate`, then completes the Auth0 prompt. Slack revokes
+the old workspace key before storing the replacement, so a failed rotation does
+not leave an extra live key behind. `--repoint` currently behaves like
+`--rotate` and still requires the signed-in qURL account to own the current
+workspace key; cross-account transfer is tracked in
+[issue #790](https://github.com/layervai/qurl-integrations/issues/790).
+If rotation fails after revoking the old key, retry with `--rotate` or
+`--repoint`; plain setup will not mint around the stored old key identity.
+If that old identity was deleted at qURL rather than revoked, Slack fails closed
+until an operator verifies the stale identity or rotates the key from qURL
+account/API-key management.
+Workspaces connected before Slack stored qURL key identity may need to rotate
+from the qURL dashboard first; Slack refuses to guess which key to revoke.
 
 **A resource I expected isn't in `/qurl list`.** Resources are channel-scoped.
 Run the command in the channel where the resource was protected, or ask an

@@ -659,6 +659,7 @@ func applyEnv(t *testing.T, kvs map[string]string) {
 	}
 	t.Setenv("AUTH0_EMAIL_CONNECTION", kvs["AUTH0_EMAIL_CONNECTION"])
 	t.Setenv(envQURLBindingTTLContract, kvs[envQURLBindingTTLContract])
+	t.Setenv(envQURLAPIKeyMintTTLContract, kvs[envQURLAPIKeyMintTTLContract])
 }
 
 func applySlackInstallEnv(t *testing.T, kvs map[string]string) {
@@ -704,6 +705,9 @@ func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	if cfg.SetupBindingReplayWindowHours != oauth.DefaultSetupBindingReplayWindowHours {
 		t.Errorf("SetupBindingReplayWindowHours = %d, want default %d", cfg.SetupBindingReplayWindowHours, oauth.DefaultSetupBindingReplayWindowHours)
 	}
+	if cfg.APIKeyMintReplayWindowHours != oauth.DefaultAPIKeyMintReplayWindowHours {
+		t.Errorf("APIKeyMintReplayWindowHours = %d, want default %d", cfg.APIKeyMintReplayWindowHours, oauth.DefaultAPIKeyMintReplayWindowHours)
+	}
 }
 
 func TestBuildOAuthConfigSetupBindingReplayWindowOverride(t *testing.T) {
@@ -731,6 +735,37 @@ func TestBuildOAuthConfigRejectsInvalidSetupBindingReplayWindow(t *testing.T) {
 	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
 	if ok {
 		t.Fatal("expected ok=false with non-canonical binding TTL contract")
+	}
+	if err == nil || !strings.Contains(err.Error(), "canonical Nh form") {
+		t.Fatalf("buildOAuthConfig() err = %v, want canonical-duration validation error", err)
+	}
+}
+
+func TestBuildOAuthConfigAPIKeyMintReplayWindowOverride(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env[envQURLAPIKeyMintTTLContract] = "18h"
+	applyEnv(t, env)
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true with all required env vars set")
+	}
+	if cfg.APIKeyMintReplayWindowHours != 18 {
+		t.Errorf("APIKeyMintReplayWindowHours = %d, want 18", cfg.APIKeyMintReplayWindowHours)
+	}
+}
+
+func TestBuildOAuthConfigRejectsInvalidAPIKeyMintReplayWindow(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env[envQURLAPIKeyMintTTLContract] = "90m"
+	applyEnv(t, env)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+	if ok {
+		t.Fatal("expected ok=false with non-canonical API-key mint TTL contract")
 	}
 	if err == nil || !strings.Contains(err.Error(), "canonical Nh form") {
 		t.Fatalf("buildOAuthConfig() err = %v, want canonical-duration validation error", err)
@@ -793,6 +828,57 @@ func TestReadSetupBindingReplayWindowHours(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("readSetupBindingReplayWindowHours() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadAPIKeyMintReplayWindowHours(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		unset       bool
+		want        int
+		wantErrText string
+	}{
+		{name: "unset defaults to upstream contract", unset: true, want: oauth.DefaultAPIKeyMintReplayWindowHours},
+		{name: "whole hour override", raw: "18h", want: 18},
+		{name: "trimmed whole hour override", raw: "36h ", want: 36},
+		{name: "minutes unit rejected", raw: "90m", wantErrText: "canonical Nh form"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unset {
+				oldValue, hadOldValue := os.LookupEnv(envQURLAPIKeyMintTTLContract)
+				if err := os.Unsetenv(envQURLAPIKeyMintTTLContract); err != nil {
+					t.Fatalf("unset %s: %v", envQURLAPIKeyMintTTLContract, err)
+				}
+				t.Cleanup(func() {
+					if hadOldValue {
+						if err := os.Setenv(envQURLAPIKeyMintTTLContract, oldValue); err != nil {
+							t.Fatalf("restore %s: %v", envQURLAPIKeyMintTTLContract, err)
+						}
+						return
+					}
+					if err := os.Unsetenv(envQURLAPIKeyMintTTLContract); err != nil {
+						t.Fatalf("restore unset %s: %v", envQURLAPIKeyMintTTLContract, err)
+					}
+				})
+			} else {
+				t.Setenv(envQURLAPIKeyMintTTLContract, tc.raw)
+			}
+			got, err := readAPIKeyMintReplayWindowHours()
+			if tc.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("readAPIKeyMintReplayWindowHours() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readAPIKeyMintReplayWindowHours() err = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("readAPIKeyMintReplayWindowHours() = %d, want %d", got, tc.want)
 			}
 		})
 	}

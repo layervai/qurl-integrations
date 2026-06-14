@@ -31,8 +31,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -64,12 +62,14 @@ const kmsWorkspaceAADKey = "workspace_id"
 // qurl-integrations-infra side in the TF for the table schema; changing
 // these here means a coordinated TF change.
 const (
-	attrTeamID       = "team_id"
-	attrQURLAPIKey   = "qurl_api_key"    // GCM-sealed plaintext, base64 in JSON, raw bytes in DDB
-	attrDataKeyCT    = "qurl_api_key_dk" // ciphertext data key returned by KMS GenerateDataKey
-	attrConfiguredBy = "configured_by"
-	attrConfiguredAt = "configured_at"
-	attrUpdatedAt    = "updated_at"
+	attrTeamID           = "team_id"
+	attrQURLAPIKey       = "qurl_api_key"    // GCM-sealed plaintext, base64 in JSON, raw bytes in DDB
+	attrDataKeyCT        = "qurl_api_key_dk" // ciphertext data key returned by KMS GenerateDataKey
+	attrQURLAPIKeyID     = "qurl_api_key_id"
+	attrQURLAPIKeyPrefix = "qurl_api_key_prefix"
+	attrConfiguredBy     = "configured_by"
+	attrConfiguredAt     = "configured_at"
+	attrUpdatedAt        = "updated_at"
 
 	attrSlackBotToken       = "slack_bot_token"
 	attrSlackBotTokenDK     = "slack_bot_token_dk"
@@ -164,10 +164,10 @@ type DDBProvider struct {
 	// The validation token is intentionally tied to encrypted key material, so a
 	// future same-plaintext rewrap would invalidate warm entries and re-run KMS
 	// decrypts even though the API key value did not change.
-	// SetAPIKey seeds this process after a successful write. DeleteAPIKey evicts
-	// this process and forces strongly-consistent refills for one TTL so a
-	// same-process eventually-consistent post-delete read cannot re-cache the
-	// revoked key.
+	// SetAPIKeyWithMetadata seeds this process after a successful write.
+	// DeleteAPIKey evicts this process and forces strongly-consistent refills
+	// for one TTL so a same-process eventually-consistent post-delete read
+	// cannot re-cache the revoked key.
 	apiKeyCacheOnce   sync.Once
 	apiKeyLookupCache *ttlcache.Cache[cachedAPIKey]
 
@@ -450,6 +450,26 @@ func apiKeyAfterCacheValidationError(ctx context.Context, cachedKey string, err 
 	return cachedKey, true, nil
 }
 
+// APIKeyID strongly reads the stored qURL key_id for explicit rotation. It
+// bypasses the plaintext-key cache because rotation needs the latest key_id
+// before revoking.
+func (p *DDBProvider) APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error) {
+	if workspaceID == "" {
+		return "", errors.New("DDBProvider.APIKeyID: workspaceID is empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("DDBProvider.APIKeyID: %w", err)
+	}
+	item, err := p.fetchAPIKeyItem(ctx, workspaceID, true, "DDBProvider.APIKeyID")
+	if err != nil {
+		return "", err
+	}
+	if ctBlob, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB); !ok || len(ctBlob.Value) == 0 {
+		return "", fmt.Errorf("DDBProvider.APIKeyID: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+	}
+	return stringAttribute(item[attrQURLAPIKeyID]), nil
+}
+
 func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, retries int) bool {
 	if err == nil || ctx.Err() != nil || retries >= apiKeySharedContextErrorRetryLimit {
 		return false
@@ -517,35 +537,16 @@ func (p *DDBProvider) fetchAndFinishAPIKeyLookup(ctx context.Context, workspaceI
 }
 
 func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consistentRead bool) (string, apiKeyCacheToken, error) {
-	// Eventually-consistent read is correct here: the per-workspace key
-	// only changes on (re-)install, and the few-ms propagation delay is
-	// inside the same "click the setup link" window. Cache-hit validation is
-	// stricter because #766 is specifically about prompt cross-instance
-	// revocation/rotation visibility. DeleteAPIKey temporarily asks for a strong
-	// read so this process cannot re-cache a just-deleted key from an
-	// eventually-consistent replica.
-	input := &dynamodb.GetItemInput{
-		TableName: aws.String(p.TableName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
-		},
-	}
-	if consistentRead {
-		input.ConsistentRead = aws.Bool(true)
-	}
-	out, err := p.Client.GetItem(ctx, input)
+	item, err := p.fetchAPIKeyItem(ctx, workspaceID, consistentRead, "DDBProvider.APIKey")
 	if err != nil {
-		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: GetItem: %w", err)
-	}
-	if out == nil || len(out.Item) == 0 {
-		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
+		return "", apiKeyCacheToken{}, err
 	}
 
-	ctBlob, ok := out.Item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
+	ctBlob, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(ctBlob.Value) == 0 {
 		return "", apiKeyCacheToken{}, fmt.Errorf("DDBProvider.APIKey: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
 	}
-	wrappedKey, ok := out.Item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
+	wrappedKey, ok := item[attrDataKeyCT].(*ddbtypes.AttributeValueMemberB)
 	if !ok || len(wrappedKey.Value) == 0 {
 		return "", apiKeyCacheToken{}, errors.New("DDBProvider.APIKey: stored item missing or has wrong type for qurl_api_key_dk")
 	}
@@ -564,20 +565,45 @@ func (p *DDBProvider) fetchAPIKey(ctx context.Context, workspaceID string, consi
 	return string(pt), newAPIKeyCacheToken(ctBlob.Value, wrappedKey.Value), nil
 }
 
-type apiKeyCacheToken [sha256.Size]byte
+func (p *DDBProvider) fetchAPIKeyItem(ctx context.Context, workspaceID string, consistentRead bool, operation string) (map[string]ddbtypes.AttributeValue, error) {
+	// Eventually-consistent read is correct for normal APIKey lookup: the
+	// per-workspace key only changes on (re-)install, and the few-ms
+	// propagation delay is inside the same "click the setup link" window.
+	// Cache-hit validation is stricter because #766 is specifically about
+	// prompt cross-instance revocation/rotation visibility. DeleteAPIKey and
+	// APIKeyID ask for a strong read when they cannot tolerate stale material.
+	input := &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	}
+	if consistentRead {
+		input.ConsistentRead = aws.Bool(true)
+	}
+	out, err := p.Client.GetItem(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("%s: GetItem: %w", operation, err)
+	}
+	if out == nil || len(out.Item) == 0 {
+		return nil, fmt.Errorf("%s: workspace %q: %w", operation, workspaceID, ErrWorkspaceNotConfigured)
+	}
+	return out.Item, nil
+}
+
+type apiKeyCacheToken struct {
+	// Intentionally stores encrypted material, not a hash, so cache invalidation
+	// compares the exact DDB ciphertext/wrapped-key pair without retaining any
+	// additional plaintext API-key material.
+	ciphertext string
+	wrappedKey string
+}
 
 func newAPIKeyCacheToken(ciphertext, wrappedKey []byte) apiKeyCacheToken {
-	h := sha256.New()
-	var length [8]byte
-	binary.BigEndian.PutUint64(length[:], uint64(len(ciphertext)))
-	_, _ = h.Write(length[:])
-	_, _ = h.Write(ciphertext)
-	binary.BigEndian.PutUint64(length[:], uint64(len(wrappedKey)))
-	_, _ = h.Write(length[:])
-	_, _ = h.Write(wrappedKey)
-	var token apiKeyCacheToken
-	copy(token[:], h.Sum(nil))
-	return token
+	return apiKeyCacheToken{
+		ciphertext: string(ciphertext),
+		wrappedKey: string(wrappedKey),
+	}
 }
 
 func (p *DDBProvider) cachedAPIKeyStillCurrent(ctx context.Context, workspaceID string, cacheToken apiKeyCacheToken) (bool, error) {
@@ -761,29 +787,58 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 	return string(pt), nil
 }
 
-// SetAPIKey upserts the per-workspace qURL API key. The configuredBy field
-// is informational (the Slack user_id of the admin who completed
-// /oauth/qurl/callback) and is persisted plaintext. UpdateItem is used instead
-// of PutItem so Slack app install metadata in the same row is preserved. The
-// apiKey value is stored exactly as minted by qurl-service; APIKey returns the
-// same plaintext without trimming.
-func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error {
+// SetAPIKeyWithMetadata stores the per-workspace qURL API key plus its qURL
+// key_id, which explicit rotation needs before it can revoke safely. The
+// configuredBy field is informational (the Slack user_id of the admin who
+// completed /oauth/qurl/callback) and is persisted plaintext. UpdateItem is
+// used instead of PutItem so Slack app install metadata in the same row is
+// preserved. The apiKey value is stored exactly as minted by qurl-service;
+// APIKey returns the same plaintext without trimming.
+func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, configuredBy string) error {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyID is empty")
+	}
+	keyPrefix = strings.TrimSpace(keyPrefix)
+	if keyPrefix == "" {
+		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyPrefix is empty")
+	}
+	return p.setAPIKey(ctx, "DDBProvider.SetAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, configuredBy)
+}
+
+func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, apiKey, keyID, keyPrefix, configuredBy string) error {
 	if workspaceID == "" {
-		return errors.New("DDBProvider.SetAPIKey: workspaceID is empty")
+		return fmt.Errorf("%s: workspaceID is empty", operation)
 	}
 	if apiKey == "" {
-		return errors.New("DDBProvider.SetAPIKey: apiKey is empty")
+		return fmt.Errorf("%s: apiKey is empty", operation)
 	}
 
 	ct, wrapped, err := p.Encryptor.Seal(ctx, []byte(apiKey), []byte(workspaceID))
 	if err != nil {
-		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
+		return fmt.Errorf("%s: encrypt: %w", operation, err)
 	}
 
 	now := p.nowOrDefault()
 	nowString := now.UTC().Format(time.RFC3339)
-	updateExpr := fmt.Sprintf("SET %s = :key, %s = :dk, %s = :by, %s = :now, %s = if_not_exists(%s, :now)",
-		attrQURLAPIKey, attrDataKeyCT, attrConfiguredBy, attrUpdatedAt, attrConfiguredAt, attrConfiguredAt)
+	setParts := []string{
+		attrQURLAPIKey + " = :key",
+		attrDataKeyCT + " = :dk",
+		attrQURLAPIKeyID + " = :key_id",
+		attrQURLAPIKeyPrefix + " = :key_prefix",
+		attrConfiguredBy + " = :by",
+		attrUpdatedAt + " = :now",
+		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", :now)",
+	}
+	values := map[string]ddbtypes.AttributeValue{
+		":key":        &ddbtypes.AttributeValueMemberB{Value: ct},
+		":dk":         &ddbtypes.AttributeValueMemberB{Value: wrapped},
+		":key_id":     &ddbtypes.AttributeValueMemberS{Value: keyID},
+		":key_prefix": &ddbtypes.AttributeValueMemberS{Value: keyPrefix},
+		":by":         &ddbtypes.AttributeValueMemberS{Value: configuredBy},
+		":now":        &ddbtypes.AttributeValueMemberS{Value: nowString},
+	}
+	updateExpr := "SET " + strings.Join(setParts, ", ")
 	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
 	// window and preserves Slack install metadata, but the upstream qurl-service
 	// mint still happens before this write. If concurrent admins mint different
@@ -794,21 +849,16 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-		UpdateExpression: aws.String(updateExpr),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":key": &ddbtypes.AttributeValueMemberB{Value: ct},
-			":dk":  &ddbtypes.AttributeValueMemberB{Value: wrapped},
-			":by":  &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-			":now": &ddbtypes.AttributeValueMemberS{Value: nowString},
-		},
-		ReturnValues: ddbtypes.ReturnValueUpdatedOld,
+		UpdateExpression:          aws.String(updateExpr),
+		ExpressionAttributeValues: values,
+		ReturnValues:              ddbtypes.ReturnValueUpdatedOld,
 	})
 	if err != nil {
-		return fmt.Errorf("DDBProvider.SetAPIKey: UpdateItem: %w", err)
+		return fmt.Errorf("%s: UpdateItem: %w", operation, err)
 	}
 	if out != nil {
 		if _, rotated := out.Attributes[attrQURLAPIKey]; rotated {
-			slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace API key",
+			slog.Warn(operation+" overwrote existing workspace API key",
 				"workspace_id", workspaceID,
 				"configured_by", configuredBy)
 		}
@@ -918,24 +968,32 @@ func normalizedStringSet(values []string) []string {
 	return out
 }
 
+func stringAttribute(value ddbtypes.AttributeValue) string {
+	if s, ok := value.(*ddbtypes.AttributeValueMemberS); ok {
+		return strings.TrimSpace(s.Value)
+	}
+	return ""
+}
+
 // SupportsDeleteAPIKey reports that DDBProvider can mutate workspace key state.
 func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 	return true
 }
 
-// DeleteAPIKey removes the qURL API key columns while preserving Slack app
-// install metadata in the same row. It returns [ErrWorkspaceNotConfigured] when
-// the workspace has no stored qURL key metadata. Workspace ownership/admin
-// gates live outside this auth row, so removing configured_by/configured_at
-// does not change who can reconnect. Removing configured_at lets a reconnect
-// stamp fresh setup metadata while rotations still preserve it via SetAPIKey.
-// Rows with partial qURL setup metadata but no readable key are treated as
-// cleanup work: the metadata is removed and the user sees a disconnect success
-// rather than an internal partial-row state.
+// DeleteAPIKey removes the qURL API key columns and qurl-service key metadata
+// while preserving Slack app install metadata in the same row. It returns
+// [ErrWorkspaceNotConfigured] when the workspace has no stored qURL key
+// metadata. Workspace ownership/admin gates live outside this auth row, so
+// removing configured_by/configured_at does not change who can reconnect.
+// Removing configured_at lets a reconnect stamp fresh setup metadata while
+// rotations still preserve it via SetAPIKeyWithMetadata. Rows with partial qURL
+// setup metadata but no readable key are treated as cleanup work: the metadata
+// is removed and the user sees a disconnect success rather than an internal
+// partial-row state.
 //
-// TODO(upstream-contract): this local disconnect cannot revoke the upstream
-// qURL key until setup persists the qurl-service key_id for workspace keys.
-// See #792.
+// TODO(upstream-contract): wire uninstall through qurl-service revocation now
+// that setup stores qurl_api_key_id; legacy rows without a key ID stay on this
+// local-disconnect path. See #792.
 func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.DeleteAPIKey: workspaceID is empty")
@@ -946,16 +1004,18 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #configured_by, #configured_at"),
+		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #configured_by, #configured_at"),
 		ConditionExpression: aws.String(
-			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
+			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
 		),
 		ExpressionAttributeNames: map[string]string{
-			"#qurl_api_key":    attrQURLAPIKey,
-			"#qurl_api_key_dk": attrDataKeyCT,
-			"#configured_by":   attrConfiguredBy,
-			"#configured_at":   attrConfiguredAt,
-			"#updated_at":      attrUpdatedAt,
+			"#qurl_api_key":        attrQURLAPIKey,
+			"#qurl_api_key_dk":     attrDataKeyCT,
+			"#qurl_api_key_id":     attrQURLAPIKeyID,
+			"#qurl_api_key_prefix": attrQURLAPIKeyPrefix,
+			"#configured_by":       attrConfiguredBy,
+			"#configured_at":       attrConfiguredAt,
+			"#updated_at":          attrUpdatedAt,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":now": &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},

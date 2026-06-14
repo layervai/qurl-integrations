@@ -73,6 +73,17 @@ func TestConfigValidateRejectsNegativeSetupBindingReplayWindow(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsNegativeAPIKeyMintReplayWindow(t *testing.T) {
+	cfg := Config{APIKeyMintReplayWindowHours: -1}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate must reject negative APIKeyMintReplayWindowHours")
+	}
+	if !strings.Contains(err.Error(), "APIKeyMintReplayWindowHours") {
+		t.Errorf("Validate error should mention APIKeyMintReplayWindowHours; got %q", err.Error())
+	}
+}
+
 // TestAPIKeyScopesIncludeReadForStoredKeyValidation fences the integration
 // contract with qurl-service: ValidateAPIKey probes GET /v1/quota, and that
 // route is protected by qurl:read. If this bot stops minting qurl:read,

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,6 +23,17 @@ const (
 	// The real response is ~few hundred bytes; 8 KiB is generous head-
 	// room without leaving an unbounded read on a misbehaving upstream.
 	minterBodyLimit = 8 << 10
+	// apiKeyListBodyLimit caps the revoked-key list response used only to
+	// distinguish "already revoked by this owner" from qurl-service's 404
+	// not-found/wrong-owner delete response.
+	apiKeyListBodyLimit = 64 << 10
+	// apiKeyRevokedMaxPages caps owner-scoped revoked-key pagination so a
+	// misbehaving upstream with has_more=true and a non-advancing cursor fails
+	// quickly instead of burning the whole request context. qurl-service lists
+	// API keys by created_at descending, not revoked_at, so this scan is a
+	// bounded best-effort confirmation until qurl-service#946 adds a direct
+	// owner-scoped key-status lookup.
+	apiKeyRevokedMaxPages = 10
 
 	// errCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
 	// when key provisioning is refused because the owner is already at
@@ -67,6 +79,12 @@ var ErrExternalIdentityAlreadyBound = errors.New("qurl-service external identity
 // key.
 var ErrStoredAPIKeyInvalid = errors.New("stored qURL API key is invalid")
 
+// ErrAPIKeyNotFound is returned by RevokeAPIKey when qurl-service returns 404.
+// qurl-service deliberately uses the same status for missing keys and keys
+// owned by another account, so callers must not treat it as revoke success
+// without an owner-scoped confirmation.
+var ErrAPIKeyNotFound = errors.New("qurl-service API key not found")
+
 // HTTPAPIKeyMinter is the production QURLAPIKeyMinter, calling qurl-service
 // with the Auth0 access_token as Bearer.
 type HTTPAPIKeyMinter struct {
@@ -102,6 +120,17 @@ type mintResponse struct {
 		KeyID     string `json:"key_id"`
 		KeyPrefix string `json:"key_prefix"`
 	} `json:"data"`
+}
+
+type listAPIKeysResponse struct {
+	Data []struct {
+		KeyID  string `json:"key_id"`
+		Status string `json:"status"`
+	} `json:"data"`
+	Meta struct {
+		HasMore    bool   `json:"has_more"`
+		NextCursor string `json:"next_cursor"`
+	} `json:"meta"`
 }
 
 // bindingResponse is the POST /v1/external-identity-bindings success shape.
@@ -219,7 +248,9 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Idempotency-Key", idempotencyKey)
+	if err := setIdempotencyKeyHeader(req, idempotencyKey); err != nil {
+		return WorkspaceAPIKeyMint{}, err
+	}
 	resp, err := m.client().Do(req)
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("do request: %w", err)
@@ -282,6 +313,25 @@ func bindingMintFromResponse(body []byte) (WorkspaceAPIKeyMint, error) {
 	}, nil
 }
 
+// MintWorkspaceReplacementAPIKey mints a fresh workspace key for an explicit
+// owner-requested rotation after the previous key has already been revoked.
+// It deliberately does not hit the external binding create endpoint: a healthy
+// existing binding owns first-setup replay and returns already_exists here.
+// qURL request authorization only checks the API key and scopes, so this
+// standalone qurl:read/write/resolve key is a valid workspace credential after
+// Slack stores it.
+func (m *HTTPAPIKeyMinter) MintWorkspaceReplacementAPIKey(ctx context.Context, accessToken, teamID, oldKeyID string) (WorkspaceAPIKeyMint, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceReplacementAPIKey: empty teamID")
+	}
+	oldKeyID = strings.TrimSpace(oldKeyID)
+	if oldKeyID == "" {
+		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceReplacementAPIKey: empty oldKeyID")
+	}
+	return m.mintLegacyAPIKey(ctx, accessToken, "Slack workspace "+teamID, apiKeyScopes(), replacementIdempotencyKey(teamID, oldKeyID))
+}
+
 // mintLegacyAPIKey posts to POST /v1/api-keys. apiKey and keyID must be
 // present for success — a missing keyID would leave us unable to revoke an
 // orphan key if the subsequent DDB persist fails.
@@ -301,8 +351,8 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
+	if err := setIdempotencyKeyHeader(req, idempotencyKey); err != nil {
+		return WorkspaceAPIKeyMint{}, err
 	}
 	resp, err := m.client().Do(req)
 	if err != nil {
@@ -367,10 +417,106 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer drainAndCloseResponse(resp)
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w (status %d)", ErrAPIKeyNotFound, resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// APIKeyRevoked reports whether keyID appears in the authenticated owner's
+// revoked-key list. It is intentionally separate from DELETE 404 handling:
+// qurl-service returns 404 for both already-revoked and wrong-owner keys, and
+// only this owner-scoped list check can distinguish those cases safely.
+// TODO(upstream-contract): prefer an owner-scoped GET /v1/api-keys/{key_id}
+// status endpoint when qurl-service exposes one (tracked at
+// layervai/qurl-service#946). Until then, the owner-scoped list is the current
+// safe contract, but it is ordered by key creation time rather than revoke time,
+// so old workspace keys can exceed this bounded scan and require operator
+// verification instead of another admin retry.
+func (m *HTTPAPIKeyMinter) APIKeyRevoked(ctx context.Context, accessToken, keyID string) (bool, error) {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return false, errors.New("APIKeyRevoked: empty keyID")
+	}
+	var cursor string
+	for page := 0; page < apiKeyRevokedMaxPages; page++ {
+		reqURL, err := m.joinAPIKeyURL()
+		if err != nil {
+			return false, err
+		}
+		u, err := url.Parse(reqURL)
+		if err != nil {
+			return false, fmt.Errorf("parse qurl-service URL: %w", err)
+		}
+		q := u.Query()
+		// Ask qurl-service for revoked rows, but keep the per-item status check
+		// in readRevokedAPIKeyList as the correctness guard if the filter is
+		// ignored or broadened upstream.
+		q.Set("status", "revoked")
+		q.Set("limit", "100")
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		u.RawQuery = q.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
+		if err != nil {
+			return false, fmt.Errorf("new request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/json")
+		resp, err := m.client().Do(req)
+		if err != nil {
+			return false, fmt.Errorf("do request: %w", err)
+		}
+		found, nextCursor, hasMore, err := func() (bool, string, bool, error) {
+			defer drainAndCloseResponse(resp)
+			return readRevokedAPIKeyList(resp, keyID)
+		}()
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return true, nil
+		}
+		if !hasMore || nextCursor == "" {
+			return false, nil
+		}
+		if nextCursor == cursor {
+			return false, errors.New("qurl-service revoked API key pagination did not advance")
+		}
+		cursor = nextCursor
+	}
+	slog.Warn("oauth/minter revoked API key scan page cap exceeded",
+		"key_id", keyID,
+		"max_pages", apiKeyRevokedMaxPages,
+		"operator_action", "confirm qurl-service revoked-key ordering or use owner-scoped key lookup")
+	return false, fmt.Errorf("qurl-service revoked API key pagination exceeded %d pages", apiKeyRevokedMaxPages)
+}
+
+func readRevokedAPIKeyList(resp *http.Response, keyID string) (found bool, nextCursor string, hasMore bool, err error) {
+	if resp.StatusCode >= 400 {
+		return false, "", false, fmt.Errorf("qurl-service GET /v1/api-keys returned %d", resp.StatusCode)
+	}
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, apiKeyListBodyLimit+1))
+	if err != nil {
+		return false, "", false, fmt.Errorf("read body: %w", err)
+	}
+	if len(rb) > apiKeyListBodyLimit {
+		return false, "", false, fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", apiKeyListBodyLimit)
+	}
+	var lr listAPIKeysResponse
+	if err := json.Unmarshal(rb, &lr); err != nil {
+		return false, "", false, fmt.Errorf("parse response: %w", err)
+	}
+	for _, key := range lr.Data {
+		if key.KeyID == keyID && strings.EqualFold(key.Status, "revoked") {
+			return true, "", false, nil
+		}
+	}
+	return false, lr.Meta.NextCursor, lr.Meta.HasMore, nil
 }
 
 func drainAndCloseResponse(resp *http.Response) {
@@ -384,6 +530,41 @@ func bindingIdempotencyKey(teamID string) string {
 	// are shorter, so hash to a stable fixed-width key with a readable prefix.
 	sum := sha256.Sum256([]byte(teamID))
 	return "slack-workspace-binding-v1-" + hex.EncodeToString(sum[:])
+}
+
+func replacementIdempotencyKey(teamID, oldKeyID string) string {
+	// Stable across --rotate retries while DDB still stores oldKeyID. If a
+	// replacement is minted but Slack fails to persist it, callers must keep
+	// this replay recoverable; revoking the replacement would make qurl-service
+	// replay a revoked key for the idempotency TTL. The raw IDs are non-secret
+	// Slack/qURL identifiers; length-prefixing keeps the unhashed value
+	// unambiguous without reintroducing weak-hash scanner noise. If upstream ID
+	// lengths ever exceed qurl-service's idempotency-header cap, validation
+	// fails closed before revoke/mint side effects.
+	return fmt.Sprintf("slack-workspace-rotate-replacement-v1-t%d-%s-k%d-%s", len(teamID), teamID, len(oldKeyID), oldKeyID)
+}
+
+func setIdempotencyKeyHeader(req *http.Request, key string) error {
+	if key == "" {
+		return nil
+	}
+	if err := validateIdempotencyKey(key); err != nil {
+		return err
+	}
+	req.Header.Set("Idempotency-Key", key)
+	return nil
+}
+
+func validateIdempotencyKey(key string) error {
+	if len(key) < 32 || len(key) > 256 {
+		return fmt.Errorf("idempotency key length %d outside qurl-service range 32-256", len(key))
+	}
+	for i, r := range key {
+		if r <= ' ' || r >= 0x7f {
+			return fmt.Errorf("idempotency key contains non-header-safe byte at offset %d", i)
+		}
+	}
+	return nil
 }
 
 func shouldFallbackToLegacyMint(status int, errorCode string) bool {

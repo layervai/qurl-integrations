@@ -18,6 +18,7 @@ import (
 //
 //	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + hmac_hex )
 //	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + mode + "|" + hmac_hex )
 //
 // where hmac_hex signs every payload field before it.
 //
@@ -48,24 +49,37 @@ import (
 // workspace_state plumbing. Acceptable for v1; revisit if install-flow
 // logs show legitimate replay.
 const (
-	stateMaxAge        = 5 * time.Minute
-	stateLegacyParts   = 5
-	stateEmailParts    = 6
-	stateNonceLen      = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
-	StateMinSecret     = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
-	stateFutureSkew    = 30 * time.Second
-	stateSeparator     = "|"
-	stateSeparatorB    = byte('|')
-	stateSeparatorRune = '|'
-	stateUserIDIndex   = 1
-	stateTeamIDIndex   = 0
-	stateNonceIndex    = 2
-	stateTSIndex       = 3
+	stateMaxAge         = 5 * time.Minute
+	stateLegacyParts    = 5
+	stateEmailParts     = 6
+	stateEmailModeParts = 7
+	stateNonceLen       = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
+	StateMinSecret      = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
+	stateFutureSkew     = 30 * time.Second
+	stateSeparator      = "|"
+	stateSeparatorB     = byte('|')
+	stateSeparatorRune  = '|'
+	stateUserIDIndex    = 1
+	stateTeamIDIndex    = 0
+	stateNonceIndex     = 2
+	stateTSIndex        = 3
 	// Slot 4 is the legacy signature; email states put the email there and
 	// shift the signature to slot 5.
-	stateLegacySigIndex = 4
-	stateEmailIndex     = 4
-	stateEmailSigIndex  = 5
+	stateLegacySigIndex    = 4
+	stateEmailIndex        = 4
+	stateEmailSigIndex     = 5
+	stateModeIndex         = 5
+	stateEmailModeSigIndex = 6
+)
+
+// SetupMode is the signed /qurl setup intent carried through Auth0.
+type SetupMode string
+
+const (
+	// SetupModeReuse is the default idempotent setup path that reuses a valid stored key.
+	SetupModeReuse SetupMode = "reuse"
+	// SetupModeRotate is the explicit owner-requested key replacement path.
+	SetupModeRotate SetupMode = "rotate"
 )
 
 // Sentinel errors so callers can log a stable reason without parsing
@@ -80,6 +94,10 @@ var (
 	errStateEmptyTeam      = errors.New("state: empty teamID")
 	errStateEmptyUser      = errors.New("state: empty userID")
 	errStateIDHasSeparator = errors.New("state: teamID, userID, or email contains pipe separator")
+	// errStateBadMode is returned to local minters that pass an invalid mode.
+	// VerifyState collapses bad wire modes into errStateMalformed so callback
+	// logs do not distinguish malformed links from deliberately forged modes.
+	errStateBadMode = errors.New("state: invalid setup mode")
 )
 
 // signedPayload returns the canonical pipe-joined byte slice that the
@@ -88,11 +106,26 @@ func signedPayload(parts ...string) []byte {
 	return []byte(strings.Join(parts, stateSeparator))
 }
 
+func normalizeSetupMode(mode SetupMode) (SetupMode, error) {
+	switch mode {
+	case "", SetupModeReuse:
+		return SetupModeReuse, nil
+	case SetupModeRotate:
+		return SetupModeRotate, nil
+	default:
+		return "", errStateBadMode
+	}
+}
+
 // mintState produces a fresh state token binding (teamID, userID) and,
 // when non-empty, a normalized email address under secret.
-func mintState(secret []byte, teamID, userID, email string, now time.Time) (string, error) {
+func mintState(secret []byte, teamID, userID, email string, mode SetupMode, now time.Time) (string, error) {
 	if len(secret) < StateMinSecret {
 		return "", errStateShortKey
+	}
+	normalizedMode, err := normalizeSetupMode(mode)
+	if err != nil {
+		return "", err
 	}
 	if teamID == "" {
 		return "", errStateEmptyTeam
@@ -126,6 +159,12 @@ func mintState(secret []byte, teamID, userID, email string, now time.Time) (stri
 	if email != "" {
 		payloadParts = append(payloadParts, email)
 	}
+	if normalizedMode != SetupModeReuse {
+		if email == "" {
+			return "", errStateBadMode
+		}
+		payloadParts = append(payloadParts, string(normalizedMode))
+	}
 	signed := signedPayload(payloadParts...)
 	mac := hmac.New(sha256.New, secret)
 	// hmac.Hash.Write never returns an error (documented in stdlib); the
@@ -146,7 +185,7 @@ func mintState(secret []byte, teamID, userID, email string, now time.Time) (stri
 //
 // Returns errStateShortKey if secret is shorter than StateMinSecret.
 func MintState(secret []byte, teamID, userID string, now time.Time) (string, error) {
-	return mintState(secret, teamID, userID, "", now)
+	return mintState(secret, teamID, userID, "", SetupModeReuse, now)
 }
 
 // MintStateWithEmail produces a fresh state token binding the Slack team/user
@@ -154,7 +193,12 @@ func MintState(secret []byte, teamID, userID string, now time.Time) (string, err
 // requires the verified Auth0 email claim to match this value before it binds
 // or mints a workspace key.
 func MintStateWithEmail(secret []byte, teamID, userID, email string, now time.Time) (string, error) {
-	return mintState(secret, teamID, userID, email, now)
+	return mintState(secret, teamID, userID, email, SetupModeReuse, now)
+}
+
+// MintStateWithEmailMode is MintStateWithEmail plus a signed setup intent.
+func MintStateWithEmailMode(secret []byte, teamID, userID, email string, mode SetupMode, now time.Time) (string, error) {
+	return mintState(secret, teamID, userID, email, mode, now)
 }
 
 // VerifiedState is the setup identity recovered from a valid state token.
@@ -162,6 +206,69 @@ type VerifiedState struct {
 	TeamID string
 	UserID string
 	Email  string
+	Mode   SetupMode
+}
+
+type parsedStateParts struct {
+	email    string
+	mode     SetupMode
+	sigIndex int
+	signed   []byte
+}
+
+func coreStatePayloadParts(parts [][]byte) []string {
+	return []string{
+		string(parts[stateTeamIDIndex]),
+		string(parts[stateUserIDIndex]),
+		string(parts[stateNonceIndex]),
+		string(parts[stateTSIndex]),
+	}
+}
+
+func parseStateParts(parts [][]byte) (parsedStateParts, error) {
+	switch len(parts) {
+	case stateLegacyParts:
+		return parsedStateParts{
+			mode:     SetupModeReuse,
+			sigIndex: stateLegacySigIndex,
+			signed:   signedPayload(coreStatePayloadParts(parts)...),
+		}, nil
+	case stateEmailParts:
+		email := string(parts[stateEmailIndex])
+		if !stateEmailNormalized(email) {
+			return parsedStateParts{}, errStateMalformed
+		}
+		payload := append(coreStatePayloadParts(parts), email)
+		return parsedStateParts{
+			email:    email,
+			mode:     SetupModeReuse,
+			sigIndex: stateEmailSigIndex,
+			signed:   signedPayload(payload...),
+		}, nil
+	case stateEmailModeParts:
+		email := string(parts[stateEmailIndex])
+		if !stateEmailNormalized(email) {
+			return parsedStateParts{}, errStateMalformed
+		}
+		mode, err := normalizeSetupMode(SetupMode(string(parts[stateModeIndex])))
+		if err != nil || mode == SetupModeReuse {
+			return parsedStateParts{}, errStateMalformed
+		}
+		payload := append(coreStatePayloadParts(parts), email, string(mode))
+		return parsedStateParts{
+			email:    email,
+			mode:     mode,
+			sigIndex: stateEmailModeSigIndex,
+			signed:   signedPayload(payload...),
+		}, nil
+	default:
+		return parsedStateParts{}, errStateMalformed
+	}
+}
+
+func stateEmailNormalized(email string) bool {
+	normalized, err := NormalizeEmail(email)
+	return err == nil && normalized == email
 }
 
 // VerifyState validates and decodes a state token. Returns the recovered
@@ -181,42 +288,15 @@ func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, e
 		return VerifiedState{}, errStateMalformed
 	}
 	parts := bytes.Split(raw, []byte{stateSeparatorB})
-	var (
-		email    string
-		sigIndex int
-		signed   []byte
-	)
-	switch len(parts) {
-	case stateLegacyParts:
-		sigIndex = stateLegacySigIndex
-		signed = signedPayload(
-			string(parts[stateTeamIDIndex]),
-			string(parts[stateUserIDIndex]),
-			string(parts[stateNonceIndex]),
-			string(parts[stateTSIndex]),
-		)
-	case stateEmailParts:
-		sigIndex = stateEmailSigIndex
-		email = string(parts[stateEmailIndex])
-		normalized, err := NormalizeEmail(email)
-		if err != nil || normalized != email {
-			return VerifiedState{}, errStateMalformed
-		}
-		signed = signedPayload(
-			string(parts[stateTeamIDIndex]),
-			string(parts[stateUserIDIndex]),
-			string(parts[stateNonceIndex]),
-			string(parts[stateTSIndex]),
-			email,
-		)
-	default:
-		return VerifiedState{}, errStateMalformed
+	parsed, err := parseStateParts(parts)
+	if err != nil {
+		return VerifiedState{}, err
 	}
 	teamID := string(parts[stateTeamIDIndex])
 	userID := string(parts[stateUserIDIndex])
 	nonce := parts[stateNonceIndex]
 	tsBytes := parts[stateTSIndex]
-	sigHex := parts[sigIndex]
+	sigHex := parts[parsed.sigIndex]
 	if teamID == "" || userID == "" || len(nonce) == 0 || len(tsBytes) == 0 || len(sigHex) == 0 {
 		return VerifiedState{}, errStateMalformed
 	}
@@ -225,7 +305,7 @@ func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, e
 		return VerifiedState{}, errStateMalformed
 	}
 	mac := hmac.New(sha256.New, secret)
-	mac.Write(signed)
+	mac.Write(parsed.signed)
 	if !hmac.Equal(wantSig, mac.Sum(nil)) {
 		return VerifiedState{}, errStateBadHMAC
 	}
@@ -240,5 +320,5 @@ func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, e
 	if now.Sub(mintedAt) > stateMaxAge {
 		return VerifiedState{}, errStateExpired
 	}
-	return VerifiedState{TeamID: teamID, UserID: userID, Email: email}, nil
+	return VerifiedState{TeamID: teamID, UserID: userID, Email: parsed.email, Mode: parsed.mode}, nil
 }

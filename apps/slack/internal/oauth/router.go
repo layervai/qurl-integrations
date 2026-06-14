@@ -129,7 +129,9 @@ type WorkspaceAPIKeyMint struct {
 type QURLAPIKeyMinter interface {
 	ValidateAPIKey(ctx context.Context, apiKey string) error
 	MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error)
+	MintWorkspaceReplacementAPIKey(ctx context.Context, accessToken, teamID, oldKeyID string) (WorkspaceAPIKeyMint, error)
 	RevokeAPIKey(ctx context.Context, accessToken, keyID string) error
+	APIKeyRevoked(ctx context.Context, accessToken, keyID string) (bool, error)
 }
 
 // AsyncTracker lets the OAuth callback spawn its fire-and-forget
@@ -246,14 +248,20 @@ type Config struct {
 	// qurl-service's QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT.
 	SetupBindingReplayWindowHours int
 
+	// APIKeyMintReplayWindowHours is the operator-facing replay window
+	// emitted when rotation mints a replacement API key but the Slack app
+	// cannot persist it locally. Zero uses the default mirror of qurl-service's
+	// API-key mint idempotency TTL.
+	APIKeyMintReplayWindowHours int
+
 	// OAuthStateSecret is the HMAC-SHA256 key used to mint and verify
 	// the `state` token threaded through Auth0. Operator-set; the
 	// constructor refuses anything shorter than stateMinSecret.
 	OAuthStateSecret []byte
 
-	// Provider is the DDB-backed key store. The callback handler first
-	// checks for a reusable workspace key, then calls SetAPIKey only
-	// when a new key had to be minted.
+	// Provider is the DDB-backed key store. Normal setup reuses a valid
+	// stored key or persists a fresh key with metadata; explicit rotation
+	// reads APIKeyID, revokes the old key, then persists the replacement.
 	Provider WorkspaceStore
 
 	// IDTokenVerifier validates Auth0 id_tokens against JWKS. Tests
@@ -277,9 +285,8 @@ type Config struct {
 
 	// AdminStore persists the workspace_mappings row that seeds the
 	// installer as the workspace's first admin. The callback calls
-	// BindWorkspace after the qurl-service key mint + DDB persist
-	// succeed, so /qurl-admin admin verbs work immediately without a
-	// second /qurl-admin admin claim step.
+	// BindWorkspace before qurl-service key work, so a refused rebind
+	// cannot overwrite the existing owner's stored key.
 	//
 	// Nil disables the bind (sandbox / no-DDB deploy) — the callback
 	// emits a slog.Warn and continues with the existing API-key
@@ -325,22 +332,24 @@ func (c Config) now() func() time.Time {
 	return time.Now
 }
 
-// setupBindingReplayWindowHours returns the operator-facing replay window for
-// binding-backed setup persist failures. A zero value preserves the
-// qurl-service default so focused tests and direct constructors stay stable.
-func setupBindingReplayWindowHours(configuredHours int) int {
+// replayWindowHoursOrDefault returns the operator-facing replay window. A zero
+// value preserves the qurl-service default so focused tests and direct
+// constructors stay stable.
+func replayWindowHoursOrDefault(configuredHours, defaultHours int) int {
 	if configuredHours > 0 {
 		return configuredHours
 	}
-	return DefaultSetupBindingReplayWindowHours
+	return defaultHours
 }
 
-// WorkspaceStore is the callback's workspace-key store. APIKey is used to
-// reuse an already configured workspace key before minting; SetAPIKey is hit
-// only after a successful replacement mint. Implemented by *auth.DDBProvider.
+// WorkspaceStore is the callback's workspace-key store. APIKey is used by
+// normal setup to reuse an already configured workspace key before minting;
+// APIKeyID is the strongly-read rotation path that needs the qURL key_id
+// before revoking. Implemented by *auth.DDBProvider.
 type WorkspaceStore interface {
 	APIKey(ctx context.Context, workspaceID string) (string, error)
-	SetAPIKey(ctx context.Context, workspaceID, apiKey, configuredBy string) error
+	APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error)
+	SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, configuredBy string) error
 	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
 
@@ -389,6 +398,9 @@ func (c Config) Validate() error {
 	}
 	if c.SetupBindingReplayWindowHours < 0 {
 		return errors.New("SetupBindingReplayWindowHours must be zero or positive")
+	}
+	if c.APIKeyMintReplayWindowHours < 0 {
+		return errors.New("APIKeyMintReplayWindowHours must be zero or positive")
 	}
 	return nil
 }

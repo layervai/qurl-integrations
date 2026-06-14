@@ -139,6 +139,79 @@ func TestHTTPAPIKeyMinterMintWorkspaceHappyPath(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceReplacementUsesAPIKeysEndpoint(t *testing.T) {
+	const oldKeyID = "key_oldoldold"
+	var (
+		gotMethod         string
+		gotPath           string
+		gotAuth           string
+		gotIdempotencyKey string
+		gotBody           mintRequest
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		writeLegacyMintSuccess(t, w)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	minted, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "tok", testTeamID, oldKeyID)
+	if err != nil {
+		t.Fatalf("MintWorkspaceReplacementAPIKey: %v", err)
+	}
+	if minted.APIKey != testAPIKey || minted.KeyID != testKeyID || minted.KeyPrefix != testKeyPrefix {
+		t.Errorf("unexpected fields: %+v", minted)
+	}
+	if minted.BindingBacked {
+		t.Error("replacement mint must not mark the key binding-backed")
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q want POST", gotMethod)
+	}
+	if gotPath != testAPIKeysPath {
+		t.Errorf("path: got %q want %s", gotPath, testAPIKeysPath)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("auth: got %q want Bearer tok", gotAuth)
+	}
+	if gotIdempotencyKey != replacementIdempotencyKey(testTeamID, oldKeyID) || len(gotIdempotencyKey) < 32 {
+		t.Errorf("Idempotency-Key = %q, want stable replacement key", gotIdempotencyKey)
+	}
+	if len(gotIdempotencyKey) > 256 || strings.ContainsAny(gotIdempotencyKey, " \t\r\n") {
+		t.Errorf("Idempotency-Key = %q, want qurl-service header-safe 32-256 char value", gotIdempotencyKey)
+	}
+	if gotBody.Name != "Slack workspace "+testTeamID {
+		t.Errorf("name = %q", gotBody.Name)
+	}
+	if strings.Join(gotBody.Scopes, ",") != strings.Join(apiKeyScopes(), ",") {
+		t.Errorf("scopes = %#v want %#v", gotBody.Scopes, apiKeyScopes())
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceReplacementRejectsUnsafeIdempotencyKey(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		writeLegacyMintSuccess(t, w)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "tok", testTeamID, "key_bad\nid")
+	if err == nil || !strings.Contains(err.Error(), "idempotency key contains non-header-safe byte") {
+		t.Fatalf("MintWorkspaceReplacementAPIKey err = %v, want unsafe idempotency key error", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceRejectsEmptyTeamID(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: "https://api.example.test"}
 	if _, err := m.MintWorkspaceAPIKey(context.Background(), "tok", " \t "); err == nil {
@@ -791,6 +864,18 @@ func TestHTTPAPIKeyMinterRevokeEmptyKeyID(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterRevokeNotFoundClassified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+	if !errors.Is(err, ErrAPIKeyNotFound) {
+		t.Fatalf("RevokeAPIKey 404 error = %v, want ErrAPIKeyNotFound", err)
+	}
+}
+
 func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -799,6 +884,141 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err == nil {
 		t.Fatal("expected error on 5xx")
+	}
+}
+
+func TestHTTPAPIKeyMinterAPIKeyRevokedFindsRevokedKey(t *testing.T) {
+	var gotQueries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQueries = append(gotQueries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("cursor") {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]string{{"key_id": "k_other", "status": "revoked"}},
+				"meta": map[string]any{"has_more": true, "next_cursor": "page-2"},
+			})
+		case "page-2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]string{{"key_id": "k_target", "status": "Revoked"}},
+				"meta": map[string]any{"has_more": false},
+			})
+		default:
+			t.Fatalf("unexpected cursor %q", r.URL.Query().Get("cursor"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	got, err := m.APIKeyRevoked(context.Background(), "tok", "k_target")
+	if err != nil {
+		t.Fatalf("APIKeyRevoked: %v", err)
+	}
+	if !got {
+		t.Fatal("APIKeyRevoked = false, want true")
+	}
+	if len(gotQueries) != 2 || !strings.Contains(gotQueries[0], "status=revoked") || !strings.Contains(gotQueries[1], "cursor=page-2") {
+		t.Fatalf("queries = %#v, want revoked status and page-2 cursor", gotQueries)
+	}
+}
+
+func TestHTTPAPIKeyMinterAPIKeyRevokedMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"key_id": "k_other", "status": "revoked"}},
+			"meta": map[string]any{"has_more": false},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	got, err := m.APIKeyRevoked(context.Background(), "tok", "k_target")
+	if err != nil {
+		t.Fatalf("APIKeyRevoked: %v", err)
+	}
+	if got {
+		t.Fatal("APIKeyRevoked = true, want false")
+	}
+}
+
+func TestHTTPAPIKeyMinterAPIKeyRevokedCapsPagination(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		nextCursor := "page-" + strconv.Itoa(requests)
+		if r.URL.Query().Get("cursor") == nextCursor {
+			t.Fatalf("server test setup produced non-advancing cursor %q", nextCursor)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"key_id": "k_other", "status": "revoked"}},
+			"meta": map[string]any{"has_more": true, "next_cursor": nextCursor},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	got, err := m.APIKeyRevoked(context.Background(), "tok", "k_target")
+	if err == nil || !strings.Contains(err.Error(), "pagination exceeded") {
+		t.Fatalf("APIKeyRevoked err = %v, want pagination exceeded", err)
+	}
+	if got {
+		t.Fatal("APIKeyRevoked = true, want false")
+	}
+	if requests != apiKeyRevokedMaxPages {
+		t.Fatalf("requests = %d, want %d", requests, apiKeyRevokedMaxPages)
+	}
+	records := logs()
+	if len(records) != 1 {
+		t.Fatalf("log records = %d, want 1: %#v", len(records), records)
+	}
+	rec := records[0]
+	if rec["msg"] != "oauth/minter revoked API key scan page cap exceeded" {
+		t.Fatalf("warning msg = %v", rec["msg"])
+	}
+	if rec["key_id"] != "k_target" || rec["max_pages"] != float64(apiKeyRevokedMaxPages) {
+		t.Fatalf("page-cap warning missing key_id/max_pages attrs: %#v", rec)
+	}
+}
+
+func TestHTTPAPIKeyMinterAPIKeyRevokedRejectsNonAdvancingCursor(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"key_id": "k_other", "status": "revoked"}},
+			"meta": map[string]any{"has_more": true, "next_cursor": "same-page"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	got, err := m.APIKeyRevoked(context.Background(), "tok", "k_target")
+	if err == nil || !strings.Contains(err.Error(), "pagination did not advance") {
+		t.Fatalf("APIKeyRevoked err = %v, want non-advancing pagination error", err)
+	}
+	if got {
+		t.Fatal("APIKeyRevoked = true, want false")
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestHTTPAPIKeyMinterAPIKeyRevokedReportsStatusBeforeLargeErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, strings.Repeat("x", apiKeyListBodyLimit+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	got, err := m.APIKeyRevoked(context.Background(), "tok", "k_target")
+	if err == nil || !strings.Contains(err.Error(), "GET /v1/api-keys returned 500") {
+		t.Fatalf("APIKeyRevoked err = %v, want status error", err)
+	}
+	if got {
+		t.Fatal("APIKeyRevoked = true, want false")
 	}
 }
 

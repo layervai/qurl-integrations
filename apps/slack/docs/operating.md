@@ -45,10 +45,42 @@ at the OAuth-callback bind layer.
   recovery override when a deployment must force a specific connection. The
   callback's security gate is the verified email claim, not the connection
   hint by itself. If a workspace already has a qURL API key and qurl-service
-  still accepts it, setup reuses that key instead of minting another one.
-  Missing or revoked stored keys ask qURL to provision the Slack workspace key;
-  if qURL reports that the workspace is already connected but the stored key
-  cannot be recovered, setup stops with admin-facing recovery guidance.
+  still accepts it, normal setup reuses that key instead of minting another one.
+  Explicit owner requests (`/qurl setup <email> --rotate` or `--repoint`)
+  take the rotation path instead: Slack strongly reads the stored qURL `key_id`,
+  revokes that old key with the freshly authenticated qURL account, then mints
+  and stores the replacement key plus its new `key_id`. Rotation mints the
+  replacement through qURL's API-key endpoint, not the external-binding create
+  endpoint; the workspace binding remains in qurl-service, and Slack's
+  workspace operations authorize through the active key's qURL scopes.
+  `--repoint` is accepted as a same-account alias for this flow; non-owning
+  cross-account transfer still fails closed and is tracked in
+  qurl-integrations#790. Rotation failure modes to expect:
+  - If the stored row predates key metadata, or if the signed-in account cannot
+    revoke the current key, rotation fails closed before any replacement is
+    minted.
+  - Missing or revoked legacy stored keys without key identity ask qURL to
+    provision the Slack workspace key; if qURL reports that the workspace is
+    already connected but the stored key cannot be recovered, setup stops with
+    admin-facing recovery guidance.
+  - Once Slack has stored a qURL `key_id`, an invalid stored key requires
+    explicit `--rotate`/`--repoint`; plain setup will not mint around that old
+    key identity because it may be the recovery path for a prior rotation
+    persist-failure.
+  - If the key was deleted at qURL rather than revoked, both plain setup and
+    Slack-side rotation fail closed until an operator verifies the stale key
+    identity or rotates the workspace key from qURL account/API-key management.
+  - Because rotation revokes before minting, a revoke-success/mint-failure
+    window leaves the workspace unable to use qURL until the owner retries
+    `--rotate`. DDB may still hold the old key value and `key_id`, but that key
+    is revoked, so workspace operations fail qurl-service validation until the
+    retry stores the replacement.
+  - If the replacement was minted but not stored, the retry uses qURL API-key
+    idempotency to recover and store the same replacement key instead of
+    spending another live key slot. That recovery is bounded by the qurl-service
+    API-key mint idempotency window; after it expires, a replacement that was
+    minted but never stored can become an orphan and must be revoked through
+    qURL account/API-key management or operator tooling before retrying.
   If the callback reports that a qURL key was provisioned but not stored,
   rerun `/qurl setup <email>` for the same workspace and qURL account within
   qurl-service's configured external-binding idempotency window. qurl-service
@@ -59,13 +91,12 @@ at the OAuth-callback bind layer.
   qURL can replay the setup key during that window. After the window expires,
   if the stored Slack key is lost/revoked, or if the admin abandons setup, use
   qURL account/API-key management or operator tooling to revoke the unused
-  workspace key before retrying; self-service
-  rotation/recovery for that path is tracked in layervai/qurl-service#910.
-  Rerunning setup is intentionally not a healthy-key rotation or qURL-account
-  switch command; use the qURL dashboard / API-key management surface or
-  operator tooling for rotation and admin hand-off. Keys are field-level
-  encrypted at rest using KMS envelope encryption, with `workspace_id` bound as
-  AAD.
+  workspace key before retrying; binding-level transfer/recovery for rows
+  without stored key metadata is tracked in layervai/qurl-service#910.
+  Rerunning setup without `--rotate`/`--repoint` is intentionally not a
+  healthy-key rotation or qURL-account switch command.
+  Keys are field-level encrypted at rest using KMS envelope encryption, with
+  `workspace_id` bound as AAD.
   Rollout order: the Slack app may deploy before the qURL API binding route is
   enabled; route-missing or dark-launch responses fall back to legacy key
   provisioning. Avoid rolling the qURL API binding route back during an active
@@ -179,6 +210,50 @@ tracked in
 The setup-binding rollout notes live in
 [qurl-integrations PR #703](https://github.com/layervai/qurl-integrations/pull/703),
 paired with [qurl-service PR #904](https://github.com/layervai/qurl-service/pull/904).
+
+## Explicit rotation visibility
+
+`event="setup_rotation_replacement_persist_failure"` means the Slack app revoked
+the previous workspace key and qURL provisioned a replacement, but the app failed
+to store the replacement locally. Treat every event as actionable: the admin can
+recover by rerunning `/qurl setup <email> --rotate` with the same qURL account
+during the idempotency replay window. The emitted `retry_window_hours` reports
+that window. The emitted window comes from the Slack task's
+`QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` runtime override when set,
+otherwise it uses the 24-hour qurl-service API-key mint default mirror. Invalid
+override values fail startup; accepted values use the canonical positive
+whole-hour `Nh` form such as `24h` or `48h` with no leading zero.
+For post-metadata rows, do not advise plain `/qurl setup <email>` as recovery
+for revoked or deleted keys; use explicit `--rotate`/`--repoint`, qURL
+account/API-key management, or operator tooling.
+
+Run this CloudWatch Logs Insights query against the Slack app log group with the
+time range set to the current replay window:
+
+```text
+fields @timestamp, team_id, key_id, retry_window_hours, operator_action, error
+| filter event = "setup_rotation_replacement_persist_failure"
+| sort @timestamp desc
+| limit 50
+```
+
+Threshold: any result opens an on-call ticket to help the workspace admin rerun
+setup before the replay window expires. For automated alerting, use a metric
+filter (or scheduled Logs Insights query that publishes a metric) matching this
+event and alarm on `count >= 1` in a 5-minute evaluation period. After the replay
+window expires, use qURL account/API-key management or operator tooling to verify
+whether the replacement is live or should be revoked.
+
+If the callback reports `qurl-service revoked API key pagination exceeded`, says
+the key could not be confirmed as revoked, or logs
+`oauth/minter revoked API key scan page cap exceeded`, do not keep asking the
+admin to retry. The old key already returns 404 and the owner-scoped revoked
+list could not confirm it within the bounded scan window. qURL currently lists
+API keys by creation time, not revoke time, so an old workspace key can be buried
+behind newer key history even when it was just revoked. If the key was deleted
+instead of revoked, it will also be absent from the revoked list. Repeated
+retries will keep failing until an operator verifies the key status or uses a
+direct owner-scoped lookup when qURL exposes one.
 
 ## Endpoints
 
@@ -335,6 +410,7 @@ destination, add code and tests before enablement.
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
+| `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
 | `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
