@@ -825,6 +825,33 @@ func TestSlashCommandUninstallClientBuildErrorAbortsWithoutDelete(t *testing.T) 
 	}
 }
 
+func TestSlashCommandUninstallKeyVanishedBetweenReadsDisconnectsLocally(t *testing.T) {
+	// The key_id read succeeds, but resolving the plaintext key for the client
+	// then reports the workspace not configured (the row's key vanished between
+	// the two reads). That falls through to DeleteAPIKey's local-only disconnect
+	// rather than aborting — no upstream DELETE is attempted.
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: ""}, // APIKey → ErrWorkspaceNotConfigured
+		keyID:                 "key_workspace_vanished",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if provider.keyIDCalls != 1 {
+		t.Fatalf("APIKeyID calls = %d, want 1", provider.keyIDCalls)
+	}
+	if calls, _ := rec.snapshot(); calls != 0 {
+		t.Fatalf("vanished key must not call upstream revoke; DELETE calls = %d, want 0", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1 (fall through to local-only)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+		t.Fatalf("local-only reply missing revocation caveat: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallRevokeSucceedsButLocalRowAlreadyGoneReportsRevoked(t *testing.T) {
 	// Concurrent uninstall / partial-row race: the upstream revoke succeeds but
 	// DeleteAPIKey then reports the row already gone. Because this call did revoke

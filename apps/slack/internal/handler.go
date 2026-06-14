@@ -1834,7 +1834,8 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 // admin on a broken uninstall; the caller keeps the "not revoked outside Slack"
 // caveat. This degrade assumes 401/403 from this endpoint is structural (the
 // deployment forbids self-revoke), not transient: a transient 401/403 (a
-// just-rotated key, clock skew, a gateway auth blip) would drop local state
+// just-rotated key, clock skew, a gateway auth blip, or a stale cached plaintext
+// key racing the fresh key_id this path strong-reads) would drop local state
 // while the upstream key is still live. Everything else (other 4xx, 5xx,
 // transport, timeout) is treated as possibly-still-live: return the error so the
 // caller aborts and the stored key_id survives.
