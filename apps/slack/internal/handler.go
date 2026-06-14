@@ -1766,10 +1766,14 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
-	// Shared reply for the two paths that end with the upstream key revoked: a
-	// clean revoke+delete, and a revoke followed by DeleteAPIKey reporting the row
-	// already gone (concurrent uninstall / partial row).
-	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
+	// Shared reply for the paths that end with the upstream key gone: a clean
+	// revoke+delete, a revoke followed by DeleteAPIKey reporting the row already
+	// gone (concurrent uninstall / partial row), and the 404 path where the key
+	// was already absent upstream. Under the confirmed self-revoke contract a live
+	// key can't actually be revoked here, so in prod this reply is reached via the
+	// 404 (already-gone) path — hence "(or was already revoked upstream)" rather
+	// than asserting this uninstall did the revoking.
+	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
 
 	// revoked reports whether the upstream key was revoked; a non-nil error means
 	// the key may still be live, so abort before local removal to preserve the
@@ -1843,6 +1847,11 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 		return false, nil
 	}
 
+	// This is deliberately a second workspace read: APIKeyID above returns the
+	// key_id, while authenticatedClient needs the KMS-decrypted plaintext key. The
+	// rotation path's combined APIKeyIdentity read returns key_id + account, not
+	// the plaintext, so it can't be reused here. The second read is ttlcache-backed
+	// and both stay inside the uninstall sync budget.
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {

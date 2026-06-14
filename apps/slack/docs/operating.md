@@ -492,12 +492,18 @@ or unexpected (5xx, transport, timeout), so the stored `key_id` is intentionally
 preserved for a retry that self-heals on the next uninstall. The abort is
 deliberate — it never severs local Slack access while leaving a possibly-live
 upstream key it can no longer identify (that would give false security on a
-compromised workspace, since the leaked key still works via the qURL API). If the
-upstream stays unreachable and Slack access must be cut urgently, revoke the key
-through qURL account/API-key tooling and then clear the `workspace_state` row's
-qURL columns directly — the manual equivalent of the local disconnect — rather
-than waiting on the retry path. A first-class admin/operator force/local-only
-escape hatch is tracked in #806.
+compromised workspace, since the leaked key still works via the qURL API).
+
+**Availability note:** this inverts the pre-upstream-revocation behavior, where
+`/qurl uninstall` always cut local Slack access. A persistent upstream outage (or
+a slow upstream that exhausts the sync budget) can now **block the disconnect**
+until it recovers — the trade-off for never orphaning a key the operator can no
+longer identify. If the upstream stays unreachable and Slack access must be cut
+urgently, revoke the key through qURL account/API-key tooling and then clear the
+`workspace_state` row's qURL columns directly — the manual equivalent of the local
+disconnect — rather than waiting on the retry path. A first-class admin/operator
+force/local-only escape hatch is tracked in #806 (sequence it soon, since this
+manual row edit is otherwise the only out during an upstream outage).
 
 ## Endpoints
 
