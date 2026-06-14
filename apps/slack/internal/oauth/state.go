@@ -78,9 +78,24 @@ type SetupMode string
 const (
 	// SetupModeReuse is the default idempotent setup path that reuses a valid stored key.
 	SetupModeReuse SetupMode = "reuse"
-	// SetupModeRotate is the explicit owner-requested key replacement path.
+	// SetupModeRotate is the explicit owner-requested same-account key replacement path.
 	SetupModeRotate SetupMode = "rotate"
+	// SetupModeRepoint is the explicit owner-requested account-move path. It
+	// resolves to a same-account rotation when the signed-in qURL account already
+	// holds the key, and detects a genuine cross-account move (different qURL
+	// account) to route the owner to the operator-assisted transfer — qurl-service
+	// has no tenant-facing cross-account binding transfer (cross-tenant refusal by
+	// design, see layervai/qurl-service#910).
+	SetupModeRepoint SetupMode = "repoint"
 )
+
+// Explicit reports whether the mode is an explicit owner-requested key
+// operation (--rotate or --repoint) rather than the default reuse setup. The
+// slash-command surface gates both explicit modes identically: they require an
+// AdminStore (owner check) and cannot run against an unreclaimed legacy owner.
+func (m SetupMode) Explicit() bool {
+	return m == SetupModeRotate || m == SetupModeRepoint
+}
 
 // Sentinel errors so callers can log a stable reason without parsing
 // error strings. Kept un-exported because no caller outside this package
@@ -112,6 +127,8 @@ func normalizeSetupMode(mode SetupMode) (SetupMode, error) {
 		return SetupModeReuse, nil
 	case SetupModeRotate:
 		return SetupModeRotate, nil
+	case SetupModeRepoint:
+		return SetupModeRepoint, nil
 	default:
 		return "", errStateBadMode
 	}

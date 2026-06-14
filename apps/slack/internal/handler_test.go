@@ -1745,7 +1745,7 @@ func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
 
 	body := url.Values{
 		"command": {commandUser},
-		"text":    {"setup --repoint Admin+Setup@Example.COM"},
+		"text":    {"setup --rotate Admin+Setup@Example.COM"},
 		"team_id": {"T123ABCDEF"},
 		"user_id": {"U_ADMIN1"},
 	}.Encode()
@@ -1766,6 +1766,37 @@ func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
 	}
 	if strings.Contains(text, "state=") || strings.Contains(text, "Continue key rotation") {
 		t.Fatalf("sandbox rotate should not mint a rotation state URL: %q", text)
+	}
+}
+
+func TestSlashCommandSetupWithRepoint_RejectsMissingAdminStore(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	body := url.Values{
+		"command": {commandUser},
+		"text":    {"setup --repoint Admin+Setup@Example.COM"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text := result["text"]
+	if !strings.Contains(text, "key repoint is not available") || !strings.Contains(text, "without `--repoint`") {
+		t.Fatalf("missing repoint-unavailable copy: %q", text)
+	}
+	if strings.Contains(text, "state=") || strings.Contains(text, "Continue key repoint") {
+		t.Fatalf("sandbox repoint should not mint a repoint state URL: %q", text)
 	}
 }
 
@@ -1852,6 +1883,23 @@ func TestSlashCommandSetupWithRotate_RejectsShapeBadLegacyOwnerBeforeStateMint(t
 	}
 }
 
+func TestSlashCommandSetupWithRepoint_RejectsShapeBadLegacyOwnerBeforeStateMint(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
+	h := newAdminTestHandler(t, ts)
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup --repoint Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
+	text := resp[respFieldText]
+	if !strings.Contains(text, "legacy workspace ownership record") || !strings.Contains(text, "without `--repoint`") {
+		t.Fatalf("missing legacy-owner repoint refusal copy: %q", text)
+	}
+	if strings.Contains(text, "state=") || strings.Contains(text, "Continue key repoint") {
+		t.Fatalf("shape-bad owner repoint should not mint a repoint state URL: %q", text)
+	}
+}
+
 func TestParseSetupSubcommandModes(t *testing.T) {
 	cases := []struct {
 		text      string
@@ -1860,7 +1908,9 @@ func TestParseSetupSubcommandModes(t *testing.T) {
 	}{
 		{text: "setup admin@example.com", wantEmail: "admin@example.com", wantMode: oauth.SetupModeReuse},
 		{text: "setup --rotate admin@example.com", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRotate},
-		{text: "setup admin@example.com --repoint", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRotate},
+		{text: "setup admin@example.com --rotate", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRotate},
+		{text: "setup --repoint admin@example.com", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRepoint},
+		{text: "setup admin@example.com --repoint", wantEmail: "admin@example.com", wantMode: oauth.SetupModeRepoint},
 	}
 	for _, tc := range cases {
 		cmd, matched, err := parseSetupSubcommand(tc.text)

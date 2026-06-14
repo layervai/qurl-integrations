@@ -128,6 +128,8 @@ const (
 	headerSlackTimestamp = "X-Slack-Request-Timestamp"
 	setupVerb            = "setup"
 	uninstallVerb        = "uninstall"
+	setupFlagRotate      = "--rotate"
+	setupFlagRepoint     = "--repoint"
 )
 
 const (
@@ -1488,12 +1490,20 @@ func parseSetupSubcommand(text string) (setupCommand, bool, error) {
 	seenMode := false
 	for _, part := range parts {
 		switch part {
-		case "--rotate", "--repoint":
+		case setupFlagRotate, setupFlagRepoint:
 			if seenMode {
 				return setupCommand{}, true, errSetupUsage
 			}
 			seenMode = true
-			cmd.mode = oauth.SetupModeRotate
+			// --rotate is an explicit same-account key replacement. --repoint
+			// additionally handles the cross-account move: it resolves to a
+			// rotation when the signed-in qURL account already holds the key and
+			// otherwise routes the owner to the operator-assisted transfer.
+			if part == setupFlagRepoint {
+				cmd.mode = oauth.SetupModeRepoint
+			} else {
+				cmd.mode = oauth.SetupModeRotate
+			}
 		default:
 			if strings.HasPrefix(part, "-") {
 				return setupCommand{}, true, errSetupUsage
@@ -1527,6 +1537,28 @@ func setupVerbRest(text string) (rest string, matched bool) {
 		return text, false
 	}
 	return strings.TrimSpace(suffix), true
+}
+
+// setupModeFlag is the CLI flag that selects an explicit setup mode, for copy.
+func setupModeFlag(mode oauth.SetupMode) string {
+	if mode == oauth.SetupModeRepoint {
+		return setupFlagRepoint
+	}
+	return setupFlagRotate
+}
+
+// setupModeAction is the user-facing verb for an explicit setup mode, for copy.
+//
+//nolint:exhaustive // default maps SetupModeReuse and the empty mode to the plain "setup" verb.
+func setupModeAction(mode oauth.SetupMode) string {
+	switch mode {
+	case oauth.SetupModeRotate:
+		return "key rotation"
+	case oauth.SetupModeRepoint:
+		return "key repoint"
+	default:
+		return "setup"
+	}
 }
 
 // handleSetup mints a workspace-bound state token and replies with the
@@ -1574,13 +1606,13 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		respondSlack(w, "Could not read your Slack workspace or user ID from the command payload.")
 		return
 	}
-	if setupCmd.mode == oauth.SetupModeRotate && h.cfg.AdminStore == nil {
-		respondSlack(w, "qURL workspace key rotation is not available on this Secure Access Agent deployment. Run `/qurl setup <email>` without `--rotate`, or contact the operator.")
+	if setupCmd.mode.Explicit() && h.cfg.AdminStore == nil {
+		respondSlack(w, fmt.Sprintf("qURL workspace %s is not available on this Secure Access Agent deployment. Run `/qurl setup <email>` without `%s`, or contact the operator.", setupModeAction(setupCmd.mode), setupModeFlag(setupCmd.mode)))
 		return
 	}
 	// Owner gate. AdminStore==nil only reaches here for first-time/reuse setup
-	// (sandbox/no-DDB); explicit rotation was rejected above because it cannot
-	// skip the owner check. Otherwise check whether the workspace has an owner
+	// (sandbox/no-DDB); explicit rotation/repoint was rejected above because it
+	// cannot skip the owner check. Otherwise check whether the workspace has an owner
 	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
 	// is irrelevant for /setup specifically (added admins can't rerun
@@ -1646,9 +1678,10 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			// callback by reclaiming the orphaned row for this caller
 			// (first-come-claims, the same posture as an unbound
 			// workspace). Log loudly so the legacy reclaim is grep-able.
-			if setupCmd.mode == oauth.SetupModeRotate {
-				slog.Warn("/qurl setup: rotation refused for shape-bad legacy owner_id — require plain setup reclaim first", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
-				respondSlack(w, "`/qurl setup <email> --rotate` cannot run until this legacy workspace ownership record is reclaimed. Run `/qurl setup <email>` without `--rotate` first, then the recorded workspace owner can rotate the key.")
+			if setupCmd.mode.Explicit() {
+				flag := setupModeFlag(setupCmd.mode)
+				slog.Warn("/qurl setup: explicit mode refused for shape-bad legacy owner_id — require plain setup reclaim first", "team_id", teamID, "caller_user_id", userID, "mode", string(setupCmd.mode), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
+				respondSlack(w, fmt.Sprintf("`/qurl setup <email> %s` cannot run until this legacy workspace ownership record is reclaimed. Run `/qurl setup <email>` without `%s` first, then the recorded workspace owner can re-run it.", flag, flag))
 				return
 			}
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
@@ -1661,10 +1694,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		return
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
-	action := "setup"
-	if setupCmd.mode == oauth.SetupModeRotate {
-		action = "key rotation"
-	}
+	action := setupModeAction(setupCmd.mode)
 	respondSlack(w, "Continue "+action+" for `"+echoText(setupCmd.email)+"`: <"+setupURL+"|Continue "+action+">\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
@@ -2025,7 +2055,8 @@ func (h *Handler) userHelpMessage(command string) string {
 		// advertises a verb whose only reply would be the not-configured
 		// error (same rule as `/qurl aliases` below).
 		lines = append(lines,
-			"• `/qurl setup <email> --rotate` / `--repoint` — Replace the workspace qURL key",
+			"• `/qurl setup <email> --rotate` — Replace the workspace qURL key on the same qURL account",
+			"• `/qurl setup <email> --repoint` — Move the workspace to a different qURL account (cross-account moves route to an operator)",
 			"_`$id` identifies a resource. A `$alias` is an alternate name for a resource in a channel — several aliases can point to one ID. Use either with `/qurl get`._",
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",

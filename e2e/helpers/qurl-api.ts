@@ -6,6 +6,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { fetchWithTransientRetry } from './http';
+
 export interface MintResult {
   resource_id: string;
   qurl_link: string;
@@ -26,7 +28,11 @@ export interface LinkAccessResult {
  * google-maps/file-revoke's `uploadImage`: a transient 429 (HTTP 200 +
  * `error` string + no `resource_id`) is retried with backoff; any other
  * missing-`resource_id` body throws WITH the connector's `error` string so a
- * real regression is legible, not a bare "expected undefined to be truthy". */
+ * real regression is legible, not a bare "expected undefined to be truthy".
+ *
+ * The HTTP call goes through fetchWithTransientRetry (bounded retry on transient
+ * connector-stack statuses; see its header + qurl-integrations-infra#1085) —
+ * distinct from the app-level 429 (HTTP 200 + `error`) loop below. */
 export async function uploadFile(
   uploadUrl: string,
   filePath: string,
@@ -45,7 +51,7 @@ export async function uploadFile(
       formData.append('viewer_ttl_seconds', String(opts.viewerTtlSeconds));
     }
 
-    const res = await fetch(`${uploadUrl}/upload`, {
+    const res = await fetchWithTransientRetry(`${uploadUrl}/upload`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: formData,

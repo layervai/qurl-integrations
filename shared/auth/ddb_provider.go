@@ -67,9 +67,18 @@ const (
 	attrDataKeyCT        = "qurl_api_key_dk" // ciphertext data key returned by KMS GenerateDataKey
 	attrQURLAPIKeyID     = "qurl_api_key_id"
 	attrQURLAPIKeyPrefix = "qurl_api_key_prefix"
-	attrConfiguredBy     = "configured_by"
-	attrConfiguredAt     = "configured_at"
-	attrUpdatedAt        = "updated_at"
+	// attrQURLAccountID records the qURL account (Auth0 id_token `sub`, which
+	// qurl-service uses as the binding/api-key owner_id) that minted the stored
+	// key. It is key provenance, NOT the workspace ownership anchor — that stays
+	// the Slack user_id in workspace_mappings (see #510). Explicit --repoint
+	// compares this against the signed-in qURL account to detect a cross-account
+	// move before touching any key. Plaintext, non-secret identifier, same
+	// posture as configured_by; legacy/sandbox rows minted before this field
+	// leave it absent (read as "").
+	attrQURLAccountID = "qurl_account_id"
+	attrConfiguredBy  = "configured_by"
+	attrConfiguredAt  = "configured_at"
+	attrUpdatedAt     = "updated_at"
 
 	attrSlackBotToken       = "slack_bot_token"
 	attrSlackBotTokenDK     = "slack_bot_token_dk"
@@ -450,24 +459,52 @@ func apiKeyAfterCacheValidationError(ctx context.Context, cachedKey string, err 
 	return cachedKey, true, nil
 }
 
-// APIKeyID strongly reads the stored qURL key_id for explicit rotation. It
-// bypasses the plaintext-key cache because rotation needs the latest key_id
-// before revoking.
-func (p *DDBProvider) APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error) {
+// fetchConfiguredAPIKeyItem strongly reads a workspace's auth row and returns it
+// only when a qURL key is actually stored, otherwise [ErrWorkspaceNotConfigured].
+// It bypasses the plaintext-key cache (the explicit rotation/repoint paths need
+// the latest key identity before revoking) and carries the caller's operation
+// label so error messages stay caller-specific. Shared by APIKeyID and
+// APIKeyIdentity so a single strong read backs both.
+func (p *DDBProvider) fetchConfiguredAPIKeyItem(ctx context.Context, workspaceID, operation string) (map[string]ddbtypes.AttributeValue, error) {
 	if workspaceID == "" {
-		return "", errors.New("DDBProvider.APIKeyID: workspaceID is empty")
+		return nil, fmt.Errorf("%s: workspaceID is empty", operation)
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("DDBProvider.APIKeyID: %w", err)
+		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
-	item, err := p.fetchAPIKeyItem(ctx, workspaceID, true, "DDBProvider.APIKeyID")
+	item, err := p.fetchAPIKeyItem(ctx, workspaceID, true, operation)
+	if err != nil {
+		return nil, err
+	}
+	if ctBlob, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB); !ok || len(ctBlob.Value) == 0 {
+		return nil, fmt.Errorf("%s: workspace %q: %w", operation, workspaceID, ErrWorkspaceNotConfigured)
+	}
+	return item, nil
+}
+
+// APIKeyID strongly reads the stored qURL key_id for explicit rotation, before
+// revoking.
+func (p *DDBProvider) APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error) {
+	item, err := p.fetchConfiguredAPIKeyItem(ctx, workspaceID, "DDBProvider.APIKeyID")
 	if err != nil {
 		return "", err
 	}
-	if ctBlob, ok := item[attrQURLAPIKey].(*ddbtypes.AttributeValueMemberB); !ok || len(ctBlob.Value) == 0 {
-		return "", fmt.Errorf("DDBProvider.APIKeyID: workspace %q: %w", workspaceID, ErrWorkspaceNotConfigured)
-	}
 	return stringAttribute(item[attrQURLAPIKeyID]), nil
+}
+
+// APIKeyIdentity strongly reads both the stored qURL key_id and the qURL account
+// (Auth0 sub) that minted it, in a single read. The explicit rotation/repoint
+// path needs both: the key_id to revoke, and the account to detect a
+// cross-account move before touching any key. A configured workspace whose row
+// predates the account field (or was written by the sandbox/no-verifier path)
+// returns qurlAccountID == "" — the caller must treat that as "provenance
+// unknown" and fail closed rather than assume same-account.
+func (p *DDBProvider) APIKeyIdentity(ctx context.Context, workspaceID string) (keyID, qurlAccountID string, err error) {
+	item, err := p.fetchConfiguredAPIKeyItem(ctx, workspaceID, "DDBProvider.APIKeyIdentity")
+	if err != nil {
+		return "", "", err
+	}
+	return stringAttribute(item[attrQURLAPIKeyID]), stringAttribute(item[attrQURLAccountID]), nil
 }
 
 func shouldRetryAPIKeyLookupAfterSharedError(ctx context.Context, err error, retries int) bool {
@@ -790,11 +827,15 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 // SetAPIKeyWithMetadata stores the per-workspace qURL API key plus its qURL
 // key_id, which explicit rotation needs before it can revoke safely. The
 // configuredBy field is informational (the Slack user_id of the admin who
-// completed /oauth/qurl/callback) and is persisted plaintext. UpdateItem is
-// used instead of PutItem so Slack app install metadata in the same row is
-// preserved. The apiKey value is stored exactly as minted by qurl-service;
-// APIKey returns the same plaintext without trimming.
-func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, configuredBy string) error {
+// completed /oauth/qurl/callback) and is persisted plaintext. qurlAccountID is
+// the qURL account (Auth0 sub) that minted the key, stored for cross-account
+// --repoint detection; it is best-effort (the sandbox/no-verifier path has no
+// verified sub) so an empty value is tolerated and simply leaves any prior
+// provenance untouched rather than erasing it. UpdateItem is used instead of
+// PutItem so Slack app install metadata in the same row is preserved. The
+// apiKey value is stored exactly as minted by qurl-service; APIKey returns the
+// same plaintext without trimming.
+func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
 		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyID is empty")
@@ -803,10 +844,10 @@ func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, ap
 	if keyPrefix == "" {
 		return errors.New("DDBProvider.SetAPIKeyWithMetadata: keyPrefix is empty")
 	}
-	return p.setAPIKey(ctx, "DDBProvider.SetAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, configuredBy)
+	return p.setAPIKey(ctx, "DDBProvider.SetAPIKeyWithMetadata", workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy)
 }
 
-func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, apiKey, keyID, keyPrefix, configuredBy string) error {
+func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	if workspaceID == "" {
 		return fmt.Errorf("%s: workspaceID is empty", operation)
 	}
@@ -837,6 +878,13 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		":key_prefix": &ddbtypes.AttributeValueMemberS{Value: keyPrefix},
 		":by":         &ddbtypes.AttributeValueMemberS{Value: configuredBy},
 		":now":        &ddbtypes.AttributeValueMemberS{Value: nowString},
+	}
+	// Only write qurl_account_id when we have a verified qURL account. An empty
+	// value (sandbox / no-verifier path) is omitted so it never erases the
+	// provenance a prior verified mint recorded.
+	if qurlAccountID = strings.TrimSpace(qurlAccountID); qurlAccountID != "" {
+		setParts = append(setParts, attrQURLAccountID+" = :account_id")
+		values[":account_id"] = &ddbtypes.AttributeValueMemberS{Value: qurlAccountID}
 	}
 	updateExpr := "SET " + strings.Join(setParts, ", ")
 	// TODO(#265): this UpdateItem closes the old GetItem+PutItem row-clobber
@@ -1008,7 +1056,11 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #configured_by, #configured_at"),
+		// qurl_account_id is in the REMOVE list but intentionally NOT in the
+		// ConditionExpression: it is only ever written alongside the key, so a row
+		// can't exist with only that attribute, and REMOVE of an absent attribute
+		// is a no-op. (TestDDBProviderDeleteAPIKey pins both expressions.)
+		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
 		ConditionExpression: aws.String(
 			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
 		),
@@ -1017,6 +1069,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 			"#qurl_api_key_dk":     attrDataKeyCT,
 			"#qurl_api_key_id":     attrQURLAPIKeyID,
 			"#qurl_api_key_prefix": attrQURLAPIKeyPrefix,
+			"#qurl_account_id":     attrQURLAccountID,
 			"#configured_by":       attrConfiguredBy,
 			"#configured_at":       attrConfiguredAt,
 			"#updated_at":          attrUpdatedAt,
