@@ -1738,26 +1738,205 @@ func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, 
 	return teamID, userID, true
 }
 
+// workspaceKeyRevoker is the optional capability a mutable AuthProvider
+// implements to expose the stored qURL key_id so /qurl uninstall can revoke the
+// upstream key before removing local credentials. *auth.DDBProvider implements
+// it; providers that cannot (e.g. auth.EnvProvider) fall back to the local-only
+// disconnect path. It is kept off the base auth.Provider interface — and
+// discovered by type assertion — because non-Slack consumers (cli) have no
+// per-workspace key_id, and unlike DeleteAPIKey there is no Supports() gate to
+// piggyback on: the assertion itself is the capability check. The same
+// strongly-read key_id powers owner-initiated rotation via oauth.WorkspaceStore,
+// the same consumer-side narrow-interface pattern.
+type workspaceKeyRevoker interface {
+	APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error)
+}
+
+// Ensure the production provider keeps satisfying the capability so a refactor
+// that drops APIKeyID surfaces here rather than silently downgrading every
+// uninstall to local-only.
+var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
+
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
-	// Reuse the sync admin-verb budget for the single DeleteAPIKey write: after
-	// the owner/admin gate, total upstream work stays inside the 2s ack envelope.
+	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
+	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
+	// ack window. The revoke is best-effort within this ctx — the qURL client may
+	// retry a flapping upstream (WithRetry), but the ctx bound makes a retry storm
+	// abort (key_id preserved) rather than miss the ack.
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
-	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
-		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
-			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
-			return
-		}
-		if errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported) {
-			respondUninstallUnsupported(w)
-			return
-		}
-		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)
-		respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
+
+	// Shown only on the revoked=true paths (204/404), which are unreachable for a
+	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
+	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
+	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
+
+	// revoked reports whether the upstream key was revoked; a non-nil error means
+	// the key may still be live, so abort before local removal to preserve the
+	// stored key_id for a retry rather than orphaning it.
+	revoked, err := h.revokeWorkspaceUpstreamKey(ctx, teamID, userID)
+	if err != nil {
+		// Covers all abort arms — a failed revoke, but also the key_id read and
+		// client-build (KMS) failures where no revoke was even attempted — so the
+		// copy says "disconnect", not "revoke".
+		respondSlack(w, ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.")
 		return
 	}
-	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID)
+
+	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrWorkspaceNotConfigured):
+			if revoked {
+				// The row's qURL columns were already cleared (concurrent uninstall
+				// / partial row), but this call did revoke the upstream key — report
+				// success, not the contradictory "isn't currently connected".
+				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
+				respondSlack(w, revokedReply)
+				return
+			}
+			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
+			return
+		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
+			respondUninstallUnsupported(w)
+			return
+		default:
+			slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID, "caller_user_id", userID)
+			respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
+			return
+		}
+	}
+	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
+	if revoked {
+		respondSlack(w, revokedReply)
+		return
+	}
 	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+}
+
+// revokeWorkspaceUpstreamKey best-effort revokes the workspace's upstream qURL
+// API key before local credential removal, using the strongly-read stored key_id.
+// It returns revoked=true only when the key was already gone upstream (404);
+// (false, nil) for a local-only disconnect (no key_id, a legacy row, or the
+// expected 403/401 self-revoke refusal); and a non-nil error when a
+// transient/unexpected failure left the key possibly live, so the caller aborts
+// before DeleteAPIKey and the stored key_id survives for a retry rather than
+// orphaning it. classifyUninstallRevokeError is the authoritative record of the
+// confirmed self-revoke contract (#805) these outcomes follow.
+func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID string) (revoked bool, err error) {
+	revoker, ok := h.cfg.AuthProvider.(workspaceKeyRevoker)
+	if !ok {
+		return false, nil
+	}
+	keyID, err := revoker.APIKeyID(ctx, teamID)
+	switch {
+	case errors.Is(err, auth.ErrWorkspaceNotConfigured):
+		// No readable key to revoke. DeleteAPIKey owns the not-connected vs
+		// partial-row-cleanup messaging, so fall through to it.
+		return false, nil
+	case err != nil:
+		slog.Error("/qurl uninstall: could not read stored qURL key id before revoke", "error", err, "team_id", teamID, "caller_user_id", userID)
+		return false, err
+	}
+	if keyID == "" {
+		slog.Warn("/qurl uninstall: legacy workspace row has no qURL key id — local-only disconnect", "team_id", teamID, "caller_user_id", userID)
+		return false, nil
+	}
+
+	// This is deliberately a second workspace read: APIKeyID above returns the
+	// key_id, while authenticatedClient needs the KMS-decrypted plaintext key. The
+	// rotation path's combined APIKeyIdentity read returns key_id + account, not
+	// the plaintext, so it can't be reused here. The second read is ttlcache-backed
+	// and both stay inside the uninstall sync budget.
+	c, err := h.authenticatedClient(ctx, teamID)
+	if err != nil {
+		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+			// Key vanished between the key_id read and here; DeleteAPIKey is the
+			// not-connected authority.
+			return false, nil
+		}
+		slog.Error("/qurl uninstall: could not build client to revoke upstream key", "error", err, "team_id", teamID, "caller_user_id", userID)
+		return false, err
+	}
+	// For a live key this DELETE always 403s → local-only degrade (by design, see
+	// classifyUninstallRevokeError); the call is kept for the #806 owner-auth path.
+	if err := c.RevokeAPIKey(ctx, keyID); err != nil {
+		return classifyUninstallRevokeError(err, teamID, userID, keyID)
+	}
+	slog.Info("/qurl uninstall: revoked upstream qURL API key", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+	return true, nil
+}
+
+// classifyUninstallRevokeError maps a RevokeAPIKey failure to (revoked, err),
+// per the confirmed qurl-service contract for DELETE /v1/api-keys/{key_id}.
+//
+// Confirmed contract (#805): uninstall has no live OAuth flow, so it
+// authenticates this DELETE with the workspace's own API key, and qurl-service
+// categorically forbids an API key from managing API keys — the DELETE returns
+// 403 ("API keys cannot manage API keys. Use JWT authentication.") for ANY
+// target key_id, including its own, structurally and before any existence check.
+// So a live workspace key ALWAYS gets 403 here: revoking the upstream key from
+// /qurl uninstall is a local-only disconnect by design, not a deployment quirk.
+// (Rotation can revoke because oauth/callback runs under the owner's freshly
+// authenticated JWT; uninstall has only the workspace API key.)
+//
+// Status handling under that contract:
+//   - 403: self-revoke forbidden — the universal case for a live key. Degrade to
+//     a local-only disconnect (false, nil); the upstream key stays live, so the
+//     caller keeps the "not revoked outside Slack" caveat and a security-motivated
+//     uninstall still needs a manual upstream revoke (see operating.md).
+//   - 401: the workspace key is already revoked/expired upstream (e.g. a prior
+//     rotation) — qurl-service's auth middleware rejects the credential with 401
+//     before the existence check. The key is already dead, so degrade too; the
+//     caveat then over-warns, the safe direction. The logged `status` field
+//     distinguishes 401 from 403 for operators.
+//   - 404: treat as revoked (true, nil) — but UNREACHABLE for a self-revoke. The
+//     credential IS the target key, so a present key 403s and an absent/dead key
+//     401s, both before the existence check; there is no "valid credential +
+//     missing target" path. This arm — like the 204 success path in
+//     revokeWorkspaceUpstreamKey — is defensive scaffolding for a future
+//     owner-authenticated revoke (#806), where the credential and target differ
+//     and a 404 (or a real 204) can occur.
+//   - everything else (other 4xx, 5xx, transport, timeout): possibly-still-live —
+//     return the error so the caller aborts and the stored key_id survives.
+//
+// Net for a self-revoke: only 403/401 (→ degrade) and 5xx/transport (→ abort)
+// occur in prod, so `upstream_revoked` is effectively always false and the
+// revoked=true arms never fire until the #806 owner-auth path lands.
+//
+// 401/403 are structural, never transient FOR A LIVE KEY: 403 is a deterministic
+// gate, and qurl-service's auth middleware returns 401 only for a genuinely
+// revoked/expired/unknown credential — a still-live key passes auth and reaches
+// the 403 gate, while an infra blip (e.g. a datastore lookup error) surfaces as
+// 5xx, not 401. So a 401 here always means the key is already dead, and degrading
+// 401/403 to local-only cannot strand a still-live key behind a transient auth
+// blip (a 5xx lands on the abort arm instead). That upstream contract is pinned
+// by qurl-service's middleware tests: TestAPIKeyAuth_ValidKey (live → passes →
+// 403), TestAPIKeyAuth_RevokedKey / TestAPIKeyAuth_ExpiredKey (dead → 401), and
+// TestAPIKeyAuth_RepoError_Returns500 (infra → 500, not 401).
+//
+// Flipping 401/403 to abort (tell the admin to retry/escalate instead of a silent
+// local-only disconnect) is deliberately sequenced behind the force/local-only
+// escape hatch (#806); until that lands the degrade is the safe interim — without
+// it, a deployment that refuses the revoke would leave admins unable to
+// disconnect at all.
+func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string) (revoked bool, err error) {
+	var apiErr *client.APIError
+	if errors.As(revokeErr, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusNotFound:
+			slog.Info("/qurl uninstall: upstream qURL key already absent — treating as revoked", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+			return true, nil
+		case http.StatusUnauthorized, http.StatusForbidden:
+			// Expected, by-design path: qurl-service forbids API-key self-revoke
+			// (403) and rejects an already-revoked key (401). Warn, not Error —
+			// the `status` field distinguishes the still-live 403 from the
+			// already-dead 401 for operators (see operating.md).
+			slog.Warn("/qurl uninstall: upstream qURL key not revoked — local-only disconnect", "status", apiErr.StatusCode, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+			return false, nil
+		}
+	}
+	slog.Error("/qurl uninstall: upstream qURL key revoke failed — aborting to preserve key id", "error", revokeErr, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+	return false, revokeErr
 }
 
 func respondUninstallUnsupported(w http.ResponseWriter) {
