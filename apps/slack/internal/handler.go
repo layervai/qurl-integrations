@@ -1643,7 +1643,7 @@ func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, 
 		return "", "", false
 	}
 	if h.cfg.AuthProvider == nil {
-		h.respondUninstallUnavailable(w)
+		respondUninstallUnavailable(w, uninstallUnavailableCredentialStorage)
 		return "", "", false
 	}
 	userID = strings.TrimSpace(values.Get(fieldUserID))
@@ -1657,7 +1657,7 @@ func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, 
 	// destructive command is owner/admin-gated.
 	if h.cfg.AdminStore == nil {
 		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
-		h.respondUninstallUnavailable(w)
+		respondUninstallUnavailable(w, uninstallUnavailableOwnerVerification)
 		return "", "", false
 	}
 	if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
@@ -1692,14 +1692,21 @@ func respondUninstallUnsupported(w http.ResponseWriter) {
 	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
 }
 
-// respondUninstallUnavailable is the single wiring-state-to-operator-copy map
-// shared by bare uninstall and uninstall argument variants.
-func (h *Handler) respondUninstallUnavailable(w http.ResponseWriter) {
-	if h.cfg.AuthProvider == nil {
+type uninstallUnavailableReason int
+
+const (
+	uninstallUnavailableCredentialStorage uninstallUnavailableReason = iota
+	uninstallUnavailableOwnerVerification
+)
+
+// respondUninstallUnavailable is the shared unavailable-reason-to-operator-copy
+// map for bare uninstall and uninstall argument variants.
+func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavailableReason) {
+	switch reason {
+	case uninstallUnavailableCredentialStorage:
 		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
-	}
-	if h.cfg.AuthProvider.SupportsDeleteAPIKey() && h.cfg.AdminStore == nil {
+	case uninstallUnavailableOwnerVerification:
 		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
