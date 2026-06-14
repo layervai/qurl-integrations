@@ -25,6 +25,7 @@ import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 import { loadEnv } from '../helpers/env';
+import { fetchWithTransientRetry } from '../helpers/http';
 import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
@@ -39,6 +40,10 @@ interface UploadResponse {
  * Retries on 429 rate-limit bursts from the upstream qURL API — the connector
  * responds with `{success:true, resource_url:..., error:"QURL creation failed:
  * ... 429 ..."}` and no `resource_id`. Treat that as transient and back off.
+ *
+ * The HTTP call goes through fetchWithTransientRetry (bounded retry on transient
+ * connector-stack statuses; see helpers/http.ts + qurl-integrations-infra#1085) —
+ * distinct from the app-level 429 loop here.
  *
  * TODO(upstream-rebrand): the literal "QURL creation failed" mirrors upstream's
  * current error text. Update this doc comment when upstream qurl-service
@@ -57,7 +62,7 @@ async function uploadImage(
     // than `BlobPart`'s `ArrayBufferView<ArrayBuffer>` expects. Runtime is
     // fine; cast to satisfy the compiler.
     form.append('file', new Blob([buf as BlobPart], { type: mime }), filename);
-    const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
+    const res = await fetchWithTransientRetry(`${env.UPLOAD_API_URL}/upload`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
       body: form,
@@ -99,7 +104,7 @@ describe('File Revoke', () => {
     expect(upload.viewerUrl).toContain('/view/');
     expect(upload.resourceId).toMatch(/^r_/);
 
-    const before = await fetch(upload.viewerUrl);
+    const before = await fetchWithTransientRetry(upload.viewerUrl);
     expect(before.status).toBe(200);
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);

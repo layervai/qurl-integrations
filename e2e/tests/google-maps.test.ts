@@ -30,6 +30,7 @@ import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 import { loadEnv } from '../helpers/env';
+import { fetchWithTransientRetry } from '../helpers/http';
 import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
@@ -96,6 +97,10 @@ interface UploadResponse {
  * silent undefined resource_id breaks downstream revoke tests; surface it loudly
  * and retry with backoff instead.
  *
+ * Two retry layers compose: fetchWithTransientRetry retries transient HTTP
+ * statuses (see helpers/http.ts + qurl-integrations-infra#1085); the loop below
+ * retries the connector's app-level 429 (HTTP 200 + `error` + no `resource_id`).
+ *
  * TODO(upstream-rebrand): the literal "QURL creation failed" mirrors upstream's
  * current error text. Update this doc comment when upstream qurl-service
  * rebrands its error strings.
@@ -115,7 +120,7 @@ async function uploadMapLocation(
     const formData = new FormData();
     formData.append('file', new Blob([jsonStr], { type: 'application/json' }), filename);
 
-    const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
+    const res = await fetchWithTransientRetry(`${env.UPLOAD_API_URL}/upload`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
       body: formData,
@@ -157,9 +162,13 @@ async function uploadMapLocation(
   throw new Error(`uploadMapLocation: still rate-limited after ${maxAttempts} attempts`);
 }
 
-/** Fetch the fileviewer page directly (bypass NHP) and return HTML */
+/** Fetch the fileviewer page directly (bypass NHP) and return HTML.
+ *
+ * Via fetchWithTransientRetry: a transient status gets a bounded retry, but a
+ * sustained outage (the fileviewer:443 ConnectTimeout) is a fetch rejection that
+ * propagates — a real outage still fails. See helpers/http.ts. */
 async function fetchViewerPage(viewerUrl: string): Promise<string> {
-  const res = await fetch(viewerUrl, { redirect: 'follow' });
+  const res = await fetchWithTransientRetry(viewerUrl, { redirect: 'follow' });
   if (!res.ok) throw new Error(`Viewer returned ${res.status}`);
   return res.text();
 }
