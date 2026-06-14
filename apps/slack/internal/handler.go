@@ -1712,7 +1712,6 @@ func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavaila
 		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
 	}
-	respondUninstallUnsupported(w)
 }
 
 func (h *Handler) canAdvertiseUninstall() bool {
