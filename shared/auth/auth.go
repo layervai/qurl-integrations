@@ -3,6 +3,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -11,7 +12,16 @@ import (
 type Provider interface {
 	// APIKey returns the qURL API key for the given workspace ID.
 	APIKey(ctx context.Context, workspaceID string) (string, error)
+	// SupportsDeleteAPIKey reports whether DeleteAPIKey can remove a stored key.
+	// When false, DeleteAPIKey must not mutate provider-backed state.
+	SupportsDeleteAPIKey() bool
+	// DeleteAPIKey removes the qURL API key for the given workspace ID.
+	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
+
+// ErrWorkspaceAPIKeyDeleteUnsupported is returned when the configured provider
+// can read a workspace key but cannot mutate/delete it.
+var ErrWorkspaceAPIKeyDeleteUnsupported = errors.New("workspace API key deletion unsupported")
 
 // EnvProvider reads the API key from an environment variable.
 // Suitable for single-workspace deployments and development.
@@ -26,4 +36,14 @@ func (p EnvProvider) APIKey(_ context.Context, _ string) (string, error) {
 		return "", fmt.Errorf("env var %s not set", p.EnvVar)
 	}
 	return key, nil
+}
+
+// SupportsDeleteAPIKey reports that EnvProvider cannot mutate environment state.
+func (p EnvProvider) SupportsDeleteAPIKey() bool {
+	return false
+}
+
+// DeleteAPIKey cannot mutate an environment-backed API key.
+func (p EnvProvider) DeleteAPIKey(_ context.Context, _ string) error {
+	return fmt.Errorf("EnvProvider.DeleteAPIKey: %w", ErrWorkspaceAPIKeyDeleteUnsupported)
 }

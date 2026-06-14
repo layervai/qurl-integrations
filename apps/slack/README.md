@@ -51,8 +51,12 @@ workspace's Secure Access Agent supports.
 | `/qurl get <$id\|$alias> reason:"…"` | Mint the link and record a reason in the audit log. |
 | `/qurl list` | List the resources available to you in this channel. |
 | `/qurl aliases` | List this channel's aliases and the resource each one points to. |
+| `/qurl uninstall` | Owner/admin-gated: disconnect qURL from this workspace's Slack commands. This does not revoke the upstream qURL API key. |
 | `/qurl feedback` | Send a bug report or feature request to the qURL team. |
 | `/qurl help` | Show the user command help. |
+
+If qURL is disconnected and the recorded workspace owner is unavailable,
+contact your qURL operator to recover or reassign ownership before reconnecting.
 
 ### Admins — `/qurl-admin`
 

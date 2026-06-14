@@ -122,6 +122,7 @@ const (
 	headerSlackSignature = "X-Slack-Signature"
 	headerSlackTimestamp = "X-Slack-Request-Timestamp"
 	setupVerb            = "setup"
+	uninstallVerb        = "uninstall"
 )
 
 const (
@@ -1126,7 +1127,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup", "feedback"}
+var userVerbs = []string{"get", "list", "aliases", "create", "setup", uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1310,6 +1311,22 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// setup is a `/qurl` verb, not admin-gated — first-come-claims;
 		// see handleSetup for why it lives on the open user surface.
 		h.handleSetup(w, values, setupEmail)
+	case text == uninstallVerb:
+		// uninstall stays on the user command as a lifecycle sibling of setup,
+		// but gates to the recorded workspace owner or explicit qURL admins
+		// before removing the key.
+		h.handleUninstall(w, values)
+	case slashSubcommand(text, uninstallVerb):
+		// Bare `/qurl uninstall` is handled above so unsupported deployments can
+		// explain that operator-managed installs are not self-service. Argument
+		// variants land here: advertise usage when uninstall is live, otherwise
+		// keep the same unsupported-deployment message as the bare verb. This
+		// deliberately pays the owner/admin read before printing Usage so
+		// unauthorized callers do not get a command-existence oracle.
+		if _, _, ok := h.requireUninstallAvailableAndAuthorized(w, values); !ok {
+			return
+		}
+		respondSlack(w, fmt.Sprintf("Usage: `%s uninstall`.", command))
 	case slashSubcommand(text, "create"):
 		// `/qurl create` is deprecated. It minted for an arbitrary URL,
 		// which Slack no longer does — `/qurl get` mints for a tunnel
@@ -1611,6 +1628,135 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupEma
 	respondSlack(w, "Continue setup for `"+echoText(setupEmail)+"`: <"+setupURL+"|Continue setup>\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
+func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
+	teamID, userID, ok := h.requireUninstallAvailableAndAuthorized(w, values)
+	if !ok {
+		return
+	}
+	h.deleteWorkspaceAPIKey(w, teamID, userID)
+}
+
+// requireUninstallAvailableAndAuthorized is the single precondition path for
+// both bare uninstall and uninstall argument variants.
+func (h *Handler) requireUninstallAvailableAndAuthorized(w http.ResponseWriter, values url.Values) (teamID, userID string, ok bool) {
+	teamID = strings.TrimSpace(values.Get(fieldTeamID))
+	if teamID == "" {
+		respondSlack(w, "Could not read your Slack workspace ID from the command payload.")
+		return "", "", false
+	}
+	if h.cfg.AuthProvider == nil {
+		respondUninstallUnavailable(w, uninstallUnavailableCredentialStorage)
+		return "", "", false
+	}
+	userID = strings.TrimSpace(values.Get(fieldUserID))
+	// Providers that cannot delete are structurally non-mutating. Return the
+	// unsupported reply before any owner/user checks or delete context setup.
+	if !h.cfg.AuthProvider.SupportsDeleteAPIKey() {
+		respondUninstallUnsupported(w)
+		return "", "", false
+	}
+	// Any provider that can delete must have AdminStore wired so this
+	// destructive command is owner/admin-gated.
+	if h.cfg.AdminStore == nil {
+		slog.Error("/qurl uninstall: owner gate unavailable for mutable auth provider", "team_id", teamID, "caller_user_id", userID)
+		respondUninstallUnavailable(w, uninstallUnavailableOwnerVerification)
+		return "", "", false
+	}
+	if !h.requireUninstallAdminOrOwner(w, teamID, userID) {
+		return "", "", false
+	}
+	return teamID, userID, true
+}
+
+func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
+	// Reuse the sync admin-verb budget for the single DeleteAPIKey write: after
+	// the owner/admin gate, total upstream work stays inside the 2s ack envelope.
+	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
+	defer cancel()
+	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
+		if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
+			return
+		}
+		if errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported) {
+			respondUninstallUnsupported(w)
+			return
+		}
+		slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID)
+		respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
+		return
+	}
+	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID)
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+}
+
+func respondUninstallUnsupported(w http.ResponseWriter) {
+	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
+}
+
+type uninstallUnavailableReason int
+
+const (
+	uninstallUnavailableCredentialStorage uninstallUnavailableReason = iota
+	uninstallUnavailableOwnerVerification
+)
+
+// respondUninstallUnavailable is the shared unavailable-reason-to-operator-copy
+// map for bare uninstall and uninstall argument variants.
+func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavailableReason) {
+	switch reason {
+	case uninstallUnavailableCredentialStorage:
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	case uninstallUnavailableOwnerVerification:
+		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		return
+	default:
+		slog.Error("/qurl uninstall: unknown unavailable reason", "reason", int(reason))
+		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact the operator.")
+		return
+	}
+}
+
+func (h *Handler) canAdvertiseUninstall() bool {
+	return h.cfg.AdminStore != nil && h.cfg.AuthProvider != nil && h.cfg.AuthProvider.SupportsDeleteAPIKey()
+}
+
+func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, userID string) bool {
+	if userID == "" {
+		respondSlack(w, ":warning: missing user_id in slash command payload")
+		return false
+	}
+	// CheckAdmin intentionally uses the same low-latency admin-store read as
+	// other Slack admin verbs; uninstall can be reconnected by the recorded
+	// owner/operator if a just-revoked admin races DynamoDB replication.
+	ctx, cancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	defer cancel()
+	isAdmin, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	if err != nil {
+		slog.Error("/qurl uninstall: owner check failed", "error", err, "team_id", teamID, "caller_user_id", userID)
+		respondSlack(w, ":warning: failed to verify who connected qURL to this workspace (upstream error; see logs). Try again in a moment.")
+		return false
+	}
+	// Issue #268 asks for workspace-admin self-service offboarding. Setup stays
+	// owner-only because it changes the key binding; uninstall only disconnects
+	// the existing Slack command mapping. CheckAdmin returns true for both the
+	// recorded workspace owner and explicit qURL workspace admins.
+	if isAdmin {
+		// Missing or legacy owner metadata should not strand an explicit admin
+		// from this recoverable local disconnect; log it for operator cleanup.
+		if ownerID == "" {
+			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
+		} else if !looksLikeSlackUserID(ownerID) {
+			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
+		}
+		return true
+	}
+	slog.Warn("/qurl uninstall: non-admin denied", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
+	respondSlack(w, "`/qurl uninstall` can only be run by a qURL workspace admin or by the person who connected qURL to this workspace.")
+	return false
+}
+
 // authenticatedClient resolves an API key for the team and returns a configured client.
 func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*client.Client, error) {
 	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, teamID)
@@ -1668,6 +1814,9 @@ func (h *Handler) userHelpMessage(command string) string {
 		setupLine += " (whoever first runs it is the only one who can re-run it — this keeps the workspace's qURL account from being switched to someone else)"
 	}
 	lines = append(lines, setupLine)
+	if h.canAdvertiseUninstall() {
+		lines = append(lines, "• `/qurl uninstall` — Disconnect qURL from this Slack workspace")
+	}
 	if h.cfg.AdminStore != nil {
 		// Glossary so the `$slug` / `$alias` tokens in the verbs and in
 		// `/qurl list` aren't unexplained. Only shown when AdminStore is
