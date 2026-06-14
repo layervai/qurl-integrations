@@ -1813,19 +1813,25 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 }
 
 // classifyUninstallRevokeError maps a RevokeAPIKey failure to (revoked, err). A
-// 404 means the key is already gone (self-heals a prior revoke-ok/delete-failed
-// retry) → revoked. 401/403 means the workspace key cannot revoke itself on this
-// deployment — degrade to a local-only disconnect (false, nil) rather than
-// stranding the admin on a broken uninstall; the caller keeps the "not revoked
-// outside Slack" caveat. Everything else (other 4xx, 5xx, transport, timeout) is
-// treated as possibly-still-live: return the error so the caller aborts and the
-// stored key_id survives.
+// 404 means the key is already absent upstream → treat as revoked. 401/403 means
+// the workspace key could not authenticate the self-revoke on this deployment —
+// degrade to a local-only disconnect (false, nil) rather than stranding the
+// admin on a broken uninstall; the caller keeps the "not revoked outside Slack"
+// caveat. Everything else (other 4xx, 5xx, transport, timeout) is treated as
+// possibly-still-live: return the error so the caller aborts and the stored
+// key_id survives.
+//
+// A retry after a prior revoke-ok/DeleteAPIKey-fail authenticates with the
+// already-revoked workspace key, so qurl-service may answer 401/403 (auth)
+// before 404 (existence). Either way the disconnect completes via the degrade
+// path; the caveat then under-claims (the key was in fact revoked), which is the
+// safe direction. The disconnect never depends on guessing 404-vs-401 here.
 //
 // TODO(upstream-contract): the 401/403 degrade assumes qurl-service permits a
-// qurl:write key to DELETE its own /v1/api-keys/{key_id}. Confirm the
-// self-revoke contract with qurl-service; if self-revoke is unsupported, every
-// uninstall lands on this branch and the path is a no-op local disconnect.
-// Tracked in #805.
+// qurl:write key to DELETE its own /v1/api-keys/{key_id}, and the comment above
+// assumes its auth-vs-existence check order. Confirm both with qurl-service; if
+// self-revoke is unsupported, every uninstall lands on the degrade branch and
+// the path is a no-op local disconnect. Tracked in #805.
 func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string) (revoked bool, err error) {
 	var apiErr *client.APIError
 	if errors.As(revokeErr, &apiErr) {
