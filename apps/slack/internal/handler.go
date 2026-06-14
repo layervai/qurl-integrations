@@ -1711,6 +1711,10 @@ func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavaila
 	case uninstallUnavailableOwnerVerification:
 		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
 		return
+	default:
+		slog.Error("/qurl uninstall: unknown unavailable reason", "reason", int(reason))
+		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact the operator.")
+		return
 	}
 }
 

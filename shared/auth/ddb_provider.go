@@ -933,8 +933,9 @@ func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 // cleanup work: the metadata is removed and the user sees a disconnect success
 // rather than an internal partial-row state.
 //
-// TODO(#792): this local disconnect cannot revoke the upstream qURL key until
-// setup persists the qurl-service key_id for workspace keys.
+// TODO(upstream-contract): this local disconnect cannot revoke the upstream
+// qURL key until setup persists the qurl-service key_id for workspace keys.
+// See #792.
 func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.DeleteAPIKey: workspaceID is empty")

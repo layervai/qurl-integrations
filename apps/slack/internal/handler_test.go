@@ -603,6 +603,23 @@ func TestSlashCommandUninstallAuthProviderNotConfigured(t *testing.T) {
 	}
 }
 
+func TestRespondUninstallUnavailableUnknownReasonWritesOperatorMessage(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	respondUninstallUnavailable(w, uninstallUnavailableReason(99))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !strings.Contains(resp[respFieldText], "qURL uninstall is not available") {
+		t.Fatalf("unknown-reason reply missing generic operator hint: %q", resp[respFieldText])
+	}
+}
+
 func TestSlashCommandUninstallMissingTeamID(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 
