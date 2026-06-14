@@ -46,16 +46,33 @@ at the OAuth-callback bind layer.
   callback's security gate is the verified email claim, not the connection
   hint by itself. If a workspace already has a qURL API key and qurl-service
   still accepts it, normal setup reuses that key instead of minting another one.
-  Explicit owner requests (`/qurl setup <email> --rotate` or `--repoint`)
-  take the rotation path instead: Slack strongly reads the stored qURL `key_id`,
-  revokes that old key with the freshly authenticated qURL account, then mints
-  and stores the replacement key plus its new `key_id`. Rotation mints the
-  replacement through qURL's API-key endpoint, not the external-binding create
-  endpoint; the workspace binding remains in qurl-service, and Slack's
-  workspace operations authorize through the active key's qURL scopes.
-  `--repoint` is accepted as a same-account alias for this flow; non-owning
-  cross-account transfer still fails closed and is tracked in
-  qurl-integrations#790. Rotation failure modes to expect:
+  Explicit owner requests (`/qurl setup <email> --rotate` and `--repoint`) take
+  the rotation path instead. Both first strongly read the stored key identity in
+  one read — the qURL `key_id` and the `qurl_account_id` (the id_token `sub` that
+  minted the key) — then branch on whether the signed-in account still holds the
+  key:
+  - Same qURL account → revoke-then-replace: revoke the old `key_id` with the
+    freshly authenticated account, then mint and store the replacement plus its
+    new `key_id`. The replacement is minted through qURL's API-key endpoint, not
+    the external-binding create endpoint; the workspace binding remains in
+    qurl-service, and Slack's workspace operations authorize through the active
+    key's qURL scopes.
+  - Different qURL account → a cross-account move. qurl-service has no
+    tenant-facing binding transfer (cross-tenant refusal by design,
+    layervai/qurl-service#910), and the signed-in account cannot revoke the other
+    account's key, so Slack fails closed (no mint, no revoke — detecting this from
+    stored provenance also spares the doomed wrong-owner DELETE that a `--rotate`
+    on the wrong account would otherwise attempt), emits the
+    `setup_cross_account_repoint_requested` event with both account ids and the
+    `mode`, and routes the owner to the operator-assisted transfer
+    (qurl-integrations#790).
+  - Unknown provenance (a row with a key but no recorded `qurl_account_id`, e.g.
+    rows minted before this field) cannot prove same-vs-cross account. `--repoint`
+    fails closed there (emitting `setup_repoint_legacy_row_refused` so operators
+    can measure how often legacy rows block repoint); `--rotate` proceeds (it is
+    same-account by intent) and records the account for next time, which is how an
+    owner self-heals a legacy row so future `--repoint` works.
+  Rotation failure modes to expect:
   - If the stored row predates key metadata, or if the signed-in account cannot
     revoke the current key, rotation fails closed before any replacement is
     minted.
@@ -358,6 +375,61 @@ behind newer key history even when it was just revoked. If the key was deleted
 instead of revoked, it will also be absent from the revoked list. Repeated
 retries will keep failing until an operator verifies the key status or uses a
 direct owner-scoped lookup when qURL exposes one.
+
+## Cross-account repoint transfer
+
+`event="setup_cross_account_repoint_requested"` means a workspace owner ran an
+explicit `/qurl setup <email> --repoint` (or `--rotate`) and signed in with a
+qURL account that is *not* the one holding the current workspace key. The app
+fails closed (no key minted, nothing revoked) and routes the owner to an
+operator-assisted transfer, because qurl-service deliberately refuses to let one
+tenant take over another tenant's `(provider, external_id)` binding (cross-tenant
+refusal, layervai/qurl-service#910). The event carries `mode` (`repoint` or
+`rotate`), `current_qurl_account_id` (the account holding the key), and
+`requested_qurl_account_id` (the destination the owner signed in as); the browser
+page intentionally does **not** disclose the current account. A `rotate` here is
+usually a wrong-account sign-in (the browser page tells the owner to re-sign-in
+with the holding account); a `repoint` is usually an intentional move.
+
+The same-vs-cross decision is a plain equality on the stored `qurl_account_id`
+(Auth0 `sub`). One edge case where a *legitimate* owner can get stuck: if the
+stored provenance ever diverges from the key's actual qurl-service owner — e.g.
+an upstream binding migration that doesn't update the Slack row — the owner's own
+`--rotate`/`--repoint` is classified cross-account and the `--rotate` self-heal
+can't help (it's blocked before it records anything). That is the intended
+fail-closed trade-off; resolve it with the operator process below.
+
+Operator process to complete a transfer (after verifying Slack-workspace
+ownership out of band):
+
+1. Confirm the request from the logged event and the owner's out-of-band proof
+   of workspace ownership.
+2. Revoke the `current_qurl_account_id` key for the workspace and free the
+   `(slack, <team_id>)` external-identity binding so the destination account can
+   mint a fresh binding-backed key. **There is no operator-guarded surface for
+   this yet** — qurl-service exposes only `POST /v1/external-identity-bindings`
+   (which refuses reassignment) and `DELETE /v1/api-keys/{key_id}` (owner-scoped),
+   with no binding delete/transfer route. So today this is a manual,
+   high-care step: revoke the key through qURL account/API-key management and
+   free the binding row via internal datastore tooling. The guarded reassign
+   surface that makes this safe and auditable is tracked in
+   layervai/qurl-service#956 — prefer it once it ships.
+3. Tell the owner to rerun `/qurl setup <email>` (plain) signed in as the
+   destination account; with the binding freed this mints and stores the new
+   account's key normally.
+
+Run this CloudWatch Logs Insights query against the Slack app log group:
+
+```text
+fields @timestamp, team_id, mode, current_qurl_account_id, requested_qurl_account_id, operator_action
+| filter event = "setup_cross_account_repoint_requested"
+| sort @timestamp desc
+| limit 50
+```
+
+Threshold: each event is an operator action item (not an outage) — a workspace
+owner is waiting on a manual transfer. Alarm on `count >= 1` only if your
+deployment offers the transfer as a supported self-service-adjacent flow.
 
 ## Endpoints
 

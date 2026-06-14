@@ -27,6 +27,7 @@ const (
 	testKeyPrefix     = "lv_live_abcd"
 	testAPIKey        = "lv_live_abcd1234"
 	testOldAPIKey     = "lv_live_oldkey1234"
+	testOldKeyID      = "k_old"
 	testAdminEmail    = "admin@example.com"
 )
 
@@ -74,13 +75,14 @@ func (b *lockedLogBuffer) String() string {
 
 // fakeWorkspaceStore captures SetAPIKeyWithMetadata calls.
 type fakeWorkspaceStore struct {
-	mu            sync.Mutex
-	existingKey   string
-	existingKeyID string
-	apiKeyErr     error
-	apiKeyCalls   int
-	setArgs       *struct {
-		WorkspaceID, APIKey, KeyID, KeyPrefix, ConfiguredBy string
+	mu              sync.Mutex
+	existingKey     string
+	existingKeyID   string
+	existingAccount string
+	apiKeyErr       error
+	apiKeyCalls     int
+	setArgs         *struct {
+		WorkspaceID, APIKey, KeyID, KeyPrefix, QURLAccountID, ConfiguredBy string
 	}
 	setErr error
 }
@@ -109,10 +111,24 @@ func (f *fakeWorkspaceStore) APIKeyID(_ context.Context, _ string) (string, erro
 	}
 	return f.existingKeyID, nil
 }
-func (f *fakeWorkspaceStore) SetAPIKeyWithMetadata(_ context.Context, ws, key, keyID, keyPrefix, by string) error {
+func (f *fakeWorkspaceStore) APIKeyIdentity(_ context.Context, _ string) (keyID, qurlAccountID string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.setArgs = &struct{ WorkspaceID, APIKey, KeyID, KeyPrefix, ConfiguredBy string }{ws, key, keyID, keyPrefix, by}
+	f.apiKeyCalls++
+	if f.apiKeyErr != nil {
+		return "", "", f.apiKeyErr
+	}
+	if f.existingKey == "" {
+		return "", "", auth.ErrWorkspaceNotConfigured
+	}
+	return f.existingKeyID, f.existingAccount, nil
+}
+func (f *fakeWorkspaceStore) SetAPIKeyWithMetadata(_ context.Context, ws, key, keyID, keyPrefix, accountID, by string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setArgs = &struct {
+		WorkspaceID, APIKey, KeyID, KeyPrefix, QURLAccountID, ConfiguredBy string
+	}{ws, key, keyID, keyPrefix, accountID, by}
 	return f.setErr
 }
 func (f *fakeWorkspaceStore) DeleteAPIKey(_ context.Context, _ string) error { return nil }
@@ -1359,7 +1375,7 @@ func TestCallbackBindIdempotentForSameCallerReusesExistingKey(t *testing.T) {
 
 func TestCallbackExplicitRotationRevokesOldKeyBeforeReplacementMint(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
@@ -1466,7 +1482,7 @@ func TestCallbackExplicitRotationValidatesReplacementIdempotencyBeforeRevoke(t *
 
 func TestCallbackExplicitRotationStopsWhenOldKeyRevokeFails(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	minter.revokeErr = errors.New("qurl-service denied revoke")
@@ -1505,7 +1521,7 @@ func TestCallbackExplicitRotationStopsWhenOldKeyRevokeFails(t *testing.T) {
 
 func TestCallbackExplicitRotationContinuesWhenOldKeyAlreadyRevokedByOwner(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	minter.revokeErr = ErrAPIKeyNotFound
@@ -1538,7 +1554,7 @@ func TestCallbackExplicitRotationContinuesWhenOldKeyAlreadyRevokedByOwner(t *tes
 
 func TestCallbackExplicitRotationStopsWhenAlreadyRevokedCheckFails(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	minter.revokeErr = ErrAPIKeyNotFound
@@ -1568,7 +1584,7 @@ func TestCallbackExplicitRotationStopsWhenAlreadyRevokedCheckFails(t *testing.T)
 
 func TestCallbackExplicitRotationStopsWhenNotFoundIsNotRevokedByOwner(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	minter.revokeErr = ErrAPIKeyNotFound
@@ -1600,7 +1616,7 @@ func TestCallbackExplicitRotationStopsWhenNotFoundIsNotRevokedByOwner(t *testing
 
 func TestCallbackExplicitRotationKeepsReplacementOnPersistFailure(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	store.setErr = errors.New("ddb down")
@@ -1626,7 +1642,7 @@ func TestCallbackExplicitRotationKeepsReplacementOnPersistFailure(t *testing.T) 
 
 func TestCallbackExplicitRotationPersistFailureLogsConfiguredReplayWindow(t *testing.T) {
 	cfg, store, _ := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	cfg.APIKeyMintReplayWindowHours = 18
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
@@ -1706,9 +1722,342 @@ func TestCallbackExplicitRotationMintsWhenWorkspaceNotConfigured(t *testing.T) {
 	minter.mintMu.Unlock()
 }
 
+// --- Explicit --repoint (cross-account detection) ---
+
+// Same signed-in qURL account as the one holding the key: --repoint is a
+// same-account rotation, so it revokes the old key and mints a replacement,
+// recording the signed-in account as provenance.
+func TestCallbackRepointSameAccountRotates(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	const oldKeyID = testOldKeyID
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = oldKeyID
+	store.existingAccount = testAdminSub // same account holds the key
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (same-account repoint rotates, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run after same-account repoint rotation")
+	}
+	if store.setArgs.QURLAccountID != testAdminSub {
+		t.Errorf("stored qURL account = %q, want signed-in account %q", store.setArgs.QURLAccountID, testAdminSub)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != oldKeyID {
+		t.Errorf("revoked keys: got %#v want [%q]", got, oldKeyID)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.replacementMintCalls != 1 || minter.mintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 0/1", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// Different signed-in qURL account than the one holding the key: a genuine
+// cross-account move. qurl-service has no tenant-facing transfer, so Slack
+// fails closed (no mint, no revoke) after a single provenance read and routes
+// the owner to the operator transfer, emitting the audit event with both ids.
+func TestCallbackRepointCrossAccountRoutesToOperator(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	const otherAccount = "auth0|other-account-999"
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = otherAccount // a different qURL account holds the key
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (cross-account repoint, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "different qURL account") || !strings.Contains(body, "operator-assisted transfer") {
+		t.Errorf("cross-account page missing operator-transfer guidance: %q", body)
+	}
+	// Must NOT disclose the current owner's qURL account to the browser.
+	if body := rec.Body.String(); strings.Contains(body, otherAccount) {
+		t.Errorf("cross-account page must not echo the current owner's qURL account, got %q", body)
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run on cross-account repoint")
+	}
+	if store.apiKeyCalls != 1 {
+		t.Errorf("store reads: got %d want 1 (fail closed after one provenance read, no key_id read)", store.apiKeyCalls)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("cross-account repoint must not revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("cross-account repoint must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+	assertCrossAccountRepointLogged(t, logs(), otherAccount, testAdminSub)
+}
+
+func assertCrossAccountRepointLogged(t *testing.T, records []map[string]any, wantCurrent, wantRequested string) {
+	t.Helper()
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != crossAccountRepointRequestedEvent {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("team_id = %v, want %q", rec["team_id"], testTeamID)
+		}
+		if rec["current_qurl_account_id"] != wantCurrent {
+			t.Errorf("current_qurl_account_id = %v, want %q", rec["current_qurl_account_id"], wantCurrent)
+		}
+		if rec["requested_qurl_account_id"] != wantRequested {
+			t.Errorf("requested_qurl_account_id = %v, want %q", rec["requested_qurl_account_id"], wantRequested)
+		}
+		if rec["operator_action"] != crossAccountRepointOperatorAction {
+			t.Errorf("operator_action = %v, want %q", rec["operator_action"], crossAccountRepointOperatorAction)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("found %d %q log events, want 1, in records: %#v", matches, crossAccountRepointRequestedEvent, records)
+	}
+}
+
+// assertLoggedEvent checks that exactly one record carries event==want with the
+// test team_id.
+func assertLoggedEvent(t *testing.T, records []map[string]any, want string) {
+	t.Helper()
+	matches := 0
+	for _, rec := range records {
+		if rec["event"] != want {
+			continue
+		}
+		matches++
+		if rec["team_id"] != testTeamID {
+			t.Errorf("%q event team_id = %v, want %q", want, rec["team_id"], testTeamID)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("found %d %q log events, want 1, in records: %#v", matches, want, records)
+	}
+}
+
+// A configured row with no recorded qURL account (legacy/sandbox) cannot prove
+// same-vs-cross account, so --repoint fails closed without minting or revoking.
+func TestCallbackRepointLegacyRowWithoutAccountFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "" // legacy row: key present, no provenance
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+	logs := captureDefaultSlogJSON(t)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (legacy repoint, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "before Slack recorded which qURL account") {
+		t.Errorf("legacy repoint page missing reclaim guidance: %q", body)
+	}
+	assertLoggedEvent(t, logs(), repointLegacyRowRefusedEvent)
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run on legacy repoint")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("legacy repoint must not revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("legacy repoint must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --repoint of an unconfigured workspace is just first setup: mint and record
+// the signed-in qURL account as provenance.
+func TestCallbackRepointMintsWhenWorkspaceNotConfigured(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (unconfigured repoint mints, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run when no stored key exists")
+	}
+	if store.setArgs.QURLAccountID != testAdminSub {
+		t.Errorf("stored qURL account = %q, want signed-in account %q", store.setArgs.QURLAccountID, testAdminSub)
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 1 || minter.replacementMintCalls != 0 {
+		t.Errorf("mint calls: regular=%d replacement=%d, want 1/0", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+func TestCallbackRepointAccountLookupErrorRenders500(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.apiKeyErr = errors.New("ddb down")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (repoint account read failure, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run when the account read failed")
+	}
+	store.mu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("repoint read failure must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --rotate signed in with a different qURL account than the one holding the key
+// is now detected proactively from stored provenance: it routes to the operator
+// like --repoint and, crucially, never attempts the doomed wrong-owner revoke.
+func TestCallbackRotateCrossAccountRoutesToOperatorWithoutRevoke(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "auth0|other-account-999" // a different qURL account holds the key
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (cross-account rotate, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "different qURL account") {
+		t.Errorf("cross-account rotate page missing guidance: %q", body)
+	}
+	store.mu.Lock()
+	if store.apiKeyCalls != 1 {
+		t.Errorf("store reads: got %d want 1 (single identity read, no second read)", store.apiKeyCalls)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("cross-account rotate must NOT attempt the doomed wrong-owner revoke, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("cross-account rotate must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// Belt-and-suspenders: if an explicit mode ever reaches the key path with an
+// empty signed-in qURL account against a provenance-bearing row (upstream gates
+// make this unreachable in production), it must fail closed with a 500 rather
+// than misroute a would-be same-account request to the operator. This pins the
+// guard independent of checkBindAllowed's ordering. The default config has a nil
+// AdminStore and no verified sub, so qurlAccountID reaches the key path empty.
+func TestCallbackExplicitModeEmptyAccountAgainstProvenanceRowFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "auth0|provenance-acct" // row has recorded provenance
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (empty account vs provenance row, body=%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "couldn't confirm") && !strings.Contains(body, "could not confirm") {
+		t.Errorf("page should say the account couldn't be confirmed: %q", body)
+	}
+	store.mu.Lock()
+	if store.setArgs != nil {
+		t.Error("must not persist when the signed-in account is unverified")
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if len(minter.revokedKeys) != 0 {
+		t.Errorf("must not revoke when the signed-in account is unverified, got %#v", minter.revokedKeys)
+	}
+	minter.revokeMu.Unlock()
+	minter.mintMu.Lock()
+	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
+		t.Errorf("must not mint: regular=%d replacement=%d", minter.mintCalls, minter.replacementMintCalls)
+	}
+	minter.mintMu.Unlock()
+}
+
+// --rotate on a legacy row (key present, no recorded account) is the self-heal
+// path: it revokes-then-replaces AND records the signed-in qURL account, so a
+// future --repoint can verify same-vs-cross account. Locks that documented
+// contract.
+func TestCallbackLegacyRotateRecordsQURLAccount(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.existingKeyID = testOldKeyID
+	store.existingAccount = "" // legacy row: no recorded provenance
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (legacy rotate self-heal, body=%s)", rec.Code, rec.Body.String())
+	}
+	store.mu.Lock()
+	if store.setArgs == nil {
+		t.Fatal("SetAPIKeyWithMetadata must run on legacy rotate")
+	}
+	if store.setArgs.QURLAccountID != testAdminSub {
+		t.Errorf("legacy rotate must record the signed-in qURL account: got %q want %q", store.setArgs.QURLAccountID, testAdminSub)
+	}
+	store.mu.Unlock()
+	minter.revokeMu.Lock()
+	if got := minter.revokedKeys; len(got) != 1 || got[0] != testOldKeyID {
+		t.Errorf("legacy rotate must revoke the old key: got %#v want [%q]", got, testOldKeyID)
+	}
+	minter.revokeMu.Unlock()
+}
+
 func TestCallbackExplicitRotationReplacementMintLimitRendersGuidance(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	minter.replacementMintErr = ErrAPIKeyLimitReached
@@ -1728,7 +2077,7 @@ func TestCallbackExplicitRotationReplacementMintLimitRendersGuidance(t *testing.
 
 func TestCallbackExplicitRotationReplacementMintFailureRendersRetry(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	const oldKeyID = "k_old"
+	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
 	minter.replacementMintErr = errors.New("qurl-service down")
@@ -1808,7 +2157,7 @@ func TestCallbackInvalidStoredKeyMintsReplacement(t *testing.T) {
 func TestCallbackInvalidMetadataBearingStoredKeyRequiresExplicitRotation(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.existingKey = "lv_live_revoked"
-	store.existingKeyID = "k_old"
+	store.existingKeyID = testOldKeyID
 	minter.validateErr = ErrStoredAPIKeyInvalid
 	state := mintTestState(t, &cfg)
 
