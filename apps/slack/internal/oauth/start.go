@@ -22,18 +22,23 @@ func Start(cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			renderOAuthErrorPage(w, http.StatusMethodNotAllowed, "Use the Slack setup link",
+				"This qURL™ setup start endpoint only works from the browser link opened by /qurl setup <email>.")
 			return
 		}
 		if len(cfg.OAuthStateSecret) < StateMinSecret {
 			slog.Error("oauth/start refused: OAUTH_STATE_SECRET unset or shorter than 32 bytes")
-			http.Error(w, "oauth not configured", http.StatusServiceUnavailable)
+			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "qURL setup is unavailable",
+				"qURL™ setup is not configured for this Slack app.",
+				"Contact your qURL administrator for help.")
 			return
 		}
 		stateParam := r.URL.Query().Get("state")
 		if stateParam == "" {
 			slog.Warn("oauth/start rejected: missing state")
-			http.Error(w, "missing state parameter — start setup from the /qurl setup <email> slash command", http.StatusBadRequest)
+			renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is incomplete",
+				"This qURL™ setup link is missing required setup details.",
+				"Return to Slack and start setup from /qurl setup <email>.")
 			return
 		}
 		verified, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
@@ -55,7 +60,9 @@ func Start(cfg Config) http.HandlerFunc {
 			// surface the misleading "setup must be completed in the
 			// same browser" error rather than re-running setup cleanly.
 			clearStateCookie(w)
-			http.Error(w, "invalid or expired setup link — run /qurl setup <email> again", http.StatusBadRequest)
+			renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
+				"This qURL™ setup link is invalid or expired.",
+				"Return to Slack and run /qurl setup <email> again.")
 			return
 		}
 		// Cookie MUST be set before the 302 — once we write the Location

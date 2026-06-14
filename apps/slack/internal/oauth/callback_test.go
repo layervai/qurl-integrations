@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -313,6 +314,69 @@ func assertSecurityHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
+func assertOAuthErrorPage(t *testing.T, rec *httptest.ResponseRecorder, heading string) {
+	t.Helper()
+	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
+	body := rec.Body.String()
+	wantTitle := "<title>" + html.EscapeString(heading) + "</title>"
+	if !strings.Contains(body, wantTitle) {
+		t.Errorf("body missing error title %q; got: %s", wantTitle, body)
+	}
+	if escapedHeading := html.EscapeString(heading); !strings.Contains(body, escapedHeading) {
+		t.Errorf("body missing heading %q; got: %s", heading, body)
+	}
+	// Headings, titles, and slash-command literals stay unmarked; each page
+	// should carry qURL™ exactly once in body copy.
+	assertSingleQURLTrademark(t, body, "error page")
+}
+
+// assertSingleQURLTrademark is intentionally exact-count. Browser-facing setup
+// pages should mark the first body-copy mention only; headings, titles, and
+// slash-command literals stay plain qURL.
+func assertSingleQURLTrademark(t *testing.T, body, page string) {
+	t.Helper()
+	if count := strings.Count(body, "qURL™"); count != 1 {
+		t.Errorf("%s trademark count: got %d want 1 in body:\n%s", page, count, body)
+	}
+}
+
+func assertLayerVOAuthChrome(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	body := rec.Body.String()
+	// These exact markers intentionally lock the LayerV-branded shell. A future
+	// restyle should update the assertions alongside the CSS.
+	for _, want := range []string{
+		`<meta name="viewport" content="width=device-width, initial-scale=1">`,
+		`<div class="brand">`,
+		`class="brand-mark" aria-hidden="true"`,
+		`<span>LayerV</span>`,
+		`aria-hidden="true"`,
+		`color-scheme:dark`,
+		`--lime:`,
+		`--cyan:`,
+		`class="card"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing LayerV OAuth chrome marker %q; got: %s", want, body)
+		}
+	}
+	for _, oldColor := range []string{"#f9fafb", "#fef2f2", "#d1d5db", "#b91c1c"} {
+		if strings.Contains(body, oldColor) {
+			t.Errorf("body still contains old light-card palette color %s: %s", oldColor, body)
+		}
+	}
+}
+
+func TestOAuthPageCSSStaysStaticAndSelfContained(t *testing.T) {
+	lowerCSS := strings.ToLower(oauthPageCSS)
+	for _, forbidden := range []string{"{{", "</style", "url(", "@import", "@font-face", "data:"} {
+		if strings.Contains(lowerCSS, forbidden) {
+			t.Fatalf("oauthPageCSS must stay static and self-contained; found %q in:\n%s", forbidden, oauthPageCSS)
+		}
+	}
+}
+
 func TestCallbackHappyPath(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 
@@ -328,6 +392,13 @@ func TestCallbackHappyPath(t *testing.T) {
 	if !strings.Contains(body, "qURL Connected") {
 		t.Errorf("success body missing headline: %s", body)
 	}
+	if !strings.Contains(body, "qURL™ is connected") {
+		t.Errorf("success body missing first body-copy trademark: %s", body)
+	}
+	if strings.Contains(body, "qURL™ Connected") {
+		t.Errorf("success headline should not include trademark: %s", body)
+	}
+	assertSingleQURLTrademark(t, body, "success")
 	// Lock auto-escape: KeyPrefix and Email must render verbatim (html/
 	// template is the load-bearing XSS defense; a refactor to text/template
 	// would silently drop the protection).
@@ -339,6 +410,7 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 	// Defense-in-depth headers are required on the success page.
 	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -372,6 +444,7 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -395,6 +468,7 @@ func TestCallbackEmailSetupRequiresNonEmptyVerifiedEmail(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -488,6 +562,74 @@ func TestOAuthErrorPageHTMLEscapesInterpolations(t *testing.T) {
 	}
 }
 
+func TestOAuthErrorPageRendersMultipleMessageParagraphs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish",
+		"qURL™ setup hit <b>unsafe</b> markup.",
+		"Second paragraph keeps the next action scannable.")
+	body := rec.Body.String()
+	first := "qURL™ setup hit &lt;b&gt;unsafe&lt;/b&gt; markup."
+	second := "Second paragraph keeps the next action scannable."
+	firstIdx := strings.Index(body, first)
+	secondIdx := strings.Index(body, second)
+	if firstIdx == -1 || secondIdx == -1 || firstIdx >= secondIdx {
+		t.Fatalf("expected escaped message paragraphs in order, got body:\n%s", body)
+	}
+	betweenMessages := body[firstIdx+len(first) : secondIdx]
+	if !strings.Contains(betweenMessages, "</p>") || !strings.Contains(betweenMessages, "<p") {
+		t.Errorf("expected the two messages to render as separate paragraphs, got between-message markup %q in body:\n%s", betweenMessages, body)
+	}
+	if strings.Contains(body, "<b>unsafe</b>") || !strings.Contains(body, "&lt;b&gt;unsafe&lt;/b&gt;") {
+		t.Errorf("message paragraphs must still be escaped; got:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
+func TestOAuthErrorPageMarksFirstBodyQURLTrademark(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusBadRequest, "qURL account mismatch",
+		"The signed-in qURL™ account did not match the email used to start setup.",
+		"Return to Slack and run /qurl setup <email> again with the same qURL account.")
+	body := rec.Body.String()
+	if !strings.Contains(body, "The signed-in qURL™ account did not match") {
+		t.Errorf("expected first body-copy qURL mention to carry trademark:\n%s", body)
+	}
+	if strings.Contains(body, "qURL™ account mismatch") {
+		t.Errorf("heading should not carry trademark:\n%s", body)
+	}
+	if strings.Contains(body, "/qurl™ setup") {
+		t.Errorf("slash-command literal should not carry trademark:\n%s", body)
+	}
+	assertSingleQURLTrademark(t, body, "error page")
+	assertOAuthErrorPage(t, rec, "qURL account mismatch")
+}
+
+func TestOAuthErrorPageSkipsBlankMessageParagraphs(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "  Retry qURL™ setup from Slack.  ")
+	body := rec.Body.String()
+	if strings.Contains(body, "<p> </p>") || strings.Contains(body, "<p></p>") {
+		t.Errorf("blank message paragraph rendered:\n%s", body)
+	}
+	if !strings.Contains(body, "Retry qURL™ setup from Slack.") {
+		t.Errorf("expected non-blank rest message to render:\n%s", body)
+	}
+	if strings.Contains(body, "  Retry qURL™ setup from Slack.  ") {
+		t.Errorf("message paragraph should be trimmed before rendering:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
+func TestOAuthErrorPageFallsBackWhenAllMessagesBlank(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderOAuthErrorPage(rec, http.StatusInternalServerError, "qURL setup did not finish", " ", "")
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL™ setup could not finish. Try again or contact your qURL administrator if this keeps happening.") {
+		t.Errorf("expected fallback guidance for all-blank messages:\n%s", body)
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
+}
+
 func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
 	// Regression: configuredBy used to be read from ?admin_user=…
 	// which let an attacker pick the DM target. Now the value is
@@ -528,6 +670,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Continue setup in the same browser")
 	// On reject, the cookie should be cleared so a refresh isn't stuck
 	// looping on the same mismatch.
 	var clearedCookie *http.Cookie
@@ -558,6 +701,7 @@ func TestCallbackRejectsMissingCookie(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Continue setup in the same browser")
 }
 
 func TestCallbackRejectsExpiredState(t *testing.T) {
@@ -573,6 +717,7 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
 }
 
 // TestCallbackMintFailureDoesNotRevoke locks the contract: when the
@@ -599,7 +744,7 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "Couldn&#39;t connect qURL") {
 		t.Errorf("502 body should render the styled error page heading; got: %q", body)
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	tracker.wg.Wait()
 	tracker.mu.Lock()
 	used := tracker.used
@@ -635,7 +780,7 @@ func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	if !strings.Contains(body, "limit") || !strings.Contains(body, "revoke") {
 		t.Errorf("body should name the key limit and how to clear it (revoke); got: %q", rec.Body.String())
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "qURL key limit reached")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -659,7 +804,7 @@ func TestCallbackExternalIdentityAlreadyBoundRendersRecoveryGuidance(t *testing.
 	if !strings.Contains(body, "already connected") || !strings.Contains(body, "administrator") {
 		t.Errorf("body should explain the existing connection and recovery path; got: %q", rec.Body.String())
 	}
-	assertSecurityHeaders(t, rec)
+	assertOAuthErrorPage(t, rec, "qURL already connected")
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -682,6 +827,7 @@ func TestCallbackKeepsBindingBackedKeyOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
 	// Binding-backed keys must stay in qurl-service so the admin can retry
 	// setup and replay the binding idempotency record into Slack storage.
 	tracker.wg.Wait()
@@ -762,6 +908,7 @@ func TestCallbackRevokesLegacyFallbackKeyOnPersistFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "qURL setup did not finish")
 	// Legacy fallback has no qurl-service binding replay path, so the
 	// unstored key is an orphan and should still be revoked asynchronously.
 	deadline := time.Now().Add(time.Second)
@@ -786,6 +933,7 @@ func TestCallbackRejectsMissingCode(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Setup link is incomplete")
 }
 
 // TestCallbackRejectsNonGET locks the method-allow contract: a POST
@@ -801,6 +949,7 @@ func TestCallbackRejectsNonGET(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("got %d want 405", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Use the Slack setup link")
 	if got := rec.Header().Get("Allow"); got != "GET" {
 		t.Errorf("Allow header: got %q want GET", got)
 	}
@@ -816,6 +965,7 @@ func TestCallbackHandlesAuth0Error(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Authorization didn't complete")
 }
 
 // TestCallbackRendersSuccessWhenVerifierFails locks the documented
@@ -859,6 +1009,7 @@ func TestCallbackAuth0TokenFailure(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502 (auth0 5xx surfaces as 502)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 }
 
 // TestExchangeAuth0CodeAcceptsExactCapBody locks the off-by-one fix on
@@ -922,6 +1073,7 @@ func TestCallbackAuth0EmptyAccessToken(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 }
 
 // countingTracker satisfies AsyncTracker by tracking how many fn
@@ -993,6 +1145,12 @@ func TestCallbackDMsConfiguredUser(t *testing.T) {
 	defer slackClient.mu.Unlock()
 	if slackClient.gotUser != testUserID {
 		t.Errorf("DM user: got %q want %q", slackClient.gotUser, testUserID)
+	}
+	if !strings.Contains(slackClient.gotText, "qURL™ is connected") {
+		t.Errorf("DM text missing first body-copy trademark: %q", slackClient.gotText)
+	}
+	if strings.Contains(slackClient.gotText, "qURL is connected") {
+		t.Errorf("DM text should not use unmarked first body-copy mention: %q", slackClient.gotText)
 	}
 }
 
@@ -1080,6 +1238,7 @@ func TestCallbackBindFailureSkipsMint(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't bind this Slack workspace")
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1210,6 +1369,7 @@ func TestCallbackStoredKeyValidationFailureDoesNotMint(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d want 502 (transient validation failure, body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
 		t.Fatal("SetAPIKey must not run when stored-key validation had a transient failure")
@@ -1234,6 +1394,7 @@ func TestCallbackStoredKeyForbiddenDoesNotMint(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d want 502 (403 validation failure must not mint, body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
 		t.Fatal("SetAPIKey must not run when stored-key validation returned 403")
@@ -1257,6 +1418,7 @@ func TestCallbackStoredKeyLookupFailureDoesNotMint(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500 (stored-key lookup failure, body=%s)", rec.Code, rec.Body.String())
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	store.mu.Lock()
 	if store.setArgs != nil {
 		t.Fatal("SetAPIKey must not run when stored-key lookup failed")
@@ -1306,9 +1468,16 @@ func TestCallbackBindRefusedForDifferentAdmin(t *testing.T) {
 	// for a bare http.Error with status 409 would slip past the
 	// status-only check and leave operators staring at the default
 	// error string instead of the rebind-refused copy.
-	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
-		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", body)
 	}
+	if !strings.Contains(body, "connected to qURL™ under a different admin") {
+		t.Errorf("rebind-refused body missing first body-copy trademark: %s", body)
+	}
+	assertSingleQURLTrademark(t, body, "rebind-refused")
+	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1339,9 +1508,13 @@ func TestCallbackBindRefusedWhenUnverified(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status: got %d want 409 (rebind-refused page, unverified arm)", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "qURL setup blocked") {
-		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL setup blocked") {
+		t.Errorf("rebind-refused page body missing 'qURL setup blocked' headline: %s", body)
 	}
+	assertSingleQURLTrademark(t, body, "rebind-refused")
+	assertSecurityHeaders(t, rec)
+	assertLayerVOAuthChrome(t, rec)
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -1369,6 +1542,7 @@ func TestCallbackBindSkippedWhenSubMissing(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500 (cannot bind without sub)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't confirm your qURL account")
 	admin.mu.Lock()
 	if admin.calls != 0 {
 		t.Errorf("BindWorkspace must not be called with empty OwnerID; got %d calls", admin.calls)
@@ -1406,6 +1580,7 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("first attempt status: got %d want 502 (mint failure)", rec.Code)
 	}
+	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
 	admin.mu.Lock()
 	if admin.calls != 1 || admin.gotSeed != testUserID {
 		t.Errorf("first attempt: BindWorkspace must run BEFORE mint and seed the admin row (calls=%d seed=%q)", admin.calls, admin.gotSeed)

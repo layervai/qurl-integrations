@@ -74,43 +74,74 @@ const (
 	keyPrefixLength = len("lv_live_abcd")
 )
 
-// successPageTemplate mirrors the Discord-side success page
-// (apps/discord/src/routes/qurl-oauth.js renderSuccess). Plain HTML with
-// no external assets so it renders in the strictest CSP / no-JS
-// environments. html/template auto-escapes every {{.Field}} interpolation
-// — that's the load-bearing XSS defense for keyPrefix (qurl-service
-// JSON response) and email (JWKS-verified id_token). teamID is
-// HMAC-recovered from the signed state so it's already a trusted
-// input, but the same auto-escape applies uniformly.
-var successPageTemplate = template.Must(template.New("oauth-success").Parse(`<!DOCTYPE html>
+// oauthPageCSS is a self-contained LayerV-inspired shell for browser-facing
+// OAuth pages. It mirrors the public site's dark surface, lime/cyan accents,
+// fine grid, and translucent cards without loading external fonts, images, or
+// stylesheets. That keeps setOAuthPageSecurityHeaders' strict CSP/no-asset
+// posture intact for setup pages opened from Slack.
+const oauthPageCSS = `
+:root{color-scheme:dark;--bg:#030712;--panel:rgba(255,255,245,.035);--panel-strong:rgba(255,255,245,.055);--hairline:rgba(255,255,245,.13);--text:#f5f5f0;--muted:#b8c0cc;--tertiary:#aeb7c4;--lime:#7ec800;--cyan:#38bdf8;--danger:#f87171}
+*{box-sizing:border-box}
+body{min-height:100vh;margin:0;display:grid;place-items:start center;padding:2rem 1rem;background:radial-gradient(900px 600px at 78% 18%,rgba(255,255,245,.035),transparent 70%),radial-gradient(700px 500px at 22% 88%,rgba(126,200,0,.075),transparent 70%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(90deg,rgba(255,255,245,.035) 1px,transparent 1px),linear-gradient(180deg,rgba(255,255,245,.035) 1px,transparent 1px);background-size:88px 88px;opacity:.7}
+.card{position:relative;width:100%;max-width:480px;border:1px solid var(--hairline);border-radius:14px;padding:2rem;background:linear-gradient(180deg,var(--panel-strong),var(--panel));box-shadow:0 0 0 1px rgba(255,255,245,.04),0 24px 60px -18px rgba(0,0,0,.65);overflow:hidden}
+.card:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:linear-gradient(90deg,var(--lime),var(--cyan))}
+.brand{display:flex;align-items:center;gap:.65rem;margin-bottom:1.5rem;font-size:.75rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--lime)}
+.brand-mark{width:.7rem;height:.7rem;border-radius:50%;background:var(--lime);box-shadow:0 0 20px rgba(126,200,0,.55)}
+h1{margin:0 0 .75rem;font-size:1.5rem;line-height:1.15;font-weight:700;letter-spacing:-.02em}
+p{margin:.75rem 0 0;color:var(--muted);font-size:.95rem;line-height:1.55}
+.kv{margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--hairline);font-size:.875rem;color:var(--muted)}
+.kv div{display:flex;justify-content:space-between;gap:1rem;margin-top:.5rem}
+.status{display:inline-flex;align-items:center;justify-content:center;width:1.5rem;height:1.5rem;margin-right:.35rem;border:1px solid currentColor;border-radius:999px;font-size:.85rem;vertical-align:.08em}
+.ok{color:var(--lime)}
+.warn{color:var(--danger)}
+code{background:rgba(255,255,245,.08);border:1px solid rgba(255,255,245,.10);padding:.12rem .35rem;border-radius:5px;color:var(--text);font-size:.875em}
+.footer{margin-top:1.5rem;color:var(--tertiary);font-size:.875rem}
+@media (max-width:520px){.card{padding:1.5rem;border-radius:12px}h1{font-size:1.35rem}.kv div{display:block}}
+`
+
+const oauthPageTemplateBeforeTitle = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>qURL Connected</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>`
+
+const oauthPageTemplateAfterTitle = `</title>
 <meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#f9fafb}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-.kv{margin-top:1rem;font-size:.875rem;color:#374151}
-.kv div{margin-top:.25rem}
-.ok{color:#059669;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
-</style>
+<style>` + oauthPageCSS + `</style>
 </head>
 <body>
 <div class="card">
-<h1><span class="ok">&#10003;</span> qURL Connected</h1>
-<p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl get</code> and <code>/qurl list</code>.</p>
+<div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>LayerV</span></div>
+`
+
+const oauthPageTemplateEnd = `</div>
+</body>
+</html>`
+
+// mustOAuthPageTemplate parses trusted package-owned template source. The title
+// and body arguments are template source fragments, not user data; dynamic values
+// must stay as {{.Field}} actions so html/template can escape them.
+func mustOAuthPageTemplate(name, title, body string) *template.Template {
+	return template.Must(template.New(name).Parse(oauthPageTemplateBeforeTitle + title + oauthPageTemplateAfterTitle + body + oauthPageTemplateEnd))
+}
+
+// successPageTemplate renders the Slack OAuth success page. html/template
+// auto-escapes every {{.Field}} interpolation — that's the load-bearing XSS
+// defense for keyPrefix (qurl-service JSON response) and email
+// (JWKS-verified id_token). teamID is HMAC-recovered from the signed state so
+// it's already a trusted input, but the same auto-escape applies uniformly.
+var successPageTemplate = mustOAuthPageTemplate("oauth-success", "qURL Connected", `
+<h1><span class="status ok" aria-hidden="true">&#10003;</span> qURL Connected</h1>
+<p>qURL™ is connected to your Slack workspace. Your team can now use <code>/qurl get</code> and <code>/qurl list</code>.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 {{if .KeyPrefix}}<div>API key prefix: <code>{{.KeyPrefix}}</code></div>{{end}}
 {{if .Email}}<div>qURL account: <code>{{.Email}}</code></div>{{end}}
 </div>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
-</div>
-</body>
-</html>`))
+<p class="footer">You can close this tab and return to Slack.</p>
+`)
 
 // successPageData is the model passed to successPageTemplate. Field names
 // must match the template's {{.Field}} accessors.
@@ -129,33 +160,15 @@ type successPageData struct {
 // The API key minted earlier in the callback is revoked before we
 // render this page so a refused install doesn't leave a half-installed
 // key behind.
-var rebindRefusedPageTemplate = template.Must(template.New("oauth-rebind-refused").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>qURL setup blocked</title>
-<meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-.kv{margin-top:1rem;font-size:.875rem;color:#374151}
-.warn{color:#b91c1c;font-weight:600}
-code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
-</style>
-</head>
-<body>
-<div class="card">
-<h1><span class="warn">&#9888;</span> qURL setup blocked</h1>
-<p>This Slack workspace is already connected to qURL under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup &lt;email&gt;</code> was not applied.</p>
+var rebindRefusedPageTemplate = mustOAuthPageTemplate("oauth-rebind-refused", "qURL setup blocked", `
+<h1><span class="status warn" aria-hidden="true">&#9888;</span> qURL setup blocked</h1>
+<p>This Slack workspace is already connected to qURL™ under a different admin. To avoid silently overwriting their configuration, this run of <code>/qurl setup &lt;email&gt;</code> was not applied.</p>
 <p>Please ask the existing qURL admin in your workspace to add you, or contact LayerV support if the original admin is no longer reachable.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>
 </div>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab.</p>
-</div>
-</body>
-</html>`))
+<p class="footer">You can close this tab.</p>
+`)
 
 // rebindRefusedPageData is the model passed to rebindRefusedPageTemplate.
 type rebindRefusedPageData struct {
@@ -166,36 +179,21 @@ type rebindRefusedPageData struct {
 // OAuth-callback failures that previously fell through to bare http.Error
 // (a blank white page with raw text — the experience operators flagged).
 // Same no-asset / strict-CSP posture as the success and rebind-refused
-// pages. Heading and Message are the only interpolations; html/template
-// auto-escapes both (they're operator-authored today, but the escape keeps
+// pages. Heading and Messages are the only interpolations; html/template
+// auto-escapes them (they're operator-authored today, but the escape keeps
 // the page safe if a future caller passes an upstream string through).
-var oauthErrorPageTemplate = template.Must(template.New("oauth-error").Parse(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>qURL setup</title>
-<meta name="robots" content="noindex">
-<style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:4rem auto;padding:0 1rem;color:#111}
-.card{border:1px solid #d1d5db;border-radius:12px;padding:2rem;background:#fef2f2}
-h1{margin:0 0 .5rem;font-size:1.5rem}
-p{color:#374151;font-size:.95rem;line-height:1.5}
-.warn{color:#b91c1c;font-weight:600}
-</style>
-</head>
-<body>
-<div class="card">
-<h1><span class="warn">&#9888;</span> {{.Heading}}</h1>
-<p>{{.Message}}</p>
-<p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
-</div>
-</body>
-</html>`))
+// Error-page titles intentionally mirror their H1 so browser chrome names the
+// specific failure without adding a trademark to title or heading text.
+var oauthErrorPageTemplate = mustOAuthPageTemplate("oauth-error", "{{.Heading}}", `
+<h1><span class="status warn" aria-hidden="true">&#9888;</span> {{.Heading}}</h1>
+{{range .Messages}}<p>{{.}}</p>{{end}}
+<p class="footer">You can close this tab and return to Slack.</p>
+`)
 
 // oauthErrorPageData is the model passed to oauthErrorPageTemplate.
 type oauthErrorPageData struct {
-	Heading string
-	Message string
+	Heading  string
+	Messages []string
 }
 
 // auth0TokenResponse is the slice of Auth0's /oauth/token response we read.
@@ -259,7 +257,9 @@ func Callback(cfg Config) http.HandlerFunc {
 		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code)
 		if err != nil {
 			slog.Error("oauth/callback Auth0 token exchange failed", "error", err)
-			http.Error(w, "authorization failed — run /qurl setup <email> again to retry", http.StatusBadGateway)
+			renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
+				"Slack finished its handoff, but qURL™ could not complete authorization.",
+				"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 			return
 		}
 
@@ -311,7 +311,9 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 	normalized, err := NormalizeEmail(qurlEmail)
 	if err != nil || normalized != verified.Email {
 		slog.Warn("oauth/callback email mismatch for setup flow")
-		http.Error(w, "authenticated email did not match setup email — run /qurl setup <email> again", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "qURL account mismatch",
+			"The signed-in qURL™ account did not match the email used to start setup.",
+			"Return to Slack and run /qurl setup <email> again with the same qURL account.")
 		return false
 	}
 	return true
@@ -325,7 +327,8 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config, now func() time.Time) (verified VerifiedState, code string, ok bool) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		renderOAuthErrorPage(w, http.StatusMethodNotAllowed, "Use the Slack setup link",
+			"This qURL™ setup callback only works from the browser redirect opened by /qurl setup <email>.")
 		return VerifiedState{}, "", false
 	}
 
@@ -343,13 +346,17 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		// On the success path, the cookie clears after verify; this
 		// closes the same-browser-replay window on Auth0 reject too.
 		clearStateCookie(w)
-		http.Error(w, "authorization failed — run /qurl setup <email> again to retry", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Authorization didn't complete",
+			"qURL™ setup was not authorized.",
+			"Return to Slack and run /qurl setup <email> again to retry.")
 		return VerifiedState{}, "", false
 	}
 	code = q.Get("code")
 	stateParam := q.Get("state")
 	if code == "" || stateParam == "" {
-		http.Error(w, "missing code or state", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is incomplete",
+			"The qURL™ authorization link is missing required setup details.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -357,7 +364,9 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if cookieState == "" {
 		slog.Warn("oauth/callback missing state cookie")
 		clearStateCookie(w)
-		http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Continue setup in the same browser",
+			"This qURL™ setup link must be completed in the same browser where it was opened from Slack.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 	// Both values come from the same MintState call so canonical
@@ -369,7 +378,9 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if !hmac.Equal([]byte(cookieState), []byte(stateParam)) {
 		slog.Warn("oauth/callback cookie/state mismatch")
 		clearStateCookie(w)
-		http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Continue setup in the same browser",
+			"This qURL™ setup link must be completed in the same browser where it was opened from Slack.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -379,7 +390,9 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	if err != nil {
 		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		clearStateCookie(w)
-		http.Error(w, "invalid or expired setup link", http.StatusBadRequest)
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
+			"This qURL™ setup link is invalid or expired.",
+			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
 
@@ -469,7 +482,9 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 	if qurlSub == "" {
 		slog.Error("oauth/callback bind skipped — id_token sub unavailable", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", verified.TeamID)
-		http.Error(w, "workspace identity could not be confirmed — run /qurl setup <email> again", http.StatusInternalServerError)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
+			"qURL™ could not confirm the signed-in account needed to bind this Slack workspace.",
+			"Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
 		return false
 	}
 	bindCtx, bindCancel := context.WithTimeout(context.Background(), bindTimeout)
@@ -523,7 +538,9 @@ func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, teamID st
 	default:
 		slog.Error("oauth/callback BindWorkspace failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"team_id", teamID, "error", bindErr)
-		http.Error(w, "workspace not bound — run /qurl setup <email> again", http.StatusInternalServerError)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't bind this Slack workspace",
+			"qURL™ could not finish binding this Slack workspace.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return false
 	}
 }
@@ -577,7 +594,8 @@ func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (
 		slog.Error("oauth/callback existing workspace key lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"error", err, "team_id", teamID)
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't connect qURL",
-			"qURL is already connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL™ is already connected to this Slack workspace, but the stored workspace key could not be read.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false, false
 	}
 
@@ -596,7 +614,8 @@ func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (
 		slog.Error("oauth/callback stored workspace key validation failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"error", err, "team_id", teamID)
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-			"qURL is already connected to this Slack workspace, but the stored workspace key could not be verified. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL™ is already connected to this Slack workspace, but the stored workspace key could not be verified.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false, false
 	}
 	slog.Info("oauth/callback reused existing workspace API key", "team_id", teamID) //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
@@ -663,16 +682,19 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 			// is plan-dependent (free 3 / growth 50 / unlimited) and is
 			// qurl-service's to own.
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				"Your qURL account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created. Revoke one you no longer use, then run /qurl setup <email> again.")
+				"Your qURL™ account already has the maximum number of API keys allowed on your plan, so a new one couldn't be created.",
+				"Revoke one you no longer use, then run /qurl setup <email> again.")
 			return "", false
 		}
 		if alreadyBound {
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL already connected",
-				"qURL is already connected for this Slack workspace, but this setup attempt could not recover the workspace key. Contact your qURL administrator for help.")
+				"qURL™ is already connected for this Slack workspace, but this setup attempt could not recover the workspace key.",
+				"Contact your qURL administrator for help.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
-			"Something went wrong while creating your qURL API key. Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"Something went wrong while creating your qURL™ API key.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 	apiKey, keyID, keyPrefix := minted.APIKey, minted.KeyID, minted.KeyPrefix
@@ -707,7 +729,9 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		// and can leak an orphaned legacy fallback key. Closes when #265's
 		// ConditionExpression shift lets us detect the lost-race case
 		// end-to-end.
-		http.Error(w, "qURL key provisioned but not stored — run /qurl setup <email> again soon", http.StatusInternalServerError)
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "qURL setup did not finish",
+			"qURL™ created a workspace key, but the Slack integration could not save it before setup finished.",
+			"Run /qurl setup <email> again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 	return keyPrefix, true
@@ -741,7 +765,7 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dmTimeout)
 	defer cancel()
-	msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl get`."
+	msg := "qURL™ is connected to your Slack workspace. Your team can now use `/qurl get`."
 	if keyPrefix != "" {
 		msg += "\nKey prefix: `" + keyPrefix + "`"
 	}
@@ -778,15 +802,37 @@ func renderRebindRefused(w http.ResponseWriter, teamID string) {
 }
 
 // renderOAuthErrorPage writes a styled error page with the given status.
-// Replaces bare http.Error on the mint-failure path so a callback failure
-// renders human-readable, actionable guidance instead of a blank page with
-// raw text. Same defense-in-depth headers as renderRebindRefused.
-func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, message string) {
+// Replaces bare http.Error callback failures with human-readable, actionable
+// guidance instead of a blank page with raw text. Same defense-in-depth
+// headers as renderRebindRefused. Each non-blank message argument renders as
+// one escaped paragraph; pass separate arguments instead of newline-joining
+// copy. If a future caller accidentally passes only blank messages, the page
+// falls back to generic retry guidance instead of rendering a heading-only
+// card.
+func renderOAuthErrorPage(w http.ResponseWriter, status int, heading, firstParagraph string, rest ...string) {
+	messages := oauthErrorMessages(firstParagraph, rest...)
 	setOAuthPageSecurityHeaders(w)
 	w.WriteHeader(status)
-	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Message: message}); err != nil {
+	if err := oauthErrorPageTemplate.Execute(w, oauthErrorPageData{Heading: heading, Messages: messages}); err != nil {
 		slog.Warn("oauth/callback error-page write failed", "error", err)
 	}
+}
+
+// oauthErrorMessages trims blank paragraphs and falls back to generic guidance.
+func oauthErrorMessages(firstParagraph string, rest ...string) []string {
+	messages := make([]string, 0, 1+len(rest))
+	if trimmed := strings.TrimSpace(firstParagraph); trimmed != "" {
+		messages = append(messages, trimmed)
+	}
+	for _, msg := range rest {
+		if trimmed := strings.TrimSpace(msg); trimmed != "" {
+			messages = append(messages, trimmed)
+		}
+	}
+	if len(messages) == 0 {
+		return []string{"qURL™ setup could not finish. Try again or contact your qURL administrator if this keeps happening."}
+	}
+	return messages
 }
 
 func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
