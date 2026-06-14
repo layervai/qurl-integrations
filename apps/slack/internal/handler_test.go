@@ -668,6 +668,12 @@ func newUninstallRevokeTestHandler(t *testing.T, provider auth.Provider, revokeS
 	return h, rec
 }
 
+// TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects covers the
+// revoke-success branch (HTTP 204 → upstream_revoked=true). Under the confirmed
+// qurl-service contract a live workspace key cannot self-revoke — it always gets
+// 403 (see classifyUninstallRevokeError) — so this 204 path is not reachable in
+// prod today; it is retained as defensive coverage that would re-activate if an
+// owner/operator-authenticated revoke path lands (#806).
 func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
@@ -734,6 +740,11 @@ func TestSlashCommandUninstallLegacyRowWithoutKeyIDDisconnectsLocally(t *testing
 	}
 }
 
+// TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly pins the confirmed
+// qurl-service contract (#805): a live workspace key authenticates the self-revoke
+// with API-key auth, which qurl-service categorically forbids (403), so this is
+// the universal prod outcome for a live key — the upstream revoke degrades to a
+// local-only disconnect and the reply keeps the "not revoked outside Slack" caveat.
 func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) {
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
@@ -751,6 +762,31 @@ func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) 
 	}
 	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
 		t.Fatalf("forbidden-revoke reply missing local-only caveat: %q", resp[respFieldText])
+	}
+}
+
+// TestSlashCommandUninstallRevokeUnauthorizedFallsBackToLocalOnly is the 401
+// sibling of the 403 case: when the workspace key was already revoked/expired
+// upstream (e.g. a prior rotation), qurl-service's auth middleware rejects the
+// credential with 401 before the existence check. It degrades to the same
+// local-only disconnect — classifyUninstallRevokeError treats 401 and 403 alike.
+func TestSlashCommandUninstallRevokeUnauthorizedFallsBackToLocalOnly(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_401",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusUnauthorized)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 1 {
+		t.Fatalf("upstream revoke DELETE calls = %d, want 1", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1 (401 degrades to local-only disconnect)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+		t.Fatalf("unauthorized-revoke reply missing local-only caveat: %q", resp[respFieldText])
 	}
 }
 
@@ -880,10 +916,10 @@ func TestSlashCommandUninstallRevokeSucceedsButLocalRowAlreadyGoneReportsRevoked
 }
 
 func TestSlashCommandUninstallRevokeSucceedsButDeleteFailsReportsRetry(t *testing.T) {
-	// Revoke succeeds but the local removal fails for a generic reason: the
-	// workspace is left pointing at a now-revoked key (the documented 401-burst
-	// window) and the admin is told to retry, which self-heals via the 404/degrade
-	// path on the next uninstall.
+	// Defensive coverage of the revoke-success branch (not reached under the
+	// confirmed self-revoke contract — see the primary success test — but kept for
+	// a future owner-auth revoke path, #806): revoke succeeds yet the local removal
+	// fails, so the admin is told to retry, which self-heals on the next uninstall.
 	provider := &revokingAuthProvider{
 		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key", deleteErr: errors.New("ddb write failed")},
 		keyID:                 "key_workspace_delfail",

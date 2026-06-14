@@ -1782,14 +1782,17 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 
 // revokeWorkspaceUpstreamKey best-effort revokes the workspace's upstream qURL
 // API key before local credential removal, using the strongly-read stored
-// key_id. The workspace key authenticates the DELETE of its own key_id (a
-// qurl:write self-revoke). It returns revoked=true when the upstream key was
-// revoked (or was already gone). It returns (false, nil) for a local-only
-// disconnect — a provider that cannot expose a key_id, a legacy row persisted
-// before key-id storage, or a service that refuses the self-revoke (401/403). A
-// non-nil error means a transient/unexpected failure left the key possibly
-// live, so the caller aborts before DeleteAPIKey and the stored key_id survives
-// for a retry instead of orphaning a live key.
+// key_id. Uninstall has no live OAuth flow, so it can only authenticate the
+// DELETE with the workspace's own API key — and qurl-service forbids an API key
+// from managing API keys, so that self-revoke is refused (403) for a live key.
+// Upstream revocation from uninstall is therefore local-only by design; see
+// classifyUninstallRevokeError for the confirmed contract (#805). It returns
+// revoked=true only when the key was already gone upstream (404); it returns
+// (false, nil) for a local-only disconnect — a provider that cannot expose a
+// key_id, a legacy row persisted before key-id storage, or the expected 403/401
+// self-revoke refusal. A non-nil error means a transient/unexpected failure left
+// the key possibly live, so the caller aborts before DeleteAPIKey and the stored
+// key_id survives for a retry instead of orphaning a live key.
 func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID string) (revoked bool, err error) {
 	revoker, ok := h.cfg.AuthProvider.(workspaceKeyRevoker)
 	if !ok {
@@ -1827,31 +1830,42 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 	return true, nil
 }
 
-// classifyUninstallRevokeError maps a RevokeAPIKey failure to (revoked, err). A
-// 404 means the key is already absent upstream → treat as revoked. 401/403 means
-// the workspace key could not authenticate the self-revoke on this deployment —
-// degrade to a local-only disconnect (false, nil) rather than stranding the
-// admin on a broken uninstall; the caller keeps the "not revoked outside Slack"
-// caveat. This degrade assumes 401/403 from this endpoint is structural (the
-// deployment forbids self-revoke), not transient: a transient 401/403 (a
-// just-rotated key, clock skew, a gateway auth blip, or a stale cached plaintext
-// key racing the fresh key_id this path strong-reads) would drop local state
-// while the upstream key is still live. Everything else (other 4xx, 5xx,
-// transport, timeout) is treated as possibly-still-live: return the error so the
-// caller aborts and the stored key_id survives.
+// classifyUninstallRevokeError maps a RevokeAPIKey failure to (revoked, err),
+// per the confirmed qurl-service contract for DELETE /v1/api-keys/{key_id}.
 //
-// A retry after a prior revoke-ok/DeleteAPIKey-fail authenticates with the
-// already-revoked workspace key, so qurl-service may answer 401/403 (auth)
-// before 404 (existence). Either way the disconnect completes via the degrade
-// path; the caveat then under-claims (the key was in fact revoked), which is the
-// safe direction. The disconnect never depends on guessing 404-vs-401 here.
+// Confirmed contract (#805): uninstall has no live OAuth flow, so it
+// authenticates this DELETE with the workspace's own API key, and qurl-service
+// categorically forbids an API key from managing API keys — the DELETE returns
+// 403 ("API keys cannot manage API keys. Use JWT authentication.") for ANY
+// target key_id, including its own, structurally and before any existence check.
+// So a live workspace key ALWAYS gets 403 here: revoking the upstream key from
+// /qurl uninstall is a local-only disconnect by design, not a deployment quirk.
+// (Rotation can revoke because oauth/callback runs under the owner's freshly
+// authenticated JWT; uninstall has only the workspace API key.)
 //
-// TODO(upstream-contract): the 401/403 degrade assumes qurl-service permits a
-// qurl:write key to DELETE its own /v1/api-keys/{key_id}, that 401/403 from this
-// endpoint is structural rather than transient, and the auth-vs-existence check
-// order above. Confirm with qurl-service; if self-revoke is unsupported, every
-// uninstall lands on the degrade branch and the path is a no-op local disconnect.
-// Tracked in #805.
+// Status handling under that contract:
+//   - 403: self-revoke forbidden — the universal case for a live key. Degrade to
+//     a local-only disconnect (false, nil); the upstream key stays live, so the
+//     caller keeps the "not revoked outside Slack" caveat and a security-motivated
+//     uninstall still needs a manual upstream revoke (see operating.md).
+//   - 401: the workspace key is already revoked/expired upstream (e.g. a prior
+//     rotation) — qurl-service's auth middleware rejects the credential with 401
+//     before the existence check. The key is already dead, so degrade too; the
+//     caveat then over-warns, the safe direction. The logged `status` field
+//     distinguishes 401 from 403 for operators.
+//   - 404: the key is already absent upstream → treat as revoked (true, nil).
+//   - everything else (other 4xx, 5xx, transport, timeout): possibly-still-live —
+//     return the error so the caller aborts and the stored key_id survives.
+//
+// 401/403 are structural, never transient: 403 is a deterministic gate and a
+// revoked key's 401 is deterministic, while a qurl-service datastore blip
+// surfaces as 5xx (the abort arm), not 401/403 — so degrading 401/403 to
+// local-only cannot strand a still-live key behind a transient auth blip.
+// Flipping 401/403 to abort (tell the admin to retry/escalate instead of a silent
+// local-only disconnect) is deliberately sequenced behind the force/local-only
+// escape hatch (#806); until that lands the degrade is the safe interim — without
+// it, a deployment that refuses the revoke would leave admins unable to
+// disconnect at all.
 func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string) (revoked bool, err error) {
 	var apiErr *client.APIError
 	if errors.As(revokeErr, &apiErr) {
@@ -1860,7 +1874,11 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 			slog.Info("/qurl uninstall: upstream qURL key already absent — treating as revoked", "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
 			return true, nil
 		case http.StatusUnauthorized, http.StatusForbidden:
-			slog.Error("/qurl uninstall: upstream refused workspace key self-revoke — local-only disconnect", "status", apiErr.StatusCode, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
+			// Expected, by-design path: qurl-service forbids API-key self-revoke
+			// (403) and rejects an already-revoked key (401). Warn, not Error —
+			// the `status` field distinguishes the still-live 403 from the
+			// already-dead 401 for operators (see operating.md).
+			slog.Warn("/qurl uninstall: upstream qURL key not revoked — local-only disconnect", "status", apiErr.StatusCode, "team_id", teamID, "caller_user_id", userID, "key_id", keyID)
 			return false, nil
 		}
 	}
