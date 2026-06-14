@@ -101,8 +101,16 @@ export async function fetchWithTransientRetry(
     const delayMs = baseDelayMs * attempt;
     // Surface the retry in CI logs so a run that RECOVERED after a blip doesn't
     // look identical to one that never blipped — the drain-gap signal #1085 wants.
+    // Log the ORIGIN only, not the full URL: the fileviewer `/view/<mint-id>` path
+    // carries the capability mint-id, which must not land in CI logs.
+    let origin: string;
+    try {
+      origin = new URL(input).origin;
+    } catch {
+      origin = '<url>'; // non-absolute input: don't throw, don't leak
+    }
     console.warn(
-      `[fetchWithTransientRetry] ${method} ${input} -> ${res.status}; ` +
+      `[fetchWithTransientRetry] ${method} ${origin} -> ${res.status}; ` +
         `retry ${attempt}/${maxAttempts - 1} in ${delayMs}ms`,
     );
     // Release the discarded response's body so its socket returns to the pool
