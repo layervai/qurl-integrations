@@ -9,6 +9,13 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+const (
+	shellBash       = "bash"
+	shellZsh        = "zsh"
+	shellFish       = "fish"
+	shellPowerShell = "powershell"
+)
+
 func completionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "completion [bash|zsh|fish|powershell]",
@@ -19,16 +26,16 @@ func completionCmd() *cobra.Command {
   Zsh:    qurl completion zsh > "${fpath[1]}/_qurl"
   Fish:   qurl completion fish > ~/.config/fish/completions/qurl.fish`,
 		Args:      cobra.ExactArgs(1),
-		ValidArgs: []string{"bash", "zsh", "fish", "powershell"},
+		ValidArgs: []string{shellBash, shellZsh, shellFish, shellPowerShell},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch args[0] {
-			case "bash":
+			case shellBash:
 				return cmd.Root().GenBashCompletionV2(cmd.OutOrStdout(), true)
-			case "zsh":
+			case shellZsh:
 				return cmd.Root().GenZshCompletion(cmd.OutOrStdout())
-			case "fish":
+			case shellFish:
 				return cmd.Root().GenFishCompletion(cmd.OutOrStdout(), true)
-			case "powershell":
+			case shellPowerShell:
 				return cmd.Root().GenPowerShellCompletionWithDesc(cmd.OutOrStdout())
 			default:
 				return cmd.Usage()

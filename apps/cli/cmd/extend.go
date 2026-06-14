@@ -12,7 +12,7 @@ func extendCmd(opts *globalOpts) *cobra.Command {
 	var extendBy string
 
 	cmd := &cobra.Command{
-		Use:               "extend <resource-id>",
+		Use:               "extend RESOURCE_ID",
 		Short:             "Extend qURL expiration",
 		Example:           "  qurl extend r_k8xqp9h2sj9 --by 24h",
 		Args:              cobra.ExactArgs(1),

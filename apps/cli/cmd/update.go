@@ -13,7 +13,7 @@ func updateCmd(opts *globalOpts) *cobra.Command {
 	var description string
 
 	cmd := &cobra.Command{
-		Use:   "update <resource-id>",
+		Use:   "update RESOURCE_ID",
 		Short: "Update a qURL's properties",
 		Example: `  qurl update r_k8xqp9h2sj9 --description "Production API access"
   qurl update r_k8xqp9h2sj9 -d ""  # clear description`,

@@ -18,7 +18,7 @@ func createCmd(opts *globalOpts) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "create <target-url>",
+		Use:   "create TARGET_URL",
 		Short: "Create a qURL for a target URL",
 		Example: `  qurl create https://api.example.com/data
   qurl create https://internal.example.com --expires 1h --one-time

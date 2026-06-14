@@ -46,6 +46,7 @@ build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually
 ## Documentation
 
 docs: build-cli # Generate markdown docs for the CLI
+	rm -rf ./docs/cli
 	./release/cli/qurl docs markdown -d ./docs/cli
 
 man: build-cli # Generate man pages for the CLI
