@@ -991,9 +991,13 @@ func (p *DDBProvider) SupportsDeleteAPIKey() bool {
 // is removed and the user sees a disconnect success rather than an internal
 // partial-row state.
 //
-// TODO(upstream-contract): wire uninstall through qurl-service revocation now
-// that setup stores qurl_api_key_id; legacy rows without a key ID stay on this
-// local-disconnect path. See #792.
+// DeleteAPIKey only removes local credential state; it does not call
+// qurl-service. Upstream revocation is orchestrated by the caller before this
+// write — the Slack uninstall path strongly reads the stored key_id via
+// [DDBProvider.APIKeyID] and self-revokes the upstream key (legacy rows without
+// a key_id stay on this local-only disconnect path). Keeping revocation out of
+// the auth package preserves its DDB+KMS-only dependency surface (it must not
+// import the qurl-service client), matching the rotation path in oauth/callback.
 func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.DeleteAPIKey: workspaceID is empty")

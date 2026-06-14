@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -602,6 +603,194 @@ func TestSlashCommandUninstallDeleteFailure(t *testing.T) {
 	}
 	if !strings.Contains(resp[respFieldText], "could not disconnect qURL") {
 		t.Fatalf("delete failure reply missing retry message: %q", resp[respFieldText])
+	}
+}
+
+// revokingAuthProvider is a recordingAuthProvider that also exposes the stored
+// qURL key_id, so the uninstall path can read it and self-revoke the upstream
+// key before local removal. *auth.DDBProvider is the production implementation;
+// recordingAuthProvider (no APIKeyID) exercises the local-only fallback.
+type revokingAuthProvider struct {
+	recordingAuthProvider
+	keyID      string
+	keyIDErr   error
+	keyIDCalls int
+}
+
+func (p *revokingAuthProvider) APIKeyID(_ context.Context, _ string) (string, error) {
+	p.keyIDCalls++
+	if p.keyIDErr != nil {
+		return "", p.keyIDErr
+	}
+	return p.keyID, nil
+}
+
+// recordingRevokeServer captures the DELETE /v1/api-keys/{id} calls the
+// uninstall self-revoke makes against the customer qURL server.
+type recordingRevokeServer struct {
+	mu        sync.Mutex
+	calls     int
+	lastKeyID string
+}
+
+func (s *recordingRevokeServer) record(keyID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	s.lastKeyID = keyID
+}
+
+func (s *recordingRevokeServer) snapshot() (calls int, lastKeyID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls, s.lastKeyID
+}
+
+// newUninstallRevokeTestHandler wires an admin-seeded handler whose qURL client
+// points at a customer server that records DELETE /v1/api-keys/{id} calls and
+// replies with revokeStatus. provider is installed as the auth provider so the
+// uninstall path can read its key_id and self-revoke.
+func newUninstallRevokeTestHandler(t *testing.T, provider auth.Provider, revokeStatus int) (*Handler, *recordingRevokeServer) {
+	t.Helper()
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	rec := &recordingRevokeServer{}
+	ts.addCustomerPrefix(http.MethodDelete, "/v1/api-keys/", func(w http.ResponseWriter, r *http.Request) {
+		rec.record(strings.TrimPrefix(r.URL.Path, "/v1/api-keys/"))
+		w.WriteHeader(revokeStatus)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AuthProvider = provider
+	return h, rec
+}
+
+func TestSlashCommandUninstallRevokesUpstreamKeyThenDisconnects(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_001",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, keyID := rec.snapshot(); calls != 1 || keyID != "key_workspace_001" {
+		t.Fatalf("upstream revoke DELETE calls=%d keyID=%q, want 1 and %q", calls, keyID, "key_workspace_001")
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "API key has been revoked") {
+		t.Fatalf("uninstall reply missing upstream-revoked confirmation: %q", resp[respFieldText])
+	}
+	if strings.Contains(resp[respFieldText], "does not revoke") {
+		t.Fatalf("uninstall reply should not carry the local-only caveat after a real revoke: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallRevokeAlreadyAbsentTreatedAsRevoked(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_404",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNotFound)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 1 {
+		t.Fatalf("upstream revoke DELETE calls = %d, want 1", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1 (404 self-heals to revoked)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "API key has been revoked") {
+		t.Fatalf("uninstall reply missing revoked confirmation for already-absent key: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallLegacyRowWithoutKeyIDDisconnectsLocally(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "", // legacy row predating key-id persistence
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 0 {
+		t.Fatalf("legacy row must not call upstream revoke; DELETE calls = %d, want 0", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+		t.Fatalf("legacy local-only reply missing revocation caveat: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallRevokeForbiddenFallsBackToLocalOnly(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_403",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusForbidden)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 1 {
+		t.Fatalf("upstream revoke DELETE calls = %d, want 1", calls)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1 (403 degrades to local-only disconnect)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
+		t.Fatalf("forbidden-revoke reply missing local-only caveat: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallRevokeServerErrorAbortsWithoutDelete(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_500",
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusInternalServerError)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if calls, _ := rec.snapshot(); calls != 1 {
+		t.Fatalf("upstream revoke DELETE calls = %d, want 1", calls)
+	}
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0 (hard revoke failure must preserve key_id)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "Nothing was disconnected") {
+		t.Fatalf("server-error reply missing abort/retry guidance: %q", resp[respFieldText])
+	}
+}
+
+func TestSlashCommandUninstallKeyIDReadErrorAbortsWithoutDelete(t *testing.T) {
+	provider := &revokingAuthProvider{
+		recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"},
+		keyID:                 "key_workspace_x",
+		keyIDErr:              errors.New("ddb transient"),
+	}
+	h, rec := newUninstallRevokeTestHandler(t, provider, http.StatusNoContent)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if provider.keyIDCalls != 1 {
+		t.Fatalf("APIKeyID calls = %d, want 1", provider.keyIDCalls)
+	}
+	if calls, _ := rec.snapshot(); calls != 0 {
+		t.Fatalf("key_id read failure must not call upstream revoke; DELETE calls = %d, want 0", calls)
+	}
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0 (key_id read failure must preserve local state)", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "Nothing was disconnected") {
+		t.Fatalf("key_id-read-error reply missing abort/retry guidance: %q", resp[respFieldText])
 	}
 }
 

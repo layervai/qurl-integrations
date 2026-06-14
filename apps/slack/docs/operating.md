@@ -359,6 +359,42 @@ instead of revoked, it will also be absent from the revoked list. Repeated
 retries will keep failing until an operator verifies the key status or uses a
 direct owner-scoped lookup when qURL exposes one.
 
+## Uninstall revocation visibility
+
+`/qurl uninstall` strongly reads the stored qURL `key_id` and revokes the
+upstream workspace key (a `qurl:write` self-revoke: the workspace key
+authenticates the `DELETE /v1/api-keys/{key_id}`) before removing local
+credentials. `event`-free log lines under the `/qurl uninstall:` prefix report
+the outcome; the terminal `/qurl uninstall: disconnected workspace Slack
+commands` line carries `upstream_revoked` so a single query separates real
+revokes from local-only disconnects:
+
+```text
+fields @timestamp, team_id, caller_user_id, key_id, upstream_revoked
+| filter @message like "/qurl uninstall:"
+| sort @timestamp desc
+| limit 50
+```
+
+Two outcomes need operator follow-up because the upstream key is **not** revoked
+but the workspace was disconnected locally:
+
+- `legacy workspace row has no qURL key id — local-only disconnect`: the
+  workspace connected before `key_id` persistence (issue #792), so Slack cannot
+  identify which key to revoke. Revoke it through qURL account/API-key
+  management if the disconnect was security-motivated.
+- `upstream refused workspace key self-revoke — local-only disconnect`
+  (`status=401`/`403`): the deployment's qURL service does not permit a
+  workspace key to revoke itself. Revoke through operator tooling and confirm
+  the self-revoke contract with the qURL service team.
+
+`upstream qURL key revoke failed — aborting to preserve key id` (and the
+`could not read stored qURL key id before revoke` variant) means nothing was
+disconnected: the stored `key_id` is intentionally preserved so the admin can
+retry. A transient failure self-heals on retry because an already-revoked key
+returns 404 and is then treated as revoked. Persistent failures past a few
+retries warrant the same upstream-key verification as the rotation path above.
+
 ## Endpoints
 
 | Endpoint | Purpose |
