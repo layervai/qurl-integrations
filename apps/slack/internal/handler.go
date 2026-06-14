@@ -1853,6 +1853,11 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 		slog.Error("/qurl uninstall: could not build client to revoke upstream key", "error", err, "team_id", teamID, "caller_user_id", userID)
 		return false, err
 	}
+	// For a live key this DELETE is expected to ALWAYS 403 and degrade to
+	// local-only (qurl-service forbids API-key self-management) — that is by
+	// design, not a bug; see classifyUninstallRevokeError. The call is still worth
+	// making for the 404 path (key already gone → accurate upstream_revoked) and a
+	// future owner-authenticated revoke path (#806).
 	if err := c.RevokeAPIKey(ctx, keyID); err != nil {
 		return classifyUninstallRevokeError(err, teamID, userID, keyID)
 	}
@@ -1887,10 +1892,17 @@ func (h *Handler) revokeWorkspaceUpstreamKey(ctx context.Context, teamID, userID
 //   - everything else (other 4xx, 5xx, transport, timeout): possibly-still-live —
 //     return the error so the caller aborts and the stored key_id survives.
 //
-// 401/403 are structural, never transient: 403 is a deterministic gate and a
-// revoked key's 401 is deterministic, while a qurl-service datastore blip
-// surfaces as 5xx (the abort arm), not 401/403 — so degrading 401/403 to
-// local-only cannot strand a still-live key behind a transient auth blip.
+// 401/403 are structural, never transient FOR A LIVE KEY: 403 is a deterministic
+// gate, and qurl-service's auth middleware returns 401 only for a genuinely
+// revoked/expired/unknown credential — a still-live key passes auth and reaches
+// the 403 gate, while an infra blip (e.g. a datastore lookup error) surfaces as
+// 5xx, not 401. So a 401 here always means the key is already dead, and degrading
+// 401/403 to local-only cannot strand a still-live key behind a transient auth
+// blip (a 5xx lands on the abort arm instead). That upstream contract is pinned
+// by qurl-service's middleware tests: TestAPIKeyAuth_ValidKey (live → passes →
+// 403), TestAPIKeyAuth_RevokedKey / TestAPIKeyAuth_ExpiredKey (dead → 401), and
+// TestAPIKeyAuth_RepoError_Returns500 (infra → 500, not 401).
+//
 // Flipping 401/403 to abort (tell the admin to retry/escalate instead of a silent
 // local-only disconnect) is deliberately sequenced behind the force/local-only
 // escape hatch (#806); until that lands the degrade is the safe interim — without
