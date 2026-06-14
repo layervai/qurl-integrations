@@ -79,6 +79,18 @@ const (
 	DefaultAPIKeyMintReplayWindowHours      = 24
 	rotationReplacementPersistFailureEvent  = "setup_rotation_replacement_persist_failure"
 	rotationReplacementPersistFailureAction = "rerun_setup_rotate_within_retry_window"
+	// crossAccountRepointRequestedEvent marks an explicit --repoint where the
+	// signed-in qURL account differs from the one holding the workspace key.
+	// qurl-service has no tenant-facing cross-account binding transfer (cross-
+	// tenant refusal by design), so Slack fails closed and routes the owner to
+	// the operator-assisted transfer rather than minting a second live key.
+	crossAccountRepointRequestedEvent = "setup_cross_account_repoint_requested"
+	crossAccountRepointOperatorAction = "operator_assisted_binding_transfer_then_rerun_setup"
+	// repointLegacyRowRefusedEvent marks a --repoint refused because the stored
+	// key predates qurl_account_id provenance, so same-vs-cross account can't be
+	// proven. Structured so operators can measure how often legacy rows block
+	// repoint (the owner self-heals with --rotate, which records the account).
+	repointLegacyRowRefusedEvent = "setup_repoint_legacy_row_refused"
 	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
 	// plus four non-secret characters. The reuse path derives this
 	// from stored plaintext because workspace_state stores api_key
@@ -235,7 +247,10 @@ type auth0TokenResponse struct {
 //     Same-caller re-entry is idempotent success.
 //  6. Reuse the stored workspace key when setup mode is normal and it
 //     still validates on qurl-service; explicit rotation revokes the
-//     stored key by key_id before minting a replacement.
+//     stored key by key_id before minting a replacement. Explicit
+//     repoint resolves to a same-account rotation, or fails closed and
+//     routes to the operator-assisted transfer when the signed-in qURL
+//     account differs from the one holding the key.
 //  7. For a newly minted key, upsert via WorkspaceStore.SetAPIKeyWithMetadata;
 //     on failure, binding-backed and rotation mints rely on qurl-service
 //     idempotency for retry recovery, while legacy fallback keys are revoked.
@@ -295,7 +310,7 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		keyPrefix, ok := ensureWorkspaceAPIKey(w, cfg, accessToken, verified.TeamID, verified.UserID, verified.Mode)
+		keyPrefix, ok := ensureWorkspaceAPIKey(w, cfg, accessToken, verified.TeamID, verified.UserID, qurlSub, verified.Mode)
 		if !ok {
 			return
 		}
@@ -578,10 +593,16 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 // require --rotate/--repoint so a prior rotate persist-failure replays the
 // replacement keyed by the old key_id instead of minting around it.
 //
+// qurlAccountID is the verified qURL account (Auth0 sub) of this setup run. It
+// is stored with every mint so future --repoint can detect a cross-account move,
+// and is the signed-in side of that comparison for --repoint itself.
+//
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string, mode SetupMode) (string, bool) {
-	if mode == SetupModeRotate {
-		return rotateWorkspaceAPIKey(w, cfg, accessToken, teamID, userID)
+func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
+	//nolint:exhaustive // SetupModeReuse (and the empty mode) fall through to the reuse-or-mint path below.
+	switch mode {
+	case SetupModeRotate, SetupModeRepoint:
+		return replaceWorkspaceAPIKey(w, cfg, accessToken, teamID, userID, qurlAccountID, mode)
 	}
 	keyPrefix, reused, ok := reuseStoredWorkspaceKey(w, cfg, teamID)
 	if !ok {
@@ -590,30 +611,91 @@ func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamI
 	if reused {
 		return keyPrefix, true
 	}
-	return mintAndPersist(w, cfg, accessToken, teamID, userID)
+	return mintAndPersist(w, cfg, accessToken, teamID, userID, qurlAccountID)
 }
 
-// rotateWorkspaceAPIKey performs explicit owner-requested rotation. It revokes
-// the currently stored key before minting the replacement, so a failed mint
-// never leaves the account holding both old and new workspace keys. Rows that
-// predate qurl_api_key_id fail closed because Slack cannot prove which qURL key
-// to revoke safely.
+// replaceWorkspaceAPIKey performs the explicit owner-requested key operations,
+// --rotate (same-account replacement) and --repoint (account move). It reads the
+// stored key identity once — the qURL key_id and the qURL account that minted it
+// — then branches:
+//
+//   - No stored key: an explicit operation on an unconfigured workspace is just
+//     first setup, so mint and store.
+//   - A different qURL account holds the key: a cross-account move. Neither mode
+//     can take it over — the signed-in account cannot revoke the other account's
+//     key, and qurl-service has no tenant-facing binding transfer (cross-tenant
+//     refusal by design, layervai/qurl-service#910). Slack fails closed (no mint,
+//     no revoke) and routes the owner to the operator-assisted transfer. Minting
+//     would leave the old account's key live alongside a new one — the exact
+//     double-live-key leak #790 guards against. Detecting this from the stored
+//     provenance also spares the doomed wrong-owner DELETE + revoked-list scan
+//     that --rotate would otherwise attempt.
+//   - --repoint against a row with no recorded qURL account (legacy/sandbox):
+//     cross-account safety cannot be proven, so fail closed. A same-account owner
+//     can self-heal with --rotate, which records the account for next time.
+//   - Same qURL account, or --rotate against a legacy row: revoke the stored key
+//     before minting the replacement, so a failed mint never leaves the account
+//     holding both old and new workspace keys. Rows with no key_id at all fail
+//     closed because Slack cannot prove which qURL key to revoke safely.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func rotateWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
+func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
 	readCtx, readCancel := context.WithTimeout(context.Background(), existingKeyTimeout)
 	defer readCancel()
-	keyID, err := cfg.Provider.APIKeyID(readCtx, teamID)
+	keyID, storedAccountID, err := cfg.Provider.APIKeyIdentity(readCtx, teamID)
 	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
-		return mintAndPersist(w, cfg, accessToken, teamID, userID)
+		return mintAndPersist(w, cfg, accessToken, teamID, userID, qurlAccountID)
 	}
 	if err != nil {
-		slog.Error("oauth/callback rotation key lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
-			"error", err, "team_id", teamID)
-		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't rotate qURL key",
+		slog.Error("oauth/callback explicit-mode key identity lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+			"error", err, "team_id", teamID, "mode", string(mode))
+		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't update qURL key",
 			"qURL is connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
+	if storedAccountID != "" && storedAccountID != qurlAccountID {
+		if qurlAccountID == "" {
+			// Belt-and-suspenders: a provenance-bearing row with no verified
+			// signed-in account. Upstream gates make this unreachable — the slash
+			// surface rejects --rotate/--repoint when AdminStore is nil, and when it
+			// is wired checkBindAllowed fails closed on an empty id_token sub before
+			// ensureWorkspaceAPIKey runs — but fail closed here too so a future
+			// reorder can't turn an empty signed-in account into a spurious
+			// cross-account operator route (or an unverified same-account rotation).
+			slog.Error("oauth/callback explicit mode reached with empty qURL account against a provenance row", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+				"team_id", teamID, "mode", string(mode))
+			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
+				"qURL could not confirm the signed-in account needed to update this workspace key. Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
+			return "", false
+		}
+		// A different qURL account holds the key. Do NOT echo it to the browser
+		// (avoid disclosing which qURL account holds a workspace); both IDs are
+		// logged for the operator running the transfer. The single message serves
+		// both modes: a --rotate run that signed in with the wrong account is told
+		// to re-sign-in, while an intentional --repoint is sent to the operator.
+		slog.Warn("oauth/callback cross-account repoint requested — routing to operator transfer", //nolint:gosec // G706: qURL account ids and team_id are non-secret identifiers needed for operator triage; slog escapes structured attributes.
+			"event", crossAccountRepointRequestedEvent,
+			"team_id", teamID,
+			"mode", string(mode),
+			"current_qurl_account_id", storedAccountID,
+			"requested_qurl_account_id", qurlAccountID,
+			"operator_action", crossAccountRepointOperatorAction)
+		renderOAuthErrorPage(w, http.StatusConflict, "qURL key belongs to a different account",
+			"This Slack workspace's qURL key belongs to a different qURL account. To protect the current owner, qURL does not let another account take over a workspace connection automatically.",
+			"If you meant to replace the key on the account that already holds it, run /qurl setup <email> --rotate signed in as that account. To move this workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
+		return "", false
+	}
+	if storedAccountID == "" && mode == SetupModeRepoint {
+		// Legacy/sandbox row: key present, provenance unknown. --repoint can't
+		// prove same-vs-cross account, so fail closed; --rotate can refresh it.
+		slog.Warn("oauth/callback repoint refused because stored key has no recorded qURL account", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+			"event", repointLegacyRowRefusedEvent,
+			"team_id", teamID)
+		renderOAuthErrorPage(w, http.StatusConflict, "Can't repoint qURL key from Slack",
+			"This workspace was connected before Slack recorded which qURL account holds its key, so a cross-account move can't be verified safely. If you own the current qURL account, run /qurl setup <email> with --rotate to refresh the key (Slack will record the account for next time). To move the workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
+		return "", false
+	}
+	// Same qURL account, or --rotate against a legacy row: revoke-then-replace.
 	if keyID == "" {
 		slog.Warn("oauth/callback rotation refused because stored key has no key_id", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"team_id", teamID)
@@ -637,7 +719,7 @@ func rotateWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamI
 		}
 	}
 
-	return mintReplacementAndPersist(w, cfg, accessToken, teamID, keyID, userID)
+	return mintReplacementAndPersist(w, cfg, accessToken, teamID, keyID, userID, qurlAccountID)
 }
 
 // confirmStoredKeyAlreadyRevoked lets a retry continue after the previous
@@ -785,7 +867,7 @@ func storedAPIKeyPrefix(apiKey string) string {
 // a distinct K2. Tracked at #265 alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
+func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string) (string, bool) {
 	// Fresh bounded context for the mint, decoupled from the request
 	// context. TimeoutHandler's 60s deadline could fire mid-mint;
 	// qurl-service may have already created the key, but we'd surface
@@ -840,7 +922,10 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	defer persistCancel()
 	// Minter success guarantees keyID/keyPrefix are non-empty; the metadata
 	// setter keeps that cross-file contract explicit for future rotations.
-	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, apiKey, keyID, keyPrefix, userID); perr != nil {
+	// qurlAccountID records who minted the key so a later --repoint can detect a
+	// cross-account move; it is best-effort and tolerated empty on the sandbox
+	// path (see SetAPIKeyWithMetadata).
+	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, apiKey, keyID, keyPrefix, qurlAccountID, userID); perr != nil {
 		if minted.BindingBacked {
 			replayWindowHours := replayWindowHoursOrDefault(cfg.SetupBindingReplayWindowHours, DefaultSetupBindingReplayWindowHours)
 			slog.Error("oauth/callback persist failed — keeping binding-backed key for setup retry", //nolint:gosec // G706: slog escapes control bytes in attribute values.
@@ -877,7 +962,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 // a key we already revoked.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, oldKeyID, userID string) (string, bool) {
+func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, oldKeyID, userID, qurlAccountID string) (string, bool) {
 	mintCtx, mintCancel := context.WithTimeout(context.Background(), mintTimeout)
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, teamID, oldKeyID)
@@ -900,7 +985,7 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 	defer persistCancel()
 	// Replacement mint success has the same metadata invariant as first setup.
-	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, minted.APIKey, minted.KeyID, minted.KeyPrefix, userID); perr != nil {
+	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, minted.APIKey, minted.KeyID, minted.KeyPrefix, qurlAccountID, userID); perr != nil {
 		replayWindowHours := replayWindowHoursOrDefault(cfg.APIKeyMintReplayWindowHours, DefaultAPIKeyMintReplayWindowHours)
 		// TODO(#265): if the owner retries after qurl-service's idempotency
 		// window expires, this live replacement can no longer be replayed and

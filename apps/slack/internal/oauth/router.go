@@ -344,12 +344,15 @@ func replayWindowHoursOrDefault(configuredHours, defaultHours int) int {
 
 // WorkspaceStore is the callback's workspace-key store. APIKey is used by
 // normal setup to reuse an already configured workspace key before minting;
-// APIKeyID is the strongly-read rotation path that needs the qURL key_id
-// before revoking. Implemented by *auth.DDBProvider.
+// APIKeyID is the strongly-read invalid-key check that needs the qURL key_id;
+// APIKeyIdentity is the strongly-read explicit rotation/repoint path that needs
+// the key_id (to revoke) and the qURL account that minted the key (to detect a
+// cross-account move) in one read. Implemented by *auth.DDBProvider.
 type WorkspaceStore interface {
 	APIKey(ctx context.Context, workspaceID string) (string, error)
 	APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error)
-	SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, configuredBy string) error
+	APIKeyIdentity(ctx context.Context, workspaceID string) (keyID, qurlAccountID string, err error)
+	SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error
 	DeleteAPIKey(ctx context.Context, workspaceID string) error
 }
 
