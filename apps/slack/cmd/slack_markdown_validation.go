@@ -9,7 +9,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
@@ -22,18 +25,21 @@ const (
 	envSlackMarkdownValidationTeamID                = "SLACK_MARKDOWN_VALIDATION_TEAM_ID"
 	envSlackMarkdownValidationEnterpriseID          = "SLACK_MARKDOWN_VALIDATION_ENTERPRISE_ID"
 	envSlackMarkdownValidationTimeout               = "SLACK_MARKDOWN_VALIDATION_TIMEOUT"
+	envSlackMarkdownValidationPersistentAck         = "SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES"
 	envSlackMarkdownValidationAssistantChannel      = "SLACK_MARKDOWN_VALIDATION_ASSISTANT_CHANNEL"
 	envSlackMarkdownValidationAssistantThreadTS     = "SLACK_MARKDOWN_VALIDATION_ASSISTANT_THREAD_TS"
 	envSlackMarkdownValidationAssistantRecipientID  = "SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_TEAM_ID"
 	envSlackMarkdownValidationAssistantRecipientUID = "SLACK_MARKDOWN_VALIDATION_ASSISTANT_RECIPIENT_USER_ID"
-	slackMarkdownValidationReviewInstructions       = "Review the posted Slack messages against operator_check; this command does not automate renderer pass/fail."
-	slackMarkdownValidationIncompleteInstructions   = "Fix the delivery error and rerun validation; renderer review requires a delivered report."
-	slackMarkdownValidationSubcommand               = "validate-slack-markdown-renderer"
 )
 
 const defaultSlackMarkdownValidationTimeout = 5 * time.Minute
 
 const (
+	slackMarkdownValidationSubcommand = "validate-slack-markdown-renderer"
+
+	slackMarkdownValidationReviewInstructions     = "Review the posted Slack messages against operator_check; this command does not automate renderer pass/fail."
+	slackMarkdownValidationIncompleteInstructions = "Fix the delivery error and rerun validation; renderer review requires a delivered report."
+
 	slackMarkdownValidationStatusAttempted        = "attempted"
 	slackMarkdownValidationStatusSkipped          = "skipped"
 	slackMarkdownValidationStatusDelivered        = "delivered"
@@ -80,6 +86,7 @@ type slackMarkdownValidationConfig struct {
 	channelID                string
 	teamID                   string
 	enterpriseID             string
+	ackPersistentMessages    bool
 	assistantChannelID       string
 	assistantThreadTS        string
 	assistantRecipientTeamID string
@@ -148,7 +155,9 @@ func runSlackMarkdownRendererValidationCLI(args []string, out io.Writer) error {
 		}
 		return err
 	}
-	report, err := runSlackMarkdownRendererValidation(context.Background(), &cfg)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	report, err := runSlackMarkdownRendererValidation(ctx, &cfg)
 	return writeSlackMarkdownValidationReport(out, &report, err)
 }
 
@@ -195,12 +204,23 @@ func parseSlackMarkdownValidationConfig(args []string, getenv func(string) strin
 			cfg.timeout = timeout
 		}
 	}
+	rawPersistentAck := strings.TrimSpace(getenv(envSlackMarkdownValidationPersistentAck))
+	var rawPersistentAckErr error
+	if rawPersistentAck != "" {
+		ack, err := strconv.ParseBool(rawPersistentAck)
+		if err != nil {
+			rawPersistentAckErr = err
+		} else {
+			cfg.ackPersistentMessages = ack
+		}
+	}
 	fs := flag.NewFlagSet(slackMarkdownValidationSubcommand, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&cfg.channelID, "channel", cfg.channelID, "Slack channel id to receive channel-reply validation messages")
 	fs.StringVar(&cfg.teamID, "team-id", cfg.teamID, "Slack team id for evidence metadata and token lookup")
 	fs.StringVar(&cfg.enterpriseID, "enterprise-id", cfg.enterpriseID, "Slack enterprise id for evidence metadata")
 	fs.DurationVar(&cfg.timeout, "timeout", cfg.timeout, "overall live validation timeout")
+	fs.BoolVar(&cfg.ackPersistentMessages, "ack-persistent-messages", cfg.ackPersistentMessages, "acknowledge validation posts persistent Slack evidence messages")
 	fs.StringVar(&cfg.assistantChannelID, "assistant-channel", cfg.assistantChannelID, "assistant-pane channel id for chat.startStream validation")
 	fs.StringVar(&cfg.assistantThreadTS, "assistant-thread-ts", cfg.assistantThreadTS, "assistant-pane thread ts for chat.startStream validation")
 	fs.StringVar(&cfg.assistantRecipientTeamID, "assistant-recipient-team-id", cfg.assistantRecipientTeamID, "recipient team id for chat.startStream validation")
@@ -209,13 +229,20 @@ func parseSlackMarkdownValidationConfig(args []string, getenv func(string) strin
 		return slackMarkdownValidationConfig{}, err
 	}
 	timeoutFlagSet := false
+	persistentAckFlagSet := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "timeout" {
 			timeoutFlagSet = true
 		}
+		if f.Name == "ack-persistent-messages" {
+			persistentAckFlagSet = true
+		}
 	})
 	if rawTimeoutErr != nil && !timeoutFlagSet {
 		return slackMarkdownValidationConfig{}, fmt.Errorf("%s must be a Go duration: %w", envSlackMarkdownValidationTimeout, rawTimeoutErr)
+	}
+	if rawPersistentAckErr != nil && !persistentAckFlagSet {
+		return slackMarkdownValidationConfig{}, fmt.Errorf("%s must be a boolean: %w", envSlackMarkdownValidationPersistentAck, rawPersistentAckErr)
 	}
 	cfg.token = strings.TrimSpace(cfg.token)
 	cfg.channelID = strings.TrimSpace(cfg.channelID)
@@ -225,19 +252,7 @@ func parseSlackMarkdownValidationConfig(args []string, getenv func(string) strin
 	cfg.assistantThreadTS = strings.TrimSpace(cfg.assistantThreadTS)
 	cfg.assistantRecipientTeamID = strings.TrimSpace(cfg.assistantRecipientTeamID)
 	cfg.assistantRecipientUserID = strings.TrimSpace(cfg.assistantRecipientUserID)
-	if cfg.token == "" {
-		return slackMarkdownValidationConfig{}, fmt.Errorf("%s is required", envSlackMarkdownValidationToken)
-	}
-	if err := auth.ValidateSlackBotTokenShape(cfg.token); err != nil {
-		return slackMarkdownValidationConfig{}, err
-	}
-	if cfg.channelID == "" {
-		return slackMarkdownValidationConfig{}, fmt.Errorf("%s or --channel is required", envSlackMarkdownValidationChannel)
-	}
-	if cfg.timeout <= 0 {
-		return slackMarkdownValidationConfig{}, fmt.Errorf("%s or --timeout must be greater than zero", envSlackMarkdownValidationTimeout)
-	}
-	if err := validateSlackMarkdownValidationAssistantConfig(&cfg); err != nil {
+	if err := validateSlackMarkdownValidationRequiredConfig(&cfg); err != nil {
 		return slackMarkdownValidationConfig{}, err
 	}
 	return cfg, nil
@@ -265,6 +280,9 @@ func runSlackMarkdownRendererValidation(ctx context.Context, input *slackMarkdow
 	if cfg.timeout <= 0 {
 		cfg.timeout = defaultSlackMarkdownValidationTimeout
 	}
+	// The parser already trims CLI configs; normalize this copy so direct
+	// test/operator entry points get the same validation without mutating input.
+	normalizeSlackMarkdownValidationConfig(&cfg)
 	cases := slackMarkdownRendererValidationCases()
 	report = slackMarkdownValidationReport{
 		GeneratedAt:        cfg.now().UTC().Format(time.RFC3339),
@@ -275,9 +293,10 @@ func runSlackMarkdownRendererValidation(ctx context.Context, input *slackMarkdow
 		TeamID:             cfg.teamID,
 		EnterpriseID:       cfg.enterpriseID,
 	}
-	// parseSlackMarkdownValidationConfig handles the CLI path; keep this for
-	// direct test/operator entry points that construct cfg themselves.
-	if err := validateSlackMarkdownValidationAssistantConfig(&cfg); err != nil {
+	// CLI and direct entry points share validation so required fields cannot
+	// drift. Direct config errors intentionally produce config_failed JSON; CLI
+	// config errors return before report construction so operator runs emit none.
+	if err := validateSlackMarkdownValidationRequiredConfig(&cfg); err != nil {
 		failureStatus = slackMarkdownValidationStatusConfigFailed
 		report.RendererVerdict = ""
 		report.ReviewInstructions = ""
@@ -333,6 +352,36 @@ func runSlackMarkdownRendererValidation(ctx context.Context, input *slackMarkdow
 	}
 	report.Surfaces[assistantSurfaceIndex].Status = slackMarkdownValidationStatusDelivered
 	return report, nil
+}
+
+func normalizeSlackMarkdownValidationConfig(cfg *slackMarkdownValidationConfig) {
+	cfg.token = strings.TrimSpace(cfg.token)
+	cfg.channelID = strings.TrimSpace(cfg.channelID)
+	cfg.teamID = strings.TrimSpace(cfg.teamID)
+	cfg.enterpriseID = strings.TrimSpace(cfg.enterpriseID)
+	cfg.assistantChannelID = strings.TrimSpace(cfg.assistantChannelID)
+	cfg.assistantThreadTS = strings.TrimSpace(cfg.assistantThreadTS)
+	cfg.assistantRecipientTeamID = strings.TrimSpace(cfg.assistantRecipientTeamID)
+	cfg.assistantRecipientUserID = strings.TrimSpace(cfg.assistantRecipientUserID)
+}
+
+func validateSlackMarkdownValidationRequiredConfig(cfg *slackMarkdownValidationConfig) error {
+	if cfg.token == "" {
+		return fmt.Errorf("%s is required", envSlackMarkdownValidationToken)
+	}
+	if err := auth.ValidateSlackBotTokenShape(cfg.token); err != nil {
+		return err
+	}
+	if cfg.channelID == "" {
+		return fmt.Errorf("%s or --channel is required", envSlackMarkdownValidationChannel)
+	}
+	if cfg.timeout <= 0 {
+		return fmt.Errorf("%s or --timeout must be greater than zero", envSlackMarkdownValidationTimeout)
+	}
+	if !cfg.ackPersistentMessages {
+		return fmt.Errorf("%s=true or --ack-persistent-messages is required because validation posts persistent Slack messages", envSlackMarkdownValidationPersistentAck)
+	}
+	return validateSlackMarkdownValidationAssistantConfig(cfg)
 }
 
 func validateSlackMarkdownValidationAssistantConfig(cfg *slackMarkdownValidationConfig) error {
@@ -450,6 +499,8 @@ func postSlackMarkdownValidationCase(ctx context.Context, cfg *slackMarkdownVali
 		return result, fmt.Errorf("%s markdown_text body evidence: %w", tc.id, retryErr)
 	}
 	// Keep this fallback trigger in step with newSlackPostMarkdownMessageFuncWithTokenLookup.
+	// The validator owns orchestration so the JSON report can preserve each
+	// attempt's ts/error_code while still sharing the production trigger and bodies.
 	result.RequestShape = slackMarkdownValidationShapePostMarkdownText
 	result.DeliveredMarkdown = deliveredRetry
 	result.FallbackText = ""

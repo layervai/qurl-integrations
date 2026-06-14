@@ -227,9 +227,9 @@ Before enabling the Slack agent standard-Markdown reply surface broadly, run the
 live renderer validation in a real Slack workspace and attach the JSON output to
 the GA enablement issue or to
 [`qurl-integrations#767`](https://github.com/layervai/qurl-integrations/issues/767).
-Run it in a dedicated validation channel or thread: the command intentionally
-leaves the posted Slack messages in place as review evidence and has no dry-run
-or cleanup mode.
+Run it only in a dedicated validation channel or thread, not a customer-visible
+space: the command intentionally leaves the posted Slack messages in place as
+review evidence and has no dry-run or cleanup mode.
 The command posts the hardened Markdown output for the exact renderer-risk cases
 that CI cannot prove: formatting, inline masked links, reference-style links,
 Slack angle links, raw HTML tag starts, image syntax, the
@@ -243,13 +243,16 @@ transport path during GA validation instead of rebuilding a tagged diagnostic
 variant.
 Treat the validation bot token as permission to post persistent evidence
 messages to the configured validation channel; run it only with a token and
-channel approved for GA validation evidence.
+channel approved for GA validation evidence. The command requires
+`SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES=true` or
+`--ack-persistent-messages` so this side effect is explicit on every live run.
 The overall run timeout defaults to 5 minutes; set
 `SLACK_MARKDOWN_VALIDATION_TIMEOUT` or `--timeout` for slower workspaces.
 
 ```bash
 SLACK_MARKDOWN_VALIDATION_BOT_TOKEN=xoxb-... \
 SLACK_MARKDOWN_VALIDATION_CHANNEL=C0123456789 \
+SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES=true \
 SLACK_MARKDOWN_VALIDATION_TEAM_ID=T0123456789 \
   go run ./apps/slack/cmd/ validate-slack-markdown-renderer \
   > slack-markdown-renderer-validation.json
@@ -273,6 +276,7 @@ validation cannot look like a complete run.
 ```bash
 SLACK_MARKDOWN_VALIDATION_BOT_TOKEN=xoxb-... \
 SLACK_MARKDOWN_VALIDATION_CHANNEL=C0123456789 \
+SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES=true \
 SLACK_MARKDOWN_VALIDATION_TEAM_ID=T0123456789 \
 SLACK_MARKDOWN_VALIDATION_ASSISTANT_CHANNEL=D0123456789 \
 SLACK_MARKDOWN_VALIDATION_ASSISTANT_THREAD_TS=1700000000.000100 \
@@ -294,7 +298,7 @@ Delivery/API failures still write the partial JSON report with `status:
 delivery_failed`, `renderer_verdict: delivery_incomplete`, and `error` before
 exiting nonzero, so attach that artifact when investigating a renderer or Slack
 API failure, then fix the delivery error and rerun before renderer review.
-Config and usage errors exit
+CLI config and usage errors exit
 before writing JSON. Slack rate limits abort the current run as a delivery
 failure rather than sleeping and retrying; rerun in the dedicated validation
 channel after the `Retry-After` window. If any Slack-rendered form still hides a
@@ -312,6 +316,7 @@ destination, add code and tests before enablement.
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
 | `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
 | `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
+| `SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES` | Validation | Set to `true` to acknowledge that live renderer validation posts persistent evidence messages. Can also be set with `--ack-persistent-messages`. |
 | `SLACK_MARKDOWN_VALIDATION_TEAM_ID` | Validation | Slack team id recorded in the JSON artifact and used for validation request metadata. |
 | `SLACK_MARKDOWN_VALIDATION_ENTERPRISE_ID` | Validation | Optional Slack Enterprise Grid id recorded in the JSON artifact and used for validation request metadata. |
 | `SLACK_MARKDOWN_VALIDATION_TIMEOUT` | Validation | Optional Go duration for the overall validation run timeout. Defaults to `5m`; can also be set with `--timeout`. |

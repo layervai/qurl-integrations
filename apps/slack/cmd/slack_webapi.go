@@ -211,12 +211,8 @@ func slackOwnerLogID(id string) string {
 	if id == "" {
 		return ""
 	}
-	// Belt-and-suspenders for cmd-layer log sites that can receive operator-
-	// supplied owner IDs before Slack signature verification. The app logger still
-	// emits structured JSON, so internal request logs rely on that escaping plus
-	// Slack signature verification rather than this helper.
-	// Slack owner IDs are uppercase alphanumeric today; fail closed if that shape
-	// changes so logs don't accept arbitrary caller-controlled strings.
+	// Pre-verification owner-ID log sites use this stricter Slack ID allowlist;
+	// printableLogSnippet remains for free-form Slack API strings.
 	// TODO(upstream-contract): if Slack broadens the owner-ID alphabet, update this
 	// allowlist and the sanitizer tests in lockstep.
 	if len(id) > slackOwnerLogIDMaxBytes {

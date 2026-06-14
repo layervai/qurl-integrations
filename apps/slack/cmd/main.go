@@ -665,7 +665,7 @@ func newWorkspaceSlackTokenLookupWithInvalidation(provider slackBotTokenProvider
 			case start.Hit:
 				value := start.Result.Value
 				if value.negative && fallbackToken != "" {
-					cache.warnLegacySlackBotTokenFallback(teamID)
+					cache.warnLegacySlackBotTokenFallback(ctx, teamID)
 				}
 				return value.token, start.Result.Err
 			case !start.Owner:
@@ -772,7 +772,7 @@ func fetchAndFinishWorkspaceSlackToken(
 	// state with no cache entry to evict and clear it later.
 	finished = true
 	if cached && cacheNegative && err == nil && fallbackToken != "" {
-		cache.warnLegacySlackBotTokenFallback(teamID)
+		cache.warnLegacySlackBotTokenFallback(ctx, teamID)
 	}
 	return token, err
 }
@@ -793,13 +793,13 @@ func (c *workspaceSlackTokenLookupCache) purge(teamID string) {
 	})
 }
 
-func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(teamID string) {
+func (c *workspaceSlackTokenLookupCache) warnLegacySlackBotTokenFallback(ctx context.Context, teamID string) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" || !c.markLegacySlackBotTokenFallbackWarned(teamID) {
 		return
 	}
 	slog.LogAttrs(
-		context.Background(),
+		ctx,
 		slog.LevelWarn,
 		"legacy SLACK_BOT_TOKEN fallback is serving workspace without Slack install token",
 		slog.String("team_id", slackOwnerLogID(teamID)),

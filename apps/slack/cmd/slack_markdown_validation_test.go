@@ -33,6 +33,8 @@ const (
 	testSlackValidationMaskedLink = "Use [billing](https://example.com/login)."
 	testSlackValidationCheck      = "check"
 	testSlackValidationTimeoutArg = "--timeout"
+	testSlackValidationHelpArg    = "--help"
+	testSlackValidationAckValue   = "true"
 )
 
 func TestParseSlackMarkdownValidationConfigRequiresTokenAndChannel(t *testing.T) {
@@ -48,6 +50,10 @@ func TestParseSlackMarkdownValidationConfigRequiresTokenAndChannel(t *testing.T)
 		t.Fatalf("missing channel error = %v, want channel requirement", err)
 	}
 	env[envSlackMarkdownValidationChannel] = testSlackValidationChannel
+	if _, err := parseSlackMarkdownValidationConfig(nil, getenv); err == nil || !strings.Contains(err.Error(), envSlackMarkdownValidationPersistentAck) {
+		t.Fatalf("missing persistent-message ack error = %v, want ack requirement", err)
+	}
+	env[envSlackMarkdownValidationPersistentAck] = testSlackValidationAckValue
 	env[envSlackMarkdownValidationTimeout] = "2m"
 	cfg, err := parseSlackMarkdownValidationConfig([]string{"--team-id", testSlackValidationTeam, testSlackValidationTimeoutArg, "30s"}, getenv)
 	if err != nil {
@@ -68,9 +74,10 @@ func TestParseSlackMarkdownValidationConfigRequiresTokenAndChannel(t *testing.T)
 func TestParseSlackMarkdownValidationConfigRejectsInvalidTimeout(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{
-		envSlackMarkdownValidationToken:   testSlackValidationToken,
-		envSlackMarkdownValidationChannel: testSlackValidationChannel,
-		envSlackMarkdownValidationTimeout: "later",
+		envSlackMarkdownValidationToken:         testSlackValidationToken,
+		envSlackMarkdownValidationChannel:       testSlackValidationChannel,
+		envSlackMarkdownValidationTimeout:       "later",
+		envSlackMarkdownValidationPersistentAck: testSlackValidationAckValue,
 	}
 	if _, err := parseSlackMarkdownValidationConfig(nil, func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), envSlackMarkdownValidationTimeout) {
 		t.Fatalf("invalid timeout error = %v, want timeout requirement", err)
@@ -82,12 +89,34 @@ func TestParseSlackMarkdownValidationConfigRejectsInvalidTimeout(t *testing.T) {
 	if cfg.timeout != 30*time.Second {
 		t.Fatalf("timeout = %s, want flag override", cfg.timeout)
 	}
-	if _, err := parseSlackMarkdownValidationConfig([]string{"--help"}, func(key string) string { return env[key] }); !errors.Is(err, flag.ErrHelp) {
+	if _, err := parseSlackMarkdownValidationConfig([]string{testSlackValidationHelpArg}, func(key string) string { return env[key] }); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("help error = %v, want flag.ErrHelp before env timeout validation", err)
 	}
 	env[envSlackMarkdownValidationTimeout] = "1m"
 	if _, err := parseSlackMarkdownValidationConfig([]string{testSlackValidationTimeoutArg, "0"}, func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), "greater than zero") {
 		t.Fatalf("zero timeout error = %v, want positive timeout requirement", err)
+	}
+}
+
+func TestParseSlackMarkdownValidationConfigPersistentAckPrecedence(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{
+		envSlackMarkdownValidationToken:         testSlackValidationToken,
+		envSlackMarkdownValidationChannel:       testSlackValidationChannel,
+		envSlackMarkdownValidationPersistentAck: "maybe",
+	}
+	if _, err := parseSlackMarkdownValidationConfig(nil, func(key string) string { return env[key] }); err == nil || !strings.Contains(err.Error(), envSlackMarkdownValidationPersistentAck) {
+		t.Fatalf("invalid persistent-message ack error = %v, want ack requirement", err)
+	}
+	cfg, err := parseSlackMarkdownValidationConfig([]string{"--ack-persistent-messages"}, func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatalf("flag ack should override invalid env ack: %v", err)
+	}
+	if !cfg.ackPersistentMessages {
+		t.Fatal("ackPersistentMessages = false, want flag override")
+	}
+	if _, err := parseSlackMarkdownValidationConfig([]string{testSlackValidationHelpArg}, func(key string) string { return env[key] }); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("help error = %v, want flag.ErrHelp before env ack validation", err)
 	}
 }
 
@@ -105,7 +134,7 @@ func TestParseSlackMarkdownValidationConfigRejectsMalformedToken(t *testing.T) {
 func TestRunSlackMarkdownRendererValidationCLIHelpReturnsCleanly(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	if err := runSlackMarkdownRendererValidationCLI([]string{"--help"}, &out); err != nil {
+	if err := runSlackMarkdownRendererValidationCLI([]string{testSlackValidationHelpArg}, &out); err != nil {
 		t.Fatalf("help error = %v, want nil", err)
 	}
 	if out.Len() != 0 {
@@ -131,17 +160,18 @@ func TestRunSlackMarkdownRendererValidationPostsEvidenceWithoutAssistantConfig(t
 	t.Cleanup(srv.Close)
 
 	report, err := runSlackMarkdownRendererValidation(context.Background(), &slackMarkdownValidationConfig{
-		token:           testSlackValidationToken,
-		channelID:       testSlackValidationChannel,
-		teamID:          testSlackValidationTeam,
-		enterpriseID:    testSlackValidationEnterprise,
-		postMessageURL:  srv.URL,
-		startStreamURL:  srv.URL,
-		appendStreamURL: srv.URL,
-		stopStreamURL:   srv.URL,
-		userAgent:       testSlackValidationUA,
-		now:             func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
-		httpClient:      srv.Client(),
+		token:                 testSlackValidationToken,
+		channelID:             testSlackValidationChannel,
+		teamID:                testSlackValidationTeam,
+		enterpriseID:          testSlackValidationEnterprise,
+		ackPersistentMessages: true,
+		postMessageURL:        srv.URL,
+		startStreamURL:        srv.URL,
+		appendStreamURL:       srv.URL,
+		stopStreamURL:         srv.URL,
+		userAgent:             testSlackValidationUA,
+		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
+		httpClient:            srv.Client(),
 	})
 	if err != nil {
 		t.Fatalf("run validation: %v", err)
@@ -208,6 +238,7 @@ func TestRunSlackMarkdownRendererValidationPostsAssistantSurface(t *testing.T) {
 		token:                    testSlackValidationToken,
 		channelID:                testSlackValidationChannel,
 		teamID:                   testSlackValidationTeam,
+		ackPersistentMessages:    true,
 		postMessageURL:           srv.URL + "/post",
 		startStreamURL:           srv.URL + testSlackValidationStartPath,
 		appendStreamURL:          srv.URL + testSlackValidationAppendPath,
@@ -261,17 +292,18 @@ func TestRunSlackMarkdownRendererValidationFailsOnPartialAssistantConfig(t *test
 	t.Cleanup(srv.Close)
 
 	report, err := runSlackMarkdownRendererValidation(context.Background(), &slackMarkdownValidationConfig{
-		token:              testSlackValidationToken,
-		channelID:          testSlackValidationChannel,
-		teamID:             testSlackValidationTeam,
-		assistantChannelID: testSlackAssistantChannel,
-		postMessageURL:     srv.URL,
-		startStreamURL:     srv.URL,
-		appendStreamURL:    srv.URL,
-		stopStreamURL:      srv.URL,
-		userAgent:          testSlackValidationUA,
-		now:                func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
-		httpClient:         srv.Client(),
+		token:                 testSlackValidationToken,
+		channelID:             testSlackValidationChannel,
+		teamID:                testSlackValidationTeam,
+		ackPersistentMessages: true,
+		assistantChannelID:    testSlackAssistantChannel,
+		postMessageURL:        srv.URL,
+		startStreamURL:        srv.URL,
+		appendStreamURL:       srv.URL,
+		stopStreamURL:         srv.URL,
+		userAgent:             testSlackValidationUA,
+		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
+		httpClient:            srv.Client(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "partial assistant-pane config") {
 		t.Fatalf("partial assistant config error = %v", err)
@@ -290,13 +322,86 @@ func TestRunSlackMarkdownRendererValidationFailsOnPartialAssistantConfig(t *test
 	}
 }
 
+func TestRunSlackMarkdownRendererValidationFailsFastOnDirectConfigErrors(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"` + testSlackValidationTS + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	tests := []struct {
+		name    string
+		mutate  func(*slackMarkdownValidationConfig)
+		wantErr string
+	}{
+		{
+			name: "missing token",
+			mutate: func(cfg *slackMarkdownValidationConfig) {
+				cfg.token = ""
+			},
+			wantErr: envSlackMarkdownValidationToken,
+		},
+		{
+			name: "malformed token",
+			mutate: func(cfg *slackMarkdownValidationConfig) {
+				cfg.token = "not-a-token"
+			},
+			wantErr: "slack bot token",
+		},
+		{
+			name: "missing channel",
+			mutate: func(cfg *slackMarkdownValidationConfig) {
+				cfg.channelID = ""
+			},
+			wantErr: envSlackMarkdownValidationChannel,
+		},
+		{
+			name: "missing persistent-message ack",
+			mutate: func(cfg *slackMarkdownValidationConfig) {
+				cfg.ackPersistentMessages = false
+			},
+			wantErr: envSlackMarkdownValidationPersistentAck,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := slackMarkdownValidationConfig{
+				token:                 testSlackValidationToken,
+				channelID:             testSlackValidationChannel,
+				ackPersistentMessages: true,
+				postMessageURL:        srv.URL,
+				userAgent:             testSlackValidationUA,
+				now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
+				httpClient:            srv.Client(),
+			}
+			tc.mutate(&cfg)
+			report, err := runSlackMarkdownRendererValidation(context.Background(), &cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if report.Status != slackMarkdownValidationStatusConfigFailed ||
+				report.RendererVerdict != "" ||
+				report.ReviewInstructions != "" ||
+				len(report.Surfaces) != 0 ||
+				len(report.Cases) != 0 {
+				t.Fatalf("direct config report = %+v", report)
+			}
+		})
+	}
+	if posts != 0 {
+		t.Fatalf("posts = %d, want direct config errors before Slack calls", posts)
+	}
+}
+
 func TestRunSlackMarkdownRendererValidationDoesNotMutateInputDefaults(t *testing.T) {
 	t.Parallel()
 	cfg := slackMarkdownValidationConfig{
-		token:              testSlackValidationToken,
-		channelID:          testSlackValidationChannel,
-		teamID:             testSlackValidationTeam,
-		assistantChannelID: testSlackAssistantChannel,
+		token:                 testSlackValidationToken,
+		channelID:             testSlackValidationChannel,
+		teamID:                testSlackValidationTeam,
+		ackPersistentMessages: true,
+		assistantChannelID:    testSlackAssistantChannel,
 	}
 
 	if _, err := runSlackMarkdownRendererValidation(context.Background(), &cfg); err == nil || !strings.Contains(err.Error(), "partial assistant-pane config") {
@@ -331,6 +436,7 @@ func TestRunSlackMarkdownRendererValidationMarksAssistantSurfaceFailed(t *testin
 		token:                    testSlackValidationToken,
 		channelID:                testSlackValidationChannel,
 		teamID:                   testSlackValidationTeam,
+		ackPersistentMessages:    true,
 		postMessageURL:           srv.URL + "/post",
 		startStreamURL:           srv.URL + testSlackValidationStartPath,
 		appendStreamURL:          srv.URL + testSlackValidationAppendPath,
@@ -366,12 +472,13 @@ func TestRunSlackMarkdownRendererValidationFailsWhenFirstPostReturnsNoTimestamp(
 	t.Cleanup(srv.Close)
 
 	report, err := runSlackMarkdownRendererValidation(context.Background(), &slackMarkdownValidationConfig{
-		token:          testSlackValidationToken,
-		channelID:      testSlackValidationChannel,
-		postMessageURL: srv.URL,
-		userAgent:      testSlackValidationUA,
-		now:            func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
-		httpClient:     srv.Client(),
+		token:                 testSlackValidationToken,
+		channelID:             testSlackValidationChannel,
+		ackPersistentMessages: true,
+		postMessageURL:        srv.URL,
+		userAgent:             testSlackValidationUA,
+		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
+		httpClient:            srv.Client(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing Slack ts") {
 		t.Fatalf("error = %v, want missing Slack ts", err)
@@ -398,12 +505,13 @@ func TestRunSlackMarkdownRendererValidationReturnsPartialEvidenceOnFailure(t *te
 	t.Cleanup(srv.Close)
 
 	report, err := runSlackMarkdownRendererValidation(context.Background(), &slackMarkdownValidationConfig{
-		token:          testSlackValidationToken,
-		channelID:      testSlackValidationChannel,
-		postMessageURL: srv.URL,
-		userAgent:      testSlackValidationUA,
-		now:            func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
-		httpClient:     srv.Client(),
+		token:                 testSlackValidationToken,
+		channelID:             testSlackValidationChannel,
+		ackPersistentMessages: true,
+		postMessageURL:        srv.URL,
+		userAgent:             testSlackValidationUA,
+		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
+		httpClient:            srv.Client(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "channel_not_found") {
 		t.Fatalf("error = %v, want channel_not_found", err)
@@ -445,6 +553,7 @@ func TestRunSlackMarkdownRendererValidationCLIDoesNotEmitJSONForConfigErrors(t *
 func TestRunSlackMarkdownRendererValidationCLIDoesNotEmitJSONForPartialAssistantConfig(t *testing.T) {
 	t.Setenv(envSlackMarkdownValidationToken, testSlackValidationToken)
 	t.Setenv(envSlackMarkdownValidationChannel, testSlackValidationChannel)
+	t.Setenv(envSlackMarkdownValidationPersistentAck, testSlackValidationAckValue)
 	t.Setenv(envSlackMarkdownValidationAssistantChannel, testSlackAssistantChannel)
 
 	var out bytes.Buffer
@@ -464,12 +573,13 @@ func TestRunSlackMarkdownRendererValidationCLIEmitsPartialReportOnFailure(t *tes
 	t.Cleanup(srv.Close)
 
 	cfg := slackMarkdownValidationConfig{
-		token:          testSlackValidationToken,
-		channelID:      testSlackValidationChannel,
-		postMessageURL: srv.URL,
-		userAgent:      testSlackValidationUA,
-		now:            func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
-		httpClient:     srv.Client(),
+		token:                 testSlackValidationToken,
+		channelID:             testSlackValidationChannel,
+		ackPersistentMessages: true,
+		postMessageURL:        srv.URL,
+		userAgent:             testSlackValidationUA,
+		now:                   func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) },
+		httpClient:            srv.Client(),
 	}
 	var out bytes.Buffer
 	report, err := runSlackMarkdownRendererValidation(context.Background(), &cfg)
