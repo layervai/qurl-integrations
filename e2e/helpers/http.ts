@@ -23,9 +23,10 @@
  *         503), and `/api/mint_link` DOES emit one app-level 503 — its pre-bake
  *         "render-at-mint not ready" guard — but that fires BEFORE any bake, so a
  *         retry still can't duplicate a `views/<mint-id>` object (its post-bake
- *         failures surface as 502, which POSTs don't retry). If any endpoint ever
- *         returns a 503 AFTER partially processing, move 503 to the
- *         idempotent-only set below.
+ *         failures surface as 502, which POSTs don't retry). TODO(upstream-contract):
+ *         this mirrors the qurl-s3-connector mint/upload contract (handler.go —
+ *         pre-bake 503 guard + 502 default) — if either endpoint ever returns a
+ *         503 AFTER partially processing, move 503 to the idempotent-only set below.
  *       · IDEMPOTENT methods (GET/HEAD/…, e.g. the `/view` read) ALSO retry
  *         {502, 504} — transient gateway failures where the backend MAY have
  *         already processed the request before the response was lost. Retrying

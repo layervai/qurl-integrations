@@ -114,7 +114,7 @@ export async function mintConnectorView(
   resourceId: string,
   apiKey: string,
   opts: { expiresAt: string; oneTimeUse?: boolean },
-): Promise<{ qurl_id: string; qurl_link: string; expires_at: string }> {
+): Promise<{ qurl_link: string }> {
   const res = await fetchWithTransientRetry(`${uploadUrl}/mint_link/${encodeURIComponent(resourceId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -132,7 +132,9 @@ export async function mintConnectorView(
   if (!link?.qurl_link) {
     throw new Error(`mint_link returned no link: ${JSON.stringify(data)}`);
   }
-  return link;
+  // Return only the field this helper guarantees (and the caller uses); the
+  // response also carries qurl_id/expires_at, but only qurl_link is guard-checked.
+  return { qurl_link: link.qurl_link };
 }
 
 /** Mint a one-time qURL link for a resource */
