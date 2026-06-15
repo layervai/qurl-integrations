@@ -53,10 +53,13 @@ describe('File Revoke', () => {
       env.QURL_API_KEY,
     );
     expect(upload.resource_id).toMatch(/^r_/);
-    // The view step navigates to this link, so assert it's present here — the
-    // shared uploadFile helper succeeds on resource_id alone and doesn't gate on
-    // qurl_link (so it can't change the viewer-ttl smoke's contract).
-    expect(upload.qurl_link).toBeTruthy();
+    // The view step navigates to this link. The shared uploadFile helper succeeds
+    // on resource_id alone (so it can't change the viewer-ttl smoke's contract),
+    // hence qurl_link is optional on the result — guard here both to fail loudly
+    // with a clear message AND to narrow the type for viewViaQurlLink below.
+    if (!upload.qurl_link) {
+      throw new Error('uploadFile succeeded but returned no qurl_link for the view step');
+    }
 
     // View the file through the REAL recipient path: qurl.link → NHP knock →
     // tunnel view. #1111 decommissioned the legacy fileviewer host, so a direct

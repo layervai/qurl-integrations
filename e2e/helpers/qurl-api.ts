@@ -39,7 +39,7 @@ export async function uploadFile(
   file: string | { bytes: Uint8Array; filename: string; mime?: string },
   apiKey: string,
   opts?: { viewerTtlSeconds?: number },
-): Promise<{ resource_id: string; qurl_link: string }> {
+): Promise<{ resource_id: string; qurl_link?: string }> {
   const fileBuffer: Uint8Array = typeof file === 'string' ? fs.readFileSync(file) : file.bytes;
   const fileName = typeof file === 'string' ? path.basename(file) : file.filename;
   const mime = typeof file === 'string' ? undefined : file.mime;
@@ -70,7 +70,7 @@ export async function uploadFile(
     // response it never contracts on. Callers needing the link assert it
     // themselves (file-revoke).
     if (data.resource_id) {
-      return { resource_id: data.resource_id, qurl_link: data.qurl_link ?? '' };
+      return { resource_id: data.resource_id, qurl_link: data.qurl_link };
     }
 
     const errStr = typeof data.error === 'string' ? data.error : '';
