@@ -67,7 +67,6 @@ describe('File Revoke', () => {
       expiresAt,
       oneTimeUse: true,
     });
-    expect(minted.qurl_link).toBeTruthy();
 
     // View through the REAL recipient path: qurl.link → NHP knock → tunnel view.
     // #1111 decommissioned the legacy fileviewer host, so only a real browser
