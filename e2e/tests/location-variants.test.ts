@@ -69,6 +69,10 @@ const LOCATION_VARIANTS = [
   { id: 'https-fragment', url: 'https://example.com/page#section-2' },
   { id: 'https-port', url: 'https://example.com:8443/api' },
   // http-plain and localhost are tested separately as expected rejections
+  // NOTE: maps RENDER support was dropped (product decision); these two now
+  // exercise only URL-shape escaping (a long https URL with @coords/path, and a
+  // short redirect URL), NOT maps. Kept as generic URL fixtures — the `maps`
+  // label is historical and rides the connector maps dead-code cleanup.
   { id: 'google-maps-full', url: 'https://www.google.com/maps/place/Eiffel+Tower/@48.8584,2.2945,17z/' },
   { id: 'google-maps-short', url: 'https://maps.app.goo.gl/abc123' },
   { id: 'url-encoded', url: 'https://example.com/path%20with%20spaces?q=%E4%B8%AD%E6%96%87' },

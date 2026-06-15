@@ -76,20 +76,25 @@ export async function viewViaQurlLink(
     const page = await (await browser.newContext()).newPage();
 
     // Wait on the tunnel-view RESPONSE, registered BEFORE goto so one that lands
-    // mid-navigation isn't missed. domcontentloaded, NOT networkidle: the tunnel
-    // keepalive means networkidle never fires. The predicate is URL-only — status
-    // is checked after, so a non-200 view throws "returned N", not "no response".
-    const tunnelResponse = page.waitForResponse((r) => TUNNEL_VIEW_RE.test(r.url()), {
-      timeout: timeoutMs,
-    });
+    // mid-navigation isn't missed. Settle it into an always-resolving promise
+    // (Response | undefined): goto and the waiter share timeoutMs, so if goto
+    // rejects first the bare waiter would reject later with nothing awaiting it —
+    // an unhandled rejection jest can misattribute to a later test. domcontentloaded,
+    // NOT networkidle: the tunnel keepalive means networkidle never fires. The
+    // predicate is URL-only — status is checked after, so a non-200 view throws
+    // "returned N", not "no response".
+    const tunnelResponse = page
+      .waitForResponse((r) => TUNNEL_VIEW_RE.test(r.url()), { timeout: timeoutMs })
+      .catch(() => undefined);
     await page.goto(qurlLink, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
 
-    const resp = await tunnelResponse.catch(() => {
+    const resp = await tunnelResponse;
+    if (!resp) {
       throw new Error(
         `viewViaQurlLink: no tunnel-view response (…/views/<id>) within ${timeoutMs}ms — ` +
           `the knock did not resolve to a served view (link revoked/consumed/expired, or tunnel down).`,
       );
-    });
+    }
     if (resp.status() !== 200) {
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }

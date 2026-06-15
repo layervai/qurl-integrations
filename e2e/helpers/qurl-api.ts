@@ -61,8 +61,16 @@ export async function uploadFile(
 
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data = (await res.json()) as { resource_id?: string; qurl_link?: string; error?: string };
-    if (data.resource_id && data.qurl_link) {
-      return { resource_id: data.resource_id, qurl_link: data.qurl_link };
+    // Success signal is `resource_id` alone — the connector's documented marker
+    // that the upload AND the mint succeeded. A mint failure returns HTTP 200 +
+    // success:true + an `error` string + NO resource_id (the 2026-05-13 shape),
+    // which falls through to the throw below. Deliberately do NOT also gate on
+    // `qurl_link`: the sibling viewer-ttl smoke asserts only resource_id, so a
+    // link requirement here would couple that test to a resource_id-without-link
+    // response it never contracts on. Callers needing the link assert it
+    // themselves (file-revoke).
+    if (data.resource_id) {
+      return { resource_id: data.resource_id, qurl_link: data.qurl_link ?? '' };
     }
 
     const errStr = typeof data.error === 'string' ? data.error : '';
@@ -70,7 +78,7 @@ export async function uploadFile(
       await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
       continue;
     }
-    throw new Error(`Upload returned no resource_id/qurl_link: ${JSON.stringify(data)}`);
+    throw new Error(`Upload returned no resource_id: ${JSON.stringify(data)}`);
   }
   throw new Error(`uploadFile: still rate-limited after ${maxAttempts} attempts`);
 }
