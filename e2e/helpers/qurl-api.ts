@@ -105,7 +105,10 @@ export async function uploadFile(
  * ready" guard (so a retry can't double-bake a `views/<mint-id>` object),
  * post-bake failures surface as 502 (which the helper does NOT retry for a
  * POST), and a rate-limited mint is HTTP 429 (which it backs off on) — so,
- * unlike `uploadFile`, no separate 200+`error` rate-limit loop is needed. */
+ * unlike `uploadFile`, no separate 200+`error` rate-limit loop is needed.
+ *
+ * `oneTimeUse` defaults true — single-view, matching `viewViaQurlLink`'s one
+ * knock+navigation per call. */
 export async function mintConnectorView(
   uploadUrl: string,
   resourceId: string,
@@ -119,12 +122,14 @@ export async function mintConnectorView(
   });
   if (!res.ok) throw new Error(`mint_link failed: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as {
-    success?: boolean;
     error?: string;
     links?: Array<{ qurl_id: string; qurl_link: string; expires_at: string }>;
   };
+  // Gate on the link itself, not a `success` flag: a non-200 already threw above
+  // (`!res.ok`), and a 200 always carries `links[]`, so a present `qurl_link` is
+  // the authoritative signal (mirrors uploadFile keying on `resource_id`).
   const link = data.links?.[0];
-  if (!data.success || !link?.qurl_link) {
+  if (!link?.qurl_link) {
     throw new Error(`mint_link returned no link: ${JSON.stringify(data)}`);
   }
   return link;

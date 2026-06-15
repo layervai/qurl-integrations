@@ -17,11 +17,15 @@
  *         provably did NOT reach/complete at the app (503 = ALB has no healthy
  *         target, the drain-gap; 408/425/429 = rejected/timed-out before
  *         processing), so a retry can't duplicate work even on a POST. NOTE the
- *         503-on-POST guarantee is contingent on the connector signaling
- *         rate-limits via HTTP 200 + `error` (not an app-level 503), so a 503
- *         here is always the ALB no-healthy-target case, never a post-accept app
- *         503. If the connector ever returns a real app-level 503 after partially
- *         processing, move 503 to the idempotent-only set below.
+ *         503-on-POST guarantee is contingent on the connector never emitting an
+ *         app-level 503 *after* partially processing. Both POST endpoints honor
+ *         that: `/upload` signals rate-limits via HTTP 200 + `error` (never a
+ *         503), and `/api/mint_link` DOES emit one app-level 503 — its pre-bake
+ *         "render-at-mint not ready" guard — but that fires BEFORE any bake, so a
+ *         retry still can't duplicate a `views/<mint-id>` object (its post-bake
+ *         failures surface as 502, which POSTs don't retry). If any endpoint ever
+ *         returns a 503 AFTER partially processing, move 503 to the
+ *         idempotent-only set below.
  *       · IDEMPOTENT methods (GET/HEAD/…, e.g. the `/view` read) ALSO retry
  *         {502, 504} — transient gateway failures where the backend MAY have
  *         already processed the request before the response was lost. Retrying
