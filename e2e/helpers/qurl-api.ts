@@ -97,7 +97,15 @@ export async function uploadFile(
  * (`MINT_API_URL`); this hits the CONNECTOR (`uploadUrl` = the `/api` base).
  *
  * `expiresAt` is REQUIRED by render-at-mint (RFC3339; the connector clamps to
- * its max-expiry cap rather than rejecting an over-cap value). */
+ * its max-expiry cap rather than rejecting an over-cap value).
+ *
+ * Sends `n: 1` (mint exactly one link → read `links[0]`). The POST goes through
+ * `fetchWithTransientRetry`, which is safe here despite being non-idempotent:
+ * per the mint handler a 503 comes ONLY from the pre-bake "render-at-mint not
+ * ready" guard (so a retry can't double-bake a `views/<mint-id>` object),
+ * post-bake failures surface as 502 (which the helper does NOT retry for a
+ * POST), and a rate-limited mint is HTTP 429 (which it backs off on) — so,
+ * unlike `uploadFile`, no separate 200+`error` rate-limit loop is needed. */
 export async function mintConnectorView(
   uploadUrl: string,
   resourceId: string,
