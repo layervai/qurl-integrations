@@ -21,9 +21,9 @@ const env = loadEnv();
 // Per-RUN nonce appended to every minted target_url so each CI run mints FRESH
 // qURL resources instead of re-targeting the same generic URLs. URL-safe
 // (alphanumeric + hyphen), so it never alters the escaping a fixture exercises.
-// Unlike google-maps.test.ts — whose byte-identical file fixtures could share an
-// md5, so it also carries a per-upload counter — every variant URL here is
-// already mutually distinct, so RUN_NONCE alone guarantees uniqueness.
+// Unlike fixed-fixture file tests (e.g. file-revoke's one-pixel PNG) — whose
+// byte-identical uploads could share an md5 — every variant URL here is already
+// mutually distinct, so RUN_NONCE alone guarantees uniqueness.
 const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 // Every resource minted this run, revoked in afterAll so they don't persist and
@@ -93,7 +93,7 @@ describe('Location Variants', () => {
     // Track before the assertions so a successfully-minted resource is always
     // revoked in afterAll even if an expect() below throws — otherwise it leaks
     // past cleanup, reintroducing the exact uncleaned-prod-state class this fix
-    // closes. (Matches google-maps.test.ts, which tracks before validating.)
+    // closes. (Matches the track-before-validate pattern in file-revoke.test.ts.)
     // Guard on a defined id so a malformed mint fails only its assertion below,
     // not also a spurious `revokeLink(undefined)` 404 warning in afterAll.
     if (result.resource_id) createdResourceIds.push(result.resource_id);

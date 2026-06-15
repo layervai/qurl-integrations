@@ -9,26 +9,25 @@
  *   1. The recipient opens the minted `qurl_link`. The capability lives in the
  *      URL FRAGMENT (`#at_<token>`), which the server never sees — only the SPA's
  *      JS reads it.
- *   2. The SPA performs the NHP "knock" (a `302` through
- *      `resolve.qurl.link…/plugins/qurl`).
- *   3. The actual view renders in a CHILD FRAME at
- *      `https://r_<id>.qurl.site…/views/<mint-id>` — NOT the top frame.
+ *   2. The SPA POSTs the token to the resolve endpoint — the NHP "knock" — which
+ *      `302`s the browser to the per-recipient tunnel view at
+ *      `https://r_<id>.qurl.site…/views/<mint-id>`.
  *
- * `node fetch`/curl cannot do step 1 (no JS to read the fragment) or step 3 (no
- * frame). A real browser can — hence Playwright chromium, headless.
+ * `node fetch`/curl can't do step 1 (no JS to read the fragment), so they only
+ * ever get the static SPA shell — never the tunnel view. A real browser can,
+ * hence Playwright chromium, headless. The arrival of the `…/views/<id>` response
+ * is the end-to-end signal: it proves the browser completed the knock AND the
+ * tunnel served the view.
  *
  * Each `qurl_link` is ONE-TIME-USE (consumed on first view), so every view needs
- * its own fresh mint+link. We therefore launch and close a fresh browser per
- * call rather than sharing one — the call is the unit of work, and a per-call
- * browser keeps state (cookies/storage) from leaking between independent mints.
+ * its own fresh mint+link — we launch and close a fresh browser per call so no
+ * cookie/storage state leaks between independent mints.
  *
- * Proven against sandbox (2026-06-15): a real mint produced
- *   302 resolve.qurl.link.layerv.xyz/plugins/qurl   (the knock)
- *   200 r_<id>.qurl.site.layerv.xyz/views/<mint-id>  (the tunnel view)
- * and the child frame rendered an `<img>`.
+ * Proven against sandbox (2026-06-15): `302 resolve.qurl.link…/plugins/qurl`
+ * (the knock) → `200 r_<id>.qurl.site…/views/<mint-id>` (the tunnel view).
  */
 
-import { chromium, type Browser, type Frame, type Response } from 'playwright';
+import { chromium, type Browser } from 'playwright';
 
 /** Matches the tunnel view URL on ANY environment:
  *   https://r_<id>.qurl.site<.layerv.xyz|.layerv.ai|…>/views/<mint-id>
@@ -41,121 +40,65 @@ export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
   headless?: boolean;
-  /** Total wall-clock budget for the navigation + knock + tunnel-frame render,
-   *  in ms. Default 30_000. The page.goto itself is capped at this value too. */
+  /** Wall-clock budget for navigation + knock + the tunnel-view response, in ms.
+   *  Default 30_000. */
   timeoutMs?: number;
 }
 
 export interface ViewViaQurlLinkResult {
-  /** Rendered HTML of the TUNNEL CHILD FRAME (not the top SPA frame). */
-  html: string;
-  /** HTTP status of the tunnel-view response (the `…/views/<id>` 200). */
+  /** HTTP status of the tunnel-view response (200 means the view served). */
   status: number;
-  /** The fully-resolved tunnel-frame URL (carries the capability mint-id — do
-   *  NOT log it; the caller asserts on `html`/`status`, not this). */
-  frameUrl: string;
+  /** The resolved tunnel-view URL (carries the capability mint-id — do NOT log
+   *  it; the caller asserts on `status`). */
+  url: string;
 }
 
 function resolveHeadless(opt?: boolean): boolean {
   if (opt !== undefined) return opt;
   // Local-debug overrides; default headless for CI.
-  if (process.env.PLAYWRIGHT_HEADED === '1' || process.env.HEADLESS === '0') {
-    return false;
-  }
-  return true;
+  return !(process.env.PLAYWRIGHT_HEADED === '1' || process.env.HEADLESS === '0');
 }
 
 /**
- * Open a minted `qurl_link` in a headless browser, drive the NHP knock, wait for
- * the fileviewer reverse-tunnel CHILD FRAME to render, and return its HTML +
- * status + URL.
+ * Open a minted `qurl_link` in a headless browser, let the SPA drive the NHP
+ * knock, and resolve when the reverse-tunnel view response (`…/views/<id>`)
+ * arrives — returning its status + URL.
  *
- * Throws a clear error if no tunnel-frame `200` (a `…/views/<id>` response)
- * appears within `timeoutMs` — that is the signal a caller asserts on for the
- * negative case (e.g. a revoked link must NOT render a tunnel view).
- *
- * The browser is launched and closed per call (the `qurl_link` is one-time-use,
- * so each view is a distinct mint anyway).
+ * THROWS if no `…/views/<id>` response arrives within `timeoutMs` — the negative
+ * signal a caller relies on (a revoked/consumed/expired link, or a tunnel that's
+ * down, never serves the view).
  */
 export async function viewViaQurlLink(
   qurlLink: string,
   opts: ViewViaQurlLinkOptions = {},
 ): Promise<ViewViaQurlLinkResult> {
-  const headless = resolveHeadless(opts.headless);
   const timeoutMs = opts.timeoutMs ?? 30_000;
-
   let browser: Browser | undefined;
   try {
-    browser = await chromium.launch({ headless });
-    const context = await browser.newContext();
-    const page = await context.newPage();
+    browser = await chromium.launch({ headless: resolveHeadless(opts.headless) });
+    const page = await (await browser.newContext()).newPage();
 
-    // Capture the tunnel-view response status as soon as it lands. The view
-    // renders in a child frame, so we watch ALL responses (not just the top
-    // document) and latch the first one whose URL matches the tunnel-view shape.
-    let tunnelStatus: number | undefined;
-    let tunnelUrl: string | undefined;
-    page.on('response', (resp: Response) => {
-      const url = resp.url();
-      if (TUNNEL_VIEW_RE.test(url) && tunnelStatus === undefined) {
-        tunnelStatus = resp.status();
-        tunnelUrl = url;
-      }
+    // Wait on the tunnel-view RESPONSE, registered BEFORE goto so one that lands
+    // mid-navigation isn't missed. domcontentloaded, NOT networkidle: the tunnel
+    // keepalive means networkidle never fires. The predicate is URL-only — status
+    // is checked after, so a non-200 view throws "returned N", not "no response".
+    const tunnelResponse = page.waitForResponse((r) => TUNNEL_VIEW_RE.test(r.url()), {
+      timeout: timeoutMs,
     });
-
-    // domcontentloaded, NOT networkidle: the tunnel transport holds a keepalive
-    // connection open, so 'networkidle' never fires and would hang to timeout.
     await page.goto(qurlLink, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
 
-    // Wait for the tunnel view to be SERVED — a 200 on `…/views/<id>`. We key on
-    // the RESPONSE, not a specific frame: the view renders in a CHILD FRAME for
-    // baked types (image/pdf — an <img> iframe) but in the TOP FRAME for url-type
-    // (the SPA fetches the 200 and renders the "Open in Google Maps" card client-
-    // side inline). Requiring a child frame would falsely fail every url-type view.
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline && tunnelStatus === undefined) {
-      await page.waitForTimeout(250);
-    }
-
-    if (tunnelStatus === undefined) {
+    const resp = await tunnelResponse.catch(() => {
       throw new Error(
         `viewViaQurlLink: no tunnel-view response (…/views/<id>) within ${timeoutMs}ms — ` +
-          `the knock did not resolve to a rendered view (link revoked/consumed/expired, ` +
-          `or the tunnel is down).`,
+          `the knock did not resolve to a served view (link revoked/consumed/expired, or tunnel down).`,
       );
+    });
+    if (resp.status() !== 200) {
+      throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }
-    if (tunnelStatus !== 200) {
-      throw new Error(
-        `viewViaQurlLink: tunnel-view returned ${tunnelStatus} (expected 200) — ` +
-          `the knock resolved but the view did not render.`,
-      );
-    }
-
-    // The 200 landed, but the SPA may still be mid-render: during the knock +
-    // client-side render the top document carries class="verifying", which it
-    // DROPS once the view is ready (the url-type "Open in Google Maps" card
-    // renders inline only after this; collecting too early yields the verifying
-    // shell). Wait for the class to clear. For baked image/pdf the view is in a
-    // child frame and the top may stay "verifying" — the `.catch` lets those
-    // fall through (the child-frame HTML is already present), then a short settle.
-    await page
-      .waitForFunction(() => !document.documentElement.classList.contains('verifying'), {
-        timeout: Math.max(8_000, deadline - Date.now()),
-      })
-      .catch(() => {});
-    await page.waitForTimeout(1_000);
-    const frameHtmls = await Promise.all(
-      page.frames().map((f: Frame) => f.content().catch(() => '')),
-    );
-    const tunnelFrame = page.frames().find((f) => TUNNEL_VIEW_RE.test(f.url()));
-    return {
-      html: frameHtmls.join('\n'),
-      status: tunnelStatus,
-      frameUrl: tunnelUrl ?? tunnelFrame?.url() ?? page.url(),
-    };
+    return { status: resp.status(), url: resp.url() };
   } finally {
-    // Always tear the browser down — a leaked chromium would hang jest's worker
-    // exit. `?.close()` is null-safe if launch threw.
+    // Always tear the browser down — a leaked chromium would hang jest's worker exit.
     await browser?.close();
   }
 }
