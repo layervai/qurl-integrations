@@ -661,6 +661,20 @@ func contextBlock(text string) map[string]any {
 	}
 }
 
+// plainTextContextBlock is contextBlock's plain_text sibling: a `context` block
+// with a single plain_text element, so Slack does no mrkdwn parsing on it. The
+// confirm card uses it for its fixed AI-provenance subtext, keeping the card's
+// "no mrkdwn next to the Approve button" invariant (the summary/reason render
+// plain_text for the same injection-defense reason).
+func plainTextContextBlock(text string) map[string]any {
+	return map[string]any{
+		"type": "context",
+		blockKitFieldElements: []any{
+			plainTextObj(text),
+		},
+	}
+}
+
 // plainTextObj returns a `plain_text` text object. Slack uses two
 // distinct text-object shapes (`plain_text` and `mrkdwn`); the modal
 // title/submit/close fields require `plain_text` specifically.

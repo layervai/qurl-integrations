@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -120,6 +122,26 @@ func (b *agentBackend) fail(op string, err error) (string, error) {
 	return "", fmt.Errorf("%s: %w", op, err)
 }
 
+// authClientForTurn resolves the workspace's qURL client for a tool call,
+// translating the "workspace not connected" case into the same actionable nudge
+// the slash path uses (workspaceNotSetupMessage), returned as CONTENT so the
+// model relays "run /qurl setup <email>" instead of a generic model-safe error.
+// Any other client error stays a fail() (logged, collapsed to the generic
+// string). nudged is true on the unbound case so callers return the nudge
+// without treating it as a hard error. The nudge is workspace state, not an
+// LLM-distilled value, so it is safe to surface verbatim.
+func (b *agentBackend) authClientForTurn(ctx context.Context, op string, tc *agent.TurnContext) (c *client.Client, nudge string, nudged bool, errOut error) {
+	c, err := b.authClient(ctx, tc.TeamID)
+	if err == nil {
+		return c, "", false, nil
+	}
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return nil, workspaceNotSetupMessage, true, nil
+	}
+	_, errOut = b.fail(op, err)
+	return nil, "", false, errOut
+}
+
 // agentBackendUnconfigured is returned (as content, not an error) when the admin
 // store isn't wired — a no-DDB deploy answers gracefully instead of erroring.
 const agentBackendUnconfigured = "Resource information isn't available in this workspace yet."
@@ -137,9 +159,12 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 	if len(allowed) == 0 {
 		return "No resources are protected in this channel yet.", nil
 	}
-	c, err := b.authClient(ctx, tc.TeamID)
+	c, nudge, nudged, err := b.authClientForTurn(ctx, "list resources: client", tc)
+	if nudged {
+		return nudge, nil
+	}
 	if err != nil {
-		return b.fail("list resources: client", err)
+		return "", err
 	}
 	resources, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
@@ -262,9 +287,12 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	if err != nil {
 		return b.fail("resolve token: channel scope", err)
 	}
-	c, err := b.authClient(ctx, tc.TeamID)
+	c, nudge, nudged, err := b.authClientForTurn(ctx, "resolve token: client", tc)
+	if nudged {
+		return nudge, nil
+	}
 	if err != nil {
-		return b.fail("resolve token: client", err)
+		return "", err
 	}
 	out, err := c.ListResources(ctx, client.ListResourcesInput{Slug: token})
 	if err != nil {
@@ -284,9 +312,12 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 
 // Quota reports the workspace plan and usage.
 func (b *agentBackend) Quota(ctx context.Context, tc *agent.TurnContext) (string, error) {
-	c, err := b.authClient(ctx, tc.TeamID)
+	c, nudge, nudged, err := b.authClientForTurn(ctx, "quota: client", tc)
+	if nudged {
+		return nudge, nil
+	}
 	if err != nil {
-		return b.fail("quota: client", err)
+		return "", err
 	}
 	q, err := c.GetQuota(ctx)
 	if err != nil {
