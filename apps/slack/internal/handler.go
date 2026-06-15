@@ -1816,9 +1816,18 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
 	// event triggers). Best-effort and idempotent: the primary disconnect already
 	// succeeded, so a sweep failure is logged inside purgeWorkspace and does not
-	// change the success reply. Runs inside the same sync budget as the slash ack.
+	// change the success reply. Run it on a tracked async goroutine off h.baseCtx
+	// (NOT this request's ctx, which `defer cancel()`s on return) so the extra
+	// DeleteItem/Query round-trips — which can be several on a workspace used in
+	// many channels — stay off the slash ack's tight sync budget. h.Go is
+	// wg-tracked so a graceful shutdown drains an in-flight purge.
+	purgeTeamID := teamID
 	purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID)
-	h.purgeWorkspace(ctx, purgeLog, teamID)
+	h.Go(func() {
+		purgeCtx, purgeCancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
+		defer purgeCancel()
+		h.purgeWorkspace(purgeCtx, purgeLog, purgeTeamID)
+	})
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
 		respondSlack(w, revokedReply)

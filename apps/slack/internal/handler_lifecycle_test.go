@@ -153,10 +153,14 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 
 	resp := slashUninstallAsAdmin(t, h)
 
-	// Existing behavior preserved: the qURL key delete still happens.
+	// Existing behavior preserved: the qURL key delete still happens synchronously
+	// (it gates the success reply).
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
+	// The full purge runs on a tracked async goroutine (off the slash ack's sync
+	// budget); drain it before asserting the rest of the workspace is gone.
+	h.Wait()
 	// New behavior: the workspace_state row (bot token + all) is removed too.
 	if provider.deleteStateCalls != 1 {
 		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (uninstall must forget the bot token)", provider.deleteStateCalls)
