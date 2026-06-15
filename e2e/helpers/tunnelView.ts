@@ -48,9 +48,6 @@ export interface ViewViaQurlLinkOptions {
 export interface ViewViaQurlLinkResult {
   /** HTTP status of the tunnel-view response (200 means the view served). */
   status: number;
-  /** The resolved tunnel-view URL (carries the capability mint-id — do NOT log
-   *  it; the caller asserts on `status`). */
-  url: string;
 }
 
 function resolveHeadless(opt?: boolean): boolean {
@@ -62,7 +59,7 @@ function resolveHeadless(opt?: boolean): boolean {
 /**
  * Open a minted `qurl_link` in a headless browser, let the SPA drive the NHP
  * knock, and resolve when the reverse-tunnel view response (`…/views/<id>`)
- * arrives — returning its status + URL.
+ * arrives — returning its HTTP status (200 = the view served).
  *
  * THROWS if no `…/views/<id>` response arrives within `timeoutMs` — the negative
  * signal a caller relies on (a revoked/consumed/expired link, or a tunnel that's
@@ -96,7 +93,7 @@ export async function viewViaQurlLink(
     if (resp.status() !== 200) {
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }
-    return { status: resp.status(), url: resp.url() };
+    return { status: resp.status() };
   } finally {
     // Always tear the browser down — a leaked chromium would hang jest's worker exit.
     await browser?.close();
