@@ -39,6 +39,9 @@ type fakeDDBClient struct {
 	updateFunc   func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
+	deleteInput  *dynamodb.DeleteItemInput
+	deleteCalls  int
+	deleteErr    error
 }
 
 func (f *fakeDDBClient) GetItem(ctx context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -62,6 +65,11 @@ func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemI
 		return f.updateOutput, f.updateErr
 	}
 	return &dynamodb.UpdateItemOutput{}, f.updateErr
+}
+func (f *fakeDDBClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteCalls++
+	f.deleteInput = in
+	return &dynamodb.DeleteItemOutput{}, f.deleteErr
 }
 
 // emptyPlaintextEncryptor decrypts any ciphertext to zero bytes. Used
@@ -2177,6 +2185,78 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "UpdateItem") {
 			t.Fatalf("wrapped error should name UpdateItem, got %v", err)
+		}
+	})
+}
+
+func TestDDBProviderDeleteWorkspaceState(t *testing.T) {
+	t.Run("deletes the whole row by team_id", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Date(2026, 6, 13, 12, 34, 56, 0, time.UTC) },
+		}
+		if err := p.DeleteWorkspaceState(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteWorkspaceState: %v", err)
+		}
+		if ddb.deleteCalls != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", ddb.deleteCalls)
+		}
+		if ddb.deleteInput == nil {
+			t.Fatal("expected DeleteItem called")
+		}
+		if got := aws.ToString(ddb.deleteInput.TableName); got != "ws" {
+			t.Errorf("DeleteItem table = %q, want %q", got, "ws")
+		}
+		if v, ok := ddb.deleteInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
+			t.Errorf("DeleteItem key = %v, want team_id=%q", ddb.deleteInput.Key, testTeamID)
+		}
+		// Whole-row delete: no ConditionExpression (idempotent on an absent row).
+		if ddb.deleteInput.ConditionExpression != nil {
+			t.Errorf("DeleteItem ConditionExpression = %q, want none (delete must be unconditional/idempotent)", aws.ToString(ddb.deleteInput.ConditionExpression))
+		}
+	})
+
+	t.Run("absent row is a no-op (no error)", func(t *testing.T) {
+		// fakeDDBClient.DeleteItem returns success with no item state, mirroring
+		// DynamoDB's no-op DeleteItem on a missing key. A nil error here proves
+		// DeleteWorkspaceState does not invent a not-found error.
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		if err := p.DeleteWorkspaceState(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteWorkspaceState on absent row: %v, want nil", err)
+		}
+		if ddb.deleteCalls != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", ddb.deleteCalls)
+		}
+	})
+
+	t.Run("empty workspace id errors before any DDB call", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		if err := p.DeleteWorkspaceState(context.Background(), ""); err == nil {
+			t.Fatal("DeleteWorkspaceState(\"\") = nil, want error")
+		}
+		if ddb.deleteCalls != 0 {
+			t.Fatalf("DeleteItem calls = %d, want 0 (must reject empty id before DDB)", ddb.deleteCalls)
+		}
+	})
+
+	t.Run("delete error is wrapped", func(t *testing.T) {
+		deleteErr := errors.New("ddb delete down")
+		ddb := &fakeDDBClient{deleteErr: deleteErr}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		err := p.DeleteWorkspaceState(context.Background(), testTeamID)
+		if err == nil {
+			t.Fatal("want delete error, got nil")
+		}
+		if !errors.Is(err, deleteErr) {
+			t.Fatalf("want wrapped delete error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "DeleteItem") {
+			t.Fatalf("wrapped error should name DeleteItem, got %v", err)
 		}
 	})
 }
