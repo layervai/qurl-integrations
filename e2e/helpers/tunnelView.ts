@@ -33,7 +33,12 @@ import { chromium, type Browser } from 'playwright';
  *   https://r_<id>.qurl.site<.layerv.xyz|.layerv.ai|…>/views/<mint-id>
  * Pinned to the `.qurl.site` host segment + the `/views/` path so it can't match
  * the `qurl.link` knock redirect or the top-frame SPA. Host-suffix-agnostic so
- * the same helper works against sandbox and prod. */
+ * the same helper works against sandbox and prod. The FIRST response matching
+ * this is the served view (asserted 200 below): the knock 302 lives on
+ * `resolve.qurl.link`, not under `.qurl.site/views/`, so there's no intermediate
+ * 3xx here to latch by mistake (verified against sandbox). If that redirect
+ * topology ever changes, this would need to follow redirects to the terminal
+ * response. */
 const TUNNEL_VIEW_RE = /\.qurl\.site[^/]*\/views\//;
 
 export interface ViewViaQurlLinkOptions {
