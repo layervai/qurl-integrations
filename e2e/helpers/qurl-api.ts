@@ -21,13 +21,14 @@ export interface LinkAccessResult {
   body?: string;
 }
 
-/** Upload a file to the connector and get a resource_id.
+/** Upload a file to the connector and get back its resource_id + qurl_link.
+ * Accepts a path (read from disk) OR in-memory bytes — the connector's upload is
+ * content-addressed, so a test fixture buffer works the same as a file.
  *
  * `viewerTtlSeconds` forwards as `session_duration` (the field #283 pins).
- * Handles the connector's documented 200-with-error-body convention like
- * google-maps/file-revoke's `uploadImage`: a transient 429 (HTTP 200 +
- * `error` string + no `resource_id`) is retried with backoff; any other
- * missing-`resource_id` body throws WITH the connector's `error` string so a
+ * Handles the connector's documented 200-with-error-body convention: a transient
+ * 429 (HTTP 200 + `error` string + no `resource_id`) is retried with backoff; any
+ * other missing-`resource_id` body throws WITH the connector's `error` string so a
  * real regression is legible, not a bare "expected undefined to be truthy".
  *
  * The HTTP call goes through fetchWithTransientRetry (bounded retry on transient
@@ -35,18 +36,19 @@ export interface LinkAccessResult {
  * distinct from the app-level 429 (HTTP 200 + `error`) loop below. */
 export async function uploadFile(
   uploadUrl: string,
-  filePath: string,
+  file: string | { bytes: Uint8Array; filename: string; mime?: string },
   apiKey: string,
   opts?: { viewerTtlSeconds?: number },
-): Promise<{ resource_id: string }> {
-  const fileBuffer = fs.readFileSync(filePath);
-  const fileName = path.basename(filePath);
-  const maxAttempts = 4; // align with google-maps/file-revoke uploadImage
+): Promise<{ resource_id: string; qurl_link?: string }> {
+  const fileBuffer: Uint8Array = typeof file === 'string' ? fs.readFileSync(file) : file.bytes;
+  const fileName = typeof file === 'string' ? path.basename(file) : file.filename;
+  const mime = typeof file === 'string' ? undefined : file.mime;
+  const maxAttempts = 4;
   const baseDelayMs = 1500;
 
   for (let i = 0; i < maxAttempts; i++) {
     const formData = new FormData();
-    formData.append('file', new Blob([fileBuffer]), fileName);
+    formData.append('file', new Blob([fileBuffer as BlobPart], mime ? { type: mime } : undefined), fileName);
     if (opts?.viewerTtlSeconds !== undefined) {
       formData.append('viewer_ttl_seconds', String(opts.viewerTtlSeconds));
     }
@@ -58,8 +60,18 @@ export async function uploadFile(
     });
 
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-    const data = (await res.json()) as { resource_id?: string; error?: string };
-    if (data.resource_id) return { resource_id: data.resource_id };
+    const data = (await res.json()) as { resource_id?: string; qurl_link?: string; error?: string };
+    // Success signal is `resource_id` alone — the connector's documented marker
+    // that the upload AND the mint succeeded. A mint failure returns HTTP 200 +
+    // success:true + an `error` string + NO resource_id (the 2026-05-13 shape),
+    // which falls through to the throw below. Deliberately do NOT also gate on
+    // `qurl_link`: the sibling viewer-ttl smoke asserts only resource_id, so a
+    // link requirement here would couple that test to a resource_id-without-link
+    // response it never contracts on. Callers needing the link assert it
+    // themselves (file-revoke).
+    if (data.resource_id) {
+      return { resource_id: data.resource_id, qurl_link: data.qurl_link };
+    }
 
     const errStr = typeof data.error === 'string' ? data.error : '';
     if (/429|rate.limit|too many requests/i.test(errStr)) {

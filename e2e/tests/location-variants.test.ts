@@ -21,9 +21,9 @@ const env = loadEnv();
 // Per-RUN nonce appended to every minted target_url so each CI run mints FRESH
 // qURL resources instead of re-targeting the same generic URLs. URL-safe
 // (alphanumeric + hyphen), so it never alters the escaping a fixture exercises.
-// Unlike google-maps.test.ts — whose byte-identical file fixtures could share an
-// md5, so it also carries a per-upload counter — every variant URL here is
-// already mutually distinct, so RUN_NONCE alone guarantees uniqueness.
+// Unlike fixed-fixture file tests (e.g. file-revoke's one-pixel PNG) — whose
+// byte-identical uploads could share an md5 — every variant URL here is already
+// mutually distinct, so RUN_NONCE alone guarantees uniqueness.
 const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 // Every resource minted this run, revoked in afterAll so they don't persist and
@@ -69,6 +69,10 @@ const LOCATION_VARIANTS = [
   { id: 'https-fragment', url: 'https://example.com/page#section-2' },
   { id: 'https-port', url: 'https://example.com:8443/api' },
   // http-plain and localhost are tested separately as expected rejections
+  // NOTE: maps RENDER support was dropped (product decision); these two now
+  // exercise only URL-shape escaping (a long https URL with @coords/path, and a
+  // short redirect URL), NOT maps. Kept as generic URL fixtures — the `maps`
+  // label is historical and rides the connector maps dead-code cleanup.
   { id: 'google-maps-full', url: 'https://www.google.com/maps/place/Eiffel+Tower/@48.8584,2.2945,17z/' },
   { id: 'google-maps-short', url: 'https://maps.app.goo.gl/abc123' },
   { id: 'url-encoded', url: 'https://example.com/path%20with%20spaces?q=%E4%B8%AD%E6%96%87' },
@@ -93,7 +97,7 @@ describe('Location Variants', () => {
     // Track before the assertions so a successfully-minted resource is always
     // revoked in afterAll even if an expect() below throws — otherwise it leaks
     // past cleanup, reintroducing the exact uncleaned-prod-state class this fix
-    // closes. (Matches google-maps.test.ts, which tracks before validating.)
+    // closes. (Matches the track-before-validate pattern in file-revoke.test.ts.)
     // Guard on a defined id so a malformed mint fails only its assertion below,
     // not also a spurious `revokeLink(undefined)` 404 warning in afterAll.
     if (result.resource_id) createdResourceIds.push(result.resource_id);
