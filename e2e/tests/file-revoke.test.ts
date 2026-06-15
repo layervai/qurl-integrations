@@ -27,12 +27,14 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 import { loadEnv } from '../helpers/env';
 import { fetchWithTransientRetry } from '../helpers/http';
 import * as qurl from '../helpers/qurl-api';
+import { viewViaQurlLink } from '../helpers/tunnelView';
 
 const env = loadEnv();
 
 interface UploadResponse {
   resource_url: string;
   resource_id: string;
+  qurl_link: string;
 }
 
 /** Upload an in-memory image buffer and return the viewer URL + resource_id.
@@ -53,7 +55,7 @@ async function uploadImage(
   buf: Uint8Array,
   filename: string,
   mime: string,
-): Promise<{ viewerUrl: string; resourceId: string }> {
+): Promise<{ qurlLink: string; resourceId: string }> {
   const maxAttempts = 4;
   const baseDelayMs = 1500;
   for (let i = 0; i < maxAttempts; i++) {
@@ -69,8 +71,8 @@ async function uploadImage(
     });
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data = (await res.json()) as Partial<UploadResponse> & { error?: string };
-    if (data.resource_url && data.resource_id) {
-      return { viewerUrl: data.resource_url, resourceId: data.resource_id };
+    if (data.qurl_link && data.resource_id) {
+      return { qurlLink: data.qurl_link, resourceId: data.resource_id };
     }
     const errStr = typeof data.error === 'string' ? data.error : '';
     if (/429|rate.limit|too many requests/i.test(errStr)) {
@@ -101,25 +103,26 @@ const ONE_PIXEL_PNG = Uint8Array.from(
 describe('File Revoke', () => {
   test('upload file → view 200 → revoke → getLinkStatus 404', async () => {
     const upload = await uploadImage(ONE_PIXEL_PNG, 'revoke-test.png', 'image/png');
-    expect(upload.viewerUrl).toContain('/view/');
     expect(upload.resourceId).toMatch(/^r_/);
 
-    const before = await fetchWithTransientRetry(upload.viewerUrl);
-    expect(before.status).toBe(200);
+    // View the file through the REAL recipient path: qurl.link → NHP knock →
+    // tunnel view. #1111 decommissioned the legacy fileviewer host, so a direct
+    // fetch of a view URL no longer works — only a browser completes the
+    // SPA-driven knock (the SPA reads the #at_ fragment in JS). A 200 here means
+    // the baked image served end-to-end through the tunnel.
+    const view = await viewViaQurlLink(upload.qurlLink);
+    expect(view.status).toBe(200);
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
 
-    // Canonical post-revoke assertion today — matches smoke.test.ts:103.
-    // The md5-addressed fileviewer URL is NOT yet gated by the qURL-layer
-    // revoke (product decision to FIX that is in infra#139, implementation
-    // folded into infra#93's synchronous-delete-on-revoke scope).
-    // TODO(infra#93/#139): add `expect((await fetch(upload.viewerUrl)).status).toBe(404)`
-    // after the revoke-triggered S3 delete wiring ships.
+    // Canonical post-revoke assertion: the resource status API reports 404 once
+    // revoked (matches smoke.test.ts). (Synchronous delete-on-revoke of the
+    // baked object is tracked separately under the render-at-mint cleanup path.)
     await expect(
       qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
     ).rejects.toThrow(/404/);
-  });
+  }, 120_000);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await uploadImage(ONE_PIXEL_PNG, 'double-revoke.png', 'image/png');
