@@ -5579,6 +5579,18 @@ async function handleQurlMap(interaction) {
 // ──────────────────────────────────────────────────────────────────────
 // /qurl detect — watermark attribution (#1101)
 // ──────────────────────────────────────────────────────────────────────
+
+// Shared no-match reply. BOTH the "no mark at all" branch and the
+// "mark found but no same-guild row" branch (the cross-guild defense-in-depth
+// filter) MUST emit BYTE-IDENTICAL copy. If they differed, a requester could
+// distinguish "no watermark" from "watermarked, but for another guild" — and
+// that distinction IS the cross-guild signal the second-layer filter exists
+// to contain (it only matters if the connector's X-Guild-Id scope regresses,
+// which is exactly when this filter is load-bearing). One constant = the two
+// paths can't drift apart. (The ambiguous >1-row reply is deliberately
+// distinct — that's a same-guild duplicate, not a cross-guild leak.)
+const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for this server).';
+
 //
 // A user uploads an image; the bot reads the invisible meta-seal watermark
 // via the connector's /api/detect, resolves it to the qurl_id it was minted
@@ -5599,8 +5611,9 @@ async function handleQurlMap(interaction) {
 //     AND we re-filter the returned rows on guild_id here (defense-in-depth
 //     — if the connector contract ever regresses, the leak still can't
 //     cross guilds because this filter fails closed).
-//   - audit on EVERY invocation (both matched + no-match), recipient id
-//     NEVER logged (audit access is broader than the ephemeral reply).
+//   - audit on EVERY invocation (matched / no_match / ambiguous / rejected
+//     / unconfigured — see AUDIT_EVENTS.QURL_DETECT), recipient id NEVER
+//     logged (audit access is broader than the ephemeral reply).
 //
 // Reply is always ephemeral. Cooldown rationale per-branch mirrors
 // handleQurlSend: honest user errors (missing/non-image/oversize attachment,
@@ -5720,6 +5733,13 @@ async function handleQurlDetect(interaction) {
     // cooldown" design (non-image / oversize branches above). The SSRF
     // probe is the one rejection that intentionally KEEPS the cooldown.
     clearDetectCooldown(interaction.guildId, interaction.user.id);
+    // Audit even this branch — the header promises an audit on EVERY
+    // invocation. No recipient is resolved on an unconfigured guild.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'unconfigured',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+    });
     return interaction.editReply({
       content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
     });
@@ -5827,7 +5847,9 @@ async function handleQurlDetect(interaction) {
       requester_id: interaction.user.id,
     });
     return interaction.editReply({
-      content: '🔍 No qURL watermark found in this image (for this server).',
+      // Shared constant — MUST match the cross-guild-filtered branch below
+      // byte-for-byte. See DETECT_NO_MATCH_MSG.
+      content: DETECT_NO_MATCH_MSG,
     });
   }
 
@@ -5843,7 +5865,10 @@ async function handleQurlDetect(interaction) {
   if (sameGuild.length === 0) {
     // Connector matched but no local same-guild row — treat as no match
     // (the local row may have aged out, or the connector's scope and ours
-    // diverged). Same non-committal copy + audit as the no-mark branch.
+    // diverged). BYTE-IDENTICAL copy to the no-mark branch above (shared
+    // DETECT_NO_MATCH_MSG) so a requester can't tell "no watermark" from
+    // "watermarked for another guild" — that distinction is the cross-guild
+    // signal this filter exists to contain.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'no_match',
       guild_id: interaction.guildId,
@@ -5851,7 +5876,7 @@ async function handleQurlDetect(interaction) {
       qurl_id: result.qurl_id,
     });
     return interaction.editReply({
-      content: '🔍 No match in this server.',
+      content: DETECT_NO_MATCH_MSG,
     });
   }
   if (sameGuild.length > 1) {
@@ -7905,22 +7930,30 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
 // Time-based sweep every 60s (was 5min). With high user counts the Map can
 // creep between the size-based 10k-threshold eviction, so a more aggressive
-// proactive sweep keeps steady-state memory tight. Entries older than the
-// cooldown window are safe to drop — they'd pass isOnCooldown() anyway.
+// proactive sweep keeps steady-state memory tight. An entry is safe to drop
+// only once it's older than the SAME window its is-on-cooldown gate uses —
+// otherwise the sweep would evict a still-active entry and silently end the
+// cooldown early.
 //
-// detectCooldowns rides the SAME interval (both keyed on the same
-// QURL_SEND_COOLDOWN_MS window) — without it, detect entries would only be
-// reaped at the 10k size threshold, letting up to ~20k expired entries
-// linger. One sweep, real parity with sendCooldowns.
-setInterval(() => {
+// detectCooldowns rides the SAME interval but is swept against
+// QURL_DETECT_COOLDOWN_MS (the window isOnDetectCooldown gates on), NOT the
+// send window — these can differ (the round-4 decoupling exists precisely so
+// detect can be a STRICTER, longer window than send). Sweeping detect at the
+// send window would truncate a longer detect cooldown back to the send
+// window, defeating the decoupling.
+// Named (not an inline arrow) so the windows-differ regression — a detect
+// entry swept at the SEND window when DETECT > SEND — is directly testable
+// via the _test export, without driving the module-level setInterval.
+function sweepCooldowns() {
   const now = Date.now();
   for (const [k, v] of sendCooldowns) {
     if (now - v > config.QURL_SEND_COOLDOWN_MS) sendCooldowns.delete(k);
   }
   for (const [k, v] of detectCooldowns) {
-    if (now - v > config.QURL_SEND_COOLDOWN_MS) detectCooldowns.delete(k);
+    if (now - v > config.QURL_DETECT_COOLDOWN_MS) detectCooldowns.delete(k);
   }
-}, 60 * 1000).unref();
+}
+setInterval(sweepCooldowns, 60 * 1000).unref();
 
 // Command definitions
 const commands = [
@@ -9613,6 +9646,12 @@ module.exports = {
       isOnDetectCooldown,
       setDetectCooldown,
       clearDetectCooldown,
+      // The 60s time-sweep, exposed so the windows-differ regression (detect
+      // entry must NOT be swept at the send window when DETECT > SEND) is
+      // testable directly. DETECT_NO_MATCH_MSG is exposed so tests pin that
+      // the two no-match branches share byte-identical copy.
+      sweepCooldowns,
+      DETECT_NO_MATCH_MSG,
       resolveRecipientUsers,
       partitionRecipients,
       resolveMentionableSelection,

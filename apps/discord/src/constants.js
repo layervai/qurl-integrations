@@ -553,6 +553,8 @@ const AUDIT_EVENTS = {
   //   - `result: 'rejected'` — the SSRF-probe gate fired (the strongest
   //                            abuse signal; the one rejection that keeps
   //                            the cooldown). No connector call.
+  //   - `result: 'unconfigured'` — the guild has no qURL API key (no
+  //                            /qurl setup). No connector call.
   // Always carries `guild_id` + `requester_id`, and NEVER the resolved
   // recipient id (audit logs are broader-access than the ephemeral reply;
   // logging the unmasked recipient would re-leak the very thing the

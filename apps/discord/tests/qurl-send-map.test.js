@@ -228,6 +228,8 @@ const {
   handleQurlDetect,
   detectCooldowns,
   isOnDetectCooldown,
+  sweepCooldowns,
+  DETECT_NO_MATCH_MSG,
 } = _test;
 
 // Flow-dispatch handlers live at module top-level (consumed by
@@ -3264,8 +3266,9 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(int);
 
     expect(mockDb.findSendsByQurlId).not.toHaveBeenCalled();
+    // Item 2: the no-mark branch emits the SHARED no-match constant.
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/No qURL watermark found/i),
+      content: DETECT_NO_MATCH_MSG,
     }));
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
       result: 'no_match', guild_id: 'guild-1',
@@ -3290,14 +3293,39 @@ describe('handleQurlDetect', () => {
 
     // Cross-guild row filtered out → recipient NEVER resolved.
     expect(usersFetch).not.toHaveBeenCalled();
+    // Item 2: BYTE-IDENTICAL to the no-mark branch (shared constant) so the
+    // cross-guild case can't be distinguished from "no watermark".
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/No match in this server/i),
+      content: DETECT_NO_MATCH_MSG,
     }));
     // No "matched" audit — the unmatched (filtered) outcome audits no_match.
     expect(logger.audit).not.toHaveBeenCalledWith('qurl_detect', expect.objectContaining({ result: 'matched' }));
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
       result: 'no_match', qurl_id: 'q_otherguild',
     }));
+  });
+
+  test('item 2: no-mark and cross-guild-filtered replies are BYTE-IDENTICAL (no cross-guild signal)', async () => {
+    // Capture the reply text from BOTH no-match paths and assert they're the
+    // exact same string — if they ever diverge, a requester could tell "no
+    // watermark" from "watermarked for another guild", which is the
+    // cross-guild signal the second-layer filter exists to contain.
+    mockDetectWatermark.mockResolvedValueOnce({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+    const noMark = makeDetectInteraction();
+    await handleQurlDetect(noMark);
+    const noMarkText = noMark.editReply.mock.calls.at(-1)[0].content;
+
+    detectCooldowns.clear(); // second invocation in the same guild/user
+    mockDetectWatermark.mockResolvedValueOnce({ detected: true, qurl_id: 'q_x', match_pct: 80, confidence: 0.9 });
+    mockDb.findSendsByQurlId.mockResolvedValueOnce([
+      { qurl_id: 'q_x', recipient_discord_id: '100000000000000003', guild_id: 'guild-OTHER' },
+    ]);
+    const crossGuild = makeDetectInteraction({ guildId: 'guild-1' });
+    await handleQurlDetect(crossGuild);
+    const crossGuildText = crossGuild.editReply.mock.calls.at(-1)[0].content;
+
+    expect(noMarkText).toBe(crossGuildText);
+    expect(noMarkText).toBe(DETECT_NO_MATCH_MSG);
   });
 
   test('ambiguity guard: >1 same-guild row for one qurl_id ⇒ refuses to attribute', async () => {
@@ -3462,8 +3490,15 @@ describe('handleQurlDetect', () => {
       content: expect.stringMatching(/not configured/i),
     }));
     expect(mockDetectWatermark).not.toHaveBeenCalled();
-    // Item 2 lock-in: cooldown cleared so retry is immediate once configured.
+    // Cooldown cleared so retry is immediate once configured.
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+    // Item 3 (round-5): this branch audits too (header promises an audit on
+    // EVERY invocation). result:'unconfigured', no recipient.
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'unconfigured', guild_id: 'guild-1', requester_id: SENDER_ID,
+    }));
+    const auditMeta = logger.audit.mock.calls.find((c) => c[0] === 'qurl_detect')[1];
+    expect('recipient_discord_id' in auditMeta).toBe(false);
   });
 
   test('required image option missing ⇒ "image option is required" + cooldown CLEARED', async () => {
@@ -3481,6 +3516,72 @@ describe('handleQurlDetect', () => {
     expect(int.deferReply).not.toHaveBeenCalled();
     expect(mockDetectWatermark).not.toHaveBeenCalled();
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// Round-5 item 1 regression: the 60s time-sweep must sweep
+// detectCooldowns against QURL_DETECT_COOLDOWN_MS, not the send window.
+// ──────────────────────────────────────────────────────────────
+describe('sweepCooldowns — detect window decoupled from send window (#823 round-5)', () => {
+  const config = require('../src/config');
+  let savedDetect;
+  let savedSend;
+  let nowSpy;
+
+  beforeEach(() => {
+    savedDetect = config.QURL_DETECT_COOLDOWN_MS;
+    savedSend = config.QURL_SEND_COOLDOWN_MS;
+    sendCooldowns.clear();
+    detectCooldowns.clear();
+  });
+  afterEach(() => {
+    config.QURL_DETECT_COOLDOWN_MS = savedDetect;
+    config.QURL_SEND_COOLDOWN_MS = savedSend;
+    if (nowSpy) nowSpy.mockRestore();
+    sendCooldowns.clear();
+    detectCooldowns.clear();
+  });
+
+  test('with DETECT(90s) > SEND(30s): a detect entry at ~31s is NOT swept (still on cooldown)', () => {
+    // This is the exact bug round-4 introduced: the sweep deleted detect
+    // entries at the SEND window, truncating a stricter detect window back
+    // to send. Set the two windows apart and prove the detect entry survives
+    // past the send window but within the detect window.
+    config.QURL_SEND_COOLDOWN_MS = 30000;
+    config.QURL_DETECT_COOLDOWN_MS = 90000;
+
+    const t0 = 1_000_000_000_000;
+    // Seed both maps with an entry stamped at t0 (direct set for precise
+    // timestamp control).
+    detectCooldowns.set('guild-1:user-1', t0);
+    sendCooldowns.set('user-1', t0);
+
+    // "Now" is t0 + 31s: past the 30s SEND window, well within the 90s
+    // DETECT window.
+    nowSpy = jest.spyOn(Date, 'now').mockReturnValue(t0 + 31_000);
+
+    sweepCooldowns();
+
+    // Regression assertion: the detect entry MUST survive (would have been
+    // wrongly swept under the send window).
+    expect(detectCooldowns.has('guild-1:user-1')).toBe(true);
+    expect(isOnDetectCooldown('guild-1', 'user-1')).toBe(true);
+    // Control: the send entry IS swept at 31s (proves the sweep ran and the
+    // send window still applies to sendCooldowns).
+    expect(sendCooldowns.has('user-1')).toBe(false);
+  });
+
+  test('a detect entry past the DETECT window IS swept', () => {
+    config.QURL_SEND_COOLDOWN_MS = 30000;
+    config.QURL_DETECT_COOLDOWN_MS = 90000;
+    const t0 = 1_000_000_000_000;
+    detectCooldowns.set('guild-1:user-1', t0);
+    nowSpy = jest.spyOn(Date, 'now').mockReturnValue(t0 + 91_000);
+
+    sweepCooldowns();
+
+    expect(detectCooldowns.has('guild-1:user-1')).toBe(false);
   });
 });
 
