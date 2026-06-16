@@ -5627,6 +5627,14 @@ const DETECT_STAFF_PERMISSIONS = [
 // ambiguity/reveal branches so EVERY no-standing outcome collapses to ONE reply. The permission
 // set is tight by design and a one-line, reversible change if real demand surfaces.
 //
+// RESIDUAL (timing side-channel): the byte-identical reply closes the CONTENT channel but not a
+// TIMING one — no-mark returns BEFORE the DDB lookup, no-standing AFTER it, and a matched reveal
+// after an extra users.fetch, so reply latency weakly clusters fast/medium/slow. A determined
+// prober could use that to distinguish "no mark" from "marked, no standing". Accepted as a residual,
+// NOT equalized with constant-time work: it's a weak oracle (ephemeral replies, network jitter, the
+// per-(guild,user) cooldown + the connector's per-guild throttle all blunt it) and the connector's
+// guild scope stays the authoritative boundary regardless.
+//
 // SCOPE (threat model): the standing gate is a bot-side UX/governance layer, NOT a server-enforced
 // authorization boundary. The connector's /api/detect enforces only guild-scope; a holder of the
 // guild's qURL API key (admin-tier) could call /api/detect directly and bypass THIS gate (guild-
@@ -6025,7 +6033,10 @@ async function handleQurlDetect(interaction) {
   // a detected match always has match_pct > 0, so a null/0/garbled value
   // is a malformed connector response, not a real 0% — render the bare
   // attribution rather than a confusing "0% match". (The audit above keeps
-  // the raw value for forensics.)
+  // the raw value for forensics.) The > 0 test is on the ROUNDED value, which
+  // is safe because the connector FLOORS a detected match_pct at 75 (Hamming
+  // path, distance <= max) or 100 (exact hit) — so a value that rounds to 0 is
+  // genuinely malformed, never a real sub-1% match being dropped.
   const pctText = (typeof matchPct === 'number' && matchPct > 0) ? ` — ${matchPct}% match` : '';
   return interaction.editReply({
     content: `🔍 This image was watermarked for ${who}${pctText}.`,
