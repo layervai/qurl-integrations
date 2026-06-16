@@ -5598,6 +5598,13 @@ const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for thi
 // RECIPIENT's Discord handle + a % match. SCOPED to the requester's guild:
 // an image watermarked in guild A must never attribute in guild B.
 //
+// ACCESS MODEL (deliberate): within a guild, detect is open to ANY member —
+// it is intentionally NOT admin- or original-sender-gated — matching the
+// sibling /qurl send (also un-gated). The ONLY access boundary the feature
+// requires is cross-guild (an image marked in guild A must never attribute in
+// guild B), enforced two ways below. Within-guild gating is a reversible
+// product choice (a few lines here) if it's ever wanted; not in v1.
+//
 // This is a deanonymization oracle by construction. The guards, in order:
 //   - guild-only (DM rejects, no oracle outside a guild).
 //   - per-(guild,user) cooldown (detectCooldowns) — best-effort
@@ -5611,9 +5618,11 @@ const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for thi
 //     AND we re-filter the returned rows on guild_id here (defense-in-depth
 //     — if the connector contract ever regresses, the leak still can't
 //     cross guilds because this filter fails closed).
-//   - audit on EVERY invocation (matched / no_match / ambiguous / rejected
-//     / unconfigured — see AUDIT_EVENTS.QURL_DETECT), recipient id NEVER
-//     logged (audit access is broader than the ephemeral reply).
+//   - audit the attribution outcomes + abuse signals (matched / no_match /
+//     ambiguous / rejected / unconfigured / rate_limited — see
+//     AUDIT_EVENTS.QURL_DETECT); recipient id NEVER logged (audit access is
+//     broader than the ephemeral reply). Honest operational failures (CDN
+//     download, connector 5xx/network) log at warn/error, not audit.
 //
 // Reply is always ephemeral. Cooldown rationale per-branch mirrors
 // handleQurlSend: honest user errors (missing/non-image/oversize attachment,
@@ -5733,8 +5742,9 @@ async function handleQurlDetect(interaction) {
     // cooldown" design (non-image / oversize branches above). The SSRF
     // probe is the one rejection that intentionally KEEPS the cooldown.
     clearDetectCooldown(interaction.guildId, interaction.user.id);
-    // Audit even this branch — the header promises an audit on EVERY
-    // invocation. No recipient is resolved on an unconfigured guild.
+    // Audit this branch — unconfigured is an attribution outcome worth
+    // surfacing (see the handler header's audit list). No recipient is
+    // resolved on an unconfigured guild.
     logger.audit(AUDIT_EVENTS.QURL_DETECT, {
       result: 'unconfigured',
       guild_id: interaction.guildId,
@@ -5825,7 +5835,19 @@ async function handleQurlDetect(interaction) {
       rate_limited: rateLimited,
       error: err && err.message,
     });
-    if (!rateLimited) {
+    if (rateLimited) {
+      // A connector 429 means this guild is spamming detect into the
+      // connector's per-guild limiter — an abuse signal, and the one detect
+      // failure that KEEPS the cooldown. Mirror the SSRF-probe reasoning and
+      // put it in the audit trail (not just logger.error) so the
+      // throttled-spam pattern is queryable. No recipient id — a throttled
+      // call never resolves one.
+      logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+        result: 'rate_limited',
+        guild_id: interaction.guildId,
+        requester_id: interaction.user.id,
+      });
+    } else {
       clearDetectCooldown(interaction.guildId, interaction.user.id);
     }
     return interaction.editReply({
@@ -5905,13 +5927,15 @@ async function handleQurlDetect(interaction) {
   // resolved recipient id. Audit logs are broader-access than the ephemeral
   // reply; logging the unmasked recipient would re-leak the deanonymization
   // the ephemeral is there to contain. confidence (0–1) lives HERE, not in
-  // the user reply — see the reply below.
+  // the user reply — see the reply below. match_pct is logged RAW
+  // (result.match_pct, not the display-rounded matchPct) so forensics keeps
+  // the connector's exact value, not the value the user happened to see.
   logger.audit(AUDIT_EVENTS.QURL_DETECT, {
     result: 'matched',
     guild_id: interaction.guildId,
     requester_id: interaction.user.id,
     qurl_id: result.qurl_id,
-    match_pct: matchPct,
+    match_pct: result.match_pct,
     confidence: result.confidence,
   });
 

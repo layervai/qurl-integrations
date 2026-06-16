@@ -3259,6 +3259,33 @@ describe('handleQurlDetect', () => {
     expect(replyContent).not.toContain('0%');
   });
 
+  test('audit keeps the RAW match_pct while the reply rounds it (item 2)', async () => {
+    // The connector value is logged verbatim for forensics; the user-facing
+    // reply rounds to a whole percent. A fractional value distinguishes the
+    // two. (The connector currently rounds, but the bot must not ASSUME that —
+    // it logs whatever the connector sent, raw.)
+    const recipientId = '100000000000000013';
+    mockDetectWatermark.mockResolvedValue({
+      detected: true, qurl_id: 'q_frac', match_pct: 92.7, confidence: 0.97,
+    });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_frac', recipient_discord_id: recipientId, guild_id: 'guild-1' },
+    ]);
+    const int = makeDetectInteraction({
+      usersFetch: jest.fn(async (id) => ({ id, username: 'CarolRecipient' })),
+    });
+
+    await handleQurlDetect(int);
+
+    // Reply rounds 92.7 → 93%.
+    const replyContent = int.editReply.mock.calls.at(-1)[0].content;
+    expect(replyContent).toMatch(/93% match/);
+    // Audit keeps the RAW 92.7 (forensics gets the connector's exact value).
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'matched', qurl_id: 'q_frac', match_pct: 92.7,
+    }));
+  });
+
   test('(ii) !detected ⇒ "no watermark found" ephemeral + no_match audit', async () => {
     mockDetectWatermark.mockResolvedValue({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
     const int = makeDetectInteraction();
@@ -3370,6 +3397,9 @@ describe('handleQurlDetect', () => {
       content: expect.stringMatching(/unavailable right now/i),
     }));
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+    // A 5xx is OPERATIONAL, not an abuse signal — it logs at error, NOT audit
+    // (only the 429 throttle audits as rate_limited).
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_detect', expect.objectContaining({ result: 'rate_limited' }));
   });
 
   test('connector 429 ⇒ rate-limited ephemeral AND cooldown KEPT (back off)', async () => {
@@ -3386,6 +3416,12 @@ describe('handleQurlDetect', () => {
     }));
     // Cooldown KEPT — the back-off signal.
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(true);
+    // The 429 (abuse signal that KEEPS the cooldown) is audited as
+    // rate_limited — mirroring the SSRF-probe audit — so the throttled-spam
+    // pattern is queryable.
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'rate_limited', guild_id: 'guild-1',
+    }));
   });
 
   // ── Item 5: missing-branch coverage ──
