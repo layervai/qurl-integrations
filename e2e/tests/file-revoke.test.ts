@@ -18,6 +18,25 @@
  * Without this coverage, a regression in the revoke API for
  * connector-uploaded resources would ship silently (URL-mint revoke
  * already covered by smoke.test.ts).
+ *
+ * Also pins two render-at-mint security guarantees (#1027, EPIC #1019), in the
+ * "distinct-per-viewer watermark + `_`/`-` resource-id SNI" test below:
+ *
+ *   - DISTINCT-PER-VIEWER WATERMARK: two qURLs minted for the SAME uploaded file
+ *     resolve to two DIFFERENT `views/<mint-id>` objects — each a per-recipient
+ *     baked copy. This is THE leak-traceability guarantee: a leaked image is
+ *     attributable to the specific recipient whose `views/<mint-id>` it is.
+ *     #1027 defines distinctness AS "different `views/` objects"; the mint-id is
+ *     hex(16 random bytes), distinct per mint by construction. (The watermark
+ *     itself is an INVISIBLE neural meta-seal mark — `watermark_metaseal_enabled`
+ *     in sandbox — so distinctness lives in bits the harness can't see via bytes;
+ *     the distinct `views/<mint-id>` object key is the strongest OBSERVABLE
+ *     backstop. See the test for why a rendered-byte hash isn't asserted.)
+ *   - SNI / DNS for the `r_<id>` host: the per-recipient view is served from a
+ *     single wildcard `r_<id>.qurl.site` label whose id carries `_` (the `r_`
+ *     prefix). A 200 through it proves DNS + the wildcard cert presenting via
+ *     TLS-SNI for an `_`-bearing label end-to-end — the real backstop for the
+ *     relaxed `view_domain` charset.
  */
 
 import * as dotenv from 'dotenv';
@@ -26,7 +45,7 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
-import { viewViaQurlLink } from '../helpers/tunnelView';
+import { mintIdFromTunnelViewUrl, viewViaQurlLink } from '../helpers/tunnelView';
 
 const env = loadEnv();
 
@@ -87,6 +106,90 @@ describe('File Revoke', () => {
     // Generous timeout: connector mint + headless-browser knock (cold chromium
     // launch + navigation + the helper's own 30s tunnel-view budget) on CI.
   }, 90_000);
+
+  test('distinct-per-viewer watermark + `_`/`-` resource-id SNI on the tunnel', async () => {
+    // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
+    // each recipient gets their OWN baked `views/<mint-id>` object, so a leak is
+    // traceable to the specific recipient.
+    const upload = await qurl.uploadFile(
+      env.UPLOAD_API_URL,
+      { bytes: ONE_PIXEL_PNG, filename: 'distinct-viewer.png', mime: 'image/png' },
+      env.QURL_API_KEY,
+    );
+    expect(upload.resource_id).toMatch(/^r_/);
+
+    // Mint two independent views for the SAME resource. expires_at is required by
+    // render-at-mint (1h; the connector clamps to its own cap). One-time-use, so
+    // each link is consumed by exactly one knock — matching one viewViaQurlLink call.
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const mintOne = qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+      expiresAt,
+      oneTimeUse: true,
+    });
+    const mintTwo = qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+      expiresAt,
+      oneTimeUse: true,
+    });
+    const [mintedA, mintedB] = await Promise.all([mintOne, mintTwo]);
+    // Each mint MUST yield its own distinct qurl.link, or the two viewers below
+    // would just be re-driving the same one-time link (and the second would 404).
+    expect(mintedA.qurl_link).not.toBe(mintedB.qurl_link);
+
+    // Drive BOTH minted links through the real recipient path (qurl.link → NHP
+    // knock → tunnel view). Sequential, NOT Promise.all: each call launches its own
+    // cold chromium and these run on a single jest worker (maxWorkers:1) — serial
+    // keeps peak memory to one browser and avoids the two knocks racing for the
+    // shared CI egress IP's WAF budget.
+    const viewA = await viewViaQurlLink(mintedA.qurl_link);
+    const viewB = await viewViaQurlLink(mintedB.qurl_link);
+
+    // Both recipients get a served (200) per-recipient object end-to-end.
+    expect(viewA.status).toBe(200);
+    expect(viewB.status).toBe(200);
+
+    // ── Distinct-per-viewer watermark (THE leak-traceability guarantee) ──
+    // Each view resolves to its OWN `views/<mint-id>` object. The mint-id is a
+    // 128-bit crypto-random hex token, distinct per mint by construction, so two
+    // mints for the same upload land on two DIFFERENT baked objects — which IS how
+    // #1027 defines "distinct watermarks: different `views/` objects". This is the
+    // strongest OBSERVABLE assertion: the watermark is an invisible neural
+    // meta-seal mark (`watermark_metaseal_enabled` in sandbox), so a rendered-byte
+    // hash can't witness distinctness — on a 1×1 transparent fixture the mark has
+    // no spatial capacity and the re-encode could be byte-identical OR differ only
+    // by encoder nondeterminism, so a byte comparison would be meaningless or flaky
+    // either way. Forensic bit-level distinctness is the watermark service's
+    // /detect contract (covered by the connector's verify-watermark tooling), not
+    // something this browser harness can see. The distinct `views/<mint-id>` object
+    // key is the pinned guarantee here.
+    const mintIdA = mintIdFromTunnelViewUrl(viewA.url);
+    const mintIdB = mintIdFromTunnelViewUrl(viewB.url);
+    expect(mintIdA).toMatch(/^[0-9a-f]+$/); // hex mint-id (mintid.go: isHexMintID)
+    expect(mintIdB).toMatch(/^[0-9a-f]+$/);
+    expect(mintIdA).not.toBe(mintIdB); // ← distinct per-recipient `views/` objects
+
+    // ── `_`-bearing resource-id host resolves over DNS + TLS-SNI ──
+    // Both views are served from the single wildcard `r_<id>.qurl.site` label. The
+    // id carries `_` (the `r_` prefix); a 200 through that host proves DNS + the
+    // wildcard cert presenting via SNI for an `_`-bearing label end-to-end — the
+    // backstop for the relaxed `view_domain` charset. (Asserted on both resolved
+    // URLs since they share the tunnel host.) NOTE: the live sandbox tunnel host id
+    // contains `_` but no `-`; the `-` half of the charset is not exercised by the
+    // live host — see the PR body.
+    for (const url of [viewA.url, viewB.url]) {
+      const host = new URL(url).hostname;
+      expect(host).toMatch(/^r_[a-z0-9_-]+\.qurl\.site/);
+      expect(host).toContain('_'); // the relaxed-charset character, resolving + TLS-valid
+    }
+
+    // Cleanup: revoke the shared resource (kills both views' token chains).
+    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    expect(revoked).toBe(true);
+    await expect(
+      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id),
+    ).rejects.toThrow(/404/);
+    // Generous timeout: two connector mints + TWO sequential cold-chromium knocks
+    // (each with the helper's own 30s tunnel-view budget) + revoke, on CI.
+  }, 180_000);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
