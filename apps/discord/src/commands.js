@@ -565,10 +565,41 @@ const addRecipientsLocks = new Set();
 const sendCooldowns = new Map();
 
 // Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
-// them) can't grow the Map beyond this. Above this, the 10%-drop eviction
-// still fires; if that fails to reclaim, setCooldown drops the oldest
-// single entry to guarantee we never exceed the cap.
-const SEND_COOLDOWNS_MAX = 20000;
+// them) can't grow a cooldown Map beyond this. Above this, the 10%-drop
+// eviction still fires; if that fails to reclaim, evictOldest drops the
+// oldest single entries to guarantee we never exceed the cap. Shared by
+// sendCooldowns and detectCooldowns so the two buckets stay byte-for-byte
+// parallel (see evictOldest).
+const COOLDOWNS_MAX = 20000;
+const SEND_COOLDOWNS_MAX = COOLDOWNS_MAX;
+
+// Shared eviction for the cooldown Maps — extracted so setCooldown and
+// setDetectCooldown share ONE implementation rather than two parallel
+// copies that could silently drift. Two phases, both relative to `max`:
+//   1. Soft bulk-drop: once the Map crosses HALF the cap, evict the oldest
+//      ~10% in one pass (cheap amortized trim so we rarely reach the cap).
+//   2. Hard cap: drop the oldest one-at-a-time until size <= max, so the
+//      ceiling holds even under a pathological insertion pattern that beats
+//      the bulk drop.
+// Relies on Map insertion-order iteration (`.keys()` yields oldest first);
+// callers delete+re-set on touch so active entries re-insert at the tail.
+function evictOldest(map, max) {
+  const softThreshold = Math.floor(max / 2);
+  if (map.size > softThreshold) {
+    const dropCount = Math.max(1, Math.floor(map.size / 10));
+    const it = map.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      map.delete(k);
+    }
+  }
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
 
 function isOnCooldown(userId) {
   const last = sendCooldowns.get(userId);
@@ -578,26 +609,11 @@ function isOnCooldown(userId) {
 
 function setCooldown(userId) {
   // LRU-ish behavior: delete first so set() re-inserts at the end of the
-  // Map's insertion order. Combined with the bulk 10%-drop eviction below,
+  // Map's insertion order. Combined with evictOldest's bulk 10%-drop,
   // active users stay resident while stale entries roll out.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
-  if (sendCooldowns.size > 10000) {
-    const dropCount = Math.max(1, Math.floor(sendCooldowns.size / 10));
-    const it = sendCooldowns.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      sendCooldowns.delete(k);
-    }
-  }
-  // Belt-and-suspenders: guarantee the hard cap even if the bulk drop
-  // didn't reclaim enough (pathological insertion patterns).
-  while (sendCooldowns.size > SEND_COOLDOWNS_MAX) {
-    const oldest = sendCooldowns.keys().next().value;
-    if (oldest === undefined) break;
-    sendCooldowns.delete(oldest);
-  }
+  evictOldest(sendCooldowns, SEND_COOLDOWNS_MAX);
 }
 
 function clearCooldown(userId) {
@@ -624,11 +640,17 @@ function clearCooldown(userId) {
 //      bot-side throttle is too. The same user probing two guilds gets two
 //      independent budgets; a shared userId key would let one guild's
 //      activity throttle another's.
-// Eviction/cap structure mirrors sendCooldowns (LRU-ish re-insert + bulk
-// 10%-drop + hard-cap fallback + the shared 60s time-sweep) so the Map
-// can't grow unbounded under a snowflake-spraying attacker.
+//   3. Separate WINDOW — keyed on config.QURL_DETECT_COOLDOWN_MS, which
+//      DEFAULTS to QURL_SEND_COOLDOWN_MS (no behavior change) but is
+//      independently tunable. Detect (a deanonymization oracle) and send
+//      are unrelated operations; coupling their windows would let a future
+//      send-cadence change silently re-tune the oracle throttle.
+// Eviction/cap structure mirrors sendCooldowns: it shares the SAME
+// evictOldest helper + COOLDOWNS_MAX cap + the 60s time-sweep, so the Map
+// can't grow unbounded under a snowflake-spraying attacker and the two
+// buckets can't drift.
 const detectCooldowns = new Map();
-const DETECT_COOLDOWNS_MAX = 20000;
+const DETECT_COOLDOWNS_MAX = COOLDOWNS_MAX;
 
 function detectCooldownKey(guildId, userId) {
   return `${guildId}:${userId}`;
@@ -637,27 +659,14 @@ function detectCooldownKey(guildId, userId) {
 function isOnDetectCooldown(guildId, userId) {
   const last = detectCooldowns.get(detectCooldownKey(guildId, userId));
   if (!last) return false;
-  return Date.now() - last < config.QURL_SEND_COOLDOWN_MS;
+  return Date.now() - last < config.QURL_DETECT_COOLDOWN_MS;
 }
 
 function setDetectCooldown(guildId, userId) {
   const key = detectCooldownKey(guildId, userId);
   detectCooldowns.delete(key);
   detectCooldowns.set(key, Date.now());
-  if (detectCooldowns.size > 10000) {
-    const dropCount = Math.max(1, Math.floor(detectCooldowns.size / 10));
-    const it = detectCooldowns.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      detectCooldowns.delete(k);
-    }
-  }
-  while (detectCooldowns.size > DETECT_COOLDOWNS_MAX) {
-    const oldest = detectCooldowns.keys().next().value;
-    if (oldest === undefined) break;
-    detectCooldowns.delete(oldest);
-  }
+  evictOldest(detectCooldowns, DETECT_COOLDOWNS_MAX);
 }
 
 function clearDetectCooldown(guildId, userId) {
@@ -5910,6 +5919,11 @@ async function handleQurlDetect(interaction) {
   const pctText = (typeof matchPct === 'number' && matchPct > 0) ? ` — ${matchPct}% match` : '';
   return interaction.editReply({
     content: `🔍 This image was watermarked for ${who}${pctText}.`,
+    // The reply embeds the recipient's <@id> mention. Ephemeral replies
+    // don't ping in practice, but suppress mention-resolution explicitly so
+    // "the deanonymized recipient is NEVER pinged" is a hard guarantee, not
+    // a reliance on Discord ephemeral behavior. parse:[] = resolve nothing.
+    allowedMentions: { parse: [] },
   });
 }
 

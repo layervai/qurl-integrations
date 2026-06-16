@@ -25,6 +25,7 @@ jest.mock('../src/config', () => ({
   // confirm-card MAPS flow). Production default is off.
   MAP_COMMAND_ENABLED: true,
   QURL_SEND_COOLDOWN_MS: 30000,
+  QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 25,
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
@@ -3215,10 +3216,15 @@ describe('handleQurlDetect', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('AliceRecipient'),
     }));
-    const replyContent = int.editReply.mock.calls.at(-1)[0].content;
+    const matchedReply = int.editReply.mock.calls.at(-1)[0];
+    const replyContent = matchedReply.content;
     expect(replyContent).toContain(`<@${recipientId}>`);
     expect(replyContent).toMatch(/92% match/);
     expect(replyContent).not.toMatch(/confidence/i);
+    // Item 1: the reply embeds <@id> but mentions are suppressed so the
+    // deanonymized recipient is NEVER pinged (hard guarantee, not a reliance
+    // on ephemeral behavior).
+    expect(matchedReply.allowedMentions).toEqual({ parse: [] });
     // Audit fired as a match WITHOUT the recipient id (broader-access log),
     // but WITH confidence (it's an operator dimension, just not user-facing).
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({

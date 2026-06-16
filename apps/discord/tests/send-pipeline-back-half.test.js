@@ -29,6 +29,7 @@ jest.mock('../src/config', () => ({
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
+  QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],

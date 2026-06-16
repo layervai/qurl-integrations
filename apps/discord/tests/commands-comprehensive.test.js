@@ -22,6 +22,7 @@ jest.mock('../src/config', () => ({
   // value pins the contract.
   MAP_COMMAND_ENABLED: false,
   QURL_SEND_COOLDOWN_MS: 30000,
+  QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
