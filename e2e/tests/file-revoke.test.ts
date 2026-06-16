@@ -121,16 +121,19 @@ describe('File Revoke', () => {
     // Mint two independent views for the SAME resource. expires_at is required by
     // render-at-mint (1h; the connector clamps to its own cap). One-time-use, so
     // each link is consumed by exactly one knock — matching one viewViaQurlLink call.
+    // Sequential, NOT Promise.all: this mirrors the proven single-mint path exactly
+    // (the existing test above, green in the sandbox gate) rather than introducing a
+    // concurrent per-resource double-bake the gate has never exercised — robustness
+    // for the first post-merge run, at the cost of one extra mint round-trip.
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const mintOne = qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+    const mintedA = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
       expiresAt,
       oneTimeUse: true,
     });
-    const mintTwo = qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+    const mintedB = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
       expiresAt,
       oneTimeUse: true,
     });
-    const [mintedA, mintedB] = await Promise.all([mintOne, mintTwo]);
     // Each mint MUST yield its own distinct qurl.link, or the two viewers below
     // would just be re-driving the same one-time link (and the second would 404).
     expect(mintedA.qurl_link).not.toBe(mintedB.qurl_link);
