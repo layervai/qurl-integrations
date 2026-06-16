@@ -571,7 +571,6 @@ const sendCooldowns = new Map();
 // sendCooldowns and detectCooldowns so the two buckets stay byte-for-byte
 // parallel (see evictOldest).
 const COOLDOWNS_MAX = 20000;
-const SEND_COOLDOWNS_MAX = COOLDOWNS_MAX;
 
 // Shared eviction for the cooldown Maps — extracted so setCooldown and
 // setDetectCooldown share ONE implementation rather than two parallel
@@ -613,7 +612,7 @@ function setCooldown(userId) {
   // active users stay resident while stale entries roll out.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
-  evictOldest(sendCooldowns, SEND_COOLDOWNS_MAX);
+  evictOldest(sendCooldowns, COOLDOWNS_MAX);
 }
 
 function clearCooldown(userId) {
@@ -650,7 +649,6 @@ function clearCooldown(userId) {
 // can't grow unbounded under a snowflake-spraying attacker and the two
 // buckets can't drift.
 const detectCooldowns = new Map();
-const DETECT_COOLDOWNS_MAX = COOLDOWNS_MAX;
 
 function detectCooldownKey(guildId, userId) {
   return `${guildId}:${userId}`;
@@ -666,7 +664,7 @@ function setDetectCooldown(guildId, userId) {
   const key = detectCooldownKey(guildId, userId);
   detectCooldowns.delete(key);
   detectCooldowns.set(key, Date.now());
-  evictOldest(detectCooldowns, DETECT_COOLDOWNS_MAX);
+  evictOldest(detectCooldowns, COOLDOWNS_MAX);
 }
 
 function clearDetectCooldown(guildId, userId) {

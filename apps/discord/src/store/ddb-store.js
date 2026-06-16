@@ -1205,6 +1205,14 @@ async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messag
 // hot path. The `> 1` ambiguous-recipient skip in the handler
 // already catches the duplicate case at length=2.
 //
+// #1101 detect note: /qurl detect applies a same-guild filter to these
+// rows, and Limit:2 is safe for it ONLY because a qurl_id belongs to a
+// single guild (one mint → one recipient → one guild), so every row a
+// qurl_id can return is same-guild and the cap can't truncate away the
+// caller's row. If that invariant were ever relaxed (a qurl_id legitimately
+// spanning guilds with >2 total rows), Limit:2 could drop the caller's
+// same-guild row and yield a false "no match" — revisit the cap then.
+//
 // Returns the rows (full attributes — GSI projection is ALL so
 // dm_channel_id / dm_message_id / expired_edited_at are present).
 async function findSendsByQurlId(qurlId) {
