@@ -606,18 +606,27 @@ function clearCooldown(userId) {
 
 // ── /qurl detect cooldown (#1101) ──
 //
+// AUTHORITATIVE abuse enforcement for the deanonymization oracle lives on
+// the CONNECTOR: it guild-scopes every lookup via the X-Guild-Id header and
+// rate-limits per guild (a 429 we honor by KEEPING this cooldown to back
+// off). This in-process Map is best-effort DEFENSE-IN-DEPTH — it's not
+// shared across shards/instances, so a multi-instance deploy could let a
+// determined caller exceed the per-process budget. It still dampens the
+// common single-instance abuse case and gives the connector room to apply
+// the real limit.
+//
 // SEPARATE Map from sendCooldowns, and keyed on a COMPOSITE `${guildId}:
 // ${userId}` rather than userId alone. Two deliberate differences from the
 // send bucket:
 //   1. Distinct bucket — a user's detect throttle must not lock out their
 //      /qurl send (and vice-versa); these are unrelated rate limits.
-//   2. Per-(guild,user) — /qurl detect is a deanonymization oracle, and
-//      attribution is guild-scoped, so the abuse guard is too. The same
-//      user probing two guilds gets two independent budgets; a shared
-//      userId key would let one guild's activity throttle another's.
+//   2. Per-(guild,user) — /qurl detect attribution is guild-scoped, so the
+//      bot-side throttle is too. The same user probing two guilds gets two
+//      independent budgets; a shared userId key would let one guild's
+//      activity throttle another's.
 // Eviction/cap structure mirrors sendCooldowns (LRU-ish re-insert + bulk
-// 10%-drop + hard-cap fallback) so the Map can't grow unbounded under a
-// snowflake-spraying attacker.
+// 10%-drop + hard-cap fallback + the shared 60s time-sweep) so the Map
+// can't grow unbounded under a snowflake-spraying attacker.
 const detectCooldowns = new Map();
 const DETECT_COOLDOWNS_MAX = 20000;
 
@@ -5570,8 +5579,11 @@ async function handleQurlMap(interaction) {
 //
 // This is a deanonymization oracle by construction. The guards, in order:
 //   - guild-only (DM rejects, no oracle outside a guild).
-//   - per-(guild,user) cooldown (detectCooldowns) — the rate limit IS the
-//     abuse guard against scraping the recipient↔image mapping.
+//   - per-(guild,user) cooldown (detectCooldowns) — best-effort
+//     defense-in-depth against scraping the recipient↔image mapping. The
+//     AUTHORITATIVE rate limit is the connector's per-guild throttle (this
+//     in-process Map isn't shared across instances); see the detectCooldowns
+//     header for the full enforcement model.
 //   - SSRF + size + image-type validation on the attachment, identical to
 //     the guards handleQurlSend applies to the same Discord-CDN fetch.
 //   - TWO layers of guild scoping: the connector scopes via X-Guild-Id,
@@ -5597,8 +5609,9 @@ async function handleQurlDetect(interaction) {
   }
 
   // Cooldown gate at entry — per (guild, user). Set BEFORE input
-  // validation so a malformed attachment still throttles (an attacker
-  // can't sidestep the oracle rate limit by spamming invalid inputs).
+  // validation so a malformed attachment still throttles (so spamming
+  // invalid inputs can't sidestep the bot-side throttle; the connector's
+  // per-guild rate limit is the authoritative backstop).
   if (isOnDetectCooldown(interaction.guildId, interaction.user.id)) {
     return interaction.reply({
       content: 'Please wait before running detect again.',
@@ -5666,8 +5679,13 @@ async function handleQurlDetect(interaction) {
     });
   }
   // Size cap before buffering — guard against pulling a 25MB+ blob into
-  // memory. Honest user error → clear cooldown.
-  if (attachment.size > MAX_FILE_SIZE) {
+  // memory. Honest user error → clear cooldown. `typeof === 'number'`
+  // guard: a missing/undefined attachment.size would make a bare
+  // `size > MAX` read false and skip this pre-check — harmless here only
+  // because the realized-buffer cap after the fetch (below) is the real
+  // backstop, but make the intent explicit rather than relying on
+  // `undefined > N` semantics.
+  if (typeof attachment.size === 'number' && attachment.size > MAX_FILE_SIZE) {
     clearDetectCooldown(interaction.guildId, interaction.user.id);
     return interaction.reply({
       content: `❌ Image too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
@@ -5698,16 +5716,19 @@ async function handleQurlDetect(interaction) {
     });
   }
 
-  // Fetch the image bytes from Discord CDN, then POST to /api/detect.
-  let result;
+  // Download the image bytes from Discord CDN. This is a SEPARATE failure
+  // domain from the connector detect below — a download failure (expired
+  // signed URL, timeout, DNS, network) is honest + re-uploadable and must
+  // NOT be reported as "detection unavailable" (detection was never
+  // reached). Its own try/catch keeps the two error surfaces distinct, and
+  // both the non-ok and the throw paths CLEAR the cooldown (honest, and the
+  // reply tells the user to re-upload, which the cooldown would block).
+  let bytes;
   try {
     const r = await fetch(attachment.url, { signal: AbortSignal.timeout(30000) });
     if (!r.ok) {
-      // CDN URLs are signed + expire (~24h). A failed fetch is almost
-      // always an expired URL on a re-shared old image, not our bug —
-      // honest + re-uploadable, so CLEAR the cooldown (the reply tells the
-      // user to "re-upload and try again," which the cooldown would
-      // otherwise block).
+      // CDN URLs are signed + expire (~24h). A non-ok fetch is almost always
+      // an expired URL on a re-shared old image, not our bug.
       logger.warn('handleQurlDetect: CDN fetch failed', {
         user_id: interaction.user.id, status: r.status,
       });
@@ -5716,24 +5737,57 @@ async function handleQurlDetect(interaction) {
         content: '❌ Could not download that image (the Discord link may have expired). Re-upload and try again.',
       });
     }
-    const bytes = Buffer.from(await r.arrayBuffer());
+    bytes = Buffer.from(await r.arrayBuffer());
+  } catch (err) {
+    // Fetch threw — AbortSignal 30s timeout, DNS, connection reset, etc.
+    // Honest download failure (NOT a detection failure), so same copy +
+    // cooldown-clear as the non-ok branch above.
+    logger.warn('handleQurlDetect: CDN fetch threw', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.editReply({
+      content: '❌ Could not download that image (re-upload and try again).',
+    });
+  }
+
+  // Realized-buffer size guard (closes the TOCTOU vs. the attachment.size
+  // pre-check): re-check the ACTUAL downloaded byte count. SSRF already
+  // pins the source to the Discord CDN, so this is defense-in-depth against
+  // a lying/absent Content-Length or a metadata/payload mismatch. Honest
+  // oversize → clear cooldown, same as the pre-fetch size branch.
+  if (bytes.length > MAX_FILE_SIZE) {
+    logger.warn('handleQurlDetect: realized buffer exceeds cap', {
+      user_id: interaction.user.id, bytes: bytes.length,
+    });
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.editReply({
+      content: `❌ Image too large (${Math.round(bytes.length / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
+    });
+  }
+
+  // POST the bytes to /api/detect.
+  let result;
+  try {
     result = await detectWatermark(bytes, {
       guildId: interaction.guildId,
       contentType: attachment.contentType,
       apiKey,
     });
   } catch (err) {
-    // detectWatermark throws (with .status, set from response.status in
-    // connector.js's throwConnectorError) on 401/400/429/5xx and on network
-    // failure. Body-free message by contract — log server-side, surface a
-    // generic ephemeral error. Don't leak err.message (it may echo
-    // connector detail) into the reply.
+    // detectWatermark (the CONNECTOR POST — the CDN download is handled in
+    // its own try/catch above) throws (with .status, set from
+    // response.status in connector.js's throwConnectorError) on
+    // 401/400/429/5xx and on a connector-side network failure. Body-free
+    // message by contract — log server-side, surface a generic ephemeral
+    // error. Don't leak err.message (it may echo connector detail) into the
+    // reply.
     //
     // Cooldown policy: a transient failure shouldn't throttle an honest
     // user for the full window, so CLEAR the cooldown — EXCEPT on a 429
     // (connector rate-limited this guild), where KEEPING the cooldown is
     // the correct back-off. (429 is cleanly distinguishable via err.status;
-    // network throws / 5xx / 4xx-other all clear.)
+    // connector network throws / 5xx / 4xx-other all clear.)
     const rateLimited = err && err.status === 429;
     logger.error('handleQurlDetect: detect failed', {
       user_id: interaction.user.id,
@@ -7839,10 +7893,18 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 // creep between the size-based 10k-threshold eviction, so a more aggressive
 // proactive sweep keeps steady-state memory tight. Entries older than the
 // cooldown window are safe to drop — they'd pass isOnCooldown() anyway.
+//
+// detectCooldowns rides the SAME interval (both keyed on the same
+// QURL_SEND_COOLDOWN_MS window) — without it, detect entries would only be
+// reaped at the 10k size threshold, letting up to ~20k expired entries
+// linger. One sweep, real parity with sendCooldowns.
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of sendCooldowns) {
     if (now - v > config.QURL_SEND_COOLDOWN_MS) sendCooldowns.delete(k);
+  }
+  for (const [k, v] of detectCooldowns) {
+    if (now - v > config.QURL_SEND_COOLDOWN_MS) detectCooldowns.delete(k);
   }
 }, 60 * 1000).unref();
 

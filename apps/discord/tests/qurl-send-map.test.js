@@ -3388,6 +3388,51 @@ describe('handleQurlDetect', () => {
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 
+  test('CDN fetch THROWS (timeout/DNS/network) ⇒ "couldn\'t download" — NOT "detection unavailable" (item 3)', async () => {
+    // A CDN fetch that throws (AbortSignal 30s timeout, DNS, reset) is its
+    // OWN failure domain — detection was never reached, so it must NOT get
+    // the connector-failure copy. Its own try/catch surfaces a download
+    // message + clears the cooldown (honest download failure).
+    global.fetch = jest.fn().mockRejectedValue(new Error('fetch timed out'));
+    const int = makeDetectInteraction();
+
+    await expect(handleQurlDetect(int)).resolves.not.toThrow();
+
+    expect(int.deferReply).toHaveBeenCalled();
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    const replyContent = int.editReply.mock.calls.at(-1)[0].content;
+    expect(replyContent).toMatch(/could not download|couldn't download|re-upload/i);
+    // Crucially NOT the connector-failure copy.
+    expect(replyContent).not.toMatch(/detection is unavailable/i);
+    // Honest download failure → cooldown cleared.
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+
+  test('realized buffer over cap (TOCTOU: metadata small, body huge) ⇒ "too large", no connector call (item 4)', async () => {
+    // attachment.size (Discord metadata) passes the pre-fetch check, but the
+    // ACTUAL downloaded body exceeds MAX_FILE_SIZE — the realized-buffer
+    // guard after the fetch must reject before POSTing to the connector.
+    const MAX = 25 * 1024 * 1024;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new ArrayBuffer(MAX + 1),
+    });
+    // Metadata size is small/honest so the pre-fetch check passes.
+    const int = makeDetectInteraction({ image: { ...VALID_IMAGE, size: 1024 } });
+
+    await handleQurlDetect(int);
+
+    expect(int.deferReply).toHaveBeenCalled();
+    // Never POSTed the oversize body to the connector.
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/too large/i),
+    }));
+    // Honest oversize → cooldown cleared.
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+
   test('no API key configured ⇒ "not configured" ephemeral AND cooldown CLEARED (item 2)', async () => {
     // BYOK returns null AND the global key is unset for this case → the
     // handler must surface the setup hint and CLEAR the cooldown (a missing
