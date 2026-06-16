@@ -5589,6 +5589,21 @@ async function handleQurlMap(interaction) {
 // distinct — that's a same-guild duplicate, not a cross-guild leak.)
 const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for this server).';
 
+// Server-staff permissions that grant /qurl detect standing — the PM "admins/mods" tier, layered
+// on top of the original-sender tier (see the handler's ACCESS MODEL). Deliberately TIGHT and
+// governance-oriented, not a broad enumeration of every mod bit:
+//   - ManageGuild — this bot's own admin gate (matches /qurl status + setup); an Administrator
+//     passes it automatically via PermissionsBitField.has().
+//   - BanMembers — the moderator tier that handles the PM's governance examples (abuse reports,
+//     DMCA, ban appeals).
+// Excludes broader content perms (e.g. ManageMessages) on purpose: ship tight, loosen if real
+// demand surfaces (a one-line change). A caller with NONE of these who is also not the original
+// sender of the qURL has no standing and gets the byte-identical no-match reply.
+const DETECT_STAFF_PERMISSIONS = [
+  PermissionFlagsBits.ManageGuild,
+  PermissionFlagsBits.BanMembers,
+];
+
 //
 // A user uploads an image; the bot reads the invisible meta-seal watermark
 // via the connector's /api/detect, resolves it to the qurl_id it was minted
@@ -5596,12 +5611,16 @@ const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for thi
 // RECIPIENT's Discord handle + a % match. SCOPED to the requester's guild:
 // an image watermarked in guild A must never attribute in guild B.
 //
-// ACCESS MODEL (deliberate): within a guild, detect is open to ANY member —
-// it is intentionally NOT admin- or original-sender-gated — matching the
-// sibling /qurl send (also un-gated). The ONLY access boundary the feature
-// requires is cross-guild (an image marked in guild A must never attribute in
-// guild B), enforced two ways below. Within-guild gating is a reversible
-// product choice (a few lines here) if it's ever wanted; not in v1.
+// ACCESS MODEL (PM decision, #1101 — "privacy is the north star"): detect REVEALS a recipient
+// only to someone with STANDING to investigate —
+//   (a) the ORIGINAL SENDER of that qURL (their distribution, their property right), or
+//   (b) server STAFF (ManageGuild / BanMembers — see DETECT_STAFF_PERMISSIONS) for governance
+//       (abuse reports, DMCA, ban appeals, where the sender may be absent or uninvolved).
+// A general member has NO standing and gets the BYTE-IDENTICAL no-match reply — they learn
+// nothing, not even that the image is a watermarked qURL (a partial result + "ask an admin" would
+// just train users to route around the privacy model). The standing check runs BEFORE the
+// ambiguity/reveal branches so EVERY no-standing outcome collapses to ONE reply. The permission
+// set is tight by design and a one-line, reversible change if real demand surfaces.
 //
 // This is a deanonymization oracle by construction. The guards, in order:
 //   - guild-only (DM rejects, no oracle outside a guild).
@@ -5616,8 +5635,11 @@ const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for thi
 //     AND we re-filter the returned rows on guild_id here (defense-in-depth
 //     — if the connector contract ever regresses, the leak still can't
 //     cross guilds because this filter fails closed).
+//   - STANDING gate (the ACCESS MODEL above): reveal only to the original
+//     sender or to staff; no-standing callers get the byte-identical no-match
+//     reply, checked BEFORE the ambiguity/reveal branches.
 //   - audit the attribution outcomes + abuse signals (matched / no_match /
-//     ambiguous / rejected / unconfigured / rate_limited — see
+//     ambiguous / rejected / unconfigured / rate_limited / no_standing — see
 //     AUDIT_EVENTS.QURL_DETECT); recipient id NEVER logged (audit access is
 //     broader than the ephemeral reply). Honest operational failures (CDN
 //     download, connector 5xx/network) log at warn/error, not audit.
@@ -5899,6 +5921,32 @@ async function handleQurlDetect(interaction) {
       content: DETECT_NO_MATCH_MSG,
     });
   }
+
+  // STANDING gate (ACCESS MODEL): reveal only to the original SENDER of this qURL or to server
+  // STAFF. Runs BEFORE the ambiguity/reveal branches ON PURPOSE — every no-standing outcome (no
+  // mark, marked-for-another-guild, ambiguous, no-standing) must collapse to the SAME
+  // byte-identical reply, or a prober could distinguish "this is a marked qURL" from "no mark".
+  // Standing is checked with .some() over the rows so the sender check still holds in the
+  // degenerate length-2 (ambiguous) case.
+  const isStaff = DETECT_STAFF_PERMISSIONS.some(
+    (p) => interaction.memberPermissions?.has(p) === true,
+  );
+  const isSender = sameGuild.some((s) => s.sender_discord_id === interaction.user.id);
+  if (!isStaff && !isSender) {
+    // No standing → audit the truth (operators see it) but reply byte-identical to no-match (the
+    // caller learns nothing). KEEP the cooldown — a no-standing probe is sensitive, not an honest
+    // input error, so it must not reset the throttle.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'no_standing',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+      qurl_id: result.qurl_id,
+    });
+    return interaction.editReply({
+      content: DETECT_NO_MATCH_MSG,
+    });
+  }
+
   if (sameGuild.length > 1) {
     // Ambiguous: >1 same-guild row for one qurl_id violates the
     // one-qurl_id-per-recipient write invariant (a write-path regression
@@ -5919,6 +5967,9 @@ async function handleQurlDetect(interaction) {
   }
 
   const send = sameGuild[0];
+  // How this caller earned standing — 'sender' (their own qURL) or 'staff' (governance). Recorded
+  // in the match audit for forensics; the user-facing reveal is identical either way.
+  const grantBasis = isSender ? 'sender' : 'staff';
   const matchPct = typeof result.match_pct === 'number' ? Math.round(result.match_pct) : null;
 
   // Audit the MATCH — qurl_id + match_pct + confidence, but NEVER the
@@ -5935,6 +5986,7 @@ async function handleQurlDetect(interaction) {
     qurl_id: result.qurl_id,
     match_pct: result.match_pct,
     confidence: result.confidence,
+    grant_basis: grantBasis,
   });
 
   // Resolve the recipient's handle. Best-effort: if the user can't be

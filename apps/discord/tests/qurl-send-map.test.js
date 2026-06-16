@@ -3198,7 +3198,7 @@ describe('handleQurlDetect', () => {
       detected: true, qurl_id: 'q_hit1', match_pct: 92, confidence: 0.98,
     });
     mockDb.findSendsByQurlId.mockResolvedValue([
-      { qurl_id: 'q_hit1', recipient_discord_id: recipientId, guild_id: 'guild-1' },
+      { qurl_id: 'q_hit1', recipient_discord_id: recipientId, guild_id: 'guild-1', sender_discord_id: SENDER_ID },
     ]);
     const usersFetch = jest.fn(async (id) => ({ id, username: 'AliceRecipient' }));
     const int = makeDetectInteraction({ usersFetch });
@@ -3230,7 +3230,7 @@ describe('handleQurlDetect', () => {
     // Audit fired as a match WITHOUT the recipient id (broader-access log),
     // but WITH confidence (it's an operator dimension, just not user-facing).
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
-      result: 'matched', qurl_id: 'q_hit1', match_pct: 92, guild_id: 'guild-1', confidence: 0.98,
+      result: 'matched', qurl_id: 'q_hit1', match_pct: 92, guild_id: 'guild-1', confidence: 0.98, grant_basis: 'sender',
     }));
     const auditMeta = logger.audit.mock.calls.find((c) => c[0] === 'qurl_detect')[1];
     expect(JSON.stringify(auditMeta)).not.toContain(recipientId);
@@ -3245,7 +3245,7 @@ describe('handleQurlDetect', () => {
       detected: true, qurl_id: 'q_zero', match_pct: 0, confidence: 0.9,
     });
     mockDb.findSendsByQurlId.mockResolvedValue([
-      { qurl_id: 'q_zero', recipient_discord_id: recipientId, guild_id: 'guild-1' },
+      { qurl_id: 'q_zero', recipient_discord_id: recipientId, guild_id: 'guild-1', sender_discord_id: SENDER_ID },
     ]);
     const int = makeDetectInteraction({
       usersFetch: jest.fn(async (id) => ({ id, username: 'BobRecipient' })),
@@ -3269,7 +3269,7 @@ describe('handleQurlDetect', () => {
       detected: true, qurl_id: 'q_frac', match_pct: 92.7, confidence: 0.97,
     });
     mockDb.findSendsByQurlId.mockResolvedValue([
-      { qurl_id: 'q_frac', recipient_discord_id: recipientId, guild_id: 'guild-1' },
+      { qurl_id: 'q_frac', recipient_discord_id: recipientId, guild_id: 'guild-1', sender_discord_id: SENDER_ID },
     ]);
     const int = makeDetectInteraction({
       usersFetch: jest.fn(async (id) => ({ id, username: 'CarolRecipient' })),
@@ -3332,7 +3332,7 @@ describe('handleQurlDetect', () => {
     }));
   });
 
-  test('item 2: no-mark and cross-guild-filtered replies are BYTE-IDENTICAL (no cross-guild signal)', async () => {
+  test('no-mark, cross-guild-filtered, and no-standing replies are ALL BYTE-IDENTICAL (no signal)', async () => {
     // Capture the reply text from BOTH no-match paths and assert they're the
     // exact same string — if they ever diverge, a requester could tell "no
     // watermark" from "watermarked for another guild", which is the
@@ -3351,7 +3351,20 @@ describe('handleQurlDetect', () => {
     await handleQurlDetect(crossGuild);
     const crossGuildText = crossGuild.editReply.mock.calls.at(-1)[0].content;
 
+    // Third branch: a matched IN-GUILD row, but the caller has NO standing (not the sender, not
+    // staff). The reply MUST be byte-identical to the other two — a no-standing prober can't tell
+    // "no mark" / "another guild" / "marked but no standing" apart.
+    detectCooldowns.clear();
+    mockDetectWatermark.mockResolvedValueOnce({ detected: true, qurl_id: 'q_ns', match_pct: 90, confidence: 0.95 });
+    mockDb.findSendsByQurlId.mockResolvedValueOnce([
+      { qurl_id: 'q_ns', recipient_discord_id: '100000000000000004', guild_id: 'guild-1', sender_discord_id: '900000000000000777' },
+    ]);
+    const noStanding = makeDetectInteraction({ guildId: 'guild-1', userId: '900000000000000888' });
+    await handleQurlDetect(noStanding);
+    const noStandingText = noStanding.editReply.mock.calls.at(-1)[0].content;
+
     expect(noMarkText).toBe(crossGuildText);
+    expect(noMarkText).toBe(noStandingText);
     expect(noMarkText).toBe(DETECT_NO_MATCH_MSG);
   });
 
@@ -3370,6 +3383,10 @@ describe('handleQurlDetect', () => {
     ]);
     const usersFetch = jest.fn();
     const int = makeDetectInteraction({ guildId: 'guild-1', usersFetch });
+    // Caller is STAFF, so they have standing and REACH the ambiguity branch (the standing gate
+    // runs first). A no-standing caller instead gets the byte-identical no-match — see the
+    // dedicated ambiguity+no-standing test below.
+    int.memberPermissions = { has: jest.fn(() => true) };
 
     await handleQurlDetect(int);
 
@@ -3383,6 +3400,76 @@ describe('handleQurlDetect', () => {
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
       result: 'ambiguous', qurl_id: 'q_dup', guild_id: 'guild-1',
     }));
+  });
+
+  test('standing: a STAFF caller (not the sender) gets the reveal (grant_basis staff)', async () => {
+    const recipientId = '100000000000000021';
+    mockDetectWatermark.mockResolvedValue({ detected: true, qurl_id: 'q_staff', match_pct: 95, confidence: 0.97 });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_staff', recipient_discord_id: recipientId, guild_id: 'guild-1', sender_discord_id: '900000000000000777' },
+    ]);
+    const usersFetch = jest.fn(async (id) => ({ id, username: 'LeakedRecipient' }));
+    // Caller is NOT the sender (777) but HAS a staff permission → standing via the staff tier.
+    const int = makeDetectInteraction({ guildId: 'guild-1', userId: '900000000000000801', usersFetch });
+    int.memberPermissions = { has: jest.fn(() => true) };
+
+    await handleQurlDetect(int);
+
+    expect(usersFetch).toHaveBeenCalledWith(recipientId);
+    const reply = int.editReply.mock.calls.at(-1)[0].content;
+    expect(reply).toContain('LeakedRecipient');
+    expect(reply).toMatch(/95% match/);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'matched', qurl_id: 'q_staff', grant_basis: 'staff',
+    }));
+  });
+
+  test('standing: a general member (not sender, not staff) is DENIED — byte-identical no-match + audit no_standing', async () => {
+    const recipientId = '100000000000000022';
+    mockDetectWatermark.mockResolvedValue({ detected: true, qurl_id: 'q_deny', match_pct: 95, confidence: 0.97 });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_deny', recipient_discord_id: recipientId, guild_id: 'guild-1', sender_discord_id: '900000000000000777' },
+    ]);
+    const usersFetch = jest.fn();
+    // Caller is neither the sender (777) nor staff (no memberPermissions) → no standing.
+    const int = makeDetectInteraction({ guildId: 'guild-1', userId: '900000000000000802', usersFetch });
+
+    await handleQurlDetect(int);
+
+    // Recipient NEVER resolved; reply byte-identical to no-match (no signal the image is marked).
+    expect(usersFetch).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: DETECT_NO_MATCH_MSG }));
+    // No 'matched' audit; audited as no_standing with the qurl_id (operators see the truth).
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_detect', expect.objectContaining({ result: 'matched' }));
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'no_standing', qurl_id: 'q_deny', guild_id: 'guild-1',
+    }));
+    // The no_standing audit must not leak the recipient id.
+    const auditMeta = logger.audit.mock.calls.find((c) => c[0] === 'qurl_detect' && c[1].result === 'no_standing')[1];
+    expect(JSON.stringify(auditMeta)).not.toContain(recipientId);
+  });
+
+  test('standing+ambiguity: a no-standing caller on an AMBIGUOUS qurl_id gets byte-identical no-match, NOT "couldn\'t determine"', async () => {
+    // The standing gate runs BEFORE the ambiguity branch, so a no-standing prober must NOT see the
+    // distinct "couldn't determine … contact an admin" message — that would leak that the image is
+    // a marked qURL. Regression guard for the gate ordering.
+    mockDetectWatermark.mockResolvedValue({ detected: true, qurl_id: 'q_dup2', match_pct: 90, confidence: 0.95 });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_dup2', recipient_discord_id: '100000000000000001', guild_id: 'guild-1', sender_discord_id: '900000000000000777' },
+      { qurl_id: 'q_dup2', recipient_discord_id: '100000000000000002', guild_id: 'guild-1', sender_discord_id: '900000000000000778' },
+    ]);
+    // Caller is neither a sender (777/778) nor staff.
+    const int = makeDetectInteraction({ guildId: 'guild-1', userId: '900000000000000803' });
+
+    await handleQurlDetect(int);
+
+    const reply = int.editReply.mock.calls.at(-1)[0].content;
+    expect(reply).toBe(DETECT_NO_MATCH_MSG);
+    expect(reply).not.toMatch(/single recipient/i);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'no_standing', qurl_id: 'q_dup2',
+    }));
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_detect', expect.objectContaining({ result: 'ambiguous' }));
   });
 
   test('connector 5xx ⇒ graceful ephemeral error, no throw, cooldown CLEARED (transient)', async () => {

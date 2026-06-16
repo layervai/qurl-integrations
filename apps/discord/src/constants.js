@@ -544,8 +544,9 @@ const AUDIT_EVENTS = {
   // connector 5xx/network) or pre-connector input rejects (cooldown, missing /
   // non-image / oversize attachment) — those log at warn/error and never reach
   // the connector or resolve a recipient. Outcomes:
-  //   - `result: 'matched'`  — connector matched a same-guild row; carries
-  //                            `qurl_id` + `match_pct` + `confidence`.
+  //   - `result: 'matched'`  — connector matched a same-guild row + the caller
+  //                            had standing; carries `qurl_id` + `match_pct` +
+  //                            `confidence` + `grant_basis` ('sender'|'staff').
   //   - `result: 'no_match'` — no mark, or a mark with no same-guild row
   //                            (on the latter, carries `qurl_id`).
   //   - `result: 'ambiguous'`— >1 same-guild row for one qurl_id (a
@@ -561,6 +562,11 @@ const AUDIT_EVENTS = {
   //   - `result: 'rate_limited'` — the connector 429'd this guild (an abuse
   //                            signal that KEEPS the cooldown, mirroring
   //                            'rejected'); the connector call was throttled.
+  //   - `result: 'no_standing'` — a matched qURL, but the caller is neither its
+  //                            original sender nor staff, so the ACCESS MODEL
+  //                            denies the reveal. Carries `qurl_id`; KEEPS the
+  //                            cooldown; the user-facing reply is byte-identical
+  //                            to no_match (the caller can't tell it apart).
   // Always carries `guild_id` + `requester_id`, and NEVER the resolved
   // recipient id (audit logs are broader-access than the ephemeral reply;
   // logging the unmasked recipient would re-leak the very thing the
