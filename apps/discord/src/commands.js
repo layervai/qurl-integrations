@@ -5640,6 +5640,15 @@ async function handleQurlDetect(interaction) {
     logger.warn('handleQurlDetect: attachment.url failed SSRF gate', {
       user_id: interaction.user.id, host: safeUrlHost(attachment.url),
     });
+    // Audit the SSRF probe — it's the STRONGEST abuse signal this handler
+    // sees (it's the one rejection that KEEPS the cooldown), so it belongs
+    // in the audit trail, not just logger.warn. No recipient id: a
+    // rejection never resolves one.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'rejected',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+    });
     return interaction.reply({
       content: '❌ Attachment source not allowed. Upload the image via Discord, not a linked URL.',
       ephemeral: true,
@@ -5678,6 +5687,12 @@ async function handleQurlDetect(interaction) {
   // double-resolve and gate before this handler runs.)
   const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
   if (!apiKey) {
+    // A missing /qurl setup is an honest config error, not abuse — clear
+    // the cooldown so the user can retry the instant an admin configures
+    // the server. Matches the handler's "honest user errors clear the
+    // cooldown" design (non-image / oversize branches above). The SSRF
+    // probe is the one rejection that intentionally KEEPS the cooldown.
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
     return interaction.editReply({
       content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
     });
@@ -5763,16 +5778,18 @@ async function handleQurlDetect(interaction) {
   const send = sameGuild[0];
   const matchPct = typeof result.match_pct === 'number' ? Math.round(result.match_pct) : null;
 
-  // Audit the MATCH — qurl_id + match_pct, but NEVER the resolved
-  // recipient id. Audit logs are broader-access than the ephemeral reply;
-  // logging the unmasked recipient would re-leak the deanonymization the
-  // ephemeral is there to contain.
+  // Audit the MATCH — qurl_id + match_pct + confidence, but NEVER the
+  // resolved recipient id. Audit logs are broader-access than the ephemeral
+  // reply; logging the unmasked recipient would re-leak the deanonymization
+  // the ephemeral is there to contain. confidence (0–1) lives HERE, not in
+  // the user reply — see the reply below.
   logger.audit(AUDIT_EVENTS.QURL_DETECT, {
     result: 'matched',
     guild_id: interaction.guildId,
     requester_id: interaction.user.id,
     qurl_id: result.qurl_id,
     match_pct: matchPct,
+    confidence: result.confidence,
   });
 
   // Resolve the recipient's handle. Best-effort: if the user can't be
@@ -5791,9 +5808,13 @@ async function handleQurlDetect(interaction) {
 
   const id = send.recipient_discord_id;
   const who = username ? `**${escapeDiscordMarkdown(username)}** (<@${id}>)` : `<@${id}>`;
+  // match_pct (0–100) is the headline the user asked for. confidence (0–1)
+  // is deliberately OMITTED from the reply — mixing a 0–100 and a 0–1 scale
+  // confused readers, and an absent confidence rendered a bare "0". It stays
+  // in the match audit above for operators.
   const pctText = matchPct === null ? '' : ` — ${matchPct}% match`;
   return interaction.editReply({
-    content: `🔍 This image was watermarked for ${who}${pctText} (detect confidence ${result.confidence}).`,
+    content: `🔍 This image was watermarked for ${who}${pctText}.`,
   });
 }
 

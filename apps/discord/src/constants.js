@@ -537,15 +537,21 @@ const AUDIT_EVENTS = {
   QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
 
   // /qurl detect — watermark-attribution lookup (#1101). Emitted once per
-  // detect invocation that reaches the connector, in BOTH the matched and
-  // unmatched branches, so the audit trail records every deanonymization
+  // detect invocation, so the audit trail records every deanonymization
   // query (this surfaces a user submitting an image → the recipient it was
   // watermarked for; a high detect rate from one user is the abuse signal
-  // the cooldown + this audit are paired to catch). Carries
-  // `result: 'matched' | 'no_match'`, `guild_id`, `requester_id`, and on a
-  // match `qurl_id` + `match_pct` — NEVER the resolved recipient id
-  // (audit logs are broader-access than the ephemeral reply; logging the
-  // unmasked recipient would re-leak the very thing the ephemeral protects).
+  // the cooldown + this audit are paired to catch). Fires on EVERY outcome:
+  //   - `result: 'matched'`  — connector matched a same-guild row; carries
+  //                            `qurl_id` + `match_pct` + `confidence`.
+  //   - `result: 'no_match'` — no mark, or a mark with no same-guild row
+  //                            (on the latter, carries `qurl_id`).
+  //   - `result: 'rejected'` — the SSRF-probe gate fired (the strongest
+  //                            abuse signal; the one rejection that keeps
+  //                            the cooldown). No connector call.
+  // Always carries `guild_id` + `requester_id`, and NEVER the resolved
+  // recipient id (audit logs are broader-access than the ephemeral reply;
+  // logging the unmasked recipient would re-leak the very thing the
+  // ephemeral protects — and a 'rejected' outcome never resolves one).
   QURL_DETECT: 'qurl_detect',
 };
 

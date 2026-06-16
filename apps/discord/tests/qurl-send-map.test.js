@@ -3074,14 +3074,25 @@ describe('handleQurlDetect', () => {
   // an `image` attachment option, a `client.users.fetch` for recipient
   // resolution, and a deferReply that flips `deferred` (the handler defers
   // before the network section). `usersFetch` lets a test stub the
-  // recipient handle or force a fetch failure.
+  // recipient handle or force a fetch failure. `omitImage: true` makes
+  // `getAttachment('image', true)` THROW like discord.js does for a missing
+  // required option (exercises the handler's required-option catch branch,
+  // distinct from a null attachment) — the shared makeInteraction's
+  // getAttachment ignores the `required` flag, so override it here.
   function makeDetectInteraction({
     guildId = 'guild-1',
     userId = SENDER_ID,
     image = VALID_IMAGE,
     usersFetch,
+    omitImage = false,
   } = {}) {
     const base = makeInteraction({ guildId, userId, options: { image } });
+    if (omitImage) {
+      base.options.getAttachment = jest.fn((name, required) => {
+        if (required) throw new Error(`Required option "${name}" not found`);
+        return null;
+      });
+    }
     base.deferReply = jest.fn(async () => { base.deferred = true; });
     base.client = {
       users: {
@@ -3131,7 +3142,7 @@ describe('handleQurlDetect', () => {
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 
-  test('rejects a non-Discord-CDN attachment url (SSRF gate — cooldown PRESERVED)', async () => {
+  test('rejects a non-Discord-CDN attachment url (SSRF gate — cooldown PRESERVED + rejected audit)', async () => {
     const int = makeDetectInteraction({ image: { ...VALID_IMAGE, url: 'https://evil.example/x.png' } });
     await handleQurlDetect(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
@@ -3141,6 +3152,13 @@ describe('handleQurlDetect', () => {
     expect(mockDetectWatermark).not.toHaveBeenCalled();
     // Probing the allow-list is an abuse signal → cooldown KEPT.
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(true);
+    // Item 3: the strongest abuse signal is in the audit trail (no recipient
+    // id — a rejection never resolves one).
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'rejected', guild_id: 'guild-1', requester_id: SENDER_ID,
+    }));
+    const auditMeta = logger.audit.mock.calls.find((c) => c[0] === 'qurl_detect')[1];
+    expect('recipient_discord_id' in auditMeta).toBe(false);
   });
 
   test('per-(guild,user) cooldown blocks a second detect in the same guild', async () => {
@@ -3191,17 +3209,20 @@ describe('handleQurlDetect', () => {
     );
     expect(mockDb.findSendsByQurlId).toHaveBeenCalledWith('q_hit1');
     expect(usersFetch).toHaveBeenCalledWith(recipientId);
-    // Ephemeral reply names the recipient + the % match + confidence.
+    // Ephemeral reply names the recipient + the % match — but NOT confidence
+    // (item 4: the 0–100 match_pct headline only; the 0–1 confidence lives
+    // in the audit, never mixed into the user-facing scale).
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('AliceRecipient'),
     }));
     const replyContent = int.editReply.mock.calls.at(-1)[0].content;
     expect(replyContent).toContain(`<@${recipientId}>`);
     expect(replyContent).toMatch(/92% match/);
-    expect(replyContent).toMatch(/confidence 0\.98/);
-    // Audit fired as a match WITHOUT the recipient id (broader-access log).
+    expect(replyContent).not.toMatch(/confidence/i);
+    // Audit fired as a match WITHOUT the recipient id (broader-access log),
+    // but WITH confidence (it's an operator dimension, just not user-facing).
     expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
-      result: 'matched', qurl_id: 'q_hit1', match_pct: 92, guild_id: 'guild-1',
+      result: 'matched', qurl_id: 'q_hit1', match_pct: 92, guild_id: 'guild-1', confidence: 0.98,
     }));
     const auditMeta = logger.audit.mock.calls.find((c) => c[0] === 'qurl_detect')[1];
     expect(JSON.stringify(auditMeta)).not.toContain(recipientId);
@@ -3259,6 +3280,81 @@ describe('handleQurlDetect', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/unavailable right now/i),
     }));
+  });
+
+  // ── Item 5: missing-branch coverage ──
+
+  test('rejects an oversize image (cooldown CLEARED — honest user error)', async () => {
+    const int = makeDetectInteraction({ image: { ...VALID_IMAGE, size: 999_999_999 } });
+    await handleQurlDetect(int);
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/too large/i),
+      ephemeral: true,
+    }));
+    // Reject before buffering — never deferred, never reached the connector.
+    expect(int.deferReply).not.toHaveBeenCalled();
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+
+  test('CDN fetch !ok ⇒ "link may have expired" ephemeral, no connector call', async () => {
+    // The handler defers, then the Discord-CDN fetch returns non-ok (signed
+    // URL expired). It must editReply the expiry hint and NOT POST to the
+    // connector with a body it never downloaded.
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 403 });
+    const int = makeDetectInteraction();
+
+    await handleQurlDetect(int);
+
+    expect(int.deferReply).toHaveBeenCalled();
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/may have expired/i),
+    }));
+  });
+
+  test('no API key configured ⇒ "not configured" ephemeral AND cooldown CLEARED (item 2)', async () => {
+    // BYOK returns null AND the global key is unset for this case → the
+    // handler must surface the setup hint and CLEAR the cooldown (a missing
+    // /qurl setup is an honest config error, not abuse). The config mock
+    // sets QURL_API_KEY by default, so blank it for this case + restore.
+    const config = require('../src/config');
+    const savedKey = config.QURL_API_KEY;
+    config.QURL_API_KEY = '';
+    mockDb.getGuildApiKey.mockResolvedValue(null);
+    const int = makeDetectInteraction();
+
+    try {
+      await handleQurlDetect(int);
+    } finally {
+      config.QURL_API_KEY = savedKey;
+    }
+
+    // Deferred before the key check, so the not-configured reply is an edit.
+    expect(int.deferReply).toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/not configured/i),
+    }));
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    // Item 2 lock-in: cooldown cleared so retry is immediate once configured.
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+
+  test('required image option missing ⇒ "image option is required" + cooldown CLEARED', async () => {
+    // getAttachment('image', true) throws (client/schema desync) → the
+    // handler catches, replies the required-option hint, and clears the
+    // cooldown for an immediate retry once the deploy stabilizes.
+    const int = makeDetectInteraction({ omitImage: true });
+
+    await handleQurlDetect(int);
+
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/`image:` option is required/i),
+      ephemeral: true,
+    }));
+    expect(int.deferReply).not.toHaveBeenCalled();
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 });
 
