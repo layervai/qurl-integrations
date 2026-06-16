@@ -455,6 +455,14 @@ module.exports = {
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 
+  // DETECT_COMMAND_ENABLED gates /qurl detect (#1101) exactly as
+  // MAP_COMMAND_ENABLED gates /qurl map: default OFF, same snapshot/restart
+  // semantics. The connector /api/detect backend 503/404s until the watermark
+  // stack is ACTIVATED (a separate gated step AFTER the connector deploys), so
+  // detect stays DARK until an operator flips this at activation — no
+  // visible-but-failing command in the interim.
+  DETECT_COMMAND_ENABLED: process.env.DETECT_COMMAND_ENABLED === 'true',
+
   // qURL send limits (/qurl send + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.

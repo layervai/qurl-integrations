@@ -21,6 +21,7 @@ jest.mock('../src/config', () => ({
   // semantics would silently keep these tests green; the explicit
   // value pins the contract.
   MAP_COMMAND_ENABLED: false,
+  DETECT_COMMAND_ENABLED: false,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
@@ -2440,6 +2441,29 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     });
     // handleQurlMap defers + then hits Places; if the dispatcher ever
     // routed through it by mistake, deferReply would fire. Negative
+    // assertion guards against that regression.
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('dispatcher replies with QURL_DETECT_DISABLED_REPLY for /qurl detect (stale-client safety net)', async () => {
+    // DETECT_COMMAND_ENABLED is off in this block. A stale client carrying the
+    // pre-flip command def can still submit /qurl detect; the dispatcher's
+    // defensive branch turns that into a clean ephemeral instead of routing to
+    // handleQurlDetect. Enforcing the flag at dispatch also means a stale detect
+    // can't reveal a recipient even if the backend is live but the flag is off.
+    const interaction = makeInteraction({
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'detect'),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: _test.QURL_DETECT_DISABLED_REPLY,
+      ephemeral: true,
+    });
+    // handleQurlDetect defers early (ephemeral) before any network work; if the
+    // dispatcher ever routed through it, deferReply would fire. Negative
     // assertion guards against that regression.
     expect(interaction.deferReply).not.toHaveBeenCalled();
   });

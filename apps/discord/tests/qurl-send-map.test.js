@@ -24,6 +24,7 @@ jest.mock('../src/config', () => ({
   // path (handleAutocomplete → searchPlaces, handleQurlMap dispatch,
   // confirm-card MAPS flow). Production default is off.
   MAP_COMMAND_ENABLED: true,
+  DETECT_COMMAND_ENABLED: true,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 25,

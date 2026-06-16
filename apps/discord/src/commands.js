@@ -3718,6 +3718,11 @@ const API_KEY_GATED_SUBCOMMANDS = new Set(
 // the same remaining capability.
 const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl send` to share files securely.';
 
+// User-facing reply for stale /qurl detect submissions when DETECT_COMMAND_ENABLED
+// is off — a Discord client routing a cached `detect` submission after the
+// registration dropped it. Mirrors QURL_MAP_DISABLED_REPLY.
+const QURL_DETECT_DISABLED_REPLY = '❌ `/qurl detect` is currently disabled.';
+
 // Slash-option choice arrays. The same wording flows into both the
 // slash-command autocomplete and the confirm-card dropdowns so users
 // see consistent labels at every step. EXPIRY_CHOICES already exists.
@@ -5621,6 +5626,12 @@ const DETECT_STAFF_PERMISSIONS = [
 // just train users to route around the privacy model). The standing check runs BEFORE the
 // ambiguity/reveal branches so EVERY no-standing outcome collapses to ONE reply. The permission
 // set is tight by design and a one-line, reversible change if real demand surfaces.
+//
+// SCOPE (threat model): the standing gate is a bot-side UX/governance layer, NOT a server-enforced
+// authorization boundary. The connector's /api/detect enforces only guild-scope; a holder of the
+// guild's qURL API key (admin-tier) could call /api/detect directly and bypass THIS gate (guild-
+// scope still holds — never cross-tenant). Closing that gap needs a connector-side per-route auth
+// factor (tracked in qurl-integrations-infra#1170); until then, standing is enforced here.
 //
 // This is a deanonymization oracle by construction. The guards, in order:
 //   - guild-only (DM rejects, no oracle outside a guild).
@@ -8691,14 +8702,16 @@ const commands = [
                 .setRequired(false)
                 .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
             )
-        )
-        // /qurl detect — watermark attribution (#1101). Required image
-        // attachment; the handler reads the invisible meta-seal mark and
-        // (guild-scoped) replies with the original recipient. Always
-        // registered (no feature toggle) — the smoke test's expected
-        // subcommand set in e2e/tests/discord-commands.smoke.test.ts
-        // includes `detect` unconditionally.
-        .addSubcommand(sub =>
+        );
+      // /qurl detect — watermark attribution (#1101). Gated behind
+      // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
+      // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
+      // separate gated step AFTER the connector deploys), so detect stays DARK
+      // until an operator flips the flag at activation — no visible-but-failing
+      // command in the interim. The smoke test (e2e/tests/discord-commands.smoke.test.ts)
+      // reads the same flag and asserts detect present-when-enabled / absent-when-off.
+      if (config.DETECT_COMMAND_ENABLED) {
+        builder.addSubcommand(sub =>
           sub.setName('detect')
             .setDescription('Find which recipient an image was watermarked for (this server)')
             .addAttachmentOption(opt =>
@@ -8707,6 +8720,7 @@ const commands = [
                 .setRequired(true)
             )
         );
+      }
       if (config.MAP_COMMAND_ENABLED) {
         builder.addSubcommand(sub =>
           sub.setName('map')
@@ -9036,7 +9050,21 @@ const commands = [
       // /qurl detect resolves its own API key inside the handler (BYOK →
       // global fallback) — deliberately NOT in API_KEY_GATED_SUBCOMMANDS,
       // so it dispatches here without the dispatcher-level key gate.
-      if (sub === 'detect') return handleQurlDetect(interaction);
+      if (sub === 'detect') {
+        if (!config.DETECT_COMMAND_ENABLED) {
+          // Stale client with a cached command def that still lists `detect`
+          // after the toggle was off — expected post-deploy traffic, not an
+          // error (same cache-TTL story as /qurl map below). Enforcing the flag
+          // HERE too means a stale detect can't reveal a recipient even if the
+          // backend is live but the flag is off.
+          logger.debug('qurl_detect_disabled_reply: stale-client /qurl detect submission caught by toggle gate', {
+            user_id: interaction.user?.id,
+            guild_id: interaction.guildId,
+          });
+          return interaction.reply({ content: QURL_DETECT_DISABLED_REPLY, ephemeral: true });
+        }
+        return handleQurlDetect(interaction);
+      }
       if (sub === 'map') {
         if (!config.MAP_COMMAND_ENABLED) {
           // Debug (not warn) — expected post-deploy traffic from
@@ -9739,6 +9767,7 @@ module.exports = {
       // Disabled-state reply for stale /qurl map submissions. Exported
       // so flag-off tests pin against the production string.
       QURL_MAP_DISABLED_REPLY,
+      QURL_DETECT_DISABLED_REPLY,
       handleAutocomplete,
       // Test-only reset: the autocomplete-failure burst counter is
       // module-level state that accumulates across tests within a
