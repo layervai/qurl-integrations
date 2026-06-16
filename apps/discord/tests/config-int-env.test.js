@@ -192,3 +192,50 @@ describe('config.intEnv — lenient mode (parseInt fallback, no strictInteger)',
     });
   });
 });
+
+// #1101 — the /qurl detect throttle. Defaults to QURL_SEND_COOLDOWN_MS so an
+// unset knob is current behavior, but is independently tunable (detect is a
+// deanonymization oracle; coupling its window to send cadence would let a
+// send-cadence change silently re-tune the oracle).
+describe('config — QURL_DETECT_COOLDOWN_MS (defaults to send, decoupled)', () => {
+  test('unset → defaults to the send cooldown (no behavior change)', () => {
+    captureFreshConfig(
+      { QURL_DETECT_COOLDOWN_MS: undefined, QURL_SEND_COOLDOWN_MS: undefined },
+      (cfg) => {
+        expect(cfg.QURL_DETECT_COOLDOWN_MS).toBe(cfg.QURL_SEND_COOLDOWN_MS);
+        expect(cfg.QURL_DETECT_COOLDOWN_MS).toBe(30000); // the send default
+      },
+    );
+  });
+
+  test('unset detect + overridden send → tracks the send override', () => {
+    captureFreshConfig(
+      { QURL_DETECT_COOLDOWN_MS: undefined, QURL_SEND_COOLDOWN_MS: '45000' },
+      (cfg) => {
+        expect(cfg.QURL_SEND_COOLDOWN_MS).toBe(45000);
+        expect(cfg.QURL_DETECT_COOLDOWN_MS).toBe(45000);
+      },
+    );
+  });
+
+  test('explicit detect override → decoupled from send', () => {
+    captureFreshConfig(
+      { QURL_DETECT_COOLDOWN_MS: '90000', QURL_SEND_COOLDOWN_MS: '30000' },
+      (cfg) => {
+        expect(cfg.QURL_SEND_COOLDOWN_MS).toBe(30000);
+        expect(cfg.QURL_DETECT_COOLDOWN_MS).toBe(90000);
+      },
+    );
+  });
+
+  test('minPositive: "0" → falls back to the send value with a warn', () => {
+    captureFreshConfig(
+      { QURL_DETECT_COOLDOWN_MS: '0', QURL_SEND_COOLDOWN_MS: '30000' },
+      (cfg, warns) => {
+        // Rejected non-positive → default (which is the resolved send value).
+        expect(cfg.QURL_DETECT_COOLDOWN_MS).toBe(30000);
+        expect(warns.some((w) => w.includes('QURL_DETECT_COOLDOWN_MS') && w.includes('must be > 0'))).toBe(true);
+      },
+    );
+  });
+});

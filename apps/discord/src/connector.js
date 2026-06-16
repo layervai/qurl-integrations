@@ -347,9 +347,15 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * @param {number} opts.n — integer 1..100, count of links to mint.
  * @param {?string} [opts.apiKey] — caller API key; falls back to `config.QURL_API_KEY`.
  * @param {?number} [opts.selfDestructSeconds] — see formatSessionDurationSeconds for value mapping. Defaults to null.
+ * @param {?string} [opts.guildId] — Discord guild snowflake. When provided,
+ *   forwarded as `guild_id` so the connector can scope a future
+ *   watermark-attribution `/api/detect` lookup to the minting guild (the
+ *   bot side of the per-guild deanonymization-isolation contract, #1101).
+ *   Optional + back-compat: omitting it leaves the mint body unchanged, so
+ *   legacy callers and pre-#1101 send paths keep working untouched.
  * @returns {Promise<Array<{qurl_id: string, qurl_link: string, expires_at: string}>>}
  */
-async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null } = {}) {
+async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds = null, guildId } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -365,6 +371,13 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
   if (sessionDuration !== null) {
     body.session_duration = sessionDuration;
+  }
+  // Only attach guild_id when truthy — an empty/undefined value would put a
+  // useless `guild_id: null` on the wire and (worse) could land as an empty
+  // attribution scope on the connector side. Truthy-gate keeps the contract
+  // optional, mirroring the session_duration handling above.
+  if (guildId) {
+    body.guild_id = guildId;
   }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
@@ -387,6 +400,69 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 
   logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
+}
+
+/**
+ * Watermark-attribution detect (the bot side of #1101). POST raw image
+ * bytes to the connector's `/api/detect`; the connector reads the
+ * invisible meta-seal watermark and resolves it to the qurl_id it was
+ * minted for, GUILD-SCOPED via the `X-Guild-Id` header so an image
+ * watermarked in guild A never attributes in guild B. This is a
+ * deanonymization oracle by design — the caller (handleQurlDetect) owns
+ * the cooldown + ephemeral-reply abuse guards and the second-layer
+ * same-guild filter on the returned rows.
+ *
+ * Contract (the endpoint another agent is building — code against this):
+ *   - Headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
+ *     Content-Type: <imageContentType || 'application/octet-stream'>.
+ *   - Body: the raw image bytes (Buffer / ArrayBuffer / Uint8Array).
+ *   - 200 JSON: { detected: boolean, qurl_id: string|null,
+ *     match_pct: number|null, confidence: number }. detected=false ⇒ no
+ *     mark OR no same-guild match (qurl_id / match_pct null). detected=true
+ *     ⇒ qurl_id + match_pct (0–100) + confidence (0–1).
+ *   - 401 bad auth / 400 missing guild|image / 429 rate-limited / 5xx —
+ *     surfaced as a thrown Error (with .status) via throwConnectorError so
+ *     the handler can ephemeral-error rather than leak the body.
+ *
+ * @param {Buffer|ArrayBuffer|Uint8Array} imageBytes — raw image bytes.
+ * @param {object} opts
+ * @param {string} opts.guildId — Discord guild snowflake (X-Guild-Id scope).
+ * @param {?string} [opts.contentType] — image MIME; defaults to octet-stream.
+ * @param {?string} [opts.apiKey] — caller API key; falls back to config.QURL_API_KEY.
+ * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
+ */
+async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
+  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');
+
+  const response = await fetch(`${config.CONNECTOR_URL}/api/detect`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': contentType || 'application/octet-stream',
+      'X-Guild-Id': guildId,
+      ...connectorAuthHeaders(apiKey),
+    },
+    body: imageBytes,
+    // Neural-net inference is the slow leg here; give it the same 60s
+    // headroom the upload paths use rather than the 30s mint window.
+    signal: AbortSignal.timeout(60000),
+  });
+
+  if (!response.ok) {
+    return throwConnectorError('Connector detect', response);
+  }
+
+  const result = await response.json();
+  // Normalize the shape so the caller can destructure without
+  // optional-chaining every field. The connector owns the values;
+  // we only coerce `detected` to a hard boolean (a missing/garbled
+  // field must read as "no attribution", never as a truthy object).
+  return {
+    detected: result.detected === true,
+    qurl_id: typeof result.qurl_id === 'string' ? result.qurl_id : null,
+    match_pct: typeof result.match_pct === 'number' ? result.match_pct : null,
+    confidence: typeof result.confidence === 'number' ? result.confidence : 0,
+  };
 }
 
 /**
@@ -429,4 +505,4 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSec
   return result;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl };
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl };

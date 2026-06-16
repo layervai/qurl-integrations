@@ -36,7 +36,7 @@ const {
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
-const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
@@ -565,10 +565,40 @@ const addRecipientsLocks = new Set();
 const sendCooldowns = new Map();
 
 // Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
-// them) can't grow the Map beyond this. Above this, the 10%-drop eviction
-// still fires; if that fails to reclaim, setCooldown drops the oldest
-// single entry to guarantee we never exceed the cap.
-const SEND_COOLDOWNS_MAX = 20000;
+// them) can't grow a cooldown Map beyond this. Above this, the 10%-drop
+// eviction still fires; if that fails to reclaim, evictOldest drops the
+// oldest single entries to guarantee we never exceed the cap. Shared by
+// sendCooldowns and detectCooldowns so the two buckets stay byte-for-byte
+// parallel (see evictOldest).
+const COOLDOWNS_MAX = 20000;
+
+// Shared eviction for the cooldown Maps — extracted so setCooldown and
+// setDetectCooldown share ONE implementation rather than two parallel
+// copies that could silently drift. Two phases, both relative to `max`:
+//   1. Soft bulk-drop: once the Map crosses HALF the cap, evict the oldest
+//      ~10% in one pass (cheap amortized trim so we rarely reach the cap).
+//   2. Hard cap: drop the oldest one-at-a-time until size <= max, so the
+//      ceiling holds even under a pathological insertion pattern that beats
+//      the bulk drop.
+// Relies on Map insertion-order iteration (`.keys()` yields oldest first);
+// callers delete+re-set on touch so active entries re-insert at the tail.
+function evictOldest(map, max) {
+  const softThreshold = Math.floor(max / 2);
+  if (map.size > softThreshold) {
+    const dropCount = Math.max(1, Math.floor(map.size / 10));
+    const it = map.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      map.delete(k);
+    }
+  }
+  while (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
 
 function isOnCooldown(userId) {
   const last = sendCooldowns.get(userId);
@@ -578,30 +608,67 @@ function isOnCooldown(userId) {
 
 function setCooldown(userId) {
   // LRU-ish behavior: delete first so set() re-inserts at the end of the
-  // Map's insertion order. Combined with the bulk 10%-drop eviction below,
+  // Map's insertion order. Combined with evictOldest's bulk 10%-drop,
   // active users stay resident while stale entries roll out.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
-  if (sendCooldowns.size > 10000) {
-    const dropCount = Math.max(1, Math.floor(sendCooldowns.size / 10));
-    const it = sendCooldowns.keys();
-    for (let i = 0; i < dropCount; i++) {
-      const k = it.next().value;
-      if (k === undefined) break;
-      sendCooldowns.delete(k);
-    }
-  }
-  // Belt-and-suspenders: guarantee the hard cap even if the bulk drop
-  // didn't reclaim enough (pathological insertion patterns).
-  while (sendCooldowns.size > SEND_COOLDOWNS_MAX) {
-    const oldest = sendCooldowns.keys().next().value;
-    if (oldest === undefined) break;
-    sendCooldowns.delete(oldest);
-  }
+  evictOldest(sendCooldowns, COOLDOWNS_MAX);
 }
 
 function clearCooldown(userId) {
   sendCooldowns.delete(userId);
+}
+
+// ── /qurl detect cooldown (#1101) ──
+//
+// AUTHORITATIVE abuse enforcement for the deanonymization oracle lives on
+// the CONNECTOR: it guild-scopes every lookup via the X-Guild-Id header and
+// rate-limits per guild (a 429 we honor by KEEPING this cooldown to back
+// off). This in-process Map is best-effort DEFENSE-IN-DEPTH — it's not
+// shared across shards/instances, so a multi-instance deploy could let a
+// determined caller exceed the per-process budget. It still dampens the
+// common single-instance abuse case and gives the connector room to apply
+// the real limit.
+//
+// SEPARATE Map from sendCooldowns, and keyed on a COMPOSITE `${guildId}:
+// ${userId}` rather than userId alone. Two deliberate differences from the
+// send bucket:
+//   1. Distinct bucket — a user's detect throttle must not lock out their
+//      /qurl send (and vice-versa); these are unrelated rate limits.
+//   2. Per-(guild,user) — /qurl detect attribution is guild-scoped, so the
+//      bot-side throttle is too. The same user probing two guilds gets two
+//      independent budgets; a shared userId key would let one guild's
+//      activity throttle another's.
+//   3. Separate WINDOW — keyed on config.QURL_DETECT_COOLDOWN_MS, which
+//      DEFAULTS to QURL_SEND_COOLDOWN_MS (no behavior change) but is
+//      independently tunable. Detect (a deanonymization oracle) and send
+//      are unrelated operations; coupling their windows would let a future
+//      send-cadence change silently re-tune the oracle throttle.
+// Eviction/cap structure mirrors sendCooldowns: it shares the SAME
+// evictOldest helper + COOLDOWNS_MAX cap + the 60s time-sweep, so the Map
+// can't grow unbounded under a snowflake-spraying attacker and the two
+// buckets can't drift.
+const detectCooldowns = new Map();
+
+function detectCooldownKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+function isOnDetectCooldown(guildId, userId) {
+  const last = detectCooldowns.get(detectCooldownKey(guildId, userId));
+  if (!last) return false;
+  return Date.now() - last < config.QURL_DETECT_COOLDOWN_MS;
+}
+
+function setDetectCooldown(guildId, userId) {
+  const key = detectCooldownKey(guildId, userId);
+  detectCooldowns.delete(key);
+  detectCooldowns.set(key, Date.now());
+  evictOldest(detectCooldowns, COOLDOWNS_MAX);
+}
+
+function clearDetectCooldown(guildId, userId) {
+  detectCooldowns.delete(detectCooldownKey(guildId, userId));
 }
 
 async function batchSettled(items, fn, batchSize = 5) {
@@ -1552,9 +1619,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   the fileviewer's client-side self-destruct timer. null/undefined inherits
  *   qurl-service's QURL_SESSION_TTL default. See mintLinks for value mapping
  *   (0.5 → "1s", N>=1 → ceil to whole seconds).
+ * @param {?string} [opts.guildId] — Discord guild snowflake. Forwarded to
+ *   mintLinks as `guild_id` on EVERY batch so the connector can guild-scope
+ *   a future watermark-attribution lookup to the minting guild (#1101).
+ *   Threaded through here (not passed to mintLinks at each call site) because
+ *   mintLinks is only reached via this batcher on the real send paths.
+ *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null }) {
+async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
@@ -1571,6 +1644,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       n: batchSize,
       apiKey,
       selfDestructSeconds,
+      guildId,
     });
     for (const link of minted) {
       // qurl_id is the join key against qurl.accessed webhooks; empty
@@ -1868,6 +1942,11 @@ async function executeSendPipeline(interaction, {
           recipientCount: recipients.length,
           apiKey,
           selfDestructSeconds,
+          // Guild-scope the mint so watermark attribution (/qurl detect,
+          // #1101) can resolve back to this guild. interaction.guildId is
+          // guaranteed non-null here — the /qurl send + /qurl map entry
+          // points both DM-reject before reaching the pipeline.
+          guildId: interaction.guildId,
         });
       } finally {
         bufHolder.buf = null;
@@ -1906,6 +1985,11 @@ async function executeSendPipeline(interaction, {
         recipientCount: recipients.length,
         apiKey,
         selfDestructSeconds,
+        // Guild-scope the mint for watermark attribution (#1101) — see the
+        // file-send branch above. Maps payloads carry no image to watermark
+        // today, but threading guild_id keeps the two pipelines symmetric
+        // and future-proofs a watermarked map render.
+        guildId: interaction.guildId,
       });
 
       if (allLinks.length < recipients.length) {
@@ -2016,6 +2100,12 @@ async function executeSendPipeline(interaction, {
       // safe to assume post-deploy. No entry-gate fires because the
       // value can't drift — it's a literal, not a forwarded param.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
+      // guild_id persisted on each row so /qurl detect (#1101) can
+      // guild-scope watermark attribution at read time (defense-in-depth
+      // alongside the connector's own X-Guild-Id scoping). Mirrors the
+      // guildId threaded into the mint above. Non-null here (entry points
+      // DM-reject). Sparse write — see recordQURLSendBatch.
+      guildId: interaction.guildId,
     })));
   } catch (err) {
     // Log the orphaned QURL resources at error level so an operator can
@@ -2599,6 +2689,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           recipientCount: newRecipients.length,
           apiKey,
           selfDestructSeconds: inheritedDestruct,
+          // Guild-scope the mint for watermark attribution (#1101). Add
+          // Recipients reuses the original send's guild via
+          // originalInteraction, so rows added here are attributable on
+          // /qurl detect the same as the initial send's rows. Without this
+          // the filter would silently drop added recipients (fails closed —
+          // no leak — but a real watermark would read "no match").
+          guildId: originalInteraction.guildId,
         });
       } catch (err) {
         // Discord CDN URLs are signed and expire (~24h). If the re-download
@@ -2662,6 +2759,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         recipientCount: newRecipients.length,
         apiKey,
         selfDestructSeconds: inheritedDestruct,
+        // Guild-scope for attribution (#1101) — see the file branch above.
+        guildId: originalInteraction.guildId,
       });
 
       if (allLinks.length < newRecipients.length) {
@@ -2748,6 +2847,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         qurlId: link.qurlId,
         expiresIn: sendConfig.expires_in,
         channelId: originalInteraction.channelId, targetType: 'user',
+        // guild_id for /qurl detect attribution (#1101) — mirrors the mint
+        // above + executeSendPipeline's row write. Reuses the original
+        // send's guild so added recipients stay attributable. Sparse write.
+        guildId: originalInteraction.guildId,
       });
     }
   }
@@ -3614,6 +3717,11 @@ const API_KEY_GATED_SUBCOMMANDS = new Set(
 // the flag-off branch of SETUP_SUCCESS_MSG so both surfaces describe
 // the same remaining capability.
 const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl send` to share files securely.';
+
+// User-facing reply for stale /qurl detect submissions when DETECT_COMMAND_ENABLED
+// is off — a Discord client routing a cached `detect` submission after the
+// registration dropped it. Mirrors QURL_MAP_DISABLED_REPLY.
+const QURL_DETECT_DISABLED_REPLY = '❌ `/qurl detect` is currently disabled.';
 
 // Slash-option choice arrays. The same wording flows into both the
 // slash-command autocomplete and the confirm-card dropdowns so users
@@ -5468,6 +5576,475 @@ async function handleQurlMap(interaction) {
     locationUrl,
     locationName,
     resourceLabel: locationName || 'location',
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// /qurl detect — watermark attribution (#1101)
+// ──────────────────────────────────────────────────────────────────────
+
+// Shared no-match reply. BOTH the "no mark at all" branch and the
+// "mark found but no same-guild row" branch (the cross-guild defense-in-depth
+// filter) MUST emit BYTE-IDENTICAL copy. If they differed, a requester could
+// distinguish "no watermark" from "watermarked, but for another guild" — and
+// that distinction IS the cross-guild signal the second-layer filter exists
+// to contain (it only matters if the connector's X-Guild-Id scope regresses,
+// which is exactly when this filter is load-bearing). One constant = the two
+// paths can't drift apart. (The ambiguous >1-row reply is deliberately
+// distinct — that's a same-guild duplicate, not a cross-guild leak.)
+const DETECT_NO_MATCH_MSG = '🔍 No qURL watermark found in this image (for this server).';
+
+// Server-staff permissions that grant /qurl detect standing — the PM "admins/mods" tier, layered
+// on top of the original-sender tier (see the handler's ACCESS MODEL). Deliberately TIGHT and
+// governance-oriented, not a broad enumeration of every mod bit:
+//   - ManageGuild — this bot's own admin gate (matches /qurl status + setup); an Administrator
+//     passes it automatically via PermissionsBitField.has().
+//   - BanMembers — the moderator tier that handles the PM's governance examples (abuse reports,
+//     DMCA, ban appeals).
+// Excludes broader content perms (e.g. ManageMessages) on purpose: ship tight, loosen if real
+// demand surfaces (a one-line change). A caller with NONE of these who is also not the original
+// sender of the qURL has no standing and gets the byte-identical no-match reply.
+const DETECT_STAFF_PERMISSIONS = [
+  PermissionFlagsBits.ManageGuild,
+  PermissionFlagsBits.BanMembers,
+];
+
+//
+// A user uploads an image; the bot reads the invisible meta-seal watermark
+// via the connector's /api/detect, resolves it to the qurl_id it was minted
+// for, and replies (EPHEMERALLY — it's sensitive) with the original
+// RECIPIENT's Discord handle + a % match. SCOPED to the requester's guild:
+// an image watermarked in guild A must never attribute in guild B.
+//
+// ACCESS MODEL (PM decision, #1101 — "privacy is the north star"): detect REVEALS a recipient
+// only to someone with STANDING to investigate —
+//   (a) the ORIGINAL SENDER of that qURL (their distribution, their property right), or
+//   (b) server STAFF (ManageGuild / BanMembers — see DETECT_STAFF_PERMISSIONS) for governance
+//       (abuse reports, DMCA, ban appeals, where the sender may be absent or uninvolved).
+// A general member has NO standing and gets the BYTE-IDENTICAL no-match reply — they learn
+// nothing, not even that the image is a watermarked qURL (a partial result + "ask an admin" would
+// just train users to route around the privacy model). The standing check runs BEFORE the
+// ambiguity/reveal branches so EVERY no-standing outcome collapses to ONE reply. The permission
+// set is tight by design and a one-line, reversible change if real demand surfaces.
+//
+// RESIDUAL (timing side-channel): the byte-identical reply closes the CONTENT channel but not a
+// TIMING one — no-mark returns BEFORE the DDB lookup, no-standing AFTER it, and a matched reveal
+// after an extra users.fetch, so reply latency weakly clusters fast/medium/slow. A determined
+// prober could use that to distinguish "no mark" from "marked, no standing". Accepted as a residual,
+// NOT equalized with constant-time work: it's a weak oracle (ephemeral replies, network jitter, the
+// per-(guild,user) cooldown + the connector's per-guild throttle all blunt it) and the connector's
+// guild scope stays the authoritative boundary regardless.
+//
+// SCOPE (threat model): the standing gate is a bot-side UX/governance layer, NOT a server-enforced
+// authorization boundary. The connector's /api/detect enforces only guild-scope; a holder of the
+// guild's qURL API key (admin-tier) could call /api/detect directly and bypass THIS gate (guild-
+// scope still holds — never cross-tenant). Closing that gap needs a connector-side per-route auth
+// factor (tracked in qurl-integrations-infra#1170); until then, standing is enforced here.
+//
+// This is a deanonymization oracle by construction. The guards, in order:
+//   - guild-only (DM rejects, no oracle outside a guild).
+//   - per-(guild,user) cooldown (detectCooldowns) — best-effort
+//     defense-in-depth against scraping the recipient↔image mapping. The
+//     AUTHORITATIVE rate limit is the connector's per-guild throttle (this
+//     in-process Map isn't shared across instances); see the detectCooldowns
+//     header for the full enforcement model.
+//   - SSRF + size + image-type validation on the attachment, identical to
+//     the guards handleQurlSend applies to the same Discord-CDN fetch.
+//   - TWO layers of guild scoping: the connector scopes via X-Guild-Id,
+//     AND we re-filter the returned rows on guild_id here (defense-in-depth
+//     — if the connector contract ever regresses, the leak still can't
+//     cross guilds because this filter fails closed).
+//   - STANDING gate (the ACCESS MODEL above): reveal only to the original
+//     sender or to staff; no-standing callers get the byte-identical no-match
+//     reply, checked BEFORE the ambiguity/reveal branches.
+//   - audit the attribution outcomes + abuse signals (matched / no_match /
+//     ambiguous / rejected / unconfigured / rate_limited / no_standing — see
+//     AUDIT_EVENTS.QURL_DETECT); recipient id NEVER logged (audit access is
+//     broader than the ephemeral reply). Honest operational failures (CDN
+//     download, connector 5xx/network) log at warn/error, not audit.
+//
+// Reply is always ephemeral. Cooldown rationale per-branch mirrors
+// handleQurlSend: honest user errors (missing/non-image/oversize attachment,
+// client-schema desync) CLEAR the cooldown so retry is immediate; the SSRF
+// probe KEEPS it (probing the allow-list is an abuse signal).
+async function handleQurlDetect(interaction) {
+  // DM rejection first — no cooldown burned on a guild-only command
+  // attempted from DMs. Same `interaction.guildId`-only signal as
+  // handleQurlSend (see its comment for the http-only-mode caveat).
+  if (!interaction.guildId) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
+  }
+
+  // Cooldown gate at entry — per (guild, user). Set BEFORE input
+  // validation so a malformed attachment still throttles (so spamming
+  // invalid inputs can't sidestep the bot-side throttle; the connector's
+  // per-guild rate limit is the authoritative backstop).
+  if (isOnDetectCooldown(interaction.guildId, interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before running detect again.',
+      ephemeral: true,
+    });
+  }
+  setDetectCooldown(interaction.guildId, interaction.user.id);
+
+  // Required-option lookup. `getAttachment(name, true)` throws on a
+  // missing option; Discord enforces required server-side, so a hit is
+  // almost always a client/schema desync during a redeploy window — clear
+  // the cooldown so retry is immediate once the deploy stabilizes (same
+  // rationale as handleQurlSend's required-option catch).
+  let attachment;
+  try {
+    attachment = interaction.options.getAttachment('image', true);
+  } catch (err) {
+    logger.warn('handleQurlDetect: required image option missing', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: '❌ The `image:` option is required. Re-run with an image attached.',
+      ephemeral: true,
+    });
+  }
+  if (!attachment || typeof attachment.url !== 'string') {
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: '❌ Attachment is missing or malformed.',
+      ephemeral: true,
+    });
+  }
+  // SSRF gate — the attachment.url is fetched below; re-validate it
+  // against the Discord-CDN allow-list exactly like handleQurlSend. This
+  // is the ONE rejection that KEEPS the cooldown — probing the allow-list
+  // is an abuse signal, not an honest user error.
+  if (!isAllowedSourceUrl(attachment.url)) {
+    logger.warn('handleQurlDetect: attachment.url failed SSRF gate', {
+      user_id: interaction.user.id, host: safeUrlHost(attachment.url),
+    });
+    // Audit the SSRF probe — it's the STRONGEST abuse signal this handler
+    // sees (it's the one rejection that KEEPS the cooldown), so it belongs
+    // in the audit trail, not just logger.warn. No recipient id: a
+    // rejection never resolves one.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'rejected',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+    });
+    return interaction.reply({
+      content: '❌ Attachment source not allowed. Upload the image via Discord, not a linked URL.',
+      ephemeral: true,
+    });
+  }
+  // Image-only: the connector's neural detector reads pixels. A non-image
+  // (PDF, zip, etc.) can't carry the meta-seal mark, so reject early
+  // rather than spend an inference round-trip. Honest user error → clear
+  // cooldown.
+  if (typeof attachment.contentType !== 'string' || !attachment.contentType.startsWith('image/')) {
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: `❌ Detect needs an image. \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\` isn't supported.`,
+      ephemeral: true,
+    });
+  }
+  // Size cap before buffering — guard against pulling a 25MB+ blob into
+  // memory. Honest user error → clear cooldown. `typeof === 'number'`
+  // guard: a missing/undefined attachment.size would make a bare
+  // `size > MAX` read false and skip this pre-check — harmless here only
+  // because the realized-buffer cap after the fetch (below) is the real
+  // backstop, but make the intent explicit rather than relying on
+  // `undefined > N` semantics.
+  if (typeof attachment.size === 'number' && attachment.size > MAX_FILE_SIZE) {
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: `❌ Image too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
+      ephemeral: true,
+    });
+  }
+
+  // Defer EARLY (ephemeral) — everything past here is network-bound (CDN
+  // fetch + neural-net inference ~seconds + a recipient users.fetch), which
+  // would blow Discord's 3-second ACK deadline on a plain reply. After
+  // deferReply, all user-visible output is editReply.
+  await interaction.deferReply({ ephemeral: true });
+
+  // Resolve the API key the same way the send paths do: per-guild BYOK
+  // first, global fallback. (handleQurlDetect resolves its own key — it's
+  // intentionally NOT in API_KEY_GATED_SUBCOMMANDS, which would
+  // double-resolve and gate before this handler runs.)
+  const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
+  if (!apiKey) {
+    // A missing /qurl setup is an honest config error, not abuse — clear
+    // the cooldown so the user can retry the instant an admin configures
+    // the server. Matches the handler's "honest user errors clear the
+    // cooldown" design (non-image / oversize branches above). The SSRF
+    // probe is the one rejection that intentionally KEEPS the cooldown.
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    // Audit this branch — unconfigured is an attribution outcome worth
+    // surfacing (see the handler header's audit list). No recipient is
+    // resolved on an unconfigured guild.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'unconfigured',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+    });
+    return interaction.editReply({
+      content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
+    });
+  }
+
+  // Download the image bytes from Discord CDN. This is a SEPARATE failure
+  // domain from the connector detect below — a download failure (expired
+  // signed URL, timeout, DNS, network) is honest + re-uploadable and must
+  // NOT be reported as "detection unavailable" (detection was never
+  // reached). Its own try/catch keeps the two error surfaces distinct, and
+  // both the non-ok and the throw paths CLEAR the cooldown (honest, and the
+  // reply tells the user to re-upload, which the cooldown would block).
+  let bytes;
+  try {
+    const r = await fetch(attachment.url, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) {
+      // CDN URLs are signed + expire (~24h). A non-ok fetch is almost always
+      // an expired URL on a re-shared old image, not our bug.
+      logger.warn('handleQurlDetect: CDN fetch failed', {
+        user_id: interaction.user.id, status: r.status,
+      });
+      clearDetectCooldown(interaction.guildId, interaction.user.id);
+      return interaction.editReply({
+        content: '❌ Could not download that image (the Discord link may have expired). Re-upload and try again.',
+      });
+    }
+    bytes = Buffer.from(await r.arrayBuffer());
+  } catch (err) {
+    // Fetch threw — AbortSignal 30s timeout, DNS, connection reset, etc.
+    // Honest download failure (NOT a detection failure), so same copy +
+    // cooldown-clear as the non-ok branch above.
+    logger.warn('handleQurlDetect: CDN fetch threw', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.editReply({
+      content: '❌ Could not download that image (re-upload and try again).',
+    });
+  }
+
+  // Realized-buffer size guard (closes the TOCTOU vs. the attachment.size
+  // pre-check): re-check the ACTUAL downloaded byte count. SSRF already
+  // pins the source to the Discord CDN, so this is defense-in-depth against
+  // a lying/absent Content-Length or a metadata/payload mismatch. Honest
+  // oversize → clear cooldown, same as the pre-fetch size branch.
+  if (bytes.length > MAX_FILE_SIZE) {
+    logger.warn('handleQurlDetect: realized buffer exceeds cap', {
+      user_id: interaction.user.id, bytes: bytes.length,
+    });
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.editReply({
+      content: `❌ Image too large (${Math.round(bytes.length / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
+    });
+  }
+
+  // POST the bytes to /api/detect.
+  let result;
+  try {
+    result = await detectWatermark(bytes, {
+      guildId: interaction.guildId,
+      contentType: attachment.contentType,
+      apiKey,
+    });
+  } catch (err) {
+    // detectWatermark (the CONNECTOR POST — the CDN download is handled in
+    // its own try/catch above) throws (with .status, set from
+    // response.status in connector.js's throwConnectorError) on
+    // 401/400/429/5xx and on a connector-side network failure. Body-free
+    // message by contract — log server-side, surface a generic ephemeral
+    // error. Don't leak err.message (it may echo connector detail) into the
+    // reply.
+    //
+    // Cooldown policy: a transient failure shouldn't throttle an honest
+    // user for the full window, so CLEAR the cooldown — EXCEPT on a 429
+    // (connector rate-limited this guild), where KEEPING the cooldown is
+    // the correct back-off. (429 is cleanly distinguishable via err.status;
+    // connector network throws / 5xx / 4xx-other all clear.)
+    const rateLimited = err && err.status === 429;
+    logger.error('handleQurlDetect: detect failed', {
+      user_id: interaction.user.id,
+      guild_id: interaction.guildId,
+      status: err && err.status,
+      rate_limited: rateLimited,
+      error: err && err.message,
+    });
+    if (rateLimited) {
+      // A connector 429 means this guild is spamming detect into the
+      // connector's per-guild limiter — an abuse signal, and the one detect
+      // failure that KEEPS the cooldown. Mirror the SSRF-probe reasoning and
+      // put it in the audit trail (not just logger.error) so the
+      // throttled-spam pattern is queryable. No recipient id — a throttled
+      // call never resolves one.
+      logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+        result: 'rate_limited',
+        guild_id: interaction.guildId,
+        requester_id: interaction.user.id,
+      });
+    } else {
+      clearDetectCooldown(interaction.guildId, interaction.user.id);
+    }
+    return interaction.editReply({
+      content: rateLimited
+        ? '❌ Watermark detection is busy right now (rate-limited). Please wait a moment and try again.'
+        : '❌ Watermark detection is unavailable right now. Please try again in a moment.',
+    });
+  }
+
+  // No mark, OR the connector found a mark but no SAME-GUILD match
+  // (detected=false collapses both — qurl_id/match_pct null). Audit the
+  // no-match outcome, then a non-committal ephemeral (don't reveal whether
+  // a mark exists in some OTHER guild — that itself would leak cross-guild
+  // signal).
+  if (!result.detected || !result.qurl_id) {
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'no_match',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+    });
+    return interaction.editReply({
+      // Shared constant — MUST match the cross-guild-filtered branch below
+      // byte-for-byte. See DETECT_NO_MATCH_MSG.
+      content: DETECT_NO_MATCH_MSG,
+    });
+  }
+
+  // Connector says detected + gave a qurl_id. Look up the recipient
+  // row(s). DEFENSE-IN-DEPTH guild filter: the connector already
+  // guild-scopes via X-Guild-Id, but re-filter on guild_id here so a
+  // connector-side contract regression can't cross guilds — this filter
+  // fails closed (a row missing guild_id, or carrying a different one, is
+  // dropped). findSendsByQurlId returns 0–1 rows in steady state
+  // (one qurl_id per recipient by write-path invariant, capped at Limit:2).
+  const sends = await db.findSendsByQurlId(result.qurl_id);
+  const sameGuild = (sends || []).filter((s) => s.guild_id === interaction.guildId);
+  if (sameGuild.length === 0) {
+    // Connector matched but no local same-guild row — treat as no match
+    // (the local row may have aged out, or the connector's scope and ours
+    // diverged). BYTE-IDENTICAL copy to the no-mark branch above (shared
+    // DETECT_NO_MATCH_MSG) so a requester can't tell "no watermark" from
+    // "watermarked for another guild" — that distinction is the cross-guild
+    // signal this filter exists to contain.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'no_match',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+      qurl_id: result.qurl_id,
+    });
+    return interaction.editReply({
+      content: DETECT_NO_MATCH_MSG,
+    });
+  }
+
+  // STANDING gate (ACCESS MODEL): reveal only to the original SENDER of this qURL or to server
+  // STAFF. Runs BEFORE the ambiguity/reveal branches ON PURPOSE — every no-standing outcome (no
+  // mark, marked-for-another-guild, ambiguous, no-standing) must collapse to the SAME
+  // byte-identical reply, or a prober could distinguish "this is a marked qURL" from "no mark".
+  // Standing is checked with .some() over the rows so the sender check still holds in the
+  // degenerate length-2 (ambiguous) case.
+  const isStaff = DETECT_STAFF_PERMISSIONS.some(
+    (p) => interaction.memberPermissions?.has(p) === true,
+  );
+  const isSender = sameGuild.some((s) => s.sender_discord_id === interaction.user.id);
+  if (!isStaff && !isSender) {
+    // No standing → audit the truth (operators see it) but reply byte-identical to no-match (the
+    // caller learns nothing). KEEP the cooldown — a no-standing probe is sensitive, not an honest
+    // input error, so it must not reset the throttle.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'no_standing',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+      qurl_id: result.qurl_id,
+    });
+    return interaction.editReply({
+      content: DETECT_NO_MATCH_MSG,
+    });
+  }
+
+  if (sameGuild.length > 1) {
+    // Ambiguous: >1 same-guild row for one qurl_id violates the
+    // one-qurl_id-per-recipient write invariant (a write-path regression
+    // landed a duplicate). Mirror the qurl.expired handler's ambiguous-skip
+    // — do NOT attribute to one row arbitrarily (it could finger the wrong
+    // recipient). Surface a non-committal reply + audit so an operator can
+    // investigate. findSendsByQurlId's Limit:2 means length is exactly 2
+    // here; the audit's qurl_id is the investigation handle.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'ambiguous',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+      qurl_id: result.qurl_id,
+    });
+    return interaction.editReply({
+      content: '🔍 Couldn\'t determine a single recipient for this image. Please contact a server admin.',
+    });
+  }
+
+  const send = sameGuild[0];
+  // How this caller earned standing — 'sender' (their own qURL) or 'staff' (governance). Recorded
+  // in the match audit for forensics; the user-facing reveal is identical either way.
+  const grantBasis = isSender ? 'sender' : 'staff';
+  const matchPct = typeof result.match_pct === 'number' ? Math.round(result.match_pct) : null;
+
+  // Audit the MATCH — qurl_id + match_pct + confidence, but NEVER the
+  // resolved recipient id. Audit logs are broader-access than the ephemeral
+  // reply; logging the unmasked recipient would re-leak the deanonymization
+  // the ephemeral is there to contain. confidence (0–1) lives HERE, not in
+  // the user reply — see the reply below. match_pct is logged RAW
+  // (result.match_pct, not the display-rounded matchPct) so forensics keeps
+  // the connector's exact value, not the value the user happened to see.
+  logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+    result: 'matched',
+    guild_id: interaction.guildId,
+    requester_id: interaction.user.id,
+    qurl_id: result.qurl_id,
+    match_pct: result.match_pct,
+    confidence: result.confidence,
+    grant_basis: grantBasis,
+  });
+
+  // Resolve the recipient's handle. Best-effort: if the user can't be
+  // fetched (left Discord, API blip), still surface the attribution with
+  // the raw mention (Discord renders <@id> client-side) rather than fail
+  // the whole detect.
+  let username = null;
+  try {
+    const user = await interaction.client.users.fetch(send.recipient_discord_id);
+    username = user && user.username;
+  } catch (err) {
+    logger.warn('handleQurlDetect: recipient user fetch failed', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+  }
+
+  const id = send.recipient_discord_id;
+  const who = username ? `**${escapeDiscordMarkdown(username)}** (<@${id}>)` : `<@${id}>`;
+  // match_pct (0–100) is the headline the user asked for. confidence (0–1)
+  // is deliberately OMITTED from the reply — mixing a 0–100 and a 0–1 scale
+  // confused readers, and an absent confidence rendered a bare "0". It stays
+  // in the match audit above for operators.
+  //
+  // Suppress the "% match" suffix unless match_pct is a POSITIVE number:
+  // a detected match always has match_pct > 0, so a null/0/garbled value
+  // is a malformed connector response, not a real 0% — render the bare
+  // attribution rather than a confusing "0% match". (The audit above keeps
+  // the raw value for forensics.) The > 0 test is on the ROUNDED value, which
+  // is safe because the connector FLOORS a detected match_pct at 75 (Hamming
+  // path, distance <= max) or 100 (exact hit) — so a value that rounds to 0 is
+  // genuinely malformed, never a real sub-1% match being dropped.
+  const pctText = (typeof matchPct === 'number' && matchPct > 0) ? ` — ${matchPct}% match` : '';
+  return interaction.editReply({
+    content: `🔍 This image was watermarked for ${who}${pctText}.`,
+    // The reply embeds the recipient's <@id> mention. Ephemeral replies
+    // don't ping in practice, but suppress mention-resolution explicitly so
+    // "the deanonymized recipient is NEVER pinged" is a hard guarantee, not
+    // a reliance on Discord ephemeral behavior. parse:[] = resolve nothing.
+    allowedMentions: { parse: [] },
   });
 }
 
@@ -7449,14 +8026,30 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
 
 // Time-based sweep every 60s (was 5min). With high user counts the Map can
 // creep between the size-based 10k-threshold eviction, so a more aggressive
-// proactive sweep keeps steady-state memory tight. Entries older than the
-// cooldown window are safe to drop — they'd pass isOnCooldown() anyway.
-setInterval(() => {
+// proactive sweep keeps steady-state memory tight. An entry is safe to drop
+// only once it's older than the SAME window its is-on-cooldown gate uses —
+// otherwise the sweep would evict a still-active entry and silently end the
+// cooldown early.
+//
+// detectCooldowns rides the SAME interval but is swept against
+// QURL_DETECT_COOLDOWN_MS (the window isOnDetectCooldown gates on), NOT the
+// send window — these can differ (the round-4 decoupling exists precisely so
+// detect can be a STRICTER, longer window than send). Sweeping detect at the
+// send window would truncate a longer detect cooldown back to the send
+// window, defeating the decoupling.
+// Named (not an inline arrow) so the windows-differ regression — a detect
+// entry swept at the SEND window when DETECT > SEND — is directly testable
+// via the _test export, without driving the module-level setInterval.
+function sweepCooldowns() {
   const now = Date.now();
   for (const [k, v] of sendCooldowns) {
     if (now - v > config.QURL_SEND_COOLDOWN_MS) sendCooldowns.delete(k);
   }
-}, 60 * 1000).unref();
+  for (const [k, v] of detectCooldowns) {
+    if (now - v > config.QURL_DETECT_COOLDOWN_MS) detectCooldowns.delete(k);
+  }
+}
+setInterval(sweepCooldowns, 60 * 1000).unref();
 
 // Command definitions
 const commands = [
@@ -8121,6 +8714,24 @@ const commands = [
                 .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
             )
         );
+      // /qurl detect — watermark attribution (#1101). Gated behind
+      // DETECT_COMMAND_ENABLED (default OFF), like /qurl map: the connector
+      // /api/detect backend 503/404s until the watermark stack is ACTIVATED (a
+      // separate gated step AFTER the connector deploys), so detect stays DARK
+      // until an operator flips the flag at activation — no visible-but-failing
+      // command in the interim. The smoke test (e2e/tests/discord-commands.smoke.test.ts)
+      // reads the same flag and asserts detect present-when-enabled / absent-when-off.
+      if (config.DETECT_COMMAND_ENABLED) {
+        builder.addSubcommand(sub =>
+          sub.setName('detect')
+            .setDescription('Find which recipient an image was watermarked for (this server)')
+            .addAttachmentOption(opt =>
+              opt.setName('image')
+                .setDescription('The image to check for a qURL watermark')
+                .setRequired(true)
+            )
+        );
+      }
       if (config.MAP_COMMAND_ENABLED) {
         builder.addSubcommand(sub =>
           sub.setName('map')
@@ -8447,6 +9058,24 @@ const commands = [
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
       if (sub === 'send') return handleQurlSend(interaction);
+      // /qurl detect resolves its own API key inside the handler (BYOK →
+      // global fallback) — deliberately NOT in API_KEY_GATED_SUBCOMMANDS,
+      // so it dispatches here without the dispatcher-level key gate.
+      if (sub === 'detect') {
+        if (!config.DETECT_COMMAND_ENABLED) {
+          // Stale client with a cached command def that still lists `detect`
+          // after the toggle was off — expected post-deploy traffic, not an
+          // error (same cache-TTL story as /qurl map below). Enforcing the flag
+          // HERE too means a stale detect can't reveal a recipient even if the
+          // backend is live but the flag is off.
+          logger.debug('qurl_detect_disabled_reply: stale-client /qurl detect submission caught by toggle gate', {
+            user_id: interaction.user?.id,
+            guild_id: interaction.guildId,
+          });
+          return interaction.reply({ content: QURL_DETECT_DISABLED_REPLY, ephemeral: true });
+        }
+        return handleQurlDetect(interaction);
+      }
       if (sub === 'map') {
         if (!config.MAP_COMMAND_ENABLED) {
           // Debug (not warn) — expected post-deploy traffic from
@@ -9121,6 +9750,21 @@ module.exports = {
       // re-stating the strings.
       handleQurlSend,
       handleQurlMap,
+      // /qurl detect handler + its per-(guild,user) cooldown surface
+      // (#1101). The cooldown Map + predicates are exposed so tests pin
+      // the abuse-guard contract (composite key, separate bucket from
+      // sendCooldowns) directly, like the send cooldowns above.
+      handleQurlDetect,
+      detectCooldowns,
+      isOnDetectCooldown,
+      setDetectCooldown,
+      clearDetectCooldown,
+      // The 60s time-sweep, exposed so the windows-differ regression (detect
+      // entry must NOT be swept at the send window when DETECT > SEND) is
+      // testable directly. DETECT_NO_MATCH_MSG is exposed so tests pin that
+      // the two no-match branches share byte-identical copy.
+      sweepCooldowns,
+      DETECT_NO_MATCH_MSG,
       resolveRecipientUsers,
       partitionRecipients,
       resolveMentionableSelection,
@@ -9134,6 +9778,7 @@ module.exports = {
       // Disabled-state reply for stale /qurl map submissions. Exported
       // so flag-off tests pin against the production string.
       QURL_MAP_DISABLED_REPLY,
+      QURL_DETECT_DISABLED_REPLY,
       handleAutocomplete,
       // Test-only reset: the autocomplete-failure burst counter is
       // module-level state that accumulates across tests within a

@@ -29,6 +29,7 @@ jest.mock('../src/config', () => ({
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
+  QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
@@ -2294,6 +2295,90 @@ describe('mintLinksInBatches', () => {
 
     expect(result).toHaveLength(0);
     expect(mockMintLinks).not.toHaveBeenCalled();
+  });
+
+  it('forwards guildId to mintLinks on EVERY batch (#1101 attribution)', async () => {
+    // guildId threads through the batcher into mintLinks so the connector
+    // can guild-scope a watermark-attribution lookup. Pin it across a
+    // re-upload boundary (>TOKENS_PER_RESOURCE) so a regression that drops
+    // it on the second batch is caught too.
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/10' }]);
+    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
+
+    await mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn,
+      expiresAt: new Date().toISOString(),
+      recipientCount: 11,
+      apiKey: 'apikey',
+      guildId: 'guild-77',
+    });
+
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    for (const call of mockMintLinks.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ guildId: 'guild-77' }));
+    }
+  });
+});
+
+// ===========================================================================
+// guild_id threading end-to-end (#1101) — the attribution linchpin
+// ===========================================================================
+//
+// These pin that the SEND pipelines actually pass interaction.guildId into
+// both the mint AND the DDB row write. The isolated connector/store tests
+// verify each function HONORS a guildId it's handed; these verify the
+// pipelines HAND it the right one. Without this, deleting the
+// `guildId: interaction.guildId` line would leave every other test green
+// while silently making every /qurl detect return "no match".
+describe('executeSendPipeline — guild_id threading (#1101)', () => {
+  it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
+    const interaction = makeInteraction({ guildId: 'guild-1' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    // Mint carried the guild (via mintLinksInBatches → mintLinks).
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ guildId: 'guild-1' }),
+    );
+    // Every persisted row carried the guild for the detect read-path filter.
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+    );
+  });
+});
+
+describe('handleAddRecipients — guild_id threading (#1101)', () => {
+  it('threads originalInteraction.guildId into BOTH mintLinks and recordQURLSendBatch', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-file-orig', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/add', resource_id: 'res-file-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-add', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction({ guildId: 'guild-1' }), 'apikey',
+    );
+
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ guildId: 'guild-1' }),
+    );
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+    );
   });
 });
 

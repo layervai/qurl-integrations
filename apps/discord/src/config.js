@@ -314,6 +314,14 @@ function takeGatewayHandoffHmac() {
   return value;
 }
 
+// /qurl send + /qurl detect cooldowns. Resolved here (not inline in the
+// export literal) so QURL_DETECT_COOLDOWN_MS can DEFAULT to the resolved
+// send value — i.e. unset detect knob == current behavior (no decoupling
+// surprise), but an operator can tune the deanonymization-oracle throttle
+// independently of send cadence. See setDetectCooldown in commands.js.
+const sendCooldownMs = intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true });
+const detectCooldownMs = intEnv('QURL_DETECT_COOLDOWN_MS', sendCooldownMs, { minPositive: true });
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -447,6 +455,14 @@ module.exports = {
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 
+  // DETECT_COMMAND_ENABLED gates /qurl detect (#1101) exactly as
+  // MAP_COMMAND_ENABLED gates /qurl map: default OFF, same snapshot/restart
+  // semantics. The connector /api/detect backend 503/404s until the watermark
+  // stack is ACTIVATED (a separate gated step AFTER the connector deploys), so
+  // detect stays DARK until an operator flips this at activation — no
+  // visible-but-failing command in the interim.
+  DETECT_COMMAND_ENABLED: process.env.DETECT_COMMAND_ENABLED === 'true',
+
   // qURL send limits (/qurl send + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.
@@ -476,7 +492,12 @@ module.exports = {
   // Per-guild operators can dial this down via the env override if
   // their qurl-service plan or DM-throughput posture demands it.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 20000, { minPositive: true }),
-  QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
+  QURL_SEND_COOLDOWN_MS: sendCooldownMs,
+  // Throttle for /qurl detect (the deanonymization oracle). Defaults to the
+  // send cooldown so behavior is unchanged unless an operator sets
+  // QURL_DETECT_COOLDOWN_MS explicitly — decoupled so a future send-cadence
+  // change can't silently re-tune the oracle. See setDetectCooldown.
+  QURL_DETECT_COOLDOWN_MS: detectCooldownMs,
 
   SHARD_ID,
 

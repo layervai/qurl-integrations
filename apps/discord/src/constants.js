@@ -535,6 +535,43 @@ const AUDIT_EVENTS = {
   // The sibling connector_no_resource_id alarm separately catches the
   // "200 + missing resource_id" shape.
   QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
+
+  // /qurl detect — watermark-attribution lookup (#1101). Audits the attribution
+  // OUTCOMES and abuse signals — the security-relevant terminal paths — so the
+  // trail records every resolved (or refused) deanonymization query plus the
+  // abuse patterns the cooldown is paired to catch (a high detect rate, a
+  // throttle). It does NOT fire on honest operational failures (CDN download,
+  // connector 5xx/network) or pre-connector input rejects (cooldown, missing /
+  // non-image / oversize attachment) — those log at warn/error and never reach
+  // the connector or resolve a recipient. Outcomes:
+  //   - `result: 'matched'`  — connector matched a same-guild row + the caller
+  //                            had standing; carries `qurl_id` + `match_pct` +
+  //                            `confidence` + `grant_basis` ('sender'|'staff').
+  //   - `result: 'no_match'` — no mark, or a mark with no same-guild row
+  //                            (on the latter, carries `qurl_id`).
+  //   - `result: 'ambiguous'`— >1 same-guild row for one qurl_id (a
+  //                            write-path duplicate violating the
+  //                            one-qurl_id-per-recipient invariant); we
+  //                            refuse to attribute. Carries `qurl_id` as
+  //                            the operator investigation handle.
+  //   - `result: 'rejected'` — the SSRF-probe gate fired (the strongest
+  //                            abuse signal; the one rejection that keeps
+  //                            the cooldown). No connector call.
+  //   - `result: 'unconfigured'` — the guild has no qURL API key (no
+  //                            /qurl setup). No connector call.
+  //   - `result: 'rate_limited'` — the connector 429'd this guild (an abuse
+  //                            signal that KEEPS the cooldown, mirroring
+  //                            'rejected'); the connector call was throttled.
+  //   - `result: 'no_standing'` — a matched qURL, but the caller is neither its
+  //                            original sender nor staff, so the ACCESS MODEL
+  //                            denies the reveal. Carries `qurl_id`; KEEPS the
+  //                            cooldown; the user-facing reply is byte-identical
+  //                            to no_match (the caller can't tell it apart).
+  // Always carries `guild_id` + `requester_id`, and NEVER the resolved
+  // recipient id (audit logs are broader-access than the ephemeral reply;
+  // logging the unmasked recipient would re-leak the very thing the
+  // ephemeral protects — and a rejected/throttled outcome never resolves one).
+  QURL_DETECT: 'qurl_detect',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

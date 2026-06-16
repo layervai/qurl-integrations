@@ -152,11 +152,24 @@ describe('Discord command registration (smoke)', () => {
         );
       }
       const mapEnabled = rawMapFlag === 'true';
+      // `detect` is conditional on DETECT_COMMAND_ENABLED (#1101), like `map` on
+      // MAP_COMMAND_ENABLED — but LENIENT here (vs the map strict throw above):
+      // it defaults OFF when the env is absent, matching the bot's default-OFF
+      // flag, so this smoke is correct against a not-yet-activated deploy WITHOUT
+      // requiring the e2e-smoke workflow to set the flag first. At detect
+      // activation, the workflow should resolve DETECT_COMMAND_ENABLED from the
+      // deploy env's tfvars (mirroring the map step) and make this strict too —
+      // part of the detect-activation wiring (see the #1101 rollout ledger).
+      const rawDetectFlag = process.env.DETECT_COMMAND_ENABLED;
+      const detectEnabled = rawDetectFlag === 'true';
       // eslint-disable-next-line no-console
-      console.log(`smoke: MAP_COMMAND_ENABLED resolved to "${rawMapFlag}" (mapEnabled=${mapEnabled})`);
-      const expectedSubcommands = mapEnabled
-        ? ['help', 'map', 'revoke', 'send', 'setup', 'status']
-        : ['help', 'revoke', 'send', 'setup', 'status'];
+      console.log(`smoke: MAP_COMMAND_ENABLED="${rawMapFlag}" (mapEnabled=${mapEnabled}); DETECT_COMMAND_ENABLED="${rawDetectFlag}" (detectEnabled=${detectEnabled})`);
+      // Base set (always present) + conditionally `detect` / `map`, then sorted to
+      // match the actual subcommand list (also sorted, above).
+      const expectedSubcommands = ['help', 'revoke', 'send', 'setup', 'status'];
+      if (detectEnabled) expectedSubcommands.push('detect');
+      if (mapEnabled) expectedSubcommands.push('map');
+      expectedSubcommands.sort();
       expect({ scope: qurl._scope, subcommands })
         .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
     }
