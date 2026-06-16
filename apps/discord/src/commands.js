@@ -5704,10 +5704,14 @@ async function handleQurlDetect(interaction) {
     const r = await fetch(attachment.url, { signal: AbortSignal.timeout(30000) });
     if (!r.ok) {
       // CDN URLs are signed + expire (~24h). A failed fetch is almost
-      // always an expired URL on a re-shared old image, not our bug.
+      // always an expired URL on a re-shared old image, not our bug —
+      // honest + re-uploadable, so CLEAR the cooldown (the reply tells the
+      // user to "re-upload and try again," which the cooldown would
+      // otherwise block).
       logger.warn('handleQurlDetect: CDN fetch failed', {
         user_id: interaction.user.id, status: r.status,
       });
+      clearDetectCooldown(interaction.guildId, interaction.user.id);
       return interaction.editReply({
         content: '❌ Could not download that image (the Discord link may have expired). Re-upload and try again.',
       });
@@ -5719,18 +5723,32 @@ async function handleQurlDetect(interaction) {
       apiKey,
     });
   } catch (err) {
-    // detectWatermark throws (with .status) on 401/400/429/5xx and on
-    // network failure. Body-free message by contract — log server-side,
-    // surface a generic ephemeral error. Don't leak err.message (it may
-    // echo connector detail) into the reply.
+    // detectWatermark throws (with .status, set from response.status in
+    // connector.js's throwConnectorError) on 401/400/429/5xx and on network
+    // failure. Body-free message by contract — log server-side, surface a
+    // generic ephemeral error. Don't leak err.message (it may echo
+    // connector detail) into the reply.
+    //
+    // Cooldown policy: a transient failure shouldn't throttle an honest
+    // user for the full window, so CLEAR the cooldown — EXCEPT on a 429
+    // (connector rate-limited this guild), where KEEPING the cooldown is
+    // the correct back-off. (429 is cleanly distinguishable via err.status;
+    // network throws / 5xx / 4xx-other all clear.)
+    const rateLimited = err && err.status === 429;
     logger.error('handleQurlDetect: detect failed', {
       user_id: interaction.user.id,
       guild_id: interaction.guildId,
       status: err && err.status,
+      rate_limited: rateLimited,
       error: err && err.message,
     });
+    if (!rateLimited) {
+      clearDetectCooldown(interaction.guildId, interaction.user.id);
+    }
     return interaction.editReply({
-      content: '❌ Watermark detection is unavailable right now. Please try again in a moment.',
+      content: rateLimited
+        ? '❌ Watermark detection is busy right now (rate-limited). Please wait a moment and try again.'
+        : '❌ Watermark detection is unavailable right now. Please try again in a moment.',
     });
   }
 
@@ -5756,8 +5774,7 @@ async function handleQurlDetect(interaction) {
   // connector-side contract regression can't cross guilds — this filter
   // fails closed (a row missing guild_id, or carrying a different one, is
   // dropped). findSendsByQurlId returns 0–1 rows in steady state
-  // (one qurl_id per recipient by write-path invariant); take the first
-  // same-guild row.
+  // (one qurl_id per recipient by write-path invariant, capped at Limit:2).
   const sends = await db.findSendsByQurlId(result.qurl_id);
   const sameGuild = (sends || []).filter((s) => s.guild_id === interaction.guildId);
   if (sameGuild.length === 0) {
@@ -5772,6 +5789,24 @@ async function handleQurlDetect(interaction) {
     });
     return interaction.editReply({
       content: '🔍 No match in this server.',
+    });
+  }
+  if (sameGuild.length > 1) {
+    // Ambiguous: >1 same-guild row for one qurl_id violates the
+    // one-qurl_id-per-recipient write invariant (a write-path regression
+    // landed a duplicate). Mirror the qurl.expired handler's ambiguous-skip
+    // — do NOT attribute to one row arbitrarily (it could finger the wrong
+    // recipient). Surface a non-committal reply + audit so an operator can
+    // investigate. findSendsByQurlId's Limit:2 means length is exactly 2
+    // here; the audit's qurl_id is the investigation handle.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'ambiguous',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+      qurl_id: result.qurl_id,
+    });
+    return interaction.editReply({
+      content: '🔍 Couldn\'t determine a single recipient for this image. Please contact a server admin.',
     });
   }
 
@@ -5812,7 +5847,13 @@ async function handleQurlDetect(interaction) {
   // is deliberately OMITTED from the reply — mixing a 0–100 and a 0–1 scale
   // confused readers, and an absent confidence rendered a bare "0". It stays
   // in the match audit above for operators.
-  const pctText = matchPct === null ? '' : ` — ${matchPct}% match`;
+  //
+  // Suppress the "% match" suffix unless match_pct is a POSITIVE number:
+  // a detected match always has match_pct > 0, so a null/0/garbled value
+  // is a malformed connector response, not a real 0% — render the bare
+  // attribution rather than a confusing "0% match". (The audit above keeps
+  // the raw value for forensics.)
+  const pctText = (typeof matchPct === 'number' && matchPct > 0) ? ` — ${matchPct}% match` : '';
   return interaction.editReply({
     content: `🔍 This image was watermarked for ${who}${pctText}.`,
   });

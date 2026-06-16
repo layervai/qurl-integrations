@@ -3228,6 +3228,29 @@ describe('handleQurlDetect', () => {
     expect(JSON.stringify(auditMeta)).not.toContain(recipientId);
   });
 
+  test('matched with a non-positive match_pct ⇒ bare attribution, no "0% match" (item 3)', async () => {
+    // Defensive: a detected match always has match_pct > 0, so a malformed
+    // 0 (or null) is a bad connector response, not a real 0% — render the
+    // bare attribution rather than a confusing "0% match".
+    const recipientId = '100000000000000011';
+    mockDetectWatermark.mockResolvedValue({
+      detected: true, qurl_id: 'q_zero', match_pct: 0, confidence: 0.9,
+    });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_zero', recipient_discord_id: recipientId, guild_id: 'guild-1' },
+    ]);
+    const int = makeDetectInteraction({
+      usersFetch: jest.fn(async (id) => ({ id, username: 'BobRecipient' })),
+    });
+
+    await handleQurlDetect(int);
+
+    const replyContent = int.editReply.mock.calls.at(-1)[0].content;
+    expect(replyContent).toContain('BobRecipient');
+    expect(replyContent).not.toMatch(/match/i); // no "% match" suffix
+    expect(replyContent).not.toContain('0%');
+  });
+
   test('(ii) !detected ⇒ "no watermark found" ephemeral + no_match audit', async () => {
     mockDetectWatermark.mockResolvedValue({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
     const int = makeDetectInteraction();
@@ -3271,7 +3294,39 @@ describe('handleQurlDetect', () => {
     }));
   });
 
-  test('connector error (e.g. 5xx / 429) ⇒ graceful ephemeral error, no throw', async () => {
+  test('ambiguity guard: >1 same-guild row for one qurl_id ⇒ refuses to attribute', async () => {
+    // A write-path duplicate landed two same-guild rows under one qurl_id
+    // (Limit:2 means findSendsByQurlId returns exactly 2). The handler must
+    // NOT attribute to one arbitrarily (could finger the wrong recipient) —
+    // mirror the qurl.expired ambiguous-skip: non-committal reply + audit
+    // result:'ambiguous', recipient NEVER resolved.
+    mockDetectWatermark.mockResolvedValue({
+      detected: true, qurl_id: 'q_dup', match_pct: 90, confidence: 0.95,
+    });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_dup', recipient_discord_id: '100000000000000001', guild_id: 'guild-1' },
+      { qurl_id: 'q_dup', recipient_discord_id: '100000000000000002', guild_id: 'guild-1' },
+    ]);
+    const usersFetch = jest.fn();
+    const int = makeDetectInteraction({ guildId: 'guild-1', usersFetch });
+
+    await handleQurlDetect(int);
+
+    // Never resolve a recipient on an ambiguous match.
+    expect(usersFetch).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/single recipient/i),
+    }));
+    // Audited as ambiguous (NOT matched), with the qurl_id investigation handle.
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_detect', expect.objectContaining({ result: 'matched' }));
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'ambiguous', qurl_id: 'q_dup', guild_id: 'guild-1',
+    }));
+  });
+
+  test('connector 5xx ⇒ graceful ephemeral error, no throw, cooldown CLEARED (transient)', async () => {
+    // Item 1: a transient connector failure (5xx / network) shouldn't
+    // throttle an honest user for the full window → CLEAR the cooldown.
     const err = new Error('Connector detect failed (503)'); err.status = 503;
     mockDetectWatermark.mockRejectedValue(err);
     const int = makeDetectInteraction();
@@ -3280,6 +3335,23 @@ describe('handleQurlDetect', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/unavailable right now/i),
     }));
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+
+  test('connector 429 ⇒ rate-limited ephemeral AND cooldown KEPT (back off)', async () => {
+    // Item 1: a 429 means the connector rate-limited this guild — KEEP the
+    // cooldown so the bot backs off rather than hammering. 429 is cleanly
+    // distinguishable via err.status (set from response.status).
+    const err = new Error('Connector detect failed (429)'); err.status = 429;
+    mockDetectWatermark.mockRejectedValue(err);
+    const int = makeDetectInteraction();
+
+    await expect(handleQurlDetect(int)).resolves.not.toThrow();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/rate-limited/i),
+    }));
+    // Cooldown KEPT — the back-off signal.
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(true);
   });
 
   // ── Item 5: missing-branch coverage ──
@@ -3297,10 +3369,12 @@ describe('handleQurlDetect', () => {
     expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 
-  test('CDN fetch !ok ⇒ "link may have expired" ephemeral, no connector call', async () => {
+  test('CDN fetch !ok ⇒ "link may have expired" ephemeral, no connector call, cooldown CLEARED', async () => {
     // The handler defers, then the Discord-CDN fetch returns non-ok (signed
     // URL expired). It must editReply the expiry hint and NOT POST to the
-    // connector with a body it never downloaded.
+    // connector with a body it never downloaded. Item 1: an expired link is
+    // honest + re-uploadable, so the cooldown CLEARS (the reply tells the
+    // user to re-upload, which the cooldown would otherwise block).
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 403 });
     const int = makeDetectInteraction();
 
@@ -3311,6 +3385,7 @@ describe('handleQurlDetect', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/may have expired/i),
     }));
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
   });
 
   test('no API key configured ⇒ "not configured" ephemeral AND cooldown CLEARED (item 2)', async () => {

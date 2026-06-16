@@ -545,6 +545,11 @@ const AUDIT_EVENTS = {
   //                            `qurl_id` + `match_pct` + `confidence`.
   //   - `result: 'no_match'` — no mark, or a mark with no same-guild row
   //                            (on the latter, carries `qurl_id`).
+  //   - `result: 'ambiguous'`— >1 same-guild row for one qurl_id (a
+  //                            write-path duplicate violating the
+  //                            one-qurl_id-per-recipient invariant); we
+  //                            refuse to attribute. Carries `qurl_id` as
+  //                            the operator investigation handle.
   //   - `result: 'rejected'` — the SSRF-probe gate fired (the strongest
   //                            abuse signal; the one rejection that keeps
   //                            the cooldown). No connector call.
