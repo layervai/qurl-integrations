@@ -257,6 +257,31 @@ describe('Connector client — coverage boost', () => {
           expect(getBody().session_duration).toBeUndefined();
         }
       });
+
+      // guild_id forwarding (#1101): mintLinks attaches the minting guild
+      // so the connector can guild-scope a future watermark-attribution
+      // lookup. Optional/back-compat — omitted when not provided. Same
+      // harness as session_duration above (mint_link request JSON body).
+      it('sends guild_id when guildId provided', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, guildId: 'guild-123' });
+        expect(getBody().guild_id).toBe('guild-123');
+      });
+
+      it('omits guild_id when guildId is absent (default param)', async () => {
+        const getBody = captureMintBody();
+        await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1 });
+        expect('guild_id' in getBody()).toBe(false);
+      });
+
+      it('omits guild_id for falsy guildId (empty string / null / undefined)', async () => {
+        for (const v of ['', null, undefined]) {
+          const getBody = captureMintBody();
+          // eslint-disable-next-line no-await-in-loop
+          await connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 1, guildId: v });
+          expect('guild_id' in getBody()).toBe(false);
+        }
+      });
     });
 
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
@@ -598,5 +623,79 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       resource_id: 'r5',
     });
     assertNoFullHashLeaked();
+  });
+
+  // detectWatermark — the bot side of /api/detect (#1101). POSTs raw image
+  // bytes with an X-Guild-Id scope header; parses {detected, qurl_id,
+  // match_pct, confidence}. The handler-side guild filter + cooldown live
+  // in commands.js (tested in qurl-send-map.test.js); these pin the wire
+  // contract this client owns.
+  describe('detectWatermark — /api/detect contract', () => {
+    function captureDetect(jsonResponse, { ok = true, status = 200 } = {}) {
+      let captured = null;
+      globalThis.fetch = jest.fn(async (url, opts) => {
+        captured = { url, opts };
+        return {
+          ok,
+          status,
+          json: async () => jsonResponse,
+          text: async () => JSON.stringify(jsonResponse),
+        };
+      });
+      return () => captured;
+    }
+
+    it('POSTs to /api/detect with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
+      const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      const bytes = Buffer.from('imagedata');
+      await connector.detectWatermark(bytes, { guildId: 'guild-9', contentType: 'image/png', apiKey: 'k-detect' });
+      const { url, opts } = get();
+      expect(url).toBe('https://connector.test.local/api/detect');
+      expect(opts.method).toBe('POST');
+      expect(opts.headers['X-Guild-Id']).toBe('guild-9');
+      expect(opts.headers['Authorization']).toBe('Bearer k-detect');
+      expect(opts.headers['Content-Type']).toBe('image/png');
+      expect(opts.body).toBe(bytes);
+    });
+
+    it('falls back to octet-stream content-type and global QURL_API_KEY', async () => {
+      const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9' });
+      const { opts } = get();
+      expect(opts.headers['Content-Type']).toBe('application/octet-stream');
+      // This describe block's config mock sets QURL_API_KEY: 'test-key'
+      // (line ~493); the fallback resolves to it when no apiKey is passed.
+      expect(opts.headers['Authorization']).toBe('Bearer test-key');
+    });
+
+    it('returns the normalized detect result on a detected match', async () => {
+      captureDetect({ detected: true, qurl_id: 'q_match1', match_pct: 92, confidence: 0.98 });
+      const res = await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(res).toEqual({ detected: true, qurl_id: 'q_match1', match_pct: 92, confidence: 0.98 });
+    });
+
+    it('coerces a garbled/absent detected field to a hard boolean false', async () => {
+      // A connector response missing `detected` (or sending a truthy
+      // non-boolean) must read as "no attribution", never as truthy.
+      captureDetect({ qurl_id: 'q_x', match_pct: 50 });
+      const res = await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(res.detected).toBe(false);
+      // Non-number match_pct / missing confidence normalize to null / 0.
+      expect(res.confidence).toBe(0);
+    });
+
+    it('throws (with .status) on a non-ok response so the handler can ephemeral-error', async () => {
+      captureDetect({ error: 'bad guild' }, { ok: false, status: 400 });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('throws when no guildId is given (attribution is guild-scoped)', async () => {
+      captureDetect({ detected: false });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { apiKey: 'k' }),
+      ).rejects.toThrow(/guild-scoped/);
+    });
   });
 });

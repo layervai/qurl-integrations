@@ -950,7 +950,7 @@ async function getWeeklyDigestData() {
 
 async function recordQURLSend({
   sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType,
-  qurlLink, qurlId, expiresIn, channelId, targetType,
+  qurlLink, qurlId, expiresIn, channelId, targetType, guildId,
 }) {
   // qurl_id is the GSI hash key on qurl_id-index, used by the
   // qurl.expired webhook handler to locate the recipient row for DM
@@ -973,6 +973,16 @@ async function recordQURLSend({
   };
   if (typeof qurlId === 'string' && qurlId.length > 0) {
     Item.qurl_id = qurlId;
+  }
+  // guild_id is a NON-KEY, non-indexed attribute — DynamoDB is schemaless
+  // for non-key attrs, so the qurl-bot-ddb table needs no Terraform change
+  // to carry it. It scopes watermark attribution to the minting guild
+  // (#1101); the /qurl detect read filters sends on it (a write-time
+  // invariant + a defense-in-depth filter at read time). Sparse like
+  // qurl_id: a legacy/non-guild send omits it rather than writing an empty
+  // string. It rides the `qurl_id-index` GSI for free (projection = ALL).
+  if (typeof guildId === 'string' && guildId.length > 0) {
+    Item.guild_id = guildId;
   }
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
@@ -1025,6 +1035,14 @@ async function recordQURLSendBatch(sends) {
         };
         if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
           Item.qurl_id = s.qurlId;
+        }
+        // guild_id: non-key attribute scoping watermark attribution to
+        // the minting guild (#1101). Sparse like qurl_id — a legacy /
+        // non-guild send omits it. No Terraform change needed (schemaless
+        // non-key attr); rides the qurl_id-index GSI for the /qurl detect
+        // read (projection = ALL). See recordQURLSend for the full why.
+        if (typeof s.guildId === 'string' && s.guildId.length > 0) {
+          Item.guild_id = s.guildId;
         }
         return { PutRequest: { Item } };
       }),

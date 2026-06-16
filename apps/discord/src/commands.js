@@ -36,7 +36,7 @@ const {
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
-const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { fireAndForgetLinkGuildWebhookSubscription } = require('./guild-webhook-link');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
@@ -602,6 +602,57 @@ function setCooldown(userId) {
 
 function clearCooldown(userId) {
   sendCooldowns.delete(userId);
+}
+
+// ── /qurl detect cooldown (#1101) ──
+//
+// SEPARATE Map from sendCooldowns, and keyed on a COMPOSITE `${guildId}:
+// ${userId}` rather than userId alone. Two deliberate differences from the
+// send bucket:
+//   1. Distinct bucket — a user's detect throttle must not lock out their
+//      /qurl send (and vice-versa); these are unrelated rate limits.
+//   2. Per-(guild,user) — /qurl detect is a deanonymization oracle, and
+//      attribution is guild-scoped, so the abuse guard is too. The same
+//      user probing two guilds gets two independent budgets; a shared
+//      userId key would let one guild's activity throttle another's.
+// Eviction/cap structure mirrors sendCooldowns (LRU-ish re-insert + bulk
+// 10%-drop + hard-cap fallback) so the Map can't grow unbounded under a
+// snowflake-spraying attacker.
+const detectCooldowns = new Map();
+const DETECT_COOLDOWNS_MAX = 20000;
+
+function detectCooldownKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
+
+function isOnDetectCooldown(guildId, userId) {
+  const last = detectCooldowns.get(detectCooldownKey(guildId, userId));
+  if (!last) return false;
+  return Date.now() - last < config.QURL_SEND_COOLDOWN_MS;
+}
+
+function setDetectCooldown(guildId, userId) {
+  const key = detectCooldownKey(guildId, userId);
+  detectCooldowns.delete(key);
+  detectCooldowns.set(key, Date.now());
+  if (detectCooldowns.size > 10000) {
+    const dropCount = Math.max(1, Math.floor(detectCooldowns.size / 10));
+    const it = detectCooldowns.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      detectCooldowns.delete(k);
+    }
+  }
+  while (detectCooldowns.size > DETECT_COOLDOWNS_MAX) {
+    const oldest = detectCooldowns.keys().next().value;
+    if (oldest === undefined) break;
+    detectCooldowns.delete(oldest);
+  }
+}
+
+function clearDetectCooldown(guildId, userId) {
+  detectCooldowns.delete(detectCooldownKey(guildId, userId));
 }
 
 async function batchSettled(items, fn, batchSize = 5) {
@@ -1552,9 +1603,15 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
  *   the fileviewer's client-side self-destruct timer. null/undefined inherits
  *   qurl-service's QURL_SESSION_TTL default. See mintLinks for value mapping
  *   (0.5 → "1s", N>=1 → ceil to whole seconds).
+ * @param {?string} [opts.guildId] — Discord guild snowflake. Forwarded to
+ *   mintLinks as `guild_id` on EVERY batch so the connector can guild-scope
+ *   a future watermark-attribution lookup to the minting guild (#1101).
+ *   Threaded through here (not passed to mintLinks at each call site) because
+ *   mintLinks is only reached via this batcher on the real send paths.
+ *   Optional/back-compat — omitting it leaves the mint body unchanged.
  * @returns {Array<{qurl_link: string, qurl_id: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null }) {
+async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
@@ -1571,6 +1628,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       n: batchSize,
       apiKey,
       selfDestructSeconds,
+      guildId,
     });
     for (const link of minted) {
       // qurl_id is the join key against qurl.accessed webhooks; empty
@@ -1868,6 +1926,11 @@ async function executeSendPipeline(interaction, {
           recipientCount: recipients.length,
           apiKey,
           selfDestructSeconds,
+          // Guild-scope the mint so watermark attribution (/qurl detect,
+          // #1101) can resolve back to this guild. interaction.guildId is
+          // guaranteed non-null here — the /qurl send + /qurl map entry
+          // points both DM-reject before reaching the pipeline.
+          guildId: interaction.guildId,
         });
       } finally {
         bufHolder.buf = null;
@@ -1906,6 +1969,11 @@ async function executeSendPipeline(interaction, {
         recipientCount: recipients.length,
         apiKey,
         selfDestructSeconds,
+        // Guild-scope the mint for watermark attribution (#1101) — see the
+        // file-send branch above. Maps payloads carry no image to watermark
+        // today, but threading guild_id keeps the two pipelines symmetric
+        // and future-proofs a watermarked map render.
+        guildId: interaction.guildId,
       });
 
       if (allLinks.length < recipients.length) {
@@ -2016,6 +2084,12 @@ async function executeSendPipeline(interaction, {
       // safe to assume post-deploy. No entry-gate fires because the
       // value can't drift — it's a literal, not a forwarded param.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
+      // guild_id persisted on each row so /qurl detect (#1101) can
+      // guild-scope watermark attribution at read time (defense-in-depth
+      // alongside the connector's own X-Guild-Id scoping). Mirrors the
+      // guildId threaded into the mint above. Non-null here (entry points
+      // DM-reject). Sparse write — see recordQURLSendBatch.
+      guildId: interaction.guildId,
     })));
   } catch (err) {
     // Log the orphaned QURL resources at error level so an operator can
@@ -2599,6 +2673,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           recipientCount: newRecipients.length,
           apiKey,
           selfDestructSeconds: inheritedDestruct,
+          // Guild-scope the mint for watermark attribution (#1101). Add
+          // Recipients reuses the original send's guild via
+          // originalInteraction, so rows added here are attributable on
+          // /qurl detect the same as the initial send's rows. Without this
+          // the filter would silently drop added recipients (fails closed —
+          // no leak — but a real watermark would read "no match").
+          guildId: originalInteraction.guildId,
         });
       } catch (err) {
         // Discord CDN URLs are signed and expire (~24h). If the re-download
@@ -2662,6 +2743,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         recipientCount: newRecipients.length,
         apiKey,
         selfDestructSeconds: inheritedDestruct,
+        // Guild-scope for attribution (#1101) — see the file branch above.
+        guildId: originalInteraction.guildId,
       });
 
       if (allLinks.length < newRecipients.length) {
@@ -2748,6 +2831,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         qurlId: link.qurlId,
         expiresIn: sendConfig.expires_in,
         channelId: originalInteraction.channelId, targetType: 'user',
+        // guild_id for /qurl detect attribution (#1101) — mirrors the mint
+        // above + executeSendPipeline's row write. Reuses the original
+        // send's guild so added recipients stay attributable. Sparse write.
+        guildId: originalInteraction.guildId,
       });
     }
   }
@@ -5471,6 +5558,245 @@ async function handleQurlMap(interaction) {
   });
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// /qurl detect — watermark attribution (#1101)
+// ──────────────────────────────────────────────────────────────────────
+//
+// A user uploads an image; the bot reads the invisible meta-seal watermark
+// via the connector's /api/detect, resolves it to the qurl_id it was minted
+// for, and replies (EPHEMERALLY — it's sensitive) with the original
+// RECIPIENT's Discord handle + a % match. SCOPED to the requester's guild:
+// an image watermarked in guild A must never attribute in guild B.
+//
+// This is a deanonymization oracle by construction. The guards, in order:
+//   - guild-only (DM rejects, no oracle outside a guild).
+//   - per-(guild,user) cooldown (detectCooldowns) — the rate limit IS the
+//     abuse guard against scraping the recipient↔image mapping.
+//   - SSRF + size + image-type validation on the attachment, identical to
+//     the guards handleQurlSend applies to the same Discord-CDN fetch.
+//   - TWO layers of guild scoping: the connector scopes via X-Guild-Id,
+//     AND we re-filter the returned rows on guild_id here (defense-in-depth
+//     — if the connector contract ever regresses, the leak still can't
+//     cross guilds because this filter fails closed).
+//   - audit on EVERY invocation (both matched + no-match), recipient id
+//     NEVER logged (audit access is broader than the ephemeral reply).
+//
+// Reply is always ephemeral. Cooldown rationale per-branch mirrors
+// handleQurlSend: honest user errors (missing/non-image/oversize attachment,
+// client-schema desync) CLEAR the cooldown so retry is immediate; the SSRF
+// probe KEEPS it (probing the allow-list is an abuse signal).
+async function handleQurlDetect(interaction) {
+  // DM rejection first — no cooldown burned on a guild-only command
+  // attempted from DMs. Same `interaction.guildId`-only signal as
+  // handleQurlSend (see its comment for the http-only-mode caveat).
+  if (!interaction.guildId) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
+  }
+
+  // Cooldown gate at entry — per (guild, user). Set BEFORE input
+  // validation so a malformed attachment still throttles (an attacker
+  // can't sidestep the oracle rate limit by spamming invalid inputs).
+  if (isOnDetectCooldown(interaction.guildId, interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before running detect again.',
+      ephemeral: true,
+    });
+  }
+  setDetectCooldown(interaction.guildId, interaction.user.id);
+
+  // Required-option lookup. `getAttachment(name, true)` throws on a
+  // missing option; Discord enforces required server-side, so a hit is
+  // almost always a client/schema desync during a redeploy window — clear
+  // the cooldown so retry is immediate once the deploy stabilizes (same
+  // rationale as handleQurlSend's required-option catch).
+  let attachment;
+  try {
+    attachment = interaction.options.getAttachment('image', true);
+  } catch (err) {
+    logger.warn('handleQurlDetect: required image option missing', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: '❌ The `image:` option is required. Re-run with an image attached.',
+      ephemeral: true,
+    });
+  }
+  if (!attachment || typeof attachment.url !== 'string') {
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: '❌ Attachment is missing or malformed.',
+      ephemeral: true,
+    });
+  }
+  // SSRF gate — the attachment.url is fetched below; re-validate it
+  // against the Discord-CDN allow-list exactly like handleQurlSend. This
+  // is the ONE rejection that KEEPS the cooldown — probing the allow-list
+  // is an abuse signal, not an honest user error.
+  if (!isAllowedSourceUrl(attachment.url)) {
+    logger.warn('handleQurlDetect: attachment.url failed SSRF gate', {
+      user_id: interaction.user.id, host: safeUrlHost(attachment.url),
+    });
+    return interaction.reply({
+      content: '❌ Attachment source not allowed. Upload the image via Discord, not a linked URL.',
+      ephemeral: true,
+    });
+  }
+  // Image-only: the connector's neural detector reads pixels. A non-image
+  // (PDF, zip, etc.) can't carry the meta-seal mark, so reject early
+  // rather than spend an inference round-trip. Honest user error → clear
+  // cooldown.
+  if (typeof attachment.contentType !== 'string' || !attachment.contentType.startsWith('image/')) {
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: `❌ Detect needs an image. \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\` isn't supported.`,
+      ephemeral: true,
+    });
+  }
+  // Size cap before buffering — guard against pulling a 25MB+ blob into
+  // memory. Honest user error → clear cooldown.
+  if (attachment.size > MAX_FILE_SIZE) {
+    clearDetectCooldown(interaction.guildId, interaction.user.id);
+    return interaction.reply({
+      content: `❌ Image too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
+      ephemeral: true,
+    });
+  }
+
+  // Defer EARLY (ephemeral) — everything past here is network-bound (CDN
+  // fetch + neural-net inference ~seconds + a recipient users.fetch), which
+  // would blow Discord's 3-second ACK deadline on a plain reply. After
+  // deferReply, all user-visible output is editReply.
+  await interaction.deferReply({ ephemeral: true });
+
+  // Resolve the API key the same way the send paths do: per-guild BYOK
+  // first, global fallback. (handleQurlDetect resolves its own key — it's
+  // intentionally NOT in API_KEY_GATED_SUBCOMMANDS, which would
+  // double-resolve and gate before this handler runs.)
+  const apiKey = await db.getGuildApiKey(interaction.guildId) || config.QURL_API_KEY;
+  if (!apiKey) {
+    return interaction.editReply({
+      content: '❌ **qURL is not configured for this server.** A server admin needs to run `/qurl setup` first.',
+    });
+  }
+
+  // Fetch the image bytes from Discord CDN, then POST to /api/detect.
+  let result;
+  try {
+    const r = await fetch(attachment.url, { signal: AbortSignal.timeout(30000) });
+    if (!r.ok) {
+      // CDN URLs are signed + expire (~24h). A failed fetch is almost
+      // always an expired URL on a re-shared old image, not our bug.
+      logger.warn('handleQurlDetect: CDN fetch failed', {
+        user_id: interaction.user.id, status: r.status,
+      });
+      return interaction.editReply({
+        content: '❌ Could not download that image (the Discord link may have expired). Re-upload and try again.',
+      });
+    }
+    const bytes = Buffer.from(await r.arrayBuffer());
+    result = await detectWatermark(bytes, {
+      guildId: interaction.guildId,
+      contentType: attachment.contentType,
+      apiKey,
+    });
+  } catch (err) {
+    // detectWatermark throws (with .status) on 401/400/429/5xx and on
+    // network failure. Body-free message by contract — log server-side,
+    // surface a generic ephemeral error. Don't leak err.message (it may
+    // echo connector detail) into the reply.
+    logger.error('handleQurlDetect: detect failed', {
+      user_id: interaction.user.id,
+      guild_id: interaction.guildId,
+      status: err && err.status,
+      error: err && err.message,
+    });
+    return interaction.editReply({
+      content: '❌ Watermark detection is unavailable right now. Please try again in a moment.',
+    });
+  }
+
+  // No mark, OR the connector found a mark but no SAME-GUILD match
+  // (detected=false collapses both — qurl_id/match_pct null). Audit the
+  // no-match outcome, then a non-committal ephemeral (don't reveal whether
+  // a mark exists in some OTHER guild — that itself would leak cross-guild
+  // signal).
+  if (!result.detected || !result.qurl_id) {
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'no_match',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+    });
+    return interaction.editReply({
+      content: '🔍 No qURL watermark found in this image (for this server).',
+    });
+  }
+
+  // Connector says detected + gave a qurl_id. Look up the recipient
+  // row(s). DEFENSE-IN-DEPTH guild filter: the connector already
+  // guild-scopes via X-Guild-Id, but re-filter on guild_id here so a
+  // connector-side contract regression can't cross guilds — this filter
+  // fails closed (a row missing guild_id, or carrying a different one, is
+  // dropped). findSendsByQurlId returns 0–1 rows in steady state
+  // (one qurl_id per recipient by write-path invariant); take the first
+  // same-guild row.
+  const sends = await db.findSendsByQurlId(result.qurl_id);
+  const sameGuild = (sends || []).filter((s) => s.guild_id === interaction.guildId);
+  if (sameGuild.length === 0) {
+    // Connector matched but no local same-guild row — treat as no match
+    // (the local row may have aged out, or the connector's scope and ours
+    // diverged). Same non-committal copy + audit as the no-mark branch.
+    logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+      result: 'no_match',
+      guild_id: interaction.guildId,
+      requester_id: interaction.user.id,
+      qurl_id: result.qurl_id,
+    });
+    return interaction.editReply({
+      content: '🔍 No match in this server.',
+    });
+  }
+
+  const send = sameGuild[0];
+  const matchPct = typeof result.match_pct === 'number' ? Math.round(result.match_pct) : null;
+
+  // Audit the MATCH — qurl_id + match_pct, but NEVER the resolved
+  // recipient id. Audit logs are broader-access than the ephemeral reply;
+  // logging the unmasked recipient would re-leak the deanonymization the
+  // ephemeral is there to contain.
+  logger.audit(AUDIT_EVENTS.QURL_DETECT, {
+    result: 'matched',
+    guild_id: interaction.guildId,
+    requester_id: interaction.user.id,
+    qurl_id: result.qurl_id,
+    match_pct: matchPct,
+  });
+
+  // Resolve the recipient's handle. Best-effort: if the user can't be
+  // fetched (left Discord, API blip), still surface the attribution with
+  // the raw mention (Discord renders <@id> client-side) rather than fail
+  // the whole detect.
+  let username = null;
+  try {
+    const user = await interaction.client.users.fetch(send.recipient_discord_id);
+    username = user && user.username;
+  } catch (err) {
+    logger.warn('handleQurlDetect: recipient user fetch failed', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+  }
+
+  const id = send.recipient_discord_id;
+  const who = username ? `**${escapeDiscordMarkdown(username)}** (<@${id}>)` : `<@${id}>`;
+  const pctText = matchPct === null ? '' : ` — ${matchPct}% match`;
+  return interaction.editReply({
+    content: `🔍 This image was watermarked for ${who}${pctText} (detect confidence ${result.confidence}).`,
+  });
+}
+
 // --- Confirm-card handlers for `/qurl send` + `/qurl map` ---
 // Any future rename of the `qurl_confirm_*` wire literals (or these
 // handler names, since they're paired with them via registerFlow)
@@ -8120,6 +8446,21 @@ const commands = [
                 .setRequired(false)
                 .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
             )
+        )
+        // /qurl detect — watermark attribution (#1101). Required image
+        // attachment; the handler reads the invisible meta-seal mark and
+        // (guild-scoped) replies with the original recipient. Always
+        // registered (no feature toggle) — the smoke test's expected
+        // subcommand set in e2e/tests/discord-commands.smoke.test.ts
+        // includes `detect` unconditionally.
+        .addSubcommand(sub =>
+          sub.setName('detect')
+            .setDescription('Find which recipient an image was watermarked for (this server)')
+            .addAttachmentOption(opt =>
+              opt.setName('image')
+                .setDescription('The image to check for a qURL watermark')
+                .setRequired(true)
+            )
         );
       if (config.MAP_COMMAND_ENABLED) {
         builder.addSubcommand(sub =>
@@ -8447,6 +8788,10 @@ const commands = [
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
       if (sub === 'send') return handleQurlSend(interaction);
+      // /qurl detect resolves its own API key inside the handler (BYOK →
+      // global fallback) — deliberately NOT in API_KEY_GATED_SUBCOMMANDS,
+      // so it dispatches here without the dispatcher-level key gate.
+      if (sub === 'detect') return handleQurlDetect(interaction);
       if (sub === 'map') {
         if (!config.MAP_COMMAND_ENABLED) {
           // Debug (not warn) — expected post-deploy traffic from
@@ -9121,6 +9466,15 @@ module.exports = {
       // re-stating the strings.
       handleQurlSend,
       handleQurlMap,
+      // /qurl detect handler + its per-(guild,user) cooldown surface
+      // (#1101). The cooldown Map + predicates are exposed so tests pin
+      // the abuse-guard contract (composite key, separate bucket from
+      // sendCooldowns) directly, like the send cooldowns above.
+      handleQurlDetect,
+      detectCooldowns,
+      isOnDetectCooldown,
+      setDetectCooldown,
+      clearDetectCooldown,
       resolveRecipientUsers,
       partitionRecipients,
       resolveMentionableSelection,

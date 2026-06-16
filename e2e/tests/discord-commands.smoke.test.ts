@@ -155,8 +155,8 @@ describe('Discord command registration (smoke)', () => {
       // eslint-disable-next-line no-console
       console.log(`smoke: MAP_COMMAND_ENABLED resolved to "${rawMapFlag}" (mapEnabled=${mapEnabled})`);
       const expectedSubcommands = mapEnabled
-        ? ['help', 'map', 'revoke', 'send', 'setup', 'status']
-        : ['help', 'revoke', 'send', 'setup', 'status'];
+        ? ['detect', 'help', 'map', 'revoke', 'send', 'setup', 'status']
+        : ['detect', 'help', 'revoke', 'send', 'setup', 'status'];
       expect({ scope: qurl._scope, subcommands })
         .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
     }

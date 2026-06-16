@@ -807,6 +807,31 @@ describe('qurl sends', () => {
     }
   });
 
+  test('recordQURLSend: writes guild_id when provided, omits when empty/missing (#1101)', async () => {
+    // Sparse guild_id on the single-row path, mirroring qurl_id semantics.
+    ddbMock.on(PutCommand).resolves({});
+    await store.recordQURLSend({
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'rcpt',
+      resourceId: 'r1', resourceType: 'file', qurlLink: 'https://…',
+      guildId: 'guild-77',
+      expiresIn: '24h', channelId: 'ch1', targetType: 'user',
+    });
+    expect(ddbMock.commandCalls(PutCommand)[0].args[0].input.Item.guild_id).toBe('guild-77');
+
+    for (const bad of [undefined, '', null]) {
+      ddbMock.reset();
+      ddbMock.on(PutCommand).resolves({});
+      // eslint-disable-next-line no-await-in-loop
+      await store.recordQURLSend({
+        sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'rcpt',
+        resourceId: 'r1', resourceType: 'file', qurlLink: 'https://…',
+        guildId: bad,
+        expiresIn: '24h', channelId: 'ch1', targetType: 'user',
+      });
+      expect('guild_id' in ddbMock.commandCalls(PutCommand)[0].args[0].input.Item).toBe(false);
+    }
+  });
+
   test('recordQURLSendBatch: writes qurl_id per row when provided, sparsely', async () => {
     ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
     await store.recordQURLSendBatch([
@@ -824,6 +849,37 @@ describe('qurl sends', () => {
     const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends'];
     expect(writes[0].PutRequest.Item.qurl_id).toBe('q_aaaaaaaaaa1');
     expect('qurl_id' in writes[1].PutRequest.Item).toBe(false);
+  });
+
+  test('recordQURLSendBatch: writes guild_id per row when provided, sparsely (#1101 attribution)', async () => {
+    // guild_id is a NON-KEY attribute scoping watermark attribution to the
+    // minting guild. Sparse like qurl_id — a row whose input omits guildId
+    // (or sends an empty string) must not surface the attribute. The
+    // /qurl detect read filters sends on guild_id, so the write side must
+    // land it exactly when present.
+    ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
+    await store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+        resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
+        qurlId: 'q_aaaaaaaaaa1', guildId: 'guild-77',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r2',
+        resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
+        qurlId: 'q_aaaaaaaaaa2',
+        // guildId omitted → row should not surface a guild_id attribute
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r3',
+        resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
+        qurlId: 'q_aaaaaaaaaa3', guildId: '',
+        // empty-string guildId → also omitted (sparse, no empty sentinel)
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ]);
+    const calls = ddbMock.commandCalls(BatchWriteCommand);
+    expect(calls).toHaveLength(1);
+    const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends'];
+    expect(writes[0].PutRequest.Item.guild_id).toBe('guild-77');
+    expect('guild_id' in writes[1].PutRequest.Item).toBe(false);
+    expect('guild_id' in writes[2].PutRequest.Item).toBe(false);
   });
 
   test('recordQURLSendBatch: chunks >25 items into multiple BatchWrite calls', async () => {

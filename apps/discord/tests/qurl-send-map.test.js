@@ -121,6 +121,9 @@ const mockDb = {
   saveSendConfig: jest.fn(),
   getGuildApiKey: jest.fn(),
   getGuildConfig: jest.fn(),
+  // /qurl detect (#1101) reads the qurl_id-index GSI to map a detected
+  // watermark back to its recipient row. Default: no rows.
+  findSendsByQurlId: jest.fn(async () => []),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -133,10 +136,12 @@ jest.mock('../src/utils/admin', () => ({
   isAdmin: jest.fn(() => true),
 }));
 
+const mockDetectWatermark = jest.fn();
 jest.mock('../src/connector', () => ({
   downloadAndUpload: jest.fn(),
   reUploadBuffer: jest.fn(),
   mintLinks: jest.fn(),
+  detectWatermark: (...a) => mockDetectWatermark(...a),
   uploadJsonToConnector: jest.fn(),
   isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
 }));
@@ -219,6 +224,9 @@ const {
   getActiveFileSends,
   setActiveFileSends,
   resolveRoleNames,
+  handleQurlDetect,
+  detectCooldowns,
+  isOnDetectCooldown,
 } = _test;
 
 // Flow-dispatch handlers live at module top-level (consumed by
@@ -338,6 +346,12 @@ beforeEach(() => {
   // implementations and crash the next call into a non-function.
   jest.clearAllMocks();
   sendCooldowns.clear();
+  // /qurl detect (#1101): clear the separate per-(guild,user) cooldown
+  // bucket + re-seed the detect mocks so a queued mockResolvedValueOnce
+  // or a sticky implementation can't leak across cases.
+  detectCooldowns.clear();
+  mockDetectWatermark.mockReset();
+  mockDb.findSendsByQurlId.mockReset().mockResolvedValue([]);
   // Targeted mockReset for mocks where the `mockResolvedValueOnce`
   // queue can leak across tests (an early-return path that doesn't
   // consume the queued value pollutes the next test's first call).
@@ -3041,6 +3055,210 @@ describe('handleQurlSend — slash entry', () => {
       // a future refactor that changes the denied-path UX surfaces here.
       expect(supersedeCalls.length).toBe(0);
     });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleQurlDetect — watermark attribution (#1101)
+// ──────────────────────────────────────────────────────────────
+
+describe('handleQurlDetect', () => {
+  const VALID_IMAGE = Object.freeze({
+    url: 'https://cdn.discordapp.com/attachments/1/2/shot.png',
+    name: 'shot.png',
+    contentType: 'image/png',
+    size: 2048,
+  });
+
+  // Extend the shared makeInteraction with the bits /qurl detect needs:
+  // an `image` attachment option, a `client.users.fetch` for recipient
+  // resolution, and a deferReply that flips `deferred` (the handler defers
+  // before the network section). `usersFetch` lets a test stub the
+  // recipient handle or force a fetch failure.
+  function makeDetectInteraction({
+    guildId = 'guild-1',
+    userId = SENDER_ID,
+    image = VALID_IMAGE,
+    usersFetch,
+  } = {}) {
+    const base = makeInteraction({ guildId, userId, options: { image } });
+    base.deferReply = jest.fn(async () => { base.deferred = true; });
+    base.client = {
+      users: {
+        fetch: usersFetch || jest.fn(async (id) => ({ id, username: `recip_${id.slice(-3)}` })),
+      },
+    };
+    return base;
+  }
+
+  // A Discord-CDN fetch stub returning the raw image bytes. The handler
+  // fetches attachment.url before POSTing to the connector; global.fetch
+  // is that CDN call here (the connector POST is mocked via
+  // mockDetectWatermark, so it never touches global.fetch).
+  let originalFetch;
+  beforeEach(() => {
+    originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+    mockDb.getGuildApiKey.mockResolvedValue(null); // → falls back to config.QURL_API_KEY
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  test('rejects in DM context (no oracle outside a guild) — no cooldown, no connector call', async () => {
+    const int = makeDetectInteraction({ guildId: null });
+    await handleQurlDetect(int);
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/in a server/),
+      ephemeral: true,
+    }));
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+  });
+
+  test('rejects a non-image attachment (cooldown CLEARED — honest user error)', async () => {
+    const int = makeDetectInteraction({ image: { ...VALID_IMAGE, contentType: 'application/pdf' } });
+    await handleQurlDetect(int);
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/needs an image/i),
+      ephemeral: true,
+    }));
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    // Honest user error unlocks retry.
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(false);
+  });
+
+  test('rejects a non-Discord-CDN attachment url (SSRF gate — cooldown PRESERVED)', async () => {
+    const int = makeDetectInteraction({ image: { ...VALID_IMAGE, url: 'https://evil.example/x.png' } });
+    await handleQurlDetect(int);
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/source not allowed/i),
+      ephemeral: true,
+    }));
+    expect(mockDetectWatermark).not.toHaveBeenCalled();
+    // Probing the allow-list is an abuse signal → cooldown KEPT.
+    expect(isOnDetectCooldown('guild-1', SENDER_ID)).toBe(true);
+  });
+
+  test('per-(guild,user) cooldown blocks a second detect in the same guild', async () => {
+    const int1 = makeDetectInteraction();
+    mockDetectWatermark.mockResolvedValue({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+    await handleQurlDetect(int1);
+    expect(int1.deferReply).toHaveBeenCalled();
+
+    // Second call, same (guild,user) → throttled BEFORE defer/connector.
+    const int2 = makeDetectInteraction();
+    await handleQurlDetect(int2);
+    expect(int2.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/wait before running detect/i),
+      ephemeral: true,
+    }));
+    expect(int2.deferReply).not.toHaveBeenCalled();
+    // Exactly one connector call (the first invocation).
+    expect(mockDetectWatermark).toHaveBeenCalledTimes(1);
+  });
+
+  test('cooldown is per-(guild,user): a different guild is NOT throttled', async () => {
+    mockDetectWatermark.mockResolvedValue({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+    await handleQurlDetect(makeDetectInteraction({ guildId: 'guild-A' }));
+    // Same user, different guild → independent budget, runs.
+    const intB = makeDetectInteraction({ guildId: 'guild-B' });
+    await handleQurlDetect(intB);
+    expect(intB.deferReply).toHaveBeenCalled();
+    expect(mockDetectWatermark).toHaveBeenCalledTimes(2);
+  });
+
+  test('(i) detected ⇒ replies (ephemerally) with the recipient handle + % match', async () => {
+    const recipientId = '100000000000000007';
+    mockDetectWatermark.mockResolvedValue({
+      detected: true, qurl_id: 'q_hit1', match_pct: 92, confidence: 0.98,
+    });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_hit1', recipient_discord_id: recipientId, guild_id: 'guild-1' },
+    ]);
+    const usersFetch = jest.fn(async (id) => ({ id, username: 'AliceRecipient' }));
+    const int = makeDetectInteraction({ usersFetch });
+
+    await handleQurlDetect(int);
+
+    // Connector called guild-scoped with the resolved key + bytes.
+    expect(mockDetectWatermark).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      expect.objectContaining({ guildId: 'guild-1', contentType: 'image/png' }),
+    );
+    expect(mockDb.findSendsByQurlId).toHaveBeenCalledWith('q_hit1');
+    expect(usersFetch).toHaveBeenCalledWith(recipientId);
+    // Ephemeral reply names the recipient + the % match + confidence.
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('AliceRecipient'),
+    }));
+    const replyContent = int.editReply.mock.calls.at(-1)[0].content;
+    expect(replyContent).toContain(`<@${recipientId}>`);
+    expect(replyContent).toMatch(/92% match/);
+    expect(replyContent).toMatch(/confidence 0\.98/);
+    // Audit fired as a match WITHOUT the recipient id (broader-access log).
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'matched', qurl_id: 'q_hit1', match_pct: 92, guild_id: 'guild-1',
+    }));
+    const auditMeta = logger.audit.mock.calls.find((c) => c[0] === 'qurl_detect')[1];
+    expect(JSON.stringify(auditMeta)).not.toContain(recipientId);
+  });
+
+  test('(ii) !detected ⇒ "no watermark found" ephemeral + no_match audit', async () => {
+    mockDetectWatermark.mockResolvedValue({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+    const int = makeDetectInteraction();
+
+    await handleQurlDetect(int);
+
+    expect(mockDb.findSendsByQurlId).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/No qURL watermark found/i),
+    }));
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'no_match', guild_id: 'guild-1',
+    }));
+  });
+
+  test('(iii) cross-guild guard: a send whose guild_id ≠ interaction.guildId ⇒ defensive "no match"', async () => {
+    // The connector returned a detected qurl_id, but the only local row for
+    // it belongs to a DIFFERENT guild. The defense-in-depth filter must
+    // drop it and reply "no match" — never resolve a cross-guild recipient.
+    const recipientId = '100000000000000009';
+    mockDetectWatermark.mockResolvedValue({
+      detected: true, qurl_id: 'q_otherguild', match_pct: 88, confidence: 0.91,
+    });
+    mockDb.findSendsByQurlId.mockResolvedValue([
+      { qurl_id: 'q_otherguild', recipient_discord_id: recipientId, guild_id: 'guild-OTHER' },
+    ]);
+    const usersFetch = jest.fn();
+    const int = makeDetectInteraction({ guildId: 'guild-1', usersFetch });
+
+    await handleQurlDetect(int);
+
+    // Cross-guild row filtered out → recipient NEVER resolved.
+    expect(usersFetch).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/No match in this server/i),
+    }));
+    // No "matched" audit — the unmatched (filtered) outcome audits no_match.
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_detect', expect.objectContaining({ result: 'matched' }));
+    expect(logger.audit).toHaveBeenCalledWith('qurl_detect', expect.objectContaining({
+      result: 'no_match', qurl_id: 'q_otherguild',
+    }));
+  });
+
+  test('connector error (e.g. 5xx / 429) ⇒ graceful ephemeral error, no throw', async () => {
+    const err = new Error('Connector detect failed (503)'); err.status = 503;
+    mockDetectWatermark.mockRejectedValue(err);
+    const int = makeDetectInteraction();
+
+    await expect(handleQurlDetect(int)).resolves.not.toThrow();
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/unavailable right now/i),
+    }));
   });
 });
 

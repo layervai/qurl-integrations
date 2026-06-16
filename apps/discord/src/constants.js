@@ -535,6 +535,18 @@ const AUDIT_EVENTS = {
   // The sibling connector_no_resource_id alarm separately catches the
   // "200 + missing resource_id" shape.
   QURL_SEND_CREATE_LINK_FAILURE: 'qurl_send_create_link_failure',
+
+  // /qurl detect — watermark-attribution lookup (#1101). Emitted once per
+  // detect invocation that reaches the connector, in BOTH the matched and
+  // unmatched branches, so the audit trail records every deanonymization
+  // query (this surfaces a user submitting an image → the recipient it was
+  // watermarked for; a high detect rate from one user is the abuse signal
+  // the cooldown + this audit are paired to catch). Carries
+  // `result: 'matched' | 'no_match'`, `guild_id`, `requester_id`, and on a
+  // match `qurl_id` + `match_pct` — NEVER the resolved recipient id
+  // (audit logs are broader-access than the ephemeral reply; logging the
+  // unmasked recipient would re-leak the very thing the ephemeral protects).
+  QURL_DETECT: 'qurl_detect',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
