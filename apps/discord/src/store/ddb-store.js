@@ -1752,8 +1752,17 @@ async function touchRenderedAt(sendId) {
 //       counter, leaving the bare poll render as the sole renderer.
 // Both want "fast-path hands off", so one flag is correct — but note that
 // "terminal" reading as "alive but hands-off" in case (b) is a latent
-// trip-hazard: anything NEW that keys off confirm_terminal must
-// distinguish (a) from (b) (e.g. via revoked_at, which only (a) sets).
+// trip-hazard. The intents are NOT fully separable at rest: only REVOKE
+// sets revoked_at, so revoked_at distinguishes revoke from {window-close,
+// degrade} — but window-close (display FROZEN) and degrade (display
+// ALIVE) are indistinguishable on the row (both set confirm_terminal
+// alone; the frozen-vs-alive fact lives only in whether monitor.stop()
+// ran, in-memory on one replica). Anything NEW that needs the display-
+// liveness axis must add its own signal, not infer it from this flag.
+// (Follow-up: rename this column to confirm_fast_path_off — the mechanism
+// it actually gates — so no future reader infers liveness from
+// "terminal"; deferred because sandbox rows already carry confirm_terminal
+// and a rename needs a read-both-write-new migration, out of scope here.)
 // Idempotent SET (no condition): re-running just re-writes `true`, and
 // there's no value to guard against — unlike the markExpired/Consumed
 // markers this isn't an at-most-once edit claim, just a sticky

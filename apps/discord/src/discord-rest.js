@@ -279,15 +279,16 @@ async function editInteractionReply(applicationId, token, payload) {
     // .message on the network-throw path. Interaction tokens are URL-safe
     // so the two forms are usually identical, but encoding the second
     // pass is free belt-and-suspenders for a flagged credential.
-    let safeMessage;
-    if (typeof err.message === 'string') {
-      // `token &&` guards the degenerate empty-token case: ''.split('')
-      // would explode the message char-by-char. Unreachable today (the
-      // fast-path's absent-guard requires a non-empty token before this
-      // is called), but cheap defense.
-      safeMessage = token ? err.message.split(token).join('[redacted-token]') : err.message;
+    // `token &&` (hoisted once) guards the degenerate empty-token case:
+    // ''.split('') would explode the message char-by-char. Unreachable
+    // today (the fast-path's absent-guard requires a non-empty token
+    // before this is called), but cheap defense. The DOUBLE pass (raw +
+    // percent-encoded) stays: undici can surface either form of the URL.
+    let safeMessage = typeof err.message === 'string' ? err.message : undefined;
+    if (safeMessage !== undefined && token) {
+      safeMessage = safeMessage.split(token).join('[redacted-token]');
       const encoded = encodeURIComponent(token);
-      if (token && encoded !== token) safeMessage = safeMessage.split(encoded).join('[redacted-token]');
+      if (encoded !== token) safeMessage = safeMessage.split(encoded).join('[redacted-token]');
     }
     logger[expired ? 'info' : 'warn']('editInteractionReply via webhook token failed', {
       applicationId, status: err.status, code: err.code, expired, errorMessage: safeMessage,
