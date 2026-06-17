@@ -239,3 +239,29 @@ describe('config — QURL_DETECT_COOLDOWN_MS (defaults to send, decoupled)', () 
     );
   });
 });
+
+describe('config — QURL_VIEW_COUNTER_COALESCE_MS (sub-second only)', () => {
+  test('unset → defaults to the largest sub-second window', () => {
+    captureFreshConfig({ QURL_VIEW_COUNTER_COALESCE_MS: undefined }, (cfg, warns) => {
+      expect(cfg.QURL_VIEW_COUNTER_COALESCE_MS).toBe(900);
+      expect(warns.filter((w) => w.includes('QURL_VIEW_COUNTER_COALESCE_MS'))).toHaveLength(0);
+    });
+  });
+
+  test('accepts an in-range sub-second override', () => {
+    captureFreshConfig({ QURL_VIEW_COUNTER_COALESCE_MS: '500' }, (cfg, warns) => {
+      expect(cfg.QURL_VIEW_COUNTER_COALESCE_MS).toBe(500);
+      expect(warns.filter((w) => w.includes('QURL_VIEW_COUNTER_COALESCE_MS'))).toHaveLength(0);
+    });
+  });
+
+  test('rejects over-900ms override back to default 900 with warn', () => {
+    captureFreshConfig({ QURL_VIEW_COUNTER_COALESCE_MS: '1500' }, (cfg, warns) => {
+      expect(cfg.QURL_VIEW_COUNTER_COALESCE_MS).toBe(900);
+      expect(warns.some((w) => (
+        w.includes('QURL_VIEW_COUNTER_COALESCE_MS')
+        && w.includes('out of range <= 900')
+      ))).toBe(true);
+    });
+  });
+});
