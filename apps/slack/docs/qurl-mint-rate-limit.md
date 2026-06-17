@@ -38,7 +38,9 @@ ADD mint_count :one
 condition: mint_window_start is current window AND mint_count < 30
 ```
 
-The first request for a brand-new or stale window takes the slower path: a conditional increment misses, a consistent `GetItem` disambiguates the state, and a reset writes the same item with `mint_count = 1` under a stale-window condition. If the current-window counter is at the limit, the handler renders the normal rate-limit copy with a retry hint for the remaining window. Post-cap attempts also take a conditional increment miss plus a consistent `GetItem`, and the handler logs the denial so operators can see cap pressure. If another task has advanced the counter into a future window and that future window is already at the limit, the retry hint is computed from that future window's end, so it can exceed one hour. If DynamoDB fails, the command fails closed with the existing generic mint-failure copy.
+The first request for a brand-new or stale window takes the slower path: a conditional increment misses, a consistent `GetItem` disambiguates the state, and a reset writes the same item with `mint_count = 1` under `attribute_not_exists(mint_window_start) OR mint_window_start < :window`. If the current-window counter is at the limit, the handler renders the normal rate-limit copy with a retry hint for the remaining window. Same-window post-cap attempts take a conditional increment miss plus a consistent `GetItem`, and the handler logs the denial so operators can see cap pressure.
+
+Future-window races follow the already-written future window instead of resetting the item backward. A future-window cap costs the initial conditional miss plus the consistent `GetItem`; an under-limit future-window read whose follow-up increment loses a race adds that second conditional increment. Both future-window denial paths compute the retry hint from that future window's end, so it can exceed one hour. If DynamoDB fails, the command fails closed with the existing generic mint-failure copy.
 
 ## Tradeoffs
 
