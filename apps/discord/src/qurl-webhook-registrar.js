@@ -326,6 +326,20 @@ function urlPathname(u) {
 //      no deliveries yet typically reports null/undefined — treat that
 //      as "presumed alive, do not delete."
 //
+//      The gate is NOT a general "alive sibling" detector — it only
+//      separates transient failures from sustained ones. A genuinely-
+//      DOWN sibling (bot crash, secret desync 401ing every delivery)
+//      produces the same `last_delivery_success === false` +
+//      `failure_count >> 3` signal as a true URL-migration orphan, so
+//      a sibling in a sustained outage WOULD get swept here. These
+//      signals fundamentally cannot distinguish "dead orphan" from
+//      "region down hard." If active-active under a shared
+//      `QURL_API_KEY` ever ships (today's deployment is single-host so
+//      this is hypothetical), the durable fix is a non-signal-based
+//      discriminator — e.g. an explicit allowlist of "valid current
+//      hosts" or an "old-host marker" set at rename time — NOT a
+//      higher failure_count floor.
+//
 //      First-boot-after-rename caveat: the *old* sub's last delivery
 //      may have been a success (the one that completed just before the
 //      rename). `last_delivery_success` only flips to false once the
@@ -396,6 +410,15 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
 // delete failure would leave the bot UN-registered (no new sub) AND
 // still-orphaned (old sub undeleted) — strictly worse than the orphan-
 // only state we started in.
+//
+// Failure-class symmetry: every non-404 DELETE outcome (transient 5xx,
+// persistent 4xx like a 403 auth misconfig, gateway timeout) is logged
+// at error level and skipped. We intentionally do NOT escalate or
+// alarm-tier-differentiate here — the registrar's job is "register
+// successfully or fail loudly," not "diagnose orphan-DELETE root cause."
+// If the same orphan-delete error repeats across many boots, the
+// repeating log line itself is the signal (CloudWatch alarm pattern on
+// `URL-migration orphan delete failed` is the runbook hook).
 //
 // Sequential DELETEs (vs parallel like the dedupe path) — orphan counts
 // are typically 0-1 per migration, and serial gives the cleanest
@@ -625,7 +648,11 @@ async function ensureWebhookSubscription(opts) {
   // failing the liveness gate is the most common "sweep did nothing"
   // class. Surface it so an operator can distinguish "qurl-service
   // schema drift (field missing)" from "sibling still alive, do not
-  // sweep" without inspecting subs by hand.
+  // sweep" without inspecting subs by hand. Steady-state noise note:
+  // if active-active multi-region ever ships under a shared API key
+  // (today's deploy is single-host), a healthy cross-host sibling is
+  // a PERPETUAL near-miss → this log would emit every boot. Today
+  // that's a non-issue; if it lands, downgrade to debug or rate-limit.
   if (nearMissCount > 0) {
     logger.info('URL-migration orphan sweep — liveness-gated near-misses', {
       near_miss_count: nearMissCount,

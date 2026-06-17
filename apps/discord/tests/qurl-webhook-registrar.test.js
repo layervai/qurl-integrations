@@ -1152,13 +1152,14 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     expect(result.webhookId).toBe('wh_current');
   });
 
-  it('does NOT delete a HEALTHY cross-host sub (liveness gate protects active-active siblings)', async () => {
-    // Active-active multi-region: two regions share a QURL_API_KEY (same
-    // owner_id) and run different BASE_URL hosts. Without the liveness
-    // gate, region A would sweep region B's healthy sub on every boot
-    // and vice-versa — the registrars would ping-pong-kill each other.
-    // The `last_delivery_success === false` gate asymmetrically allows
-    // deletion only of unambiguously-dead orphans.
+  it('does NOT delete a HEALTHY cross-host sub (liveness gate protects siblings whose last delivery succeeded)', async () => {
+    // Active-active multi-region under a shared QURL_API_KEY is the
+    // hypothetical motivating scenario, but the gate only protects
+    // siblings whose LAST delivery succeeded (or hasn't happened yet).
+    // It does NOT protect a sibling in a sustained outage — see the
+    // long comment above buildUrlMigrationOrphanFilter for why these
+    // signals fundamentally can't distinguish that case.
+    // Today's deployment is single-host so this is purely defensive.
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
