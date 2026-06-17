@@ -14,8 +14,9 @@ ghcr.io/layervai/qurl-integrations/s3-static-connector
 
 The publish workflow rebuilds the multi-arch image from the same Dockerfile
 after PR tests, then pushes `:main` and `:<git-sha>` tags after merges to
-`qurl-integrations/main`. Deployments should pin the resolved image digest once
-the published image has soaked.
+`qurl-integrations/main`. The published digest is rebuilt rather than the
+byte-identical per-arch image loaded during PR behavior tests, so deployments
+should pin the resolved image digest once the published image has soaked.
 
 The image packages two pinned processes:
 
@@ -56,6 +57,10 @@ This contract is frozen — additive only once published.
 Credentials come from Envoy's default AWS credential provider chain (EC2 instance
 role via IMDSv2, ECS task role, web identity, or env) — no static IAM key is
 required in the happy path.
+
+The shared nginx cache key zone is fixed at `s3cache:10m` (roughly 80k keys).
+That is sized for small static sites; consumers with very large object counts
+should add key-zone tuning before reusing the image for that keyspace.
 
 This image targets standard AWS commercial-partition S3 virtual-hosted
 endpoints (`<bucket>.s3.<region>.amazonaws.com`). China, GovCloud, FIPS,
@@ -114,9 +119,10 @@ viewers.
 Range serving is intended for uncompressed objects. nginx gzip takes precedence
 for compressible content types such as CSS, JS, JSON, SVG, and XML, so text
 asset ranges are not part of the contract. Viewer headers are stripped before
-the Envoy/S3 hop, so a cold range request can still return `206` to the viewer
-while nginx fetches and caches the full object from S3; subsequent ranges can be
-served as `206` from nginx's cache.
+the Envoy/S3 hop, including `Range` and conditional `If-*` headers. A cold range
+request can still return `206` to the viewer while nginx fetches and caches the
+full object from S3; subsequent ranges can be served as `206` from nginx's
+cache.
 
 ## Logging
 
@@ -197,7 +203,9 @@ the supervisor intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
   signing-failure signal.
 - IMDSv2 from inside a container requires **hop-limit 2** on the host.
 - Passing `AWS_REGION` explicitly is preferred. When it is omitted, the image
-  uses `curl` at startup for the IMDSv2 region fallback.
+  uses `curl` at startup for the IMDSv2 region fallback; a region-less,
+  non-EC2/non-ECS environment can spend up to roughly 4s probing IMDS before
+  failing validation.
 - The bucket stays private; this image needs no bucket-policy change.
 
 ## Out of scope
