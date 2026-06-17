@@ -403,7 +403,9 @@ if (config.ENABLE_GATEWAY_HOT_STANDBY) {
 }
 
 // Symmetric with the eventShipper check above — fail fast on
-// inconsistent flag-vs-secret state. The error message is the
+// inconsistent flag-vs-secret state before process-role branching.
+// Command registration/dispatch can shift by topology, so every task
+// must see a coherent toggle contract. The error message is the
 // operator-facing source of truth for the remediation steps.
 const mapCommandMissing = missingMapCommandKeys(config);
 if (mapCommandMissing.length > 0) {

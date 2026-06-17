@@ -341,15 +341,16 @@ function invalidHotStandbyValues(cfg) {
   return problems;
 }
 
-// PLACEHOLDER is treated as missing because the SSM parameter
-// ships with that literal sentinel value; remediation ("seed a
-// real key") is identical to the empty-key case.
+// PLACEHOLDER is treated as missing because the bot SSM parameters
+// ship with that literal sentinel value; remediation ("seed a
+// real secret") is identical to the empty-key case for Google Maps,
+// qURL resolve, and detect access-token credentials.
 //
 // TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also
-// the seed value for `aws_ssm_parameter.bot` in
+// the seed value for every `aws_ssm_parameter.bot` entry in
 // qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
 // (search that repo for `value = "PLACEHOLDER"`). If infra ever
-// renames the sentinel (e.g., "REPLACE_ME"), update here in
+// renames the sentinel (e.g., "REPLACE_ME"), update all aliases here in
 // lockstep — otherwise the boot check silently regresses to
 // "non-empty value passes" and the original incident class
 // returns. `git grep TODO(infra-sentinel-sync)` finds the marker.

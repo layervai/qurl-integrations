@@ -520,11 +520,14 @@ function assertPublicHttpsTarget(targetUrl) {
  */
 async function resolveDetectTarget() {
   const token = config.DETECT_ACCESS_TOKEN?.trim();
-  if (!token) {
-    throw new Error('DETECT_ACCESS_TOKEN is not configured (required to resolve the detect tunnel target)');
+  const missingResolveKeys = [];
+  if (!token) missingResolveKeys.push('DETECT_ACCESS_TOKEN');
+  if (!config.QURL_API_KEY?.trim()) missingResolveKeys.push('QURL_API_KEY');
+  if (missingResolveKeys.length === 1) {
+    throw new Error(`${missingResolveKeys[0]} is not configured (required to resolve the detect tunnel target)`);
   }
-  if (!config.QURL_API_KEY?.trim()) {
-    throw new Error('QURL_API_KEY is not configured (required to resolve the detect tunnel target)');
+  if (missingResolveKeys.length > 1) {
+    throw new Error(`${missingResolveKeys.join(', ')} are not configured (required to resolve the detect tunnel target)`);
   }
   if (inFlightDetectTargetResolve) return inFlightDetectTargetResolve;
 

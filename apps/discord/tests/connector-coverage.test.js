@@ -755,6 +755,24 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
+    it('reports both resolve credentials when DETECT_ACCESS_TOKEN and QURL_API_KEY are unset', async () => {
+      jest.resetModules();
+      mockResolve.mockReset();
+      jest.doMock('../src/config', () => ({
+        CONNECTOR_URL: 'https://connector.test.local',
+        QURL_ENDPOINT: 'https://api.test.local',
+        // DETECT_ACCESS_TOKEN and QURL_API_KEY intentionally absent.
+      }));
+      const connectorNoResolveSecrets = require('../src/connector');
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connectorNoResolveSecrets.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/DETECT_ACCESS_TOKEN, QURL_API_KEY are not configured/);
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
     it('SSRF guard: a private/loopback resolved target_url throws and NO POST happens', async () => {
       const get = captureDetect({ detected: false }, { target: 'https://127.0.0.1/api/detect' });
       await expect(
