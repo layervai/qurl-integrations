@@ -109,14 +109,17 @@ function isPrivateHost(host) {
     // Bracketed IPv6 literal — strip and check.
     return isPrivateHost(h.slice(1, -1));
   }
-  // IPv6 common locals (::1 already handled above for exact-match; this
-  // catches fc00::/7 unique-local and fe80::/10 link-local prefixes). The fc/fd
-  // checks require a ':' so a PUBLIC DNS name that merely starts with those
-  // letters (e.g. `fd-cdn.example.com`, which reaches here UNbracketed) isn't
-  // misclassified as a ULA literal — real IPv6 literals arrive bracket-stripped
-  // and always contain a colon. `fe80:` already carries its own colon.
-  if ((h.startsWith('fc') || h.startsWith('fd')) && h.includes(':')) return true;
-  if (h.startsWith('fe80:')) return true;
+  // IPv6 locals reach here bracket-stripped, so they always contain a ':':
+  // unique-local fc00::/7 (fc/fd), link-local fe80::/10, and deprecated
+  // site-local fec0::/10 — the latter two span first-hextet fe80–feff, i.e.
+  // `fe[89a-f][0-9a-f]:` (a real /10 literal always writes the full 4-digit
+  // hextet). Gate on the ':' so a PUBLIC DNS name that merely starts with these
+  // letters (e.g. `fd-cdn.example.com`, reaching here UNbracketed) is NOT
+  // misclassified as an IPv6 local literal — DNS names never contain a colon.
+  if (h.includes(':')) {
+    if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
+    if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
+  }
   // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
   // prefix (URL parsing already stripped the brackets) and re-check.
   const mapped = h.match(/^::ffff:([0-9.]+)$/);

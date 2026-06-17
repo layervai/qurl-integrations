@@ -761,6 +761,11 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       // resolve() ran (the knock), but the SSRF guard rejected before the POST.
       expect(mockResolve).toHaveBeenCalledTimes(1);
       expect(get()).toBeNull();
+      // Breadcrumb: a rejected target is logged (message only, never the URL).
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel target rejected by SSRF guard',
+        expect.objectContaining({ error: expect.stringMatching(/private\/internal/) }),
+      );
     });
 
     it('SSRF guard: a non-https resolved target_url throws and NO POST happens', async () => {
@@ -841,6 +846,12 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toThrow(/resolve transport failure/);
       expect(mockResolve).toHaveBeenCalledTimes(1);
       expect(fetchSpy).not.toHaveBeenCalled();
+      // Breadcrumb: a failed knock/transport is logged distinctly from a
+      // rejected target, so activation failures are diagnosable.
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel resolve failed (knock/transport)',
+        expect.objectContaining({ error: 'resolve transport failure' }),
+      );
     });
   });
 });

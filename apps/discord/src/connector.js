@@ -504,10 +504,27 @@ async function resolveDetectTarget() {
   if (!config.DETECT_ACCESS_TOKEN) {
     throw new Error('DETECT_ACCESS_TOKEN is not configured (required to resolve the detect tunnel target)');
   }
-  const { target_url: targetUrl } = await getQurlClient().resolve({
-    access_token: config.DETECT_ACCESS_TOKEN,
-  });
-  return assertPublicHttpsTarget(targetUrl);
+  // Breadcrumb the two distinct failure modes of this oracle path so an
+  // activation-time failure is diagnosable — a failed knock/transport vs. a
+  // rejected target — rather than an undistinguished throw at the handler. Log
+  // ONLY the error message: never the access_token, and never the raw
+  // target_url (assertPublicHttpsTarget's messages are static and URL-free, and
+  // a malformed target could carry userinfo).
+  let targetUrl;
+  try {
+    ({ target_url: targetUrl } = await getQurlClient().resolve({
+      access_token: config.DETECT_ACCESS_TOKEN,
+    }));
+  } catch (err) {
+    logger.warn('Detect tunnel resolve failed (knock/transport)', { error: err.message });
+    throw err;
+  }
+  try {
+    return assertPublicHttpsTarget(targetUrl);
+  } catch (err) {
+    logger.warn('Detect tunnel target rejected by SSRF guard', { error: err.message });
+    throw err;
+  }
 }
 
 /**

@@ -76,17 +76,22 @@ describe('createOneTimeLink SSRF / private-host blocklist', () => {
 // with those letters — a false positive there would silently break /qurl detect
 // (the tunnel target comes from qURL infra, not user input).
 describe('isPrivateHost — IPv6 ULA prefix vs. public DNS', () => {
-  it('classifies real IPv6 ULA / link-local literals as private', () => {
-    expect(isPrivateHost('fd00::1')).toBe(true);   // unique-local
-    expect(isPrivateHost('fc00::1')).toBe(true);   // unique-local
-    expect(isPrivateHost('fe80::1')).toBe(true);   // link-local
+  it('classifies real IPv6 ULA / link-local / site-local literals as private', () => {
+    expect(isPrivateHost('fd00::1')).toBe(true);   // unique-local fc00::/7
+    expect(isPrivateHost('fc00::1')).toBe(true);   // unique-local fc00::/7
+    expect(isPrivateHost('fe80::1')).toBe(true);   // link-local, bottom of fe80::/10
+    expect(isPrivateHost('febf::1')).toBe(true);   // link-local, top of fe80::/10
+    expect(isPrivateHost('fec0::1')).toBe(true);   // deprecated site-local fec0::/10
+    expect(isPrivateHost('feff::1')).toBe(true);   // top of fec0::/10
   });
 
-  it('does NOT misclassify public DNS names starting with fc/fd as private', () => {
-    // No colon ⇒ a hostname, not an IPv6 ULA literal. Pre-fix these were
-    // falsely blocked by the bare `startsWith('fc'|'fd')` check.
+  it('does NOT misclassify public DNS names starting with fc/fd/fe as private', () => {
+    // No colon ⇒ a hostname, not an IPv6 local literal. Pre-fix the bare
+    // `startsWith('fc'|'fd')` (and the narrow `fe80:`) would have mishandled
+    // these — the colon gate is what keeps a public DNS name out.
     expect(isPrivateHost('fd-detect.qurl.link')).toBe(false);
     expect(isPrivateHost('fcdn.example.com')).toBe(false);
+    expect(isPrivateHost('feb-cdn.example.com')).toBe(false);  // 'feb' prefix, but no colon
     expect(isPrivateHost('detect-tunnel.qurl.link')).toBe(false);
   });
 });
