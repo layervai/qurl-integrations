@@ -388,9 +388,13 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 			return nil, evalErr
 		}
 		if !ok {
-			return nil, &ddbtypes.ConditionalCheckFailedException{
+			condErr := &ddbtypes.ConditionalCheckFailedException{
 				Message: aws.String("ConditionalCheckFailedException"),
 			}
+			if in.ReturnValuesOnConditionCheckFailure == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld && present {
+				condErr.Item = cloneItem(existing)
+			}
+			return nil, condErr
 		}
 	}
 	// UpdateItem on a missing row materializes the row from the key
@@ -491,6 +495,7 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 //
 //	SET redeemed = :true, redeemed_by = :user, redeemed_at = :now_iso
 //	ADD allowed_resource_ids :rids SET updated_at = :now
+//	ADD #count :one
 //	DELETE allowed_resource_ids :rids SET updated_at = :now
 //
 // A general DDB expression parser is much larger than this; we'd
@@ -508,7 +513,7 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 				return err
 			}
 		case "ADD":
-			if err := applyAddClause(c.body, item, vals); err != nil {
+			if err := applyAddClause(c.body, item, vals, names); err != nil {
 				return err
 			}
 		case "DELETE":
@@ -600,9 +605,9 @@ func applyRemoveClause(body string, item map[string]ddbtypes.AttributeValue, nam
 	return nil
 }
 
-// applyAddClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) merge form used by AddAdmin.
-func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
+// applyAddClause handles `<attr> :v`. Supports the SS merge form used by
+// AddAdmin and numeric ADD for rate-limit counters.
+func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	body = strings.TrimSpace(body)
 	parts := strings.Fields(body)
 	if len(parts) != 2 {
@@ -613,14 +618,31 @@ func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) 
 	if !ok {
 		return fmt.Errorf("fakeDDB ADD: unknown value %q", parts[1])
 	}
-	incoming, ok := v.(*ddbtypes.AttributeValueMemberSS)
-	if !ok {
-		return fmt.Errorf("fakeDDB ADD: only string-set ADD is supported, got %T", v)
+	switch incoming := v.(type) {
+	case *ddbtypes.AttributeValueMemberSS:
+		existingRaw, _ := getAttrPath(item, attr, names)
+		existing, _ := existingRaw.(*ddbtypes.AttributeValueMemberSS)
+		return setAttrPath(item, attr, names, &ddbtypes.AttributeValueMemberSS{Value: mergeStringSet(existing, incoming.Value)})
+	case *ddbtypes.AttributeValueMemberN:
+		add, err := strconv.ParseInt(incoming.Value, 10, 64)
+		if err != nil {
+			return err
+		}
+		var cur int64
+		if existingRaw, ok := getAttrPath(item, attr, names); ok {
+			existing, ok := existingRaw.(*ddbtypes.AttributeValueMemberN)
+			if !ok {
+				return fmt.Errorf("fakeDDB ADD: target %q is not N", attr)
+			}
+			cur, err = strconv.ParseInt(existing.Value, 10, 64)
+			if err != nil {
+				return err
+			}
+		}
+		return setAttrPath(item, attr, names, &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(cur+add, 10)})
+	default:
+		return fmt.Errorf("fakeDDB ADD: unsupported value type %T", v)
 	}
-	existing, _ := item[attr].(*ddbtypes.AttributeValueMemberSS)
-	merged := mergeStringSet(existing, incoming.Value)
-	item[attr] = &ddbtypes.AttributeValueMemberSS{Value: merged}
-	return nil
 }
 
 // applyDeleteClause handles `<attr> :v`. Currently only supports the
@@ -731,6 +753,7 @@ func splitTopLevelCommas(s string) []string {
 //	contains(<attr>, :val)
 //	NOT contains(<attr>, :val)
 //	<attr> = :val
+//	<attr> < :val
 //	<attr> > :val
 //
 // Returns (true, nil) when every subexpression is satisfied. OR is

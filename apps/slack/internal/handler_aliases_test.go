@@ -74,6 +74,36 @@ func TestHandleAliases_HappyPath(t *testing.T) {
 	}
 }
 
+func TestHandleAliases_InBotRateLimitDeniesBeforeListing(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_test", map[string]string{
+		"prod": testResourceIDFix,
+	})
+	var fetches atomic.Int32
+	ts.addCustomer("GET", "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testResourceIDFix, testKeyType: client.ResourceTypeTunnel, testKeySlug: "prod-db"},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	enableAdminStoreRateLimit(t, h, 1)
+
+	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(first, "Aliases configured for this channel") {
+		t.Fatalf("first aliases reply = %q, want normal listing", first)
+	}
+
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+		t.Fatalf("second aliases reply = %q, want in-bot rate-limit copy with retry hint", second)
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("ListResources fetches = %d, want throttled call to stop before upstream listing", got)
+	}
+}
+
 // TestHandleAliases_SlugOnlyBindingReportsNoAliases fences the empty-state for
 // a channel whose only bindings are auto-bound `$<slug>` aliases (no
 // user-defined alias). The install flow binds `$<slug>` as a channel alias, so

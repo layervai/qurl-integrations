@@ -41,6 +41,7 @@ const (
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
+	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -1337,7 +1338,7 @@ func readBoolEnvFailSafe(name string, emptyDefault, parseErrDefault bool) bool {
 	}
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		slog.Warn("agent env flag set to an unparseable value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
+		slog.Warn("env flag set to an unparseable value; using the fail-safe default", //nolint:gosec // G706: operator-set flag value, not a secret; slog's JSON handler escapes control bytes like the other env-logging sites.
 			"env", name, "value", raw, "fail_safe_default", parseErrDefault)
 		return parseErrDefault
 	}
@@ -1388,6 +1389,14 @@ func readAgentSurfaceExclusiveAcks() bool {
 // off, so a typo can never silently turn the surface on for every workspace at once.
 func readAgentDefaultEnabled() bool {
 	return readBoolEnvFailSafe("QURL_AGENT_DEFAULT_ENABLED", false, false)
+}
+
+// readSlackRateLimitEnabled reads QURL_SLACK_RATE_LIMIT_ENABLED, the staged
+// opt-in for the DDB-backed in-bot `/qurl get` + `/qurl aliases` gate. Absent
+// and malformed both fail safe to OFF so sandbox/open-gate deployments stay
+// unchanged until production explicitly enables the write path.
+func readSlackRateLimitEnabled() bool {
+	return readBoolEnvFailSafe(envSlackRateLimitEnabled, false, false)
 }
 
 // Conservative per-hour turn caps applied when the operator doesn't set the env, so
@@ -1513,14 +1522,16 @@ func buildAdminStore(ctx context.Context) *slackdata.Store {
 			"missing_env", missingAdminStoreEnvVars())
 		return nil
 	}
-	s, err := slackdata.NewStore(ctx)
+	rateLimitEnabled := readSlackRateLimitEnabled()
+	s, err := slackdata.NewStore(ctx, slackdata.WithRateLimitEnabled(rateLimitEnabled))
 	if err != nil {
 		slog.Error("slackdata.NewStore failed; /qurl-admin admin will be disabled", "error", err)
 		return nil
 	}
 	slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.
 		"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
-		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable))
+		"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable),
+		"slack_rate_limit_enabled", rateLimitEnabled)
 	return s
 }
 

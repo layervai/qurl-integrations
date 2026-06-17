@@ -374,7 +374,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-		return "", &userError{msg: commonGetMintFailedMessage}
+		return "", &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
 		return "", &userError{msg: rateLimitMessage(retry, "")}
@@ -454,9 +454,9 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 // fat-fingered alias" tradeoff — don't "optimize" it away by short-circuiting the
 // fallbacks on a binding miss in a configured channel. Each scan is bounded by
 // listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
-// the request rate; if the in-bot limiter (CheckRateLimit, a stub today) ever
-// needs to shed this resolution cost too, add a cheap token-shape pre-filter
-// before the alias scan rather than moving the gate back ahead of resolution.
+// the request rate. If the in-bot limiter ever needs to shed this resolution
+// cost too, add a cheap token-shape pre-filter before the alias scan rather than
+// moving the gate back ahead of resolution.
 //
 // One NARROW exception (closes #534): when the channel allow-set is EMPTY (a
 // "cold" channel with no protected resources), BOTH fallbacks below would be
