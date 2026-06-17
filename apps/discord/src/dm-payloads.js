@@ -53,6 +53,14 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
 // and the content has been served, so for THEM the door has already
 // closed — the link is dead even though its 30m expiry hasn't elapsed.
 //
+// The "one-time qURL" wording is a contract assumption: qurl-service
+// sets `consumed: true` ONLY on the one-time-use branch (resolve_service
+// commitConsume → publishAccessEvent); a multi-use link hitting its
+// final allowed access increments the use counter and emits
+// `consumed: false`, never true. So consumed===true strictly implies a
+// one-time link here. If that emit-side invariant ever changes, this
+// copy must change with it.
+//
 // COPY IS DELIBERATELY MARKER-FREE (past/perfect tense, no <t:N:R>):
 // at consumption time the link's `expires_at` is still ~minutes in the
 // FUTURE. Rendering it through Discord's relative-time marker (as the

@@ -13,8 +13,8 @@
 //
 // The recipient row is looked up via the qurl_id-index GSI exactly like
 // the qurl.expired path; the consumed copy is STATIC (no <t:N:R> expiry
-// marker) because at consumption time the link's expires_at is still in
-// the future — rendering it relative would read "expired in N minutes".
+// marker) — see buildConsumedDMPayload in dm-payloads.js for why. The
+// "no future <t:N:R> marker" assertions below pin that, fencing the fix.
 
 const crypto = require('crypto');
 
@@ -254,6 +254,32 @@ describe('POST /webhooks/qurl — qurl.accessed does NOT flip when not consumed'
     expect(flipVerdictLog()).toBeNull();
     expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
+  });
+
+  it('split emission: a consumed:false event then a consumed:true event on the same qURL flips ONLY on the burn', async () => {
+    // recordQurlView documents a false→true follow-on shape: the first
+    // access can land consumed:false and a later event flips it true at
+    // the same access_count (ddb-store.js). The DM flip must fire only
+    // on the consumed:true event, not the earlier consumed:false one.
+    const res1 = await signedRequest({
+      ...VALID_PAYLOAD,
+      id: 'evt-split-1',
+      data: { qurl_id: QURL_ID, resource_id: RESOURCE_ID, access_count: 1, consumed: false },
+    });
+    expect(res1.status).toBe(200);
+    await drainTicks();
+    expect(flipVerdictLog()).toBeNull();
+    expect(mockEditDM).not.toHaveBeenCalled();
+
+    const res2 = await signedRequest({
+      ...VALID_PAYLOAD,
+      id: 'evt-split-2',
+      data: { qurl_id: QURL_ID, resource_id: RESOURCE_ID, access_count: 1, consumed: true },
+    });
+    expect(res2.status).toBe(200);
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'edited', transient: false });
+    expect(mockEditDM).toHaveBeenCalledTimes(1);
   });
 });
 
