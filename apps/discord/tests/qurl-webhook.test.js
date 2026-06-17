@@ -27,7 +27,7 @@ jest.mock('../src/discord', () => ({
   sendDM: jest.fn(),
 }));
 
-const mockRecordQurlView = jest.fn(async () => 'recorded');
+const mockRecordQurlView = jest.fn(async () => ({ result: 'recorded', firstView: true }));
 // Fast-path (PR-B) store fns. The recorded-view block now calls
 // editSenderCounterInBackground instead of the SQS publisher; its first
 // step is findSendsByQurlId, so the gate (recorded → fast-path enters;
@@ -146,7 +146,7 @@ const VALID_PAYLOAD = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockRecordQurlView.mockImplementation(async () => 'recorded');
+  mockRecordQurlView.mockImplementation(async () => ({ result: 'recorded', firstView: true }));
   mockFindSendsByQurlId.mockImplementation(async () => []);
   mockEditInteractionReply.mockImplementation(async () => ({ ok: true }));
   // Reset cache-state mocks to "primed + the usr_test owner is known"
@@ -162,13 +162,8 @@ beforeEach(() => {
 describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, PR-B)', () => {
   // PR-B replaced the SQS view-update push with the cross-replica
   // editSenderCounterInBackground fast-path. The route enters that
-  // fast-path ONLY when recordQurlView returns the literal 'recorded'
-  // (a real new view) — NOT on dedup hits or any other status. The
-  // fast-path's FIRST step is db.findSendsByQurlId, so we observe the
-  // gate via that call. (The deep fast-path behavior — terminal skip,
-  // absent-guard, N<=L, content-only edit, commit-after-success — lives
-  // in qurl-webhook-counter.test.js; here we pin only the recorded-vs-not
-  // gate, the same contract the old publish-gate test pinned.)
+  // fast-path ONLY when recordQurlView returns result='recorded'
+  // (a real new view) — NOT on dedup hits or any other status.
   //
   // The fast-path is fire-and-forget off the 200, so each assertion
   // drains the deferred microtask chain first.
@@ -191,7 +186,7 @@ describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, 
   };
 
   it('enters the fast-path on result === "recorded"', async () => {
-    mockRecordQurlView.mockImplementation(async () => 'recorded');
+    mockRecordQurlView.mockImplementation(async () => ({ result: 'recorded', firstView: true }));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
     await drain();
@@ -199,8 +194,8 @@ describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, 
     expect(mockFindSendsByQurlId).toHaveBeenCalledWith(VALID_PAYLOAD.data.qurl_id);
   });
 
-  it('does NOT enter the fast-path on dedup result (e.g. "deduped")', async () => {
-    mockRecordQurlView.mockImplementation(async () => 'deduped');
+  it('does NOT enter the fast-path on dedup result', async () => {
+    mockRecordQurlView.mockImplementation(async () => ({ result: 'dedup', firstView: false }));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
     await drain();
@@ -213,7 +208,7 @@ describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, 
     // trigger an edit.
     for (const result of ['updated', 'noop', 'replayed', '', null, undefined]) {
       jest.clearAllMocks();
-      mockRecordQurlView.mockImplementation(async () => result);
+      mockRecordQurlView.mockImplementation(async () => ({ result, firstView: false }));
       await signedRequest(VALID_PAYLOAD);
       await drain();
       expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
@@ -423,7 +418,7 @@ describe('POST /webhooks/qurl — payload handling', () => {
   });
 
   it('surfaces store dedup result on replay', async () => {
-    mockRecordQurlView.mockResolvedValueOnce('dedup');
+    mockRecordQurlView.mockResolvedValueOnce({ result: 'dedup', firstView: false });
     const raw = JSON.stringify(VALID_PAYLOAD);
     const res = await request(app)
       .post('/webhooks/qurl')

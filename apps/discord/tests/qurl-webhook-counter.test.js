@@ -178,7 +178,7 @@ beforeEach(() => {
   mockWithinLag = false;
   mockOwnerSecrets.clear();
   mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
-  mockRecordQurlView.mockResolvedValue('recorded');
+  mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: true });
   mockFindSendsByQurlId.mockResolvedValue([{ send_id: SEND_ID, sender_discord_id: SENDER_ID }]);
   mockGetSendRenderState.mockResolvedValue(armedState());
   // getSendItems is the empty-qurlIds fallback only — default armedState
@@ -426,6 +426,61 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     await flushCounter();
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 1);
+  });
+
+  it('scheduled trailing flush fires and edits the settled aggregate without waiting for the poll', async () => {
+    mockGetSendRenderState.mockResolvedValue(armedState({
+      lastRenderedCount: 1,
+      lastRenderedAt: Date.now() - 850,
+      viewedCount: 2,
+      qurlIds: ['q_a', 'q_b'],
+    }));
+    mockIncrementSendViewedCount.mockResolvedValue(2);
+
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+      expect.objectContaining({ send_id: SEND_ID }),
+    );
+
+    logger.debug.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    await flushCounter();
+
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    const payload = mockEditInteractionReply.mock.calls[0][2];
+    expect(payload.content).toContain('👀 2 viewed');
+    expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 2);
+  });
+
+  it('CAS-lost lower edit schedules exactly one repair-floor re-render', async () => {
+    mockGetSendRenderState
+      .mockResolvedValueOnce(armedState({
+        expectedCount: 3,
+        lastRenderedCount: 1,
+        lastRenderedAt: 0,
+        viewedCount: 1,
+        qurlIds: ['q_a', 'q_b', 'q_c'],
+      }))
+      .mockResolvedValueOnce(armedState({
+        expectedCount: 3,
+        lastRenderedCount: 2,
+        lastRenderedAt: Date.now(),
+        viewedCount: 2,
+        qurlIds: ['q_a', 'q_b', 'q_c'],
+      }));
+    mockIncrementSendViewedCount.mockResolvedValue(2);
+    mockTryAdvanceRenderedCount.mockResolvedValue(false);
+
+    await signedRequest();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await flushCounter();
+
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(2);
+    expect(mockTryAdvanceRenderedCount).toHaveBeenCalledTimes(2);
+    expect(mockEditInteractionReply.mock.calls[1][2].content).toContain('👀 2 viewed');
   });
 
   it('BURST: many views in a short window → bounded edit count (≤3, not N), final render correct', async () => {

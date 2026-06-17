@@ -613,29 +613,12 @@ function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = fal
   senderCounterFlushTimers.set(sendId, timer);
 }
 
-// COALESCING (step 4b): the fast-path is leading-edge-debounced per send
-// (~1 edit per QURL_VIEW_COUNTER_COALESCE_MS per replica) so a high-fan-
-// out send can't storm Discord's per-message edit budget. The gate is the
-// PRIMARY edit coalescer: it collapses a burst to roughly the replica
-// count's worth of edits per window, flat in fan-out. It does not bound
-// viewed_count writes; those remain one DDB UpdateItem per distinct first
-// view so the render path can stay O(1). If that hot item throttles, the
-// fast-path skips and the poll backstop renders from qurl_view rows.
-// It is NOT a hard "no 429 by construction" guarantee, though: the gate
-// reads an eventually-consistent last_rendered_at via a plain GetItem, and
-// in the read→edit→commit window a leader's stamp is genuinely unwritten,
-// so concurrent replicas (and even sequential followers inside that
-// window) can pass the gate and each PATCH once. The monotonic CAS keeps
-// the displayed COUNT correct, but it can't un-fire an already-sent edit.
-// That residual concurrent-leading-edge tail falls back to discord.js's
-// internal 429 backoff — the safety net, not the strategy. A ConsistentRead
-// here wouldn't fix it (the dominant stale window is the unwritten
-// pre-commit interval, not replication lag); a hard cap would need a
-// pre-edit lease, which resurrects the stuck-counter risk this design
-// avoids. Coalesced DISTINCT first-views still update viewed_count and
-// schedule a short trailing flush, so the final frame of a burst is
-// rendered by this webhook path inside the sub-second window instead of
-// waiting for the monitor poll.
+// COALESCING (step 4b): leading-edge debounce per send. It bounds
+// Discord edits, not viewed_count writes; those remain one DDB UpdateItem
+// per distinct first view and fall back to the poll reader if throttled.
+// Multiple replicas can still each pass a stale/unwritten last_rendered_at
+// and PATCH once; the CAS keeps count monotonic, while discord.js 429
+// backoff is the final safety net.
 //
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
@@ -969,8 +952,7 @@ router.post('/qurl', async (req, res) => {
       eventId,
       returnMeta: true,
     });
-    const dbResult = typeof viewRecord === 'string' ? viewRecord : viewRecord.result;
-    const firstView = typeof viewRecord === 'string' ? accessCount === 1 : viewRecord.firstView === true;
+    const { result: dbResult, firstView } = viewRecord;
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result: dbResult });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result: dbResult });
     // Sub-second view counter (feat #60, PR-B): on a real new view
@@ -980,15 +962,10 @@ router.post('/qurl', async (req, res) => {
     // already-decided 200 — the polling backstop in monitorLinkStatus
     // re-renders anything this edit misses.
     //
-    // SUPERSESSION: this REPLACES the old viewUpdatePublisher.publish()
-    // SQS push. Two editors on one message (the SQS-push full-payload
-    // safeEdit on the monitor's replica + this content-only fast-path
-    // edit) would fight over the same confirmation. The fast-path is
-    // strictly better (no SQS hop, no monitor-replica dependency, content
-    // only so the buttons survive), so it supersedes the push. The
-    // publisher/consumer modules + boot wiring stay in place but
-    // dead-but-quiet (nothing calls publish here anymore); a follow-up
-    // rips them out.
+    // SUPERSESSION: do not also publish to the old SQS view-update path.
+    // Two editors would fight over the same confirmation; the content-only
+    // interaction-token edit is now the single fast-path. Follow-up #875
+    // removes the dead publisher/consumer/registry wiring.
     if (dbResult === 'recorded') {
       editSenderCounterInBackground({ qurlId: data.qurl_id, firstView });
     }

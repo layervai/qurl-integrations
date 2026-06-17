@@ -1225,23 +1225,11 @@ async function start() {
     eventPublisher.start();
   }
 
-  // View-update SQS plumbing (feat #60, sub-second view counter) —
-  // SUPERSEDED by the cross-replica interaction-token fast-path
-  // (routes/qurl-webhook.js editSenderCounterInBackground). The webhook
-  // receiver no longer publishes view-updates, so the publisher has no
-  // producers and the consumer would just idle-long-poll an empty queue.
-  // We therefore do NOT start either, even when ENABLE_VIEW_UPDATE_PUSH
-  // is set — flipping the flag on today buys nothing and burns empty SQS
-  // receives. The modules + this gate stay wired (a focused follow-up
-  // rips out the publisher/consumer/registry trio); leaving them in keeps
-  // this PR scoped to the counter mechanism, but starting the dead loop
-  // would be a standing cost so the start calls are removed now.
-  //
-  // (Gated on ENABLE_VIEW_UPDATE_PUSH && isHttp historically: isHttp owned
-  // both the webhook receiver — publisher — and the monitorLinkStatus
-  // instances — consumer. Kept as a no-op so the env-validation contract
-  // missingViewUpdatePushKeys and operator config stay meaningful until
-  // the rip-out.)
+  // View-update SQS plumbing is superseded by the interaction-token
+  // fast-path. The webhook no longer publishes to SQS, so starting this
+  // loop would only burn empty receives. Follow-up #875 removes the dead
+  // publisher/consumer/registry wiring; until then, keep the flag as an
+  // explicit no-op so operator config fails quiet instead of starting cost.
   if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
     logger.info('ENABLE_VIEW_UPDATE_PUSH set but the SQS view-update path is superseded by the webhook fast-path — not starting the (producer-less) publisher/consumer; see index.js');
   }
