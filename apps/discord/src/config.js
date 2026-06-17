@@ -431,6 +431,17 @@ module.exports = {
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
 
+  // Multi-use qURL access token (`at_...`) the bot resolves to reach the
+  // watermark-detect endpoint over the qURL reverse-tunnel (PR-3, #1101).
+  // connector.js's resolveDetectTarget() calls QurlClient.resolve({
+  // access_token: DETECT_ACCESS_TOKEN }) — which issues an NHP knock for the
+  // bot's current IP — immediately before each /api/detect POST. Secret-
+  // shaped (read verbatim from env like QURL_API_KEY / QURL_WEBHOOK_SECRET);
+  // no default. When unset, /qurl detect surfaces a clear configured-error
+  // (resolveDetectTarget throws) rather than silently failing. SSM-seeded at
+  // detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
+  DETECT_ACCESS_TOKEN: process.env.DETECT_ACCESS_TOKEN,
+
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL
     || (process.env.NODE_ENV === 'production' ? 'https://get.qurl.link:9808' : 'http://localhost:9808'),

@@ -12,6 +12,17 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
+// Mock the qURL SDK so connector.detectWatermark's resolve()-then-POST tunnel
+// flow can be driven without a real /v1/resolve round-trip. `mockResolve` is a
+// shared jest.fn the detect tests configure per case (returns {target_url} or
+// throws). The `mock`-prefix lets the factory reference it past jest's hoist.
+// Only resolveDetectTarget() constructs a QurlClient (lazily), so the upload /
+// mint describes never touch this — they don't reach the detect path.
+const mockResolve = jest.fn();
+jest.mock('@layervai/qurl', () => ({
+  QurlClient: jest.fn().mockImplementation(() => ({ resolve: mockResolve })),
+}));
+
 const originalFetch = globalThis.fetch;
 
 describe('Connector client — coverage boost', () => {
@@ -488,9 +499,14 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    mockResolve.mockReset();
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.test.local',
       QURL_API_KEY: 'test-key',
+      // resolveDetectTarget() reads this; the detect tests below set it via
+      // the mock and exercise both the configured and unset paths.
+      DETECT_ACCESS_TOKEN: 'at_detect_token',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
@@ -625,13 +641,22 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     assertNoFullHashLeaked();
   });
 
-  // detectWatermark — the bot side of /api/detect (#1101). POSTs raw image
-  // bytes with an X-Guild-Id scope header; parses {detected, qurl_id,
-  // match_pct, confidence}. The handler-side guild filter + cooldown live
-  // in commands.js (tested in qurl-send-map.test.js); these pin the wire
-  // contract this client owns.
-  describe('detectWatermark — /api/detect contract', () => {
-    function captureDetect(jsonResponse, { ok = true, status = 200 } = {}) {
+  // detectWatermark — the bot side of #1101, now over the qURL reverse-tunnel.
+  // The public connector /api/detect path is gone: detectWatermark first
+  // resolve()s the tunnel target (NHP knock for our IP), SSRF-guards it, then
+  // POSTs the raw image bytes with the X-Guild-Id scope header; parses
+  // {detected, qurl_id, match_pct, confidence}. The handler-side guild filter
+  // + cooldown live in commands.js (tested in qurl-send-map.test.js); these
+  // pin the two-leg wire contract this client owns.
+  describe('detectWatermark — resolve-then-POST tunnel contract', () => {
+    // A known-good public https tunnel target the resolve mock hands back.
+    const TUNNEL_TARGET = 'https://detect-tunnel.qurl.link/api/detect';
+
+    // Wire up resolve() → {target_url} AND the subsequent POST to that target.
+    // Returns a getter for the captured POST {url, opts}. Defaults resolve to
+    // TUNNEL_TARGET; pass `target` to exercise the SSRF guard.
+    function captureDetect(jsonResponse, { ok = true, status = 200, target = TUNNEL_TARGET } = {}) {
+      mockResolve.mockResolvedValue({ target_url: target, resource_id: 'res_detect' });
       let captured = null;
       globalThis.fetch = jest.fn(async (url, opts) => {
         captured = { url, opts };
@@ -645,20 +670,25 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       return () => captured;
     }
 
-    it('POSTs to /api/detect with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
+    it('resolves the tunnel target then POSTs there with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
       const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
       const bytes = Buffer.from('imagedata');
       await connector.detectWatermark(bytes, { guildId: 'guild-9', contentType: 'image/png', apiKey: 'k-detect' });
+      // resolve() is called per-detect with the DETECT_ACCESS_TOKEN (the NHP
+      // knock for our current IP); the POST then goes to the resolved target.
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(mockResolve).toHaveBeenCalledWith({ access_token: 'at_detect_token' });
       const { url, opts } = get();
-      expect(url).toBe('https://connector.test.local/api/detect');
+      expect(url).toBe(TUNNEL_TARGET);
       expect(opts.method).toBe('POST');
       expect(opts.headers['X-Guild-Id']).toBe('guild-9');
+      // Per-call apiKey threads into the POST Bearer (NOT the resolve Bearer).
       expect(opts.headers['Authorization']).toBe('Bearer k-detect');
       expect(opts.headers['Content-Type']).toBe('image/png');
       expect(opts.body).toBe(bytes);
     });
 
-    it('falls back to octet-stream content-type and global QURL_API_KEY', async () => {
+    it('falls back to octet-stream content-type and global QURL_API_KEY for the POST Bearer', async () => {
       const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
       await connector.detectWatermark(Buffer.from('x'), { guildId: 'guild-9' });
       const { opts } = get();
@@ -691,11 +721,54 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toMatchObject({ status: 400 });
     });
 
-    it('throws when no guildId is given (attribution is guild-scoped)', async () => {
-      captureDetect({ detected: false });
+    it('throws when no guildId is given (attribution is guild-scoped) BEFORE resolving', async () => {
+      // Ordering guard: the guildId check must run before resolveDetectTarget,
+      // so resolve() (the NHP knock) is never issued for a malformed call.
+      const get = captureDetect({ detected: false });
       await expect(
         connector.detectWatermark(Buffer.from('x'), { apiKey: 'k' }),
       ).rejects.toThrow(/guild-scoped/);
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(get()).toBeNull();
+    });
+
+    it('throws a clear configured-error when DETECT_ACCESS_TOKEN is unset, no POST', async () => {
+      // Re-require connector under a config mock with DETECT_ACCESS_TOKEN unset.
+      jest.resetModules();
+      mockResolve.mockReset();
+      jest.doMock('../src/config', () => ({
+        CONNECTOR_URL: 'https://connector.test.local',
+        QURL_ENDPOINT: 'https://api.test.local',
+        QURL_API_KEY: 'test-key',
+        // DETECT_ACCESS_TOKEN intentionally absent.
+      }));
+      const connectorNoToken = require('../src/connector');
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connectorNoToken.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/DETECT_ACCESS_TOKEN is not configured/);
+      // Neither the knock nor the POST is attempted without the token.
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('SSRF guard: a private/loopback resolved target_url throws and NO POST happens', async () => {
+      const get = captureDetect({ detected: false }, { target: 'https://127.0.0.1/api/detect' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/private\/internal/);
+      // resolve() ran (the knock), but the SSRF guard rejected before the POST.
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
+    });
+
+    it('SSRF guard: a non-https resolved target_url throws and NO POST happens', async () => {
+      const get = captureDetect({ detected: false }, { target: 'http://detect-tunnel.qurl.link/api/detect' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/https:/);
+      expect(get()).toBeNull();
     });
   });
 });

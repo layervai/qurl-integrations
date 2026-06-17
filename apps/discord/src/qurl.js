@@ -230,4 +230,4 @@ async function getResourceStatus(resourceId, apiKey) {
   return qurlFetch('GET', `/qurls/${resourceId}`, null, apiKey);
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus };
+module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };

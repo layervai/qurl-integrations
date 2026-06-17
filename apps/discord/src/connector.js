@@ -1,5 +1,13 @@
+const { QurlClient } = require('@layervai/qurl');
+
 const config = require('./config');
 const logger = require('./logger');
+
+// Reuse the security-critical, syntactic private/loopback/link-local IP guard
+// from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
+// could drift out of sync. qurl.js has no connector.js dependency, so this
+// require introduces no cycle.
+const { isPrivateHost } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
@@ -402,18 +410,105 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   return result.links;
 }
 
+// Lazily-constructed, cached qURL SDK client used solely by
+// resolveDetectTarget() to resolve the detect access token over the
+// reverse-tunnel. Constructed on first use (not at module load) so the bot
+// boots even when QURL_API_KEY is unset in non-detect deployments, and so
+// tests can inject a mocked @layervai/qurl before the first call.
+//
+// CACHE THE CLIENT, NEVER THE RESOLVED target_url: resolve() issues a fresh
+// NHP knock per call (see resolveDetectTarget) — a stale target_url would
+// have been opened for a previous IP/knock-window and must not be reused.
+//
+// Bearer note: the SDK's `apiKey` is the qURL API Bearer for the /v1/resolve
+// call and MUST carry the `qurl:resolve` scope (enforced server-side by qURL,
+// NOT by this code — it's a key-provisioning step for the bot's QURL_API_KEY).
+// This is intentionally the global config.QURL_API_KEY, decoupled from the
+// per-call `apiKey` that detectWatermark threads only into the detect POST's
+// Bearer via connectorAuthHeaders.
+let _qurlClient = null;
+function getQurlClient() {
+  if (!_qurlClient) {
+    // baseUrl is the bare qURL API base (no `/v1`) — the SDK prepends
+    // `/v1/resolve` itself. Same base qurl.js uses for qurlFetch
+    // (`${config.QURL_ENDPOINT}/v1${path}`).
+    _qurlClient = new QurlClient({ apiKey: config.QURL_API_KEY, baseUrl: config.QURL_ENDPOINT });
+  }
+  return _qurlClient;
+}
+
+// SSRF guard for the resolve()-returned tunnel target. Must be a PUBLIC
+// `https:` URL; reject any non-https scheme, embedded userinfo (the
+// `https://good@127.0.0.1/` hostname-confusion bypass), and any
+// private/loopback/link-local host (reusing qurl.js's syntactic isPrivateHost).
+// Deliberately NOT port-locked (the tunnel target may sit on a non-standard
+// port) and NOT DNS-resolved (syntactic check only — resolve-per-call keeps
+// the knock window tight; a DNS round-trip per detect isn't warranted here).
+function assertPublicHttpsTarget(targetUrl) {
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    throw new Error('Detect tunnel resolved an unparseable target URL');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Detect tunnel target must be an https: URL');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Detect tunnel target must not contain userinfo');
+  }
+  if (isPrivateHost(parsed.hostname)) {
+    throw new Error('Detect tunnel target points to a private/internal address');
+  }
+  return targetUrl;
+}
+
 /**
- * Watermark-attribution detect (the bot side of #1101). POST raw image
- * bytes to the connector's `/api/detect`; the connector reads the
- * invisible meta-seal watermark and resolves it to the qurl_id it was
- * minted for, GUILD-SCOPED via the `X-Guild-Id` header so an image
- * watermarked in guild A never attributes in guild B. This is a
- * deanonymization oracle by design — the caller (handleQurlDetect) owns
- * the cooldown + ephemeral-reply abuse guards and the second-layer
- * same-guild filter on the returned rows.
+ * Resolve the qURL reverse-tunnel target for the watermark-detect endpoint.
  *
- * Contract (the endpoint another agent is building — code against this):
- *   - Headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
+ * Calls `QurlClient.resolve({ access_token: config.DETECT_ACCESS_TOKEN })`,
+ * which (per the SDK) triggers an NHP knock granting network access for the
+ * CALLER'S CURRENT IP, then returns the `target_url` to POST the image to.
+ * The caller MUST POST within the knock window from the same IP — hence this
+ * is invoked immediately before each detect POST (resolve-per-call), and the
+ * returned target_url is never cached. This is exactly what lets the bot's
+ * dynamic egress IP reach a tunnel that only admits knocked IPs.
+ *
+ * @returns {Promise<string>} the SSRF-validated public https target_url.
+ * @throws if DETECT_ACCESS_TOKEN is unset, or the resolved target fails the
+ *   public-https SSRF guard.
+ */
+async function resolveDetectTarget() {
+  if (!config.DETECT_ACCESS_TOKEN) {
+    throw new Error('DETECT_ACCESS_TOKEN is not configured (required to resolve the detect tunnel target)');
+  }
+  const { target_url: targetUrl } = await getQurlClient().resolve({
+    access_token: config.DETECT_ACCESS_TOKEN,
+  });
+  return assertPublicHttpsTarget(targetUrl);
+}
+
+/**
+ * Watermark-attribution detect (the bot side of #1101). Resolves the qURL
+ * reverse-tunnel target (resolveDetectTarget — see its NHP-knock rationale),
+ * then POSTs the raw image bytes to that `target_url`. The detect service
+ * reads the invisible meta-seal watermark and resolves it to the qurl_id it
+ * was minted for, GUILD-SCOPED via the `X-Guild-Id` header so an image
+ * watermarked in guild A never attributes in guild B. This is a
+ * deanonymization oracle by design — the caller (handleQurlDetect) owns the
+ * cooldown + ephemeral-reply abuse guards and the second-layer same-guild
+ * filter on the returned rows.
+ *
+ * REACH MODEL: the public connector `/api/detect` path is gone; detect now
+ * lives behind the qURL reverse-tunnel. resolve() opens the tunnel firewall
+ * for the bot's current egress IP and the POST goes out from that same IP
+ * within the knock window — so resolve-then-POST happens per call and a stale
+ * target_url is never reused (a dynamic bot IP would otherwise be locked out).
+ *
+ * Contract:
+ *   - Resolve: client `apiKey` (config.QURL_API_KEY, needs `qurl:resolve`
+ *     scope) is the Bearer; `access_token` is config.DETECT_ACCESS_TOKEN.
+ *   - POST headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
  *     Content-Type: <imageContentType || 'application/octet-stream'>.
  *   - Body: the raw image bytes (Buffer / ArrayBuffer / Uint8Array).
  *   - 200 JSON: { detected: boolean, qurl_id: string|null,
@@ -428,14 +523,20 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
  * @param {object} opts
  * @param {string} opts.guildId — Discord guild snowflake (X-Guild-Id scope).
  * @param {?string} [opts.contentType] — image MIME; defaults to octet-stream.
- * @param {?string} [opts.apiKey] — caller API key; falls back to config.QURL_API_KEY.
+ * @param {?string} [opts.apiKey] — caller API key for the detect POST Bearer;
+ *   falls back to config.QURL_API_KEY. (The resolve() Bearer is always the
+ *   global config.QURL_API_KEY — see getQurlClient.)
  * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
  */
 async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');
 
-  const response = await fetch(`${config.CONNECTOR_URL}/api/detect`, {
+  // Resolve-per-call: opens the tunnel firewall for our current IP, then POST
+  // from that same IP within the knock window. Never cache the target_url.
+  const targetUrl = await resolveDetectTarget();
+
+  const response = await fetch(targetUrl, {
     method: 'POST',
     headers: {
       'Content-Type': contentType || 'application/octet-stream',
