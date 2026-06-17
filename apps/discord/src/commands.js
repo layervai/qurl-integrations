@@ -160,6 +160,14 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
 const { sendDM } = require('./discord');
 const { editDM, sendChannelMessage } = require('./discord-rest');
+// renderViewCounter lives in its own leaf module so the cross-replica
+// webhook fast-path (routes/qurl-webhook.js) can import the SAME pure
+// renderer without pulling commands.js (+ discord.js) into the HTTP
+// receiver's require graph. The monitor's buildStatusMsg() below + the
+// fast-path both call it, so the confirmation body stays byte-identical
+// across replicas. Still re-exported via _test (see module.exports) so
+// the byte-identity unit test reads it where it always did.
+const { renderViewCounter } = require('./view-counter-render');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -1477,26 +1485,31 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // best-effort and silent-drops on the N-1/N replicas that don't host
   // this monitor (view-update-registry.js's SILENT DROP doc), so on
   // most sends the polling tick below is what actually renders the
-  // counter. Polling on the flat steadyPollInterval (60s for a 30m+
-  // expiry) meant a view that landed seconds after the send wasn't
-  // reflected for up to a minute — "far too much latency" for a counter
-  // the product surfaces as live. Recipients overwhelmingly open within
-  // the first minute or two, so poll every EARLY_POLL_INTERVAL_MS for
-  // the first EARLY_POLL_WINDOW_MS of the monitor's life, then fall back
-  // to steadyPollInterval.
+  // counter. The webhook fast-path (routes/qurl-webhook.js) now OWNS
+  // sub-second latency — it edits the sender's confirmation from any
+  // replica the instant a qurl.accessed view records, no poll involved.
+  // So this poll is now purely a BACKSTOP / self-heal floor: it covers a
+  // legacy/pre-feature send (no persisted token), a fast-path edit that
+  // transiently failed (it deliberately does NOT advance last_rendered_count
+  // on a failed edit, so the next poll re-renders and self-heals), and the
+  // expand/collapse toggle the content-only fast-path doesn't restore.
+  //
+  // Because the fast-path carries the latency, #839's aggressive 5s dense
+  // ramp is relaxed back to a MODEST one: the first tick still fires at
+  // ~3s (FIRST_POLL_DELAY_MS), then EARLY_POLL_INTERVAL_MS (~15s) through
+  // the early window, then the flat steadyPollInterval (≤60s). A view the
+  // fast-path missed is still re-rendered within ~15s — fine for a
+  // backstop — at a fraction of the idle BatchGet volume the 5s ramp
+  // incurred.
   //
   // Cost: this replaces the old pollCount decay (which throttled an idle
-  // monitor toward every-4th-tick), so the steady phase is now a flat
-  // steadyPollInterval (≤60s) — a few × more idle BatchGets than before,
-  // bounded by MAX_CONCURRENT_MONITORS and trivially cheap (a ≤50-key
-  // BatchGet on eventually-consistent small items). Discord-edit volume
-  // does NOT scale with poll rate: runTick edits ONLY on a real
-  // pending→opened transition (`changed`) and each link flips once, so
-  // total edits over the monitor's life are bounded by recipient count
-  // (≤50). Denser polling can split transitions a slow tick would have
-  // coalesced into one edit, but at ≥5s spacing that's far under
-  // Discord's editReply rate limit — no 429 exposure.
-  const EARLY_POLL_INTERVAL_MS = 5000;
+  // monitor toward every-4th-tick), so the steady phase is a flat
+  // steadyPollInterval (≤60s). Discord-edit volume does NOT scale with
+  // poll rate: runTick edits ONLY on a real pending→opened transition
+  // (`changed`) and each link flips once, so total edits over the
+  // monitor's life are bounded by recipient count (≤50). At ≥15s spacing
+  // this is far under Discord's editReply rate limit — no 429 exposure.
+  const EARLY_POLL_INTERVAL_MS = 15000;
   const EARLY_POLL_WINDOW_MS = 90000;
   const startTime = Date.now();
   // Anchor for the dense early phase. Distinct from startTime (which
@@ -2331,6 +2344,66 @@ async function executeSendPipeline(interaction, {
     throw err;
   }
 
+  // Arm the cross-replica view-counter fast-path. The webhook receiver
+  // (routes/qurl-webhook.js) edits THIS ephemeral confirmation from any
+  // replica using the persisted interaction token, so a view lands on
+  // the sender's "👀 N viewed" within sub-second latency regardless of
+  // which replica hosts the in-memory monitor. Persisted only AFTER the
+  // editReply landed: before that, the @original message doesn't exist
+  // for the fast-path's PATCH to target, and confirmMsg/delivered exist
+  // only here (saveSendConfig ran earlier, before they were computed).
+  //
+  // Gate: delivered > 0 (no monitor / no counter otherwise) AND a token
+  // is present AND the send is NOT view-counter-degraded. Best-effort +
+  // logged-swallowed exactly like saveSendConfig — a failure here just
+  // leaves the fast-path inert (the poll backstop still renders), it must
+  // not break a send whose DMs already delivered.
+  //
+  // DEGRADED GATE: when any link is missing its qurl_id the monitor
+  // suppresses the counter entirely (renders bare baseMsg — a partial-
+  // attribution "N viewed" would mislead worse than no counter). The
+  // fast-path renders from qurl_views and CANNOT see that degrade (it
+  // hardcodes degraded:false), so arming it on a degraded send would let
+  // a view stamp the very partial counter the monitor suppresses, then
+  // the poll would flip it back to bare — a forbidden flicker. So we
+  // simply DON'T arm the fast-path on a degraded send; its (bare) poll
+  // render is the sole renderer, matching today's behavior. Mirrors the
+  // monitor's own construction-time degrade check.
+  //
+  // SECURITY: interaction.token is a live bearer cred — NEVER log it. The
+  // catch below logs only sendId + err.message, never the token.
+  // applicationId is the standard discord.js Interaction property (set on
+  // the reconstructed worker interaction too, from the raw gateway
+  // application_id); no `client` fallback needed.
+  const counterDegraded = qurlLinks.some(l => !l.qurlId);
+  if (delivered > 0 && interaction.token && !counterDegraded) {
+    try {
+      await db.saveSendConfirmState(sendId, {
+        interactionToken: interaction.token,
+        interactionAppId: interaction.applicationId,
+        expectedCount: delivered,
+        // The COLLAPSED base — exactly the string the monitor uses as
+        // baseMsg, WITHOUT the "👀 …" counter line (confirmMsg is that
+        // base; monitor.getFullMsg() would double-stamp the counter).
+        confirmBaseMsg: confirmMsg,
+        // The send's full qurl_id set, so the fast-path counts views off
+        // its single GetItem (no recipient-row Query). Filter falsy —
+        // legacy/non-guild links may omit qurlId.
+        confirmQurlIds: qurlLinks.map(l => l.qurlId).filter(Boolean),
+        // Epoch seconds; bounds the sensitive token's life just past the
+        // 14-min monitor cap (16 min). getSendRenderState self-defends on
+        // this (treats a past value as absent) so the bot stops trusting
+        // a dead token even before the qurl-bot-ddb terraform enables a
+        // DDB TTL on confirm_expires_at to physically reap the row.
+        confirmExpiresAt: Math.floor(Date.now() / 1000) + 16 * 60,
+      });
+    } catch (err) {
+      logger.error('saveSendConfirmState failed; webhook view-counter fast-path disabled for this send (poll backstop still renders)', {
+        sendId, error: err.message,
+      });
+    }
+  }
+
   // Non-ephemeral channel notification when sending to @everyone or the
   // voice-channel population. Recipients on voice or scrolling on mobile
   // miss the DM ping otherwise — this post is the only chat signal that
@@ -2371,6 +2444,10 @@ async function executeSendPipeline(interaction, {
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
   if (monitor) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
+    // Running union of the send's qurl_ids (original + every /qurl add)
+    // so the fast-path re-persist always writes the COMPLETE set, not
+    // just the latest batch. Seeded from the original send links.
+    const allQurlIds = qurlLinks.map(l => l.qurlId).filter(Boolean);
     // Single source of truth for the "adding recipients" lock: the global
     // addRecipientsLocks Set keyed by sendId. Acquire at the top of the
     // collect handler, release in a single outer finally{} so any throw
@@ -2416,6 +2493,14 @@ async function executeSendPipeline(interaction, {
         // buildConfirmMsg now returns {content, attachmentText, needsExpand};
         // extract content for the monitor + editReply (string-only).
         confirmMsg = buildConfirmMsg(showAllRecipients).content;
+        // The expand/collapse choice lives in the IN-MEMORY monitor only
+        // (updateBaseMsg → the poll re-renders the expanded list). It is
+        // deliberately NOT persisted: the webhook fast-path always renders
+        // the persisted COLLAPSED base (content-only edit), so right after
+        // an expand a concurrent fast-path counter edit can briefly show
+        // the collapsed list — the next poll tick (≤15s) restores the
+        // expanded view off the updated in-memory base. Accepted minor
+        // toggle-flicker (option c); the poll is the self-heal floor.
         monitor.updateBaseMsg(confirmMsg);
         const fullMsg = monitor.getFullMsg();
         const updatedRow = new ActionRowBuilder().addComponents(
@@ -2463,6 +2548,18 @@ async function executeSendPipeline(interaction, {
           const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           revokeSucceeded = true;
+          // Freeze the confirmation display so a late webhook fast-path
+          // edit can't resurrect a live-looking "👀 N viewed" counter
+          // over this "Revoked X/Y" terminal copy (getSendRenderState
+          // reads confirm_terminal → terminal, which the fast-path checks
+          // FIRST and skips on). Best-effort + logged-swallowed: a miss
+          // narrows to a cosmetic race (a view landing in the tens-of-ms
+          // before the flag lands could re-render the counter once); the
+          // monitor.stop() above already halts the poll, so this is the
+          // only remaining off-monitor editor to fence.
+          db.markConfirmTerminal(sendId).catch((err) => {
+            logger.warn('markConfirmTerminal (revoke) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
+          });
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
           await interaction.editReply({
@@ -2556,11 +2653,42 @@ async function executeSendPipeline(interaction, {
             if (addResult.delivered > 0) {
               addRecipientsCount += addResult.delivered;
               monitor.addRecipients(addResult.delivered, addResult.newLinks);
+              // Extend the running qurl_id union with this batch's links.
+              for (const l of (addResult.newLinks || [])) {
+                if (l?.qurlId) allQurlIds.push(l.qurlId);
+              }
               const totalSent = delivered + addRecipientsCount;
               confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
               monitor.updateBaseMsg(confirmMsg);
               await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
+              // Mid-life degrade: an added link missing its qurl_id flips
+              // the send to view-counter-degraded (the monitor renders bare
+              // baseMsg from here on). The fast-path can't see that, so
+              // DISARM it by marking the confirmation terminal — its
+              // terminal guard then skips, leaving the (bare) poll render
+              // as the sole renderer. Matches the send-time degraded gate.
+              if ((addResult.newLinks || []).some(l => !l?.qurlId)) {
+                db.markConfirmTerminal(sendId).catch((err) => {
+                  logger.warn('markConfirmTerminal (add-recipients degrade) failed; fast-path could briefly stamp a partial counter until poll re-renders bare', { sendId, error: err.message });
+                });
+              } else {
+                // Re-arm the fast-path with the post-add totals so a view
+                // landing after /qurl add renders against the new base +
+                // count + qurl_id set. PARTIAL update — omitting
+                // interactionToken/appId leaves them untouched
+                // (saveSendConfirmState skips undefined keys) so it can't
+                // null the live token. Best-effort + logged-swallowed.
+                db.saveSendConfirmState(sendId, {
+                  expectedCount: totalSent,
+                  confirmBaseMsg: confirmMsg,
+                  confirmQurlIds: allQurlIds,
+                }).catch((err) => {
+                  logger.warn('saveSendConfirmState (add-recipients re-persist) failed; fast-path renders pre-add totals until poll catches up', {
+                    sendId, error: err.message,
+                  });
+                });
+              }
             }
 
             await selectInteraction.editReply({ content: addResult.msg, components: [] });
@@ -2603,6 +2731,18 @@ async function executeSendPipeline(interaction, {
         }
         // Revoke attempted but failed — leave the failure message.
         if (revokeInFlight) return;
+        // Management window closed — this is the confirmation's terminal
+        // render. Freeze it so a webhook fast-path edit arriving after the
+        // collector ended can't re-animate the counter over the
+        // window-closed banner. Fire-and-forget .catch in this sync 'end'
+        // handler (best-effort, logged-swallowed); the monitor.stop()
+        // above froze the poll, leaving the fast-path as the only
+        // off-monitor editor to fence. Expired is intentionally NOT fenced
+        // here — the qurl.expired handler edits the recipient DM, never
+        // this sender confirmation, so it needs no terminal mark.
+        db.markConfirmTerminal(sendId).catch((err) => {
+          logger.warn('markConfirmTerminal (window-closed) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
+        });
         interaction.editReply({
           content: monitor.getFullMsg() + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
@@ -7827,28 +7967,6 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
   return { ...data, row };
 }
 
-// Pure render of the sender's live "👀 N viewed / M pending" counter
-// line. Extracted from monitorLinkStatus's buildStatusMsg() closure so
-// the SAME byte-for-byte output can be produced off-monitor by the
-// cross-replica webhook fast-path (PR-B): any replica can rebuild the
-// confirmation body from the persisted render state (baseMsg +
-// last_rendered_count + expected_count) without the in-memory monitor's
-// linkStatus map. Keeping it pure (plain args in, string out — no
-// closure refs) is what lets both the monitor and the fast-path call it
-// and guarantees they can't drift.
-//
-// `degraded` mirrors viewCounterDegraded: when ANY tracked link is
-// missing a qurl_id the counter would mis-attribute, so we render the
-// baseMsg alone rather than a partial count. pending floors at 0 so a
-// race where viewed transiently exceeds expectedCount (e.g. a webhook
-// double-fire landing before expectedCount is bumped by /qurl add)
-// never renders a negative "pending".
-function renderViewCounter({ baseMsg, viewed, expectedCount, degraded }) {
-  if (degraded) return baseMsg;
-  const pending = Math.max(0, expectedCount - viewed);
-  return `${baseMsg}\n👀 ${viewed} viewed / ${pending} pending`;
-}
-
 // Builds the post-send confirmation body. When the full inline render
 // would exceed Discord's 2000-char content cap, falls back to a
 // `recipients.txt` attachment; "(see attached)" is appended only to
@@ -9785,11 +9903,12 @@ module.exports = {
       revokeAllLinks,
       renderRevokeMsg,
       renderSendConfirm,
-      // Pure view-counter render, exposed so the wording/floor contract
-      // is pinned directly (degraded→baseMsg, normal→counter line,
-      // pending floors at 0) rather than only via the monitor closure.
-      // PR-B's fast-path also calls this; the unit test is the byte-
-      // identity anchor both render sites lean on.
+      // Pure view-counter render, re-exported (defined in
+      // ./view-counter-render) so the wording/floor contract is pinned
+      // directly (degraded→baseMsg, normal→counter line, pending floors
+      // at 0) rather than only via the monitor closure. The webhook
+      // fast-path imports the same module function; the unit test is the
+      // byte-identity anchor both render sites lean on.
       renderViewCounter,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,

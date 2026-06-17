@@ -43,6 +43,17 @@ jest.mock('../src/store', () => ({
   // expired markers are imported by the route module but unused on this path.
   markExpiredDMEdited: jest.fn(),
   clearExpiredDMEdited: jest.fn(),
+  // View-counter fast-path (PR-B) store fns: the recorded-view block now
+  // ALSO runs editSenderCounterInBackground, which reads render state.
+  // Default getSendRenderState → null so the fast-path short-circuits at
+  // step 2 here (these consumed-flip tests aren't about the counter — the
+  // counter has its own suite, qurl-webhook-counter.test.js). findSendsByQurlId
+  // is shared by BOTH paths now, so consumed-flip assertions key on the
+  // consumed-flip's OWN signals (editDM / markConsumedDMEdited), not it.
+  getSendRenderState: jest.fn(async () => null),
+  getSendItems: jest.fn(async () => []),
+  getQurlViews: jest.fn(async () => new Map()),
+  tryAdvanceRenderedCount: jest.fn(),
   healthCheck: jest.fn(),
   getStats: jest.fn(() => ({})),
 }));
@@ -50,19 +61,13 @@ jest.mock('../src/store', () => ({
 const mockEditDM = jest.fn();
 jest.mock('../src/discord-rest', () => ({
   editDM: (...args) => mockEditDM(...args),
+  editInteractionReply: jest.fn(async () => ({ ok: true })),
   sendChannelMessage: jest.fn(),
 }));
 
 // Real buildConsumedDMPayload — let the receiver render a real Discord
 // payload so a shape drift (renamed field, removed embed) fails here.
 const { buildConsumedDMPayload } = require('../src/dm-payloads');
-
-// view-update-publisher is fire-and-forget on the accessed path; stub it.
-jest.mock('../src/view-update-publisher', () => ({
-  publish: jest.fn(),
-  start: jest.fn(),
-  stop: jest.fn(),
-}));
 
 let mockPrimed = true;
 let mockWithinLag = false;
@@ -226,7 +231,9 @@ describe('POST /webhooks/qurl — qurl.accessed does NOT flip when not consumed'
     expect(res.status).toBe(200);
     await drainTicks();
     expect(flipVerdictLog()).toBeNull(); // flip never even scheduled
-    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
+    // findSendsByQurlId is NOT asserted here: it's now shared with the
+    // view-counter fast-path (which DOES run on this recorded view). The
+    // CONSUMED-flip's own signals are the truthful "didn't flip" check.
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
@@ -239,7 +246,9 @@ describe('POST /webhooks/qurl — qurl.accessed does NOT flip when not consumed'
     expect(res.status).toBe(200);
     await drainTicks();
     expect(flipVerdictLog()).toBeNull();
-    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
+    // editDM is the consumed-flip's own signal; findSendsByQurlId is now
+    // shared with the view-counter fast-path so it's no longer a clean
+    // "didn't flip" proxy.
     expect(mockEditDM).not.toHaveBeenCalled();
   });
 

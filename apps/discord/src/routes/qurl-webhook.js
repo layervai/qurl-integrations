@@ -27,9 +27,9 @@ const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS, DM_STATUS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
 const subs = require('../webhook-subscriptions');
-const viewUpdatePublisher = require('../view-update-publisher');
-const { editDM } = require('../discord-rest');
+const { editDM, editInteractionReply } = require('../discord-rest');
 const { buildExpiredDMPayload, buildConsumedDMPayload } = require('../dm-payloads');
+const { renderViewCounter } = require('../view-counter-render');
 const { parseExpiryMs } = require('../utils/time');
 
 const router = express.Router();
@@ -573,6 +573,152 @@ function flipConsumedDMInBackground({ qurlId, eventId }) {
     });
 }
 
+// Terminal verdict log message for the sender view-counter fast-path.
+// Mirrors flipConsumedDMInBackground's verdict line — the single
+// guaranteed end signal on EVERY branch (skip, edited, edit-failed) so a
+// fire-and-forget caller and the unit tests have a uniform drain anchor.
+const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
+
+// Sub-second sender view-counter fast-path (feat #60, PR-B). On a real
+// new view (dbResult === 'recorded'), edits the sender's "/qurl send"
+// confirmation to "👀 N viewed / M pending" from ANY replica using the
+// persisted interaction-webhook token — no Gateway, no in-memory monitor
+// needed. This SUPERSEDES the SQS view-update push (which the recorded-
+// view block no longer calls): two editors fighting on one message (the
+// monitor replica's full-payload safeEdit + this content-only edit) would
+// race; the fast-path wins and the poll backstop self-heals any miss.
+//
+// FIRE-AND-FORGET (mirrors flipConsumedDMInBackground): the view is
+// already recorded and the 200 already returned, so a counter-edit miss
+// must not make qurl-service retry the whole accessed event. Everything
+// runs inside the deferred chain and a .catch keeps a throw out of
+// Express.
+//
+// ORDERING IS LOAD-BEARING — DO NOT REORDER. The advance-the-count step
+// (8) commits ONLY after a confirmed edit (7). Advancing before the edit
+// would re-introduce the stuck-counter regression: on a transient edit
+// failure last_rendered_count would move forward without the display
+// moving, and the poll backstop's pre-read compare would then skip the
+// re-render forever. Each step's skip is intentional defense — see the
+// inline notes.
+//
+// SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
+// Only sendId / qurlId / counts appear in the verdict log.
+function editSenderCounterInBackground({ qurlId }) {
+  // Defer into the microtask queue so a future sync-throw refactor
+  // surfaces as a rejection instead of escaping the handler (same shape
+  // as flipConsumedDMInBackground).
+  Promise.resolve()
+    .then(async () => {
+      // 1. GSI lookup → the single send owning this qurl_id. Defensive
+      //    skip on != 1 (0 = pre-rollout / no persisted send; > 1 =
+      //    ambiguous duplicate key) — same shape as the expired handler.
+      const rows = await db.findSendsByQurlId(qurlId);
+      if (rows.length !== 1) {
+        logger.debug('qURL webhook sender-counter: skip — row count != 1', {
+          qurl_id: qurlId, count: rows.length,
+        });
+        return { status: 'no-single-send' };
+      }
+      const sendId = rows[0].send_id;
+      const senderId = rows[0].sender_discord_id;
+
+      // 2. Render state for this send. Absent → no persisted confirm row
+      //    (legacy send predating the feature, or a saveSendConfirmState
+      //    that failed); the poll backstop is the sole renderer.
+      const state = await db.getSendRenderState(sendId);
+      if (!state) {
+        logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'no-state' };
+      }
+
+      // 3. TERMINAL CHECK FIRST. A revoked / window-closed / otherwise
+      //    frozen confirmation must NOT be resurrected by a late view
+      //    edit — checked before anything else so we never even read the
+      //    send items for a dead display.
+      if (state.terminal) {
+        logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'terminal' };
+      }
+
+      // 4. ABSENT-GUARD. No token / app id / base means this send predates
+      //    the persistence window (or the token TTL'd away) — the
+      //    fast-path has nothing to edit with, so the poll backstop
+      //    covers it. (PR-A maps confirm_base_msg → state.baseMsg.)
+      if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
+        logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'absent' };
+      }
+
+      // 5. Compute N — the count of DISTINCT viewed qurl_ids across the
+      //    WHOLE send (NOT this event's per-qurl access_count). The send's
+      //    qurl_id set is persisted on the config row (state.qurlIds), so
+      //    it comes for free off the step-2 GetItem — no extra recipient
+      //    Query. BatchGet their view rows, count those with accessCount
+      //    > 0 (`views.get(id)?.accessCount` — the map is sparse, only
+      //    accessed qurls have a row). Fallback to the recipient-row Query
+      //    only if the set wasn't persisted (a pre-confirm-qurl-ids row
+      //    that somehow still cleared the absent-guard).
+      const qurlIds = state.qurlIds.length > 0
+        ? state.qurlIds
+        : (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);
+      const views = await db.getQurlViews(qurlIds);
+      const N = qurlIds.filter(id => views.get(id)?.accessCount > 0).length;
+
+      // 6. PRE-READ COMPARE (advisory dedup — NOT a commit). If N is no
+      //    higher than the last count we confirmed-rendered, skip: this is
+      //    a redelivery, or a concurrent multi-recipient view already
+      //    rendered an equal-or-higher count. Prevents a backwards flicker
+      //    without a write; the authoritative monotonic guard is the CAS
+      //    in step 8.
+      const L = state.lastRenderedCount;
+      if (N <= L) {
+        logger.debug('qURL webhook sender-counter: skip — N <= last rendered (redelivery / already-rendered)', {
+          qurl_id: qurlId, send_id: sendId, n: N, last_rendered: L,
+        });
+        return { status: 'no-advance', n: N };
+      }
+
+      // 7. Render the SAME pure body the monitor renders (byte-identical),
+      //    then edit CONTENT ONLY. Per the verified Discord API behavior,
+      //    PATCH .../messages/@original is a PARTIAL update: OMITTING
+      //    `components` PRESERVES the existing Add/Revoke buttons. So we
+      //    send `{content}` alone — NO components key — and the buttons
+      //    stay. (Sending components:[] would clear them.)
+      const content = renderViewCounter({
+        baseMsg: state.baseMsg,
+        viewed: N,
+        expectedCount: state.expectedCount,
+        degraded: false,
+      });
+      const r = await editInteractionReply(state.interactionAppId, state.interactionToken, { content });
+
+      // 8. COMMIT AFTER SUCCESS ONLY. Advance last_rendered_count via the
+      //    monotonic CAS only when the edit confirmed. On a failed edit we
+      //    do NOT advance — the poll backstop will re-render and self-heal
+      //    (this is THE invariant that prevents the stuck-counter
+      //    regression on a transient edit failure).
+      if (!r.ok) {
+        return { status: 'edit-failed', n: N };
+      }
+      await db.tryAdvanceRenderedCount(sendId, N);
+      return { status: 'edited', n: N };
+    })
+    .then((verdict) => {
+      // Observability-only terminal verdict (no HTTP response to map to).
+      // The single uniform end signal across every branch — the unit
+      // tests poll for this line to drain the deferred chain.
+      logger.debug(COUNTER_VERDICT_MSG, { qurl_id: qurlId, status: verdict.status });
+    })
+    .catch((err) => {
+      // NEVER log the token; err.message from the store/edit fns carries
+      // none. A throw here is swallowed — the poll backstop renders.
+      logger.error('qURL webhook sender-counter: fast-path threw', {
+        error: err?.message, qurl_id: qurlId,
+      });
+    });
+}
+
 router.post('/qurl', async (req, res) => {
   const ip = req.ip || 'unknown';
   // OR-coupling note: an IP that already burned the HMAC limiter
@@ -720,22 +866,24 @@ router.post('/qurl', async (req, res) => {
     });
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result: dbResult });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result: dbResult });
-    // Sub-second view counter (feat #60): publish to SQS only on
-    // result === 'recorded' (a real new view, not a per-event dedup
-    // replay). Fire-and-log — the polling fallback in
-    // monitorLinkStatus catches anything the publisher drops. No
-    // await: the HTTP response must come back to qurl-service
-    // promptly so it doesn't retry on its own.
+    // Sub-second view counter (feat #60, PR-B): on a real new view
+    // (result === 'recorded', NOT a per-event dedup replay) edit the
+    // sender's confirmation to "👀 N viewed" directly from this replica
+    // via the persisted interaction token. Fire-and-forget off the
+    // already-decided 200 — the polling backstop in monitorLinkStatus
+    // re-renders anything this edit misses.
+    //
+    // SUPERSESSION: this REPLACES the old viewUpdatePublisher.publish()
+    // SQS push. Two editors on one message (the SQS-push full-payload
+    // safeEdit on the monitor's replica + this content-only fast-path
+    // edit) would fight over the same confirmation. The fast-path is
+    // strictly better (no SQS hop, no monitor-replica dependency, content
+    // only so the buttons survive), so it supersedes the push. The
+    // publisher/consumer modules + boot wiring stay in place but
+    // dead-but-quiet (nothing calls publish here anymore); a follow-up
+    // rips them out.
     if (dbResult === 'recorded') {
-      // Defer into the microtask queue so a future sync-throw refactor
-      // of publish() surfaces as a rejection instead of escaping.
-      Promise.resolve().then(() => viewUpdatePublisher.publish({
-        qurlId: data.qurl_id,
-        accessCount,
-        eventId,
-      })).catch((err) => {
-        logger.error('viewUpdatePublisher.publish threw', { error: err?.message, qurl_id: data.qurl_id });
-      });
+      editSenderCounterInBackground({ qurlId: data.qurl_id });
     }
     // One-time link consumed → flip the recipient's DM to "closed".
     // Fire-and-forget off the already-decided 200 (see

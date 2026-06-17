@@ -1176,11 +1176,12 @@ describe('qurl sends', () => {
 
   // ── View-counter render state (cross-replica fast-path, PR-B) ──
 
-  test('saveSendConfig: omitting render-state fields leaves them null (behavior-neutral for existing callers)', async () => {
-    // The existing /qurl send caller passes none of the new params; they
-    // must land null (not undefined → DDB ValidationException without
-    // removeUndefinedValues, and not silently dropped) so the row behaves
-    // exactly as it did pre-PR. last_rendered_count stays ABSENT at write.
+  test('saveSendConfig: does NOT write view-counter render-state (that is saveSendConfirmState only)', async () => {
+    // saveSendConfig runs BEFORE the token/confirmMsg/delivered exist, so
+    // it carries no render-state fields — they are written separately by
+    // saveSendConfirmState after the editReply. Pin that the config Put
+    // never touches the render-state attrs (no second, sensitive-token
+    // write surface to keep in sync).
     ddbMock.on(PutCommand).resolves({});
     await store.saveSendConfig({
       sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
@@ -1189,31 +1190,14 @@ describe('qurl sends', () => {
       attachmentContentType: null, attachmentUrl: null,
     });
     const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
-    expect(item.interaction_token).toBeNull();
-    expect(item.interaction_app_id).toBeNull();
-    expect(item.expected_count).toBeNull();
-    expect(item.confirm_expires_at).toBeNull();
-    expect(item.last_rendered_count).toBeUndefined(); // absent → "0 rendered"
+    expect(item).not.toHaveProperty('interaction_token');
+    expect(item).not.toHaveProperty('interaction_app_id');
+    expect(item).not.toHaveProperty('expected_count');
+    expect(item).not.toHaveProperty('confirm_expires_at');
+    expect(item).not.toHaveProperty('last_rendered_count');
   });
 
-  test('saveSendConfig: persists render-state fields when passed (interaction_token included)', async () => {
-    ddbMock.on(PutCommand).resolves({});
-    await store.saveSendConfig({
-      sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
-      connectorResourceId: 'conn', actualUrl: null, expiresIn: '24h',
-      personalMessage: null, locationName: null, attachmentName: null,
-      attachmentContentType: null, attachmentUrl: null,
-      interactionToken: 'tok-abc', interactionAppId: 'app-1',
-      expectedCount: 5, confirmExpiresAt: 1234567890,
-    });
-    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
-    expect(item.interaction_token).toBe('tok-abc');
-    expect(item.interaction_app_id).toBe('app-1');
-    expect(item.expected_count).toBe(5);
-    expect(item.confirm_expires_at).toBe(1234567890);
-  });
-
-  test('getSendRenderState: maps row fields, derives terminal/showAll defaults, no ownership filter', async () => {
+  test('getSendRenderState: maps row fields, derives terminal default, no ownership filter', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: {
         send_id: 's1', sender_discord_id: 'sender',
@@ -1226,17 +1210,17 @@ describe('qurl sends', () => {
     expect(state).toEqual({
       interactionToken: 'tok-abc', interactionAppId: 'app-1',
       expectedCount: 5, lastRenderedCount: 2,
-      baseMsg: undefined, terminal: false, showAll: false,
+      baseMsg: undefined, qurlIds: [], terminal: false,
     });
   });
 
-  test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; showAll from flag', async () => {
+  test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; qurlIds passthrough', async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { send_id: 's1', revoked_at: 'when', show_all_recipients: true },
+      Item: { send_id: 's1', revoked_at: 'when', confirm_qurl_ids: ['q_a', 'q_b'] },
     });
     const viaRevoke = await store.getSendRenderState('s1');
     expect(viaRevoke.terminal).toBe(true);
-    expect(viaRevoke.showAll).toBe(true);
+    expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
     // defaults when fields absent
     expect(viaRevoke.expectedCount).toBe(0);
     expect(viaRevoke.lastRenderedCount).toBe(0);
@@ -1245,6 +1229,7 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({ Item: { send_id: 's2', confirm_terminal: true } });
     const viaTerminalFlag = await store.getSendRenderState('s2');
     expect(viaTerminalFlag.terminal).toBe(true);
+    expect(viaTerminalFlag.qurlIds).toEqual([]); // absent → [] not undefined
   });
 
   test('getSendRenderState: returns null on missing row / empty sendId', async () => {
@@ -1252,6 +1237,26 @@ describe('qurl sends', () => {
     expect(await store.getSendRenderState('nope')).toBeNull();
     expect(await store.getSendRenderState('')).toBeNull();
     expect(await store.getSendRenderState(undefined)).toBeNull();
+  });
+
+  test('getSendRenderState: self-defends past confirm_expires_at — treats a dead token as absent', async () => {
+    // The bot enforces the interaction token's ~15-min lifetime itself
+    // (the table has no DDB TTL yet), so a row whose confirm_expires_at is
+    // in the past returns null → the fast-path skips, the poll backstop
+    // renders. Without this, a stale token would be re-tried until reaped.
+    const pastSeconds = Math.floor(Date.now() / 1000) - 60;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', interaction_token: 'tok-dead', interaction_app_id: 'app-1', confirm_expires_at: pastSeconds },
+    });
+    expect(await store.getSendRenderState('s1')).toBeNull();
+
+    // A future confirm_expires_at still returns the live state.
+    ddbMock.reset();
+    const futureSeconds = Math.floor(Date.now() / 1000) + 600;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', interaction_token: 'tok-live', interaction_app_id: 'app-1', confirm_expires_at: futureSeconds },
+    });
+    expect((await store.getSendRenderState('s1')).interactionToken).toBe('tok-live');
   });
 
   test('tryAdvanceRenderedCount: monotonic guard — advances up, rejects equal/lower', async () => {
@@ -1300,18 +1305,50 @@ describe('qurl sends', () => {
     expect(input.ConditionExpression).toBeUndefined(); // sticky kill-switch, no guard
   });
 
-  test('setConfirmShowAll: SET show_all_recipients = :v with a coerced boolean', async () => {
+  test('saveSendConfirmState: send-time write SETs all five present fields', async () => {
     ddbMock.on(UpdateCommand).resolves({});
-    await store.setConfirmShowAll('s1', true);
-    let input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.UpdateExpression).toMatch(/SET show_all_recipients = :v/);
-    expect(input.ExpressionAttributeValues[':v']).toBe(true);
+    await store.saveSendConfirmState('s1', {
+      interactionToken: 'tok-live', interactionAppId: 'app-1',
+      expectedCount: 3, confirmBaseMsg: 'Sent to 3 users', confirmExpiresAt: 1234567890,
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1' });
+    expect(input.UpdateExpression).toMatch(/^SET /);
+    // Every present field lands; the placeholder values carry the data.
+    const vals = Object.values(input.ExpressionAttributeValues);
+    expect(vals).toEqual(expect.arrayContaining([
+      'tok-live', 'app-1', 3, 'Sent to 3 users', 1234567890,
+    ]));
+    for (const attr of ['interaction_token', 'interaction_app_id', 'expected_count', 'confirm_base_msg', 'confirm_expires_at']) {
+      expect(input.UpdateExpression).toContain(attr);
+    }
+  });
 
-    ddbMock.reset();
+  test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
+    // THE regression guard: a fixed five-attr SET would write
+    // interaction_token = null when the add caller omits it, permanently
+    // disarming the fast-path (its absent-guard skips on a null token).
+    // Build-from-present-keys must touch ONLY expected_count + confirm_base_msg.
     ddbMock.on(UpdateCommand).resolves({});
-    await store.setConfirmShowAll('s1', 0); // falsy non-bool → coerced false
-    input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.ExpressionAttributeValues[':v']).toBe(false);
+    await store.saveSendConfirmState('s1', {
+      expectedCount: 5, confirmBaseMsg: 'Sent to 5 users',
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('expected_count');
+    expect(input.UpdateExpression).toContain('confirm_base_msg');
+    // The token / app id / TTL attrs must NOT appear in the SET clause at all.
+    expect(input.UpdateExpression).not.toContain('interaction_token');
+    expect(input.UpdateExpression).not.toContain('interaction_app_id');
+    expect(input.UpdateExpression).not.toContain('confirm_expires_at');
+    expect(Object.values(input.ExpressionAttributeValues)).not.toContain(null);
+  });
+
+  test('saveSendConfirmState: no recognized field → no write at all (not an empty SET)', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', {});
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    await store.saveSendConfirmState('s1'); // no fields arg
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
@@ -1346,6 +1383,26 @@ describe('qurl sends', () => {
       expect(rows).toEqual([]);
     }
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  test('getSendItems: projects qurl_id (load-bearing for the view-counter fast-path N)', async () => {
+    // The webhook fast-path maps a send's recipient rows → qurl_ids via
+    // this fn, then counts DISTINCT viewed ids. If the projection ever
+    // drops qurl_id, the fast-path computes qurlIds=[] → N=0 → it never
+    // edits, and EVERY fast-path unit test (which mocks getSendItems to
+    // already carry qurl_id) stays green. This is the one production
+    // dependency the mocks structurally hide — pin it here.
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        send_id: 's1', sender_discord_id: 'owner',
+        resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+        dm_channel_id: 'c1', dm_message_id: 'm1', dm_status: 'sent',
+      }],
+    });
+    const items = await store.getSendItems('s1', 'owner');
+    expect(items).toEqual([expect.objectContaining({
+      resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+    })]);
   });
 
   test('findSendsByQurlId: tolerates DDB returning Count>1 (consumer handles defensively)', async () => {

@@ -224,6 +224,51 @@ async function removeRoleFromMember(guildId, userId, roleId) {
   }
 }
 
+/**
+ * Edit an interaction's original reply via the interaction WEBHOOK token
+ * (no Gateway, no bot-token auth). This is the cross-replica primitive
+ * for the sub-second view counter: the sender's `/qurl send`
+ * confirmation is an ephemeral interaction reply, editable ONLY via its
+ * interaction token (a portable string), so ANY replica that holds the
+ * persisted token can PATCH it — the editing replica need NOT be the one
+ * that created the reply or the one running the in-memory monitor.
+ *
+ * Endpoint: PATCH /webhooks/{application_id}/{token}/messages/@original.
+ * The token in the URL path IS the auth for webhook routes (the bot
+ * token header @discordjs/rest also attaches is ignored here), which is
+ * what makes this work from a replica with no relationship to the
+ * original interaction.
+ *
+ * CAVEAT — token TTL: the interaction token expires ~15 min after the
+ * interaction was created. Past that, Discord returns 401/404
+ * (10015 Unknown Webhook / 50027 Invalid Webhook Token). That's the same
+ * ceiling the in-memory monitor already lives under (it caps at 14 min);
+ * this helper inherits it, it is not a new limitation.
+ *
+ * Returns `{ ok: true }` / `{ ok: false, status, code }` — never throws,
+ * matching editDM so the webhook fast-path can branch on `.ok` and let
+ * the polling backstop cover a transient miss.
+ *
+ * SECURITY: `token` is a live bearer cred — callers MUST NOT log it.
+ */
+async function editInteractionReply(applicationId, token, payload) {
+  try {
+    await client.rest.patch(Routes.webhookMessage(applicationId, token, '@original'), { body: payload });
+    return { ok: true };
+  } catch (err) {
+    // info (not warn) on the expired-token codes — past the ~15-min TTL
+    // this is the EXPECTED terminal state for a long-lived qURL, not an
+    // anomaly; the counter just freezes, which the monitor cap already
+    // accepts. `errorMessage`/`status`/`code` are logged WITHOUT the
+    // token (the URL carrying it is never logged).
+    const expired = err.code === 10015 || err.code === 50027 || err.status === 401 || err.status === 404;
+    logger[expired ? 'info' : 'warn']('editInteractionReply via webhook token failed', {
+      applicationId, status: err.status, code: err.code, expired, errorMessage: err.message,
+    });
+    return { ok: false, status: err.status, code: err.code };
+  }
+}
+
 // TODO(pr-4d): migrate routes/oauth.js + routes/webhooks.js to call
 // these helpers instead of the gateway-cache helpers in src/discord.js.
 // `editDM` is consumed by commands.js's revoke path; `sendDM` /
@@ -236,6 +281,7 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 module.exports = {
   sendDM,
   editDM,
+  editInteractionReply,
   sendChannelMessage,
   addRoleToMember,
   removeRoleFromMember,

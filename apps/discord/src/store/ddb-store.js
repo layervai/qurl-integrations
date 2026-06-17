@@ -1565,12 +1565,6 @@ async function saveSendConfig({
   sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl,
   expiresIn, personalMessage, locationName, attachmentName,
   attachmentContentType, attachmentUrl, selfDestructSeconds,
-  // View-counter render-state fields (feat: cross-replica fast-path).
-  // All optional — the existing /qurl send caller omits them, so they
-  // land absent/null and the row behaves exactly as before. PR-B's
-  // send-pipeline wiring passes them so any replica can rebuild + edit
-  // the sender's "👀 N viewed" confirmation off the monitor.
-  interactionToken, interactionAppId, expectedCount, confirmExpiresAt,
 }) {
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
   await ddb.send(new PutCommand({
@@ -1588,28 +1582,11 @@ async function saveSendConfig({
       attachment_content_type: attachmentContentType ?? null,
       attachment_url: encryptedUrl,
       self_destruct_seconds: selfDestructSeconds ?? null,
-      // SENSITIVE: interaction_token is a live Discord interaction-webhook
-      // bearer cred (~15 min). NEVER log it; the qurl_send_configs row is
-      // logged nowhere as a whole (audited: the qurl.expired/consumed
-      // webhook paths read qurl_sends, not this table, and getSendConfig's
-      // consumers — handleAddRecipients, getRecentSends — read named
-      // fields, never the token). confirm_expires_at is the row's DDB TTL
-      // value so the token self-reaps just past the 14-min monitor cap.
-      // INFRA NOTE: qurl-send-configs has NO TTL attribute configured
-      // today (see scripts/provision-ddb-local.js — the table spec has no
-      // `ttlAttribute`, unlike qurl-views/orphaned-oauth-tokens which use
-      // `expires_at`). For the token to actually self-expire, the
-      // qurl-bot-ddb terraform module + provisioner must enable TimeToLive
-      // on `confirm_expires_at` for this table. Writing the attribute is
-      // harmless until then (DDB ignores a TTL value on a non-TTL table);
-      // it just won't reap. DO NOT change infra from this repo.
-      interaction_token: interactionToken ?? null,
-      interaction_app_id: interactionAppId ?? null,
-      expected_count: expectedCount ?? null,
-      confirm_expires_at: confirmExpiresAt ?? null,
-      // last_rendered_count intentionally absent at write → "0 rendered"
-      // semantics (getSendRenderState defaults it to 0). tryAdvanceRenderedCount
-      // SETs it on the first confirmed edit.
+      // The view-counter render state (interaction_token, expected_count,
+      // confirm_base_msg, confirm_expires_at, confirm_qurl_ids) is written
+      // SEPARATELY by saveSendConfirmState AFTER the initial editReply —
+      // saveSendConfig runs earlier (before the token / confirmMsg /
+      // delivered exist), so it deliberately carries none of those fields.
       created_at: nowIso(),
     },
   }));
@@ -1644,8 +1621,19 @@ async function getSendConfig(sendId, senderDiscordId) {
 // `terminal` is derived (not stored as one flag): the display is dead
 // once the sender revoked (revoked_at) OR a window-close/expired path
 // set confirm_terminal — either way a late fast-path edit must NOT
-// resurrect a live-looking counter. `showAll` reflects the expand/
-// collapse toggle (show_all_recipients), defaulting false.
+// resurrect a live-looking counter. `qurlIds` is the send's full set of
+// minted qurl_ids (persisted on this row so the fast-path counts views
+// from a single GetItem, with no extra recipient-row Query).
+//
+// EXPIRY SELF-DEFENSE: the qurl_send_configs table has no DDB TTL on
+// confirm_expires_at yet (that needs a qurl-bot-ddb terraform change —
+// see saveSendConfirmState). So the bot enforces the token's lifetime
+// itself: once `now > confirm_expires_at` we treat the render state as
+// absent (return null), so the fast-path stops trusting an
+// interaction_token past its ~15-min Discord TTL regardless of whether
+// the row has been physically reaped. This decouples the feature from
+// the cross-repo TTL change — at worst a dead token lingers at rest, but
+// the bot never reads it.
 async function getSendRenderState(sendId) {
   if (typeof sendId !== 'string' || sendId.length === 0) return null;
   const res = await ddb.send(new GetCommand({
@@ -1654,17 +1642,22 @@ async function getSendRenderState(sendId) {
   }));
   const row = res.Item;
   if (!row) return null;
+  // Past the confirm window the interaction token is dead (Discord
+  // rejects it); treat the whole render state as absent so the fast-path
+  // skips and the poll backstop is the sole renderer.
+  if (typeof row.confirm_expires_at === 'number' && Math.floor(Date.now() / 1000) > row.confirm_expires_at) {
+    return null;
+  }
   return {
-    // SENSITIVE: a live Discord bearer cred (~15 min), TTL'd via
-    // confirm_expires_at. NEVER log this value — callers use it only as
-    // the editReply credential.
+    // SENSITIVE: a live Discord bearer cred (~15 min). NEVER log this
+    // value — callers use it only as the editReply credential.
     interactionToken: row.interaction_token ?? null,
     interactionAppId: row.interaction_app_id ?? null,
     expectedCount: row.expected_count ?? 0,
     lastRenderedCount: row.last_rendered_count ?? 0,
     baseMsg: row.confirm_base_msg ?? undefined,
+    qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
     terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
-    showAll: row.show_all_recipients === true,
   };
 }
 
@@ -1712,16 +1705,58 @@ async function markConfirmTerminal(sendId) {
   }));
 }
 
-// Persists the recipient-list expand/collapse choice for the fast-path
-// renderer (PR-B's Show/Hide Recipients toggle handler) so a re-render
-// from any replica honors the last toggle. Plain SET — last write wins,
-// which matches a user toggling: the most recent click is the truth.
-async function setConfirmShowAll(sendId, showAll) {
+// Persists the cross-replica fast-path's render state onto the
+// qurl_send_configs row AFTER the initial confirmation editReply has
+// landed (the send-pipeline calls saveSendConfig EARLIER, before
+// confirmMsg / delivered / the interaction token exist, so this is a
+// SEPARATE write rather than more optional args on saveSendConfig).
+//
+// PARTIAL UPDATE BY DESIGN — the SET clause is built from ONLY the keys
+// the caller actually passed (anything `=== undefined` is skipped). Two
+// callers with different field sets share this fn safely:
+//   - send-time wires the full set (interactionToken, interactionAppId,
+//     expectedCount, confirmBaseMsg, confirmExpiresAt, confirmQurlIds) to
+//     arm the fast-path; and
+//   - /qurl add re-persists ONLY expectedCount + confirmBaseMsg +
+//     confirmQurlIds to track the new totals + newly-minted links.
+// A fixed five-attribute SET would let the add caller's omitted
+// interactionToken land as null and PERMANENTLY disarm the fast-path
+// (its absent-guard skips on a null token). Building the clause from the
+// present keys is what keeps the add re-persist from clobbering the live
+// token. No-op (no write) when no recognized field is present.
+//
+// SECURITY: interactionToken is a live Discord interaction-webhook bearer
+// cred (~15 min, TTL'd via confirm_expires_at). NEVER log it — this fn
+// writes it but never logs, and the field name is the only thing that
+// ever appears in a log.
+async function saveSendConfirmState(sendId, {
+  interactionToken, interactionAppId, expectedCount, confirmBaseMsg, confirmExpiresAt, confirmQurlIds,
+} = {}) {
+  // Map of attribute → provided value, keeping only the keys the caller
+  // actually passed so an omitted field is left untouched (never nulled).
+  const fields = {
+    interaction_token: interactionToken,
+    interaction_app_id: interactionAppId,
+    expected_count: expectedCount,
+    confirm_base_msg: confirmBaseMsg,
+    confirm_expires_at: confirmExpiresAt,
+    confirm_qurl_ids: confirmQurlIds,
+  };
+  const sets = [];
+  const values = {};
+  let i = 0;
+  for (const [attr, val] of Object.entries(fields)) {
+    if (val === undefined) continue;
+    const placeholder = `:v${i++}`;
+    sets.push(`${attr} = ${placeholder}`);
+    values[placeholder] = val;
+  }
+  if (sets.length === 0) return;
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
-    UpdateExpression: 'SET show_all_recipients = :v',
-    ExpressionAttributeValues: { ':v': Boolean(showAll) },
+    UpdateExpression: `SET ${sets.join(', ')}`,
+    ExpressionAttributeValues: values,
   }));
 }
 
@@ -1757,6 +1792,12 @@ async function getSendItems(sendId, senderDiscordId) {
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,
+    // qurl_id is the sparse GSI hash key (recordQURLSendBatch writes it
+    // only when the mint surfaced one). Projected here so the webhook
+    // fast-path can map a send's recipient rows → its tracked qurl_ids
+    // and count DISTINCT viewed links. Legacy / non-guild sends omit it
+    // (undefined); the fast-path filters falsy before the views BatchGet.
+    qurl_id: item.qurl_id,
     // dm_channel_id / dm_message_id are written by markSendDMDelivered
     // after a successful sendDM; legacy rows predating that wire-up
     // have them unset, in which case the revoke path skips the DM
@@ -2202,7 +2243,8 @@ module.exports = {
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   markConsumedDMEdited, clearConsumedDMEdited,
   // View-counter render state (cross-replica fast-path, PR-B)
-  getSendRenderState, tryAdvanceRenderedCount, markConfirmTerminal, setConfirmShowAll,
+  saveSendConfirmState,
+  getSendRenderState, tryAdvanceRenderedCount, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

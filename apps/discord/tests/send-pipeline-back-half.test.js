@@ -139,6 +139,10 @@ const mockDb = {
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
+  // Cross-replica fast-path render-state persist (PR-B). Default resolves
+  // so the send pipeline's best-effort call is a no-op in tests that
+  // don't assert on it.
+  saveSendConfirmState: jest.fn().mockResolvedValue(undefined),
   // qurl_views webhook-fed reader. Default is an empty Map so a test
   // that doesn't override gets the "no views yet" path. Per-test
   // mockResolvedValueOnce drives the status-transition assertions.
@@ -443,8 +447,12 @@ describe('monitorLinkStatus — early-poll latency (long-expiry sends tick withi
   // 30m expiry is load-bearing: at the old code's steady interval this
   // is 60s, so advancing only ~20s would read 0 — that's the regression
   // this test guards. (A short '1m' expiry already polled at 15s, so it
-  // would not exercise the bug.)
-  it('a view recorded seconds after a 30m-expiry send is reflected within seconds, not ~60s', async () => {
+  // would not exercise the bug.) PR-B relaxed the early ramp from 5s to
+  // ~15s (the fast-path now owns sub-second latency; the poll is a
+  // backstop), so the early backstop catches the view by ~18s here — far
+  // inside the 90s early window and far short of the 60s steady interval
+  // the regression would impose.
+  it('a view recorded seconds after a 30m-expiry send is reflected within ~15s, not ~60s', async () => {
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-latency', interaction,
@@ -463,9 +471,10 @@ describe('monitorLinkStatus — early-poll latency (long-expiry sends tick withi
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: true }],
     ]));
 
-    // Advance well short of the old 60s steady interval. The dense
-    // early phase must have caught the view by now.
-    await jest.advanceTimersByTimeAsync(15000);
+    // Advance into the early window (next tick at ~18s) but well short of
+    // the old 60s steady interval. The early backstop must have caught the
+    // view by now — a flat-60s regression would still read 0.
+    await jest.advanceTimersByTimeAsync(20000);
 
     expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
@@ -527,12 +536,14 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
     monitor.stop();
   });
 
-  it('polls densely (~5s) during the early window, then decays to the steady interval', async () => {
-    // 30m expiry → steady interval = 60s; early phase = every 5s for the
-    // first 90s. Pins both halves of the ramp: dense early so a view
-    // renders within seconds, then sparse so an idle monitor isn't a
-    // sustained DDB cost. (The early-poll-latency describe above pins
-    // the user-visible render; this pins the cadence shape.)
+  it('polls modestly (~15s) during the early window, then decays to the steady interval', async () => {
+    // 30m expiry → steady interval = 60s; early phase = every ~15s for the
+    // first 90s. PR-B relaxed #839's 5s dense ramp to this modest 15s one
+    // because the webhook fast-path now owns sub-second latency and the
+    // poll is purely a backstop. Pins both halves of the ramp: a ~15s
+    // early backstop floor, then the sparse 60s steady interval so an idle
+    // monitor isn't a sustained DDB cost. (The early-poll-latency describe
+    // above pins the user-visible render; this pins the cadence shape.)
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
@@ -544,16 +555,24 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
     await jest.advanceTimersByTimeAsync(3000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
 
-    // Dense early phase: ~3 more ticks over the next 15s (at 8s, 13s, 18s).
-    await jest.advanceTimersByTimeAsync(15000);
+    // Modest early phase: ~15s spacing → ticks at 18s, 33s, 48s over the
+    // next 45s (3 more on top of the 3s tick). Floor-bound assertion so
+    // the exact boundary count isn't brittle; the point is the early
+    // phase still ticks several times within the window (a regression to
+    // the flat 60s steady would yield 0 more here).
+    await jest.advanceTimersByTimeAsync(45000);
     const callsAfterEarly = mockDb.getQurlViews.mock.calls.length;
-    expect(callsAfterEarly).toBeGreaterThanOrEqual(4);
+    expect(callsAfterEarly).toBeGreaterThanOrEqual(3);
 
     // After the 90s early window, cadence decays to the 60s steady
-    // interval: a 30s advance well past the window yields no new tick.
+    // interval. Drain past earlyPhaseUntil so the last early tick (~93s)
+    // has rescheduled at the 60s steady delay; a SHORT advance then yields
+    // no new tick (we're well inside that 60s gap), proving the decay.
+    // (A larger advance would cross the steady tick and false-fail — the
+    // point is the cadence widened, not that it stopped.)
     await jest.advanceTimersByTimeAsync(90000); // past earlyPhaseUntil; drains remaining early ticks
     const callsAtWindowEnd = mockDb.getQurlViews.mock.calls.length;
-    await jest.advanceTimersByTimeAsync(30000); // 30s < 60s steady interval
+    await jest.advanceTimersByTimeAsync(10000); // 10s ≪ 60s steady interval
     expect(mockDb.getQurlViews.mock.calls.length).toBe(callsAtWindowEnd);
     monitor.stop();
   });
@@ -2158,7 +2177,7 @@ describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     mockTime.expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs failure'); });
 
     await expect(handleAddRecipients(
@@ -2183,7 +2202,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
 
     const result = await handleAddRecipients(
@@ -2504,7 +2523,7 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
   it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
     const interaction = makeInteraction({ guildId: 'guild-1' });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -2518,6 +2537,92 @@ describe('executeSendPipeline — guild_id threading (#1101)', () => {
     // Every persisted row carried the guild for the detect read-path filter.
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+    );
+  });
+});
+
+// ===========================================================================
+// Cross-replica view-counter fast-path render-state persist (feat #60, PR-B)
+// ===========================================================================
+//
+// After the initial confirmation editReply, executeSendPipeline persists
+// the render state (token + appId + expectedCount + collapsed baseMsg +
+// TTL) so the webhook receiver can edit the counter from any replica.
+// These pin (a) the send-time persist carries the live token + the
+// COLLAPSED base (not getFullMsg's counter line), and (b) the /qurl add
+// re-persist updates ONLY count + base and NEVER nulls the token — the
+// silent regression that would permanently disarm the fast-path after a
+// single /qurl add.
+describe('executeSendPipeline — view-counter fast-path render-state persist', () => {
+  it('persists token + appId + collapsed baseMsg + expected_count after editReply', async () => {
+    const interaction = makeInteraction({
+      token: 'interaction-tok-live', applicationId: 'app-123', guildId: 'guild-1',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockDb.saveSendConfirmState).toHaveBeenCalledTimes(1);
+    const [sendId, fields] = mockDb.saveSendConfirmState.mock.calls[0];
+    expect(typeof sendId).toBe('string');
+    expect(fields.interactionToken).toBe('interaction-tok-live');
+    expect(fields.interactionAppId).toBe('app-123');
+    expect(fields.expectedCount).toBe(1);
+    // The COLLAPSED base — the "Sent to N users | Expires…" header, NOT a
+    // string carrying the "👀 …" counter line (which would double-stamp
+    // when the fast-path re-renders through renderViewCounter).
+    expect(typeof fields.confirmBaseMsg).toBe('string');
+    expect(fields.confirmBaseMsg).toContain('Sent to 1 user');
+    expect(fields.confirmBaseMsg).not.toContain('👀');
+    // TTL is epoch seconds in the future (token self-reaps just past cap).
+    expect(fields.confirmExpiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  });
+
+  it('does NOT arm the fast-path on a view-counter-degraded send (link missing qurl_id)', async () => {
+    // A degraded send (any link without a qurl_id) renders the BARE
+    // baseMsg with no counter — the fast-path can't see the degrade and
+    // would stamp a forbidden partial-attribution "N viewed", so the
+    // send-time gate must skip persisting the render-state entirely.
+    const interaction = makeInteraction({ token: 'tok-live', applicationId: 'app-123', guildId: 'guild-1' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    // Mint returns a link WITHOUT qurl_id → qurlLinks[i].qurlId undefined → degraded.
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockDb.saveSendConfirmState).not.toHaveBeenCalled();
+  });
+
+  it('skips the persist when no interaction token is present (legacy/worker w/o token)', async () => {
+    const interaction = makeInteraction({ token: undefined, applicationId: 'app-123' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockDb.saveSendConfirmState).not.toHaveBeenCalled();
+  });
+
+  it('a send-time persist failure is logged-swallowed, not thrown (DMs already delivered)', async () => {
+    const interaction = makeInteraction({ token: 'tok', applicationId: 'app-123' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    mockDb.saveSendConfirmState.mockRejectedValueOnce(new Error('ddb throttle'));
+
+    // Must not reject — the send already delivered.
+    await expect(executeSendPipeline(interaction, makePipelineParams())).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('saveSendConfirmState failed'),
+      expect.objectContaining({ error: 'ddb throttle' }),
     );
   });
 });
