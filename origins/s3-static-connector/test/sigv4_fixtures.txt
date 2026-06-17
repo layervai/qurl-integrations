@@ -15,6 +15,11 @@
 # so the exotic rows are forward-looking coverage for the eventual frozen,
 # published image, not load-bearing for the pilot.
 #
+# Hard reuse gate: before a consumer uses this image for object keys outside
+# the simple static-site key contract, close GitHub issue #854 with real-S3
+# soak evidence or equivalent SigV4 canonical-request verification, then update
+# the README support contract below.
+#
 # request-path            -> expected S3 key path Envoy signs & sends   [status]
 
 /                         -> /index.html                                [behavior]

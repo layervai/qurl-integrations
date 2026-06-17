@@ -82,7 +82,8 @@ that the protected dashboards never emit.
 The CI-backed key contract is for simple static-site object paths using
 letters, numbers, dots, underscores, hyphens, and slashes. Object keys that
 need percent-encoding (spaces, non-ASCII bytes, literal `%2F`, etc.) stay in
-the staging-soak bucket before this image is reused for such keyspaces.
+the staging-soak bucket before this image is reused for such keyspaces. Treat
+the SigV4 exotic-key soak as a hard reuse gate, tracked in GitHub issue #854.
 
 Successful responses pass through the object's `Content-Type` and `Cache-Control`
 verbatim. These security headers are set on **every** response (200/404/405/5xx):

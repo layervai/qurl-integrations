@@ -191,7 +191,7 @@ removed=$(printf '%s\n' "$purge_report" | cache_removed)
 after_entries=$(cache_entries)
 expect_eq "full purge leaves no cache files" "$after_entries" 0
 [ "$removed" -ge 1 ] && ok "full purge removes at least one cache file" || no "full purge removed '$removed' files, want >= 1"
-curl -s -o /dev/null "$base/metrics.json?_t=11"
+curl -s -o /dev/null "$base/metrics.json?_t=13"
 expect_stub_gets "metrics upstream GETs after full cache purge" 'GET /metrics.json ' 3
 
 # 6d. Missing keys are not negative-cached. OSS nginx file-based cache purges
