@@ -13,7 +13,6 @@ IMG="${IMG:-s3-static-connector:test}"
 NET="s3-static-connector-testnet"
 STUB="s3-static-connector-stub"
 ORIGIN="s3-static-connector-app"
-HOSTPORT=18080
 arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) ;; esac
 PLATFORM="${PLATFORM:-linux/$arch}"
 TMPROOT="${TMPDIR:-/tmp}"
@@ -27,6 +26,11 @@ cleanup() {
 }
 trap cleanup EXIT
 cleanup
+
+origin_base_url() {
+  port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}' "$ORIGIN")"
+  printf 'http://localhost:%s\n' "$port"
+}
 
 set -e
 if [ "${SKIP_BUILD:-false}" = "true" ]; then
@@ -49,18 +53,18 @@ docker run -d --name "$STUB" --network "$NET" \
   -v "$DIR/test/stub-s3/stub.py:/stub.py:ro" \
   python:3.12-slim python /stub.py >/dev/null
 
-docker run -d --name "$ORIGIN" --network "$NET" -p "$HOSTPORT:8080" \
+docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
   -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
   -e CACHE_CONNECTOR_ID=stats-connector -e CACHE_REPLICA_ID=origin-a \
   -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
   -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
   "$IMG" >/dev/null
+base="$(origin_base_url)"
 # Assertion commands below need to collect and report failures instead of
 # aborting on the first mismatch.
 set +e
 
-base="http://localhost:$HOSTPORT"
 ready=0
 for _ in $(seq 1 40); do
   if [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" = "200" ]; then ready=1; break; fi
@@ -236,7 +240,7 @@ expect_eq "Range body (cached)" "$(cat "$B")" "0123"
 
 # 14. S3_PREFIX is joined with the clean-URL path at runtime.
 docker rm -f "$ORIGIN" >/dev/null 2>&1
-docker run -d --name "$ORIGIN" --network "$NET" -p "$HOSTPORT:8080" \
+docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 -e S3_PREFIX=site \
   -e CACHE_DEFAULT_TTL=60s \
   -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
@@ -244,6 +248,7 @@ docker run -d --name "$ORIGIN" --network "$NET" -p "$HOSTPORT:8080" \
   -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
   -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
   "$IMG" >/dev/null
+base="$(origin_base_url)"
 
 ready=0
 for _ in $(seq 1 40); do
