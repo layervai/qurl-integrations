@@ -2,6 +2,7 @@ const { QurlClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
+const { PLACEHOLDER_SENTINEL } = require('./boot-requirements');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -15,6 +16,9 @@ const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 const ALLOWED_DETECT_TARGET_HOST_SUFFIXES = [
+  // TODO(upstream-contract): qurl-service resolve() returns qURL-hosted
+  // tunnel targets for detect tokens minted with target_path=/api/detect.
+  // Keep this allowlist in lockstep with that resolver contract.
   '.qurl.site',
   '.qurl.link',
 ];
@@ -482,17 +486,22 @@ function assertPublicHttpsTarget(targetUrl) {
   if (parsed.username || parsed.password) {
     throw new Error('Detect tunnel target must not contain userinfo');
   }
-  if (isPrivateHost(parsed.hostname)) {
+  const hostname = parsed.hostname.replace(/\.$/, '').toLowerCase();
+  if (isPrivateHost(hostname)) {
     throw new Error('Detect tunnel target points to a private/internal address');
   }
-  const hostname = parsed.hostname.replace(/\.$/, '').toLowerCase();
   if (!ALLOWED_DETECT_TARGET_HOST_SUFFIXES.some(suffix => hostname.endsWith(suffix))) {
     throw new Error('Detect tunnel target host is not an allowed qURL tunnel host');
   }
   // Node normalizes explicit https :443 to an empty port; allow both shapes so
-  // the intent survives parser/refactor differences.
+  // the intent survives parser/refactor differences. qURL resource hosts are
+  // bare default-443 https URLs; a non-default port would point at a different
+  // service than the tunnel resource.
   if (
     (parsed.port !== '' && parsed.port !== '443')
+    // TODO(upstream-contract): qurl-service detect tokens are minted with
+    // target_path=/api/detect. Update this guard with that service if the
+    // tunnel path changes.
     || parsed.pathname !== '/api/detect'
     || parsed.search
     || parsed.hash
@@ -515,14 +524,16 @@ function assertPublicHttpsTarget(targetUrl) {
  * leave less grant time, which is still preferable to double-knocking a burst.
  *
  * @returns {Promise<string>} the SSRF-validated public https target_url.
- * @throws if DETECT_ACCESS_TOKEN is unset, or the resolved target fails the
- *   public-https SSRF guard.
+ * @throws if QURL_API_KEY / DETECT_ACCESS_TOKEN is unset or still the
+ *   placeholder sentinel, or the resolved target fails the public-https SSRF
+ *   guard.
  */
 async function resolveDetectTarget() {
   const token = config.DETECT_ACCESS_TOKEN?.trim();
+  const qurlApiKey = config.QURL_API_KEY?.trim();
   const missingResolveKeys = [];
-  if (!token) missingResolveKeys.push('DETECT_ACCESS_TOKEN');
-  if (!config.QURL_API_KEY?.trim()) missingResolveKeys.push('QURL_API_KEY');
+  if (!qurlApiKey || qurlApiKey === PLACEHOLDER_SENTINEL) missingResolveKeys.push('QURL_API_KEY');
+  if (!token || token === PLACEHOLDER_SENTINEL) missingResolveKeys.push('DETECT_ACCESS_TOKEN');
   if (missingResolveKeys.length === 1) {
     throw new Error(`${missingResolveKeys[0]} is not configured (required to resolve the detect tunnel target)`);
   }

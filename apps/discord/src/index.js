@@ -419,10 +419,18 @@ if (mapCommandMissing.length > 0) {
 
 const detectCommandMissing = missingDetectCommandKeys(config);
 if (detectCommandMissing.length > 0) {
+  const detectRemediation = [];
+  if (detectCommandMissing.includes('QURL_API_KEY')) {
+    detectRemediation.push('Seed QURL_API_KEY with a qurl:resolve-capable service credential.');
+  }
+  if (detectCommandMissing.includes('DETECT_ACCESS_TOKEN')) {
+    detectRemediation.push(
+      'Seed /qurl-bot-discord/DETECT_ACCESS_TOKEN with a multi-use at_ token minted for target_path=/api/detect.'
+    );
+  }
   logger.error(
     `DETECT_COMMAND_ENABLED=true but ${detectCommandMissing.join(', ')} is missing or still the literal "${PLACEHOLDER_SENTINEL}" sentinel. ` +
-    'Seed QURL_API_KEY with a qurl:resolve-capable service credential and seed ' +
-    '/qurl-bot-discord/DETECT_ACCESS_TOKEN with a multi-use at_ token minted for target_path=/api/detect before re-flipping the toggle.'
+    `${detectRemediation.join(' ')} Re-flip the toggle only after the missing values are seeded.`
   );
   process.exit(1);
 }

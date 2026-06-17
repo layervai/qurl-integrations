@@ -755,7 +755,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('reports both resolve credentials when DETECT_ACCESS_TOKEN and QURL_API_KEY are unset', async () => {
+    it('reports both resolve credentials when QURL_API_KEY and DETECT_ACCESS_TOKEN are unset', async () => {
       jest.resetModules();
       mockResolve.mockReset();
       jest.doMock('../src/config', () => ({
@@ -768,7 +768,26 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       globalThis.fetch = fetchSpy;
       await expect(
         connectorNoResolveSecrets.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
-      ).rejects.toThrow(/DETECT_ACCESS_TOKEN, QURL_API_KEY are not configured/);
+      ).rejects.toThrow(/QURL_API_KEY, DETECT_ACCESS_TOKEN are not configured/);
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('treats PLACEHOLDER resolve credentials as unset at runtime', async () => {
+      jest.resetModules();
+      mockResolve.mockReset();
+      jest.doMock('../src/config', () => ({
+        CONNECTOR_URL: 'https://connector.test.local',
+        QURL_ENDPOINT: 'https://api.test.local',
+        QURL_API_KEY: 'PLACEHOLDER',
+        DETECT_ACCESS_TOKEN: 'PLACEHOLDER',
+      }));
+      const connectorPlaceholderResolveSecrets = require('../src/connector');
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connectorPlaceholderResolveSecrets.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/QURL_API_KEY, DETECT_ACCESS_TOKEN are not configured/);
       expect(mockResolve).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
     });
@@ -786,6 +805,15 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         'Detect tunnel target rejected by SSRF guard',
         expect.objectContaining({ error: expect.stringMatching(/private\/internal/) }),
       );
+    });
+
+    it('SSRF guard: a trailing-dot private resolved target_url throws and NO POST happens', async () => {
+      const get = captureDetect({ detected: false }, { target: 'https://127.0.0.1./api/detect' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/private\/internal/);
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
     });
 
     it('SSRF guard: a non-https resolved target_url throws and NO POST happens', async () => {
