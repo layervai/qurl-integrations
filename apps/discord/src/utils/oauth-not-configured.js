@@ -7,7 +7,6 @@
 // would tell a probing attacker which secret an operator hasn't
 // shipped yet. This module is the single source of truth for the
 // wire-vs-log split so the two routers can't drift on it.
-const { renderPage } = require('../templates/page');
 const logger = require('../logger');
 
 /**
@@ -32,7 +31,7 @@ function renderNotConfiguredPage(res, surface, reason) {
     : 'The Auth0 application for the qURL Discord bot has not been registered yet. '
       + 'Run /qurl setup again later, or contact your layerv.ai admin.';
 
-  return res.status(503).send(renderPage({
+  return res.status(503).send(res.renderPage({
     title: 'qURL Setup Not Configured',
     icon: '⚠️',
     heading: 'qURL setup is not configured yet',
