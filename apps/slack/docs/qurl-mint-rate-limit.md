@@ -38,4 +38,4 @@ The first request in a new window resets the same item to `mint_count = 1` under
 
 ## Tradeoffs
 
-This is a fixed-window limiter rather than a true sliding-window token bucket. The pre-pivot enforcement was also hour-window shaped, and the operational property that matters for GA is cross-task persistence. Counter keys are hashed so raw Slack user IDs are not embedded in DynamoDB keys.
+This is a fixed-window limiter rather than a true sliding-window token bucket. The pre-pivot enforcement was also hour-window shaped, and the operational property that matters for GA is cross-task persistence. Counter keys are hashed so raw Slack user IDs are not embedded in DynamoDB keys. Native TTL cleanup for inactive counter rows is tracked in layervai/qurl-integrations-infra#1225.

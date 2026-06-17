@@ -277,8 +277,8 @@ func getTokenCommandBody(teamID, triggerID, responseURL string) string {
 // against the resource-scoped endpoint. Used by the async-infra tests
 // in this file, which construct their *Handler with a bespoke Config
 // (custom pool size, retry, or BaseContext) and so can't share
-// newAdminTestHandler. The rate-limit gate is a stubbed always-allow
-// (slackdata.CheckRateLimit), so no rate-limit seed is needed.
+// newAdminTestHandler. CheckRateLimit materializes its own counter
+// item on first mint, so no rate-limit seed is needed.
 func seedGetAliasBinding(t *testing.T, h *Handler, teamID string) {
 	t.Helper()
 	names := defaultTestTableNames()

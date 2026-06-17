@@ -32,11 +32,9 @@ const noChannelAliasesMessage = ":mag: No aliases are configured for this channe
 //
 // TODO: rate-limit. /qurl aliases costs one DDB GetItem plus one
 // ListResources page per invocation (constant, no longer amplified by
-// the channel's alias count). A user can still spam the verb; the
-// in-bot rate-limit gate (slackdata.CheckRateLimit) is a stub today
-// for /qurl get, and once it lands the same gate should cover /qurl
-// aliases. Tracked alongside the /qurl get rate-limit TODO in
-// SLACK_QURL_ROLLOUT.md.
+// the channel's alias count). A user can still spam the verb; if that
+// becomes a real cost problem, add an aliases-specific gate rather than
+// reusing the mint quota enforced by slackdata.CheckRateLimit.
 func (h *Handler) handleAliases(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "aliases", values, func(ctx context.Context, log *slog.Logger) {
 		h.processAliases(ctx, log, values)
