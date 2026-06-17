@@ -97,6 +97,12 @@ stub_get_count() {
 ok() { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
 no() { fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else no "$1 (got '$2', want '$3')"; fi; }
+expect_contains() {
+  case "$2" in
+    *"$3"*) ok "$1" ;;
+    *) no "$1 (missing substring '$3' in '$2')" ;;
+  esac
+}
 expect_security_headers() {
   label="$1"
   expect_eq "HSTS ($label)" "$(hval Strict-Transport-Security)" "max-age=31536000; includeSubDomains"
@@ -117,6 +123,16 @@ expect_stub_gets() {
   done
   expect_eq "$label" "$got" "$want"
 }
+
+# 0. Runtime cachectl JSON escaping matches the host-side unit contract. This
+# catches awk implementation drift between CI hosts and the container image.
+special_replica="$(printf 'origin-a\tline\nnext\bback\fpage\abel\rcr')"
+status_json=$(docker exec \
+  -e CACHE_CONNECTOR_ID='stats"quoted\slash' \
+  -e CACHE_REPLICA_ID="$special_replica" \
+  "$ORIGIN" qurl-origin-cachectl status)
+expect_contains "runtime status escapes connector metadata" "$status_json" '"connector_id":"stats\"quoted\\slash"'
+expect_contains "runtime status escapes replica metadata" "$status_json" '"replica_id":"origin-a\tline\nnext\bback\fpage\u0007bel\rcr"'
 
 # 1. root -> index
 code=$(curl -s -o "$B" -w '%{http_code}' "$base/"); expect_eq "GET / status" "$code" 200

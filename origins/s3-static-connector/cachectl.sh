@@ -44,13 +44,18 @@ json_escape() {
       if (NR > 1) {
         printf "\\n"
       }
-      gsub(/\\/, "\\\\")
-      gsub(/"/, "\\\"")
-      for (i = 1; i < 32; i++) {
-        control = sprintf("%c", i)
-        gsub(control, escaped[control])
+      for (pos = 1; pos <= length($0); pos++) {
+        c = substr($0, pos, 1)
+        if (c == "\\") {
+          printf "%s", "\\\\"
+        } else if (c == "\"") {
+          printf "%s", "\\\""
+        } else if (c in escaped) {
+          printf "%s", escaped[c]
+        } else {
+          printf "%s", c
+        }
       }
-      printf "%s", $0
     }
   '
 }

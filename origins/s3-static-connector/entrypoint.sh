@@ -22,7 +22,10 @@ if [ -z "${AWS_REGION:-}" ]; then
       'http://169.254.169.254/latest/meta-data/placement/region' 2>/dev/null || true)"
   fi
 fi
-export AWS_REGION
+if [ -n "${AWS_REGION:-}" ] && [ -z "${AWS_DEFAULT_REGION:-}" ]; then
+  AWS_DEFAULT_REGION="$AWS_REGION"
+fi
+export AWS_REGION AWS_DEFAULT_REGION
 
 mkdir -p /tmp/s3cache /tmp/client_body /tmp/proxy_temp
 
