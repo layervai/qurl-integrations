@@ -68,10 +68,9 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
 // FUTURE. Rendering it through Discord's relative-time marker (as the
 // expired payload does) would read "expired in 25 minutes" — a
 // future-tense "expired", exactly the confusing state this whole change
-// kills. Static copy is the fix: it says "you opened it, it's done"
-// without any time anchor that could re-render future-tense. (A
-// `<t:now:R>` "opened just now" anchor is possible but adds nothing —
-// the recipient just clicked, they know when.)
+// kills. Static copy is the fix: no time anchor that could re-render
+// future-tense. (This is the single canonical home for the marker-free
+// rationale; the route + test comments point here.)
 //
 // UX choices (whole-embed replacement, QURL_BRAND color, `components: []`
 // to clear the now-dead Step Through button) mirror buildExpiredDMPayload
