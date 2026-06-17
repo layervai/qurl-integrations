@@ -488,12 +488,12 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
       return ORPHAN_FILTER_RESULTS.NO_MATCH;
     }
     // From here on: host + path + description all match (a "candidate").
-    // Liveness gate decides match vs near-miss. `failure_count` is
-    // checked as `typeof === 'number'` so an unparseable / missing
-    // field is classified as NEAR_MISS_LIVENESS, not MATCH — the row
-    // is held back from deletion (fail-closed) but is still counted
-    // toward `nearMissCount` so the schema-drift case surfaces in the
-    // observability log, rather than silently disappearing into NO_MATCH.
+    // Liveness gate decides match vs near-miss. Both checks below
+    // route an unparseable / missing field to NEAR_MISS_LIVENESS
+    // (not MATCH) — the row is held back from deletion (fail-closed)
+    // but is still counted toward `nearMissCount` so the schema-drift
+    // case surfaces in the observability log, rather than silently
+    // disappearing into NO_MATCH.
     if (s.last_delivery_success !== false) return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
     // Number.isFinite (not typeof === 'number') because NaN is
     // typeof 'number' AND NaN < anything is false — a NaN failure_count
