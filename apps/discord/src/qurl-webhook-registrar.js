@@ -535,11 +535,29 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
 // (old sub undeleted) — strictly worse than the orphan-only state we
 // started in.
 //
-// Every non-404 outcome (transient 5xx, persistent 4xx, gateway timeout)
-// is logged + skipped identically; we deliberately don't alarm-tier-
-// differentiate here. A repeating log line on the same orphan IS the
-// signal (CloudWatch alarm pattern on `URL-migration orphan delete
-// failed`). Sequential DELETEs because orphan counts are typically 0-1.
+// Failure-class semantics:
+//   - 5xx + network errors: log at ERROR, retry on next invocation
+//     (transient; CloudWatch alarm pattern on the error line catches
+//     a sustained problem).
+//   - 4xx (other than 404): log at WARN once per (webhook_id, status)
+//     pair per process lifetime, then suppress further attempts'
+//     identical log lines. The bot path (`guild-webhook-link.js`)
+//     runs many times per day across N replicas; without this dedupe
+//     a permanently-undeletable orphan (e.g. 403 if the API key
+//     loses delete scope on that resource) would emit an error line
+//     every guild-link forever, drowning the signal. The DELETE
+//     itself is still attempted on every invocation (idempotent;
+//     the next boot's API key MAY have different scope, or the
+//     resource state MAY change) — only the log is suppressed.
+//   - 404: classified as `DELETE_OUTCOMES.ALREADY_ABSENT` upstream in
+//     `deleteSubscription`, surfaced as the "already absent" log line.
+//
+// Sequential DELETEs because orphan counts are typically 0-1; parallel
+// would buy nothing and hurt per-orphan log isolation.
+const persistentClientErrorSuppressionCache = new Set();
+function isClientError(status) {
+  return typeof status === 'number' && status >= 400 && status < 500 && status !== 404;
+}
 async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
   for (const orphan of orphans) {
     try {
@@ -560,15 +578,41 @@ async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
         last_delivery_success: orphan.last_delivery_success,
       });
     } catch (err) {
-      logger.error('URL-migration orphan delete failed (continuing — next invocation retries)', {
-        old_url: orphan.url,
-        webhook_id: orphan.webhook_id,
-        error: err.message,
-        status: err.status,
-        op: err.op,
-      });
+      // Persistent client error (4xx other than 404): log once per
+      // (webhook_id, status) per process to avoid drowning the signal
+      // on the bot path where the sweep runs many times/day. 5xx and
+      // network errors log every time (transient → repeating is the
+      // signal).
+      if (isClientError(err.status)) {
+        const cacheKey = `${orphan.webhook_id}:${err.status}`;
+        if (!persistentClientErrorSuppressionCache.has(cacheKey)) {
+          persistentClientErrorSuppressionCache.add(cacheKey);
+          logger.warn('URL-migration orphan delete failed with persistent 4xx (subsequent identical attempts suppressed this process)', {
+            old_url: orphan.url,
+            webhook_id: orphan.webhook_id,
+            error: err.message,
+            status: err.status,
+            op: err.op,
+          });
+        }
+      } else {
+        logger.error('URL-migration orphan delete failed (continuing — next invocation retries)', {
+          old_url: orphan.url,
+          webhook_id: orphan.webhook_id,
+          error: err.message,
+          status: err.status,
+          op: err.op,
+        });
+      }
     }
   }
+}
+
+// Test seam — the persistent-4xx suppression cache is process-scoped
+// (module-level Set), so unit tests that exercise the suppression
+// across multiple invocations need a way to reset between cases.
+function _resetUrlMigrationOrphanDeleteSuppressionCache() {
+  persistentClientErrorSuppressionCache.clear();
 }
 
 // Pick a deterministic survivor across replicas so two replicas racing
@@ -970,5 +1014,6 @@ module.exports = {
     cleanupUrlMigrationOrphans,
     ORPHAN_FILTER_RESULTS,
     URL_MIGRATION_ORPHAN_MIN_FAILURES,
+    _resetUrlMigrationOrphanDeleteSuppressionCache,
   },
 };

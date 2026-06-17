@@ -1309,6 +1309,75 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     }
   });
 
+  it('logs a persistent 4xx DELETE failure at WARN exactly once per (webhook_id, status) per process', async () => {
+    // The bot path (linkGuildWebhookSubscription) runs many times/day.
+    // A persistently-undeletable orphan (e.g. 403 if the API key
+    // loses delete scope on that resource) would emit an error line
+    // every guild-link forever without per-process suppression of
+    // identical 4xx logs. Pin: first 4xx logs at WARN; subsequent
+    // identical 4xx on the same webhook_id SUPPRESS the log, while
+    // still attempting the DELETE on each invocation.
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let deleteAttempts = 0;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_persistent_403' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_persistent_403': () => {
+          deleteAttempts += 1;
+          return { status: 403, body: { error: 'forbidden' } };
+        },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      // Invoke twice. First attempt should log at WARN; second should
+      // suppress the log but still ATTEMPT the DELETE.
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      expect(deleteAttempts).toBe(2); // DELETE attempted both times
+      const warnLines = warnSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed with persistent 4xx'));
+      const errorLines = errorSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed'));
+      expect(warnLines).toHaveLength(1); // WARN logged exactly once
+      expect(errorLines).toHaveLength(0); // never logged at ERROR
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('logs a 5xx DELETE failure at ERROR on every invocation (transient — repeating IS the signal)', async () => {
+    // 5xx is transient by convention; we want the repeating log line
+    // to be the alarm signal, not a one-shot WARN that gets lost.
+    // Different from the 4xx path — pin that 5xx does NOT suppress.
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_persistent_503' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_persistent_503': () => ({ status: 503, body: { error: 'transient' } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const errorLines = errorSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed (continuing'));
+      const warnLines = warnSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed with persistent 4xx'));
+      expect(errorLines).toHaveLength(2); // ERROR on EACH invocation
+      expect(warnLines).toHaveLength(0); // never at WARN
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
   it('does NOT classify same-hostname different-port as cross-host (port-insensitive comparison)', async () => {
     // A port-flip rename (`:8080` → `:8443`, or implicit-443 vs
     // explicit-:443) at the same hostname is NOT a URL-migration:
