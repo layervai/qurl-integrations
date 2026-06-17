@@ -4,8 +4,10 @@ const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
 /**
- * Lightweight qURL API client using fetch.
- * Avoids ESM/CJS compatibility issues with the @layervai/qurl SDK.
+ * Lightweight qURL API client using fetch. Predates the @layervai/qurl SDK,
+ * which the bot now also uses (connector.js, detect-over-tunnel #1101). The two
+ * clients coexist pending consolidation onto the SDK — see #830. (This client
+ * originally avoided the SDK over ESM/CJS interop; that blocker is resolved.)
  */
 
 // Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
@@ -107,9 +109,17 @@ function isPrivateHost(host) {
     // Bracketed IPv6 literal — strip and check.
     return isPrivateHost(h.slice(1, -1));
   }
-  // IPv6 common locals (::1 already handled above for exact-match; this
-  // catches fc00::/7 unique-local and fe80::/10 link-local prefixes).
-  if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
+  // IPv6 locals reach here bracket-stripped, so they always contain a ':':
+  // unique-local fc00::/7 (fc/fd), link-local fe80::/10, and deprecated
+  // site-local fec0::/10 — the latter two span first-hextet fe80–feff, i.e.
+  // `fe[89a-f][0-9a-f]:` (a real /10 literal always writes the full 4-digit
+  // hextet). Gate on the ':' so a PUBLIC DNS name that merely starts with these
+  // letters (e.g. `fd-cdn.example.com`, reaching here UNbracketed) is NOT
+  // misclassified as an IPv6 local literal — DNS names never contain a colon.
+  if (h.includes(':')) {
+    if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
+    if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
+  }
   // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
   // prefix (URL parsing already stripped the brackets) and re-check.
   const mapped = h.match(/^::ffff:([0-9.]+)$/);
@@ -230,4 +240,4 @@ async function getResourceStatus(resourceId, apiKey) {
   return qurlFetch('GET', `/qurls/${resourceId}`, null, apiKey);
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus };
+module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
