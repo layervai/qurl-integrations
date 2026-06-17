@@ -154,15 +154,24 @@ function canonicalUrl(u) {
 // requested explicitly; loop bounded at 50 iterations (5000 subs)
 // so a misbehaving cursor can't spin forever.
 //
+// Also collects URL-migration orphan candidates in the same pass when
+// `orphanFilter` is provided — a sub passes the filter iff it's a
+// stale sibling of `target` at a different host (rename leftover).
+// Doing both in one cursor walk avoids the second full-scan we'd
+// otherwise pay on the create-fresh path. Callers that don't need the
+// orphan list (per-guild bootstrap) pass no filter and only see matches.
+//
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
-//     [] (possibly with no matches), caller takes create-fresh path.
+//     {matches, orphans}, possibly empty. Caller takes create-fresh on
+//     empty matches.
 //   - 50-page cap hit (cursor never ends) → THROWS, refuses to fall
 //     through to create-fresh which would silently compound
 //     duplicates on every restart.
-async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
+async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orphanFilter }) {
   const target = canonicalUrl(bridgeUrl);
   const matches = [];
+  const orphans = [];
   let cursor = '';
   for (let i = 0; i < 50; i++) {
     // Explicit limit=100 (vs relying on a server default that could
@@ -177,9 +186,10 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
     const subs = Array.isArray(resp?.data) ? resp.data : [];
     for (const s of subs) {
       if (canonicalUrl(s.url) === target) matches.push(s);
+      else if (orphanFilter && orphanFilter(s)) orphans.push(s);
     }
     const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return matches;
+    if (!next) return { matches, orphans };
     cursor = next;
   }
   throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
@@ -234,7 +244,7 @@ function urlPathname(u) {
   } catch { return null; }
 }
 
-// URL-migration orphan sweep.
+// URL-migration orphan predicate.
 //
 // Symptom (sandbox, 2026-06): the bot's `base_url` was renamed from
 // `discord.layerv.xyz` → `discord.connector.layerv.xyz`. The registrar's
@@ -257,63 +267,39 @@ function urlPathname(u) {
 //      of the deletion set even though they share owner_id with the bot
 //      under today's bot-API-key-shared model.
 //
-// Each match is DELETEd best-effort: a 5xx on one orphan logs an error
-// and continues to the next + to the normal create path. Next invocation
-// retries the orphan delete idempotently. We deliberately do NOT propagate
-// the failure: blocking the create on a stale-orphan delete failure would
-// leave the bot UN-registered (no new sub) AND still-orphaned (old sub
-// undeleted) — strictly worse than the orphan-only state we started in.
-async function findUrlMigrationOrphans({ apiEndpoint, apiKey, bridgeUrl, descriptionPrefix }) {
-  if (!descriptionPrefix) return [];
+// Returned as a closure so it composes into `findExistingSubscriptions`
+// as the `orphanFilter` arg: one cursor walk produces both the matches
+// AND the orphan candidates, avoiding a second full-scan on every
+// create-fresh boot. Returns null when no safe prefix can be derived —
+// callers treat that as "skip the sweep".
+function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
+  if (!descriptionPrefix) return null;
   const targetHost = urlHost(bridgeUrl);
   const targetPath = urlPathname(bridgeUrl);
-  if (!targetHost || !targetPath) return [];
-  const orphans = [];
-  let cursor = '';
-  for (let i = 0; i < 50; i++) {
-    const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}&limit=100` : '?limit=100';
-    const path = `/v1/webhooks${qs}`;
-    const resp = await callQurlService({ method: 'GET', path, apiEndpoint, apiKey });
-    const subs = Array.isArray(resp?.data) ? resp.data : [];
-    for (const s of subs) {
-      const subHost = urlHost(s.url);
-      const subPath = urlPathname(s.url);
-      const subDesc = typeof s.description === 'string' ? s.description : '';
-      if (subHost === null || subPath === null) continue;
-      if (subPath !== targetPath) continue;
-      if (subHost === targetHost) continue;
-      if (!subDesc.startsWith(descriptionPrefix)) continue;
-      orphans.push(s);
-    }
-    const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return orphans;
-    cursor = next;
-  }
-  // Same fail-loud policy as findExistingSubscriptions: a stuck cursor
-  // must not silently fall through. The caller catches and logs so the
-  // create-fresh path can still proceed even if the orphan sweep failed.
-  throw new Error('findUrlMigrationOrphans: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor');
+  if (!targetHost || !targetPath) return null;
+  return function isUrlMigrationOrphan(s) {
+    const subHost = urlHost(s.url);
+    const subPath = urlPathname(s.url);
+    if (subHost === null || subPath === null) return false;
+    if (subPath !== targetPath) return false;
+    if (subHost === targetHost) return false;
+    const subDesc = typeof s.description === 'string' ? s.description : '';
+    return subDesc.startsWith(descriptionPrefix);
+  };
 }
 
-async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, bridgeUrl, descriptionPrefix }) {
-  let orphans;
-  try {
-    orphans = await findUrlMigrationOrphans({ apiEndpoint, apiKey, bridgeUrl, descriptionPrefix });
-  } catch (err) {
-    // Log + continue: orphan sweep is observability-grade cleanup, not
-    // load-bearing for registration. A pagination cap or transient list
-    // failure shouldn't block create-fresh.
-    logger.error('URL-migration orphan sweep list failed (continuing with create)', {
-      error: err.message, status: err.status, op: err.op,
-    });
-    return;
-  }
-  if (orphans.length === 0) return;
-  // Sequential DELETEs (vs parallel like the dedupe path) — orphan counts
-  // are typically 0-1 per migration, and serial gives the cleanest
-  // per-orphan failure isolation in the logs. Each failure is caught,
-  // logged, and skipped so the rest of the sweep + the create path
-  // still proceed.
+// Best-effort DELETE for each URL-migration orphan. A 5xx on one orphan
+// logs an error and continues to the next + to the normal create path.
+// Next invocation retries the orphan delete idempotently. We deliberately
+// do NOT propagate the failure: blocking the create on a stale-orphan
+// delete failure would leave the bot UN-registered (no new sub) AND
+// still-orphaned (old sub undeleted) — strictly worse than the orphan-
+// only state we started in.
+//
+// Sequential DELETEs (vs parallel like the dedupe path) — orphan counts
+// are typically 0-1 per migration, and serial gives the cleanest
+// per-orphan failure isolation in the logs.
+async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
   for (const orphan of orphans) {
     try {
       await deleteSubscription({ apiEndpoint, apiKey, webhookId: orphan.webhook_id });
@@ -325,9 +311,6 @@ async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, bridgeUrl, desc
         last_delivery_success: orphan.last_delivery_success,
       });
     } catch (err) {
-      // Don't propagate: blocking create on a stale-orphan delete
-      // failure leaves the bot UN-registered AND orphaned — worse than
-      // the starting state. Next invocation retries the delete.
       logger.error('URL-migration orphan delete failed (continuing — next invocation retries)', {
         old_url: orphan.url,
         webhook_id: orphan.webhook_id,
@@ -511,7 +494,19 @@ async function ensureWebhookSubscription(opts) {
   // deterministic survivor + deleting the rest. Both replicas independently
   // pick the same survivor (oldest by created_at) so concurrent dedupe
   // converges without coordination.
-  const matches = await findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl });
+  //
+  // Co-collect URL-migration orphan candidates in the same cursor walk —
+  // subs at the same `/webhooks/qurl` path but a DIFFERENT host whose
+  // description starts with this bot's stable prefix. Picked up here so
+  // the create-fresh branch below doesn't pay a second full scan. See
+  // buildUrlMigrationOrphanFilter for the safety criteria.
+  const orphanFilter = buildUrlMigrationOrphanFilter({
+    bridgeUrl,
+    descriptionPrefix: deriveDescriptionPrefix(description),
+  });
+  const { matches, orphans } = await findExistingSubscriptions({
+    apiEndpoint, apiKey, bridgeUrl, orphanFilter,
+  });
   const existing = pickSurvivor(matches);
   const wasDedupe = matches.length > 1 && existing != null;
   if (wasDedupe) {
@@ -609,18 +604,17 @@ async function ensureWebhookSubscription(opts) {
     logger.info('qURL webhook subscription reconciled (existing found, bootstrap rotate)', { webhookId, url: bridgeUrl });
   } else {
     // No existing sub at the requested URL. Before creating a fresh one,
-    // sweep for URL-migration orphans: prior subs this bot registered at
-    // a DIFFERENT host (e.g. `base_url` rename) on the same `/webhooks/qurl`
+    // best-effort DELETE the URL-migration orphans we picked up during
+    // the cursor walk above — prior subs this bot registered at a
+    // DIFFERENT host (e.g. `base_url` rename) on the same `/webhooks/qurl`
     // path. Without this, a rename leaves the old sub alive in
     // qurl-service forever, retrying deliveries that the bot can no
-    // longer verify. See findUrlMigrationOrphans for the safety criteria
-    // (description-prefix match keeps sibling-service subs out of scope).
-    await cleanupUrlMigrationOrphans({
-      apiEndpoint,
-      apiKey,
-      bridgeUrl,
-      descriptionPrefix: deriveDescriptionPrefix(description),
-    });
+    // longer verify. See buildUrlMigrationOrphanFilter for the safety
+    // criteria (description-prefix match keeps sibling-service subs out
+    // of scope).
+    if (orphans.length > 0) {
+      await cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans });
+    }
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
     webhookId = created.webhook_id;
     secret = created.secret;
@@ -686,7 +680,7 @@ module.exports = {
     redactSecret,
     QurlServiceError,
     deriveDescriptionPrefix,
-    findUrlMigrationOrphans,
+    buildUrlMigrationOrphanFilter,
     cleanupUrlMigrationOrphans,
   },
 };
