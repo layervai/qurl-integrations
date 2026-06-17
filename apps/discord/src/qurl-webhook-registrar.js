@@ -48,6 +48,21 @@
 const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
 
+// LOAD-BEARING shared constant — the orphan-sweep description-prefix
+// matcher derives this from the caller's `description`, so every
+// caller of ensureWebhookSubscription whose subs should be co-swept
+// MUST emit a description that starts with this prefix followed by
+// ` (`. Two callers today:
+//   - apps/discord/src/guild-webhook-link.js (imports this directly)
+//   - apps/discord/lambda/webhook-registrar/index.js (passes through
+//     a `description` from terraform — terraform must set a string
+//     that begins `<DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX> (...)`
+//     See infra-side `webhook_registrar_lambda.tf:webhook_registrar_description`.)
+// Don't edit this without coordinating both call sites + the infra
+// terraform string. Any drift silently disables the sweep for the
+// drifted source's orphans (deleteDescriptionPrefix mismatch).
+const DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX = 'Discord bot view counter';
+
 const QURL_ACCESSED = QURL_WEBHOOK_EVENTS.ACCESSED;
 const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
 
@@ -623,12 +638,16 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
  * @param {string} opts.description    - human-readable; surfaces in qurl-service UI
  * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When set to a non-placeholder value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness.
  * @param {Function} [opts.persistSecret] - optional async(secret) → void callback for best-effort persistence
+ * @param {boolean} [opts.urlMigrationSweepEnabled=true] - hard guard for the cross-host orphan sweep. Default ON for today's single-host deployment. Set to `false` BEFORE any active-active multi-region rollout under a shared `QURL_API_KEY` — see #827. A false value disables both the orphan classification (no near-miss logging, no DELETE attempts) and short-circuits the whole sweep path; matches + dedupe still run normally.
  * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused', ownerId: string}>}
  *   `ownerId` is the qurl-service auth0 owner the API key resolves to. Required
  *   by per-guild callers for receiver routing.
  */
 async function ensureWebhookSubscription(opts) {
-  const { apiEndpoint, apiKey, bridgeUrl, description, initialSecret, persistSecret } = opts;
+  const {
+    apiEndpoint, apiKey, bridgeUrl, description, initialSecret, persistSecret,
+    urlMigrationSweepEnabled = true,
+  } = opts;
   if (!apiEndpoint || !apiKey || !bridgeUrl) {
     throw new Error('ensureWebhookSubscription: apiEndpoint, apiKey, bridgeUrl all required');
   }
@@ -644,10 +663,18 @@ async function ensureWebhookSubscription(opts) {
   // description starts with this bot's stable prefix. Picked up here so
   // the create-fresh branch below doesn't pay a second full scan. See
   // buildUrlMigrationOrphanFilter for the safety criteria.
-  const orphanFilter = buildUrlMigrationOrphanFilter({
-    bridgeUrl,
-    descriptionPrefix: deriveDescriptionPrefix(description),
-  });
+  // Hard guard: `urlMigrationSweepEnabled=false` collapses the filter
+  // to null so no row is classified as orphan or near-miss. The Lambda
+  // wrapper reads `QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP`
+  // to flip this without code changes — required defense-in-depth for
+  // the hypothetical active-active multi-region case (#827) where the
+  // sweep would cannibalize healthy peers.
+  const orphanFilter = urlMigrationSweepEnabled
+    ? buildUrlMigrationOrphanFilter({
+      bridgeUrl,
+      descriptionPrefix: deriveDescriptionPrefix(description),
+    })
+    : null;
   const { matches, orphans, nearMissCount } = await findExistingSubscriptions({
     apiEndpoint, apiKey, bridgeUrl, orphanFilter,
   });
@@ -835,6 +862,7 @@ module.exports = {
   deleteSubscription,
   buildSsmPersistSecret,
   WEBHOOK_ACTIONS,
+  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
   // Exposed for webhook-subscriptions.js so the registry's
   // discoverDefaultOwnerId tick goes through the same QurlServiceError /
   // op-tagged transport as the rest of the registrar surface — kept off

@@ -1574,6 +1574,50 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     expect(createCalled).toBe(true);
   });
 
+  it('skips the sweep entirely when urlMigrationSweepEnabled=false (hard guard for active-active rollout)', async () => {
+    // Hard guard for the cannibalization risk tracked in #827. When the
+    // flag is false, no row is classified as orphan or near-miss; the
+    // matches + dedupe path still runs normally.
+    let deleted = false;
+    let nearMissLogged = false;
+    const logSpy = jest.spyOn(console, 'log').mockImplementation((line) => {
+      if (typeof line === 'string' && line.includes('liveness-gated near-misses')) {
+        nearMissLogged = true;
+      }
+    });
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          // What would be a confirmed orphan with sweep enabled.
+          deadOrphan({ webhook_id: 'wh_would_orphan' }),
+          // What would be a near-miss with sweep enabled.
+          { webhook_id: 'wh_would_near_miss', url: OLD_URL, description: BOT_DESC, events: ['qurl.accessed'], failure_count: 0, last_delivery_success: true },
+        ] } }),
+        'DELETE /v1/webhooks/wh_would_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await ensureWebhookSubscription({ ...BOT_OPTS, urlMigrationSweepEnabled: false });
+      expect(deleted).toBe(false); // hard-guard wins
+      expect(nearMissLogged).toBe(false); // no observability noise when disabled
+      expect(result.action).toBe('created');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('runs the sweep normally when urlMigrationSweepEnabled defaults to true (no opt set)', async () => {
+    // Sanity-check: omitting the opt entirely preserves the existing
+    // single-host behavior (sweep runs).
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan()] } }),
+      'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS); // no urlMigrationSweepEnabled key
+    expect(deleted).toBe(true);
+  });
+
   it('skips the sweep when description is empty (cannot derive a safe prefix)', async () => {
     // Defensive: an empty description would derive an empty prefix,
     // which would match LITERALLY every sub via startsWith(''). The

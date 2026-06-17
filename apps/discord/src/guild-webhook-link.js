@@ -8,7 +8,11 @@ const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
-const { ensureWebhookSubscription, deleteSubscription } = require('./qurl-webhook-registrar');
+const {
+  ensureWebhookSubscription,
+  deleteSubscription,
+  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
+} = require('./qurl-webhook-registrar');
 const subs = require('./webhook-subscriptions');
 
 // Frozen discriminator for the `reason` field on link results.
@@ -112,7 +116,13 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       apiEndpoint: config.QURL_ENDPOINT,
       apiKey,
       bridgeUrl: bridgeUrl(),
-      description: `Discord bot view counter (guild=${guildId}${descriptionContext ? `, ${descriptionContext}` : ''})`,
+      // Stable prefix is the shared DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX
+      // constant — same string the central registrar's terraform-set
+      // description must start with — so the orphan-sweep matcher in
+      // qurl-webhook-registrar.js classifies both this caller's subs
+      // and the central registrar's coherently. Don't inline the
+      // literal here; the constant is the single source of truth.
+      description: `${DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX} (guild=${guildId}${descriptionContext ? `, ${descriptionContext}` : ''})`,
     });
   } catch (err) {
     logger.warn('Per-guild webhook subscription registration failed', {
