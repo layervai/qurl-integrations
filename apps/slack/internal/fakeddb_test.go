@@ -871,19 +871,40 @@ func TestFakeDDBEvalConditionParenthesizedTopLevelOR(t *testing.T) {
 		"count": &ddbtypes.AttributeValueMemberN{Value: "2"},
 	}
 	vals := map[string]ddbtypes.AttributeValue{
-		":one":   &ddbtypes.AttributeValueMemberN{Value: "1"},
-		":three": &ddbtypes.AttributeValueMemberN{Value: "3"},
+		":one":     &ddbtypes.AttributeValueMemberN{Value: "1"},
+		":three":   &ddbtypes.AttributeValueMemberN{Value: "3"},
+		":ten":     &ddbtypes.AttributeValueMemberN{Value: "10"},
+		":hundred": &ddbtypes.AttributeValueMemberN{Value: "100"},
 	}
 	names := map[string]string{
 		"#count": "count",
 	}
 
-	ok, err := evalCondition("(#count = :one) OR (#count < :three)", item, true, vals, names)
-	if err != nil {
-		t.Fatalf("evalCondition parenthesized OR: %v", err)
-	}
-	if !ok {
-		t.Fatal("evalCondition parenthesized OR = false, want true")
+	for _, tc := range []struct {
+		name string
+		expr string
+		want bool
+	}{
+		{
+			name: "second disjunct true",
+			expr: "(#count = :one) OR (#count < :three)",
+			want: true,
+		},
+		{
+			name: "both disjuncts false",
+			expr: "(#count = :ten) OR (#count > :hundred)",
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := evalCondition(tc.expr, item, true, vals, names)
+			if err != nil {
+				t.Fatalf("evalCondition parenthesized OR: %v", err)
+			}
+			if ok != tc.want {
+				t.Fatalf("evalCondition parenthesized OR = %v, want %v", ok, tc.want)
+			}
+		})
 	}
 }
 
@@ -918,8 +939,11 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
-	inner := stripOuterParens(term)
-	if parts := splitTopLevelKeyword(inner, "OR"); len(parts) > 1 {
+	term = strings.TrimSpace(stripOuterParens(term))
+	if term == "" {
+		return false, nil
+	}
+	if parts := splitTopLevelKeyword(term, "OR"); len(parts) > 1 {
 		for _, part := range parts {
 			ok, err := evalConditionTerm(strings.TrimSpace(part), item, present, vals, names)
 			if err != nil {
@@ -931,7 +955,6 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		}
 		return false, nil
 	}
-	term = inner
 	switch {
 	case strings.HasPrefix(term, "attribute_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_exists("), ")")

@@ -273,6 +273,8 @@ func TestCheckRateLimit_DeniesFutureWindowRaceAfterRead(t *testing.T) {
 			if retry != wantRetry {
 				t.Fatalf("retry = %s, want %s", retry, wantRetry)
 			}
+			// These fixtures each consume the local-window attempt plus one
+			// future-window follow-up; they are not asserting a global limit.
 			if updates != 2 {
 				t.Fatalf("updates = %d, want 2", updates)
 			}
