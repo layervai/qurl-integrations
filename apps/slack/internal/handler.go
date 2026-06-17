@@ -1711,7 +1711,11 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// attempts do not consume quota.
 	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, h.now()); !ok {
 		slog.Warn("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
-		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run `/qurl setup <email>` again.", humanizeRetry(retry)))
+		retryCommand := "`/qurl setup <email>`"
+		if setupCmd.mode.Explicit() {
+			retryCommand = fmt.Sprintf("`/qurl setup <email> %s`", setupModeFlag(setupCmd.mode))
+		}
+		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
 		return
 	}
 	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())

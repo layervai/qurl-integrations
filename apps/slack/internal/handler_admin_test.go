@@ -975,6 +975,29 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
+	t.Run("non-owner refusals do not consume setup-link quota", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		for i := 0; i < setupLinkRateLimitMax; i++ {
+			got := invokeSetup(t, h, stranger)
+			if strings.Contains(got, "/oauth/qurl/start?state=") {
+				t.Fatalf("non-owner attempt %d minted setup URL: %q", i+1, got)
+			}
+			if strings.Contains(got, "generated several qURL setup links") {
+				t.Fatalf("non-owner attempt %d burned setup-link quota before owner gate: %q", i+1, got)
+			}
+		}
+
+		ts.seedWorkspace(t, team, stranger, stranger, testWorkspaceConfiguredAt.Add(time.Minute))
+		got := invokeSetup(t, h, stranger)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("same caller after becoming owner should not be setup-link limited, got: %q", got)
+		}
+	})
+
 	t.Run("shape-bad owner_id (pre-pivot Auth0 sub): setup allowed so the legacy row can be reclaimed", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		// Migration-day state: a pre-pivot row whose owner_id holds the

@@ -1766,6 +1766,30 @@ func TestSlashCommandSetupWithEmail_RateLimitsSetupLinksPerWorkspaceUser(t *test
 	}
 }
 
+func TestSlashCommandSetupWithRotate_RateLimitCopyKeepsModeFlag(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	now := fixedNow
+	h.now = func() time.Time { return now }
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	for i := 0; i < setupLinkRateLimitMax; i++ {
+		text := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
+		if !strings.Contains(text, "/oauth/qurl/start?state=") {
+			t.Fatalf("rotate attempt %d should mint setup URL, got: %q", i+1, text)
+		}
+	}
+
+	limited := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
+	if strings.Contains(limited, "/oauth/qurl/start?state=") {
+		t.Fatalf("rate-limited rotate attempt minted setup URL: %q", limited)
+	}
+	if !strings.Contains(limited, "`/qurl setup <email> --rotate`") {
+		t.Fatalf("rate-limited rotate attempt missing rotate retry command: %q", limited)
+	}
+}
+
 func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
