@@ -150,6 +150,10 @@ function armedState(overrides = {}) {
     interactionAppId: APP_ID,
     expectedCount: 3,
     lastRenderedCount: 0,
+    // 0 = never edited → always older than the coalesce window, so the
+    // first edit of a send is never debounced. Tests that exercise the
+    // cooldown override this with a recent epoch-MS instant.
+    lastRenderedAt: 0,
     baseMsg: 'Sent to 3 users',
     // The send's qurl_id set is persisted on the render-state row, so the
     // fast-path counts views off it directly (getSendItems is only the
@@ -303,5 +307,119 @@ describe('sender view-counter fast-path — defensive row-count skip', () => {
     await flushCounter();
     expect(mockGetSendRenderState).not.toHaveBeenCalled();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
+  });
+});
+
+describe('sender view-counter fast-path — edit coalescing (leading-edge debounce)', () => {
+  it('a 2nd view within the coalesce window is SKIPPED before the BatchGet (poll backstop flushes it)', async () => {
+    // The send already rendered ~200ms ago (well inside the ~1.5s default
+    // window). A fresh view must NOT edit — it would storm Discord on a
+    // high-fan-out send. Crucially the skip happens BEFORE getQurlViews,
+    // so the coalesced event skips that read too.
+    mockGetSendRenderState.mockResolvedValue(armedState({
+      lastRenderedCount: 1,
+      lastRenderedAt: Date.now() - 200,
+      qurlIds: ['q_a', 'q_b', 'q_c'],
+    }));
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).not.toHaveBeenCalled();
+    expect(mockGetSendItems).not.toHaveBeenCalled();
+  });
+
+  it('a view OLDER than the coalesce window edits normally', async () => {
+    // 10s since the last edit is well past the ~1.5s window → not debounced.
+    mockGetSendRenderState.mockResolvedValue(armedState({
+      lastRenderedCount: 0,
+      lastRenderedAt: Date.now() - 10_000,
+    }));
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 1);
+  });
+
+  it('BURST: many views in a short window → bounded edit count (≤3, not N), final render correct', async () => {
+    // Simulate a high-fan-out send: a wave of qurl.accessed webhooks for
+    // DISTINCT recipients arriving inside one coalesce window. The store
+    // mocks share a single in-test "row" that mirrors the real DDB
+    // qurl_send_configs row — getSendRenderState reads its
+    // last_rendered_count / last_rendered_at, tryAdvanceRenderedCount
+    // CAS-updates both (commit-after-edit). This exercises the REAL
+    // leading-edge gate end-to-end across replicas, not a mocked verdict.
+    const TRACKED = Array.from({ length: 30 }, (_, i) => `q_burst_${i}`);
+    // The row as the store sees it. last_rendered_at starts 0 (never
+    // edited) so the first webhook is NOT debounced.
+    const row = { lastRenderedCount: 0, lastRenderedAt: 0 };
+    // Views accumulate as recipients open: webhook i means i+1 distinct
+    // qurls have now been viewed. We grow the viewed set per request.
+    let viewedSoFar = 0;
+
+    mockFindSendsByQurlId.mockResolvedValue([{ send_id: SEND_ID, sender_discord_id: SENDER_ID }]);
+    mockGetSendRenderState.mockImplementation(async () => armedState({
+      expectedCount: TRACKED.length,
+      lastRenderedCount: row.lastRenderedCount,
+      lastRenderedAt: row.lastRenderedAt,
+      qurlIds: TRACKED,
+    }));
+    mockGetQurlViews.mockImplementation(async () => {
+      const m = new Map();
+      for (let i = 0; i < viewedSoFar; i += 1) m.set(TRACKED[i], { accessCount: 1, consumed: false });
+      return m;
+    });
+    // Commit-after-edit CAS: advance only if strictly higher; stamp the
+    // debounce clock to "now" so subsequent webhooks in the window skip.
+    mockTryAdvanceRenderedCount.mockImplementation(async (_sendId, n) => {
+      if (n > row.lastRenderedCount) {
+        row.lastRenderedCount = n;
+        row.lastRenderedAt = Date.now();
+        return true;
+      }
+      return false;
+    });
+
+    // Fire 30 distinct-recipient views back-to-back within one window.
+    for (let i = 0; i < TRACKED.length; i += 1) {
+      viewedSoFar = i + 1;
+      const payload = {
+        ...VALID_PAYLOAD,
+        id: `evt-burst-${i}`,
+        data: { ...VALID_PAYLOAD.data, qurl_id: TRACKED[i] },
+      };
+      // eslint-disable-next-line no-await-in-loop
+      await signedRequest(payload);
+    }
+    // Drain every scheduled fast-path chain.
+    for (let i = 0; i < 200; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // Coalesced: the leading edge edits (lastRenderedAt was 0), then the
+    // rest of the burst lands inside the window and is debounced. With
+    // synchronous in-test timing the whole burst falls in one window, so
+    // exactly ONE edit fires — assert the bound holds (<= 3 << 30) rather
+    // than pinning the exact count, since real wall-clock could straddle
+    // the window and admit a second leading edge.
+    expect(mockEditInteractionReply.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(mockEditInteractionReply.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+    // The poll backstop (monitorLinkStatus) is the trailing-edge flush
+    // that renders the SETTLED final count after the burst — simulate it
+    // by running the fast-path once more past the window.
+    row.lastRenderedAt = Date.now() - 10_000; // window elapsed
+    viewedSoFar = TRACKED.length;             // all recipients have viewed
+    await signedRequest({
+      ...VALID_PAYLOAD,
+      id: 'evt-burst-flush',
+      data: { ...VALID_PAYLOAD.data, qurl_id: TRACKED[0] },
+    });
+    await flushCounter();
+    const lastPayload = mockEditInteractionReply.mock.calls.at(-1)[2];
+    expect(lastPayload.content).toContain(`👀 ${TRACKED.length} viewed`);
+    // And the persisted count converged to the true total.
+    expect(row.lastRenderedCount).toBe(TRACKED.length);
   });
 });

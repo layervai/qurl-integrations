@@ -509,6 +509,18 @@ module.exports = {
   // QURL_DETECT_COOLDOWN_MS explicitly — decoupled so a future send-cadence
   // change can't silently re-tune the oracle. See setDetectCooldown.
   QURL_DETECT_COOLDOWN_MS: detectCooldownMs,
+  // Leading-edge debounce for the sub-second view-counter fast-path
+  // (qurl-webhook.js editSenderCounterInBackground). On a high-fan-out
+  // send (cap QURL_SEND_MAX_RECIPIENTS, default 20000) every recipient's
+  // first view fires a qurl.accessed webhook; un-coalesced, each would
+  // PATCH the sender confirmation, storming Discord's per-message edit
+  // budget (429s) and hot-writing the qurl_send_configs row. This bounds
+  // fast-path edits per send to ~1 per window: a replica skips the edit
+  // when the row's last_rendered_at is younger than this. The poll
+  // backstop (monitorLinkStatus) is the trailing-edge flush that renders
+  // the final count after the burst settles. ~1.5s keeps the counter
+  // visibly live while capping edits well under Discord's rate.
+  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 1500, { minPositive: true }),
 
   SHARD_ID,
 

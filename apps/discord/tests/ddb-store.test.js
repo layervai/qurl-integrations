@@ -1210,8 +1210,20 @@ describe('qurl sends', () => {
     expect(state).toEqual({
       interactionToken: 'tok-abc', interactionAppId: 'app-1',
       expectedCount: 5, lastRenderedCount: 2,
+      // last_rendered_at absent on the row → 0 (never edited), which the
+      // fast-path treats as "older than any coalesce window".
+      lastRenderedAt: 0,
       baseMsg: undefined, qurlIds: [], terminal: false,
     });
+  });
+
+  test('getSendRenderState: maps last_rendered_at (epoch MS) through for the coalesce gate', async () => {
+    const at = 1_700_000_000_000;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', last_rendered_count: 4, last_rendered_at: at },
+    });
+    const state = await store.getSendRenderState('s1');
+    expect(state.lastRenderedAt).toBe(at);
   });
 
   test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; qurlIds passthrough', async () => {
@@ -1268,13 +1280,22 @@ describe('qurl sends', () => {
     ccfe.name = 'ConditionalCheckFailedException';
 
     ddbMock.on(UpdateCommand).resolves({});
+    const before = Date.now();
     expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(true); // 0→1
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // Coalescing: the SAME write stamps last_rendered_at (epoch MS) so the
+    // next webhook's leading-edge debounce sees this confirmed edit.
     expect(input.UpdateExpression).toMatch(/SET last_rendered_count = :n/);
+    expect(input.UpdateExpression).toMatch(/last_rendered_at = :now/);
+    // The MS clock lives in the SET clause, NOT the condition — only the
+    // count is guarded monotonic.
     expect(input.ConditionExpression).toBe(
       'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
     );
     expect(input.ExpressionAttributeValues[':n']).toBe(1);
+    const stamped = input.ExpressionAttributeValues[':now'];
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
 
     ddbMock.reset();
     ddbMock.on(UpdateCommand).rejects(ccfe);

@@ -1655,6 +1655,15 @@ async function getSendRenderState(sendId) {
     interactionAppId: row.interaction_app_id ?? null,
     expectedCount: row.expected_count ?? 0,
     lastRenderedCount: row.last_rendered_count ?? 0,
+    // Epoch MS of the last confirmed fast-path edit (0 if never). The
+    // webhook fast-path leading-edge-debounces on this: skip the edit
+    // when Date.now() - lastRenderedAt < QURL_VIEW_COUNTER_COALESCE_MS.
+    // MS (not the seconds confirm_expires_at uses) because the cooldown
+    // is ~1.5s — seconds granularity would be too coarse to bound a
+    // sub-second burst. Written alongside last_rendered_count in the
+    // SAME conditional UpdateItem (commit-after-edit), so it only
+    // advances when an edit actually landed.
+    lastRenderedAt: row.last_rendered_at ?? 0,
     baseMsg: row.confirm_base_msg ?? undefined,
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
     terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
@@ -1672,14 +1681,24 @@ async function getSendRenderState(sendId) {
 // caller treats it as "someone already showed an equal-or-higher count,
 // nothing to do"). Same CCFE-as-control-flow shape as
 // markExpiredDMEdited / flipRevokedAt.
+//
+// COALESCING: last_rendered_at (epoch MS) is stamped in the SAME write
+// so the next webhook's leading-edge debounce (getSendRenderState →
+// lastRenderedAt) sees this edit's instant and skips re-editing inside
+// the cooldown window. Stamped UNCONDITIONALLY relative to the count
+// guard — it lives in the SET clause, not the condition — so even the
+// degenerate "advance from N to the same N" can't happen (the count
+// condition rejects equal), and a genuine advance always refreshes the
+// debounce clock. Caller advances only after a confirmed edit, so this
+// timestamp tracks displayed reality, not attempts.
 async function tryAdvanceRenderedCount(sendId, n) {
   try {
     await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
-      UpdateExpression: 'SET last_rendered_count = :n',
+      UpdateExpression: 'SET last_rendered_count = :n, last_rendered_at = :now',
       ConditionExpression: 'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
-      ExpressionAttributeValues: { ':n': n },
+      ExpressionAttributeValues: { ':n': n, ':now': Date.now() },
     }));
     return true;
   } catch (err) {

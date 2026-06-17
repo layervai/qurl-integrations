@@ -23,6 +23,7 @@
 
 const express = require('express');
 const db = require('../store');
+const config = require('../config');
 const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS, DM_STATUS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
@@ -602,6 +603,14 @@ const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 // re-render forever. Each step's skip is intentional defense — see the
 // inline notes.
 //
+// COALESCING (step 4b): the fast-path is leading-edge-debounced per send
+// (~1 edit per QURL_VIEW_COUNTER_COALESCE_MS) so a high-fan-out send
+// can't storm Discord's per-message edit budget or hot-write the config
+// row. The poll backstop is the trailing-edge flush. We do NOT lean on
+// discord.js's internal 429 handling for this — the gate keeps us under
+// the limit by construction rather than absorbing rejections after the
+// fact.
+//
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
 function editSenderCounterInBackground({ qurlId }) {
@@ -648,6 +657,31 @@ function editSenderCounterInBackground({ qurlId }) {
       if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
         logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
         return { status: 'absent' };
+      }
+
+      // 4b. COALESCE (leading-edge debounce). A high-fan-out send (cap
+      //    QURL_SEND_MAX_RECIPIENTS, default 20000) fires one
+      //    qurl.accessed per recipient's first view; un-coalesced each
+      //    would PATCH this confirmation, storming Discord's per-message
+      //    edit budget (429s) and hot-writing the config row. Skip the
+      //    edit if the last CONFIRMED edit (state.lastRenderedAt, epoch
+      //    MS, advanced only after a successful PATCH in step 8) is
+      //    younger than the cooldown. This caps fast-path edits per send
+      //    to ~1 per window regardless of fan-out; the poll backstop
+      //    (monitorLinkStatus) is the trailing-edge flush that renders
+      //    the settled final count. Placed BEFORE the getQurlViews
+      //    BatchGet so a coalesced event skips that read too (net DDB
+      //    reduction under burst). Leading-edge (not trailing) keeps the
+      //    counter visibly live — the first view of a burst renders
+      //    immediately, only the rapid followers within the window wait
+      //    for the poll. lastRenderedAt === 0 (never edited) is always
+      //    older than the window, so the first edit is never debounced.
+      const sinceLastEditMs = Date.now() - state.lastRenderedAt;
+      if (sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
+        logger.debug('qURL webhook sender-counter: skip — within coalesce window (poll backstop flushes)', {
+          qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs,
+        });
+        return { status: 'coalesced' };
       }
 
       // 5. Compute N — the count of DISTINCT viewed qurl_ids across the
