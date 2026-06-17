@@ -211,6 +211,26 @@ out="$(run_ctl_at_connector "$replica_a" stats-connector origin-a purge-connecto
 expect_eq "connector fanout result names first replica" "$(printf '%s\n' "$out" | json_str replica_id)" origin-a
 CACHE_DIR="$replica_a"; expect_no_file "$(entry_file GET /metrics.json)" "connector purge removed first replica entry"
 CACHE_DIR="$replica_b"; expect_file "$(entry_file GET /metrics.json)" "connector purge does not mutate peer replica cache"
+
+# Positive fan-out contract: deployment/orchestration repeats the same
+# connector-scoped purge on every active origin replica serving the site.
+CACHE_DIR="$replica_a"; reset_cache; seed_entry GET /metrics.json; seed_entry HEAD /metrics.json; seed_entry GET /other.json
+CACHE_DIR="$replica_b"; reset_cache; seed_entry GET /metrics.json; seed_entry HEAD /metrics.json; seed_entry GET /other.json
+out_a="$(run_ctl_at_connector "$replica_a" stats-connector origin-a purge-connector stats-connector /metrics.json)"
+out_b="$(run_ctl_at_connector "$replica_b" stats-connector origin-b purge-connector stats-connector /metrics.json)"
+expect_eq "connector fanout first replica reports connector" "$(printf '%s\n' "$out_a" | json_str connector_id)" stats-connector
+expect_eq "connector fanout second replica reports connector" "$(printf '%s\n' "$out_b" | json_str connector_id)" stats-connector
+expect_eq "connector fanout first replica reports replica id" "$(printf '%s\n' "$out_a" | json_str replica_id)" origin-a
+expect_eq "connector fanout second replica reports replica id" "$(printf '%s\n' "$out_b" | json_str replica_id)" origin-b
+removed_a="$(printf '%s\n' "$out_a" | json_num entries_removed)"
+removed_b="$(printf '%s\n' "$out_b" | json_num entries_removed)"
+expect_eq "connector fanout removes both replica GET+HEAD entries" "$((removed_a + removed_b))" 4
+CACHE_DIR="$replica_a"; expect_no_file "$(entry_file GET /metrics.json)" "connector fanout removed first replica GET"
+CACHE_DIR="$replica_a"; expect_no_file "$(entry_file HEAD /metrics.json)" "connector fanout removed first replica HEAD"
+CACHE_DIR="$replica_a"; expect_file "$(entry_file GET /other.json)" "connector fanout preserves first replica unrelated entry"
+CACHE_DIR="$replica_b"; expect_no_file "$(entry_file GET /metrics.json)" "connector fanout removed second replica GET"
+CACHE_DIR="$replica_b"; expect_no_file "$(entry_file HEAD /metrics.json)" "connector fanout removed second replica HEAD"
+CACHE_DIR="$replica_b"; expect_file "$(entry_file GET /other.json)" "connector fanout preserves second replica unrelated entry"
 CACHE_DIR="$ROOT/cache"; reset_cache
 
 # Object-style root index invalidation covers both possible viewer cache keys.
