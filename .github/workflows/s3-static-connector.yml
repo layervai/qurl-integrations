@@ -34,11 +34,14 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Ensure envsubst
-        run: command -v envsubst >/dev/null || { sudo apt-get update && sudo apt-get install -y gettext-base; }
+      - name: Ensure shell tools
+        run: command -v envsubst >/dev/null && command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y gettext-base shellcheck; }
 
       - name: Render config goldens
         run: bash test/render_test.sh
+
+      - name: Shell lint
+        run: shellcheck -S warning render.sh cachectl.sh entrypoint.sh test/render_test.sh test/cachectl_test.sh test/behavior_test.sh
 
       - name: Cache-control contract
         run: bash test/cachectl_test.sh

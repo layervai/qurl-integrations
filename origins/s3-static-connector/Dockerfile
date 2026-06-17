@@ -16,7 +16,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends bash ca-certificates curl gettext-base tini; \
     rm -rf /var/lib/apt/lists/*; \
-    install -d -o 65532 -g 65532 /etc/qurl/rendered /tmp/s3cache /tmp/client_body /tmp/proxy_temp
+    install -d -o 65532 -g 65532 /etc/qurl/rendered /tmp/s3cache /tmp/client_body /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
 
 COPY --from=envoy /usr/local/bin/envoy /usr/local/bin/envoy
 COPY templates/ /etc/qurl/templates/

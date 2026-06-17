@@ -126,6 +126,12 @@ if render public-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADD
 fi
 grep -q "LISTEN_ADDR must bind loopback" "$TMP/public-listen.err"
 
+if render loopback-hostname-overmatch S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=127.example.com:8080 2>"$TMP/loopback-hostname-overmatch.err"; then
+  echo "MISMATCH: 127.* hostname rendered as loopback" >&2
+  exit 1
+fi
+grep -q "LISTEN_ADDR must bind loopback" "$TMP/loopback-hostname-overmatch.err"
+
 if render invalid-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR='127.0.0.1:8080;include' 2>"$TMP/invalid-listen.err"; then
   echo "MISMATCH: invalid LISTEN_ADDR rendered successfully" >&2
   exit 1

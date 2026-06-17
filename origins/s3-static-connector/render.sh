@@ -94,6 +94,34 @@ validate_port() {
   fi
 }
 
+valid_ipv4_octet() {
+  case "$1" in
+    ""|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  [ "$1" -le 255 ]
+}
+
+is_ipv4_loopback() {
+  case "$1" in
+    127.*.*.*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *.*.*.*.*) return 1 ;;
+  esac
+
+  loopback_rest="${1#127.}"
+  loopback_octet_b="${loopback_rest%%.*}"
+  loopback_rest="${loopback_rest#*.}"
+  loopback_octet_c="${loopback_rest%%.*}"
+  loopback_octet_d="${loopback_rest#*.}"
+  valid_ipv4_octet "$loopback_octet_b" &&
+    valid_ipv4_octet "$loopback_octet_c" &&
+    valid_ipv4_octet "$loopback_octet_d"
+}
+
 validate_listener() {
   name="$1"
   addr="$2"
@@ -124,10 +152,13 @@ assert_loopback_listener() {
   addr="$2"
   host="$(listener_host "$addr")"
   case "$host" in
-    127.*|localhost|::1)
+    localhost|::1)
       return
       ;;
   esac
+  if is_ipv4_loopback "$host"; then
+    return
+  fi
   echo "$name must bind loopback by default (got $addr); set ALLOW_NON_LOOPBACK_LISTEN=true only for local tests or diagnostics" >&2
   exit 1
 }

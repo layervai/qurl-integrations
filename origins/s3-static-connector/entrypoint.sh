@@ -27,7 +27,7 @@ if [ -n "${AWS_REGION:-}" ] && [ -z "${AWS_DEFAULT_REGION:-}" ]; then
 fi
 export AWS_REGION AWS_DEFAULT_REGION
 
-mkdir -p /tmp/s3cache /tmp/client_body /tmp/proxy_temp
+mkdir -p /tmp/s3cache /tmp/client_body /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
 
 # Render nginx.conf + envoy.yaml (fails fast on missing S3_BUCKET / AWS_REGION).
 . /usr/local/bin/render.sh
