@@ -417,8 +417,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 // tests can inject a mocked @layervai/qurl before the first call.
 //
 // CACHE THE CLIENT, NEVER THE RESOLVED target_url: resolve() issues a fresh
-// NHP knock per call (see resolveDetectTarget) — a stale target_url would
-// have been opened for a previous IP/knock-window and must not be reused.
+// NHP knock per call (see resolveDetectTarget) — a stale target_url's network
+// access was granted to a previous IP/knock-window and must not be reused.
 //
 // Bearer note: the SDK's `apiKey` is the qURL API Bearer for the /v1/resolve
 // call and MUST carry the `qurl:resolve` scope (enforced server-side by qURL,
@@ -433,16 +433,23 @@ function getQurlClient() {
     // `/v1/resolve` itself. Same base qurl.js uses for qurlFetch
     // (`${config.QURL_ENDPOINT}/v1${path}`).
     //
-    // timeout: explicitly bound the resolve() control-plane call. The SDK
-    // already defaults to 30s/attempt, but pinning it keeps the resolve leg
-    // bounded regardless of SDK-default drift, so a stalled qURL endpoint
-    // degrades like the detect POST's AbortSignal.timeout rather than hanging
-    // the interaction with no upper bound. resolve() is a fast knock+lookup,
-    // so 30s sits well under the POST's 60s.
+    // timeout / maxRetries: explicitly bound and harden the resolve()
+    // control-plane call. The SDK already defaults to timeout 30s/attempt and
+    // maxRetries 3 (on 429/5xx + transport errors), but pinning both keeps the
+    // resolve leg's resilience visible and stable against SDK-default drift:
+    //   - timeout bounds a stalled qURL endpoint so it degrades like the detect
+    //     POST's AbortSignal.timeout instead of hanging with no upper bound.
+    //   - maxRetries gives resolve the same transient-failure resilience that
+    //     qurlFetch's 3-attempt backoff gives the other qURL calls, so a single
+    //     blip doesn't fail the whole detect interaction.
+    // resolve() is a fast knock+lookup, so 30s sits well under the POST's 60s;
+    // the retry worst case is timeout*(maxRetries+1)+backoff, still inside
+    // Discord's 15-min deferred-interaction window.
     _qurlClient = new QurlClient({
       apiKey: config.QURL_API_KEY,
       baseUrl: config.QURL_ENDPOINT,
       timeout: 30000,
+      maxRetries: 3,
     });
   }
   return _qurlClient;
@@ -453,8 +460,12 @@ function getQurlClient() {
 // `https://good@127.0.0.1/` hostname-confusion bypass), and any
 // private/loopback/link-local host (reusing qurl.js's syntactic isPrivateHost).
 // Deliberately NOT port-locked (the tunnel target may sit on a non-standard
-// port) and NOT DNS-resolved (syntactic check only — resolve-per-call keeps
-// the knock window tight; a DNS round-trip per detect isn't warranted here).
+// port) and NOT DNS-resolved — a syntactic check ONLY, unlike the link-minting
+// path's assertNotPrivateAfterResolve in qurl.js, which adds a DNS-level
+// anti-rebinding guard. The asymmetry is intentional: target_url here comes
+// from a TRUSTED resolve() (not user input) and resolve-per-call keeps the
+// knock window tight, so a DNS round-trip per detect isn't warranted. A future
+// reader should NOT assume this carries the link guard's DNS guarantee.
 function assertPublicHttpsTarget(targetUrl) {
   let parsed;
   try {
@@ -511,10 +522,10 @@ async function resolveDetectTarget() {
  * filter on the returned rows.
  *
  * REACH MODEL: the public connector `/api/detect` path is gone; detect now
- * lives behind the qURL reverse-tunnel. resolve() opens the tunnel firewall
- * for the bot's current egress IP and the POST goes out from that same IP
- * within the knock window — so resolve-then-POST happens per call and a stale
- * target_url is never reused (a dynamic bot IP would otherwise be locked out).
+ * lives behind the qURL reverse-tunnel. resolve() grants network access to the
+ * bot's current egress IP and the POST goes out from that same IP within the
+ * knock window — so resolve-then-POST happens per call and a stale target_url
+ * is never reused (a dynamic bot IP would otherwise be locked out).
  *
  * Contract:
  *   - Resolve: client `apiKey` (config.QURL_API_KEY, needs `qurl:resolve`
@@ -540,17 +551,14 @@ async function resolveDetectTarget() {
  * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
  */
 async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
-  // The resolve() leg ALWAYS authenticates with the global config.QURL_API_KEY
-  // (see getQurlClient); a per-call `apiKey` overrides only the detect POST
-  // Bearer, never the resolve Bearer. So this path specifically REQUIRES
-  // config.QURL_API_KEY — a set `apiKey` alone can't satisfy resolve, which
-  // would otherwise go out with an undefined Bearer and 401 confusingly.
-  // (config.QURL_API_KEY also backstops the POST Bearer via connectorAuthHeaders.)
+  // resolve() always uses the global config.QURL_API_KEY (see getQurlClient), so
+  // this leg requires it even when a per-call `apiKey` is set — the apiKey
+  // overrides only the POST Bearer, not the resolve Bearer.
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');
 
-  // Resolve-per-call: opens the tunnel firewall for our current IP, then POST
-  // from that same IP within the knock window. Never cache the target_url.
+  // Resolve-per-call — never cache the target_url (rationale in the REACH MODEL
+  // note above and resolveDetectTarget's docstring).
   const targetUrl = await resolveDetectTarget();
 
   const response = await fetch(targetUrl, {

@@ -4,8 +4,10 @@ const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
 /**
- * Lightweight qURL API client using fetch.
- * Avoids ESM/CJS compatibility issues with the @layervai/qurl SDK.
+ * Lightweight qURL API client using fetch. Predates the @layervai/qurl SDK,
+ * which the bot now also uses (connector.js, detect-over-tunnel #1101). The two
+ * clients coexist pending consolidation onto the SDK — see #830. (This client
+ * originally avoided the SDK over ESM/CJS interop; that blocker is resolved.)
  */
 
 // Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
