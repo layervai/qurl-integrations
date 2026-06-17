@@ -33,6 +33,7 @@ describe('Connector client — coverage boost', () => {
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
       QURL_API_KEY: 'test-key-for-connector',
+      QURL_ENDPOINT: 'https://api.qurl.test',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
@@ -458,6 +459,7 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
       QURL_API_KEY: '', // empty — should throw
+      QURL_ENDPOINT: 'https://api.qurl.test',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
@@ -793,6 +795,51 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       // resolve() ran (the knock), but the userinfo guard rejected before the POST.
       expect(mockResolve).toHaveBeenCalledTimes(1);
       expect(get()).toBeNull();
+    });
+
+    it.each([
+      ['wrong path', 'https://detect-tunnel.qurl.link/api/upload'],
+      ['query string', 'https://detect-tunnel.qurl.link/api/detect?x=1'],
+      ['fragment', 'https://detect-tunnel.qurl.link/api/detect#x'],
+      ['non-default port', 'https://detect-tunnel.qurl.link:444/api/detect'],
+      ['bare qURL apex', 'https://qurl.link/api/detect'],
+      ['untrusted host', 'https://attacker.example/api/detect'],
+    ])('SSRF guard: rejects %s resolved target_url and NO POST happens', async (_label, target) => {
+      const get = captureDetect({ detected: false }, { target });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/qURL|target/);
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
+    });
+
+    it('resolves each settled detect call so the NHP grant stays fresh', async () => {
+      const get = captureDetect({ detected: false });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(mockResolve).toHaveBeenCalledTimes(2);
+      expect(get()).not.toBeNull();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('shares one in-flight resolve across concurrent detect calls', async () => {
+      let releaseResolve;
+      mockResolve.mockReturnValue(new Promise(resolve => {
+        releaseResolve = resolve;
+      }));
+      globalThis.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => ({ detected: false, qurl_id: null, match_pct: null, confidence: 0 }),
+        text: async () => '{}',
+      }));
+
+      const first = connector.detectWatermark(Buffer.from('a'), { guildId: 'g', apiKey: 'k' });
+      const second = connector.detectWatermark(Buffer.from('b'), { guildId: 'g', apiKey: 'k' });
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      releaseResolve({ target_url: TUNNEL_TARGET, resource_id: 'res_detect' });
+      await Promise.all([first, second]);
+      expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      expect(globalThis.fetch.mock.calls.map(([url]) => url)).toEqual([TUNNEL_TARGET, TUNNEL_TARGET]);
     });
 
     it('requires config.QURL_API_KEY for the resolve Bearer even when a per-call apiKey is given (no resolve, no POST)', async () => {

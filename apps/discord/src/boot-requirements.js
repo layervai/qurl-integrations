@@ -353,14 +353,30 @@ function invalidHotStandbyValues(cfg) {
 // lockstep — otherwise the boot check silently regresses to
 // "non-empty value passes" and the original incident class
 // returns. `git grep TODO(infra-sentinel-sync)` finds the marker.
-const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
+const PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
+const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = PLACEHOLDER_SENTINEL;
+const DETECT_ACCESS_TOKEN_PLACEHOLDER_SENTINEL = PLACEHOLDER_SENTINEL;
+
+function missingSecretOrPlaceholder(value) {
+  const trimmed = String(value ?? '').trim();
+  return !trimmed || trimmed === PLACEHOLDER_SENTINEL;
+}
+
 function missingMapCommandKeys(cfg) {
   if (!cfg.MAP_COMMAND_ENABLED) return [];
   const key = cfg.GOOGLE_MAPS_API_KEY;
-  if (!key || key === GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL) {
+  if (missingSecretOrPlaceholder(key)) {
     return ['GOOGLE_MAPS_API_KEY'];
   }
   return [];
+}
+
+function missingDetectCommandKeys(cfg) {
+  if (!cfg.DETECT_COMMAND_ENABLED) return [];
+  const missing = [];
+  if (missingSecretOrPlaceholder(cfg.QURL_API_KEY)) missing.push('QURL_API_KEY');
+  if (missingSecretOrPlaceholder(cfg.DETECT_ACCESS_TOKEN)) missing.push('DETECT_ACCESS_TOKEN');
+  return missing;
 }
 
 // Process-role parsing for the gateway/HTTP split. Lifted out of
@@ -445,7 +461,10 @@ module.exports = {
   invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
+  PLACEHOLDER_SENTINEL,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+  DETECT_ACCESS_TOKEN_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };

@@ -14,6 +14,11 @@ const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time
 
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
+const ALLOWED_DETECT_TARGET_HOST_SUFFIXES = [
+  '.qurl.site',
+  '.qurl.link',
+];
+let inFlightDetectTargetResolve = null;
 
 // Truncate the connector's MD5 of an uploaded file before logging. The full
 // hash is treated as sensitive in our broader infrastructure; see internal
@@ -446,8 +451,8 @@ function getQurlClient() {
     // the retry worst case is timeout*(maxRetries+1)+backoff, still inside
     // Discord's 15-min deferred-interaction window.
     _qurlClient = new QurlClient({
-      apiKey: config.QURL_API_KEY,
-      baseUrl: config.QURL_ENDPOINT,
+      apiKey: config.QURL_API_KEY?.trim(),
+      baseUrl: String(config.QURL_ENDPOINT || '').trim(),
       timeout: 30000,
       maxRetries: 3,
     });
@@ -455,17 +460,15 @@ function getQurlClient() {
   return _qurlClient;
 }
 
-// SSRF guard for the resolve()-returned tunnel target. Must be a PUBLIC
-// `https:` URL; reject any non-https scheme, embedded userinfo (the
-// `https://good@127.0.0.1/` hostname-confusion bypass), and any
-// private/loopback/link-local host (reusing qurl.js's syntactic isPrivateHost).
-// Deliberately NOT port-locked (the tunnel target may sit on a non-standard
-// port) and NOT DNS-resolved — a syntactic check ONLY, unlike the link-minting
-// path's assertNotPrivateAfterResolve in qurl.js, which adds a DNS-level
-// anti-rebinding guard. The asymmetry is intentional: target_url here comes
-// from a TRUSTED resolve() (not user input) and resolve-per-call keeps the
-// knock window tight, so a DNS round-trip per detect isn't warranted. A future
-// reader should NOT assume this carries the link guard's DNS guarantee.
+// SSRF guard for the resolve()-returned tunnel target. Must be a qURL-hosted
+// public `https:` /api/detect URL; reject non-https schemes, embedded userinfo
+// (the `https://good@127.0.0.1/` hostname-confusion bypass), private/loopback/
+// link-local hosts (reusing qurl.js's syntactic isPrivateHost), non-default
+// ports, and path/query/fragment drift. This is still syntactic only, unlike
+// the link-minting path's assertNotPrivateAfterResolve in qurl.js, which adds a
+// DNS-level anti-rebinding guard. The asymmetry is intentional: target_url here
+// comes from a trusted resolve() response and resolve-per-call keeps the knock
+// window tight, so a DNS round-trip per detect isn't warranted.
 function assertPublicHttpsTarget(targetUrl) {
   let parsed;
   try {
@@ -482,6 +485,18 @@ function assertPublicHttpsTarget(targetUrl) {
   if (isPrivateHost(parsed.hostname)) {
     throw new Error('Detect tunnel target points to a private/internal address');
   }
+  const hostname = parsed.hostname.replace(/\.$/, '').toLowerCase();
+  if (!ALLOWED_DETECT_TARGET_HOST_SUFFIXES.some(suffix => hostname.endsWith(suffix))) {
+    throw new Error('Detect tunnel target host is not an allowed qURL tunnel host');
+  }
+  if (
+    (parsed.port !== '' && parsed.port !== '443')
+    || parsed.pathname !== '/api/detect'
+    || parsed.search
+    || parsed.hash
+  ) {
+    throw new Error('Detect tunnel target must be a qURL https /api/detect URL');
+  }
   return targetUrl;
 }
 
@@ -491,39 +506,52 @@ function assertPublicHttpsTarget(targetUrl) {
  * Calls `QurlClient.resolve({ access_token: config.DETECT_ACCESS_TOKEN })`,
  * which (per the SDK) triggers an NHP knock granting network access for the
  * CALLER'S CURRENT IP, then returns the `target_url` to POST the image to.
- * The caller MUST POST within the knock window from the same IP — hence this
- * is invoked immediately before each detect POST (resolve-per-call), and the
- * returned target_url is never cached. This is exactly what lets the bot's
- * dynamic egress IP reach a tunnel that only admits knocked IPs.
+ * The caller MUST POST within the knock window from the same IP. The settled
+ * target_url is never cached, but simultaneous detect calls share one in-flight
+ * resolve so a short burst does not double-fire the same knock.
  *
  * @returns {Promise<string>} the SSRF-validated public https target_url.
  * @throws if DETECT_ACCESS_TOKEN is unset, or the resolved target fails the
  *   public-https SSRF guard.
  */
 async function resolveDetectTarget() {
-  if (!config.DETECT_ACCESS_TOKEN) {
+  const token = config.DETECT_ACCESS_TOKEN?.trim();
+  if (!token) {
     throw new Error('DETECT_ACCESS_TOKEN is not configured (required to resolve the detect tunnel target)');
   }
+  if (!config.QURL_API_KEY?.trim()) {
+    throw new Error('QURL_API_KEY is not configured (required to resolve the detect tunnel target)');
+  }
+  if (inFlightDetectTargetResolve) return inFlightDetectTargetResolve;
+
   // Breadcrumb the two distinct failure modes of this oracle path so an
   // activation-time failure is diagnosable — a failed knock/transport vs. a
   // rejected target — rather than an undistinguished throw at the handler. Log
   // ONLY the error message: never the access_token, and never the raw
   // target_url (assertPublicHttpsTarget's messages are static and URL-free, and
   // a malformed target could carry userinfo).
-  let targetUrl;
+  inFlightDetectTargetResolve = (async () => {
+    let targetUrl;
+    try {
+      ({ target_url: targetUrl } = await getQurlClient().resolve({
+        access_token: token,
+      }));
+    } catch (err) {
+      logger.warn('Detect tunnel resolve failed (knock/transport)', { error: err.message });
+      throw err;
+    }
+    try {
+      return assertPublicHttpsTarget(targetUrl);
+    } catch (err) {
+      logger.warn('Detect tunnel target rejected by SSRF guard', { error: err.message });
+      throw err;
+    }
+  })();
+
   try {
-    ({ target_url: targetUrl } = await getQurlClient().resolve({
-      access_token: config.DETECT_ACCESS_TOKEN,
-    }));
-  } catch (err) {
-    logger.warn('Detect tunnel resolve failed (knock/transport)', { error: err.message });
-    throw err;
-  }
-  try {
-    return assertPublicHttpsTarget(targetUrl);
-  } catch (err) {
-    logger.warn('Detect tunnel target rejected by SSRF guard', { error: err.message });
-    throw err;
+    return await inFlightDetectTargetResolve;
+  } finally {
+    inFlightDetectTargetResolve = null;
   }
 }
 
@@ -541,8 +569,8 @@ async function resolveDetectTarget() {
  * REACH MODEL: the public connector `/api/detect` path is gone; detect now
  * lives behind the qURL reverse-tunnel. resolve() grants network access to the
  * bot's current egress IP and the POST goes out from that same IP within the
- * knock window — so resolve-then-POST happens per call and a stale target_url
- * is never reused (a dynamic bot IP would otherwise be locked out).
+ * knock window — so resolve-then-POST happens for each settled call and a stale
+ * target_url is never reused (a dynamic bot IP would otherwise be locked out).
  *
  * Contract:
  *   - Resolve: client `apiKey` (config.QURL_API_KEY, needs `qurl:resolve`

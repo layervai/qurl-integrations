@@ -24,7 +24,9 @@ const {
   invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
+  missingDetectCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+  DETECT_ACCESS_TOKEN_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -418,6 +420,68 @@ describe('missingMapCommandKeys', () => {
       missingMapCommandKeys({
         MAP_COMMAND_ENABLED: true,
         GOOGLE_MAPS_API_KEY: 'AIzaSyA-real-looking-key-1234567890',
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('missingDetectCommandKeys', () => {
+  it('returns empty when the flag is off — qURL detect token state is irrelevant', () => {
+    expect(missingDetectCommandKeys({})).toEqual([]);
+    expect(missingDetectCommandKeys({ DETECT_COMMAND_ENABLED: false })).toEqual([]);
+    expect(
+      missingDetectCommandKeys({
+        DETECT_COMMAND_ENABLED: false,
+        QURL_API_KEY: '',
+        DETECT_ACCESS_TOKEN: DETECT_ACCESS_TOKEN_PLACEHOLDER_SENTINEL,
+      }),
+    ).toEqual([]);
+  });
+
+  it('requires both qURL resolve credential and detect access token when toggle is on', () => {
+    expect(
+      missingDetectCommandKeys({ DETECT_COMMAND_ENABLED: true }),
+    ).toEqual(['QURL_API_KEY', 'DETECT_ACCESS_TOKEN']);
+    expect(
+      missingDetectCommandKeys({
+        DETECT_COMMAND_ENABLED: true,
+        QURL_API_KEY: 'qurl-resolve-key',
+      }),
+    ).toEqual(['DETECT_ACCESS_TOKEN']);
+    expect(
+      missingDetectCommandKeys({
+        DETECT_COMMAND_ENABLED: true,
+        DETECT_ACCESS_TOKEN: 'at_detecttoken1234567890',
+      }),
+    ).toEqual(['QURL_API_KEY']);
+  });
+
+  it('flags PLACEHOLDER sentinels when the toggle is on', () => {
+    expect(
+      missingDetectCommandKeys({
+        DETECT_COMMAND_ENABLED: true,
+        QURL_API_KEY: 'PLACEHOLDER',
+        DETECT_ACCESS_TOKEN: DETECT_ACCESS_TOKEN_PLACEHOLDER_SENTINEL,
+      }),
+    ).toEqual(['QURL_API_KEY', 'DETECT_ACCESS_TOKEN']);
+  });
+
+  it('flags whitespace-only values when the toggle is on', () => {
+    expect(
+      missingDetectCommandKeys({
+        DETECT_COMMAND_ENABLED: true,
+        QURL_API_KEY: '   ',
+        DETECT_ACCESS_TOKEN: '\n\t ',
+      }),
+    ).toEqual(['QURL_API_KEY', 'DETECT_ACCESS_TOKEN']);
+  });
+
+  it('returns empty when toggle is on and both secrets are real values', () => {
+    expect(
+      missingDetectCommandKeys({
+        DETECT_COMMAND_ENABLED: true,
+        QURL_API_KEY: 'qurl-resolve-key',
+        DETECT_ACCESS_TOKEN: 'at_detecttoken1234567890',
       }),
     ).toEqual([]);
   });
