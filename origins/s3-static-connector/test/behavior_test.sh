@@ -13,6 +13,8 @@ IMG="${IMG:-s3-static-connector:test}"
 NET="s3-static-connector-testnet"
 STUB="s3-static-connector-stub"
 ORIGIN="s3-static-connector-app"
+# python:3.12.13-slim-trixie multi-arch index, used only for the local stub.
+STUB_IMG="python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9"
 arch="$(uname -m)"; case "$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) ;; esac
 PLATFORM="${PLATFORM:-linux/$arch}"
 TMPROOT="${TMPDIR:-/tmp}"
@@ -51,7 +53,7 @@ docker network create "$NET" >/dev/null
 
 docker run -d --name "$STUB" --network "$NET" \
   -v "$DIR/test/stub-s3/stub.py:/stub.py:ro" \
-  python:3.12-slim python /stub.py >/dev/null
+  "$STUB_IMG" python /stub.py >/dev/null
 
 docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \

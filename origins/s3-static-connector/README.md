@@ -55,6 +55,11 @@ Credentials come from Envoy's default AWS credential provider chain (EC2 instanc
 role via IMDSv2, ECS task role, web identity, or env) — no static IAM key is
 required in the happy path.
 
+This image targets standard AWS commercial-partition S3 virtual-hosted
+endpoints (`<bucket>.s3.<region>.amazonaws.com`). China, GovCloud, FIPS,
+dualstack, and VPC endpoint hostnames need a future signed-host/SNI override;
+`S3_ENDPOINT_ADDR` changes only the dial target, not the Host Envoy signs.
+
 ## Behavior contract
 
 Only `GET` and `HEAD` are served (anything else → `405`). Object resolution uses

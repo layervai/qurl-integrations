@@ -230,7 +230,7 @@ if [ -n "$CACHE_DEFAULT_TTL" ]; then
       exit 1
       ;;
   esac
-  CACHE_FALLBACK_DIRECTIVE="proxy_cache_valid 200 206 ${CACHE_DEFAULT_TTL};"
+  CACHE_FALLBACK_DIRECTIVE="proxy_cache_valid 200 ${CACHE_DEFAULT_TTL};"
 else
   CACHE_FALLBACK_DIRECTIVE="# CACHE_DEFAULT_TTL unset; no fallback proxy_cache_valid emitted."
 fi
