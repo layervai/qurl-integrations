@@ -193,17 +193,26 @@ func TestCheckRateLimit_DeniesFutureWindowRaceAfterRead(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		secondWindow int64
+		secondCount  int64
 		wantWindow   int64
 	}{
 		{
 			name:         "same future window consumed capacity",
 			secondWindow: futureWindowUnix,
+			secondCount:  int64(limit),
 			wantWindow:   futureWindowUnix,
 		},
 		{
 			name:         "newer future window wins retry hint",
 			secondWindow: newerWindowUnix,
+			secondCount:  int64(limit),
 			wantWindow:   newerWindowUnix,
+		},
+		{
+			name:         "backward reset keeps conservative retry hint",
+			secondWindow: localWindowUnix,
+			secondCount:  int64(limit - 1),
+			wantWindow:   futureWindowUnix,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -239,7 +248,7 @@ func TestCheckRateLimit_DeniesFutureWindowRaceAfterRead(t *testing.T) {
 							Message: aws.String("future race"),
 							Item: map[string]ddbtypes.AttributeValue{
 								attrRateLimitWindow: numberAttr(tc.secondWindow),
-								attrRateLimitCount:  numberAttr(int64(limit)),
+								attrRateLimitCount:  numberAttr(tc.secondCount),
 							},
 						}
 					default:

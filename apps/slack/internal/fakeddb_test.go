@@ -496,6 +496,8 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 
 func cloneUpdatedNewAttributes(item map[string]ddbtypes.AttributeValue, expr string, names map[string]string) map[string]ddbtypes.AttributeValue {
 	out := map[string]ddbtypes.AttributeValue{}
+	// The fake returns touched top-level attributes for UPDATED_NEW. That is
+	// enough for current callers, though nested writes return the parent value.
 	for _, attr := range updatedTopLevelAttrs(expr, names) {
 		if v, ok := item[attr]; ok {
 			out[attr] = v
