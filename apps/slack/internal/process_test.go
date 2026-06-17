@@ -432,6 +432,7 @@ func TestHandle_AsyncGetSurfacesIdempotencyKey(t *testing.T) {
 // Slack's retry storm.
 func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	const concurrency = 100
+	const expectedAllowedMints = 30
 
 	var keys sync.Map
 	var hits atomic.Int32
@@ -448,8 +449,9 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	rec := newResponseURLRecorder(t)
-	// Pool capacity bumped so all concurrency requests are dispatched
-	// (the dedup property is what's under test, not back-pressure).
+	// Pool capacity is intentionally above the per-user mint cap: the test
+	// still exercises a retry storm, but the rate-limit gate now stops the
+	// excess requests before they reach qurl-service.
 	h := NewHandler(Config{
 		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
 		SlackSigningSecret: testSigningSecret,
@@ -484,13 +486,13 @@ func TestHandle_ConcurrentGetSharesIdempotencyKey(t *testing.T) {
 	wg.Wait()
 	h.Wait()
 
-	if got := hits.Load(); got != concurrency {
-		t.Errorf("upstream hits = %d, want %d (pool was sized for full dispatch)", got, concurrency)
+	if got := hits.Load(); got != expectedAllowedMints {
+		t.Errorf("upstream hits = %d, want %d allowed by the per-user mint cap", got, expectedAllowedMints)
 	}
 	var uniqueKeys int
 	keys.Range(func(_, _ any) bool { uniqueKeys++; return true })
 	if uniqueKeys != 1 {
-		t.Errorf("upstream observed %d unique Idempotency-Keys across %d requests, want 1", uniqueKeys, concurrency)
+		t.Errorf("upstream observed %d unique Idempotency-Keys across %d allowed requests, want 1", uniqueKeys, expectedAllowedMints)
 	}
 }
 

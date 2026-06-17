@@ -2,17 +2,23 @@ package slackdata
 
 import (
 	"context"
-	"log/slog"
-	"sync"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"net/http"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// rateLimitStubWarnOnce ensures the "rate-limit gate is a stub" log
-// line fires exactly once per process — without this, slog would
-// flood with one line per /qurl get mint. Once-only also means the
-// alert is visible in dashboards as "this process is degraded"
-// rather than "this user just hit the gate".
-var rateLimitStubWarnOnce sync.Once
+const (
+	mintRateLimitWindow = time.Hour
+	mintRateLimitMax    = int64(30)
+	attrMintWindowStart = "mint_window_start"
+	attrMintCount       = "mint_count"
+)
 
 // CheckRateLimit is the in-bot per-user mint-rate gate. Pre-pivot
 // this was an HTTP call to qurl-service `/internal/v1/admin/rate-
@@ -21,29 +27,114 @@ var rateLimitStubWarnOnce sync.Once
 // and doesn't track per-Slack-user mint counts. The rate-limit
 // surface stays in-bot.
 //
-// **STUB IMPLEMENTATION.** This method currently always returns
-// (true, 0, nil) — every mint is allowed. The first call emits a
-// once-only WARN so operators see the open-gate posture in
-// CloudWatch on the first mint after each restart rather than only
-// in code review. The pre-pivot enforcement (30 mints per
-// slack_user_id per hour, cross-team) needs a new in-bot home; the
-// rollout doc proposes either:
-//   - In-memory token bucket on the Fargate task (fast; lost on
-//     redeploy; per-task not per-workspace).
-//   - DDB-backed counter on the workspace_state row (durable;
-//     cross-task; one extra write per mint).
-//
-// Today the bot relies on qurl-service's customer-level rate-limits
-// (the API key has its own quota) as a coarser backstop.
-//
-// TODO: implement once the in-bot rate-limit strategy is picked
-// (see SLACK_QURL_ROLLOUT.md — pending design issue).
+// The chosen strategy is a DynamoDB fixed-window counter item in the
+// channel_policies table. Each Slack user gets one hashed counter key
+// whose mint_window_start/mint_count fields are updated atomically, so
+// the gate is shared by every Fargate task and survives restarts without
+// adding a table or creating one row per user per hour.
 func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) (allowed bool, retry time.Duration, err error) {
-	_ = ctx
-	_ = slackUserID
-	_ = teamID
-	rateLimitStubWarnOnce.Do(func() {
-		slog.Warn("slackdata.CheckRateLimit is a no-op stub — every mint is allowed; qurl-service's API-key quota is the only enforcer")
+	if slackUserID == "" || teamID == "" {
+		return false, 0, &Error{StatusCode: http.StatusBadRequest, Title: "CheckRateLimit: slack_user_id and team_id are required"}
+	}
+	now := s.nowOrDefault().UTC()
+	windowStart := now.Truncate(mintRateLimitWindow)
+	windowEnd := windowStart.Add(mintRateLimitWindow)
+	windowUnix := windowStart.Unix()
+	counterKey := mintRateLimitCounterKey(slackUserID)
+
+	if err := s.incrementMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
+		return true, 0, nil
+	} else if !isConditionalCheckFailed(err) {
+		return false, 0, ddbToError("CheckRateLimit", err)
+	}
+
+	item, err := s.getMintCounter(ctx, teamID, counterKey)
+	if err != nil {
+		return false, 0, ddbToError("CheckRateLimit", err)
+	}
+	storedWindow := readNumber(item, attrMintWindowStart)
+	count := readNumber(item, attrMintCount)
+	if storedWindow == windowUnix && count >= mintRateLimitMax {
+		return false, windowEnd.Sub(now), nil
+	}
+	if storedWindow == windowUnix {
+		if err := s.incrementMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
+			return true, 0, nil
+		} else if !isConditionalCheckFailed(err) {
+			return false, 0, ddbToError("CheckRateLimit", err)
+		}
+		return false, windowEnd.Sub(now), nil
+	}
+
+	if err := s.resetMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
+		return true, 0, nil
+	} else if !isConditionalCheckFailed(err) {
+		return false, 0, ddbToError("CheckRateLimit", err)
+	}
+	if err := s.incrementMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
+		return true, 0, nil
+	} else if !isConditionalCheckFailed(err) {
+		return false, 0, ddbToError("CheckRateLimit", err)
+	}
+	return false, windowEnd.Sub(now), nil
+}
+
+func (s *Store) incrementMintCounter(ctx context.Context, teamID, counterKey string, windowUnix int64) error {
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(counterKey),
+		},
+		UpdateExpression:    aws.String("ADD " + attrMintCount + " :one"),
+		ConditionExpression: aws.String(attrMintWindowStart + " = :window AND " + attrMintCount + " < :limit"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":one":    numberAttr(1),
+			":window": numberAttr(windowUnix),
+			":limit":  numberAttr(mintRateLimitMax),
+		},
 	})
-	return true, 0, nil
+	return err
+}
+
+func (s *Store) getMintCounter(ctx context.Context, teamID, counterKey string) (map[string]ddbtypes.AttributeValue, error) {
+	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      aws.String(s.ChannelPoliciesName),
+		ConsistentRead: aws.Bool(true),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(counterKey),
+		},
+	})
+	if getErr != nil {
+		return nil, getErr
+	}
+	return out.Item, nil
+}
+
+func (s *Store) resetMintCounter(ctx context.Context, teamID, counterKey string, windowUnix int64) error {
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:    stringAttr(teamID),
+			attrSlackChannelID: stringAttr(counterKey),
+		},
+		UpdateExpression:    aws.String("SET " + attrMintWindowStart + " = :window, " + attrMintCount + " = :one"),
+		ConditionExpression: aws.String("attribute_not_exists(" + attrMintWindowStart + ") OR " + attrMintWindowStart + " < :window"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":one":    numberAttr(1),
+			":window": numberAttr(windowUnix),
+		},
+	})
+	return err
+}
+
+func isConditionalCheckFailed(err error) bool {
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	return errors.As(err, &ccfe)
+}
+
+func mintRateLimitCounterKey(slackUserID string) string {
+	sum := sha256.Sum256([]byte(slackUserID))
+	return "rate_limit#" + hex.EncodeToString(sum[:])[:16]
 }

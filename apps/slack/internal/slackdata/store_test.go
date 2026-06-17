@@ -961,6 +961,11 @@ func TestChannelsForResource_UnionSortAndQueryShape(t *testing.T) {
 				channelPolicyRow("C_set", []string{testTargetResourceID, "r_other"}, nil),         // via allowed_resource_ids
 				channelPolicyRow("C_alias", nil, map[string]string{"dash": testTargetResourceID}), // via alias binding
 				channelPolicyRow("C_unrelated", []string{"r_nope"}, nil),                          // neither
+				{
+					attrSlackChannelID:  stringAttr("rate_limit#user"),
+					attrMintWindowStart: numberAttr(1_782_000_000),
+					attrMintCount:       numberAttr(30),
+				}, // mint counter item; not a channel exposure
 			}}, nil
 		},
 	})

@@ -301,6 +301,40 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 	}
 }
 
+func TestHandleGet_AdminStoreRateLimitDenialShowsRetryHint(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.cfg.AdminStore.Now = func() time.Time {
+		return time.Date(2026, 6, 17, 12, 42, 0, 0, time.UTC)
+	}
+	inv := newAdminSlashInvoker(t, h)
+	for i := 0; i < 30; i++ {
+		allowed, retry, err := h.cfg.AdminStore.CheckRateLimit(context.Background(), testAdminUserID, testAdminTeamID)
+		if err != nil {
+			t.Fatalf("prefill rate limit %d: %v", i+1, err)
+		}
+		if !allowed || retry != 0 {
+			t.Fatalf("prefill rate limit %d allowed=%v retry=%s, want allowed/no retry", i+1, allowed, retry)
+		}
+	}
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "Rate limit hit") {
+		t.Fatalf("denied async reply missing rate-limit copy: %q", async)
+	}
+	if !strings.Contains(async, "Try again in 18m") {
+		t.Fatalf("denied async reply missing retry-after hint: %q", async)
+	}
+	if got := mintHits.Load(); got != 0 {
+		t.Fatalf("mint hits = %d, want denied request not to reach qurl-service", got)
+	}
+}
+
 // TestHandleGet_MintTransportError fences 5xx and bare network
 // errors → user-facing "Could not reach qURL. Please try again."
 // (mapMintError's serviceUnreachableMessage branch).

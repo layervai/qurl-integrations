@@ -408,7 +408,7 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 	}
 	table[key] = existing
 	out := &dynamodb.UpdateItemOutput{}
-	if in.ReturnValues == ddbtypes.ReturnValueAllNew {
+	if in.ReturnValues == ddbtypes.ReturnValueAllNew || in.ReturnValues == ddbtypes.ReturnValueUpdatedNew {
 		out.Attributes = cloneItem(existing)
 	}
 	return out, nil
@@ -508,7 +508,7 @@ func applyUpdateExpression(expr string, item, vals map[string]ddbtypes.Attribute
 				return err
 			}
 		case "ADD":
-			if err := applyAddClause(c.body, item, vals); err != nil {
+			if err := applyAddClause(c.body, item, vals, names); err != nil {
 				return err
 			}
 		case "DELETE":
@@ -600,26 +600,44 @@ func applyRemoveClause(body string, item map[string]ddbtypes.AttributeValue, nam
 	return nil
 }
 
-// applyAddClause handles `<attr> :v`. Currently only supports the
-// SS (string-set) merge form used by AddAdmin.
-func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue) error {
+// applyAddClause handles `<attr> :v`. Supports the SS merge form used by
+// policy/admin mutations and the numeric increment form used by counters.
+func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue, names map[string]string) error {
 	body = strings.TrimSpace(body)
 	parts := strings.Fields(body)
 	if len(parts) != 2 {
 		return fmt.Errorf("fakeDDB ADD: expected `<attr> :value`, got %q", body)
 	}
-	attr := parts[0]
+	attrParts := resolvePath(parts[0], names)
+	if len(attrParts) != 1 {
+		return fmt.Errorf("fakeDDB ADD: unsupported attr path %q", parts[0])
+	}
+	attr := attrParts[0]
 	v, ok := vals[parts[1]]
 	if !ok {
 		return fmt.Errorf("fakeDDB ADD: unknown value %q", parts[1])
 	}
-	incoming, ok := v.(*ddbtypes.AttributeValueMemberSS)
-	if !ok {
-		return fmt.Errorf("fakeDDB ADD: only string-set ADD is supported, got %T", v)
+	switch incoming := v.(type) {
+	case *ddbtypes.AttributeValueMemberSS:
+		existing, _ := item[attr].(*ddbtypes.AttributeValueMemberSS)
+		merged := mergeStringSet(existing, incoming.Value)
+		item[attr] = &ddbtypes.AttributeValueMemberSS{Value: merged}
+	case *ddbtypes.AttributeValueMemberN:
+		add, err := strconv.ParseInt(incoming.Value, 10, 64)
+		if err != nil {
+			return err
+		}
+		var cur int64
+		if existing, ok := item[attr].(*ddbtypes.AttributeValueMemberN); ok {
+			cur, err = strconv.ParseInt(existing.Value, 10, 64)
+			if err != nil {
+				return err
+			}
+		}
+		item[attr] = &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(cur+add, 10)}
+	default:
+		return fmt.Errorf("fakeDDB ADD: only string-set or number ADD is supported, got %T", v)
 	}
-	existing, _ := item[attr].(*ddbtypes.AttributeValueMemberSS)
-	merged := mergeStringSet(existing, incoming.Value)
-	item[attr] = &ddbtypes.AttributeValueMemberSS{Value: merged}
 	return nil
 }
 
@@ -751,6 +769,22 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
+	if strings.Contains(term, " OR ") {
+		inner := term
+		if strings.HasPrefix(inner, "(") && strings.HasSuffix(inner, ")") {
+			inner = strings.TrimSuffix(strings.TrimPrefix(inner, "("), ")")
+		}
+		for _, part := range strings.Split(inner, " OR ") {
+			ok, err := evalConditionTerm(strings.TrimSpace(part), item, present, vals, names)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 	switch {
 	case strings.HasPrefix(term, "attribute_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_exists("), ")")
