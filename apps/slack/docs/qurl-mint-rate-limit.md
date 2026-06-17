@@ -6,6 +6,8 @@ Slack `/qurl get` mint attempts use a DynamoDB-backed per-user fixed-window coun
 
 The gate allows 30 channel-authorized mint attempts per Slack user per workspace per hour. A request only counts after the alias resolves to a channel-authorized resource, so typos and unauthorized aliases do not burn quota. Once the request reaches qurl-service, the attempt is already counted; an upstream mint failure is not refunded.
 
+The quota is intentionally per `(workspace, Slack user)`, not a global cross-workspace human quota. Issue #400 is about restoring the Slack bot's per-user mint backstop after the pivot while keeping qurl-service integration-agnostic; using the Slack team partition matches that workspace-scoped ownership and keeps the qurl-service API-key quota as a separate workspace-level backstop.
+
 ## Why DynamoDB
 
 The issue considered three strategies:
@@ -27,7 +29,7 @@ mint_window_start = <hour_window_start_unix>
 mint_count = <number>
 ```
 
-The truncated hash is 64 bits. That keeps raw Slack user IDs out of the key while making collision risk negligible at Slack-workspace user counts; a collision would share quota between those users.
+The truncated hash is 64 bits. That keeps raw Slack user IDs out of the key while making collision risk negligible at Slack-workspace user counts; a collision would share quota between those users. This is key obfuscation, not a privacy boundary: `slack_team_id` remains stored as the plaintext partition key.
 
 Normal in-window requests use a single conditional `UpdateItem`:
 
@@ -40,6 +42,8 @@ The first request in a new window resets the same item to `mint_count = 1` under
 
 ## Tradeoffs
 
-This is a fixed-window limiter rather than a true sliding-window token bucket. The pre-pivot enforcement was also hour-window shaped, and the operational property that matters for GA is cross-task persistence. The gate counts attempts, not successful upstream creates, because the atomic check-and-consume happens before the mint call.
+This is a fixed-window limiter rather than a true sliding-window token bucket. The pre-pivot enforcement was also hour-window shaped, and the operational property that matters for GA is cross-task persistence. The sharp edge is the normal fixed-window boundary burst: a user can mint up to 30 times near the end of one hour and up to 30 more at the start of the next. The gate counts attempts, not successful upstream creates, because the atomic check-and-consume happens before the mint call.
+
+The 30/hour limit and one-hour window are compile-time constants. That is deliberate for this release because they preserve the pre-pivot policy without adding a runtime tuning surface; changing them requires a redeploy.
 
 Counter rows share the `channel_policies` team partition with channel policy rows. `ChannelsForResource` filters them out, but until TTL cleanup lands, the `/qurl list` Edit-modal prefill query still pages over dormant counter rows. Storage remains bounded to one row per `(workspace, user)`, not one row per hour, and native TTL cleanup for inactive counter rows is tracked in layervai/qurl-integrations-infra#1225.

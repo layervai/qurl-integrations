@@ -740,9 +740,41 @@ func splitTopLevelCommas(s string) []string {
 	return out
 }
 
+func splitTopLevelKeyword(s, keyword string) []string {
+	delimiter := " " + keyword + " "
+	depth := 0
+	out := []string{}
+	last := 0
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '(':
+			depth++
+			i++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		default:
+			if depth == 0 && strings.HasPrefix(s[i:], delimiter) {
+				out = append(out, strings.TrimSpace(s[last:i]))
+				i += len(delimiter)
+				last = i
+				continue
+			}
+			i++
+		}
+	}
+	tail := strings.TrimSpace(s[last:])
+	if tail != "" {
+		out = append(out, tail)
+	}
+	return out
+}
+
 // evalCondition supports the exact ConditionExpression shapes the
-// production code emits, joined by " AND ". Each subexpression is
-// one of:
+// production code emits, joined by top-level " AND " and, for reset
+// conditions, parenthesized top-level " OR ". Each subexpression is one of:
 //
 //	attribute_exists(<attr>)
 //	attribute_not_exists(<attr>)
@@ -751,11 +783,10 @@ func splitTopLevelCommas(s string) []string {
 //	<attr> = :val
 //	<attr> > :val
 //
-// Returns (true, nil) when every subexpression is satisfied. OR is
-// NOT parsed — no production caller emits it post-scope-cut.
+// Returns (true, nil) when every subexpression is satisfied.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
-	parts := strings.Split(expr, " AND ")
+	parts := splitTopLevelKeyword(expr, "AND")
 	for _, p := range parts {
 		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
@@ -769,12 +800,12 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
-	if strings.Contains(term, " OR ") {
-		inner := term
-		if strings.HasPrefix(inner, "(") && strings.HasSuffix(inner, ")") {
-			inner = strings.TrimSuffix(strings.TrimPrefix(inner, "("), ")")
-		}
-		for _, part := range strings.Split(inner, " OR ") {
+	inner := term
+	if strings.HasPrefix(inner, "(") && strings.HasSuffix(inner, ")") {
+		inner = strings.TrimSuffix(strings.TrimPrefix(inner, "("), ")")
+	}
+	if parts := splitTopLevelKeyword(inner, "OR"); len(parts) > 1 {
+		for _, part := range parts {
 			ok, err := evalConditionTerm(strings.TrimSpace(part), item, present, vals, names)
 			if err != nil {
 				return false, err
