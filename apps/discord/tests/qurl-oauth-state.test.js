@@ -210,5 +210,64 @@ describe('qurl-oauth-state', () => {
         else process.env.OAUTH_STATE_SECRET = savedShared;
       }
     });
+
+    it('ignores a short legacy secret when a dedicated qURL secret is active', async () => {
+      const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
+      const savedShared = process.env.OAUTH_STATE_SECRET;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      process.env.QURL_OAUTH_STATE_SECRET = 'q'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 'short';
+      try {
+        await jest.isolateModulesAsync(async () => {
+          // eslint-disable-next-line global-require
+          const { signQurlOAuthState: sign, verifyQurlOAuthState: verify } = require('../src/utils/qurl-oauth-state');
+          const state = sign('guild-1', 'user-2');
+          expect(verify(state).ok).toBe(true);
+
+          const [encoded] = state.split('.');
+          const legacySig = crypto.createHmac('sha256', process.env.OAUTH_STATE_SECRET)
+            .update(encoded)
+            .digest('hex');
+          expect(verify(`${encoded}.${legacySig}`).ok).toBe(false);
+        });
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Ignoring OAUTH_STATE_SECRET'));
+      } finally {
+        warnSpy.mockRestore();
+        if (savedQurl === undefined) delete process.env.QURL_OAUTH_STATE_SECRET;
+        else process.env.QURL_OAUTH_STATE_SECRET = savedQurl;
+        if (savedShared === undefined) delete process.env.OAUTH_STATE_SECRET;
+        else process.env.OAUTH_STATE_SECRET = savedShared;
+      }
+    });
+
+    it('returns config_error instead of throwing when configured secrets are unusable', async () => {
+      const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
+      const savedShared = process.env.OAUTH_STATE_SECRET;
+      process.env.QURL_OAUTH_STATE_SECRET = 'short';
+      delete process.env.OAUTH_STATE_SECRET;
+      try {
+        await jest.isolateModulesAsync(async () => {
+          // eslint-disable-next-line global-require
+          const { verifyQurlOAuthState: verify } = require('../src/utils/qurl-oauth-state');
+          const payload = {
+            k: 'qurl-oauth',
+            g: 'guild-1',
+            u: 'user-2',
+            n: 'nonce',
+            e: Math.floor(Date.now() / 1000) + 60,
+          };
+          const encoded = Buffer.from(JSON.stringify(payload)).toString('base64')
+            .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+          const sig = crypto.createHmac('sha256', 'short').update(encoded).digest('hex');
+          expect(() => verify(`${encoded}.${sig}`)).not.toThrow();
+          expect(verify(`${encoded}.${sig}`)).toEqual({ ok: false, reason: 'config_error' });
+        });
+      } finally {
+        if (savedQurl === undefined) delete process.env.QURL_OAUTH_STATE_SECRET;
+        else process.env.QURL_OAUTH_STATE_SECRET = savedQurl;
+        if (savedShared === undefined) delete process.env.OAUTH_STATE_SECRET;
+        else process.env.OAUTH_STATE_SECRET = savedShared;
+      }
+    });
   });
 });

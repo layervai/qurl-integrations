@@ -27,14 +27,20 @@
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const config = require('../config');
+const {
+  MIN_OAUTH_STATE_SECRET_LENGTH,
+  readEnvSecret,
+} = require('./oauth-state-secrets');
 
 const STATE_KIND = 'qurl-oauth';
 const STATE_TTL_SECONDS = 5 * 60;
 
 let _warnedFallback = false;
+let _warnedShortLegacy = false;
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
-// Secret precedence (highest first):
+// Signing uses the first secret below; verification tries every configured
+// secret in order so already-clicked links survive the migration window:
 //   1. QURL_OAUTH_STATE_SECRET — flow-dedicated, lets ops rotate the
 //      qURL OAuth signer without invalidating in-flight GitHub OAuth
 //      links. Preferred going forward.
@@ -46,28 +52,31 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 //   4. Test fallback          — per-process random secret for jest only.
 //
 // Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM while leaving
-// OAUTH_STATE_SECRET present, deploy, wait longer than STATE_TTL_SECONDS,
-// then drop OAUTH_STATE_SECRET. Verification accepts both configured keys
-// during that window; after the legacy key is removed it stops validating.
+// OAUTH_STATE_SECRET present, deploy, wait longer than STATE_TTL_SECONDS, then
+// replace OAUTH_STATE_SECRET with the SSM PLACEHOLDER sentinel. Verification
+// accepts both configured keys during that window; after the legacy key is
+// disabled it stops validating.
 // Minimum acceptable secret length — per round-9 #4. 32 chars is the
 // floor for an HMAC-SHA256 secret with adequate entropy (matches the
 // `0`.repeat(64) test fixture's order of magnitude, well below the
 // 128-char hex secrets ops actually provisions). A 4-char accidental
 // value would HMAC just fine with no security; reject upfront.
-const MIN_STATE_SECRET_LENGTH = 32;
-const SSM_PLACEHOLDER_SECRET = 'PLACEHOLDER';
-
-function envSecret(name) {
-  const value = process.env[name];
-  if (!value || !value.trim() || value === SSM_PLACEHOLDER_SECRET) return undefined;
-  return value;
-}
-
-function addSecret(secrets, value, label) {
+function addSecret(secrets, value, label, { optionalAfterPrimary = false } = {}) {
   if (!value) return;
-  if (value.length < MIN_STATE_SECRET_LENGTH) {
+  if (value.length < MIN_OAUTH_STATE_SECRET_LENGTH) {
+    if (optionalAfterPrimary && secrets.length > 0) {
+      if (!_warnedShortLegacy) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `Ignoring ${label} for qURL OAuth state: secret is shorter than `
+          + `${MIN_OAUTH_STATE_SECRET_LENGTH} chars while a dedicated secret is active.`
+        );
+        _warnedShortLegacy = true;
+      }
+      return;
+    }
     throw new Error(
-      `Refusing to mint qURL OAuth state: ${label} is shorter than ${MIN_STATE_SECRET_LENGTH} chars `
+      `Refusing to mint qURL OAuth state: ${label} is shorter than ${MIN_OAUTH_STATE_SECRET_LENGTH} chars `
       + `(got ${value.length}). Provision a 64+ char value in SSM.`
     );
   }
@@ -76,8 +85,8 @@ function addSecret(secrets, value, label) {
 
 function stateSecrets() {
   const secrets = [];
-  addSecret(secrets, envSecret('QURL_OAUTH_STATE_SECRET'), 'QURL_OAUTH_STATE_SECRET');
-  addSecret(secrets, envSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET');
+  addSecret(secrets, readEnvSecret('QURL_OAUTH_STATE_SECRET'), 'QURL_OAUTH_STATE_SECRET');
+  addSecret(secrets, readEnvSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET', { optionalAfterPrimary: true });
   if (secrets.length > 0) return secrets;
 
   if (!config.GITHUB_CLIENT_SECRET) {
@@ -155,8 +164,14 @@ function verifyQurlOAuthState(state) {
     return { ok: false, reason: 'malformed_chars' };
   }
   const sigBuf = Buffer.from(sig, 'hex');
+  let secrets;
+  try {
+    secrets = stateSecrets();
+  } catch {
+    return { ok: false, reason: 'config_error' };
+  }
   let sigOk = false;
-  for (const secret of stateSecrets()) {
+  for (const secret of secrets) {
     const expected = crypto.createHmac('sha256', secret)
       .update(encoded)
       .digest('hex');

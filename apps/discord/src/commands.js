@@ -35,6 +35,10 @@ const {
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
+const {
+  MIN_OAUTH_STATE_SECRET_LENGTH,
+  readEnvSecret,
+} = require('./utils/oauth-state-secrets');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
@@ -174,20 +178,31 @@ const { editDM, sendChannelMessage } = require('./discord-rest');
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
 let _warnedStateSecretFallback = false;
+let _warnedShortLegacyStateSecret = false;
 // Random per-process fallback so even inside the Jest harness there's no
 // static key that, if accidentally shipped, would be forgeable. Regenerated
 // on every process start; tests that need a stable secret should set
 // GITHUB_OAUTH_STATE_SECRET explicitly in their own mocks.
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-const SSM_PLACEHOLDER_SECRET = 'PLACEHOLDER';
 
-function envStateSecret(name) {
-  const value = process.env[name];
-  if (!value || !value.trim() || value === SSM_PLACEHOLDER_SECRET) return undefined;
-  return value;
-}
-
-function addStateSecret(secrets, value) {
+function addStateSecret(secrets, value, label, { optionalAfterPrimary = false } = {}) {
+  if (!value) return;
+  if (value.length < MIN_OAUTH_STATE_SECRET_LENGTH) {
+    if (optionalAfterPrimary && secrets.length > 0) {
+      if (!_warnedShortLegacyStateSecret) {
+        logger.warn(
+          `Ignoring ${label} for GitHub OAuth state: secret is shorter than `
+          + `${MIN_OAUTH_STATE_SECRET_LENGTH} chars while a dedicated secret is active.`
+        );
+        _warnedShortLegacyStateSecret = true;
+      }
+      return;
+    }
+    throw new Error(
+      `Refusing to mint OAuth state: ${label} is shorter than ${MIN_OAUTH_STATE_SECRET_LENGTH} chars `
+      + `(got ${value.length}). Provision a 64+ char value in SSM.`
+    );
+  }
   if (value && !secrets.includes(value)) secrets.push(value);
 }
 
@@ -196,8 +211,8 @@ function stateSecrets() {
   // reader during cutover. Once OAUTH_STATE_SECRET is removed, old shared-key
   // states stop validating after the pending-link TTL has elapsed.
   const secrets = [];
-  addStateSecret(secrets, envStateSecret('GITHUB_OAUTH_STATE_SECRET'));
-  addStateSecret(secrets, envStateSecret('OAUTH_STATE_SECRET'));
+  addStateSecret(secrets, readEnvSecret('GITHUB_OAUTH_STATE_SECRET'), 'GITHUB_OAUTH_STATE_SECRET');
+  addStateSecret(secrets, readEnvSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET', { optionalAfterPrimary: true });
   if (secrets.length > 0) return secrets;
 
   if (!config.GITHUB_CLIENT_SECRET) {
@@ -242,8 +257,14 @@ function verifyStateBinding(state, discordId) {
   const [nonce, sig] = parts;
   if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
   const sigBuf = Buffer.from(sig, 'hex');
+  let secrets;
   try {
-    return stateSecrets().some(secret => {
+    secrets = stateSecrets();
+  } catch {
+    return false;
+  }
+  try {
+    return secrets.some(secret => {
       const expected = crypto.createHmac('sha256', secret)
         .update(`${discordId}:${nonce}`)
         .digest('hex');

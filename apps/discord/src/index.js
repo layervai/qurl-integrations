@@ -1,6 +1,10 @@
 const config = require('./config');
 const logger = require('./logger');
 const { isPositiveFinite } = require('./utils/time');
+const {
+  normalizeSecretValue,
+  validateProductionOAuthStateSecrets,
+} = require('./utils/oauth-state-secrets');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -161,10 +165,6 @@ if (isMultiTenant) {
   logger.info(`Single-guild plain mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP features dormant; only /qurl registered.`);
 }
 
-function hasSeededSecret(value) {
-  return Boolean(value && value.trim() && value !== 'PLACEHOLDER');
-}
-
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
@@ -208,28 +208,29 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // GITHUB_OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-  // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). OAUTH_STATE_SECRET remains accepted during the
-  // migration window so a code deploy can land before the new SSM parameter.
-  if (config.isOpenNHPActive
-    && !hasSeededSecret(process.env.GITHUB_OAUTH_STATE_SECRET)
-    && !hasSeededSecret(process.env.OAUTH_STATE_SECRET)) {
-    logger.error(
-      'GITHUB_OAUTH_STATE_SECRET must be set in production '
-      + '(or legacy OAUTH_STATE_SECRET during migration). Generate with: openssl rand -hex 32'
-    );
+  // Dedicated OAuth state secrets guard GitHub and qURL/Auth0 callbacks.
+  // OAUTH_STATE_SECRET remains accepted only during the migration window, and
+  // all accepted state-secret envs must be real 32+ char values rather than the
+  // Terraform SSM PLACEHOLDER sentinel.
+  const oauthStateSecretErrors = validateProductionOAuthStateSecrets(process.env, {
+    isOpenNHPActive: config.isOpenNHPActive,
+    isQurlOAuthConfigured: config.isQurlOAuthConfigured,
+  });
+  if (oauthStateSecretErrors.length > 0) {
+    oauthStateSecretErrors.forEach(error => logger.error(error));
     process.exit(1);
   }
-
-  if (config.isQurlOAuthConfigured
-    && !hasSeededSecret(process.env.QURL_OAUTH_STATE_SECRET)
-    && !hasSeededSecret(process.env.OAUTH_STATE_SECRET)) {
-    logger.error(
-      'QURL_OAUTH_STATE_SECRET must be set in production when qURL OAuth is configured '
-      + '(or legacy OAUTH_STATE_SECRET during migration). Generate with: openssl rand -hex 32'
-    );
-    process.exit(1);
+  const legacyOAuthStateSecret = normalizeSecretValue(process.env.OAUTH_STATE_SECRET);
+  const githubOAuthStateSecret = normalizeSecretValue(process.env.GITHUB_OAUTH_STATE_SECRET);
+  const qurlOAuthStateSecret = normalizeSecretValue(process.env.QURL_OAUTH_STATE_SECRET);
+  if (config.isOpenNHPActive && legacyOAuthStateSecret && !githubOAuthStateSecret) {
+    logger.warn('GitHub OAuth state is using legacy OAUTH_STATE_SECRET; provision GITHUB_OAUTH_STATE_SECRET to close the migration window.');
+  }
+  if (config.isQurlOAuthConfigured && legacyOAuthStateSecret && !qurlOAuthStateSecret) {
+    logger.warn('qURL OAuth state is using legacy OAUTH_STATE_SECRET; provision QURL_OAUTH_STATE_SECRET to close the migration window.');
+  }
+  if (githubOAuthStateSecret && qurlOAuthStateSecret && githubOAuthStateSecret === qurlOAuthStateSecret) {
+    logger.warn('GITHUB_OAUTH_STATE_SECRET and QURL_OAUTH_STATE_SECRET are identical; use distinct values to preserve rotation isolation.');
   }
 }
 

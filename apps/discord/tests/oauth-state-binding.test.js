@@ -72,16 +72,20 @@ describe('verifyStateBinding', () => {
 
   describe('secret precedence (#184)', () => {
     let savedGitHubStateSecret;
+    let savedQurlStateSecret;
     let savedSharedStateSecret;
 
     beforeEach(() => {
       savedGitHubStateSecret = process.env.GITHUB_OAUTH_STATE_SECRET;
+      savedQurlStateSecret = process.env.QURL_OAUTH_STATE_SECRET;
       savedSharedStateSecret = process.env.OAUTH_STATE_SECRET;
     });
 
     afterEach(() => {
       if (savedGitHubStateSecret === undefined) delete process.env.GITHUB_OAUTH_STATE_SECRET;
       else process.env.GITHUB_OAUTH_STATE_SECRET = savedGitHubStateSecret;
+      if (savedQurlStateSecret === undefined) delete process.env.QURL_OAUTH_STATE_SECRET;
+      else process.env.QURL_OAUTH_STATE_SECRET = savedQurlStateSecret;
       if (savedSharedStateSecret === undefined) delete process.env.OAUTH_STATE_SECRET;
       else process.env.OAUTH_STATE_SECRET = savedSharedStateSecret;
     });
@@ -122,6 +126,41 @@ describe('verifyStateBinding', () => {
 
       expect(verifyStateBinding(legacyState, '12345')).toBe(true);
       expect(verifyStateBinding(placeholderState, '12345')).toBe(false);
+    });
+
+    it('trims GitHub OAuth state secrets read from env', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = `  ${'g'.repeat(64)}  `;
+      delete process.env.OAUTH_STATE_SECRET;
+
+      const state = makeState('12345', 'g'.repeat(64));
+      expect(verifyStateBinding(state, '12345')).toBe(true);
+    });
+
+    it('rejects short GitHub OAuth state secrets instead of using them', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'short';
+      delete process.env.OAUTH_STATE_SECRET;
+
+      const shortState = makeState('12345', process.env.GITHUB_OAUTH_STATE_SECRET);
+      expect(verifyStateBinding(shortState, '12345')).toBe(false);
+    });
+
+    it('ignores a short legacy secret when a dedicated GitHub secret is active', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'g'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 'short';
+
+      const primaryState = makeState('12345', process.env.GITHUB_OAUTH_STATE_SECRET);
+      const legacyState = makeState('12345', process.env.OAUTH_STATE_SECRET);
+
+      expect(verifyStateBinding(primaryState, '12345')).toBe(true);
+      expect(verifyStateBinding(legacyState, '12345')).toBe(false);
+    });
+
+    it('does not accept a GitHub-format state signed with the qURL state secret', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'g'.repeat(64);
+      process.env.QURL_OAUTH_STATE_SECRET = 'q'.repeat(64);
+
+      const qurlSignedState = makeState('12345', process.env.QURL_OAUTH_STATE_SECRET);
+      expect(verifyStateBinding(qurlSignedState, '12345')).toBe(false);
     });
   });
 });
