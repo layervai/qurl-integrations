@@ -91,8 +91,13 @@ cache_removed() {
 cache_json_str() {
   sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"
 }
-stub_get_count() {
-  docker logs "$STUB" 2>&1 | grep -c "$1"
+stub_log_mark() {
+  docker logs "$STUB" 2>&1 | wc -l | tr -d ' '
+}
+stub_get_count_since() {
+  mark="$1"
+  pattern="$2"
+  docker logs "$STUB" 2>&1 | tail -n +"$((mark + 1))" | grep -c "$pattern"
 }
 ok() { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
 no() { fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
@@ -111,13 +116,14 @@ expect_security_headers() {
   expect_eq "Referrer-Policy ($label)" "$(hval Referrer-Policy)" "no-referrer"
   expect_eq "X-Robots-Tag ($label)" "$(hval X-Robots-Tag)" "noindex, nofollow, noarchive, nosnippet, noimageindex"
 }
-expect_stub_gets() {
+expect_stub_gets_since() {
   label="$1"
-  pattern="$2"
-  want="$3"
+  mark="$2"
+  pattern="$3"
+  want="$4"
   got=""
   for _ in $(seq 1 10); do
-    got="$(stub_get_count "$pattern")"
+    got="$(stub_get_count_since "$mark" "$pattern")"
     [ "$got" = "$want" ] && break
     sleep 0.1
   done
@@ -138,8 +144,9 @@ expect_contains "runtime status escapes replica metadata" "$status_json" '"repli
 code=$(curl -s -o "$B" -w '%{http_code}' "$base/"); expect_eq "GET / status" "$code" 200
 expect_eq "GET / body" "$(cat "$B")" "index"
 docker exec "$ORIGIN" qurl-origin-cachectl purge /index.html >/dev/null
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/"
-expect_stub_gets "targeted purge /index.html evicts root clean URL" 'GET /index.html ' 2
+expect_stub_gets_since "targeted purge /index.html evicts root clean URL" "$mark" 'GET /index.html ' 1
 
 # 2. extensionless -> /path/index.html, and the signer saw that exact path + auth
 fetch -X GET "$base/website"
@@ -167,9 +174,10 @@ expect_eq "GET metrics Content-Type" "$(hval Content-Type)" "application/json"
 expect_eq "GET metrics Cache-Control" "$(hval Cache-Control)" "max-age=300"
 
 # 6. query excluded from cache key: two ?_t= GETs hit the stub once
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/cacheprobe.json?_t=1"
 curl -s -o /dev/null "$base/cacheprobe.json?_t=2"
-expect_stub_gets "cacheprobe upstream GETs (query excluded + cached)" 'GET /cacheprobe.json ' 1
+expect_stub_gets_since "cacheprobe upstream GETs (query excluded + cached)" "$mark" 'GET /cacheprobe.json ' 1
 
 # 6b. deploy automation can target one local nginx cache path without evicting
 # unrelated paths.
@@ -179,10 +187,12 @@ removed=$(printf '%s\n' "$purge_report" | cache_removed)
 after_entries=$(cache_entries)
 expect_eq "targeted purge removes cacheprobe file" "$removed" 1
 expect_eq "targeted purge decrements cache file count" "$after_entries" $((before_entries - 1))
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/cacheprobe.json?_t=3"
-expect_stub_gets "cacheprobe upstream GETs after targeted cache purge" 'GET /cacheprobe.json ' 2
+expect_stub_gets_since "cacheprobe upstream GETs after targeted cache purge" "$mark" 'GET /cacheprobe.json ' 1
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/metrics.json?_t=10"
-expect_stub_gets "metrics upstream GETs unaffected by targeted purge" 'GET /metrics.json ' 1
+expect_stub_gets_since "metrics upstream GETs unaffected by targeted purge" "$mark" 'GET /metrics.json ' 0
 purge_report=$(docker exec "$ORIGIN" qurl-origin-cachectl purge-connector other-connector /metrics.json 2>&1)
 code=$?
 expect_eq "connector purge rejects wrong connector" "$code" 3
@@ -190,16 +200,18 @@ case "$purge_report" in
   *"Refusing connector-scoped purge"*) ok "connector purge wrong-connector message" ;;
   *) no "connector purge wrong-connector message (got '$purge_report')" ;;
 esac
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/metrics.json?_t=11"
-expect_stub_gets "metrics upstream GETs unchanged after rejected connector purge" 'GET /metrics.json ' 1
+expect_stub_gets_since "metrics upstream GETs unchanged after rejected connector purge" "$mark" 'GET /metrics.json ' 0
 purge_report=$(docker exec "$ORIGIN" qurl-origin-cachectl purge-connector stats-connector /metrics.json)
 expect_eq "connector purge reports scope" "$(printf '%s\n' "$purge_report" | cache_json_str scope)" "connector"
 expect_eq "connector purge reports connector id" "$(printf '%s\n' "$purge_report" | cache_json_str connector_id)" "stats-connector"
 expect_eq "connector purge reports replica id" "$(printf '%s\n' "$purge_report" | cache_json_str replica_id)" "origin-a"
 removed=$(printf '%s\n' "$purge_report" | cache_removed)
 expect_eq "connector purge removes metrics file" "$removed" 1
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/metrics.json?_t=12"
-expect_stub_gets "metrics upstream GETs after connector purge" 'GET /metrics.json ' 2
+expect_stub_gets_since "metrics upstream GETs after connector purge" "$mark" 'GET /metrics.json ' 1
 
 # 6c. No path arguments still purge the whole cache, matching the current
 # CloudFront "/*" deploy invalidation shape.
@@ -207,16 +219,22 @@ purge_report=$(docker exec "$ORIGIN" qurl-origin-cachectl purge)
 removed=$(printf '%s\n' "$purge_report" | cache_removed)
 after_entries=$(cache_entries)
 expect_eq "full purge leaves no cache files" "$after_entries" 0
-[ "$removed" -ge 1 ] && ok "full purge removes at least one cache file" || no "full purge removed '$removed' files, want >= 1"
+if [ "$removed" -ge 1 ]; then
+  ok "full purge removes at least one cache file"
+else
+  no "full purge removed '$removed' files, want >= 1"
+fi
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/metrics.json?_t=13"
-expect_stub_gets "metrics upstream GETs after full cache purge" 'GET /metrics.json ' 3
+expect_stub_gets_since "metrics upstream GETs after full cache purge" "$mark" 'GET /metrics.json ' 1
 
 # 6d. Missing keys are not negative-cached. OSS nginx file-based cache purges
 # cannot reliably invalidate intercepted 404s from the shared cache zone, so
 # new S3 keys must not be hidden behind an unpurgeable local negative cache.
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/future-object.json"
 curl -s -o /dev/null "$base/future-object.json"
-expect_stub_gets "missing key is not negative-cached" 'GET /future-object.json ' 2
+expect_stub_gets_since "missing key is not negative-cached" "$mark" 'GET /future-object.json ' 2
 
 # 7. exact security header set on 200 and on 404
 for path in "/" "/definitely-missing"; do
@@ -252,14 +270,16 @@ expect_eq "HEAD metrics Content-Type" "$(printf '%s\n' "$hb" | awk -F': ' 'tolow
 
 # 13. Range. Viewer Range is not forwarded to S3, so nginx serves 206 while
 # fetching the full 200 from S3 once; subsequent ranges are served from cache.
+mark="$(stub_log_mark)"
 code=$(curl -s -o "$B" -w '%{http_code}' -H 'Range: bytes=0-3' "$base/range.bin")
 expect_eq "Range status (cold cache)" "$code" 206
 expect_eq "Range body (cold cache)" "$(cat "$B")" "0123"
-expect_stub_gets "Range upstream GETs after cold range" 'GET /range.bin ' 1
+expect_stub_gets_since "Range upstream GETs after cold range" "$mark" 'GET /range.bin ' 1
+mark="$(stub_log_mark)"
 code=$(curl -s -o "$B" -w '%{http_code}' -H 'Range: bytes=4-6' "$base/range.bin")
 expect_eq "Range status (cached different slice)" "$code" 206
 expect_eq "Range body (cached different slice)" "$(cat "$B")" "456"
-expect_stub_gets "Range upstream GETs after cached range" 'GET /range.bin ' 1
+expect_stub_gets_since "Range upstream GETs after cached range" "$mark" 'GET /range.bin ' 0
 
 # 14. S3_PREFIX is joined with the clean-URL path at runtime.
 docker rm -f "$ORIGIN" >/dev/null 2>&1
@@ -289,14 +309,16 @@ expect_eq "S3_PREFIX /website signed path" "$(hval X-Stub-Path)" "/site/website/
 fetch "$base/"
 expect_eq "S3_PREFIX / body" "$(cat "$B")" "prefixed-index"
 expect_eq "S3_PREFIX / signed path" "$(hval X-Stub-Path)" "/site/index.html"
+mark="$(stub_log_mark)"
 curl -s -o /dev/null "$base/website"
-expect_stub_gets "CACHE_DEFAULT_TTL caches metadata-less object" 'GET /site/website/index.html ' 1
+expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
 
 # 15. The entrypoint supervisor exits the container if either child dies.
 docker exec "$ORIGIN" sh -c '
 found=0
 for comm in /proc/[0-9]*/comm; do
-  if [ "$(cat "$comm")" = "nginx" ]; then
+  name="$(cat "$comm" 2>/dev/null || true)"
+  if [ "$name" = "nginx" ]; then
     pid="${comm%/comm}"
     pid="${pid##*/}"
     kill -KILL "$pid"

@@ -250,6 +250,18 @@ expect_eq "root index alias purge removes four entries" "$(printf '%s\n' "$out" 
 expect_no_file "$(entry_file GET /)" "root alias removed GET /"
 expect_no_file "$(entry_file GET /index.html)" "root alias removed GET /index.html"
 
+reset_cache
+seed_entry GET /
+seed_entry HEAD /
+seed_entry GET /index.html
+seed_entry HEAD /index.html
+out="$(run_ctl purge /)"
+expect_eq "root viewer path purge removes index aliases" "$(printf '%s\n' "$out" | json_num entries_removed)" 4
+expect_no_file "$(entry_file GET /)" "root viewer path removed GET /"
+expect_no_file "$(entry_file HEAD /)" "root viewer path removed HEAD /"
+expect_no_file "$(entry_file GET /index.html)" "root viewer path removed GET /index.html"
+expect_no_file "$(entry_file HEAD /index.html)" "root viewer path removed HEAD /index.html"
+
 # Object-style nested index invalidation covers clean URL and trailing-slash
 # aliases without touching sibling assets.
 reset_cache
@@ -265,6 +277,24 @@ for path in /website/index.html /website /website/; do
   expect_no_file "$(entry_file HEAD "$path")" "nested alias removed HEAD $path"
 done
 expect_file "$(entry_file GET /website/app.js)" "nested alias preserves sibling asset"
+
+# Viewer-style directory invalidation also covers object index and clean URL
+# aliases, matching the paths deployment automation passes today.
+for purge_path in /website /website/; do
+  reset_cache
+  for path in /website/index.html /website /website/; do
+    seed_entry GET "$path"
+    seed_entry HEAD "$path"
+  done
+  seed_entry GET /website/app.js
+  out="$(run_ctl purge "$purge_path")"
+  expect_eq "viewer directory purge $purge_path removes clean URL variants" "$(printf '%s\n' "$out" | json_num entries_removed)" 6
+  for path in /website/index.html /website /website/; do
+    expect_no_file "$(entry_file GET "$path")" "viewer directory purge $purge_path removed GET $path"
+    expect_no_file "$(entry_file HEAD "$path")" "viewer directory purge $purge_path removed HEAD $path"
+  done
+  expect_file "$(entry_file GET /website/app.js)" "viewer directory purge $purge_path preserves sibling asset"
+done
 
 # If deploy automation passes an S3 object path while S3_PREFIX is set, cachectl
 # strips the prefix and still purges the viewer-path cache keys nginx uses.

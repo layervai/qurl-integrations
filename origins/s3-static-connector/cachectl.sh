@@ -169,6 +169,22 @@ emit_path_candidates() {
         esac
         ;;
     esac
+    case "$p" in
+      /)
+        printf '/%s\n' "$INDEX_DOCUMENT"
+        ;;
+      */)
+        dir="${p%/}"
+        [ -z "$dir" ] || printf '%s\n' "$dir"
+        printf '%s%s\n' "$p" "$INDEX_DOCUMENT"
+        ;;
+      *.*)
+        ;;
+      *)
+        printf '%s/%s\n' "$p" "$INDEX_DOCUMENT"
+        printf '%s/\n' "$p"
+        ;;
+    esac
   done
 }
 

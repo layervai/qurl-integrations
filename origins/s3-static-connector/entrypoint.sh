@@ -25,7 +25,16 @@ fi
 if [ -n "${AWS_REGION:-}" ] && [ -z "${AWS_DEFAULT_REGION:-}" ]; then
   AWS_DEFAULT_REGION="$AWS_REGION"
 fi
-export AWS_REGION AWS_DEFAULT_REGION
+if [ -n "${AWS_REGION:-}" ]; then
+  export AWS_REGION
+else
+  unset AWS_REGION
+fi
+if [ -n "${AWS_DEFAULT_REGION:-}" ]; then
+  export AWS_DEFAULT_REGION
+else
+  unset AWS_DEFAULT_REGION
+fi
 
 mkdir -p /tmp/s3cache /tmp/client_body /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
 

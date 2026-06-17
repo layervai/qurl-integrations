@@ -152,10 +152,11 @@ cache and leaves the cache directory in place. nginx's shared cache zone can
 briefly retain metadata for deleted files; nginx treats the next lookup as a
 MISS/refetch, though in-flight requests may produce transient cache-file log
 noise. With path arguments, it removes the matching `GET` and `HEAD` cache
-entries. Paths are viewer paths, but
-object-style index paths such as `/index.html` and `/website/index.html` also
-purge their clean-URL aliases (`/`, `/website`, `/website/`) so deploy
-automation can mirror the current stats invalidation list.
+entries. Directory viewer paths such as `/`, `/website`, and `/website/`, plus
+object-style index paths such as `/index.html` and `/website/index.html`, all
+purge the corresponding index aliases (`/`, `/index.html`, `/website`,
+`/website/`, `/website/index.html`) so deploy automation can mirror the current
+stats invalidation list.
 
 `purge-connector` is the connector-scoped form for replica-aware deployments. It
 does the same local cache deletion as `purge`, but first requires the requested
