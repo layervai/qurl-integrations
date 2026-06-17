@@ -335,6 +335,30 @@ func TestHandleGet_AdminStoreRateLimitDenialShowsRetryHint(t *testing.T) {
 	}
 }
 
+func TestHandleGet_AdminStoreRateLimitErrorFailsClosed(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.ddb.SetUpdateItemErr(ts.tableNames.channelPolicy, errors.New("ddb down"))
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, commonGetMintFailedMessage) {
+		t.Fatalf("async reply = %q, want generic mint failure", async)
+	}
+	if strings.Contains(async, "Rate limit hit") {
+		t.Fatalf("async reply = %q, want DDB-error path not quota-denied copy", async)
+	}
+	if got := mintHits.Load(); got != 0 {
+		t.Fatalf("mint hits = %d, want rate-limit store error not to reach qurl-service", got)
+	}
+}
+
 // TestHandleGet_MintTransportError fences 5xx and bare network
 // errors → user-facing "Could not reach qURL. Please try again."
 // (mapMintError's serviceUnreachableMessage branch).

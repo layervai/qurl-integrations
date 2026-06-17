@@ -2,6 +2,7 @@ package slackdata
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -112,5 +113,25 @@ func TestCheckRateLimit_Validation(t *testing.T) {
 	store := newStore(&stubDDB{})
 	if _, _, err := store.CheckRateLimit(context.Background(), "", "T123"); err == nil {
 		t.Fatalf("missing user err = nil, want validation error")
+	}
+}
+
+func TestCheckRateLimit_FailsClosedOnDynamoError(t *testing.T) {
+	store := newStore(&stubDDB{
+		updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			return nil, errors.New("ddb down")
+		},
+		getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			t.Fatal("GetItem must not run after a non-conditional counter write error")
+			return nil, errors.New("unreachable")
+		},
+	})
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
+	if err == nil {
+		t.Fatalf("CheckRateLimit error = nil, want DDB failure")
+	}
+	if allowed || retry != 0 {
+		t.Fatalf("allowed=%v retry=%s, want fail-closed denial with no retry hint", allowed, retry)
 	}
 }

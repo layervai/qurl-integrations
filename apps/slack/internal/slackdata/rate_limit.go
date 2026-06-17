@@ -42,10 +42,8 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 	windowUnix := windowStart.Unix()
 	counterKey := mintRateLimitCounterKey(slackUserID)
 
-	if err := s.incrementMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
-		return true, 0, nil
-	} else if !isConditionalCheckFailed(err) {
-		return false, 0, ddbToError("CheckRateLimit", err)
+	if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
+		return allowed, 0, err
 	}
 
 	item, err := s.getMintCounter(ctx, teamID, counterKey)
@@ -58,25 +56,29 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 		return false, windowEnd.Sub(now), nil
 	}
 	if storedWindow == windowUnix {
-		if err := s.incrementMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
-			return true, 0, nil
-		} else if !isConditionalCheckFailed(err) {
-			return false, 0, ddbToError("CheckRateLimit", err)
+		if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
+			return allowed, 0, err
 		}
 		return false, windowEnd.Sub(now), nil
 	}
 
-	if err := s.resetMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
-		return true, 0, nil
-	} else if !isConditionalCheckFailed(err) {
-		return false, 0, ddbToError("CheckRateLimit", err)
+	if allowed, err := mintCounterWriteResult(s.resetMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
+		return allowed, 0, err
 	}
-	if err := s.incrementMintCounter(ctx, teamID, counterKey, windowUnix); err == nil {
-		return true, 0, nil
-	} else if !isConditionalCheckFailed(err) {
-		return false, 0, ddbToError("CheckRateLimit", err)
+	if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
+		return allowed, 0, err
 	}
 	return false, windowEnd.Sub(now), nil
+}
+
+func mintCounterWriteResult(err error) (allowed bool, fatal error) {
+	if err == nil {
+		return true, nil
+	}
+	if isConditionalCheckFailed(err) {
+		return false, nil
+	}
+	return false, ddbToError("CheckRateLimit", err)
 }
 
 func (s *Store) incrementMintCounter(ctx context.Context, teamID, counterKey string, windowUnix int64) error {
