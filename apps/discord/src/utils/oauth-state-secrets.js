@@ -54,6 +54,13 @@ function shortSecretMessage(name, value) {
 function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuthConfigured }) {
   const secrets = normalizeProductionOAuthStateSecrets(env);
   const errors = [];
+  const seenErrors = new Set();
+
+  function pushError(message) {
+    if (seenErrors.has(message)) return;
+    seenErrors.add(message);
+    errors.push(message);
+  }
 
   function requireFlowSecret(primaryName, primary, flowLabel) {
     const legacy = secrets.legacy;
@@ -61,19 +68,19 @@ function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuth
     const legacyShort = shortSecretMessage('OAUTH_STATE_SECRET', legacy);
 
     if (primaryShort) {
-      errors.push(primaryShort);
+      pushError(primaryShort);
       return;
     }
 
     if (isUsableOAuthStateSecret(primary)) return;
 
     if (legacyShort) {
-      errors.push(`${legacyShort} It is currently the legacy ${flowLabel} OAuth state secret.`);
+      pushError(`${legacyShort} It is currently the legacy OAuth state secret during migration.`);
       return;
     }
 
     if (!isUsableOAuthStateSecret(legacy)) {
-      errors.push(
+      pushError(
         `${primaryName} must be set in production ${flowLabel} OAuth mode `
         + '(or legacy OAUTH_STATE_SECRET during migration). Generate with: openssl rand -hex 32'
       );

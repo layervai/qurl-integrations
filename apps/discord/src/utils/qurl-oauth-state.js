@@ -27,6 +27,7 @@
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const config = require('../config');
+const logger = require('../logger');
 const {
   collectStateSecrets,
   readEnvSecret,
@@ -64,9 +65,7 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 // value would HMAC just fine with no security; reject upfront.
 function warnShortLegacySecret(label, length) {
   if (!_warnedShortLegacy) {
-    // Keep this utility logger-free; commands.js imports it during module load.
-    // eslint-disable-next-line no-console
-    console.warn(
+    logger.warn(
       `Ignoring ${label} for qURL OAuth state: secret is too short `
       + `(got ${length}) while a dedicated secret is active.`
     );
@@ -96,8 +95,7 @@ function stateSecrets() {
       );
     }
     if (!_warnedFallback) {
-      // eslint-disable-next-line no-console
-      console.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
+      logger.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
       _warnedFallback = true;
     }
     return [_testFallbackSecret];
@@ -178,10 +176,7 @@ function verifyQurlOAuthState(state) {
       const expected = crypto.createHmac('sha256', secret)
         .update(encoded)
         .digest('hex');
-      if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) {
-        return true;
-      }
-      return false;
+      return crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'));
     });
   } catch {
     return { ok: false, reason: 'sig_compare_threw' };

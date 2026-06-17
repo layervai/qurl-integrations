@@ -75,5 +75,17 @@ describe('oauth-state-secrets helpers', () => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain('OAUTH_STATE_SECRET must be at least 32 chars');
     });
+
+    it('dedupes a short legacy secret error when both flows depend on it', () => {
+      const { errors } = validateProductionOAuthStateSecrets({
+        OAUTH_STATE_SECRET: 'short',
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: true,
+      });
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('OAUTH_STATE_SECRET must be at least 32 chars');
+    });
   });
 });
