@@ -147,15 +147,15 @@ function canonicalUrl(u) {
   } catch { return u; }
 }
 
-// Tri-state classifier output for the orphan filter. Hoisted above
-// findExistingSubscriptions (the only callsite that compares against
-// these values) so the constant references aren't forward references
-// — safe at runtime due to TDZ + async-execution timing, but cleaner
-// reading order.
+// Tri-state classifier output for the orphan filter. Defined above its
+// only consumer (findExistingSubscriptions) for reading order. Uniform
+// string values across all three results so a future `if (verdict)`
+// can't fall into a truthiness footgun — only strict `===` against
+// MATCH / NEAR_MISS_LIVENESS / NO_MATCH is valid.
 const ORPHAN_FILTER_RESULTS = Object.freeze({
   MATCH: 'match',
   NEAR_MISS_LIVENESS: 'near-miss-liveness',
-  NO_MATCH: false,
+  NO_MATCH: 'no-match',
 });
 
 // Returns ALL subscriptions matching our URL (typically 0 or 1; >1
