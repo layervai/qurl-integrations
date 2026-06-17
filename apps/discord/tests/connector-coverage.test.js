@@ -814,16 +814,27 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       );
     });
 
-    it('host-pin allows a look-alike-rejecting suffix: `evilqurl.site` is NOT under .qurl.site', async () => {
+    it('host-pin rejects the look-alike suffix `evilqurl.site` (no dot separator)', async () => {
       // Guards the endsWith boundary: `evilqurl.site` must NOT satisfy the
       // `.qurl.site` suffix (no dot separator), so it's rejected like any other
-      // non-qURL host. (The valid forms `qurl.site` / `*.qurl.site` are covered
-      // by the happy-path tests above using TUNNEL_TARGET.)
+      // non-qURL host. (The `*.qurl.site` subdomain form is covered by the
+      // happy-path tests above via TUNNEL_TARGET; the apex form below.)
       const get = captureDetect({ detected: false }, { target: 'https://evilqurl.site/api/detect' });
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/qurl\.site/);
       expect(get()).toBeNull();
+    });
+
+    it('host-pin allows the apex `qurl.site` host (POST proceeds)', async () => {
+      // Exercises the `host === 'qurl.site'` arm; the `*.qurl.site` subdomain arm
+      // is covered by the happy-path tests via TUNNEL_TARGET (r_<id>.qurl.site).
+      const get = captureDetect(
+        { detected: false, qurl_id: null, match_pct: null, confidence: 0 },
+        { target: 'https://qurl.site/api/detect' },
+      );
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(get().url).toBe('https://qurl.site/api/detect');
     });
 
     it('requires config.QURL_API_KEY for the resolve Bearer even when a per-call apiKey is given (no resolve, no POST)', async () => {
