@@ -818,6 +818,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		}
 		return false, nil
 	}
+	term = inner
 	switch {
 	case strings.HasPrefix(term, "attribute_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_exists("), ")")

@@ -72,6 +72,9 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 		if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
 			return allowed, 0, err
 		}
+		// A conditional miss after a fresh under-limit read means another writer
+		// won the remaining capacity or advanced the window. Deny conservatively
+		// rather than spend another read chasing a narrow race.
 		return false, windowEnd.Sub(now), nil
 	}
 
