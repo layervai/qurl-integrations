@@ -50,7 +50,7 @@ This contract is frozen — additive only once published.
 | `S3_ENDPOINT_PORT` | No | `443` | Test/diagnostic override for the Envoy cluster port. Must be numeric and in `1..65535`. |
 | `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_PLAINTEXT_S3=true` for plaintext local tests or diagnostics. |
 | `CACHE_MAX_SIZE` | No | `1g` | nginx `proxy_cache_path` max size. Entries still use the image's fixed `inactive=24h` idle eviction, so an object not requested for 24h can refetch even when its object TTL is longer. |
-| `CACHE_DEFAULT_TTL` | No | (unset) | Unset = cache per the object's `Cache-Control` / nginx default. Set it to force a fallback TTL for objects S3 returns without cache metadata. Must be a non-zero nginx time literal such as `60s`, `5m`, or `1h30m`. |
+| `CACHE_DEFAULT_TTL` | No | (unset) | Unset = cache per the object's `Cache-Control` / nginx default. Set it to force a fallback TTL for objects S3 returns without cache metadata. Must be a non-zero nginx time literal such as `60`, `60s`, `5m`, or `1h30m`; millisecond TTLs are intentionally unsupported. |
 | `CACHE_CONNECTOR_ID` | No | `QURL_CONNECTOR_ID`, then empty | Logical connector/site label used by `qurl-origin-cachectl purge-connector` as a fail-closed deployment guard. Set it to the stable customer-provided connector ID/slug used by your deploy automation. |
 | `CACHE_REPLICA_ID` | No | container `HOSTNAME` when set | Physical origin/cache replica label emitted in cache-control JSON so fan-out jobs can account for every replica they touched. |
 
@@ -111,6 +111,7 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 | --- | ---: | --- | --- |
 | Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404` |
 | Signing / auth failure (S3 `403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) |
+| Other expected S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`, `416`, `429`) | 404 | `Not Found` | access log preserves the exact `upstream_status` |
 | Upstream 5xx / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
 | Method other than GET/HEAD | 405 | (nginx default) | access log only |
 

@@ -19,7 +19,7 @@ CACHE_MAX_SIZE="${CACHE_MAX_SIZE:-1g}"
 # Unset → defer to the object's Cache-Control / nginx default (cache only what
 # S3 marks cacheable), per the env contract. Set it to force a fallback TTL.
 CACHE_DEFAULT_TTL="${CACHE_DEFAULT_TTL:-}"
-: "${AWS_REGION:?AWS_REGION is required (pass it, or let entrypoint resolve it from IMDS)}"
+: "${AWS_REGION:?AWS_REGION is required (set AWS_REGION, or set AWS_DEFAULT_REGION before entrypoint runs)}"
 
 if [ "${S3_BUCKET#*.}" != "$S3_BUCKET" ]; then
   echo "S3_BUCKET must not contain dots; this image uses virtual-hosted-style S3 TLS/SNI, which is incompatible with dotted bucket names" >&2
@@ -253,13 +253,13 @@ fi
 if [ -n "$CACHE_DEFAULT_TTL" ]; then
   case "$CACHE_DEFAULT_TTL" in
     *[!0-9A-Za-z]*)
-      echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60s, 5m, or 1h30m" >&2
+      echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60, 60s, 5m, or 1h30m; millisecond TTLs are intentionally not supported" >&2
       exit 1
       ;;
   esac
-  ttl_literal_re='^([0-9]+y)?([0-9]+M)?([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?$|^[0-9]+$'
+  ttl_literal_re='^([0-9]+y)?([0-9]+M)?([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?$|^[0-9]+$'
   if ! printf '%s\n' "$CACHE_DEFAULT_TTL" | grep -Eq "$ttl_literal_re"; then
-    echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60s, 5m, or 1h30m" >&2
+    echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60, 60s, 5m, or 1h30m; millisecond TTLs are intentionally not supported" >&2
     exit 1
   fi
   case "$CACHE_DEFAULT_TTL" in

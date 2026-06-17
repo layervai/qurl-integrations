@@ -7,10 +7,10 @@ the expected canonical path/Host, which is what proves nginx's rewrite + query
 strip + signing-after-rewrite wiring. Cryptographic verification against real S3
 happens during the staging soak.
 
-Known keys return fixture bodies + headers. `forbidden*` -> 403 (auth/signing
-failure), `boom*` -> 500 (upstream 5xx), unknown -> 404. The received request
-line is echoed to stderr (docker logs) so the test can assert cache behavior by
-counting upstream hits.
+Known keys return fixture bodies + headers. `badrequest*` -> 400, `forbidden*`
+-> 403 (auth/signing failure), `boom*` -> 500 (upstream 5xx), unknown -> 404.
+The received request line is echoed to stderr (docker logs) so the test can
+assert cache behavior by counting upstream hits.
 """
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +75,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve(self, head_only=False):
         key = self._key()
+        if "badrequest" in key:
+            return self._send(400, b"<Error><Code>InvalidRequest</Code></Error>",
+                              ctype="application/xml", head_only=head_only)
         if "forbidden" in key:
             return self._send(403, b"", head_only=head_only)
         if "boom" in key:

@@ -255,6 +255,13 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$base/forbidden.json")
 expect_eq "forbidden client status" "$code" 404
 if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"403"'; then ok "forbidden logged upstream_status 403"; else no "forbidden not logged as upstream 403"; fi
 
+# 9b. other S3-side 4xx responses are also masked; clients must never see XML
+# error bodies or distinguish malformed/denied/missing object states.
+fetch "$base/badrequest.json"
+expect_eq "badrequest client status" "$(status_code)" 404
+expect_eq "badrequest body" "$(cat "$B")" "Not Found"
+if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"400"'; then ok "badrequest logged upstream_status 400"; else no "badrequest not logged as upstream 400"; fi
+
 # 10. upstream 5xx -> 502 Bad Gateway
 fetch "$base/boom.json"
 expect_eq "boom status" "$(status_code)" 502

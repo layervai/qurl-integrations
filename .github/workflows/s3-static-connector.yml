@@ -154,6 +154,9 @@ jobs:
           docker buildx imagetools inspect --raw "${IMAGE_NAME}:main" > /tmp/main.json
           docker buildx imagetools inspect --raw "${IMAGE_NAME}:${GITHUB_SHA}" > /tmp/sha.json
 
+          # Verify the load-bearing platform manifests. The build-push-action
+          # publish step owns provenance/SBOM attestation emission for the
+          # candidate digest.
           extract_platform_manifests() {
             jq -S '
               [
