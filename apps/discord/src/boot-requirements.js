@@ -108,10 +108,8 @@ function missingKekRequiredKeys(env) {
 // false-positive. Caller gates on NODE_ENV==='production'; string-or-null
 // mirrors unsupportedRoleShipperCombo et al.
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
-  // A usable redirect base is a parseable https:// URL with a host. Parsing
-  // (not a string prefix) normalizes the case-insensitive scheme and treats
-  // a bare "https://" — which throws — as not usable; a valid https origin
-  // short-circuits the common good case.
+  // Parse rather than prefix-match (see header for why): a valid https
+  // origin short-circuits the common good case.
   let usableHttps = false;
   try {
     usableHttps = new URL(cfg.BASE_URL).protocol === 'https:';

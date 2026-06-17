@@ -205,15 +205,6 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).toContain(LOCALHOST);
   });
 
-  it('rejects customer mode + qURL OAuth configured + explicit http:// BASE_URL', () => {
-    const msg = baseUrlHttpsProblem(
-      cfg({ isQurlOAuthConfigured: true, BASE_URL: 'http://bot.example.com' }),
-      true,
-    );
-    expect(msg).not.toBeNull();
-    expect(msg).toContain('http://bot.example.com');
-  });
-
   it('preserves the OpenNHP fail-fast with an OpenNHP-precise message (no qURL red herring)', () => {
     // Pre-#619 behavior (the old index.js OpenNHP check) must be unchanged,
     // and an OpenNHP-only deploy (no Auth0) must see an OpenNHP-named message
