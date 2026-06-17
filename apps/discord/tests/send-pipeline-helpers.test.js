@@ -611,7 +611,7 @@ describe('qURL client', () => {
       });
 
       await expect(qurl.createOneTimeLink('https://example.com', '1h', 'label'))
-        .rejects.toThrow(/500/);
+        .rejects.toThrow(/qURL API POST.*failed.*500/);
     });
 
     it('includes authorization header', async () => {
@@ -652,7 +652,7 @@ describe('qURL client', () => {
         json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404', detail: 'qURL not found' } }),
       });
 
-      await expect(qurl.deleteLink('r_badid1234567')).rejects.toThrow(/404/);
+      await expect(qurl.deleteLink('r_badid1234567')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
     });
   });
 });

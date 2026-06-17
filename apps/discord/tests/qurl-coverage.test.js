@@ -84,15 +84,20 @@ describe('qURL client — getResourceStatus', () => {
     expect(url).toBe('https://api.test.local/v1/qurls/res-123');
     expect(opts.method).toBe('GET');
     expect(opts.headers.Authorization).toBe('Bearer test-api-key');
+    // The bot's User-Agent is preserved across the SDK migration (literal wire
+    // identifier per CLAUDE.md).
+    expect(opts.headers['User-Agent']).toBe('qurl-discord-bot/1.0');
     expect(result.resource_id).toBe('res-123');
     // The SDK renames the API's wire-format `qurls` field to `access_tokens`.
     expect(result.access_tokens).toHaveLength(1);
   });
 
-  it('throws on 404 API error', async () => {
+  it('throws on 404 API error (status-only message, body redacted)', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue(apiError(404, { code: 'not_found' }));
 
-    await expect(qurl.getResourceStatus('bad-id')).rejects.toThrow(/404/);
+    // callQurl re-throws a status-only error (the old wire-contract shape), not
+    // the SDK error whose message would carry the server `detail`.
+    await expect(qurl.getResourceStatus('bad-id')).rejects.toThrow(/qURL API GET.*failed.*404/);
   });
 
   it('throws on an unexpected 204 (a status read expects a body)', async () => {
@@ -213,12 +218,12 @@ describe('qURL client — retry + audit behavior', () => {
     expect(authCalls).toHaveLength(1);
   });
 
-  it('redacts the error body — logs status/code only, never the response body', async () => {
-    // REDACTION INVARIANT: qurl.js's error breadcrumb must carry status (+ the
-    // short error code) and NOTHING from the body. A qURL error body can echo
-    // request headers or tokens, so even with the SDK error's `detail`
-    // available, we never log it. Pin that a token planted in the body never
-    // reaches logger.debug, while the status still does.
+  it('redacts the error body end-to-end — neither the log nor the thrown error carries it', async () => {
+    // REDACTION INVARIANT: a qURL error body can echo request headers or tokens,
+    // so the body must never escape this module — not via the breadcrumb, and
+    // not via the thrown error's message (the revoke path logs `err.message`
+    // unconditionally). Plant a token in the body and assert it reaches neither
+    // logger.debug nor the thrown error, while the status still surfaces in both.
     const logger = require('../src/logger');
     logger.debug.mockClear();
     // A clearly-fake stand-in for a body that echoes a token — not a real key
@@ -227,8 +232,16 @@ describe('qURL client — retry + audit behavior', () => {
     globalThis.fetch = jest.fn().mockResolvedValue(
       apiError(500, { code: 'server_error', detail: `internal failure near ${SECRET}` }),
     );
-    await expect(qurl.getResourceStatus('res-redact')).rejects.toThrow(/500/);
 
+    const thrown = await qurl.getResourceStatus('res-redact').then(
+      () => { throw new Error('expected rejection'); },
+      (e) => e,
+    );
+    // Thrown error: status-only, never the body.
+    expect(thrown.message).toMatch(/500/);
+    expect(thrown.message).not.toContain(SECRET);
+
+    // Breadcrumb: status logged, body never logged.
     const leaked = logger.debug.mock.calls.some((args) => JSON.stringify(args).includes(SECRET));
     expect(leaked).toBe(false);
     const loggedStatus = logger.debug.mock.calls.some(
@@ -267,6 +280,16 @@ describe('qURL client — retry + audit behavior', () => {
     await qurl.getResourceStatus('res-429');
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
+
+  it('retries DELETE on 503 then succeeds (revoke shares the GET/DELETE retry budget)', async () => {
+    // DELETE is idempotent, so unlike POST it does get the {429,502,503,504}
+    // retry budget — pin that the revoke path retries a transient 503.
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce(apiError(503))
+      .mockResolvedValueOnce(apiOk(204, undefined));
+    await qurl.deleteLink('r_resource1234');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('qURL client — createOneTimeLink happy path', () => {
@@ -293,6 +316,16 @@ describe('qURL client — createOneTimeLink happy path', () => {
     );
     const result = await qurl.createOneTimeLink('https://example.com/file', '1h', 'label');
     expect(result.resource_id).toBe('r1');
+  });
+
+  it('does NOT retry the create POST on a transient 503 (mutating-retry policy)', async () => {
+    // POST is non-idempotent: the SDK retries it only on 429, never 5xx — so a
+    // create is attempted exactly once on a 503, removing the duplicate-create
+    // risk the pre-SDK client carried (it retried POST on transient 5xx).
+    globalThis.fetch = jest.fn().mockResolvedValue(apiError(503));
+    await expect(qurl.createOneTimeLink('https://example.com/file', '1h', 'label'))
+      .rejects.toThrow(/qURL API POST.*failed.*503/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
   it('rejects when DNS lookup fails', async () => {

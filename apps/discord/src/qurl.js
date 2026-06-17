@@ -10,7 +10,7 @@ const dns = require('dns').promises;
  * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
  * uses the same SDK. This module adds only the concerns the SDK doesn't own:
  *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
- *     error-body redaction in logs — see callQurl();
+ *     error-body redaction — in logs and in the errors it throws — see callQurl();
  *   - the SSRF guards for the user-supplied create target (isPrivateHost +
  *     assertNotPrivateAfterResolve), which are client-independent.
  */
@@ -50,7 +50,7 @@ function makeClient(apiKey) {
 
 /**
  * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
- * `method`/`path` are labels for the audit/log payload (the same
+ * `method`/`path` are labels for the audit/log/error payload (the same
  * dependency/method/path shape the pre-SDK client emitted) — the SDK owns the
  * actual wire path.
  *
@@ -60,29 +60,37 @@ function makeClient(apiKey) {
  *     {429, 502, 503, 504}), so this fires once per request, not once per
  *     attempt. If that ever changes, the audit count would multiply on a single
  *     auth failure. Pinned by tests/qurl-coverage.test.js.
- *   - REDACTION: log only status + error code, never the SDK error's message or
- *     detail — a qURL error body can echo request headers or tokens, and an
- *     operator running LOG_LEVEL=debug during an incident must not tail those
- *     into logs. Pinned by tests/qurl-coverage.test.js.
+ *   - REDACTION: never let a qURL error body escape this module. The SDK's
+ *     QURLError.message is `Title (status): detail`, and `detail` can echo
+ *     request headers or tokens — so on a real HTTP-status failure we log only
+ *     status + code and re-throw a status-only Error (callers such as the revoke
+ *     path log the thrown `.message`, so the body must not reach it). status-0
+ *     errors (network / timeout / client-validation) carry no server body, so
+ *     they propagate unchanged — their message is transport/SDK text and is
+ *     useful. Pinned by tests/qurl-coverage.test.js.
  */
 async function callQurl(method, path, fn) {
   try {
     return await fn();
   } catch (err) {
-    // A real HTTP status from the API. The SDK uses status 0 for its
-    // client-side validation / network / timeout errors — those are not API
-    // auth failures and get neither the audit emit nor the error breadcrumb.
-    const status = Number.isInteger(err && err.status) && err.status > 0 ? err.status : null;
-    if (status !== null) {
-      logger.debug('qURL API error', { method, path, status, code: err.code });
-      if (status === 401 || status === 403) {
-        logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
-          dependency: 'qurl_service',
-          status,
-          method,
-          path,
-        });
-      }
+    // The SDK uses status 0 for its client-side validation / network / timeout
+    // errors; a positive status is a real HTTP status from the API.
+    const status = Number.isInteger(err && err.status) ? err.status : 0;
+    // Redaction: status + error code only — never err.message / err.detail.
+    logger.debug('qURL API error', { method, path, status, code: err && err.code });
+    if (status === 401 || status === 403) {
+      logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
+        dependency: 'qurl_service',
+        status,
+        method,
+        path,
+      });
+    }
+    // A real HTTP status means the SDK error wraps a server response body — throw
+    // a status-only error so that body can't leak through a caller that logs
+    // `err.message`. status 0 (no server body) propagates unchanged.
+    if (status > 0) {
+      throw new Error(`qURL API ${method} ${path} failed (${status})`);
     }
     throw err;
   }
