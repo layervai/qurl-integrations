@@ -1033,39 +1033,48 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
   });
 });
 
-describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host sweep before create)', () => {
+describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host sweep)', () => {
   // Symptom motivating this block: sandbox `base_url` rename from
   // `discord.layerv.xyz` → `discord.connector.layerv.xyz` left an
   // orphan sub (wh_s6wOhbKLPYSk--Jv) alive forever. qurl-service
   // kept delivering to the old host (DNS still resolved to the same
   // ALB) and every delivery failed sig-verification at the bot.
   //
-  // The sweep runs ONLY when findExistingSubscriptions(newUrl) returned
-  // empty (i.e. the create-fresh branch) and matches on a stable
-  // description prefix. Description-prefix safety keeps sibling-service
-  // subs (e.g. qurl-s3-connector) out of the deletion set even though
-  // they share owner_id with the bot under today's bot-API-key-shared
-  // model (see project_qurl_api_key_blast_radius).
+  // The sweep runs BEFORE the find/reuse/rotate/create branching (so a
+  // transient orphan-DELETE 5xx on one boot is retried on every
+  // subsequent boot, not just the next create-fresh one — that "retry"
+  // window would otherwise close the moment the new sub is created).
+  // Cross-host detection uses host inequality; description-prefix +
+  // boundary anchoring keeps sibling-service subs (e.g. qurl-s3-connector)
+  // out of scope even though they share owner_id with the bot under
+  // today's bot-API-key-shared model (see project_qurl_api_key_blast_radius).
+  // A liveness gate (last_delivery_success === false) prevents the sweep
+  // from cannibalizing a healthy cross-host sibling (e.g. an active-
+  // active multi-region deploy sharing a QURL_API_KEY).
   const NEW_URL = 'https://discord.connector.layerv.xyz/webhooks/qurl';
   const OLD_URL = 'https://discord.layerv.xyz/webhooks/qurl';
   const BOT_DESC = 'Discord bot view counter (region=us-east-2, env=sandbox)';
   const BOT_OPTS = { ...BASE_OPTS, bridgeUrl: NEW_URL, description: BOT_DESC };
 
-  it('deletes a cross-host orphan with matching description before creating fresh at the new URL', async () => {
+  // Default orphan shape used across the cases below — matches all
+  // sweep criteria (cross-host, same path, description-prefix, dead).
+  function deadOrphan(overrides = {}) {
+    return {
+      webhook_id: 'wh_orphan',
+      url: OLD_URL,
+      description: BOT_DESC,
+      events: ['qurl.accessed', 'qurl.expired'],
+      failure_count: 1475,
+      last_delivery_success: false,
+      ...overrides,
+    };
+  }
+
+  it('deletes a cross-host orphan with matching description + dead liveness before creating fresh at the new URL', async () => {
     let orphanDeleted = false;
     let createCalled = false;
     mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [
-        // Cross-host, same path, matching description prefix → orphan.
-        {
-          webhook_id: 'wh_orphan',
-          url: OLD_URL,
-          description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
-          events: ['qurl.accessed', 'qurl.expired'],
-          failure_count: 1475,
-          last_delivery_success: false,
-        },
-      ] } }),
+      'GET /v1/webhooks': () => ({ body: { data: [deadOrphan()] } }),
       'DELETE /v1/webhooks/wh_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
       'POST /v1/webhooks': () => {
         createCalled = true;
@@ -1110,13 +1119,12 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     expect(result.action).toBe('created');
   });
 
-  it('does NOT touch other-host subs when an existing sub is found at the new URL (no migration in progress)', async () => {
-    // Existence at the requested URL means we're in the normal find-or-
-    // update path, not a migration. Skip the orphan sweep entirely —
-    // a cross-host sub at that point is intentional dual-host config or
-    // a co-existing legacy sub the operator deliberately retained, not
-    // something for this code path to garbage-collect.
-    let deleted = false;
+  it('sweeps a stale cross-host orphan even when the reuse path runs at the new URL (retry-on-next-boot)', async () => {
+    // The sweep runs BEFORE branching, so a transient DELETE 5xx on a
+    // previous create-fresh boot still gets retried on every subsequent
+    // boot via this very path. Without the hoist, that retry window
+    // would close the moment the new sub is created.
+    let orphanDeleted = false;
     let secretEndpointHit = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
@@ -1128,43 +1136,111 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           events: ['qurl.accessed', 'qurl.expired'],
           owner_id: 'auth0|bot',
         },
-        // Cross-host, matching description — WOULD be a sweep target,
-        // but the sweep must not run since a current-URL match exists.
-        {
-          webhook_id: 'wh_other_host',
-          url: OLD_URL,
-          description: BOT_DESC,
-          events: ['qurl.accessed', 'qurl.expired'],
-        },
+        // Cross-host orphan from a previous rename — still dead and
+        // never cleaned up. Sweep must still pick it up here.
+        deadOrphan({ webhook_id: 'wh_stale_orphan' }),
       ] } }),
-      'DELETE /v1/webhooks/wh_other_host': () => { deleted = true; return { status: 204, body: '' }; },
+      'DELETE /v1/webhooks/wh_stale_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
       'POST /v1/webhooks/wh_current/secret': () => {
         secretEndpointHit = true;
         return { body: { data: { webhook_id: 'wh_current', secret: 'whsec_rot' } } };
       },
     });
     const result = await ensureWebhookSubscription(BOT_OPTS);
-    expect(deleted).toBe(false); // sweep did not run
-    expect(secretEndpointHit).toBe(true); // normal rotate path ran
+    expect(orphanDeleted).toBe(true); // sweep ran despite existing sub at new URL
+    expect(secretEndpointHit).toBe(true); // normal rotate path also ran
     expect(result.webhookId).toBe('wh_current');
   });
 
-  it('continues with create when a DELETE fails (5xx) so the bot still registers; next run retries the orphan', async () => {
+  it('does NOT delete a HEALTHY cross-host sub (liveness gate protects active-active siblings)', async () => {
+    // Active-active multi-region: two regions share a QURL_API_KEY (same
+    // owner_id) and run different BASE_URL hosts. Without the liveness
+    // gate, region A would sweep region B's healthy sub on every boot
+    // and vice-versa — the registrars would ping-pong-kill each other.
+    // The `last_delivery_success === false` gate asymmetrically allows
+    // deletion only of unambiguously-dead orphans.
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_other_region',
+          url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl', // different host, same path, same description prefix
+          description: 'Discord bot view counter (region=eu-central-1, env=sandbox)',
+          events: ['qurl.accessed', 'qurl.expired'],
+          failure_count: 0,
+          last_delivery_success: true, // healthy
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_other_region': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false); // critical: healthy active-active sibling untouched
+    expect(result.action).toBe('created');
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['missing entirely (field omitted)', '__MISSING__'],
+  ])('does NOT delete a cross-host sub with last_delivery_success=%s (presumed-alive)', async (_label, livenessValue) => {
+    // A brand-new sub with no deliveries yet typically reports null/undefined.
+    // Strict `=== false` gate treats that as presumed-alive — better to miss
+    // an orphan than to false-positive delete a freshly-created sibling.
+    let deleted = false;
+    const sub = {
+      webhook_id: 'wh_no_deliveries_yet',
+      url: 'https://otherhost.example/webhooks/qurl',
+      description: BOT_DESC,
+      events: ['qurl.accessed'],
+      failure_count: 0,
+    };
+    if (livenessValue !== '__MISSING__') sub.last_delivery_success = livenessValue;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [sub] } }),
+      'DELETE /v1/webhooks/wh_no_deliveries_yet': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('does NOT delete a description that matches the prefix without the " (" boundary (no over-match)', async () => {
+    // The boundary anchor turns the prefix into a full-segment match.
+    // Without it, `startsWith("Discord bot view counter")` would over-
+    // match a sibling like `Discord bot view counter-archiver (...)`
+    // or `Discord bot view counterX`.
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_overmatch',
+          url: OLD_URL,
+          description: 'Discord bot view counterX (env=sandbox)',
+          events: ['qurl.accessed'],
+          failure_count: 100,
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_overmatch': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('continues with create when a DELETE fails (5xx) so the bot still registers; next boot retries the orphan', async () => {
     // Load-bearing failure semantics: blocking the create on a stale-
     // orphan DELETE failure would leave the bot UN-registered AND
     // orphaned — strictly worse than the orphan-only state we started
-    // in. Log + continue + create.
+    // in. Log + continue + create. The hoisted sweep means the next
+    // boot ALSO retries the orphan delete (not gated on create-fresh).
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     let createCalled = false;
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
-          {
-            webhook_id: 'wh_orphan_5xx',
-            url: OLD_URL,
-            description: BOT_DESC,
-            events: ['qurl.accessed', 'qurl.expired'],
-          },
+          deadOrphan({ webhook_id: 'wh_orphan_5xx' }),
         ] } }),
         'DELETE /v1/webhooks/wh_orphan_5xx': () => ({ status: 503, body: { error: 'transient' } }),
         'POST /v1/webhooks': () => {
@@ -1182,18 +1258,36 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     }
   });
 
+  it('retries a previously-failed orphan DELETE on the FOLLOWING boot (sweep is not gated on create-fresh)', async () => {
+    // Pins the hoisted-cleanup invariant directly: after a successful
+    // create on boot 1 (orphan DELETE 5xx-swallowed), boot 2 finds
+    // BOTH the just-created sub AND the still-alive orphan. Sweep
+    // re-attempts the orphan DELETE here — closing the recurrence
+    // window the cr-bot flagged.
+    let orphanDeletedOnBoot2 = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        // Boot 2's listing: new sub from boot 1 + orphan still alive.
+        { webhook_id: 'wh_new', url: NEW_URL, description: BOT_DESC, events: ['qurl.accessed', 'qurl.expired'], owner_id: 'auth0|bot' },
+        deadOrphan({ webhook_id: 'wh_orphan_retry' }),
+      ] } }),
+      'DELETE /v1/webhooks/wh_orphan_retry': () => { orphanDeletedOnBoot2 = true; return { status: 204, body: '' }; },
+      // Boot 2 takes reuse path (initialSecret + existing match) — no
+      // secret rotate, but events PATCH might run if drift, which it
+      // doesn't here.
+    });
+    const result = await ensureWebhookSubscription({ ...BOT_OPTS, initialSecret: 'whsec_known' });
+    expect(orphanDeletedOnBoot2).toBe(true);
+    expect(result.action).toBe('reused');
+  });
+
   it('treats DELETE 404 as success (concurrent cleanup by another invocation)', async () => {
     // 404 propagates through deleteSubscription as a no-throw. Two
     // Lambdas running concurrently (rare; reserved-concurrency=1 in
     // infra but defense-in-depth) must not crash the sweep.
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        {
-          webhook_id: 'wh_already_gone',
-          url: OLD_URL,
-          description: BOT_DESC,
-          events: ['qurl.accessed', 'qurl.expired'],
-        },
+        deadOrphan({ webhook_id: 'wh_already_gone' }),
       ] } }),
       'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
       'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
@@ -1215,6 +1309,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           url: 'https://example.test/webhooks/something-else',
           description: BOT_DESC, // same prefix
           events: ['qurl.accessed'],
+          failure_count: 100,
+          last_delivery_success: false,
         },
       ] } }),
       'DELETE /v1/webhooks/wh_other_path': () => { deleted = true; return { status: 204, body: '' }; },
@@ -1234,14 +1330,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
-          {
-            webhook_id: 'wh_orphan_log',
-            url: OLD_URL,
-            description: BOT_DESC,
-            events: ['qurl.accessed', 'qurl.expired'],
-            failure_count: 99,
-            last_delivery_success: false,
-          },
+          deadOrphan({ webhook_id: 'wh_orphan_log', failure_count: 99 }),
         ] } }),
         'DELETE /v1/webhooks/wh_orphan_log': () => ({ status: 204, body: '' }),
         'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
@@ -1277,12 +1366,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
         meta: { next_cursor: 'page2', has_more: true },
       } }),
       'GET /v1/webhooks?cursor=page2&limit=100': () => ({ body: {
-        data: [{
-          webhook_id: 'wh_orphan_paged',
-          url: OLD_URL,
-          description: BOT_DESC,
-          events: ['qurl.accessed', 'qurl.expired'],
-        }],
+        data: [deadOrphan({ webhook_id: 'wh_orphan_paged' })],
         meta: { next_cursor: '', has_more: false },
       } }),
       'DELETE /v1/webhooks/wh_orphan_paged': () => { deletedIds.push('wh_orphan_paged'); return { status: 204, body: '' }; },
@@ -1299,8 +1383,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     const deletedIds = [];
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_orphan_a', url: 'https://oldhost-a.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
-        { webhook_id: 'wh_orphan_b', url: 'https://oldhost-b.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
+        deadOrphan({ webhook_id: 'wh_orphan_a', url: 'https://oldhost-a.example/webhooks/qurl' }),
+        deadOrphan({ webhook_id: 'wh_orphan_b', url: 'https://oldhost-b.example/webhooks/qurl' }),
       ] } }),
       'DELETE /v1/webhooks/wh_orphan_a': () => { deletedIds.push('wh_orphan_a'); return { status: 204, body: '' }; },
       'DELETE /v1/webhooks/wh_orphan_b': () => { deletedIds.push('wh_orphan_b'); return { status: 204, body: '' }; },
@@ -1319,8 +1403,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     try {
       mockFetchResponses({
         'GET /v1/webhooks': () => ({ body: { data: [
-          { webhook_id: 'wh_5xx', url: 'https://oldhost-a.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
-          { webhook_id: 'wh_ok',  url: 'https://oldhost-b.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
+          deadOrphan({ webhook_id: 'wh_5xx', url: 'https://oldhost-a.example/webhooks/qurl' }),
+          deadOrphan({ webhook_id: 'wh_ok',  url: 'https://oldhost-b.example/webhooks/qurl' }),
         ] } }),
         'DELETE /v1/webhooks/wh_5xx': () => ({ status: 503, body: { error: 'transient' } }),
         'DELETE /v1/webhooks/wh_ok':  () => { deletedIds.push('wh_ok');  return { status: 204, body: '' }; },
@@ -1341,7 +1425,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     let deleted = false;
     mockFetchResponses({
       'GET /v1/webhooks': () => ({ body: { data: [
-        { webhook_id: 'wh_anything', url: OLD_URL, description: 'literally anything', events: [] },
+        { webhook_id: 'wh_anything', url: OLD_URL, description: 'literally anything', events: [], failure_count: 1, last_delivery_success: false },
       ] } }),
       'DELETE /v1/webhooks/wh_anything': () => { deleted = true; return { status: 204, body: '' }; },
       'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),

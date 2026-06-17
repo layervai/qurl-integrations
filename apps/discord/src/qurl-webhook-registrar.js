@@ -154,12 +154,12 @@ function canonicalUrl(u) {
 // requested explicitly; loop bounded at 50 iterations (5000 subs)
 // so a misbehaving cursor can't spin forever.
 //
-// Also collects URL-migration orphan candidates in the same pass when
-// `orphanFilter` is provided — a sub passes the filter iff it's a
-// stale sibling of `target` at a different host (rename leftover).
-// Doing both in one cursor walk avoids the second full-scan we'd
-// otherwise pay on the create-fresh path. Callers that don't need the
-// orphan list (per-guild bootstrap) pass no filter and only see matches.
+// Always returns `{ matches, orphans }`. `orphans` is the subset of
+// the walk's rows that satisfy `orphanFilter(s)` when one is provided
+// (URL-migration leftovers, see buildUrlMigrationOrphanFilter); when
+// no filter is provided OR the filter rejects every row, `orphans` is
+// empty. Co-collecting in the same cursor walk avoids paying a second
+// full-scan on the create-fresh path.
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
@@ -218,6 +218,22 @@ async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
 // bot creates". Extract that prefix so the URL-migration orphan sweep
 // only matches the bot's own historical subs, never a sibling service's.
 //
+// LOAD-BEARING CONSTRAINT (don't quietly break this):
+// description is set at CREATE time and NEVER reconciled (see the comment
+// above createSubscription). The orphan retains whatever description the
+// OLD deploy gave it. The sweep can only catch an orphan whose pre-`(`
+// portion is BYTE-IDENTICAL to the bot's current pre-`(` portion. The
+// motivating incident's orphan had description
+//   `Discord bot — view counter (sandbox, owner-scoped)`
+// (em-dash + different wording) while the current bot emits
+//   `Discord bot view counter (...)`
+// — those prefixes don't match, so that historical orphan is NOT swept
+// by this code. That's fine for the recurrence-prevention goal (any
+// future rename leaves an orphan whose description was minted by the
+// CURRENT shape), but it means: if you ever edit the pre-`(` portion
+// of the bot's description, every pre-edit orphan becomes permanently
+// uncatchable. Pair any such edit with a one-off cleanup pass.
+//
 // Falls back to the whole string if no ` (` present, so a caller passing
 // a description without parens still gets a sensible match (string-exact).
 function deriveDescriptionPrefix(description) {
@@ -235,6 +251,14 @@ function urlHost(u) {
 // Pull the pathname from a URL string with trailing-slash normalization
 // (mirrors canonicalUrl semantics so `/webhooks/qurl` and `/webhooks/qurl/`
 // compare equal). Returns null on parse failure.
+//
+// Semantic divergence vs canonicalUrl: this drops the query string
+// (URL.pathname excludes it), whereas canonicalUrl preserves the query
+// as route-distinguishing. The orphan sweep deliberately ignores the
+// query — a rename should be cross-host on the same route, not gated on
+// query-string equality. The bot's bridge URL is unparametrized today
+// so the divergence is moot in practice; if a query string ever enters
+// the bridge URL, re-evaluate whether sweep needs to consider it.
 function urlPathname(u) {
   try {
     const url = new URL(u);
@@ -261,11 +285,28 @@ function urlPathname(u) {
 //   1. URL pathname matches the bot's bridge URL pathname (same route)
 //   2. URL host DIFFERS from the bot's current bridge URL host
 //      (cross-host = candidate for rename)
-//   3. Description STARTS WITH the bot's stable description prefix
-//      (e.g. `Discord bot view counter`) — this is the safety net that
-//      keeps connector subs (description: `qurl-s3-connector ...`) out
-//      of the deletion set even though they share owner_id with the bot
-//      under today's bot-API-key-shared model.
+//   3. Description matches the bot's stable description prefix EXACTLY
+//      or with ' (' as the next character — i.e. the prefix is the full
+//      stable segment, not just an arbitrary character-prefix. Without
+//      the boundary, `Discord bot view counter` would over-match a
+//      hypothetical `Discord bot view counterX (...)` sibling.
+//      This is the safety net that keeps sibling-service subs (e.g.
+//      `qurl-s3-connector resource.closed subscription`) out of the
+//      deletion set even though they share owner_id with the bot under
+//      today's bot-API-key-shared model.
+//   4. Liveness gate: `last_delivery_success === false`. The motivating
+//      orphan had `last_delivery_success: false` + `failure_count: 1475`.
+//      Without this gate, an active-active multi-region deploy that
+//      ever shares the same `QURL_API_KEY` across regions (same owner_id,
+//      different `BASE_URL` hosts) would self-cannibalize — region A
+//      boots, finds no sub at host A, sweeps region B's healthy sub
+//      because everything else matches (host≠, path=, description-prefix=).
+//      The liveness signal asymmetrically protects a healthy sub
+//      (last_delivery_success: true OR null/undefined) while still
+//      catching the unambiguously-dead orphan we're targeting.
+//      Strictness on `=== false` (vs `!== true`): a brand-new sub with
+//      no deliveries yet typically reports null/undefined — treat that
+//      as "presumed alive, do not delete."
 //
 // Returned as a closure so it composes into `findExistingSubscriptions`
 // as the `orphanFilter` arg: one cursor walk produces both the matches
@@ -277,6 +318,7 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
   const targetHost = urlHost(bridgeUrl);
   const targetPath = urlPathname(bridgeUrl);
   if (!targetHost || !targetPath) return null;
+  const prefixWithBoundary = `${descriptionPrefix} (`;
   return function isUrlMigrationOrphan(s) {
     const subHost = urlHost(s.url);
     const subPath = urlPathname(s.url);
@@ -284,7 +326,9 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     if (subPath !== targetPath) return false;
     if (subHost === targetHost) return false;
     const subDesc = typeof s.description === 'string' ? s.description : '';
-    return subDesc.startsWith(descriptionPrefix);
+    if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) return false;
+    if (s.last_delivery_success !== false) return false;
+    return true;
   };
 }
 
@@ -507,6 +551,20 @@ async function ensureWebhookSubscription(opts) {
   const { matches, orphans } = await findExistingSubscriptions({
     apiEndpoint, apiKey, bridgeUrl, orphanFilter,
   });
+
+  // Best-effort orphan cleanup runs BEFORE the find-or-create branching,
+  // not just before create. If the create-fresh branch ran on a previous
+  // boot and the orphan DELETE 5xx'd, that boot would create the new sub
+  // anyway — and on every subsequent boot the new sub is found at
+  // `bridgeUrl`, the existing/reuse branches return early, and the
+  // orphan-cleanup would never get another chance to retry. Hoisting
+  // here makes the retry-on-next-boot claim actually true: every boot
+  // collects orphans during the cursor walk and DELETEs whatever it
+  // finds, regardless of whether it then takes existing/reuse/rotate/create.
+  if (orphans.length > 0) {
+    await cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans });
+  }
+
   const existing = pickSurvivor(matches);
   const wasDedupe = matches.length > 1 && existing != null;
   if (wasDedupe) {
@@ -603,18 +661,8 @@ async function ensureWebhookSubscription(opts) {
     }
     logger.info('qURL webhook subscription reconciled (existing found, bootstrap rotate)', { webhookId, url: bridgeUrl });
   } else {
-    // No existing sub at the requested URL. Before creating a fresh one,
-    // best-effort DELETE the URL-migration orphans we picked up during
-    // the cursor walk above — prior subs this bot registered at a
-    // DIFFERENT host (e.g. `base_url` rename) on the same `/webhooks/qurl`
-    // path. Without this, a rename leaves the old sub alive in
-    // qurl-service forever, retrying deliveries that the bot can no
-    // longer verify. See buildUrlMigrationOrphanFilter for the safety
-    // criteria (description-prefix match keeps sibling-service subs out
-    // of scope).
-    if (orphans.length > 0) {
-      await cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans });
-    }
+    // URL-migration orphan cleanup already ran above (pre-branch), so
+    // we can go straight to create here.
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
     webhookId = created.webhook_id;
     secret = created.secret;
