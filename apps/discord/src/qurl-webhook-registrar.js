@@ -315,12 +315,21 @@ function deriveDescriptionPrefix(description) {
   return idx === -1 ? description : description.slice(0, idx);
 }
 
-// Pull the host from a URL string. Returns null on parse failure so the
-// caller can skip the row defensively (same fallback shape as canonicalUrl).
-// `URL.host` is already lowercased by the WHATWG URL parser, so no
-// explicit fold needed.
+// Pull the HOSTNAME (NOT host — `hostname` excludes the port) from a URL
+// string. Returns null on parse failure so the caller can skip the row
+// defensively (same fallback shape as canonicalUrl). The WHATWG URL
+// parser lowercases `hostname` already, so no explicit fold needed.
+//
+// Hostname over host (port-insensitive): the orphan sweep classifies
+// "same host with different port" as same-host, NOT cross-host. A
+// hypothetical rename that only flips :8080 → :8443 (or implicit-443
+// vs explicit-:443) wouldn't sweep — which is correct, since a port
+// change at the same hostname doesn't break delivery routing (the new
+// port still resolves to the same ALB; no orphan accrues). The bot's
+// bridge URL today is unparametrized + port-less, so this is purely
+// defense-in-depth against a future port-bearing URL.
 function urlHost(u) {
-  try { return new URL(u).host; } catch { return null; }
+  try { return new URL(u).hostname; } catch { return null; }
 }
 
 // Pull the pathname from a URL string with trailing-slash normalization
@@ -389,13 +398,12 @@ function urlPathname(u) {
 //      to-register was the central Lambda or a guild link.
 //   4. Liveness gate: BOTH `last_delivery_success === false` AND
 //      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
-//      compound check tolerates a single transient delivery failure on
-//      an otherwise-healthy cross-host sibling — without the
-//      `failure_count` floor, a sibling reboot during a single-blip
-//      window would DELETE a healthy peer. Strictness on `=== false`
-//      (vs `!== true`): a brand-new sub with no deliveries yet
-//      typically reports null/undefined — treat that as
-//      "presumed alive, do not delete."
+//      compound check tolerates not just transient delivery failures
+//      but also short sustained outages (the floor is 30, not 3, so
+//      a peer needs ~minutes of consecutive failures before becoming
+//      sweep-eligible). Strictness on `=== false` (vs `!== true`): a
+//      brand-new sub with no deliveries yet typically reports
+//      null/undefined — treat that as "presumed alive, do not delete."
 //
 //      LOAD-BEARING ENVIRONMENT-ISOLATION ASSUMPTION:
 //      The description prefix is identical across environments
@@ -451,19 +459,31 @@ function urlPathname(u) {
 // MIN_FAILURES tunes the compound liveness gate's transient-blip
 // tolerance — a candidate sub with last_delivery_success=false AND
 // failure_count below this is treated as transient (NEAR_MISS), not
-// orphan-confirmed (MATCH). Sized small (3) because a single transient
-// failure is plausible but several in a row indicates sustained dead-
-// path; the motivating orphan had failure_count=1475, well above.
+// orphan-confirmed (MATCH). Sized at 30 (not 3) because:
+//   - The motivating orphan had 1475, comfortably above.
+//   - A sustained-but-recoverable peer outage (~minutes) would
+//     reach failure_count=3 trivially, so a small floor buys almost
+//     no protection against the active-active cannibalization
+//     scenario in #827. Raising to 30 means a peer would need to be
+//     down for ~10-30+ minutes (assuming roughly one delivery
+//     attempt per minute) before its sub becomes sweep-eligible,
+//     which is the kind of sustained outage where operator
+//     intervention is already in progress.
+//   - Cost is asymmetric: a true URL-migration orphan's failure_count
+//     climbs unbounded, so the higher floor just delays cleanup by a
+//     bounded amount, not prevents it. A false-positive deletion of a
+//     healthy peer is by contrast unrecoverable without re-creating.
 //
-// TODO(upstream-contract): the threshold value assumes qurl-service
-// increments `failure_count` ONCE PER FAILED DELIVERY (not per retry
-// attempt within a delivery). If the increment semantics ever change
-// to count attempts, a single genuinely-transient blip could already
-// land failure_count >= 3, and a peer reboot in that window would
-// DELETE a healthy sibling — the false-positive the gate exists to
-// prevent. If qurl-service publishes a counter-semantics doc, pin
-// this against it; absent that, the assumption is observational.
-const URL_MIGRATION_ORPHAN_MIN_FAILURES = 3;
+// TODO(upstream-contract): the threshold value still assumes
+// qurl-service increments `failure_count` ONCE PER FAILED DELIVERY
+// (not per retry attempt within a delivery) and that delivery
+// attempts continue for dead hosts. If the increment semantics ever
+// change to count attempts, OR if qurl-service stops attempting
+// deliveries to dead hosts (signal stalls), the threshold's safety
+// margin changes. Pin against qurl-service's published counter
+// semantics when they exist; absent that, the assumption is
+// observational.
+const URL_MIGRATION_ORPHAN_MIN_FAILURES = 30;
 // ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
 // only consumer) so the tri-state predicate composes cleanly. The
 // observability rationale for the tri-state: "matched everything except

@@ -1309,6 +1309,36 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     }
   });
 
+  it('does NOT classify same-hostname different-port as cross-host (port-insensitive comparison)', async () => {
+    // A port-flip rename (`:8080` → `:8443`, or implicit-443 vs
+    // explicit-:443) at the same hostname is NOT a URL-migration:
+    // the new port still resolves to the same backend, no orphan
+    // accrues. Pin that `urlHost` uses `hostname` (port-excluded)
+    // not `host` (port-included). Without this, a sub at
+    // `https://discord.layerv.xyz:443/webhooks/qurl` could be
+    // classified as cross-host against the unparametrized
+    // `https://discord.layerv.xyz/webhooks/qurl` and falsely swept.
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_same_host_diff_port',
+          // Same hostname as NEW_URL (`discord.connector.layerv.xyz`),
+          // but with an explicit `:8443`.
+          url: 'https://discord.connector.layerv.xyz:8443/webhooks/qurl',
+          description: BOT_DESC,
+          events: ['qurl.accessed'],
+          failure_count: 9999,
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_same_host_diff_port': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
   it('does NOT touch same-host subs at a DIFFERENT path (path filter)', async () => {
     // A bot rev that ever served `/webhooks/qurl/v2` (hypothetical)
     // could collide here. Pin that the path filter excludes any sub
