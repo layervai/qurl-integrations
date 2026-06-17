@@ -38,7 +38,7 @@ ADD mint_count :one
 condition: mint_window_start is current window AND mint_count < 30
 ```
 
-The first request for a brand-new or stale window takes the slower path: a conditional increment misses, a consistent `GetItem` disambiguates the state, and a reset writes the same item with `mint_count = 1` under a stale-window condition. If the current-window counter is at the limit, the handler renders the normal rate-limit copy with a retry hint for the remaining window. Post-cap attempts also take a conditional increment miss plus a consistent `GetItem`, and the handler logs the denial so operators can see cap pressure. If DynamoDB fails, the command fails closed with the existing generic mint-failure copy.
+The first request for a brand-new or stale window takes the slower path: a conditional increment misses, a consistent `GetItem` disambiguates the state, and a reset writes the same item with `mint_count = 1` under a stale-window condition. If the current-window counter is at the limit, the handler renders the normal rate-limit copy with a retry hint for the remaining window. Post-cap attempts also take a conditional increment miss plus a consistent `GetItem`, and the handler logs the denial so operators can see cap pressure. If another task has advanced the counter into a future window and that future window is already at the limit, the retry hint is computed from that future window's end, so it can exceed one hour. If DynamoDB fails, the command fails closed with the existing generic mint-failure copy.
 
 ## Tradeoffs
 
