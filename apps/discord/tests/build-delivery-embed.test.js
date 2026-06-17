@@ -163,7 +163,15 @@ const baseArgs = {
   guildIconUrl: 'https://cdn.discordapp.com/icons/g/icon.png',
 };
 
-beforeEach(() => { capturedEmbeds.length = 0; capturedButtons.length = 0; });
+const TEST_NOW_SECONDS = 1704067200;
+
+beforeEach(() => {
+  capturedEmbeds.length = 0;
+  capturedButtons.length = 0;
+  jest.spyOn(Date, 'now').mockReturnValue(TEST_NOW_SECONDS * 1000);
+});
+
+afterEach(() => { jest.restoreAllMocks(); });
 
 describe('buildDeliveryPayload — senderAlias sanitization (author row)', () => {
   // Author row is plaintext (no markdown rendering), so description
@@ -270,6 +278,14 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     expect(desc).toMatch(/🕐 Closes <t:1735689600:R>/);
     // Locks against accidental reversion to a static label
     expect(desc).not.toMatch(/Closes in \*\*\d/);
+  });
+
+  it('renders Closed when the qURL already expired at delivery render time', () => {
+    const expiredAt = TEST_NOW_SECONDS - 60;
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: expiredAt });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toMatch(new RegExp(`🕐 Closed <t:${expiredAt}:R>`));
+    expect(desc).not.toMatch(/🕐 Closes <t:/);
   });
 
   // Defensive guard: a future caller that drops `expiresAt` (or passes
