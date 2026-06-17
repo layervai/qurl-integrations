@@ -1264,6 +1264,50 @@ describe('qurl sends', () => {
     await expect(store.clearExpiredDMEdited('s1', 'rcpt')).rejects.toThrow();
   });
 
+  test('markConsumedDMEdited: conditional UpdateItem with attribute_not_exists(consumed_edited_at)', async () => {
+    // Parallel to markExpiredDMEdited but on a DISTINCT attribute, so a
+    // consumed-flip and a later expired-flip on the same row each have
+    // their own idempotency marker.
+    ddbMock.on(UpdateCommand).resolves({});
+    const result = await store.markConsumedDMEdited('s1', 'rcpt');
+    expect(result).toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+    expect(input.ConditionExpression).toBe('attribute_not_exists(consumed_edited_at)');
+    expect(input.UpdateExpression).toBe('SET consumed_edited_at = :t');
+    expect(typeof input.ExpressionAttributeValues[':t']).toBe('string');
+  });
+
+  test('markConsumedDMEdited: returns false on ConditionalCheckFailedException (already flipped)', async () => {
+    const ccfe = new Error('conditional');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    const result = await store.markConsumedDMEdited('s1', 'rcpt');
+    expect(result).toBe(false);
+  });
+
+  test('markConsumedDMEdited: rethrows non-CCFE errors (caller maps to a pre-marker transient)', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('ProvisionedThroughputExceededException'));
+    await expect(store.markConsumedDMEdited('s1', 'rcpt')).rejects.toThrow();
+  });
+
+  test('clearConsumedDMEdited: REMOVE expression on the same composite key', async () => {
+    // Rollback path — called by the consumed-flip handler when editDM
+    // reported a transient failure, so a redelivery / the qurl.expired
+    // backstop can re-attempt the flip.
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.clearConsumedDMEdited('s1', 'rcpt');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+    expect(input.UpdateExpression).toBe('REMOVE consumed_edited_at');
+    expect(input.ConditionExpression).toBeUndefined();
+  });
+
+  test('clearConsumedDMEdited: rethrows DDB errors so caller can log it', async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error('throttle'));
+    await expect(store.clearConsumedDMEdited('s1', 'rcpt')).rejects.toThrow();
+  });
+
   test('isSendRevoked: returns true when qurl_send_configs.revoked_at is set', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: '2026-05-19T12:00:00Z' },

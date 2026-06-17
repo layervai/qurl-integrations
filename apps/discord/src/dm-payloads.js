@@ -5,9 +5,9 @@
 // require graph (Discord REST, view-update-registry, flow-state,
 // etc.) at module-init time during tests.
 //
-// Today only buildExpiredDMPayload lives here. buildRevokedDMPayload
-// stays in commands.js next to its sole caller (the /qurl revoke
-// editTargets loop) until a second consumer needs it.
+// Today buildExpiredDMPayload + buildConsumedDMPayload live here.
+// buildRevokedDMPayload stays in commands.js next to its sole caller
+// (the /qurl revoke editTargets loop) until a second consumer needs it.
 //
 // CONTRACT: every builder MUST pass `components: []` explicitly.
 // Discord's PATCH /messages does NOT clear fields that aren't
@@ -48,4 +48,32 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
   return { embeds: [embed], components: [] };
 }
 
-module.exports = { buildExpiredDMPayload };
+// Companion to buildExpiredDMPayload for the qurl.accessed webhook path
+// when `data.consumed === true`: the recipient opened a one-time qURL
+// and the content has been served, so for THEM the door has already
+// closed — the link is dead even though its 30m expiry hasn't elapsed.
+//
+// COPY IS DELIBERATELY MARKER-FREE (past/perfect tense, no <t:N:R>):
+// at consumption time the link's `expires_at` is still ~minutes in the
+// FUTURE. Rendering it through Discord's relative-time marker (as the
+// expired payload does) would read "expired in 25 minutes" — a
+// future-tense "expired", exactly the confusing state this whole change
+// kills. Static copy is the fix: it says "you opened it, it's done"
+// without any time anchor that could re-render future-tense. (A
+// `<t:now:R>` "opened just now" anchor is possible but adds nothing —
+// the recipient just clicked, they know when.)
+//
+// UX choices mirror buildExpiredDMPayload: the embed wholly replaces
+// the original delivery embed (PATCH only supports whole-array embed
+// replacement, and the "tap to step through" framing is misleading once
+// the one-time content is gone), color stays on QURL_BRAND for symmetry
+// with the expired/revoke paths, and `components: []` clears the now-
+// dead Step Through button (see module CONTRACT above).
+function buildConsumedDMPayload() {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.QURL_BRAND)
+    .setDescription('🔓 You opened this one-time qURL.\nIt has been used and is no longer active.');
+  return { embeds: [embed], components: [] };
+}
+
+module.exports = { buildExpiredDMPayload, buildConsumedDMPayload };

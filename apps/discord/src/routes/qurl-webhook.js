@@ -29,7 +29,7 @@ const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hard
 const subs = require('../webhook-subscriptions');
 const viewUpdatePublisher = require('../view-update-publisher');
 const { editDM } = require('../discord-rest');
-const { buildExpiredDMPayload } = require('../dm-payloads');
+const { buildExpiredDMPayload, buildConsumedDMPayload } = require('../dm-payloads');
 const { parseExpiryMs } = require('../utils/time');
 
 const router = express.Router();
@@ -195,47 +195,48 @@ function rowExpiresAtSeconds(row) {
   return Math.floor((createdMs + ms) / 1000);
 }
 
-// qurl.expired handler — the upstream fires this when a qURL reaches
-// expires_at without being revoked. The bot looks the
-// recipient row up via the qurl_id-index GSI and PATCHes the DM body
-// so Discord's <t:UNIX:R> relative-time marker flips tense from
-// "Closes in N" to "Closed N ago" without further edits.
+// Shared recipient-DM tense-flip core for both close-the-door webhook
+// paths (qurl.expired and qurl.accessed-with-consumed). The flip
+// sequence is identical — GSI lookup of the recipient row, editability
+// gate, sibling-marker cross-check (don't clobber the OTHER path's more-
+// specific copy), revoke guard, idempotency-marker claim, editDM, and
+// marker rollback on transient failure — only the marker attribute, the
+// payload, and the log label differ. This helper RETURNS a verdict and
+// never touches `res`: each caller owns its HTTP-status mapping (the
+// expired path maps to 200/503 so the upstream's webhook retry can
+// recover; the consumed path runs fire-and-forget off the already-sent
+// 200 and ignores the verdict beyond logging).
 //
-// Status policy:
-//   - 200 on permanent can't-action conditions (no matching row, send
-//     was revoked first, DM was already edited, dm_status not SENT,
-//     hard shape-mismatch, recipient blocked the bot / deleted the
-//     DM, marker-rollback failed).
-//   - 503 on transient infra failures that a retry can recover from:
-//     PRE-marker GSI Query throw, PRE-marker UpdateItem throw on the
-//     idempotency marker, POST-marker transient editDM failure
-//     (ok:false && expected:false, or thrown error) WITH a successful
-//     marker rollback. 503 trips the upstream's 5-attempt retry
-//     (1+2+4+8+16=31s backoff).
-// editDM's `expected` discriminator (set on the not-ok path) drives
-// the post-edit branch: expected:true means "recipient-side
-// permanent" (200 keep marker), expected:false means "Discord-side
-// transient" (rollback marker + 503).
-async function handleQurlExpired(req, res, { data, eventId }) {
-  if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
-    logger.warn('qURL webhook qurl.expired missing qurl_id', {
-      qurl_id: data?.qurl_id, resource_id: data?.resource_id, event_id: eventId,
-    });
-    return res.status(200).json({ status: 'invalid-payload' });
-  }
-
+// Verdict shape: { status, transient }. `transient: true` is the only
+// retry-worthy outcome (PRE-marker GSI/mark throw, or POST-marker
+// transient editDM failure WITH a successful marker rollback). Every
+// other status is a permanent can't-or-needn't-action condition.
+//
+// Options:
+//   - opts.label         human log label (e.g. 'qurl.expired')
+//   - opts.skipIfAttr    sibling marker attribute name to honor; if the
+//                        row already carries it, the OTHER path flipped
+//                        the DM first — skip so we don't overwrite its
+//                        more-specific copy. (expired skips when
+//                        consumed_edited_at is set, and vice versa.)
+//   - opts.buildPayload(row) → payload | null. null means "cannot
+//                        render for this row" (e.g. expiry couldn't be
+//                        reconstructed); the helper skips the edit.
+//   - opts.markEdited / opts.clearEdited  the path's own idempotency
+//                        marker claim + rollback.
+async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, buildPayload, markEdited, clearEdited }) {
   let rows;
   try {
-    rows = await db.findSendsByQurlId(data.qurl_id);
+    rows = await db.findSendsByQurlId(qurlId);
   } catch (err) {
-    // 503 (pre-marker transient): the marker hasn't been claimed yet,
-    // so the upstream's retry can re-enter cleanly and recover the
-    // edit on the next attempt. DDB throttle / transient AWS-side
-    // 5xx is exactly the recoverable case.
-    logger.error('qURL webhook qurl.expired: GSI lookup failed', {
-      error: err.message, qurl_id: data.qurl_id, event_id: eventId,
+    // Pre-marker transient: the marker hasn't been claimed yet, so a
+    // retry (the upstream's for the expired path, a redelivery for the
+    // consumed path) can re-enter cleanly. DDB throttle / transient
+    // AWS-side 5xx is exactly the recoverable case.
+    logger.error(`qURL webhook ${label}: GSI lookup failed`, {
+      error: err.message, qurl_id: qurlId, event_id: eventId,
     });
-    return res.status(503).json({ status: 'lookup-error' });
+    return { status: 'lookup-error', transient: true };
   }
 
   if (rows.length === 0) {
@@ -256,20 +257,20 @@ async function handleQurlExpired(req, res, { data, eventId }) {
     // Count=0 miss can never be a not-yet-propagated row — every
     // mint that qualifies for expiry has had time to land in the
     // GSI hundreds of times over.
-    logger.debug('qURL webhook qurl.expired: no recipient row for qurl_id (pre-rollout or missing-from-mint)', {
-      qurl_id: data.qurl_id, event_id: eventId,
+    logger.debug(`qURL webhook ${label}: no recipient row for qurl_id (pre-rollout or missing-from-mint)`, {
+      qurl_id: qurlId, event_id: eventId,
     });
-    return res.status(200).json({ status: 'no-recipient-row' });
+    return { status: 'no-recipient-row' };
   }
   if (rows.length > 1) {
     // DDB doesn't enforce GSI hash-key uniqueness; the write-path
     // invariant should keep this at 1. Log + skip rather than blind-
     // index [0] so the regression is greppable and we don't edit a
     // wrong recipient's DM.
-    logger.warn('qURL webhook qurl.expired: GSI returned multiple rows for one qurl_id', {
-      qurl_id: data.qurl_id, count: rows.length, event_id: eventId,
+    logger.warn(`qURL webhook ${label}: GSI returned multiple rows for one qurl_id`, {
+      qurl_id: qurlId, count: rows.length, event_id: eventId,
     });
-    return res.status(200).json({ status: 'ambiguous-recipient' });
+    return { status: 'ambiguous-recipient' };
   }
 
   const row = rows[0];
@@ -278,141 +279,121 @@ async function handleQurlExpired(req, res, { data, eventId }) {
   // DM never made it — no message exists to PATCH. Same skip set the
   // revoke editTargets loop uses (commands.js:7251).
   if (dmStatus !== DM_STATUS.SENT || !channelId || !messageId) {
-    logger.debug('qURL webhook qurl.expired: row not editable', {
-      qurl_id: data.qurl_id, send_id: sendId, dm_status: dmStatus, event_id: eventId,
+    logger.debug(`qURL webhook ${label}: row not editable`, {
+      qurl_id: qurlId, send_id: sendId, dm_status: dmStatus, event_id: eventId,
     });
-    return res.status(200).json({ status: 'dm-not-editable' });
+    return { status: 'dm-not-editable' };
   }
 
-  const expiresAtSeconds = rowExpiresAtSeconds(row);
-  if (expiresAtSeconds === null) {
-    // expires_in is sourced from the closed EXPIRY_LABELS set at write
-    // time, so this branch is defense-in-depth against a future
-    // migration / manual repair that landed an off-set value on the
-    // row. Skip rather than render a wrong-time marker.
-    logger.warn('qURL webhook qurl.expired: cannot reconstruct expires_at from row', {
-      qurl_id: data.qurl_id, send_id: sendId,
+  // Sibling-path cross-check: the OTHER close path already flipped this
+  // DM to its (more-specific) copy. The consumed copy ("you opened it")
+  // and the expired marker ("expired N ago") describe the same dead
+  // door, but whichever landed first is the truthful one for the
+  // recipient — re-editing would overwrite it with a redundant or
+  // less-accurate message. `findSendsByQurlId` projects ALL, so the
+  // sibling marker is already on `row` (zero extra read). Read straight
+  // off the row rather than the marker function so a redelivery sees a
+  // marker the local UpdateItem already wrote.
+  if (skipIfAttr && row[skipIfAttr]) {
+    logger.debug(`qURL webhook ${label}: sibling path already flipped the DM; skipping`, {
+      qurl_id: qurlId, send_id: sendId, skip_attr: skipIfAttr, event_id: eventId,
+    });
+    return { status: 'sibling-already-flipped' };
+  }
+
+  const payload = buildPayload(row);
+  if (!payload) {
+    // The caller's renderer declined (e.g. the expired path couldn't
+    // reconstruct expires_at from a corrupt row). Skip rather than ship
+    // a malformed/wrong-time marker. Checked BEFORE the marker claim so
+    // a future repair of the row lets the next event render cleanly.
+    logger.warn(`qURL webhook ${label}: cannot build DM payload for row`, {
+      qurl_id: qurlId, send_id: sendId,
       created_at: row.created_at, expires_in: row.expires_in,
       event_id: eventId,
     });
-    return res.status(200).json({ status: 'cannot-reconstruct-expiry' });
+    return { status: 'cannot-reconstruct-expiry' };
   }
 
   // Sender revoked first — the DM already says "Alice closed the door".
-  // Re-editing to "Closed N ago" would overwrite the more specific
-  // revoke copy with a less informative timeline marker.
+  // Re-editing would overwrite the more specific revoke copy.
   //
   // TOCTOU race window: between `isSendRevoked` returning false and
   // `editDM` landing, a concurrent /qurl revoke could PATCH the DM
-  // to "closed the door" and we'd then clobber it with "Closed N ago".
-  // Window is tens of ms (one DDB GetItem + one Discord PATCH). The
-  // resulting state is still correct ("closed"), just less specific
-  // than the revoke copy. Out-of-scope to close — pessimistically
-  // locking would need a leader election the bot doesn't have today,
-  // and the worst case is bounded by the EXPIRY_LABELS max window
-  // (7d) plus the scanner's bucket cadence.
+  // to "closed the door" and we'd then clobber it. Window is tens of ms
+  // (one DDB GetItem + one Discord PATCH). The resulting state is still
+  // correct ("closed"), just less specific than the revoke copy. Out-of-
+  // scope to close — pessimistically locking would need a leader
+  // election the bot doesn't have today.
   try {
     if (await db.isSendRevoked(sendId)) {
-      logger.debug('qURL webhook qurl.expired: send was revoked; skipping DM edit', {
-        qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+      logger.debug(`qURL webhook ${label}: send was revoked; skipping DM edit`, {
+        qurl_id: qurlId, send_id: sendId, event_id: eventId,
       });
-      return res.status(200).json({ status: 'send-revoked' });
+      return { status: 'send-revoked' };
     }
   } catch (err) {
     // 5xx-style here would tempt the upstream to retry; the revoked-
     // check is best-effort. Logging + continuing is preferred to
-    // dead-lettering an expiry event over a transient GetItem failure.
+    // dead-lettering the event over a transient GetItem failure.
     //
-    // Failure-mode asymmetry: if the send WAS revoked (DM reads
-    // "Alice closed the door") and `isSendRevoked` throws transiently,
-    // continuing claims the marker, edits the DM to "Closed N ago",
-    // and the marker is now permanent — so the revoke copy is
-    // permanently lost. End state is still correct ("closed"), just
-    // less specific. Rare (requires (a) revoke already happened AND
-    // (b) the very next isSendRevoked GetItem throws), and the
-    // alternative (dead-letter every expiry over a GetItem blip) is
-    // strictly worse.
-    logger.warn('qURL webhook qurl.expired: revoke-check failed; continuing', {
-      error: err.message, qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    // Failure-mode asymmetry: if the send WAS revoked and isSendRevoked
+    // throws transiently, continuing claims the marker, edits the DM,
+    // and the revoke copy is permanently lost. End state is still
+    // correct ("closed"), just less specific. Rare, and the alternative
+    // (dead-letter over a GetItem blip) is strictly worse.
+    logger.warn(`qURL webhook ${label}: revoke-check failed; continuing`, {
+      error: err.message, qurl_id: qurlId, send_id: sendId, event_id: eventId,
     });
   }
 
-  // Idempotency marker — first call wins, repeats short-circuit. The
-  // qurl.expired path has no separate delivery-dedup log (the view-
-  // counter path's eventId dedup is view-specific and doesn't flow
-  // here), so this marker is the sole idempotency layer. Sufficient:
-  // a duplicate scanner fire / wire retry both pass the same qurl_id
-  // here and the conditional UpdateItem short-circuits the second.
+  // Idempotency marker — first call wins, repeats short-circuit. Each
+  // path has its OWN marker (expired_edited_at / consumed_edited_at) so
+  // a redelivery / dual-emission of the same event re-enters and the
+  // conditional UpdateItem short-circuits the second.
   //
   // At-most-once gap (claim-before-act): if the process dies between
-  // the marker write and the edit attempt — or a non-Discord layer
-  // 5xxs at exactly that interleave — the rollback below never runs.
-  // The retry then short-circuits at `already-edited` and the edit
-  // is permanently lost. Bounded by the 8-day S3 lifecycle (same
-  // mitigation as the rollback-failed terminal case below).
+  // the marker write and the edit attempt, the rollback below never
+  // runs. A retry then short-circuits at `already-edited` and the edit
+  // is lost. For the consumed path this also suppresses the qurl.expired
+  // backstop (the marker IS set, so the expired handler's
+  // sibling-already-flipped skip honors it), so the DM never flips at
+  // all in that narrow window. Bounded by the 8-day S3 lifecycle, same
+  // as the expired path's own gap — and far rarer than a clean failure,
+  // which DOES roll back.
   let claimed;
   try {
-    claimed = await db.markExpiredDMEdited(sendId, recipientId);
+    claimed = await markEdited(sendId, recipientId);
   } catch (err) {
-    // 503 (pre-marker transient): same rationale as `lookup-error` —
-    // the marker hasn't been claimed yet (UpdateItem threw before the
-    // write landed for a non-CCFE reason like ProvisionedThroughput
-    // exceeded), so an upstream retry can re-enter cleanly. CCFE
-    // ("already edited") is NOT routed here — markExpiredDMEdited
-    // returns false on CCFE and we treat that as the permanent
-    // already-edited skip below.
-    logger.error('qURL webhook qurl.expired: markExpiredDMEdited failed', {
-      error: err.message, qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    // Pre-marker transient: UpdateItem threw before the write landed
+    // for a non-CCFE reason (e.g. ProvisionedThroughput exceeded), so a
+    // retry can re-enter cleanly. CCFE ("already edited") is NOT routed
+    // here — markEdited returns false on CCFE, handled as already-edited
+    // below.
+    logger.error(`qURL webhook ${label}: marker claim failed`, {
+      error: err.message, qurl_id: qurlId, send_id: sendId, event_id: eventId,
     });
-    return res.status(503).json({ status: 'mark-error' });
+    return { status: 'mark-error', transient: true };
   }
   if (!claimed) {
-    logger.debug('qURL webhook qurl.expired: already edited', {
-      qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    logger.debug(`qURL webhook ${label}: already edited`, {
+      qurl_id: qurlId, send_id: sendId, event_id: eventId,
     });
-    return res.status(200).json({ status: 'already-edited' });
-  }
-
-  const payload = buildExpiredDMPayload({ expiresAtSeconds });
-  if (!payload) {
-    // Defensive — buildExpiredDMPayload validated the same way above
-    // via rowExpiresAtSeconds. If we got here, the two validators
-    // drifted out of sync. Roll back the marker on the way out so a
-    // future drift that actually trips this branch lets the next
-    // retry recover instead of permanently losing the edit; same
-    // rollback contract as the transient-edit path below. Best-
-    // effort — a rollback failure here is itself recoverable on the
-    // next event but should never happen in practice.
-    logger.error('qURL webhook qurl.expired: buildExpiredDMPayload returned null after validation', {
-      qurl_id: data.qurl_id, expires_at: expiresAtSeconds, event_id: eventId,
-    });
-    try {
-      await db.clearExpiredDMEdited(sendId, recipientId);
-    } catch (rollbackErr) {
-      logger.error('qURL webhook qurl.expired: marker rollback failed on payload-build-failed', {
-        error: rollbackErr.message, qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
-      });
-    }
-    return res.status(200).json({ status: 'payload-build-failed' });
+    return { status: 'already-edited' };
   }
 
   // editDM returns {ok, expected} on failure and {ok: true} on success.
-  // The `expected` discriminator drives the retry decision:
-  //   - ok:true                          → 200 edited (success)
-  //   - ok:false, expected:true          → 200 edit-failed-expected
+  //   - ok:true                          → edited (success)
+  //   - ok:false, expected:true          → edit-failed-expected
   //         (permanent — recipient blocked the bot / deleted the DM;
-  //          a retry can't recover, so keep the marker and return 200)
-  //   - ok:false, expected:false / throw → 503 edit-failed-transient
-  //         (transient — Discord 5xx or network; roll back the marker
-  //          and return 503 so the upstream's 5-attempt backoff can
-  //          recover the edit on the next attempt)
+  //          a retry can't recover, so keep the marker)
+  //   - ok:false, expected:false / throw → edit-failed-transient
+  //         (transient — Discord 5xx or network; roll back the marker so
+  //          a retry can recover the edit on the next attempt)
   //
-  // Marker rollback is best-effort: if `clearExpiredDMEdited` itself
-  // throws, the marker stays in place, the next retry short-circuits
-  // at `already-edited`, and the missed edit falls back to the 8-day
-  // S3 lifecycle — same blast radius as the prior always-200 design.
-  // Treats the rollback failure as the genuinely terminal case rather
-  // than another layer of retry to compound atop.
+  // Marker rollback is best-effort: if clearEdited itself throws, the
+  // marker stays, the next retry short-circuits at `already-edited`, and
+  // the missed edit falls back to the 8-day S3 lifecycle.
   let editRes;
   try {
     editRes = await editDM(channelId, messageId, payload);
@@ -420,37 +401,138 @@ async function handleQurlExpired(req, res, { data, eventId }) {
     editRes = { ok: false, expected: false, threwErr: err };
   }
   if (editRes.ok) {
-    logger.info('qURL webhook qurl.expired: DM edited', {
-      qurl_id: data.qurl_id, send_id: sendId, ok: true, event_id: eventId,
+    logger.info(`qURL webhook ${label}: DM edited`, {
+      qurl_id: qurlId, send_id: sendId, ok: true, event_id: eventId,
     });
-    return res.status(200).json({ status: 'edited' });
+    return { status: 'edited' };
   }
   if (editRes.expected) {
-    logger.info('qURL webhook qurl.expired: DM edit failed-expected', {
-      qurl_id: data.qurl_id, send_id: sendId, ok: false, expected: true, event_id: eventId,
+    logger.info(`qURL webhook ${label}: DM edit failed-expected`, {
+      qurl_id: qurlId, send_id: sendId, ok: false, expected: true, event_id: eventId,
     });
-    return res.status(200).json({ status: 'edit-failed-expected' });
+    return { status: 'edit-failed-expected' };
   }
-  // Transient — roll back the marker so the upstream's retry can recover.
+  // Transient — roll back the marker so a retry can recover.
   const transientLog = {
-    qurl_id: data.qurl_id, send_id: sendId, ok: false, expected: false, event_id: eventId,
+    qurl_id: qurlId, send_id: sendId, ok: false, expected: false, event_id: eventId,
   };
   if (editRes.threwErr) transientLog.error = editRes.threwErr.message;
-  logger.warn('qURL webhook qurl.expired: transient editDM failure — rolling back marker for retry', transientLog);
+  logger.warn(`qURL webhook ${label}: transient editDM failure — rolling back marker for retry`, transientLog);
   try {
-    await db.clearExpiredDMEdited(sendId, recipientId);
+    await clearEdited(sendId, recipientId);
   } catch (rollbackErr) {
     // Marker rollback failed → next retry will short-circuit at
     // `already-edited`. Edit is permanently missed; 8-day S3 lifecycle
-    // bounds the blast radius. Return 200 here (not 503) so the retry
-    // backoff doesn't loop on the doomed event.
-    logger.error('qURL webhook qurl.expired: marker rollback failed — missed edit', {
-      qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    // bounds the blast radius. Report non-transient so the caller's
+    // retry backoff doesn't loop on the doomed event.
+    logger.error(`qURL webhook ${label}: marker rollback failed — missed edit`, {
+      qurl_id: qurlId, send_id: sendId, event_id: eventId,
       error: rollbackErr.message,
     });
-    return res.status(200).json({ status: 'edit-failed-rollback-failed' });
+    return { status: 'edit-failed-rollback-failed' };
   }
-  return res.status(503).json({ status: 'edit-failed-transient' });
+  return { status: 'edit-failed-transient', transient: true };
+}
+
+// qurl.expired handler — the upstream fires this when a qURL reaches
+// expires_at (regardless of prior revoke/consume state). The bot looks
+// the recipient row up via the qurl_id-index GSI and PATCHes the DM body
+// so Discord's <t:UNIX:R> relative-time marker flips tense from
+// "Closes in N" to "Closed N ago" without further edits.
+//
+// Status policy:
+//   - 200 on permanent can't-action conditions (no matching row, send
+//     was revoked first, consumed-flip already closed the DM, DM was
+//     already edited, dm_status not SENT, hard shape-mismatch, recipient
+//     blocked the bot / deleted the DM, marker-rollback failed).
+//   - 503 on transient infra failures that a retry can recover from
+//     (verdict.transient — pre-marker throws, or a transient editDM
+//     failure with a successful marker rollback). 503 trips the
+//     upstream's 5-attempt retry (1+2+4+8+16=31s backoff).
+async function handleQurlExpired(req, res, { data, eventId }) {
+  if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
+    logger.warn('qURL webhook qurl.expired missing qurl_id', {
+      qurl_id: data?.qurl_id, resource_id: data?.resource_id, event_id: eventId,
+    });
+    return res.status(200).json({ status: 'invalid-payload' });
+  }
+
+  const verdict = await flipRecipientDMToClosed({
+    qurlId: data.qurl_id,
+    eventId,
+    label: 'qurl.expired',
+    // Don't overwrite the consumed-flip copy ("you opened it") with a
+    // less-accurate "expired N ago" once a one-time link was consumed.
+    skipIfAttr: 'consumed_edited_at',
+    // Reconstruct the absolute expiry instant from the row and render
+    // the <t:N:R> marker. Returns null (→ cannot-reconstruct-expiry) on
+    // a corrupt/off-set row. buildExpiredDMPayload re-validates the same
+    // way, so a null from it after a finite reconstruction would mean
+    // the two validators drifted — handled by the null-skip in the
+    // helper, same as a failed reconstruction.
+    buildPayload: (row) => {
+      const expiresAtSeconds = rowExpiresAtSeconds(row);
+      if (expiresAtSeconds === null) return null;
+      return buildExpiredDMPayload({ expiresAtSeconds });
+    },
+    markEdited: db.markExpiredDMEdited,
+    clearEdited: db.clearExpiredDMEdited,
+  });
+
+  return res.status(verdict.transient ? 503 : 200).json({ status: verdict.status });
+}
+
+// Consumed-flip for the qurl.accessed path: when a recipient opens a
+// ONE-TIME qURL and consumes it (`data.consumed === true`), the link is
+// dead for them even though its 30m TTL hasn't elapsed. Flip their DM
+// from the present-tense "🕐 Closes <t:...:R>" embed to the past-tense
+// "🔓 You opened this one-time qURL … no longer active" copy so they
+// don't see "Closes in ~25m" on a link they can no longer reach.
+//
+// FIRE-AND-FORGET by design (mirrors the view-counter publish above, NOT
+// handleQurlExpired's response coupling): the view is already recorded
+// and the 200 already returned to qurl-service. Surfacing a flip failure
+// as a 503 would lie about the primary op (the view DID record) and make
+// qurl-service retry the whole accessed event. The flip's own backstops
+// make blocking the response unnecessary:
+//   - a REDELIVERED qurl.accessed re-enters here (we gate on
+//     `consumed === true`, not `dbResult === 'recorded'`, and the
+//     consumed_edited_at marker short-circuits the redundant edit); and
+//   - the eventual qurl.expired event (which fires regardless of prior
+//     consume state — see the EventQurlExpired contract) is the
+//     last-resort flip, skipping only when consumed_edited_at is set.
+// So a transiently-failed flip that rolls its marker back is recovered;
+// nothing is permanently stuck on the no-await path.
+function flipConsumedDMInBackground({ qurlId, eventId }) {
+  // Defer into the microtask queue so a future sync-throw refactor of
+  // the flip surfaces as a rejection instead of escaping the handler.
+  Promise.resolve()
+    .then(() => flipRecipientDMToClosed({
+      qurlId,
+      eventId,
+      label: 'qurl.accessed-consumed',
+      // Don't overwrite a sender-revoke or expired flip already on the DM.
+      skipIfAttr: 'expired_edited_at',
+      // Static past-tense copy — NO expiry marker. At consumption time
+      // the link's expires_at is still in the future, so a <t:N:R>
+      // marker would render "expired in N minutes". See buildConsumedDMPayload.
+      buildPayload: () => buildConsumedDMPayload(),
+      markEdited: db.markConsumedDMEdited,
+      clearEdited: db.clearConsumedDMEdited,
+    }))
+    .then((verdict) => {
+      // Verdict is for observability only on this path — there's no
+      // HTTP response left to map it to. The redelivery + expired
+      // backstop recover anything `transient`.
+      logger.debug('qURL webhook qurl.accessed-consumed: flip verdict', {
+        qurl_id: qurlId, event_id: eventId, status: verdict.status, transient: Boolean(verdict.transient),
+      });
+    })
+    .catch((err) => {
+      logger.error('qURL webhook qurl.accessed-consumed: flip threw', {
+        error: err?.message, qurl_id: qurlId, event_id: eventId,
+      });
+    });
 }
 
 router.post('/qurl', async (req, res) => {
@@ -616,6 +698,16 @@ router.post('/qurl', async (req, res) => {
       })).catch((err) => {
         logger.error('viewUpdatePublisher.publish threw', { error: err?.message, qurl_id: data.qurl_id });
       });
+    }
+    // One-time link consumed → flip the recipient's DM to "closed".
+    // Fire-and-forget off the already-decided 200 (see
+    // flipConsumedDMInBackground). Gated on `consumed`, NOT on
+    // dbResult === 'recorded': the flip's own consumed_edited_at marker
+    // is the idempotency layer, so attempting on any consumed event lets
+    // a redelivery recover a transiently-missed flip while the marker
+    // short-circuits the redundant edit.
+    if (consumed) {
+      flipConsumedDMInBackground({ qurlId: data.qurl_id, eventId });
     }
     return res.status(200).json({ status: dbResult });
   } catch (err) {
