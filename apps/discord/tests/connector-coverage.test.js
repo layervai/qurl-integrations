@@ -649,8 +649,10 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
   // + cooldown live in commands.js (tested in qurl-send-map.test.js); these
   // pin the two-leg wire contract this client owns.
   describe('detectWatermark — resolve-then-POST tunnel contract', () => {
-    // A known-good public https tunnel target the resolve mock hands back.
-    const TUNNEL_TARGET = 'https://detect-tunnel.qurl.link/api/detect';
+    // A known-good public https tunnel target the resolve mock hands back —
+    // the real qURL reverse-tunnel host form `r_<id>.qurl.site` (qurl-service
+    // resourceIDPattern), which the assertPublicHttpsTarget host-pin allows.
+    const TUNNEL_TARGET = 'https://r_abc12345678.qurl.site/api/detect';
 
     // Wire up resolve() → {target_url} AND the subsequent POST to that target.
     // Returns a getter for the captured POST {url, opts}. Defaults resolve to
@@ -769,7 +771,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('SSRF guard: a non-https resolved target_url throws and NO POST happens', async () => {
-      const get = captureDetect({ detected: false }, { target: 'http://detect-tunnel.qurl.link/api/detect' });
+      const get = captureDetect({ detected: false }, { target: 'http://r_abc12345678.qurl.site/api/detect' });
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/https:/);
@@ -777,21 +779,51 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
 
     it('SSRF guard: a PUBLIC host with embedded userinfo throws and NO POST happens', async () => {
-      // Pins the userinfo branch INDEPENDENTLY of isPrivateHost: the host is
-      // public (a `https://good@public-host/` hostname-confusion bypass), so
-      // isPrivateHost would NOT fire and the scheme is https — only the
-      // userinfo check can reject this. The other SSRF tests are caught by the
-      // private-host / scheme guards, so without this case the userinfo branch
-      // is unexercised.
+      // Pins the userinfo branch INDEPENDENTLY of the other guards: the host is
+      // an OTHERWISE-VALID public qurl.site tunnel host, so neither isPrivateHost
+      // nor the qurl.site host-pin fires and the scheme is https — only the
+      // userinfo check can reject this `https://good@valid-host/` confusion form.
       const get = captureDetect(
         { detected: false },
-        { target: 'https://attacker@detect-tunnel.qurl.link/api/detect' },
+        { target: 'https://attacker@r_abc12345678.qurl.site/api/detect' },
       );
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/userinfo/);
       // resolve() ran (the knock), but the userinfo guard rejected before the POST.
       expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
+    });
+
+    it('SSRF guard: a PUBLIC non-qURL host (not under qurl.site) throws and NO POST happens', async () => {
+      // Host-pin: even a perfectly public, non-private https host is rejected
+      // unless it's under the qURL tunnel domain (qurl.site) — so a compromised
+      // or spoofed resolve() can't redirect the image bytes + Bearer to an
+      // attacker endpoint. isPrivateHost would NOT fire on a public host; only
+      // the host-pin catches this.
+      const get = captureDetect({ detected: false }, { target: 'https://evil.example.com/api/detect' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/qurl\.site/);
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
+      // And it's logged via the SSRF-rejection breadcrumb (message only).
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel target rejected by SSRF guard',
+        expect.objectContaining({ error: expect.stringMatching(/qurl\.site/) }),
+      );
+    });
+
+    it('host-pin rejects the look-alike suffix `evilqurl.site` (no dot separator)', async () => {
+      // Guards the endsWith boundary: `evilqurl.site` must NOT satisfy the
+      // `.qurl.site` suffix (no dot separator), so it's rejected like any other
+      // non-qURL host. (The valid `*.qurl.site` subdomain form — the only shape a
+      // real tunnel host `r_<id>.qurl.site` takes — is covered by the happy-path
+      // tests above via TUNNEL_TARGET.)
+      const get = captureDetect({ detected: false }, { target: 'https://evilqurl.site/api/detect' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/qurl\.site/);
       expect(get()).toBeNull();
     });
 
