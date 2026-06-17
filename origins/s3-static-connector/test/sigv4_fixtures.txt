@@ -1,0 +1,34 @@
+# SigV4 / canonicalization regression fixtures for s3-static-connector.
+#
+# The doc names these regression classes: spaces, +, %2F, repeated slashes,
+# query strings, range requests, HEAD requests, extensionless paths. This file
+# is the checklist; the `status` column says how each is actually covered.
+#
+# behavior_test.sh exercises the path-canonicalization + signing-present aspect
+# against the local stub (asserts the rewritten path arrives at S3 and an
+# Authorization header is attached). The stub has no shared secret, so full
+# *cryptographic* SigV4 verification — especially S3's single-URI-encoding quirk
+# for the exotic-character rows — is validated against real S3 during the
+# staging soak (doc Verification §5), NOT in CI.
+#
+# stats serves only simple keys (index.html, metrics.json, website/index.html),
+# so the exotic rows are forward-looking coverage for the eventual frozen,
+# published image, not load-bearing for the pilot.
+#
+# request-path            -> expected S3 key path Envoy signs & sends   [status]
+
+/                         -> /index.html                                [behavior]
+/website                  -> /website/index.html                        [behavior]
+/website/                 -> /website/index.html                        [behavior]
+/metrics.json             -> /metrics.json                              [behavior]
+/metrics.json?_t=123      -> /metrics.json   (query stripped)           [behavior: query string]
+/v1.2/docs                -> /v1.2/docs      (dot suppresses rewrite)   [behavior]
+/deep/path                -> /deep/path/index.html  (extensionless)     [behavior: extensionless]
+GET /range.bin Range: 0-3 -> 206 partial     (range request)           [behavior: range]
+HEAD /metrics.json        -> 200 no body      (HEAD request)            [behavior: HEAD]
+
+# Exotic characters — soak-verified against real S3 (stub can't crypto-verify):
+/a b.txt                  -> /a b.txt         (space)                   [soak]
+/a+b.txt                  -> /a+b.txt         (plus)                    [soak]
+/a%2Fb.txt                -> /a%2Fb.txt       (encoded slash, S3 quirk) [soak]
+/dir//file.txt            -> nginx merge_slashes normalizes; see README [soak]
