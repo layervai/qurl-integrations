@@ -317,7 +317,25 @@ async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, bui
     return { status: 'sibling-already-flipped' };
   }
 
-  const payload = buildPayload(row);
+  // buildPayload is the one synchronous caller-supplied step in this
+  // helper. Guard it so a throw becomes a permanent skip rather than
+  // rejecting up to the caller — on the expired path handleQurlExpired
+  // awaits this OUTSIDE its try (the route's try wraps recordQurlView,
+  // not the expired delegation), so an unguarded throw here would escape
+  // into Express v4, which doesn't catch async rejections. The consumed
+  // path is already insulated by flipConsumedDMInBackground's .catch;
+  // guarding here covers both callers at the seam rather than per-caller.
+  // Realistically defensive — the expired builder validates and returns
+  // null (not throws) on bad input, and the consumed builder is static.
+  let payload;
+  try {
+    payload = buildPayload(row);
+  } catch (err) {
+    logger.error(`qURL webhook ${label}: buildPayload threw — skipping`, {
+      error: err.message, qurl_id: qurlId, send_id: sendId, event_id: eventId,
+    });
+    return { status: 'payload-build-error' };
+  }
   if (!payload) {
     // The caller's renderer declined (e.g. the expired path couldn't
     // reconstruct expires_at from a corrupt row). Skip rather than ship
