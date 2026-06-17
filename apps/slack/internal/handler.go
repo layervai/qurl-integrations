@@ -1571,6 +1571,8 @@ func setupModeAction(mode oauth.SetupMode) string {
 	case oauth.SetupModeRepoint:
 		return "key repoint"
 	default:
+		// Unknown future modes fall back to the legacy setup copy until
+		// they get explicit user-facing language.
 		return "setup"
 	}
 }

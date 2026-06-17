@@ -54,7 +54,7 @@ func ClassifyOAuthBindError(err error) oauth.BindConflictCode {
 		// this classifier being updated. Surface a warn so on-call
 		// sees the drift on CloudWatch before users start reporting
 		// "every rebind 500s."
-		slog.Warn("classifyBindError: slackdata returned 409 with unmapped Code; defaulting to generic 500 (classifier and slackdata.ErrCodeWorkspace* have drifted)",
+		slog.Warn("ClassifyOAuthBindError: slackdata returned 409 with unmapped Code; defaulting to generic 500 (classifier and slackdata.ErrCodeWorkspace* have drifted)",
 			"code", ae.Code, "title", ae.Title)
 		return ""
 	}

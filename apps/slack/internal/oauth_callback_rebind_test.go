@@ -21,7 +21,6 @@ const (
 	oauthRebindOwnerUserID = "UOWNER526"
 	oauthRebindOtherUserID = "UOTHER526"
 	oauthRebindAdminEmail  = "admin@example.com"
-	oauthRebindCookiePath  = "/oauth/qurl"
 )
 
 func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) {
@@ -56,6 +55,7 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	if err != nil {
 		t.Fatalf("MintState: %v", err)
 	}
+	oauthBasePath := oauthRebindOAuthBasePath(t)
 
 	startRec := httptest.NewRecorder()
 	oauth.Start(cfg)(startRec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, oauth.StartPath+"?state="+url.QueryEscape(state), http.NoBody))
@@ -66,11 +66,11 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	startResult := startRec.Result()
 	defer func() { _ = startResult.Body.Close() }()
 
-	stateCookie := oauthRebindStateCookie(startResult.Cookies())
+	stateCookie := oauthRebindStateCookie(startResult.Cookies(), oauthBasePath)
 	if stateCookie == nil {
 		t.Fatal("start response did not include the OAuth state cookie")
 	}
-	callbackReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
+	callbackReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, oauthBasePath+"/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	for _, c := range startResult.Cookies() {
 		callbackReq.AddCookie(c)
 	}
@@ -117,9 +117,20 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	}
 }
 
-func oauthRebindStateCookie(cookies []*http.Cookie) *http.Cookie {
+// oauthRebindOAuthBasePath derives the package-private cookie/callback base
+// from StartPath so OAuth route drift fails loudly in this cross-package test.
+func oauthRebindOAuthBasePath(t *testing.T) string {
+	t.Helper()
+	base, ok := strings.CutSuffix(oauth.StartPath, "/start")
+	if !ok {
+		t.Fatalf("oauth.StartPath %q does not end with /start", oauth.StartPath)
+	}
+	return base
+}
+
+func oauthRebindStateCookie(cookies []*http.Cookie, cookiePath string) *http.Cookie {
 	for _, c := range cookies {
-		if c.Path == oauthRebindCookiePath && c.MaxAge > 0 {
+		if c.Path == cookiePath && c.MaxAge > 0 {
 			return c
 		}
 	}
