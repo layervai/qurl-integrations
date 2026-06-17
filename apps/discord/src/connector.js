@@ -1,13 +1,14 @@
+const { QurlClient } = require('@layervai/qurl');
+
 const config = require('./config');
 const logger = require('./logger');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
-// AND the shared fetch-based qURL API client from qurl.js rather than
-// duplicating ~50 lines of IP-literal parsing (that could drift out of sync)
-// or carrying a second qURL client. resolveDetectTarget() uses `qurlFetch` to
-// self-mint the ephemeral detect qURL. qurl.js has no connector.js dependency,
-// so this require introduces no cycle.
-const { isPrivateHost, qurlFetch } = require('./qurl');
+// from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
+// could drift out of sync. resolveDetectTarget() self-mints the ephemeral
+// detect qURL via the @layervai/qurl SDK (the standardized client), not qurl.js.
+// qurl.js has no connector.js dependency, so this require introduces no cycle.
+const { isPrivateHost } = require('./qurl');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 const { formatSessionDurationSeconds, isPositiveFinite } = require('./utils/time');
@@ -411,15 +412,62 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 }
 
 // Module-level cache for the detect tunnel's resource_id (resolved from
-// DETECT_TUNNEL_SLUG via qurlFetch). The resource_id is a stable, NON-secret
-// identifier, so caching it across calls is safe and skips a /resources lookup
-// on every detect. CACHE ONLY THIS, NEVER the minted access token or the
-// resolved target_url: each detect mints a FRESH ephemeral qURL (a ~5-min
-// short-lived credential) and the resolve()/knock grants network access to the
-// caller's CURRENT IP/knock-window — a stale token or target_url would be a
+// DETECT_TUNNEL_SLUG via the SDK's listResources). The resource_id is a stable,
+// NON-secret identifier, so caching it across calls is safe and skips a
+// listResources lookup on every detect. CACHE ONLY THIS, NEVER the minted access
+// token or the resolved target_url: each detect mints a FRESH ephemeral qURL (a
+// ~5-min short-lived credential) and the resolve()/knock grants network access to
+// the caller's CURRENT IP/knock-window — a stale token or target_url would be a
 // long-lived credential to leak / an un-knocked reuse, exactly what the
 // ephemeral-per-call design avoids.
 let _detectResourceId = null;
+
+// Lazily-constructed, cached qURL SDK client used solely by
+// resolveDetectTarget() to self-mint + resolve the ephemeral detect qURL over
+// the reverse-tunnel. Constructed on first use (not at module load) so the bot
+// boots even when QURL_API_KEY is unset in non-detect deployments, and so tests
+// can inject a mocked @layervai/qurl before the first call.
+//
+// CACHE THE CLIENT, NEVER THE RESOLVED target_url: resolve() issues a fresh NHP
+// knock per call (see resolveDetectTarget) — a stale target_url's network access
+// was granted to a previous IP/knock-window and must not be reused.
+//
+// NOTE: createQurlForResource's `target_path` option needs @layervai/qurl
+// >= 0.2.1; the dep bump to 0.2.1 is a follow-up once that SDK version is
+// published — package.json pins ~0.2.0 for now so CI can resolve the dep.
+//
+// Bearer note: the SDK's `apiKey` is the qURL API Bearer for the listResources /
+// createQurlForResource / resolve calls and MUST carry the `qurl:resolve` scope
+// (enforced server-side by qURL, NOT by this code — it's a key-provisioning step
+// for the bot's QURL_API_KEY). This is intentionally the global
+// config.QURL_API_KEY, decoupled from the per-call `apiKey` that detectWatermark
+// threads only into the detect POST's Bearer via connectorAuthHeaders.
+let _qurlClient = null;
+function getQurlClient() {
+  if (!_qurlClient) {
+    // baseUrl is the bare qURL API base (no `/v1`) — the SDK prepends the
+    // versioned path itself.
+    //
+    // timeout / maxRetries: explicitly bound and harden the mint+resolve
+    // control-plane calls. The SDK already defaults to timeout 30s/attempt and
+    // maxRetries 3 (on 429/5xx + transport errors), but pinning both keeps the
+    // detect legs' resilience visible and stable against SDK-default drift:
+    //   - timeout bounds a stalled qURL endpoint so it degrades like the detect
+    //     POST's AbortSignal.timeout instead of hanging with no upper bound.
+    //   - maxRetries gives the mint+resolve legs transient-failure resilience so
+    //     a single blip doesn't fail the whole detect interaction.
+    // resolve() is a fast knock+lookup, so 30s sits well under the POST's 60s;
+    // the retry worst case is timeout*(maxRetries+1)+backoff, still inside
+    // Discord's 15-min deferred-interaction window.
+    _qurlClient = new QurlClient({
+      apiKey: config.QURL_API_KEY,
+      baseUrl: config.QURL_ENDPOINT,
+      timeout: 30000,
+      maxRetries: 3,
+    });
+  }
+  return _qurlClient;
+}
 
 // SSRF guard for the resolve()-returned tunnel target. Must be a PUBLIC
 // `https:` URL; reject any non-https scheme, embedded userinfo (the
@@ -468,14 +516,15 @@ function assertPublicHttpsTarget(targetUrl) {
  * Resolve the qURL reverse-tunnel target for the watermark-detect endpoint.
  *
  * Self-mints an EPHEMERAL qURL to the detect tunnel resource per call (no
- * pre-seeded token, no SDK), using the bot's own `QURL_API_KEY` via `qurlFetch`:
+ * pre-seeded token), using the bot's own `QURL_API_KEY` via the @layervai/qurl
+ * SDK (getQurlClient):
  *   1. resolve the tunnel resource_id from DETECT_TUNNEL_SLUG
- *      (`GET /resources?slug=…`) — CACHED in `_detectResourceId` (it's stable +
- *      non-secret);
+ *      (`listResources({ slug, status: 'active' })`) — CACHED in
+ *      `_detectResourceId` (it's stable + non-secret);
  *   2. mint a fresh short-lived qURL on that resource
- *      (`POST /resources/{id}/qurls {target_path:'/api/detect'}`) → a 201 whose
+ *      (`createQurlForResource(id, { target_path: '/api/detect' })`) whose
  *      `qurl_link` fragment carries the `at_…` access token;
- *   3. `POST /resolve {access_token}` — this is the NHP knock: it grants network
+ *   3. `resolve({ access_token })` — this is the NHP knock: it grants network
  *      access for the CALLER'S CURRENT IP and returns the `target_url` to POST
  *      the image to.
  * The caller MUST POST within the knock window from the same IP — hence this is
@@ -503,17 +552,19 @@ async function resolveDetectTarget() {
 
   // Resolve the tunnel resource_id from the slug, cached across calls — it's a
   // stable, non-secret identifier. Assign the cache ONLY after a successful
-  // extract so a failed GET doesn't poison it. The list shape is the array
-  // directly (Array) or `res.resources`; the id field is `id` or `resource_id`.
+  // extract so a failed lookup doesn't poison it. The SDK owns response shaping:
+  // listResources returns `{ resources: [...] }` and each resource carries `id`.
   let resourceId = _detectResourceId;
   if (!resourceId) {
-    const res = await qurlFetch('GET', `/resources?slug=${encodeURIComponent(config.DETECT_TUNNEL_SLUG)}`);
-    const list = Array.isArray(res) ? res : res?.resources;
-    const first = list?.[0];
-    resourceId = first?.id || first?.resource_id;
-    if (!resourceId) {
+    const { resources } = await getQurlClient().listResources({
+      slug: config.DETECT_TUNNEL_SLUG,
+      status: 'active',
+    });
+    const rid = resources?.[0]?.id;
+    if (!rid) {
       throw new Error('Detect tunnel resource not found for slug');
     }
+    resourceId = rid;
     _detectResourceId = resourceId;
   }
 
@@ -523,7 +574,7 @@ async function resolveDetectTarget() {
   // rethrow so an activation-time failure is diagnosable at the handler.
   let accessToken;
   try {
-    const minted = await qurlFetch('POST', `/resources/${resourceId}/qurls`, { target_path: '/api/detect' });
+    const minted = await getQurlClient().createQurlForResource(resourceId, { target_path: '/api/detect' });
     const link = typeof minted?.qurl_link === 'string' ? minted.qurl_link : '';
     const hashIdx = link.indexOf('#');
     accessToken = hashIdx >= 0 ? link.slice(hashIdx + 1) : '';
@@ -544,7 +595,7 @@ async function resolveDetectTarget() {
   // userinfo).
   let targetUrl;
   try {
-    ({ target_url: targetUrl } = await qurlFetch('POST', '/resolve', { access_token: accessToken }));
+    ({ target_url: targetUrl } = await getQurlClient().resolve({ access_token: accessToken }));
   } catch (err) {
     logger.warn('Detect tunnel resolve failed (knock/transport)', { error: err.message });
     throw err;
@@ -578,7 +629,7 @@ async function resolveDetectTarget() {
  *
  * Contract:
  *   - Reach: resolveDetectTarget() self-mints + resolves using the bot's own
- *     `config.QURL_API_KEY` (the qurlFetch Bearer; needs `qurl:resolve` scope)
+ *     `config.QURL_API_KEY` (the SDK Bearer; needs `qurl:resolve` scope)
  *     against the DETECT_TUNNEL_SLUG resource. No pre-seeded access token.
  *   - POST headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
  *     Content-Type: <imageContentType || 'application/octet-stream'>.
@@ -597,12 +648,12 @@ async function resolveDetectTarget() {
  * @param {?string} [opts.contentType] — image MIME; defaults to octet-stream.
  * @param {?string} [opts.apiKey] — caller API key for the detect POST Bearer;
  *   falls back to config.QURL_API_KEY. (The mint+resolve leg always uses the
- *   global config.QURL_API_KEY as the qurlFetch Bearer — see resolveDetectTarget.)
+ *   global config.QURL_API_KEY as the SDK Bearer — see resolveDetectTarget.)
  * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
  */
 async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
   // The mint+resolve leg always uses the global config.QURL_API_KEY as the
-  // qurlFetch Bearer (see resolveDetectTarget), so this leg requires it even
+  // SDK Bearer (see resolveDetectTarget), so this leg requires it even
   // when a per-call `apiKey` is set — the apiKey overrides only the POST Bearer.
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');

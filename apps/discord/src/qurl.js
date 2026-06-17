@@ -4,12 +4,10 @@ const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
 /**
- * Lightweight qURL API client using fetch. This is the bot's single qURL API
- * client — connector.js's detect-over-tunnel path (#1101) reuses `qurlFetch`
- * (exported below) to self-mint an ephemeral qURL per detect rather than
- * carrying a second client. (This client originally avoided the @layervai/qurl
- * SDK over ESM/CJS interop; that blocker is resolved, but with the SDK now
- * fully removed there is no remaining consolidation work — #830 is moot.)
+ * Lightweight qURL API client using fetch. Predates the @layervai/qurl SDK,
+ * which the bot now also uses (connector.js, detect-over-tunnel #1101). The two
+ * clients coexist pending consolidation onto the SDK — see #830. (This client
+ * originally avoided the SDK over ESM/CJS interop; that blocker is resolved.)
  */
 
 // Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
@@ -242,4 +240,4 @@ async function getResourceStatus(resourceId, apiKey) {
   return qurlFetch('GET', `/qurls/${resourceId}`, null, apiKey);
 }
 
-module.exports = { qurlFetch, createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
+module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
