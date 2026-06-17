@@ -12,264 +12,282 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-func TestCheckRateLimit_AllowsUntilHourlyLimitThenReturnsRetry(t *testing.T) {
-	now := time.Date(2026, 6, 17, 12, 42, 0, 0, time.UTC)
-	windowStart := now.Truncate(mintRateLimitWindow)
-	counterKey := mintRateLimitCounterKey(testCallerSlackID)
-	item := map[string]ddbtypes.AttributeValue{
-		attrSlackTeamID:     stringAttr("T123"),
-		attrSlackChannelID:  stringAttr(counterKey),
-		attrMintWindowStart: numberAttr(windowStart.Unix()),
-		attrMintCount:       numberAttr(mintRateLimitMax - 1),
-	}
-	store := newStore(&stubDDB{
-		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			if got := aws.ToString(in.UpdateExpression); got != "ADD mint_count :one SET #ttl = :ttl" {
-				t.Fatalf("UpdateExpression = %q", got)
-			}
-			if got := in.ExpressionAttributeNames["#ttl"]; got != attrMintTTL {
-				t.Fatalf("ExpressionAttributeNames[#ttl] = %q, want %q", got, attrMintTTL)
-			}
-			if got := readNumber(in.ExpressionAttributeValues, ":ttl"); got != mintCounterExpiresAt(windowStart.Unix()) {
-				t.Fatalf(":ttl = %d, want %d", got, mintCounterExpiresAt(windowStart.Unix()))
-			}
-			if got := aws.ToString(in.ConditionExpression); got != "mint_window_start = :window AND mint_count < :limit" {
-				t.Fatalf("ConditionExpression = %q", got)
-			}
-			if got := readString(in.Key, attrSlackChannelID); got != counterKey {
-				t.Fatalf("counter key = %q, want %q", got, counterKey)
-			}
-			return &dynamodb.UpdateItemOutput{}, nil
-		},
-		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			return &dynamodb.GetItemOutput{Item: item}, nil
-		},
-	})
-	store.Now = func() time.Time { return now }
+const (
+	testRateLimitTeamID = "TTEAM001"
+	testRateLimitUserID = "UUSER001"
+)
 
-	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
+func TestCheckRateLimit_DisabledSkipsValidationAndDDB(t *testing.T) {
+	ddb := newRateLimitDDB(false)
+	store := newRateLimitStore(ddb)
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), "", "")
 	if err != nil {
-		t.Fatalf("CheckRateLimit under limit error = %v", err)
+		t.Fatalf("CheckRateLimit disabled: %v", err)
 	}
 	if !allowed || retry != 0 {
-		t.Fatalf("under limit allowed=%v retry=%s, want allowed with no retry", allowed, retry)
+		t.Fatalf("CheckRateLimit disabled = allowed %v retry %s, want allowed/no retry", allowed, retry)
 	}
-
-	store.Client = &stubDDB{
-		updateItemFn: func(_ *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("at limit")}
-		},
-		getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			if !aws.ToBool(in.ConsistentRead) {
-				t.Fatalf("denied-path GetItem ConsistentRead = false, want true")
-			}
-			item[attrMintCount] = numberAttr(mintRateLimitMax)
-			return &dynamodb.GetItemOutput{Item: item}, nil
-		},
-	}
-	allowed, retry, err = store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
-	if err != nil {
-		t.Fatalf("CheckRateLimit at limit error = %v", err)
-	}
-	if allowed {
-		t.Fatalf("at limit allowed = true, want false")
-	}
-	if retry != 18*time.Minute {
-		t.Fatalf("retry = %s, want 18m", retry)
+	if ddb.getCalls != 0 || len(ddb.updateKeys) != 0 {
+		t.Fatalf("disabled CheckRateLimit touched DDB: gets=%d updates=%v", ddb.getCalls, ddb.updateKeys)
 	}
 }
 
-func TestCheckRateLimit_ResetsStaleWindow(t *testing.T) {
-	now := time.Date(2026, 6, 17, 12, 42, 0, 0, time.UTC)
-	windowUnix := now.Truncate(mintRateLimitWindow).Unix()
-	store := newStore(&stubDDB{
-		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			if got := aws.ToString(in.UpdateExpression); strings.HasPrefix(got, "ADD mint_count :one") {
-				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("stale window")}
-			}
-			if got := aws.ToString(in.UpdateExpression); got != "SET mint_window_start = :window, mint_count = :one, #ttl = :ttl" {
-				t.Fatalf("reset UpdateExpression = %q", got)
-			}
-			if got := in.ExpressionAttributeNames["#ttl"]; got != attrMintTTL {
-				t.Fatalf("reset ExpressionAttributeNames[#ttl] = %q, want %q", got, attrMintTTL)
-			}
-			if got := aws.ToString(in.ConditionExpression); got != "attribute_not_exists(mint_window_start) OR mint_window_start < :window" {
-				t.Fatalf("reset ConditionExpression = %q", got)
-			}
-			if got := readNumber(in.ExpressionAttributeValues, ":window"); got != windowUnix {
-				t.Fatalf(":window = %d, want %d", got, windowUnix)
-			}
-			if got := readNumber(in.ExpressionAttributeValues, ":ttl"); got != mintCounterExpiresAt(windowUnix) {
-				t.Fatalf(":ttl = %d, want %d", got, mintCounterExpiresAt(windowUnix))
-			}
-			return &dynamodb.UpdateItemOutput{}, nil
-		},
-		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
-				attrMintWindowStart: numberAttr(windowUnix - int64(mintRateLimitWindow/time.Second)),
-				attrMintCount:       numberAttr(mintRateLimitMax),
-			}}, nil
-		},
-	})
-	store.Now = func() time.Time { return now }
+func TestCheckRateLimit_EnabledRequiresTeamAndUser(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
 
-	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
-	if err != nil {
-		t.Fatalf("CheckRateLimit stale window error = %v", err)
-	}
-	if !allowed || retry != 0 {
-		t.Fatalf("stale window allowed=%v retry=%s, want allowed/no retry", allowed, retry)
-	}
-}
-
-func TestCheckRateLimit_FollowsFutureWindowUnderClockSkew(t *testing.T) {
-	now := time.Date(2026, 6, 17, 12, 59, 59, 0, time.UTC)
-	windowUnix := now.Truncate(mintRateLimitWindow).Unix()
-	futureWindowUnix := windowUnix + int64(mintRateLimitWindow/time.Second)
-	var updates int
-	store := newStore(&stubDDB{
-		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			updates++
-			switch updates {
-			case 1:
-				if got := readNumber(in.ExpressionAttributeValues, ":window"); got != windowUnix {
-					t.Fatalf("first :window = %d, want local window %d", got, windowUnix)
-				}
-				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("future window")}
-			case 2:
-				if got := readNumber(in.ExpressionAttributeValues, ":window"); got != futureWindowUnix {
-					t.Fatalf("second :window = %d, want future window %d", got, futureWindowUnix)
-				}
-				return &dynamodb.UpdateItemOutput{}, nil
-			default:
-				t.Fatalf("unexpected UpdateItem call %d", updates)
-				return nil, errors.New("unreachable")
-			}
-		},
-		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
-				attrMintWindowStart: numberAttr(futureWindowUnix),
-				attrMintCount:       numberAttr(mintRateLimitMax - 1),
-			}}, nil
-		},
-	})
-	store.Now = func() time.Time { return now }
-
-	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
-	if err != nil {
-		t.Fatalf("CheckRateLimit future window error = %v", err)
-	}
-	if !allowed || retry != 0 {
-		t.Fatalf("future window allowed=%v retry=%s, want allowed/no retry", allowed, retry)
-	}
-}
-
-func TestCheckRateLimit_DeniesWhenCurrentWindowRaceConsumesCapacity(t *testing.T) {
-	now := time.Date(2026, 6, 17, 12, 42, 0, 0, time.UTC)
-	windowUnix := now.Truncate(mintRateLimitWindow).Unix()
-	var updates int
-	store := newStore(&stubDDB{
-		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			updates++
-			if got := readNumber(in.ExpressionAttributeValues, ":window"); got != windowUnix {
-				t.Fatalf("update %d :window = %d, want %d", updates, got, windowUnix)
-			}
-			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("race")}
-		},
-		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
-				attrMintWindowStart: numberAttr(windowUnix),
-				attrMintCount:       numberAttr(mintRateLimitMax - 1),
-			}}, nil
-		},
-	})
-	store.Now = func() time.Time { return now }
-
-	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
-	if err != nil {
-		t.Fatalf("CheckRateLimit current-window race error = %v", err)
-	}
-	if allowed {
-		t.Fatal("current-window race allowed = true, want conservative deny")
-	}
-	if retry != 18*time.Minute {
-		t.Fatalf("retry = %s, want 18m", retry)
-	}
-	if updates != 2 {
-		t.Fatalf("UpdateItem calls = %d, want 2", updates)
-	}
-}
-
-func TestCheckRateLimit_DeniesWhenFutureWindowRaceConsumesCapacity(t *testing.T) {
-	now := time.Date(2026, 6, 17, 12, 59, 59, 0, time.UTC)
-	windowUnix := now.Truncate(mintRateLimitWindow).Unix()
-	futureWindowUnix := windowUnix + int64(mintRateLimitWindow/time.Second)
-	var updates int
-	store := newStore(&stubDDB{
-		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			updates++
-			switch updates {
-			case 1:
-				if got := readNumber(in.ExpressionAttributeValues, ":window"); got != windowUnix {
-					t.Fatalf("first :window = %d, want local window %d", got, windowUnix)
-				}
-			case 2:
-				if got := readNumber(in.ExpressionAttributeValues, ":window"); got != futureWindowUnix {
-					t.Fatalf("second :window = %d, want future window %d", got, futureWindowUnix)
-				}
-			default:
-				t.Fatalf("unexpected UpdateItem call %d", updates)
-			}
-			return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("future race")}
-		},
-		getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
-				attrMintWindowStart: numberAttr(futureWindowUnix),
-				attrMintCount:       numberAttr(mintRateLimitMax - 1),
-			}}, nil
-		},
-	})
-	store.Now = func() time.Time { return now }
-
-	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
-	if err != nil {
-		t.Fatalf("CheckRateLimit future-window race error = %v", err)
-	}
-	if allowed {
-		t.Fatal("future-window race allowed = true, want conservative deny")
-	}
-	wantRetry := time.Unix(futureWindowUnix, 0).UTC().Add(mintRateLimitWindow).Sub(now)
-	if retry != wantRetry {
-		t.Fatalf("retry = %s, want %s", retry, wantRetry)
-	}
-	if updates != 2 {
-		t.Fatalf("UpdateItem calls = %d, want 2", updates)
-	}
-}
-
-func TestCheckRateLimit_Validation(t *testing.T) {
-	store := newStore(&stubDDB{})
-	if _, _, err := store.CheckRateLimit(context.Background(), "", "T123"); err == nil {
-		t.Fatalf("missing user err = nil, want validation error")
-	}
-}
-
-func TestCheckRateLimit_FailsClosedOnDynamoError(t *testing.T) {
-	store := newStore(&stubDDB{
-		updateItemFn: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			return nil, errors.New("ddb down")
-		},
-		getItemFn: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
-			t.Fatal("GetItem must not run after a non-conditional counter write error")
-			return nil, errors.New("unreachable")
-		},
-	})
-
-	allowed, retry, err := store.CheckRateLimit(context.Background(), testCallerSlackID, "T123")
+	allowed, retry, err := store.CheckRateLimit(context.Background(), "", testRateLimitTeamID)
 	if err == nil {
-		t.Fatalf("CheckRateLimit error = nil, want DDB failure")
+		t.Fatal("CheckRateLimit missing user error = nil")
+	}
+	var storeErr *Error
+	if !errors.As(err, &storeErr) || storeErr.StatusCode != 400 {
+		t.Fatalf("CheckRateLimit missing user err = %#v, want 400", err)
 	}
 	if allowed || retry != 0 {
-		t.Fatalf("allowed=%v retry=%s, want fail-closed denial with no retry hint", allowed, retry)
+		t.Fatalf("CheckRateLimit missing user = allowed %v retry %s, want denied/no retry", allowed, retry)
 	}
+	if ddb.getCalls != 0 || len(ddb.updateKeys) != 0 {
+		t.Fatalf("missing user touched DDB: gets=%d updates=%v", ddb.getCalls, ddb.updateKeys)
+	}
+}
+
+func TestCheckRateLimit_UsesSyntheticCounterItemAndResetsWindow(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
+	store.RateLimitLimit = 2
+	store.RateLimitWindow = time.Hour
+
+	now := time.Date(2026, 6, 17, 12, 5, 0, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+
+	for i := 1; i <= 2; i++ {
+		allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+		if err != nil {
+			t.Fatalf("CheckRateLimit call %d: %v", i, err)
+		}
+		if !allowed || retry != 0 {
+			t.Fatalf("CheckRateLimit call %d = allowed %v retry %s, want allowed/no retry", i, allowed, retry)
+		}
+	}
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+	if err != nil {
+		t.Fatalf("CheckRateLimit denied call: %v", err)
+	}
+	if allowed {
+		t.Fatal("third call allowed, want denied at limit")
+	}
+	if retry != 55*time.Minute {
+		t.Fatalf("retry = %s, want 55m", retry)
+	}
+
+	counterKey := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+	if strings.Contains(counterKey, testRateLimitUserID) {
+		t.Fatalf("counter key %q leaked raw Slack user ID", counterKey)
+	}
+	if _, ok := ddb.items[testRateLimitTeamID]; ok {
+		t.Fatalf("rate limit mutated the real workspace row %q", testRateLimitTeamID)
+	}
+	for _, key := range ddb.updateKeys {
+		if key != counterKey {
+			t.Fatalf("UpdateItem key = %q, want synthetic counter key %q", key, counterKey)
+		}
+	}
+
+	now = now.Add(time.Hour)
+	allowed, retry, err = store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+	if err != nil {
+		t.Fatalf("CheckRateLimit after rollover: %v", err)
+	}
+	if !allowed || retry != 0 {
+		t.Fatalf("CheckRateLimit after rollover = allowed %v retry %s, want allowed/no retry", allowed, retry)
+	}
+	if got := readNumber(ddb.items[counterKey], attrRateLimitCount); got != 1 {
+		t.Fatalf("counter after rollover = %d, want reset to 1", got)
+	}
+	if got, want := readNumber(ddb.items[counterKey], attrRateLimitExpiresAt), now.Truncate(time.Hour).Add(2*time.Hour).Unix(); got != want {
+		t.Fatalf("counter expires_at = %d, want %d", got, want)
+	}
+}
+
+func TestCheckRateLimit_RepairsConcurrentInitializeRace(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	ddb.raceInitializeWindow = true
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
+	store.RateLimitLimit = 2
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+	if err != nil {
+		t.Fatalf("CheckRateLimit concurrent init: %v", err)
+	}
+	if !allowed || retry != 0 {
+		t.Fatalf("CheckRateLimit concurrent init = allowed %v retry %s, want allowed/no retry", allowed, retry)
+	}
+	counterKey := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+	if got := readNumber(ddb.items[counterKey], attrRateLimitCount); got != 2 {
+		t.Fatalf("counter after concurrent init repair = %d, want 2", got)
+	}
+	if len(ddb.updateKeys) != 3 {
+		t.Fatalf("updates after concurrent init repair = %v, want initial increment, lost init, retry increment", ddb.updateKeys)
+	}
+}
+
+func TestCheckRateLimit_WorkspaceNotBoundDoesNotCreateCounter(t *testing.T) {
+	ddb := newRateLimitDDB(false)
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+	if err == nil {
+		t.Fatal("CheckRateLimit unbound workspace error = nil")
+	}
+	var storeErr *Error
+	if !errors.As(err, &storeErr) || storeErr.StatusCode != 404 || storeErr.Code != ErrCodeWorkspaceNotBound {
+		t.Fatalf("CheckRateLimit unbound err = %#v, want workspace-not-bound 404", err)
+	}
+	if allowed || retry != 0 {
+		t.Fatalf("CheckRateLimit unbound = allowed %v retry %s, want denied/no retry", allowed, retry)
+	}
+	if len(ddb.updateKeys) != 0 {
+		t.Fatalf("unbound workspace created/updated counters: %v", ddb.updateKeys)
+	}
+}
+
+func newRateLimitStore(client DynamoDBClient) *Store {
+	return &Store{
+		Client:                client,
+		WorkspaceMappingsName: "workspace_mappings",
+		ChannelPoliciesName:   "channel_policies",
+		RateLimitLimit:        defaultRateLimitLimit,
+		RateLimitWindow:       defaultRateLimitWindow,
+		Now:                   func() time.Time { return time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC) },
+	}
+}
+
+type rateLimitDDB struct {
+	workspaceBound       bool
+	raceInitializeWindow bool
+	items                map[string]map[string]ddbtypes.AttributeValue
+	getCalls             int
+	updateKeys           []string
+}
+
+func newRateLimitDDB(workspaceBound bool) *rateLimitDDB {
+	return &rateLimitDDB{
+		workspaceBound: workspaceBound,
+		items:          map[string]map[string]ddbtypes.AttributeValue{},
+	}
+}
+
+func (f *rateLimitDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.getCalls++
+	key := rateLimitTestKey(in.Key)
+	if key == testRateLimitTeamID {
+		if !f.workspaceBound {
+			return &dynamodb.GetItemOutput{}, nil
+		}
+		return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(testRateLimitTeamID),
+		}}, nil
+	}
+	item, ok := f.items[key]
+	if !ok {
+		return &dynamodb.GetItemOutput{}, nil
+	}
+	return &dynamodb.GetItemOutput{Item: cloneRateLimitTestItem(item)}, nil
+}
+
+func (f *rateLimitDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	key := rateLimitTestKey(in.Key)
+	f.updateKeys = append(f.updateKeys, key)
+
+	existing, present := f.items[key]
+	if f.raceInitializeWindow && aws.ToString(in.ConditionExpression) == "attribute_not_exists(#window)" {
+		f.raceInitializeWindow = false
+		f.items[key] = map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID:        stringAttr(key),
+			attrRateLimitWindow:    in.ExpressionAttributeValues[":window"],
+			attrRateLimitCount:     in.ExpressionAttributeValues[":one"],
+			attrRateLimitExpiresAt: in.ExpressionAttributeValues[":expires_at"],
+		}
+		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
+	}
+	if cond := aws.ToString(in.ConditionExpression); cond != "" {
+		ok, err := f.rateLimitConditionOK(cond, existing, present, in.ExpressionAttributeValues)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			condErr := &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
+			if in.ReturnValuesOnConditionCheckFailure == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld && present {
+				condErr.Item = cloneRateLimitTestItem(existing)
+			}
+			return nil, condErr
+		}
+	}
+
+	item := cloneRateLimitTestItem(existing)
+	if !present {
+		item = map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(key)}
+	}
+	switch aws.ToString(in.UpdateExpression) {
+	case "ADD #count :one":
+		item[attrRateLimitCount] = numberAttr(readNumber(item, attrRateLimitCount) + 1)
+	case "SET #window = :window, #count = :one, #expires_at = :expires_at":
+		item[attrRateLimitWindow] = in.ExpressionAttributeValues[":window"]
+		item[attrRateLimitCount] = in.ExpressionAttributeValues[":one"]
+		item[attrRateLimitExpiresAt] = in.ExpressionAttributeValues[":expires_at"]
+	default:
+		return nil, errors.New("unexpected UpdateExpression: " + aws.ToString(in.UpdateExpression))
+	}
+	f.items[key] = item
+	return &dynamodb.UpdateItemOutput{Attributes: cloneRateLimitTestItem(item)}, nil
+}
+
+func (f *rateLimitDDB) rateLimitConditionOK(cond string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue) (bool, error) {
+	switch cond {
+	case "#window = :window AND #count < :limit":
+		return present &&
+			readNumber(item, attrRateLimitWindow) == readNumber(vals, ":window") &&
+			readNumber(item, attrRateLimitCount) < readNumber(vals, ":limit"), nil
+	case "attribute_not_exists(#window)":
+		if !present {
+			return true, nil
+		}
+		_, ok := item[attrRateLimitWindow]
+		return !ok, nil
+	case "#window = :old_window":
+		return present && readNumber(item, attrRateLimitWindow) == readNumber(vals, ":old_window"), nil
+	default:
+		return false, errors.New("unexpected ConditionExpression: " + cond)
+	}
+}
+
+func (f *rateLimitDDB) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *rateLimitDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *rateLimitDDB) Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	return nil, errors.New("not implemented")
+}
+
+func rateLimitTestKey(key map[string]ddbtypes.AttributeValue) string {
+	return readString(key, attrSlackTeamID)
+}
+
+func cloneRateLimitTestItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.AttributeValue {
+	out := make(map[string]ddbtypes.AttributeValue, len(item))
+	for k, v := range item {
+		out[k] = v
+	}
+	return out
 }

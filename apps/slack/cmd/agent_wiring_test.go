@@ -258,6 +258,30 @@ func TestReadAgentDefaultEnabled(t *testing.T) {
 	}
 }
 
+func TestReadSlackRateLimitEnabled(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "unset is off for sandbox", val: "", want: false},
+		{name: "true enables", val: "true", want: true},
+		{name: "1 enables", val: "1", want: true},
+		{name: "false stays off", val: "false", want: false},
+		{name: "0 stays off", val: "0", want: false},
+		{name: "garbage fails safe to off", val: "enable", want: false},
+		{name: "yes fails safe to off", val: "yes", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envSlackRateLimitEnabled, tc.val)
+			if got := readSlackRateLimitEnabled(); got != tc.want {
+				t.Fatalf("readSlackRateLimitEnabled(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReadAgentMaxTurns(t *testing.T) {
 	cases := []struct {
 		name string

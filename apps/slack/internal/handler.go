@@ -108,6 +108,20 @@ func authErrorMessage(err error) string {
 	return authFailureMessage
 }
 
+// rateLimitErrorMessage maps the rate-limit gate's defensive storage errors to
+// user-facing copy. Most failures are DDB/service-health failures, but the
+// workspace-not-bound branch can happen if an admin unbinds the workspace
+// between the caller's auth lookup and the limiter's own existence read.
+func rateLimitErrorMessage(err error) string {
+	var storeErr *slackdata.Error
+	if errors.As(err, &storeErr) &&
+		storeErr.StatusCode == http.StatusNotFound &&
+		storeErr.Code == slackdata.ErrCodeWorkspaceNotBound {
+		return workspaceUnboundReply
+	}
+	return serviceUnreachableMessage
+}
+
 // ackWorkingOnIt is the user-visible ephemeral text returned synchronously
 // while async work runs. The hourglass keeps the user oriented that a
 // follow-up via response_url is on its way.

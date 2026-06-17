@@ -14,155 +14,201 @@ import (
 )
 
 const (
-	mintRateLimitWindow = time.Hour
-	mintRateLimitMax    = int64(30)
-	mintRateLimitTTL    = 2 * mintRateLimitWindow
-	attrMintWindowStart = "mint_window_start"
-	attrMintCount       = "mint_count"
-	attrMintTTL         = "ttl"
+	defaultRateLimitLimit  = 30
+	defaultRateLimitWindow = time.Hour
+	rateLimitKeyPrefix     = "__slack_rate_limit#"
+	attrRateLimitCount     = "rate_limit_count"
+	// Table-wide DDB TTL reaps any workspace_mappings item carrying a numeric
+	// expires_at. Only synthetic counter items may write this attribute; real
+	// workspace binding rows must never carry it.
+	attrRateLimitExpiresAt = "expires_at"
+	attrRateLimitWindow    = "rate_limit_window"
 )
 
-// CheckRateLimit is the in-bot per-user mint-rate gate. Pre-pivot
-// this was an HTTP call to qurl-service `/internal/v1/admin/rate-
-// limit/check`; post-pivot (Justin's 2026-05-12 review on
-// qurl-integrations-infra#523) qurl-service is integration-agnostic
-// and doesn't track per-Slack-user mint counts. The rate-limit
-// surface stays in-bot.
+// CheckRateLimit is the in-bot per-(team, user) qURL command gate. When the
+// feature flag is off it preserves the historical sandbox/open-gate behavior.
+// When enabled it stores one synthetic counter item per Slack team/user in the
+// workspace_mappings table, leaving the real workspace row bounded and avoiding
+// a shared hot write item for large workspaces.
 //
-// The chosen strategy is a DynamoDB fixed-window counter item in the
-// channel_policies table. Each Slack user gets one hashed counter key
-// whose mint_window_start/mint_count fields are updated atomically, so
-// the gate is shared by every Fargate task and survives restarts without
-// adding a table or creating one row per user per hour.
+// The workspace existence read is deliberately kept inside this method even
+// though current handlers authenticate first. That preserves the public method's
+// invariant that unbound teams never create synthetic counter rows, including if
+// a future call site invokes it before auth.
 func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) (allowed bool, retry time.Duration, err error) {
+	if !s.RateLimitEnabled {
+		return true, 0, nil
+	}
 	if slackUserID == "" || teamID == "" {
-		return false, 0, &Error{StatusCode: http.StatusBadRequest, Title: "CheckRateLimit: slack_user_id and team_id are required"}
+		return false, 0, &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "CheckRateLimit: team_id and user_id are required",
+		}
 	}
+	if err := s.ensureRateLimitWorkspaceBound(ctx, teamID); err != nil {
+		return false, 0, err
+	}
+
+	window := s.rateLimitWindow()
+	limit := s.rateLimitLimit()
 	now := s.nowOrDefault().UTC()
-	windowStart := now.Truncate(mintRateLimitWindow)
-	windowEnd := windowStart.Add(mintRateLimitWindow)
+	windowStart := now.Truncate(window)
 	windowUnix := windowStart.Unix()
-	counterKey := mintRateLimitCounterKey(slackUserID)
+	retry = windowStart.Add(window).Sub(now)
 
-	if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
-		return allowed, 0, err
+	counterKey := rateLimitKey(teamID, slackUserID)
+	ok, item, updateErr := s.incrementCurrentRateLimitWindow(ctx, counterKey, windowUnix, limit)
+	if updateErr != nil || ok {
+		return ok, 0, updateErr
 	}
-
-	item, err := s.getMintCounter(ctx, teamID, counterKey)
-	if err != nil {
-		return false, 0, ddbToError("CheckRateLimit", err)
-	}
-	storedWindow := readNumber(item, attrMintWindowStart)
-	count := readNumber(item, attrMintCount)
-	// If another task has already advanced the counter into a later window
-	// (hour-boundary race or clock skew), follow that authoritative item instead
-	// of resetting it backward or denying while capacity remains.
-	if storedWindow > windowUnix {
-		futureWindowEnd := time.Unix(storedWindow, 0).UTC().Add(mintRateLimitWindow)
-		if count >= mintRateLimitMax {
-			return false, futureWindowEnd.Sub(now), nil
-		}
-		if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, storedWindow)); allowed || err != nil {
-			return allowed, 0, err
-		}
-		return false, futureWindowEnd.Sub(now), nil
-	}
-	if storedWindow == windowUnix && count >= mintRateLimitMax {
-		return false, windowEnd.Sub(now), nil
-	}
-	if storedWindow == windowUnix {
-		if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
-			return allowed, 0, err
-		}
-		// A conditional miss after a fresh under-limit read means another writer
-		// won the remaining capacity or advanced the window. Deny conservatively
-		// rather than spend another read chasing a narrow race.
-		return false, windowEnd.Sub(now), nil
+	storedWindow, hasWindow := readRateLimitWindow(item)
+	if hasWindow && storedWindow == windowUnix {
+		return false, retry, nil
 	}
 
-	if allowed, err := mintCounterWriteResult(s.resetMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
-		return allowed, 0, err
+	var resetOK bool
+	if hasWindow {
+		resetOK, updateErr = s.resetRateLimitWindow(ctx, counterKey, windowUnix, storedWindow)
+	} else {
+		resetOK, updateErr = s.initializeRateLimitWindow(ctx, counterKey, windowUnix)
 	}
-	if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, windowUnix)); allowed || err != nil {
-		return allowed, 0, err
+	if updateErr != nil || resetOK {
+		return resetOK, 0, updateErr
 	}
-	return false, windowEnd.Sub(now), nil
+
+	// Another worker initialized/reset the window between our condition failure
+	// and our repair write. Retry the normal current-window increment once.
+	ok, item, updateErr = s.incrementCurrentRateLimitWindow(ctx, counterKey, windowUnix, limit)
+	if updateErr != nil || ok {
+		return ok, 0, updateErr
+	}
+	if storedWindow, hasWindow = readRateLimitWindow(item); hasWindow && storedWindow == windowUnix {
+		return false, retry, nil
+	}
+	return false, 0, &Error{
+		StatusCode: http.StatusServiceUnavailable,
+		Title:      "CheckRateLimit: concurrent counter update did not settle",
+	}
 }
 
-func mintCounterWriteResult(err error) (allowed bool, fatal error) {
+func (s *Store) rateLimitLimit() int {
+	if s.RateLimitLimit > 0 {
+		return s.RateLimitLimit
+	}
+	return defaultRateLimitLimit
+}
+
+func (s *Store) rateLimitWindow() time.Duration {
+	if s.RateLimitWindow > 0 {
+		return s.RateLimitWindow
+	}
+	return defaultRateLimitWindow
+}
+
+func rateLimitKey(teamID, slackUserID string) string {
+	// Keep raw Slack user IDs out of table keys while preserving a stable
+	// per-(team,user) counter item.
+	sum := sha256.Sum256([]byte(slackUserID))
+	scope := hex.EncodeToString(sum[:16])
+	return rateLimitKeyPrefix + teamID + "#" + scope
+}
+
+func (s *Store) ensureRateLimitWorkspaceBound(ctx context.Context, teamID string) error {
+	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:            aws.String(s.WorkspaceMappingsName),
+		ProjectionExpression: aws.String(attrSlackTeamID),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if err != nil {
+		return ddbToError("CheckRateLimit", err)
+	}
+	if len(out.Item) == 0 {
+		return &Error{
+			StatusCode: http.StatusNotFound,
+			Code:       ErrCodeWorkspaceNotBound,
+			Title:      "CheckRateLimit: workspace is not bound",
+		}
+	}
+	return nil
+}
+
+func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey string, windowUnix int64, limit int) (allowed bool, item map[string]ddbtypes.AttributeValue, err error) {
+	_, err = s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(counterKey),
+		},
+		UpdateExpression:    aws.String("ADD #count :one"),
+		ConditionExpression: aws.String("#window = :window AND #count < :limit"),
+		ExpressionAttributeNames: map[string]string{
+			"#count":  attrRateLimitCount,
+			"#window": attrRateLimitWindow,
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":one":    numberAttr(1),
+			":window": numberAttr(windowUnix),
+			":limit":  numberAttr(int64(limit)),
+		},
+		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld,
+	})
+	if err == nil {
+		return true, nil, nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if errors.As(err, &ccfe) {
+		return false, ccfe.Item, nil
+	}
+	return false, nil, ddbToError("CheckRateLimit", err)
+}
+
+func (s *Store) initializeRateLimitWindow(ctx context.Context, counterKey string, windowUnix int64) (bool, error) {
+	return s.setRateLimitWindow(ctx, counterKey, windowUnix, "attribute_not_exists(#window)", nil)
+}
+
+func (s *Store) resetRateLimitWindow(ctx context.Context, counterKey string, windowUnix, oldWindow int64) (bool, error) {
+	return s.setRateLimitWindow(ctx, counterKey, windowUnix, "#window = :old_window", map[string]ddbtypes.AttributeValue{
+		":old_window": numberAttr(oldWindow),
+	})
+}
+
+func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, windowUnix int64, condition string, extra map[string]ddbtypes.AttributeValue) (bool, error) {
+	values := map[string]ddbtypes.AttributeValue{
+		":expires_at": numberAttr(time.Unix(windowUnix, 0).Add(2 * s.rateLimitWindow()).Unix()),
+		":one":        numberAttr(1),
+		":window":     numberAttr(windowUnix),
+	}
+	for k, v := range extra {
+		values[k] = v
+	}
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(counterKey),
+		},
+		UpdateExpression:    aws.String("SET #window = :window, #count = :one, #expires_at = :expires_at"),
+		ConditionExpression: aws.String(condition),
+		ExpressionAttributeNames: map[string]string{
+			"#count":      attrRateLimitCount,
+			"#expires_at": attrRateLimitExpiresAt,
+			"#window":     attrRateLimitWindow,
+		},
+		ExpressionAttributeValues: values,
+	})
 	if err == nil {
 		return true, nil
 	}
-	if isConditionalCheckFailed(err) {
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if errors.As(err, &ccfe) {
 		return false, nil
 	}
 	return false, ddbToError("CheckRateLimit", err)
 }
 
-func (s *Store) incrementMintCounter(ctx context.Context, teamID, counterKey string, windowUnix int64) error {
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(counterKey),
-		},
-		UpdateExpression:         aws.String("ADD " + attrMintCount + " :one SET #ttl = :ttl"),
-		ConditionExpression:      aws.String(attrMintWindowStart + " = :window AND " + attrMintCount + " < :limit"),
-		ExpressionAttributeNames: map[string]string{"#ttl": attrMintTTL},
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":one":    numberAttr(1),
-			":ttl":    numberAttr(mintCounterExpiresAt(windowUnix)),
-			":window": numberAttr(windowUnix),
-			":limit":  numberAttr(mintRateLimitMax),
-		},
-	})
-	return err
-}
-
-func (s *Store) getMintCounter(ctx context.Context, teamID, counterKey string) (map[string]ddbtypes.AttributeValue, error) {
-	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName:      aws.String(s.ChannelPoliciesName),
-		ConsistentRead: aws.Bool(true),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(counterKey),
-		},
-	})
-	if getErr != nil {
-		return nil, getErr
+func readRateLimitWindow(item map[string]ddbtypes.AttributeValue) (int64, bool) {
+	if _, ok := item[attrRateLimitWindow].(*ddbtypes.AttributeValueMemberN); !ok {
+		return 0, false
 	}
-	return out.Item, nil
-}
-
-func (s *Store) resetMintCounter(ctx context.Context, teamID, counterKey string, windowUnix int64) error {
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(counterKey),
-		},
-		UpdateExpression:         aws.String("SET " + attrMintWindowStart + " = :window, " + attrMintCount + " = :one, #ttl = :ttl"),
-		ConditionExpression:      aws.String("attribute_not_exists(" + attrMintWindowStart + ") OR " + attrMintWindowStart + " < :window"),
-		ExpressionAttributeNames: map[string]string{"#ttl": attrMintTTL},
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":one":    numberAttr(1),
-			":ttl":    numberAttr(mintCounterExpiresAt(windowUnix)),
-			":window": numberAttr(windowUnix),
-		},
-	})
-	return err
-}
-
-func mintCounterExpiresAt(windowUnix int64) int64 {
-	return time.Unix(windowUnix, 0).UTC().Add(mintRateLimitTTL).Unix()
-}
-
-func isConditionalCheckFailed(err error) bool {
-	var ccfe *ddbtypes.ConditionalCheckFailedException
-	return errors.As(err, &ccfe)
-}
-
-func mintRateLimitCounterKey(slackUserID string) string {
-	sum := sha256.Sum256([]byte(slackUserID))
-	return "rate_limit#" + hex.EncodeToString(sum[:])[:16]
+	return readNumber(item, attrRateLimitWindow), true
 }

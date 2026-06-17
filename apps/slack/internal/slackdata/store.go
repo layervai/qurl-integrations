@@ -93,6 +93,9 @@ type Store struct {
 	Client                DynamoDBClient
 	WorkspaceMappingsName string
 	ChannelPoliciesName   string
+	RateLimitEnabled      bool
+	RateLimitLimit        int
+	RateLimitWindow       time.Duration
 
 	// Now is injected so tests can pin the clock for created_at /
 	// updated_at assertions without poking a package-global.
@@ -107,6 +110,7 @@ type storeOptions struct {
 	workspaceMappingsName string
 	channelPoliciesName   string
 	ddbClient             DynamoDBClient
+	rateLimitEnabled      bool
 	awsConfigFns          []func(*awsconfig.LoadOptions) error
 }
 
@@ -123,6 +127,13 @@ func WithTableNames(workspaceMappings, channelPolicies string) StoreOption {
 		o.workspaceMappingsName = workspaceMappings
 		o.channelPoliciesName = channelPolicies
 	}
+}
+
+// WithRateLimitEnabled gates the in-bot per-user Slack command rate limit.
+// Keep disabled for sandbox/no-prod deploys; production opts in once the DDB
+// write path has table/IAM headroom confirmed.
+func WithRateLimitEnabled(enabled bool) StoreOption {
+	return func(o *storeOptions) { o.rateLimitEnabled = enabled }
 }
 
 // NewStore constructs a [Store], loading AWS config from the ambient
@@ -162,6 +173,9 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 		Client:                o.ddbClient,
 		WorkspaceMappingsName: o.workspaceMappingsName,
 		ChannelPoliciesName:   o.channelPoliciesName,
+		RateLimitEnabled:      o.rateLimitEnabled,
+		RateLimitLimit:        defaultRateLimitLimit,
+		RateLimitWindow:       defaultRateLimitWindow,
 		Now:                   time.Now,
 	}, nil
 }

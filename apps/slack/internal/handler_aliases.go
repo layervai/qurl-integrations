@@ -30,11 +30,9 @@ const noChannelAliasesMessage = ":mag: No aliases are configured for this channe
 //     call (the same source `/qurl list` uses — the one the API
 //     actually returns slugs on), and POSTs the result to response_url.
 //
-// TODO: rate-limit. /qurl aliases costs one DDB GetItem plus one
-// ListResources page per invocation (constant, no longer amplified by
-// the channel's alias count). A user can still spam the verb; if that
-// becomes a real cost problem, add an aliases-specific gate rather than
-// reusing the mint quota enforced by slackdata.CheckRateLimit.
+// The same in-bot rate-limit gate as `/qurl get` runs before the
+// channel-policy read and upstream ListResources page so repeated clicks can't
+// amplify DDB/API reads past the per-user command budget.
 func (h *Handler) handleAliases(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "aliases", values, func(ctx context.Context, log *slog.Logger) {
 		h.processAliases(ctx, log, values)
@@ -46,6 +44,7 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 	responseURL := values.Get(fieldResponseURL)
 	teamID := values.Get(fieldTeamID)
 	channelID := values.Get(fieldChannelID)
+	userID := values.Get(fieldUserID)
 
 	if h.cfg.AdminStore == nil {
 		log.Warn("aliases: AdminStore is nil; replying not-configured")
@@ -62,10 +61,23 @@ func (h *Handler) processAliases(ctx context.Context, log *slog.Logger, values u
 		return
 	}
 
+	// Keep the API-key lookup before the limiter so an unconfigured workspace
+	// still gets setup guidance; the limiter fronts the channel-policy read and
+	// resource-list fanout that make this verb expensive to spam.
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("aliases: API key lookup failed", "error", err)
 		_ = h.postResponse(log, responseURL, ":warning: "+authErrorMessage(err))
+		return
+	}
+	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, userID, teamID)
+	if err != nil {
+		log.Warn("aliases: rate-limit check failed", "error", err, "team_id", teamID, "user_id", userID)
+		_ = h.postResponse(log, responseURL, ":warning: "+rateLimitErrorMessage(err))
+		return
+	}
+	if !ok {
+		_ = h.postResponse(log, responseURL, ":warning: "+rateLimitMessage(retry, ""))
 		return
 	}
 

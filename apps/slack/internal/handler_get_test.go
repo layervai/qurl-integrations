@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -20,6 +21,20 @@ const (
 	testKeyMeta                 = "meta"
 	testKeyRequestID            = "request_id"
 )
+
+func TestRateLimitErrorMessage(t *testing.T) {
+	notBound := &slackdata.Error{
+		StatusCode: http.StatusNotFound,
+		Code:       slackdata.ErrCodeWorkspaceNotBound,
+		Title:      "CheckRateLimit: workspace is not bound",
+	}
+	if got := rateLimitErrorMessage(notBound); got != workspaceUnboundReply {
+		t.Fatalf("workspace-not-bound copy = %q, want %q", got, workspaceUnboundReply)
+	}
+	if got := rateLimitErrorMessage(errors.New("ddb timeout")); got != serviceUnreachableMessage {
+		t.Fatalf("generic copy = %q, want %q", got, serviceUnreachableMessage)
+	}
+}
 
 // writeCreateFixture writes a POST /v1/qurls success envelope.
 func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID string) {
@@ -301,61 +316,29 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 	}
 }
 
-func TestHandleGet_AdminStoreRateLimitDenialShowsRetryHint(t *testing.T) {
+func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
 	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var mintHits atomic.Int32
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
 		mintHits.Add(1)
-		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+		writeCreateFixture(t, w, "https://qurl.link/allowed", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
-	h.cfg.AdminStore.Now = func() time.Time {
-		return time.Date(2026, 6, 17, 12, 42, 0, 0, time.UTC)
-	}
-	inv := newAdminSlashInvoker(t, h)
-	for i := 0; i < 30; i++ {
-		allowed, retry, err := h.cfg.AdminStore.CheckRateLimit(context.Background(), testAdminUserID, testAdminTeamID)
-		if err != nil {
-			t.Fatalf("prefill rate limit %d: %v", i+1, err)
-		}
-		if !allowed || retry != 0 {
-			t.Fatalf("prefill rate limit %d allowed=%v retry=%s, want allowed/no retry", i+1, allowed, retry)
-		}
-	}
-	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, "Rate limit hit") {
-		t.Fatalf("denied async reply missing rate-limit copy: %q", async)
-	}
-	if !strings.Contains(async, "Try again in 18m") {
-		t.Fatalf("denied async reply missing retry-after hint: %q", async)
-	}
-	if got := mintHits.Load(); got != 0 {
-		t.Fatalf("mint hits = %d, want denied request not to reach qurl-service", got)
-	}
-}
+	enableAdminStoreRateLimit(t, h, 1)
 
-func TestHandleGet_AdminStoreRateLimitErrorFailsClosed(t *testing.T) {
-	ts := newAdminTestServers(t)
-	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
-	ts.ddb.SetUpdateItemErr(ts.tableNames.channelPolicy, errors.New("ddb down"))
-	var mintHits atomic.Int32
-	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		mintHits.Add(1)
-		writeCreateFixture(t, w, "https://qurl.link/should-not", testResourceIDFix)
-	})
-	h := newAdminTestHandler(t, ts)
-	inv := newAdminSlashInvoker(t, h)
+	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(first, "https://qurl.link/allowed") {
+		t.Fatalf("first get did not mint: %q", first)
+	}
 
-	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(async, commonGetMintFailedMessage) {
-		t.Fatalf("async reply = %q, want generic mint failure", async)
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+		t.Fatalf("second get = %q, want in-bot rate-limit copy with retry hint", second)
 	}
-	if strings.Contains(async, "Rate limit hit") {
-		t.Fatalf("async reply = %q, want DDB-error path not quota-denied copy", async)
-	}
-	if got := mintHits.Load(); got != 0 {
-		t.Fatalf("mint hits = %d, want rate-limit store error not to reach qurl-service", got)
+	if got := mintHits.Load(); got != 1 {
+		t.Fatalf("mint hits = %d, want only the under-limit call to reach qURL", got)
 	}
 }
 
