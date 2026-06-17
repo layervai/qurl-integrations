@@ -19,7 +19,7 @@ jest.mock('../src/logger', () => ({
 // target_url) — each a jest.fn the detect tests configure per case (see
 // captureDetect). The `mock`-prefix lets the factory reference it past jest's
 // hoist. Keep the REAL `isPrivateHost` from qurl.js — the host-pin SSRF cases
-// need its IP-literal parsing. Only resolveDetectTarget() builds a QurlClient,
+// need its IP-literal parsing. Only resolveDetectTarget() builds a QURLClient,
 // so the upload / mint describes never touch this — they don't reach the detect
 // path (they hit globalThis.fetch directly, and the SDK is never invoked there).
 const mockClient = {
@@ -28,7 +28,7 @@ const mockClient = {
   resolve: jest.fn(),
 };
 jest.mock('@layervai/qurl', () => ({
-  QurlClient: jest.fn().mockImplementation(() => mockClient),
+  QURLClient: jest.fn().mockImplementation(() => mockClient),
 }));
 
 // Reset all three SDK method mocks between tests (call counts + implementations).

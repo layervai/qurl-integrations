@@ -1,4 +1,4 @@
-const { QurlClient } = require('@layervai/qurl');
+const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
@@ -459,7 +459,7 @@ function getQurlClient() {
     // resolve() is a fast knock+lookup, so 30s sits well under the POST's 60s;
     // the retry worst case is timeout*(maxRetries+1)+backoff, still inside
     // Discord's 15-min deferred-interaction window.
-    _qurlClient = new QurlClient({
+    _qurlClient = new QURLClient({
       apiKey: config.QURL_API_KEY,
       baseUrl: config.QURL_ENDPOINT,
       timeout: 30000,
