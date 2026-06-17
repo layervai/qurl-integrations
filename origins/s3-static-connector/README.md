@@ -74,6 +74,11 @@ removal) before these rules — a strict superset of CloudFront for the static
 paths served here; it differs only on pathological inputs (e.g. `//a`, `/../a`)
 that the protected dashboards never emit.
 
+The CI-backed key contract is for simple static-site object paths using
+letters, numbers, dots, underscores, hyphens, and slashes. Object keys that
+need percent-encoding (spaces, non-ASCII bytes, literal `%2F`, etc.) stay in
+the staging-soak bucket before this image is reused for such keyspaces.
+
 Successful responses pass through the object's `Content-Type` and `Cache-Control`
 verbatim. These security headers are set on **every** response (200/404/405/5xx):
 
