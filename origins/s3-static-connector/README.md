@@ -45,7 +45,7 @@ This contract is frozen — additive only once published.
 | `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback. Do not set in protected deployments. |
 | `ALLOW_PLAINTEXT_S3` | No | `false` | Explicit local-test/diagnostic escape hatch required before setting `S3_TLS=false`. Do not set in protected deployments. |
 | `INDEX_DOCUMENT` | No | `index.html` | Powers clean URLs; empty is invalid when explicitly set. |
-| `AWS_REGION` | Yes | `AWS_DEFAULT_REGION` | Region for the S3 endpoint host and SigV4. Set it directly in deployments; the entrypoint copies `AWS_DEFAULT_REGION` when only that is supplied. Validated as lowercase letters, numbers, and hyphen-separated segments. |
+| `AWS_REGION` | Yes | `AWS_DEFAULT_REGION` | Standard AWS commercial region for the S3 endpoint host and SigV4 (for example, `us-east-1`). Set it directly in deployments; the entrypoint copies `AWS_DEFAULT_REGION` when only that is supplied. China, GovCloud, ISO, and ISO-B endpoints are not supported. |
 | `S3_ENDPOINT_ADDR` | No | bucket S3 vhost | Test/diagnostic override for the Envoy cluster address. Leave unset for real S3. Must be a DNS name, IPv4 address, or unbracketed IPv6 address. |
 | `S3_ENDPOINT_PORT` | No | `443` | Test/diagnostic override for the Envoy cluster port. Must be numeric and in `1..65535`. |
 | `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_PLAINTEXT_S3=true` for plaintext local tests or diagnostics. |

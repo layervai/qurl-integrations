@@ -36,11 +36,15 @@ if [ "${#S3_BUCKET}" -lt 3 ] || [ "${#S3_BUCKET}" -gt 63 ]; then
   exit 1
 fi
 case "$AWS_REGION" in
-  *[!a-z0-9-]*|-*|*-|*--*)
-    echo "AWS_REGION must use lowercase letters, numbers, and single hyphen separators" >&2
+  *[!a-z0-9-]*|-*|*-|*--*|cn-*|us-gov-*|us-iso-*|us-isob-*)
+    echo "AWS_REGION must be a standard AWS commercial region such as us-east-1; China, GovCloud, ISO, and ISO-B endpoints are not supported" >&2
     exit 1
     ;;
 esac
+if ! printf '%s\n' "$AWS_REGION" | grep -Eq '^[a-z]{2}-[a-z]+-[0-9]+$'; then
+  echo "AWS_REGION must be a standard AWS commercial region such as us-east-1; China, GovCloud, ISO, and ISO-B endpoints are not supported" >&2
+  exit 1
+fi
 
 case "$S3_PREFIX" in
   *[!A-Za-z0-9._/-]*)

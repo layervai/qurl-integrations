@@ -102,13 +102,25 @@ if render invalid-region S3_BUCKET=example-bucket AWS_REGION='us-east-1;include'
   echo "MISMATCH: invalid AWS_REGION rendered successfully" >&2
   exit 1
 fi
-grep -q "AWS_REGION must use lowercase" "$TMP/invalid-region.err"
+grep -q "AWS_REGION must be a standard AWS commercial region" "$TMP/invalid-region.err"
 
 if render injected-region S3_BUCKET=example-bucket AWS_REGION=$'us-east-1\ninclude' 2>"$TMP/injected-region.err"; then
   echo "MISMATCH: injected AWS_REGION rendered successfully" >&2
   exit 1
 fi
-grep -q "AWS_REGION must use lowercase" "$TMP/injected-region.err"
+grep -q "AWS_REGION must be a standard AWS commercial region" "$TMP/injected-region.err"
+
+if render unsupported-partition-region S3_BUCKET=example-bucket AWS_REGION=cn-north-1 2>"$TMP/unsupported-partition-region.err"; then
+  echo "MISMATCH: unsupported-partition AWS_REGION rendered successfully" >&2
+  exit 1
+fi
+grep -q "AWS_REGION must be a standard AWS commercial region" "$TMP/unsupported-partition-region.err"
+
+if render malformed-region S3_BUCKET=example-bucket AWS_REGION=useast1 2>"$TMP/malformed-region.err"; then
+  echo "MISMATCH: malformed AWS_REGION rendered successfully" >&2
+  exit 1
+fi
+grep -q "AWS_REGION must be a standard AWS commercial region" "$TMP/malformed-region.err"
 
 if render invalid-endpoint-addr S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_ENDPOINT_ADDR=$'stub\ninclude' 2>"$TMP/invalid-endpoint-addr.err"; then
   echo "MISMATCH: invalid S3_ENDPOINT_ADDR rendered successfully" >&2

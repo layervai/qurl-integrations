@@ -56,6 +56,8 @@ static_resources:
   - name: s3
     type: LOGICAL_DNS
     connect_timeout: 5s
+    # Standard AWS commercial S3 egress is the supported path; IPv6-only S3
+    # egress stays out of scope for this image.
     dns_lookup_family: V4_ONLY
     load_assignment:
       cluster_name: s3
