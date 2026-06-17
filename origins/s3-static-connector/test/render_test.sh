@@ -54,6 +54,12 @@ if render dotdot-prefix S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_PREFIX=
 fi
 grep -q "S3_PREFIX must not contain dot or dot-dot" "$TMP/dotdot-prefix.err"
 
+if render empty-prefix-segment S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_PREFIX='site//assets' 2>"$TMP/empty-prefix-segment.err"; then
+  echo "MISMATCH: empty-segment S3_PREFIX rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_PREFIX must not contain empty path segments" "$TMP/empty-prefix-segment.err"
+
 if render zero-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_TTL=0s 2>"$TMP/zero-ttl.err"; then
   echo "MISMATCH: zero CACHE_DEFAULT_TTL rendered successfully" >&2
   exit 1
@@ -130,7 +136,7 @@ render ipv6-loopback S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR='
 grep -q 'server \[::1\]:9090;' "$TMP/ipv6-loopback/nginx.conf"
 grep -q 'socket_address: { address: "::1", port_value: 9090 }' "$TMP/ipv6-loopback/envoy.yaml"
 render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 ALLOW_NON_LOOPBACK_LISTEN=true
-render plaintext-s3-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=false S3_ENDPOINT_ADDR=stub S3_ENDPOINT_PORT=9000 ALLOW_NON_LOOPBACK_LISTEN=true
+render plaintext-s3-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=false S3_ENDPOINT_ADDR=stub S3_ENDPOINT_PORT=9000 ALLOW_PLAINTEXT_S3=true
 grep -q 'match_typed_subject_alt_names:' "$TMP/default/envoy.yaml"
 grep -q 'exact: example-bucket.s3.us-east-1.amazonaws.com' "$TMP/default/envoy.yaml"
 if grep -q 'match_typed_subject_alt_names:' "$TMP/plaintext-s3-allowed/envoy.yaml"; then

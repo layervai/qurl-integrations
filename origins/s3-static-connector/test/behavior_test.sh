@@ -58,6 +58,7 @@ docker run -d --name "$STUB" --network "$NET" \
 docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
   -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
+  -e ALLOW_PLAINTEXT_S3=true \
   -e CACHE_CONNECTOR_ID=stats-connector -e CACHE_REPLICA_ID=origin-a \
   -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
   -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
@@ -250,6 +251,7 @@ docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 -e S3_PREFIX=site \
   -e CACHE_DEFAULT_TTL=60s \
   -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
+  -e ALLOW_PLAINTEXT_S3=true \
   -e CACHE_CONNECTOR_ID=stats-connector -e CACHE_REPLICA_ID=origin-a \
   -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
   -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \

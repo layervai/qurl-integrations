@@ -13,6 +13,7 @@ S3_PREFIX="${S3_PREFIX:-}"
 LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1:8080}"
 ENVOY_LISTEN_ADDR="${ENVOY_LISTEN_ADDR:-127.0.0.1:9090}"
 ALLOW_NON_LOOPBACK_LISTEN="${ALLOW_NON_LOOPBACK_LISTEN:-false}"
+ALLOW_PLAINTEXT_S3="${ALLOW_PLAINTEXT_S3:-false}"
 INDEX_DOCUMENT="${INDEX_DOCUMENT:-index.html}"
 CACHE_MAX_SIZE="${CACHE_MAX_SIZE:-1g}"
 # Unset → defer to the object's Cache-Control / nginx default (cache only what
@@ -178,6 +179,12 @@ done
 while [ "${S3_PREFIX_NORMALIZED%/}" != "$S3_PREFIX_NORMALIZED" ]; do
   S3_PREFIX_NORMALIZED="${S3_PREFIX_NORMALIZED%/}"
 done
+case "$S3_PREFIX_NORMALIZED" in
+  *//*)
+    echo "S3_PREFIX must not contain empty path segments" >&2
+    exit 1
+    ;;
+esac
 if [ -n "$S3_PREFIX_NORMALIZED" ]; then
   S3_PREFIX_NORMALIZED="/${S3_PREFIX_NORMALIZED}"
 fi
@@ -205,8 +212,8 @@ case "$S3_TLS" in
     exit 1
     ;;
 esac
-if [ "$S3_TLS" = "false" ] && [ "$ALLOW_NON_LOOPBACK_LISTEN" != "true" ]; then
-  echo "S3_TLS=false is only allowed with ALLOW_NON_LOOPBACK_LISTEN=true for local tests or diagnostics" >&2
+if [ "$S3_TLS" = "false" ] && [ "$ALLOW_PLAINTEXT_S3" != "true" ]; then
+  echo "S3_TLS=false is only allowed with ALLOW_PLAINTEXT_S3=true for local tests or diagnostics" >&2
   exit 1
 fi
 

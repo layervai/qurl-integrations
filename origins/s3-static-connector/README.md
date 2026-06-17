@@ -12,9 +12,10 @@ Published image:
 ghcr.io/layervai/qurl-integrations/s3-static-connector
 ```
 
-The publish workflow pushes `:main` and `:<git-sha>` tags after merges to
+The publish workflow rebuilds the multi-arch image from the same Dockerfile
+after PR tests, then pushes `:main` and `:<git-sha>` tags after merges to
 `qurl-integrations/main`. Deployments should pin the resolved image digest once
-the image has been published and soaked.
+the published image has soaked.
 
 The image packages two pinned processes:
 
@@ -37,15 +38,16 @@ This contract is frozen — additive only once published.
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `S3_BUCKET` | Yes | none | Private bucket to serve from. Must be a non-dotted, DNS-compatible name using lowercase letters, numbers, and hyphens. |
-| `S3_PREFIX` | No | empty | Key prefix; normalized to a single leading slash, no trailing slash. |
+| `S3_PREFIX` | No | empty | Key prefix; normalized to a single leading slash, no trailing slash; empty internal path segments (`//`) are rejected. |
 | `LISTEN_ADDR` | No | `127.0.0.1:8080` | nginx listen address; matches `protect-connector`'s default `port:8080`. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
 | `ENVOY_LISTEN_ADDR` | No | `127.0.0.1:9090` | Internal signer listener; never exposed outside the container. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
-| `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback and for plaintext S3 endpoint diagnostics. Do not set in protected deployments. |
+| `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback. Do not set in protected deployments. |
+| `ALLOW_PLAINTEXT_S3` | No | `false` | Explicit local-test/diagnostic escape hatch required before setting `S3_TLS=false`. Do not set in protected deployments. |
 | `INDEX_DOCUMENT` | No | `index.html` | Powers clean URLs; empty is invalid when explicitly set. |
 | `AWS_REGION` | Usually | env / IMDS | Region for the S3 endpoint host and SigV4. Resolved from IMDSv2 when unset; validated as lowercase letters, numbers, and hyphen-separated segments. |
 | `S3_ENDPOINT_ADDR` | No | bucket S3 vhost | Test/diagnostic override for the Envoy cluster address. Leave unset for real S3. Must be a DNS name, IPv4 address, or unbracketed IPv6 address. |
 | `S3_ENDPOINT_PORT` | No | `443` | Test/diagnostic override for the Envoy cluster port. Must be numeric and in `1..65535`. |
-| `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_NON_LOOPBACK_LISTEN=true` for plaintext local tests or diagnostics. |
+| `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_PLAINTEXT_S3=true` for plaintext local tests or diagnostics. |
 | `CACHE_MAX_SIZE` | No | `1g` | nginx `proxy_cache_path` max size. |
 | `CACHE_DEFAULT_TTL` | No | (unset) | Unset = cache per the object's `Cache-Control` / nginx default. Set it to force a fallback TTL for objects S3 returns without cache metadata. Must be a non-zero nginx time literal such as `60s`, `5m`, or `1h30m`. |
 | `CACHE_CONNECTOR_ID` | No | `QURL_CONNECTOR_ID`, then empty | Logical connector/site label used by `qurl-origin-cachectl purge-connector` as a fail-closed deployment guard. Set it to the stable customer-provided connector ID/slug used by your deploy automation. |
@@ -106,12 +108,12 @@ verbatim. These security headers are set on **every** response (200/404/405/5xx)
 S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
 distinction is preserved in the access log for alarming.
 
-Range serving is intended for uncompressed objects. nginx gzip can take
-precedence for compressible content types such as CSS, JS, JSON, SVG, and XML,
-so byte-range behavior for those assets is not part of the contract. Viewer
-headers are stripped before the Envoy/S3 hop, so a cold range request can still
-return `206` to the viewer while nginx fetches and caches the full object from
-S3; subsequent ranges can be served as `206` from nginx's cache.
+Range serving is intended for uncompressed objects. nginx gzip takes precedence
+for compressible content types such as CSS, JS, JSON, SVG, and XML, so text
+asset ranges are not part of the contract. Viewer headers are stripped before
+the Envoy/S3 hop, so a cold range request can still return `206` to the viewer
+while nginx fetches and caches the full object from S3; subsequent ranges can be
+served as `206` from nginx's cache.
 
 ## Logging
 
@@ -159,6 +161,12 @@ serves that connector and count the emitted `replica_id`s. Targeting one
 replica should be an explicit diagnostic or maintenance override. FRP load
 balancing fans viewer requests across registered replicas; it does not purge
 peer nginx cache directories.
+
+Targeted purge is coupled to the rendered nginx cache key
+(`$request_method$scheme$proxy_host$uri`) and `proxy_cache_path levels=1:2`.
+The render and live behavior tests lock those values against `cachectl.sh`; any
+future cache-key or upstream-name change must update the template, helper, and
+tests together.
 
 It is intentionally **not** exposed as an HTTP endpoint, because the connector
 forwards viewer traffic to the origin port and cache administration must stay

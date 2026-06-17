@@ -32,20 +32,29 @@ mkdir -p /tmp/s3cache /tmp/client_body /tmp/proxy_temp
 # Startup marker for the OriginRestart metric filter ($.msg == "origin_started").
 printf '{"layer":"origin","msg":"origin_started"}\n'
 
+envoy_pid=""
+nginx_pid=""
+term() {
+  [ -n "$envoy_pid" ] && kill -TERM "$envoy_pid" 2>/dev/null || true
+  [ -n "$nginx_pid" ] && kill -TERM "$nginx_pid" 2>/dev/null || true
+}
+wait_children() {
+  [ -n "$envoy_pid" ] && wait "$envoy_pid" 2>/dev/null || true
+  [ -n "$nginx_pid" ] && wait "$nginx_pid" 2>/dev/null || true
+}
+shutdown() {
+  term
+  wait_children
+  exit 143
+}
+trap shutdown TERM INT
+
 /usr/local/bin/envoy -c "${RENDER_DIR}/envoy.yaml" \
   --log-format '{"layer":"envoy","level":"%l","name":"%n","message":"%j"}' &
 envoy_pid=$!
 
 /usr/sbin/nginx -c "${RENDER_DIR}/nginx.conf" -g 'daemon off;' &
 nginx_pid=$!
-
-term() { kill -TERM "$envoy_pid" "$nginx_pid" 2>/dev/null || true; }
-shutdown() {
-  term
-  wait "$envoy_pid" "$nginx_pid" 2>/dev/null || true
-  exit 143
-}
-trap shutdown TERM INT
 
 # Supervisor: `wait -n` reaps the first exited child. A `kill -0` poll loop can
 # miss zombies under dash; PID-scoped `wait -n` requires bash >= 5.1 (bookworm has 5.2).
@@ -62,7 +71,7 @@ if ! kill -0 "$nginx_pid" 2>/dev/null; then
 fi
 
 term
-wait "$envoy_pid" "$nginx_pid" 2>/dev/null || true
+wait_children
 if [ "$exit_code" -eq 0 ]; then
   exit 1
 fi
