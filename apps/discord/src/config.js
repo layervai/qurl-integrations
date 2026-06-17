@@ -519,11 +519,11 @@ module.exports = {
   // skips the edit when the row's last_rendered_at is younger than this.
   // (M autoscaled replicas can each read a stale last_rendered_at before
   // any commits, so the precise worst case is ~M edits/window — still
-  // flat in fan-out, far under Discord's edit rate.) The poll
-  // backstop (monitorLinkStatus) is the trailing-edge flush that renders
-  // the final count after the burst settles. ~1.5s keeps the counter
-  // visibly live while capping edits well under Discord's rate.
-  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 1500, { minPositive: true }),
+  // flat in fan-out, far under Discord's edit rate.) A coalesced first
+  // view schedules a trailing flush after the remaining window, so even
+  // the final view in a burst is rendered by the webhook fast-path in
+  // under a second instead of waiting for the poll backstop.
+  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 500, { minPositive: true, max: 900 }),
 
   SHARD_ID,
 

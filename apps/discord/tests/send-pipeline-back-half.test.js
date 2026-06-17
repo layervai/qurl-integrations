@@ -2657,6 +2657,7 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
     expect(fields.interactionToken).toBe('interaction-tok-live');
     expect(fields.interactionAppId).toBe('app-123');
     expect(fields.expectedCount).toBe(1);
+    expect(fields.viewedCount).toBe(0);
     // The COLLAPSED base — the "Sent to N users | Expires…" header, NOT a
     // string carrying the "👀 …" counter line (which would double-stamp
     // when the fast-path re-renders through renderViewCounter).
@@ -3158,4 +3159,3 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     expect(message.content).not.toMatch(/‮/);
   });
 });
-

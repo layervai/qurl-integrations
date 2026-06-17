@@ -1481,27 +1481,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // Fast first tick catches sub-second self-destruct sends where the
   // recipient burns the link before any interval would fire.
   const FIRST_POLL_DELAY_MS = 3000;
-  // Dense early-poll phase. The sub-second SQS view-update push is
-  // best-effort and silent-drops on the N-1/N replicas that don't host
-  // this monitor (view-update-registry.js's SILENT DROP doc), so on
-  // most sends the polling tick below is what actually renders the
-  // counter. The webhook fast-path (routes/qurl-webhook.js) now OWNS
-  // sub-second latency — it edits the sender's confirmation from any
-  // replica the instant a qurl.accessed view records, no poll involved.
-  // So this poll is now a BACKSTOP / self-heal floor: it covers a
-  // legacy/pre-feature send (no persisted token), a fast-path edit that
-  // transiently failed (it deliberately does NOT advance last_rendered_count
-  // on a failed edit, so the next poll re-renders and self-heals), the
-  // expand/collapse toggle the content-only fast-path doesn't restore, and
-  // — since the fast-path is now leading-edge-coalesced
-  // (QURL_VIEW_COUNTER_COALESCE_MS, see routes/qurl-webhook.js step 4b) —
-  // the TRAILING-EDGE FLUSH of a burst's final-window tail: the last few
-  // views of a high-fan-out send land inside one coalesce window and are
-  // skipped by the fast-path, so this poll is what renders the settled
-  // final count. That makes the poll REQUIRED for convergence on a
-  // coalesced send, not merely a nice-to-have — do NOT remove it or widen
-  // its steady interval past the point where a coalesced tail would sit
-  // un-flushed for an unacceptably long time.
+  // Dense early-poll phase. The webhook fast-path
+  // (routes/qurl-webhook.js) owns sub-second latency: it edits the
+  // sender's confirmation from any replica the instant a qurl.accessed
+  // view records, keeps viewed_count as an O(1) aggregate, and schedules
+  // its own trailing flush for coalesced bursts. This poll is now a
+  // BACKSTOP / self-heal floor: it covers a legacy/pre-feature send (no
+  // persisted token), a fast-path edit that transiently failed (it
+  // deliberately does NOT advance last_rendered_count on a failed edit,
+  // so the next poll re-renders and self-heals), and the expand/collapse
+  // toggle the content-only fast-path doesn't restore.
   //
   // Because the fast-path carries the latency, #839's aggressive 5s dense
   // ramp is relaxed back to a MODEST one: the first tick still fires at
@@ -1637,12 +1626,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         // or skip the allDone bookkeeping above. (tryAdvanceRenderedCount
         // also stamps last_rendered_at, arming the coalesce clock — so a
         // genuine NEW view landing within QURL_VIEW_COUNTER_COALESCE_MS
-        // (~1.5s) AFTER this tick IS coalesced by the fast-path's step 4b
-        // and deferred to the next poll tick. Benign: the poll just
-        // rendered the current count, and the ≤15s backstop catches the
-        // follower — the window is far shorter than the tick spacing, so
-        // this only shifts a sub-1.5s-after-tick view from fast-path to
-        // poll, never strands it.) NOT advanced on the degraded
+        // after this tick is coalesced by the fast-path's step 4b and
+        // rendered by the webhook trailing flush, not stranded for the
+        // next poll.) NOT advanced on the degraded
         // early-return or the terminal-freeze render — neither displays a
         // live counter, so advancing would strand it.
         if (ok) {
@@ -2443,6 +2429,7 @@ async function executeSendPipeline(interaction, {
         // its single GetItem (no recipient-row Query). Filter falsy —
         // legacy/non-guild links may omit qurlId.
         confirmQurlIds: qurlLinks.map(l => l.qurlId).filter(Boolean),
+        viewedCount: 0,
         // Epoch seconds. Aligned to the real Discord interaction-token TTL
         // (~15 min), NOT a minute past it: getSendRenderState self-defends
         // by treating a past value as absent, so setting this to ~15 min

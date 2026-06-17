@@ -1092,7 +1092,9 @@ const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 // self-destruct semantics ("once consumed, always consumed"). If
 // qurl-service ever needs to un-consume a row, that's a separate
 // API contract change.
-async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
+async function recordQurlView({
+  qurlId, accessCount, consumed, eventId, returnMeta = false,
+}) {
   if (!qurlId) throw new Error('recordQurlView: qurlId is required');
   if (typeof accessCount !== 'number' || accessCount < 0) {
     throw new Error(`recordQurlView: accessCount must be a non-negative number (got ${accessCount})`);
@@ -1101,7 +1103,7 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
   const nowMs = Date.now();
   const consumedBool = Boolean(consumed);
   try {
-    await ddb.send(new UpdateCommand({
+    const res = await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_views,
       Key: { qurl_id: qurlId },
       // `consumed` is a DDB reserved keyword — must be aliased via
@@ -1124,13 +1126,18 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
         ':false': false,
         ':true': true,
       },
+      ReturnValues: returnMeta ? 'ALL_OLD' : undefined,
     }));
-    return 'recorded';
+    if (!returnMeta) return 'recorded';
+    return {
+      result: 'recorded',
+      firstView: !(res.Attributes?.access_count > 0),
+    };
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException') {
       // Replay (same event_id) OR out-of-order (lower-or-equal count
       // with no consumed flip). Row already reflects a >= state.
-      return 'dedup';
+      return returnMeta ? { result: 'dedup', firstView: false } : 'dedup';
     }
     throw err;
   }
@@ -1140,12 +1147,10 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
 // keys per request, so this chunks at 100. That chunking is LOAD-BEARING,
 // not defensive: max recipients is QURL_SEND_MAX_RECIPIENTS (default
 // 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
-// On the view-counter fast-path this read is off the webhook's 200
-// response (fire-and-forget) and coalescing bounds it to ~1/window/
-// replica, but for a large send a single non-coalesced edit still pays
-// the full chunk count — the counter's "sub-second" is per-edit network
-// latency, which degrades with N. (Counter-sharding would cap this; out
-// of scope under the realistic recipient cap.)
+// The sender-counter fast-path now renders from qurl_send_configs.viewed_count,
+// so this BatchGet-all path is not on the normal sub-second render path.
+// It remains the monitor poll reader and a legacy fallback for live rows
+// created before viewed_count existed.
 async function getQurlViews(qurlIds) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
   // Drop empties defensively — an empty qurl_id is a collision attractor.
@@ -1639,6 +1644,14 @@ async function getSendConfig(sendId, senderDiscordId) {
 // saveSendConfig that failed — both leave the fast-path inert and the
 // in-memory monitor as the sole renderer).
 //
+// `viewedCount` is an O(1) aggregate of distinct qurl_ids viewed for
+// this send, incremented only after recordQurlView proves this webhook
+// is the first recorded view for that qurl_id. The fast-path renders
+// from it instead of BatchGetting every qurl_id, so max-fanout sends keep
+// the same sub-second shape as small sends. `lastRenderedCount` remains
+// the commit-after-edit floor: viewed_count can run ahead when a view
+// records but the Discord edit is coalesced or transiently fails.
+//
 // `terminal` is derived (not stored as one flag): the display is dead
 // once the sender revoked (revoked_at) OR a window-close/expired path
 // set confirm_terminal — either way a late fast-path edit must NOT
@@ -1675,12 +1688,13 @@ async function getSendRenderState(sendId) {
     interactionToken: row.interaction_token ?? null,
     interactionAppId: row.interaction_app_id ?? null,
     expectedCount: row.expected_count ?? 0,
+    viewedCount: typeof row.viewed_count === 'number' ? row.viewed_count : null,
     lastRenderedCount: row.last_rendered_count ?? 0,
     // Epoch MS of the last confirmed fast-path edit (0 if never). The
     // webhook fast-path leading-edge-debounces on this: skip the edit
     // when Date.now() - lastRenderedAt < QURL_VIEW_COUNTER_COALESCE_MS.
     // MS (not the seconds confirm_expires_at uses) because the cooldown
-    // is ~1.5s — seconds granularity would be too coarse to bound a
+    // is sub-second — seconds granularity would be too coarse to bound a
     // sub-second burst. Written alongside last_rendered_count in the
     // SAME conditional UpdateItem (commit-after-edit), so it only
     // advances when an edit actually landed.
@@ -1689,6 +1703,20 @@ async function getSendRenderState(sendId) {
     qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
     terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
   };
+}
+
+async function incrementSendViewedCount(sendId, floor = 0) {
+  const safeFloor = Number.isSafeInteger(floor) && floor > 0 ? floor : 0;
+  const res = await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    // Initialize from last_rendered_count for live rows created before
+    // viewed_count existed, then add exactly one distinct first-view.
+    UpdateExpression: 'SET viewed_count = if_not_exists(viewed_count, :floor) + :one',
+    ExpressionAttributeValues: { ':floor': safeFloor, ':one': 1 },
+    ReturnValues: 'UPDATED_NEW',
+  }));
+  return res.Attributes?.viewed_count ?? safeFloor + 1;
 }
 
 // Monotonic AFTER-edit commit for the view counter (PR-B calls this
@@ -1807,7 +1835,7 @@ async function markConfirmTerminal(sendId) {
 // writes it but never logs, and the field name is the only thing that
 // ever appears in a log.
 async function saveSendConfirmState(sendId, {
-  interactionToken, interactionAppId, expectedCount, confirmBaseMsg, confirmExpiresAt, confirmQurlIds,
+  interactionToken, interactionAppId, expectedCount, confirmBaseMsg, confirmExpiresAt, confirmQurlIds, viewedCount,
 } = {}) {
   // Map of attribute → provided value, keeping only the keys the caller
   // actually passed so an omitted field is left untouched (never nulled).
@@ -1818,6 +1846,7 @@ async function saveSendConfirmState(sendId, {
     confirm_base_msg: confirmBaseMsg,
     confirm_expires_at: confirmExpiresAt,
     confirm_qurl_ids: confirmQurlIds,
+    viewed_count: viewedCount,
   };
   const sets = [];
   const values = {};
@@ -2321,7 +2350,7 @@ module.exports = {
   markConsumedDMEdited, clearConsumedDMEdited,
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
-  getSendRenderState, tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
+  getSendRenderState, incrementSendViewedCount, tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

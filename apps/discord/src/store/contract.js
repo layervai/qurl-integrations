@@ -107,6 +107,7 @@ const STORE_METHODS = Object.freeze([
   // surface PR-B's webhook fast-path drives.
   'saveSendConfirmState',
   'getSendRenderState',
+  'incrementSendViewedCount',
   'tryAdvanceRenderedCount',
   'touchRenderedAt',
   'markConfirmTerminal',

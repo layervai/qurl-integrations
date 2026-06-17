@@ -579,6 +579,7 @@ function flipConsumedDMInBackground({ qurlId, eventId }) {
 // guaranteed end signal on EVERY branch (skip, edited, edit-failed) so a
 // fire-and-forget caller and the unit tests have a uniform drain anchor.
 const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
+const senderCounterFlushTimers = new Map();
 
 // Sub-second sender view-counter fast-path (feat #60, PR-B). On a real
 // new view (dbResult === 'recorded'), edits the sender's "/qurl send"
@@ -601,6 +602,17 @@ const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 // re-render forever. Each step's skip is intentional defense — see the
 // inline notes.
 //
+function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = false }) {
+  const existing = senderCounterFlushTimers.get(sendId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    senderCounterFlushTimers.delete(sendId);
+    editSenderCounterInBackground({ qurlId, force: true, repairFloor });
+  }, Math.max(0, delayMs));
+  if (typeof timer.unref === 'function') timer.unref();
+  senderCounterFlushTimers.set(sendId, timer);
+}
+
 // COALESCING (step 4b): the fast-path is leading-edge-debounced per send
 // (~1 edit per QURL_VIEW_COUNTER_COALESCE_MS per replica) so a high-fan-
 // out send can't storm Discord's per-message edit budget or hot-write the
@@ -617,12 +629,16 @@ const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 // here wouldn't fix it (the dominant stale window is the unwritten
 // pre-commit interval, not replication lag); a hard cap would need a
 // pre-edit lease, which resurrects the stuck-counter risk this design
-// avoids. The poll backstop is the trailing-edge flush for the settled
-// final count.
+// avoids. Coalesced DISTINCT first-views still update viewed_count and
+// schedule a short trailing flush, so the final frame of a burst is
+// rendered by this webhook path inside the sub-second window instead of
+// waiting for the monitor poll.
 //
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
-function editSenderCounterInBackground({ qurlId }) {
+function editSenderCounterInBackground({
+  qurlId, firstView = false, force = false, repairFloor = false,
+}) {
   // Defer into the microtask queue so a future sync-throw refactor
   // surfaces as a rejection instead of escaping the handler (same shape
   // as flipConsumedDMInBackground).
@@ -668,6 +684,11 @@ function editSenderCounterInBackground({ qurlId }) {
         return { status: 'absent' };
       }
 
+      let viewedCount = state.viewedCount;
+      if (firstView) {
+        viewedCount = await db.incrementSendViewedCount(sendId, state.lastRenderedCount);
+      }
+
       // 4b. COALESCE (leading-edge debounce). A high-fan-out send (cap
       //    QURL_SEND_MAX_RECIPIENTS, default 20000) fires one
       //    qurl.accessed per recipient's first view; un-coalesced each
@@ -678,60 +699,54 @@ function editSenderCounterInBackground({ qurlId }) {
       //    younger than the cooldown. This caps fast-path edits to ~1 per
       //    window per replica — flat in fan-out (M autoscaled replicas can
       //    each fire one stale-read edit per window, so ~M/window worst
-      //    case, still far under Discord's edit rate); the poll backstop
-      //    (monitorLinkStatus) is the trailing-edge flush that renders
-      //    the settled final count. Placed BEFORE the getQurlViews
-      //    BatchGet so a coalesced event skips that read — saving the
-      //    BatchGet only; the two reads ABOVE this gate (findSendsByQurlId
-      //    GSI + getSendRenderState GetItem) still run per recorded view,
-      //    so this is read amplification vs the old enqueue-only publish,
-      //    not a net reduction — it just keeps the burst's per-event cost
-      //    flat instead of adding a BatchGet on top. Leading-edge (not
-      //    trailing) keeps the
-      //    counter visibly live — the first view of a burst renders
-      //    immediately, only the rapid followers within the window wait
-      //    for the poll. lastRenderedAt === 0 (never edited) is always
-      //    older than the window, so the first edit is never debounced.
+      //    case, still far under Discord's edit rate). Placed before the
+      //    legacy getQurlViews fallback so normal coalesced events stay
+      //    O(1): a first distinct view has already advanced viewed_count
+      //    above, and the delayed flush below reads that aggregate instead
+      //    of walking every qurl_id. Leading-edge keeps the counter visibly
+      //    live (first view renders immediately); the scheduled trailing
+      //    flush renders rapid followers inside the same sub-second window.
+      //    lastRenderedAt === 0 (never edited) is always older than the
+      //    window, so the first edit is never debounced.
       const sinceLastEditMs = Date.now() - state.lastRenderedAt;
-      if (sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
-        logger.debug('qURL webhook sender-counter: skip — within coalesce window (poll backstop flushes)', {
-          qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs,
-        });
+      if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
+        const pendingCount = typeof viewedCount === 'number' ? viewedCount : state.lastRenderedCount;
+        if (pendingCount > state.lastRenderedCount) {
+          const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
+          scheduleSenderCounterFlush({ sendId, qurlId, delayMs });
+          logger.debug('qURL webhook sender-counter: coalesced — scheduled trailing flush', {
+            qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs, delay_ms: delayMs,
+          });
+        } else {
+          logger.debug('qURL webhook sender-counter: skip — within coalesce window (no distinct advance)', {
+            qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs,
+          });
+        }
         return { status: 'coalesced' };
       }
 
       // 5. Compute N — the count of DISTINCT viewed qurl_ids across the
-      //    WHOLE send (NOT this event's per-qurl access_count). The send's
-      //    qurl_id set is persisted on the config row (state.qurlIds), so
-      //    it comes for free off the step-2 GetItem — no extra recipient
-      //    Query. getQurlViews reads their view rows and counts those with
-      //    accessCount > 0 (`views.get(id)?.accessCount` — the map is
-      //    sparse, only accessed qurls have a row). NOTE this is a CHUNKED
-      //    BatchGet (⌈N/100⌉ sequential requests, up to ~200 at the 20000
-      //    cap), not a single read — the coalesce gate above keeps it to
-      //    ~1/window/replica, but a non-coalesced edit on a large send
-      //    pays the full chunk count (see getQurlViews). Fallback to the
-      //    recipient-row Query only if the set wasn't persisted (a
-      //    pre-confirm-qurl-ids row that somehow still cleared the
-      //    absent-guard).
-      // The getSendItems fallback needs senderId (the send-config range
-      // key), which we read off the GSI row above — only populated because
-      // qurl_id-index projects ALL. If that projection ever narrows to
-      // KEYS_ONLY/INCLUDE, senderId goes undefined and getSendItems would
-      // silently scope to the wrong key; skip + log instead so the
-      // dependency is explicit rather than latent (the persisted-qurlIds
-      // primary path doesn't hit this, which is why mocks hide it).
-      let qurlIds;
-      if (state.qurlIds.length > 0) {
-        qurlIds = state.qurlIds;
-      } else if (!senderId) {
-        logger.debug('qURL webhook sender-counter: skip — no persisted qurlIds and senderId missing (GSI projection narrowed?)', { qurl_id: qurlId, send_id: sendId });
-        return { status: 'no-qurl-ids' };
-      } else {
-        qurlIds = (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);
+      //    WHOLE send (NOT this event's per-qurl access_count). New rows
+      //    carry viewed_count, an O(1) aggregate advanced only when
+      //    recordQurlView reports this qurl_id's first recorded view. That
+      //    keeps a 20k-recipient send on the same sub-second path as a
+      //    one-recipient send; the old BatchGet-all-qurl_ids path is now a
+      //    legacy fallback for live rows created before viewed_count
+      //    existed.
+      let N = viewedCount;
+      if (typeof N !== 'number') {
+        let qurlIds;
+        if (state.qurlIds.length > 0) {
+          qurlIds = state.qurlIds;
+        } else if (!senderId) {
+          logger.debug('qURL webhook sender-counter: skip — no aggregate/qurlIds and senderId missing (GSI projection narrowed?)', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'no-count-source' };
+        } else {
+          qurlIds = (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);
+        }
+        const views = await db.getQurlViews(qurlIds);
+        N = qurlIds.filter(id => views.get(id)?.accessCount > 0).length;
       }
-      const views = await db.getQurlViews(qurlIds);
-      const N = qurlIds.filter(id => views.get(id)?.accessCount > 0).length;
 
       // 6. PRE-READ COMPARE (advisory dedup — NOT a commit). If N is no
       //    higher than the last count we confirmed-rendered, skip: this is
@@ -740,7 +755,7 @@ function editSenderCounterInBackground({ qurlId }) {
       //    without a write; the authoritative monotonic guard is the CAS
       //    in step 8.
       const L = state.lastRenderedCount;
-      if (N <= L) {
+      if (N <= L && !(repairFloor && N === L && N > 0)) {
         logger.debug('qURL webhook sender-counter: skip — N <= last rendered (redelivery / already-rendered)', {
           qurl_id: qurlId, send_id: sendId, n: N, last_rendered: L,
         });
@@ -786,7 +801,10 @@ function editSenderCounterInBackground({ qurlId }) {
         }
         return { status: 'edit-failed', n: N };
       }
-      await db.tryAdvanceRenderedCount(sendId, N);
+      const advanced = await db.tryAdvanceRenderedCount(sendId, N);
+      if (!repairFloor && !advanced && N < state.expectedCount) {
+        scheduleSenderCounterFlush({ sendId, qurlId, delayMs: 0, repairFloor: true });
+      }
       return { status: 'edited', n: N };
     })
     .then((verdict) => {
@@ -943,12 +961,15 @@ router.post('/qurl', async (req, res) => {
   const consumed = data.consumed === true;
 
   try {
-    const dbResult = await db.recordQurlView({
+    const viewRecord = await db.recordQurlView({
       qurlId: data.qurl_id,
       accessCount,
       consumed,
       eventId,
+      returnMeta: true,
     });
+    const dbResult = typeof viewRecord === 'string' ? viewRecord : viewRecord.result;
+    const firstView = typeof viewRecord === 'string' ? accessCount === 1 : viewRecord.firstView === true;
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result: dbResult });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result: dbResult });
     // Sub-second view counter (feat #60, PR-B): on a real new view
@@ -968,7 +989,7 @@ router.post('/qurl', async (req, res) => {
     // dead-but-quiet (nothing calls publish here anymore); a follow-up
     // rips them out.
     if (dbResult === 'recorded') {
-      editSenderCounterInBackground({ qurlId: data.qurl_id });
+      editSenderCounterInBackground({ qurlId: data.qurl_id, firstView });
     }
     // One-time link consumed → flip the recipient's DM to "closed".
     // Fire-and-forget off the already-decided 200 (see
@@ -1000,5 +1021,7 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  for (const timer of senderCounterFlushTimers.values()) clearTimeout(timer);
+  senderCounterFlushTimers.clear();
 };
 module.exports = router;

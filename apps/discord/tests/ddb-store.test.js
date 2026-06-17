@@ -1232,6 +1232,7 @@ describe('qurl sends', () => {
     expect(state).toEqual({
       interactionToken: 'tok-abc', interactionAppId: 'app-1',
       expectedCount: 5, lastRenderedCount: 2,
+      viewedCount: null,
       // last_rendered_at absent on the row → 0 (never edited), which the
       // fast-path treats as "older than any coalesce window".
       lastRenderedAt: 0,
@@ -1242,10 +1243,11 @@ describe('qurl sends', () => {
   test('getSendRenderState: maps last_rendered_at (epoch MS) through for the coalesce gate', async () => {
     const at = 1_700_000_000_000;
     ddbMock.on(GetCommand).resolves({
-      Item: { send_id: 's1', last_rendered_count: 4, last_rendered_at: at },
+      Item: { send_id: 's1', last_rendered_count: 4, last_rendered_at: at, viewed_count: 4 },
     });
     const state = await store.getSendRenderState('s1');
     expect(state.lastRenderedAt).toBe(at);
+    expect(state.viewedCount).toBe(4);
   });
 
   test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; qurlIds passthrough', async () => {
@@ -1339,6 +1341,17 @@ describe('qurl sends', () => {
     await expect(store.tryAdvanceRenderedCount('s1', 1)).rejects.toThrow('throughput');
   });
 
+  test('incrementSendViewedCount: atomically initializes from rendered floor, increments, and returns updated viewed_count', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { viewed_count: 6 } });
+    await expect(store.incrementSendViewedCount('s1', 5)).resolves.toBe(6);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-qurl-send-configs');
+    expect(input.Key).toEqual({ send_id: 's1' });
+    expect(input.UpdateExpression).toBe('SET viewed_count = if_not_exists(viewed_count, :floor) + :one');
+    expect(input.ExpressionAttributeValues).toEqual({ ':floor': 5, ':one': 1 });
+    expect(input.ReturnValues).toBe('UPDATED_NEW');
+  });
+
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
     // Refreshes the coalesce clock on a FAILED edit attempt without
     // advancing the count (which would strand the stuck-counter guard).
@@ -1366,11 +1379,12 @@ describe('qurl sends', () => {
     expect(input.ConditionExpression).toBeUndefined(); // sticky kill-switch, no guard
   });
 
-  test('saveSendConfirmState: send-time write SETs all five present fields', async () => {
+  test('saveSendConfirmState: send-time write SETs all present render fields', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.saveSendConfirmState('s1', {
       interactionToken: 'tok-live', interactionAppId: 'app-1',
       expectedCount: 3, confirmBaseMsg: 'Sent to 3 users', confirmExpiresAt: 1234567890,
+      viewedCount: 0,
     });
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.Key).toEqual({ send_id: 's1' });
@@ -1378,9 +1392,9 @@ describe('qurl sends', () => {
     // Every present field lands; the placeholder values carry the data.
     const vals = Object.values(input.ExpressionAttributeValues);
     expect(vals).toEqual(expect.arrayContaining([
-      'tok-live', 'app-1', 3, 'Sent to 3 users', 1234567890,
+      'tok-live', 'app-1', 3, 'Sent to 3 users', 1234567890, 0,
     ]));
-    for (const attr of ['interaction_token', 'interaction_app_id', 'expected_count', 'confirm_base_msg', 'confirm_expires_at']) {
+    for (const attr of ['interaction_token', 'interaction_app_id', 'expected_count', 'confirm_base_msg', 'confirm_expires_at', 'viewed_count']) {
       expect(input.UpdateExpression).toContain(attr);
     }
   });
@@ -1401,6 +1415,7 @@ describe('qurl sends', () => {
     expect(input.UpdateExpression).not.toContain('interaction_token');
     expect(input.UpdateExpression).not.toContain('interaction_app_id');
     expect(input.UpdateExpression).not.toContain('confirm_expires_at');
+    expect(input.UpdateExpression).not.toContain('viewed_count');
     expect(Object.values(input.ExpressionAttributeValues)).not.toContain(null);
   });
 
@@ -1630,6 +1645,21 @@ describe('qurl views', () => {
     const THIRTY_DAYS = 30 * 24 * 60 * 60;
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
     expect(input.ExpressionAttributeValues[':exp']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
+    expect(input.ReturnValues).toBeUndefined();
+  });
+
+  test('recordQurlView: returnMeta reports firstView from ALL_OLD access_count', async () => {
+    ddbMock.on(UpdateCommand).resolvesOnce({});
+    await expect(store.recordQurlView({
+      qurlId: 'q_new', accessCount: 2, consumed: false, eventId: 'evt-new', returnMeta: true,
+    })).resolves.toEqual({ result: 'recorded', firstView: true });
+
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { access_count: 1 } });
+    await expect(store.recordQurlView({
+      qurlId: 'q_repeat', accessCount: 2, consumed: false, eventId: 'evt-repeat', returnMeta: true,
+    })).resolves.toEqual({ result: 'recorded', firstView: false });
+    const input = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
+    expect(input.ReturnValues).toBe('ALL_OLD');
   });
 
   test('recordQurlView: ConditionalCheckFailedException → "dedup" (replay path, NOT a failure)', async () => {
