@@ -16,7 +16,9 @@ const (
 // fixed window it can allow a boundary burst, but the goal is dampening repeat
 // minting rather than an exact sliding limit. Entries are keyed from
 // Slack-signed team/user IDs and swept once per window instead of capped
-// globally, so this stays best-effort rather than a hard cross-task cap.
+// globally, so this stays best-effort rather than a hard cross-task cap. The
+// slash payload's upstream Slack signature verification keeps callers from
+// cheaply forging arbitrary keys.
 type setupLinkRateLimiter struct {
 	mu        sync.Mutex
 	entries   map[string]setupLinkRateLimitEntry
