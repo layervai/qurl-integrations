@@ -16,8 +16,10 @@ import (
 const (
 	mintRateLimitWindow = time.Hour
 	mintRateLimitMax    = int64(30)
+	mintRateLimitTTL    = 2 * mintRateLimitWindow
 	attrMintWindowStart = "mint_window_start"
 	attrMintCount       = "mint_count"
+	attrMintTTL         = "ttl"
 )
 
 // CheckRateLimit is the in-bot per-user mint-rate gate. Pre-pivot
@@ -104,10 +106,12 @@ func (s *Store) incrementMintCounter(ctx context.Context, teamID, counterKey str
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("ADD " + attrMintCount + " :one"),
-		ConditionExpression: aws.String(attrMintWindowStart + " = :window AND " + attrMintCount + " < :limit"),
+		UpdateExpression:         aws.String("ADD " + attrMintCount + " :one SET #ttl = :ttl"),
+		ConditionExpression:      aws.String(attrMintWindowStart + " = :window AND " + attrMintCount + " < :limit"),
+		ExpressionAttributeNames: map[string]string{"#ttl": attrMintTTL},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":one":    numberAttr(1),
+			":ttl":    numberAttr(mintCounterExpiresAt(windowUnix)),
 			":window": numberAttr(windowUnix),
 			":limit":  numberAttr(mintRateLimitMax),
 		},
@@ -137,14 +141,20 @@ func (s *Store) resetMintCounter(ctx context.Context, teamID, counterKey string,
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET " + attrMintWindowStart + " = :window, " + attrMintCount + " = :one"),
-		ConditionExpression: aws.String("attribute_not_exists(" + attrMintWindowStart + ") OR " + attrMintWindowStart + " < :window"),
+		UpdateExpression:         aws.String("SET " + attrMintWindowStart + " = :window, " + attrMintCount + " = :one, #ttl = :ttl"),
+		ConditionExpression:      aws.String("attribute_not_exists(" + attrMintWindowStart + ") OR " + attrMintWindowStart + " < :window"),
+		ExpressionAttributeNames: map[string]string{"#ttl": attrMintTTL},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":one":    numberAttr(1),
+			":ttl":    numberAttr(mintCounterExpiresAt(windowUnix)),
 			":window": numberAttr(windowUnix),
 		},
 	})
 	return err
+}
+
+func mintCounterExpiresAt(windowUnix int64) int64 {
+	return time.Unix(windowUnix, 0).UTC().Add(mintRateLimitTTL).Unix()
 }
 
 func isConditionalCheckFailed(err error) bool {

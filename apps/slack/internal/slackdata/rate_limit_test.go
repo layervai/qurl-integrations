@@ -3,6 +3,7 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,8 +24,14 @@ func TestCheckRateLimit_AllowsUntilHourlyLimitThenReturnsRetry(t *testing.T) {
 	}
 	store := newStore(&stubDDB{
 		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			if got := aws.ToString(in.UpdateExpression); got != "ADD mint_count :one" {
+			if got := aws.ToString(in.UpdateExpression); got != "ADD mint_count :one SET #ttl = :ttl" {
 				t.Fatalf("UpdateExpression = %q", got)
+			}
+			if got := in.ExpressionAttributeNames["#ttl"]; got != attrMintTTL {
+				t.Fatalf("ExpressionAttributeNames[#ttl] = %q, want %q", got, attrMintTTL)
+			}
+			if got := readNumber(in.ExpressionAttributeValues, ":ttl"); got != mintCounterExpiresAt(windowStart.Unix()) {
+				t.Fatalf(":ttl = %d, want %d", got, mintCounterExpiresAt(windowStart.Unix()))
 			}
 			if got := aws.ToString(in.ConditionExpression); got != "mint_window_start = :window AND mint_count < :limit" {
 				t.Fatalf("ConditionExpression = %q", got)
@@ -77,17 +84,23 @@ func TestCheckRateLimit_ResetsStaleWindow(t *testing.T) {
 	windowUnix := now.Truncate(mintRateLimitWindow).Unix()
 	store := newStore(&stubDDB{
 		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
-			if got := aws.ToString(in.UpdateExpression); got == "ADD mint_count :one" {
+			if got := aws.ToString(in.UpdateExpression); strings.HasPrefix(got, "ADD mint_count :one") {
 				return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("stale window")}
 			}
-			if got := aws.ToString(in.UpdateExpression); got != "SET mint_window_start = :window, mint_count = :one" {
+			if got := aws.ToString(in.UpdateExpression); got != "SET mint_window_start = :window, mint_count = :one, #ttl = :ttl" {
 				t.Fatalf("reset UpdateExpression = %q", got)
+			}
+			if got := in.ExpressionAttributeNames["#ttl"]; got != attrMintTTL {
+				t.Fatalf("reset ExpressionAttributeNames[#ttl] = %q, want %q", got, attrMintTTL)
 			}
 			if got := aws.ToString(in.ConditionExpression); got != "attribute_not_exists(mint_window_start) OR mint_window_start < :window" {
 				t.Fatalf("reset ConditionExpression = %q", got)
 			}
 			if got := readNumber(in.ExpressionAttributeValues, ":window"); got != windowUnix {
 				t.Fatalf(":window = %d, want %d", got, windowUnix)
+			}
+			if got := readNumber(in.ExpressionAttributeValues, ":ttl"); got != mintCounterExpiresAt(windowUnix) {
+				t.Fatalf(":ttl = %d, want %d", got, mintCounterExpiresAt(windowUnix))
 			}
 			return &dynamodb.UpdateItemOutput{}, nil
 		},

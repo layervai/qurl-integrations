@@ -491,6 +491,7 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 //
 //	SET redeemed = :true, redeemed_by = :user, redeemed_at = :now_iso
 //	ADD allowed_resource_ids :rids SET updated_at = :now
+//	ADD mint_count :one SET #ttl = :ttl
 //	DELETE allowed_resource_ids :rids SET updated_at = :now
 //
 // A general DDB expression parser is much larger than this; we'd
