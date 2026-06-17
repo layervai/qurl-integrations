@@ -1617,7 +1617,10 @@ async function getSendConfig(sendId, senderDiscordId) {
   // reads the token via getSendRenderState (which is the ONLY return
   // shape that intentionally carries it, and its sole caller logs only
   // scalars). Strip it here so the full-row getter is token-free.
-  const { interaction_token: _omit, ...safe } = row;
+  // Same destructure-and-omit idiom as getGuildConfig's qurl_api_key strip
+  // (the `_drop` throwaway matches that precedent + the `_`-prefix
+  // no-unused-vars convention).
+  const { interaction_token: _drop, ...safe } = row;
   return safe.attachment_url
     ? { ...safe, attachment_url: decrypt(safe.attachment_url) }
     : safe;
@@ -1700,22 +1703,15 @@ async function getSendRenderState(sendId) {
 // nothing to do"). Same CCFE-as-control-flow shape as
 // markExpiredDMEdited / flipRevokedAt.
 //
-// COALESCING: last_rendered_at (epoch MS) is stamped in the SAME write
-// so the next webhook's leading-edge debounce (getSendRenderState →
-// lastRenderedAt) sees this edit's instant and skips re-editing inside
-// the cooldown window. Stamped UNCONDITIONALLY relative to the count
-// guard — it lives in the SET clause, not the condition — so even the
-// degenerate "advance from N to the same N" can't happen (the count
-// condition rejects equal), and a genuine advance always refreshes the
-// debounce clock. The SUCCESS path advances the count + stamps the clock
-// together. The FAILURE path stamps the clock alone via touchRenderedAt
-// (below) — so last_rendered_at means "last edit ATTEMPT", while
-// last_rendered_count means "last DISPLAYED count". Splitting the two
-// keeps coalescing alive during an edit outage (a burst against a 5xx-ing
-// Discord would otherwise re-attempt a PATCH per view — every gate sees
-// last_rendered_at=0 since no success ever stamped it) WITHOUT advancing
-// the count on a failed display (which would strand the stuck-counter
-// guard). Same ~M-edits/window bound on both paths.
+// COALESCING: last_rendered_at (epoch MS) is stamped in the SAME write,
+// in the SET clause NOT the condition — so the count guard rejecting an
+// equal advance can't suppress the clock refresh, and the next webhook's
+// leading-edge debounce (getSendRenderState → lastRenderedAt) always sees
+// this edit's instant. This is the SUCCESS-path stamp (count + clock
+// together); the FAILURE path stamps the clock alone via touchRenderedAt
+// (below). So last_rendered_at = "last edit ATTEMPT", last_rendered_count
+// = "last DISPLAYED count" — the split's why lives at the route's step-8
+// (qurl-webhook.js), the only caller.
 async function tryAdvanceRenderedCount(sendId, n) {
   try {
     await ddb.send(new UpdateCommand({

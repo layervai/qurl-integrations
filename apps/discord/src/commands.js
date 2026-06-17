@@ -2443,12 +2443,19 @@ async function executeSendPipeline(interaction, {
         // its single GetItem (no recipient-row Query). Filter falsy —
         // legacy/non-guild links may omit qurlId.
         confirmQurlIds: qurlLinks.map(l => l.qurlId).filter(Boolean),
-        // Epoch seconds; bounds the sensitive token's life just past the
-        // 14-min monitor cap (16 min). getSendRenderState self-defends on
-        // this (treats a past value as absent) so the bot stops trusting
-        // a dead token even before the qurl-bot-ddb terraform enables a
-        // DDB TTL on confirm_expires_at to physically reap the row.
-        confirmExpiresAt: Math.floor(Date.now() / 1000) + 16 * 60,
+        // Epoch seconds. Aligned to the real Discord interaction-token TTL
+        // (~15 min), NOT a minute past it: getSendRenderState self-defends
+        // by treating a past value as absent, so setting this to ~15 min
+        // makes the fast-path stop trusting the token right when Discord
+        // kills it — closing the dead-token retry window where a view
+        // between token-death and self-defense would fire a PATCH that
+        // 401s. Kept ABOVE the 14-min monitor cap so the fast-path stays
+        // live for the whole window the token is actually valid (a value
+        // ≤14 min would self-defend while the monitor + token are still
+        // good). This also bounds the sensitive token's at-rest life until
+        // the qurl-bot-ddb DDB TTL on confirm_expires_at lands
+        // (qurl-integrations-infra#1227) to physically reap the row.
+        confirmExpiresAt: Math.floor(Date.now() / 1000) + 15 * 60,
       });
     } catch (err) {
       logger.error('saveSendConfirmState failed; webhook view-counter fast-path disabled for this send (poll backstop still renders)', {

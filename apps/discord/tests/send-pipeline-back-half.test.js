@@ -2663,7 +2663,8 @@ describe('executeSendPipeline — view-counter fast-path render-state persist', 
     expect(typeof fields.confirmBaseMsg).toBe('string');
     expect(fields.confirmBaseMsg).toContain('Sent to 1 user');
     expect(fields.confirmBaseMsg).not.toContain('👀');
-    // TTL is epoch seconds in the future (token self-reaps just past cap).
+    // TTL is epoch seconds in the future (token self-reaps at ~the real
+    // ~15-min Discord token TTL, just above the 14-min monitor cap).
     expect(fields.confirmExpiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 
