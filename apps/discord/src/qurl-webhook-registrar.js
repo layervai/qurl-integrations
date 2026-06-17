@@ -147,6 +147,17 @@ function canonicalUrl(u) {
   } catch { return u; }
 }
 
+// Tri-state classifier output for the orphan filter. Hoisted above
+// findExistingSubscriptions (the only callsite that compares against
+// these values) so the constant references aren't forward references
+// — safe at runtime due to TDZ + async-execution timing, but cleaner
+// reading order.
+const ORPHAN_FILTER_RESULTS = Object.freeze({
+  MATCH: 'match',
+  NEAR_MISS_LIVENESS: 'near-miss-liveness',
+  NO_MATCH: false,
+});
+
 // Returns ALL subscriptions matching our URL (typically 0 or 1; >1
 // only after a cold-bootstrap race created duplicates — see the
 // dedupe path in ensureWebhookSubscription). Paginates so a caller
@@ -373,18 +384,20 @@ function urlPathname(u) {
 // AND the orphan candidates, avoiding a second full-scan on every
 // create-fresh boot. Returns null when no safe prefix can be derived —
 // callers treat that as "skip the sweep".
+// MIN_FAILURES tunes the compound liveness gate's transient-blip
+// tolerance — a candidate sub with last_delivery_success=false AND
+// failure_count below this is treated as transient (NEAR_MISS), not
+// orphan-confirmed (MATCH). Sized small (3) because a single transient
+// failure is plausible but several in a row indicates sustained dead-
+// path; the motivating orphan had failure_count=1475, well above.
 const URL_MIGRATION_ORPHAN_MIN_FAILURES = 3;
-// Tri-state return so a caller (findExistingSubscriptions) can both
-// collect confirmed orphans AND record near-miss observability —
-// "matched everything except the liveness gate" is the case we WANT
-// to surface in CloudWatch so an operator can grep CloudWatch for
-// "schema field is missing" (TODO upstream-contract above) vs "field
-// is present but says alive" without staring at qurl-service directly.
-const ORPHAN_FILTER_RESULTS = Object.freeze({
-  MATCH: 'match',
-  NEAR_MISS_LIVENESS: 'near-miss-liveness',
-  NO_MATCH: false,
-});
+// ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
+// only consumer) so the tri-state predicate composes cleanly. The
+// observability rationale for the tri-state: "matched everything except
+// the liveness gate" is the case we WANT to surface in CloudWatch so an
+// operator can grep CloudWatch for "schema field is missing" (TODO
+// upstream-contract above) vs "field is present but says alive" without
+// staring at qurl-service directly.
 function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
   if (!descriptionPrefix) return null;
   const targetHost = urlHost(bridgeUrl);
@@ -404,8 +417,10 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     // From here on: host + path + description all match (a "candidate").
     // Liveness gate decides match vs near-miss. `failure_count` is
     // checked as `typeof === 'number'` so an unparseable / missing
-    // field fails closed (skip), avoiding accidental deletion if
-    // qurl-service ever omits the field.
+    // field is classified as NEAR_MISS_LIVENESS, not MATCH — the row
+    // is held back from deletion (fail-closed) but is still counted
+    // toward `nearMissCount` so the schema-drift case surfaces in the
+    // observability log, rather than silently disappearing into NO_MATCH.
     if (s.last_delivery_success !== false) return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
     if (typeof s.failure_count !== 'number' || s.failure_count < URL_MIGRATION_ORPHAN_MIN_FAILURES) {
       return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
