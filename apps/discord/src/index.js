@@ -1,7 +1,10 @@
 const config = require('./config');
 const logger = require('./logger');
 const { isPositiveFinite } = require('./utils/time');
-const { validateProductionOAuthStateSecrets } = require('./utils/oauth-state-secrets');
+const {
+  productionOAuthStateSecretWarnings,
+  validateProductionOAuthStateSecrets,
+} = require('./utils/oauth-state-secrets');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -218,20 +221,10 @@ if (process.env.NODE_ENV === 'production') {
     oauthStateSecretErrors.forEach(error => logger.error(error));
     process.exit(1);
   }
-  const {
-    legacy: legacyOAuthStateSecret,
-    github: githubOAuthStateSecret,
-    qurl: qurlOAuthStateSecret,
-  } = oauthStateSecrets;
-  if (config.isOpenNHPActive && legacyOAuthStateSecret && !githubOAuthStateSecret) {
-    logger.warn('GitHub OAuth state is using legacy OAUTH_STATE_SECRET; provision GITHUB_OAUTH_STATE_SECRET to close the migration window.');
-  }
-  if (config.isQurlOAuthConfigured && legacyOAuthStateSecret && !qurlOAuthStateSecret) {
-    logger.warn('qURL OAuth state is using legacy OAUTH_STATE_SECRET; provision QURL_OAUTH_STATE_SECRET to close the migration window.');
-  }
-  if (githubOAuthStateSecret && qurlOAuthStateSecret && githubOAuthStateSecret === qurlOAuthStateSecret) {
-    logger.warn('GITHUB_OAUTH_STATE_SECRET and QURL_OAUTH_STATE_SECRET are identical; use distinct values to preserve rotation isolation.');
-  }
+  productionOAuthStateSecretWarnings(oauthStateSecrets, {
+    isOpenNHPActive: config.isOpenNHPActive,
+    isQurlOAuthConfigured: config.isQurlOAuthConfigured,
+  }).forEach(warning => logger.warn(warning));
 }
 
 // Any deploy that issues real GitHub OAuth tokens must encrypt persisted

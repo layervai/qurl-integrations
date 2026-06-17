@@ -1,6 +1,7 @@
 const {
   MIN_OAUTH_STATE_SECRET_LENGTH,
   normalizeSecretValue,
+  productionOAuthStateSecretWarnings,
   validateProductionOAuthStateSecrets,
 } = require('../src/utils/oauth-state-secrets');
 
@@ -86,6 +87,40 @@ describe('oauth-state-secrets helpers', () => {
 
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain('OAUTH_STATE_SECRET must be at least 32 chars');
+    });
+  });
+
+  describe('productionOAuthStateSecretWarnings', () => {
+    it('warns when a configured flow is still using the legacy state secret', () => {
+      const warnings = productionOAuthStateSecretWarnings({
+        legacy: 's'.repeat(64),
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: true,
+      });
+
+      expect(warnings).toEqual([
+        expect.stringContaining('GitHub OAuth state is using legacy OAUTH_STATE_SECRET'),
+        expect.stringContaining('qURL OAuth state is using legacy OAUTH_STATE_SECRET'),
+      ]);
+    });
+
+    it('warns when dedicated secrets match each other or the legacy secret', () => {
+      const shared = 's'.repeat(64);
+      const warnings = productionOAuthStateSecretWarnings({
+        legacy: shared,
+        github: shared,
+        qurl: shared,
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: true,
+      });
+
+      expect(warnings).toEqual([
+        expect.stringContaining('GITHUB_OAUTH_STATE_SECRET and QURL_OAUTH_STATE_SECRET are identical'),
+        expect.stringContaining('GITHUB_OAUTH_STATE_SECRET matches legacy OAUTH_STATE_SECRET'),
+        expect.stringContaining('QURL_OAUTH_STATE_SECRET matches legacy OAUTH_STATE_SECRET'),
+      ]);
     });
   });
 });

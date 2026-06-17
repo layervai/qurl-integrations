@@ -100,11 +100,35 @@ function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuth
   return { errors, secrets };
 }
 
+function productionOAuthStateSecretWarnings(secrets, { isOpenNHPActive, isQurlOAuthConfigured }) {
+  const warnings = [];
+  const { legacy, github, qurl } = secrets;
+
+  if (isOpenNHPActive && legacy && !github) {
+    warnings.push('GitHub OAuth state is using legacy OAUTH_STATE_SECRET; provision GITHUB_OAUTH_STATE_SECRET to close the migration window.');
+  }
+  if (isQurlOAuthConfigured && legacy && !qurl) {
+    warnings.push('qURL OAuth state is using legacy OAUTH_STATE_SECRET; provision QURL_OAUTH_STATE_SECRET to close the migration window.');
+  }
+  if (github && qurl && github === qurl) {
+    warnings.push('GITHUB_OAUTH_STATE_SECRET and QURL_OAUTH_STATE_SECRET are identical; use distinct values to preserve rotation isolation.');
+  }
+  if (legacy && github && legacy === github) {
+    warnings.push('GITHUB_OAUTH_STATE_SECRET matches legacy OAUTH_STATE_SECRET; use distinct values before removing legacy to preserve rotation isolation.');
+  }
+  if (legacy && qurl && legacy === qurl) {
+    warnings.push('QURL_OAUTH_STATE_SECRET matches legacy OAUTH_STATE_SECRET; use distinct values before removing legacy to preserve rotation isolation.');
+  }
+
+  return warnings;
+}
+
 module.exports = {
   SSM_PLACEHOLDER_SECRET,
   MIN_OAUTH_STATE_SECRET_LENGTH,
   collectStateSecrets,
   normalizeSecretValue,
+  productionOAuthStateSecretWarnings,
   readEnvSecret,
   validateProductionOAuthStateSecrets,
 };
