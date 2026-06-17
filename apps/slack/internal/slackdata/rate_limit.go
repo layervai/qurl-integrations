@@ -110,6 +110,8 @@ func (s *Store) followFutureRateLimitWindowOnce(ctx context.Context, counterKey 
 	if latestWindow, hasLatestWindow := readRateLimitWindow(latest); followNewer && hasLatestWindow && latestWindow > storedWindow {
 		return s.followFutureRateLimitWindowOnce(ctx, counterKey, latestWindow, limit, window, now, latest, false)
 	}
+	// If the row moved back to the local window or otherwise did not settle the
+	// stored future window, deny conservatively; the next call re-reads the row.
 	return false, futureRetry, nil
 }
 
