@@ -1054,15 +1054,15 @@ func TestClassifyBindErrorMapping(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := classifyBindError(c.err); got != c.want {
-				t.Errorf("classifyBindError(%v) = %q, want %q", c.err, got, c.want)
+			if got := internal.ClassifyOAuthBindError(c.err); got != c.want {
+				t.Errorf("ClassifyOAuthBindError(%v) = %q, want %q", c.err, got, c.want)
 			}
 		})
 	}
 }
 
 // TestAdminStoreAdapterForwardsAllFields exercises the production
-// adminStoreAdapter against a captor that satisfies slackdataBinder,
+// OAuth admin-store adapter against a captor that satisfies SlackdataBinder,
 // with a non-zero CreatedAt. The reflect-shape test fences the struct
 // field set; this fences the adapter's translation line so a future
 // regression that drops one of TeamID / OwnerID / CreatedAt from the
@@ -1070,7 +1070,7 @@ func TestClassifyBindErrorMapping(t *testing.T) {
 // callback passes zero values today.
 func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
 	captured := &capturingSlackdataStore{}
-	adapter := &adminStoreAdapter{store: captured}
+	adapter := internal.NewOAuthAdminStoreAdapter(captured)
 	want := oauth.WorkspaceMapping{
 		TeamID:    "T_capture",
 		OwnerID:   "auth0|capture-owner",
@@ -1094,8 +1094,8 @@ func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
 	}
 }
 
-// capturingSlackdataStore satisfies slackdataBinder so the production
-// adminStoreAdapter can be exercised without standing up a real
+// capturingSlackdataStore satisfies internal.SlackdataBinder so the production
+// OAuth admin-store adapter can be exercised without standing up a real
 // slackdata.Store.
 type capturingSlackdataStore struct {
 	gotMapping   *slackdata.WorkspaceMapping
@@ -1119,7 +1119,7 @@ func mustParseTime(t *testing.T, s string) time.Time {
 
 // TestAdminStoreAdapterMappingShapesMatch fences the field-for-field
 // equivalence of oauth.WorkspaceMapping and slackdata.WorkspaceMapping.
-// The adminStoreAdapter copies between the two by named field; a new
+// The OAuth admin-store adapter copies between the two by named field; a new
 // field added to one and not the other would silently drop on the
 // adapter's copy. Reflect-walk the field sets so the build breaks
 // when they drift.
@@ -1127,7 +1127,7 @@ func TestAdminStoreAdapterMappingShapesMatch(t *testing.T) {
 	oauthFields := structFieldSet(reflect.TypeOf(oauth.WorkspaceMapping{}))
 	storeFields := structFieldSet(reflect.TypeOf(slackdata.WorkspaceMapping{}))
 	if !reflect.DeepEqual(oauthFields, storeFields) {
-		t.Errorf("oauth.WorkspaceMapping vs slackdata.WorkspaceMapping fields differ — adminStoreAdapter copy would silently drop the diff\noauth:     %v\nslackdata: %v", oauthFields, storeFields)
+		t.Errorf("oauth.WorkspaceMapping vs slackdata.WorkspaceMapping fields differ — OAuth admin-store adapter copy would silently drop the diff\noauth:     %v\nslackdata: %v", oauthFields, storeFields)
 	}
 }
 

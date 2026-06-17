@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +13,6 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -23,6 +21,7 @@ const (
 	oauthRebindOwnerUserID = "UOWNER526"
 	oauthRebindOtherUserID = "UOTHER526"
 	oauthRebindAdminEmail  = "admin@example.com"
+	oauthRebindCookiePath  = "/oauth/qurl"
 )
 
 func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) {
@@ -47,8 +46,8 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 		Provider:          workspaceStore,
 		IDTokenVerifier:   oauthRebindIDTokenVerifier{},
 		Minter:            minter,
-		AdminStore:        oauthAdminStoreAdapter{store: adminStore},
-		BindClassifyError: classifyOAuthRebindTestBindError,
+		AdminStore:        NewOAuthAdminStoreAdapter(adminStore),
+		BindClassifyError: ClassifyOAuthBindError,
 		HTTPClient:        &http.Client{Transport: oauthRebindTokenTransport{}, Timeout: 5 * time.Second},
 		Now:               func() time.Time { return now },
 	}
@@ -67,16 +66,13 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	startResult := startRec.Result()
 	defer func() { _ = startResult.Body.Close() }()
 
-	stateCookieName := ""
+	stateCookie := oauthRebindStateCookie(startResult.Cookies())
+	if stateCookie == nil {
+		t.Fatal("start response did not include the OAuth state cookie")
+	}
 	callbackReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	for _, c := range startResult.Cookies() {
-		if c.Value == state {
-			stateCookieName = c.Name
-		}
 		callbackReq.AddCookie(c)
-	}
-	if stateCookieName == "" {
-		t.Fatal("start response did not include the OAuth state cookie")
 	}
 	callbackRec := httptest.NewRecorder()
 	oauth.Callback(cfg)(callbackRec, callbackReq)
@@ -95,7 +91,7 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	}
 	callbackResult := callbackRec.Result()
 	defer func() { _ = callbackResult.Body.Close() }()
-	if !oauthRebindCookieCleared(callbackResult.Cookies(), stateCookieName) {
+	if !oauthRebindCookieCleared(callbackResult.Cookies(), stateCookie.Name) {
 		t.Fatal("callback did not clear OAuth state cookie on refused rebind")
 	}
 
@@ -121,6 +117,15 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	}
 }
 
+func oauthRebindStateCookie(cookies []*http.Cookie) *http.Cookie {
+	for _, c := range cookies {
+		if c.Path == oauthRebindCookiePath && c.MaxAge > 0 {
+			return c
+		}
+	}
+	return nil
+}
+
 func oauthRebindCookieCleared(cookies []*http.Cookie, name string) bool {
 	for _, c := range cookies {
 		if c.Name == name && c.MaxAge < 0 {
@@ -128,38 +133,6 @@ func oauthRebindCookieCleared(cookies []*http.Cookie, name string) bool {
 		}
 	}
 	return false
-}
-
-type oauthAdminStoreAdapter struct {
-	store *slackdata.Store
-}
-
-func (a oauthAdminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
-	return a.store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{
-		TeamID:    m.TeamID,
-		OwnerID:   m.OwnerID,
-		CreatedAt: m.CreatedAt,
-	}, seedAdmin)
-}
-
-// Keep this mapping in lockstep with apps/slack/cmd/main.go's classifyBindError;
-// package main cannot be imported here, but the callback needs the same
-// production classification to route real slackdata.Store conflicts correctly.
-func classifyOAuthRebindTestBindError(err error) oauth.BindConflictCode {
-	var ae *slackdata.Error
-	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
-		return ""
-	}
-	switch ae.Code {
-	case slackdata.ErrCodeWorkspaceAlreadyBoundToCaller:
-		return oauth.BindConflictAlreadyBoundToCaller
-	case slackdata.ErrCodeWorkspaceAlreadyBound:
-		return oauth.BindConflictAlreadyBound
-	case slackdata.ErrCodeWorkspaceBindUnverified:
-		return oauth.BindConflictUnverified
-	default:
-		return ""
-	}
 }
 
 type oauthRebindWorkspaceStore struct {
