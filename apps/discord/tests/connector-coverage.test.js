@@ -770,5 +770,48 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toThrow(/https:/);
       expect(get()).toBeNull();
     });
+
+    it('SSRF guard: a PUBLIC host with embedded userinfo throws and NO POST happens', async () => {
+      // Pins the userinfo branch INDEPENDENTLY of isPrivateHost: the host is
+      // public (a `https://good@public-host/` hostname-confusion bypass), so
+      // isPrivateHost would NOT fire and the scheme is https — only the
+      // userinfo check can reject this. The other SSRF tests are caught by the
+      // private-host / scheme guards, so without this case the userinfo branch
+      // is unexercised.
+      const get = captureDetect(
+        { detected: false },
+        { target: 'https://attacker@detect-tunnel.qurl.link/api/detect' },
+      );
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/userinfo/);
+      // resolve() ran (the knock), but the userinfo guard rejected before the POST.
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(get()).toBeNull();
+    });
+
+    it('requires config.QURL_API_KEY for the resolve Bearer even when a per-call apiKey is given (no resolve, no POST)', async () => {
+      // resolve() always authenticates with the global QURL_API_KEY (getQurlClient),
+      // so a set per-call apiKey can't substitute for it. With QURL_API_KEY unset
+      // we must fail fast with the clean configured-error BEFORE any knock or POST,
+      // not let resolve go out with an undefined Bearer.
+      jest.resetModules();
+      mockResolve.mockReset();
+      jest.doMock('../src/config', () => ({
+        CONNECTOR_URL: 'https://connector.test.local',
+        QURL_ENDPOINT: 'https://api.test.local',
+        // QURL_API_KEY intentionally absent.
+        DETECT_ACCESS_TOKEN: 'at_detect_token',
+      }));
+      const connectorNoKey = require('../src/connector');
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connectorNoKey.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k-detect' }),
+      ).rejects.toThrow(/QURL_API_KEY is not configured/);
+      // A per-call apiKey can't stand in for the resolve Bearer: no knock, no POST.
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
   });
 });

@@ -432,7 +432,18 @@ function getQurlClient() {
     // baseUrl is the bare qURL API base (no `/v1`) — the SDK prepends
     // `/v1/resolve` itself. Same base qurl.js uses for qurlFetch
     // (`${config.QURL_ENDPOINT}/v1${path}`).
-    _qurlClient = new QurlClient({ apiKey: config.QURL_API_KEY, baseUrl: config.QURL_ENDPOINT });
+    //
+    // timeout: explicitly bound the resolve() control-plane call. The SDK
+    // already defaults to 30s/attempt, but pinning it keeps the resolve leg
+    // bounded regardless of SDK-default drift, so a stalled qURL endpoint
+    // degrades like the detect POST's AbortSignal.timeout rather than hanging
+    // the interaction with no upper bound. resolve() is a fast knock+lookup,
+    // so 30s sits well under the POST's 60s.
+    _qurlClient = new QurlClient({
+      apiKey: config.QURL_API_KEY,
+      baseUrl: config.QURL_ENDPOINT,
+      timeout: 30000,
+    });
   }
   return _qurlClient;
 }
@@ -529,7 +540,13 @@ async function resolveDetectTarget() {
  * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
  */
 async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
-  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  // The resolve() leg ALWAYS authenticates with the global config.QURL_API_KEY
+  // (see getQurlClient); a per-call `apiKey` overrides only the detect POST
+  // Bearer, never the resolve Bearer. So this path specifically REQUIRES
+  // config.QURL_API_KEY — a set `apiKey` alone can't satisfy resolve, which
+  // would otherwise go out with an undefined Bearer and 401 confusingly.
+  // (config.QURL_API_KEY also backstops the POST Bearer via connectorAuthHeaders.)
+  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');
 
   // Resolve-per-call: opens the tunnel firewall for our current IP, then POST
