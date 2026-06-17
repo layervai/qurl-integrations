@@ -99,7 +99,7 @@ verbatim. These security headers are set on **every** response (200/404/405/5xx)
 | --- | ---: | --- | --- |
 | Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404` |
 | Signing / auth failure (S3 `403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) |
-| Upstream 5xx / Envoy down | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
+| Upstream 5xx / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
 | Method other than GET/HEAD | 405 | (nginx default) | access log only |
 
 S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
@@ -108,8 +108,9 @@ distinction is preserved in the access log for alarming.
 Range serving is intended for uncompressed objects. nginx gzip can take
 precedence for compressible content types such as CSS, JS, JSON, SVG, and XML,
 so byte-range behavior for those assets is not part of the contract. Viewer
-headers are stripped before the Envoy/S3 hop, so a cold range request can fetch
-and cache the full object; subsequent ranges can be served from nginx's cache.
+headers are stripped before the Envoy/S3 hop, so a cold range request can still
+return `206` to the viewer while nginx fetches and caches the full object from
+S3; subsequent ranges can be served as `206` from nginx's cache.
 
 ## Logging
 
@@ -135,8 +136,11 @@ docker exec s3-static-connector qurl-origin-cachectl purge-connector stats-conne
 ```
 
 With no path arguments, the command removes all entries from nginx's local proxy
-cache and leaves the cache directory in place. With path arguments, it removes
-the matching `GET` and `HEAD` cache entries. Paths are viewer paths, but
+cache and leaves the cache directory in place. nginx's shared cache zone can
+briefly retain metadata for deleted files; nginx treats the next lookup as a
+MISS/refetch, though in-flight requests may produce transient cache-file log
+noise. With path arguments, it removes the matching `GET` and `HEAD` cache
+entries. Paths are viewer paths, but
 object-style index paths such as `/index.html` and `/website/index.html` also
 purge their clean-URL aliases (`/`, `/website`, `/website/`) so deploy
 automation can mirror the current stats invalidation list.
@@ -170,7 +174,8 @@ unpurgeable local negative cache.
 
 `entrypoint.sh` renders both configs from the environment, then runs Envoy and
 nginx and exits as soon as **either** exits — so a crash of either process takes
-the container down and produces a clean restart/alarm signal. `tini` is PID 1.
+the container down and produces a clean restart/alarm signal. `tini` is PID 1;
+the supervisor intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
 
 ## Deploy requirements
 

@@ -233,12 +233,16 @@ hb=$(curl -s -I "$base/metrics.json" | tr -d '\r')
 expect_eq "HEAD metrics status" "$(printf '%s' "$hb" | awk 'NR==1{print $2}')" 200
 expect_eq "HEAD metrics Content-Type" "$(printf '%s\n' "$hb" | awk -F': ' 'tolower($1)=="content-type"{print $2}')" "application/json"
 
-# 13. Range -> 206 partial. nginx fills the cache with the full object on a
-# range MISS (returns 200), then serves 206 from cache — so warm it first.
-curl -s -o /dev/null "$base/range.bin"
+# 13. Range. Viewer Range is not forwarded to S3, so nginx serves 206 while
+# fetching the full 200 from S3 once; subsequent ranges are served from cache.
 code=$(curl -s -o "$B" -w '%{http_code}' -H 'Range: bytes=0-3' "$base/range.bin")
-expect_eq "Range status (cached)" "$code" 206
-expect_eq "Range body (cached)" "$(cat "$B")" "0123"
+expect_eq "Range status (cold cache)" "$code" 206
+expect_eq "Range body (cold cache)" "$(cat "$B")" "0123"
+expect_stub_gets "Range upstream GETs after cold range" 'GET /range.bin ' 1
+code=$(curl -s -o "$B" -w '%{http_code}' -H 'Range: bytes=4-6' "$base/range.bin")
+expect_eq "Range status (cached different slice)" "$code" 206
+expect_eq "Range body (cached different slice)" "$(cat "$B")" "456"
+expect_stub_gets "Range upstream GETs after cached range" 'GET /range.bin ' 1
 
 # 14. S3_PREFIX is joined with the clean-URL path at runtime.
 docker rm -f "$ORIGIN" >/dev/null 2>&1
