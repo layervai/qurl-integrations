@@ -36,7 +36,7 @@ const {
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const {
-  MIN_OAUTH_STATE_SECRET_LENGTH,
+  collectStateSecrets,
   readEnvSecret,
 } = require('./utils/oauth-state-secrets');
 const { deleteLink } = require('./qurl');
@@ -185,25 +185,13 @@ let _warnedShortLegacyStateSecret = false;
 // GITHUB_OAUTH_STATE_SECRET explicitly in their own mocks.
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
-function addStateSecret(secrets, value, label, { optionalAfterPrimary = false } = {}) {
-  if (!value) return;
-  if (value.length < MIN_OAUTH_STATE_SECRET_LENGTH) {
-    if (optionalAfterPrimary && secrets.length > 0) {
-      if (!_warnedShortLegacyStateSecret) {
-        logger.warn(
-          `Ignoring ${label} for GitHub OAuth state: secret is shorter than `
-          + `${MIN_OAUTH_STATE_SECRET_LENGTH} chars while a dedicated secret is active.`
-        );
-        _warnedShortLegacyStateSecret = true;
-      }
-      return;
-    }
-    throw new Error(
-      `Refusing to mint OAuth state: ${label} is shorter than ${MIN_OAUTH_STATE_SECRET_LENGTH} chars `
-      + `(got ${value.length}). Provision a 64+ char value in SSM.`
+function warnShortLegacyStateSecret(label) {
+  if (!_warnedShortLegacyStateSecret) {
+    logger.warn(
+      `Ignoring ${label} for GitHub OAuth state: secret is too short while a dedicated secret is active.`
     );
+    _warnedShortLegacyStateSecret = true;
   }
-  if (!secrets.includes(value)) secrets.push(value);
 }
 
 function stateSecrets() {
@@ -212,9 +200,13 @@ function stateSecrets() {
   // states stop validating after the pending-link TTL has elapsed.
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
-  const secrets = [];
-  addStateSecret(secrets, readEnvSecret('GITHUB_OAUTH_STATE_SECRET'), 'GITHUB_OAUTH_STATE_SECRET');
-  addStateSecret(secrets, readEnvSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET', { optionalAfterPrimary: true });
+  const secrets = collectStateSecrets([
+    { value: readEnvSecret('GITHUB_OAUTH_STATE_SECRET'), label: 'GITHUB_OAUTH_STATE_SECRET' },
+    { value: readEnvSecret('OAUTH_STATE_SECRET'), label: 'OAUTH_STATE_SECRET', optionalAfterPrimary: true },
+  ], {
+    errorPrefix: 'Refusing to mint OAuth state',
+    warnShortOptional: warnShortLegacyStateSecret,
+  });
   if (secrets.length > 0) return secrets;
 
   if (!config.GITHUB_CLIENT_SECRET) {
@@ -239,8 +231,11 @@ function stateSecrets() {
     }
     return [_testFallbackSecret];
   }
-  addStateSecret(secrets, config.GITHUB_CLIENT_SECRET, 'GITHUB_CLIENT_SECRET fallback');
-  return secrets;
+  return collectStateSecrets([
+    { value: config.GITHUB_CLIENT_SECRET, label: 'GITHUB_CLIENT_SECRET fallback' },
+  ], {
+    errorPrefix: 'Refusing to mint OAuth state',
+  });
 }
 
 function stateSecret() {

@@ -12,13 +12,28 @@ function readEnvSecret(name) {
   return normalizeSecretValue(process.env[name]);
 }
 
-function isSeededSecret(value) {
-  return normalizeSecretValue(value) !== undefined;
-}
-
 function isUsableOAuthStateSecret(value) {
   const secret = normalizeSecretValue(value);
   return Boolean(secret && secret.length >= MIN_OAUTH_STATE_SECRET_LENGTH);
+}
+
+function collectStateSecrets(candidates, { errorPrefix, warnShortOptional } = {}) {
+  const secrets = [];
+  for (const { value, label, optionalAfterPrimary = false } of candidates) {
+    if (!value) continue;
+    if (value.length < MIN_OAUTH_STATE_SECRET_LENGTH) {
+      if (optionalAfterPrimary && secrets.length > 0) {
+        if (warnShortOptional) warnShortOptional(label, value.length);
+        continue;
+      }
+      throw new Error(
+        `${errorPrefix}: ${label} is shorter than ${MIN_OAUTH_STATE_SECRET_LENGTH} chars `
+        + `(got ${value.length}). Generate a 64-char value with: openssl rand -hex 32.`
+      );
+    }
+    if (!secrets.includes(value)) secrets.push(value);
+  }
+  return secrets;
 }
 
 function shortSecretMessage(name, value) {
@@ -70,9 +85,9 @@ function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuth
 module.exports = {
   SSM_PLACEHOLDER_SECRET,
   MIN_OAUTH_STATE_SECRET_LENGTH,
+  collectStateSecrets,
   normalizeSecretValue,
   readEnvSecret,
-  isSeededSecret,
   isUsableOAuthStateSecret,
   validateProductionOAuthStateSecrets,
 };

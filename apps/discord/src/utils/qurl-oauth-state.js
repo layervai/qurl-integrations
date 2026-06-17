@@ -28,7 +28,7 @@
 const crypto = require('crypto');
 const config = require('../config');
 const {
-  MIN_OAUTH_STATE_SECRET_LENGTH,
+  collectStateSecrets,
   readEnvSecret,
 } = require('./oauth-state-secrets');
 
@@ -61,34 +61,27 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 // `0`.repeat(64) test fixture's order of magnitude, well below the
 // 128-char hex secrets ops actually provisions). A 4-char accidental
 // value would HMAC just fine with no security; reject upfront.
-function addSecret(secrets, value, label, { optionalAfterPrimary = false } = {}) {
-  if (!value) return;
-  if (value.length < MIN_OAUTH_STATE_SECRET_LENGTH) {
-    if (optionalAfterPrimary && secrets.length > 0) {
-      if (!_warnedShortLegacy) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `Ignoring ${label} for qURL OAuth state: secret is shorter than `
-          + `${MIN_OAUTH_STATE_SECRET_LENGTH} chars while a dedicated secret is active.`
-        );
-        _warnedShortLegacy = true;
-      }
-      return;
-    }
-    throw new Error(
-      `Refusing to mint qURL OAuth state: ${label} is shorter than ${MIN_OAUTH_STATE_SECRET_LENGTH} chars `
-      + `(got ${value.length}). Provision a 64+ char value in SSM.`
+function warnShortLegacySecret(label) {
+  if (!_warnedShortLegacy) {
+    // Keep this utility logger-free; commands.js imports it during module load.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `Ignoring ${label} for qURL OAuth state: secret is too short while a dedicated secret is active.`
     );
+    _warnedShortLegacy = true;
   }
-  if (!secrets.includes(value)) secrets.push(value);
 }
 
 function stateSecrets() {
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
-  const secrets = [];
-  addSecret(secrets, readEnvSecret('QURL_OAUTH_STATE_SECRET'), 'QURL_OAUTH_STATE_SECRET');
-  addSecret(secrets, readEnvSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET', { optionalAfterPrimary: true });
+  const secrets = collectStateSecrets([
+    { value: readEnvSecret('QURL_OAUTH_STATE_SECRET'), label: 'QURL_OAUTH_STATE_SECRET' },
+    { value: readEnvSecret('OAUTH_STATE_SECRET'), label: 'OAUTH_STATE_SECRET', optionalAfterPrimary: true },
+  ], {
+    errorPrefix: 'Refusing to mint qURL OAuth state',
+    warnShortOptional: warnShortLegacySecret,
+  });
   if (secrets.length > 0) return secrets;
 
   if (!config.GITHUB_CLIENT_SECRET) {
@@ -111,8 +104,11 @@ function stateSecrets() {
   // GitHub provision 32+ char client secrets by default, but a manual
   // /placeholder env on a misconfigured dev box would slip past
   // otherwise.
-  addSecret(secrets, config.GITHUB_CLIENT_SECRET, 'GITHUB_CLIENT_SECRET fallback');
-  return secrets;
+  return collectStateSecrets([
+    { value: config.GITHUB_CLIENT_SECRET, label: 'GITHUB_CLIENT_SECRET fallback' },
+  ], {
+    errorPrefix: 'Refusing to mint qURL OAuth state',
+  });
 }
 
 function stateSecret() {
