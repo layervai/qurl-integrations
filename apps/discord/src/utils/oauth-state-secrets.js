@@ -52,6 +52,9 @@ function shortSecretMessage(name, value) {
 }
 
 function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuthConfigured }) {
+  // Boot-time validation mirrors collectStateSecrets() by using the same
+  // normalization helper and MIN_OAUTH_STATE_SECRET_LENGTH constant. Keep
+  // runtime collection and production boot rules in lockstep.
   const secrets = normalizeProductionOAuthStateSecrets(env);
   const errors = [];
   const seenErrors = new Set();

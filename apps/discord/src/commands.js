@@ -199,6 +199,12 @@ function stateSecrets() {
   // Prefer a GitHub-flow secret, with OAUTH_STATE_SECRET as the legacy shared
   // reader during cutover. Once OAUTH_STATE_SECRET is removed, old shared-key
   // states stop validating after the pending-link TTL has elapsed.
+  //
+  // Rotation playbook: provision GITHUB_OAUTH_STATE_SECRET in SSM while
+  // leaving OAUTH_STATE_SECRET present, deploy, wait longer than
+  // PENDING_LINK_EXPIRY_MINUTES, then replace OAUTH_STATE_SECRET with the SSM
+  // PLACEHOLDER sentinel. Dual-read covers OAUTH_STATE_SECRET only; migrating
+  // directly from GITHUB_CLIENT_SECRET fallback can invalidate in-flight links.
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
   const secrets = collectStateSecrets([

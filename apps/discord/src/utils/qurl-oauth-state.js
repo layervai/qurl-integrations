@@ -49,7 +49,8 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 //      kind-binding on the state token already prevents cross-purpose
 //      forgery, so sharing was secure; the precedence here is purely
 //      operational hygiene per PR #177 review (issue #184).
-//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for old/dev env-parity.
+//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for old/dev env-parity;
+//      production boot requires #1 or #2 and will not start on this fallback.
 //   4. Test fallback          — per-process random secret for jest only.
 //
 // Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM while leaving
