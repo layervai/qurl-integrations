@@ -1475,7 +1475,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
           url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
           description: BOT_DESC,
           events: ['qurl.accessed', 'qurl.expired'],
-          failure_count: 1, // below MIN_FAILURES (3)
+          failure_count: 1, // below MIN_FAILURES (30)
           last_delivery_success: false,
         },
       ] } }),
@@ -1780,10 +1780,10 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
     // future contract migration, an in-process injection bug) could.
     // `Number.isFinite` rejects all three uniformly, matching the
     // stated fail-closed invariant. Without it, NaN/Infinity would
-    // slip through `typeof === 'number'` AND the `< 3` comparison
-    // (NaN < 3 is false; Infinity < 3 is false) → classify as MATCH
-    // → DELETE. This unit test makes the predicate-level guarantee
-    // wire-independent.
+    // slip through a `typeof === 'number'` check AND the floor
+    // comparison (NaN < N is false; Infinity < N is false for any
+    // finite N) → classify as MATCH → DELETE. This unit test makes
+    // the predicate-level guarantee wire-independent.
     const f = buildUrlMigrationOrphanFilter({
       bridgeUrl: 'https://bot.test.example/webhooks/qurl',
       descriptionPrefix: 'X',
