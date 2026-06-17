@@ -51,7 +51,6 @@ function renderPage({ title, icon, heading, message, subtext, details, type = 'i
   }
 
   const color = TYPE_COLORS[type] || TYPE_COLORS.info;
-  const escapedCspNonce = escapeHtml(cspNonce);
 
   const detailsHtml = Array.isArray(details) && details.length > 0
     ? `<dl class="details">${details.map((d) => `
@@ -68,7 +67,7 @@ function renderPage({ title, icon, heading, message, subtext, details, type = 'i
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <title>${escapeHtml(title)} - qURL</title>
-      <style nonce="${escapedCspNonce}">
+      <style nonce="${cspNonce}">
         * { box-sizing: border-box; }
         body {
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

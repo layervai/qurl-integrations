@@ -64,8 +64,10 @@ app.use(helmet({
     useDefaults: false,
     directives: {
       defaultSrc: ["'none'"],
+      // No legacy inline-style fallback: old CSP1-only browsers get a
+      // readable unstyled admin page instead of reopening 'unsafe-inline'.
       styleSrc: [cspNonceSource],
-      imgSrc: ['data:'],
+      imgSrc: ["'self'", 'data:'],
       connectSrc: ["'self'"],
       baseUri: ["'none'"],
       frameAncestors: ["'none'"],
