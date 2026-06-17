@@ -1488,11 +1488,20 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // counter. The webhook fast-path (routes/qurl-webhook.js) now OWNS
   // sub-second latency — it edits the sender's confirmation from any
   // replica the instant a qurl.accessed view records, no poll involved.
-  // So this poll is now purely a BACKSTOP / self-heal floor: it covers a
+  // So this poll is now a BACKSTOP / self-heal floor: it covers a
   // legacy/pre-feature send (no persisted token), a fast-path edit that
   // transiently failed (it deliberately does NOT advance last_rendered_count
-  // on a failed edit, so the next poll re-renders and self-heals), and the
-  // expand/collapse toggle the content-only fast-path doesn't restore.
+  // on a failed edit, so the next poll re-renders and self-heals), the
+  // expand/collapse toggle the content-only fast-path doesn't restore, and
+  // — since the fast-path is now leading-edge-coalesced
+  // (QURL_VIEW_COUNTER_COALESCE_MS, see routes/qurl-webhook.js step 4b) —
+  // the TRAILING-EDGE FLUSH of a burst's final-window tail: the last few
+  // views of a high-fan-out send land inside one coalesce window and are
+  // skipped by the fast-path, so this poll is what renders the settled
+  // final count. That makes the poll REQUIRED for convergence on a
+  // coalesced send, not merely a nice-to-have — do NOT remove it or widen
+  // its steady interval past the point where a coalesced tail would sit
+  // un-flushed for an unacceptably long time.
   //
   // Because the fast-path carries the latency, #839's aggressive 5s dense
   // ramp is relaxed back to a MODEST one: the first tick still fires at
@@ -1507,8 +1516,13 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // steadyPollInterval (≤60s). Discord-edit volume does NOT scale with
   // poll rate: runTick edits ONLY on a real pending→opened transition
   // (`changed`) and each link flips once, so total edits over the
-  // monitor's life are bounded by recipient count (≤50). At ≥15s spacing
-  // this is far under Discord's editReply rate limit — no 429 exposure.
+  // monitor's life are bounded by the count of distinct recipient views
+  // (≤ QURL_SEND_MAX_RECIPIENTS, default 20000 — NOT 50), spread across
+  // the link's whole lifetime. At ≥15s spacing this is far under
+  // Discord's editReply rate limit — no 429 exposure. (The webhook
+  // fast-path, which fires per-view rather than per-tick, is the path
+  // that needs the burst coalescing above; this poll is naturally rate-
+  // limited by its own ≥15s tick spacing.)
   const EARLY_POLL_INTERVAL_MS = 15000;
   const EARLY_POLL_WINDOW_MS = 90000;
   const startTime = Date.now();
