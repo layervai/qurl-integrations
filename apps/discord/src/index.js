@@ -1225,23 +1225,25 @@ async function start() {
     eventPublisher.start();
   }
 
-  // View-update SQS plumbing (feat #60, sub-second view counter).
-  // Independent of the event-shipper gates above; gated only on
-  // `config.ENABLE_VIEW_UPDATE_PUSH` AND `isHttp` (the tier that
-  // owns BOTH the webhook receiver — publisher — and the
-  // monitorLinkStatus instances — consumer). Same shutdown-race
-  // guard as the event-shipper sibling above.
+  // View-update SQS plumbing (feat #60, sub-second view counter) —
+  // SUPERSEDED by the cross-replica interaction-token fast-path
+  // (routes/qurl-webhook.js editSenderCounterInBackground). The webhook
+  // receiver no longer publishes view-updates, so the publisher has no
+  // producers and the consumer would just idle-long-poll an empty queue.
+  // We therefore do NOT start either, even when ENABLE_VIEW_UPDATE_PUSH
+  // is set — flipping the flag on today buys nothing and burns empty SQS
+  // receives. The modules + this gate stay wired (a focused follow-up
+  // rips out the publisher/consumer/registry trio); leaving them in keeps
+  // this PR scoped to the counter mechanism, but starting the dead loop
+  // would be a standing cost so the start calls are removed now.
   //
-  // Combined mode is intentionally NOT rejected here (unlike
-  // ENABLE_EVENT_SHIPPER): there's no in-process direct-dispatch
-  // path competing with the SQS round-trip — both paths converge
-  // in consumer → registry → monitor. Combined mode just means
-  // the publisher and consumer live in the same process; messages
-  // still round-trip through SQS, and registry dispatch + status
-  // === 'opened' guards handle any race or redelivery.
+  // (Gated on ENABLE_VIEW_UPDATE_PUSH && isHttp historically: isHttp owned
+  // both the webhook receiver — publisher — and the monitorLinkStatus
+  // instances — consumer. Kept as a no-op so the env-validation contract
+  // missingViewUpdatePushKeys and operator config stay meaningful until
+  // the rip-out.)
   if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
-    viewUpdatePublisher.start();
-    viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });
+    logger.info('ENABLE_VIEW_UPDATE_PUSH set but the SQS view-update path is superseded by the webhook fast-path — not starting the (producer-less) publisher/consumer; see index.js');
   }
 
   // Open the Discord gateway WebSocket. Two disjoint paths:

@@ -381,6 +381,14 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     });
 
     // Fire 30 distinct-recipient views back-to-back within one window.
+    // viewedSoFar advances BEFORE each request, so every chain sees a
+    // strictly higher N than the last committed last_rendered_count — i.e.
+    // every event is edit-ELIGIBLE on the N>L pre-read (step 6) and the
+    // monotonic CAS (step 8). Only the 4b coalesce gate suppresses them.
+    // That makes this a genuine discriminator for the GATE, not the
+    // pre-existing dedup: with the gate disabled this asserts 30 edits
+    // (verified red), with it ~1. (If a future edit lets the N<=L skip
+    // carry this test, the gate-disabled red-check stops failing — re-pin.)
     for (let i = 0; i < TRACKED.length; i += 1) {
       viewedSoFar = i + 1;
       const payload = {
@@ -403,8 +411,21 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     // exactly ONE edit fires — assert the bound holds (<= 3 << 30) rather
     // than pinning the exact count, since real wall-clock could straddle
     // the window and admit a second leading edge.
+    //
+    // SCOPE OF THIS BOUND: the mock makes tryAdvanceRenderedCount's stamp
+    // synchronously visible to the next getSendRenderState, so this proves
+    // single-replica SEQUENTIAL coalescing. It does NOT prove the
+    // distributed bound — in prod, M replicas reading an eventually-
+    // consistent last_rendered_at before any commits can each fire one
+    // leading edge per window (~M/window, see the route's COALESCING
+    // header). Do not read <=3 here as a cross-replica guarantee.
     expect(mockEditInteractionReply.mock.calls.length).toBeLessThanOrEqual(3);
     expect(mockEditInteractionReply.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // The whole point: the BatchGet read is also skipped for coalesced
+    // events, so under a 30-view burst getQurlViews fires only for the
+    // un-coalesced edit(s) — a quantity ONLY the gate suppresses (the
+    // N<=L dedup runs AFTER the BatchGet, so it can't account for this).
+    expect(mockGetQurlViews.mock.calls.length).toBeLessThanOrEqual(3);
 
     // The poll backstop (monitorLinkStatus) is the trailing-edge flush
     // that renders the SETTLED final count after the burst — simulate it

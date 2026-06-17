@@ -604,12 +604,23 @@ const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 // inline notes.
 //
 // COALESCING (step 4b): the fast-path is leading-edge-debounced per send
-// (~1 edit per QURL_VIEW_COUNTER_COALESCE_MS) so a high-fan-out send
-// can't storm Discord's per-message edit budget or hot-write the config
-// row. The poll backstop is the trailing-edge flush. We do NOT lean on
-// discord.js's internal 429 handling for this — the gate keeps us under
-// the limit by construction rather than absorbing rejections after the
-// fact.
+// (~1 edit per QURL_VIEW_COUNTER_COALESCE_MS per replica) so a high-fan-
+// out send can't storm Discord's per-message edit budget or hot-write the
+// config row. The gate is the PRIMARY coalescer — it collapses a burst to
+// roughly the replica count's worth of edits per window, flat in fan-out.
+// It is NOT a hard "no 429 by construction" guarantee, though: the gate
+// reads an eventually-consistent last_rendered_at via a plain GetItem, and
+// in the read→edit→commit window a leader's stamp is genuinely unwritten,
+// so concurrent replicas (and even sequential followers inside that
+// window) can pass the gate and each PATCH once. The monotonic CAS keeps
+// the displayed COUNT correct, but it can't un-fire an already-sent edit.
+// That residual concurrent-leading-edge tail falls back to discord.js's
+// internal 429 backoff — the safety net, not the strategy. A ConsistentRead
+// here wouldn't fix it (the dominant stale window is the unwritten
+// pre-commit interval, not replication lag); a hard cap would need a
+// pre-edit lease, which resurrects the stuck-counter risk this design
+// avoids. The poll backstop is the trailing-edge flush for the settled
+// final count.
 //
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
@@ -666,12 +677,19 @@ function editSenderCounterInBackground({ qurlId }) {
       //    edit budget (429s) and hot-writing the config row. Skip the
       //    edit if the last CONFIRMED edit (state.lastRenderedAt, epoch
       //    MS, advanced only after a successful PATCH in step 8) is
-      //    younger than the cooldown. This caps fast-path edits per send
-      //    to ~1 per window regardless of fan-out; the poll backstop
+      //    younger than the cooldown. This caps fast-path edits to ~1 per
+      //    window per replica — flat in fan-out (M autoscaled replicas can
+      //    each fire one stale-read edit per window, so ~M/window worst
+      //    case, still far under Discord's edit rate); the poll backstop
       //    (monitorLinkStatus) is the trailing-edge flush that renders
       //    the settled final count. Placed BEFORE the getQurlViews
-      //    BatchGet so a coalesced event skips that read too (net DDB
-      //    reduction under burst). Leading-edge (not trailing) keeps the
+      //    BatchGet so a coalesced event skips that read — saving the
+      //    BatchGet only; the two reads ABOVE this gate (findSendsByQurlId
+      //    GSI + getSendRenderState GetItem) still run per recorded view,
+      //    so this is read amplification vs the old enqueue-only publish,
+      //    not a net reduction — it just keeps the burst's per-event cost
+      //    flat instead of adding a BatchGet on top. Leading-edge (not
+      //    trailing) keeps the
       //    counter visibly live — the first view of a burst renders
       //    immediately, only the rapid followers within the window wait
       //    for the poll. lastRenderedAt === 0 (never edited) is always

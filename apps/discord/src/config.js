@@ -515,8 +515,11 @@ module.exports = {
   // first view fires a qurl.accessed webhook; un-coalesced, each would
   // PATCH the sender confirmation, storming Discord's per-message edit
   // budget (429s) and hot-writing the qurl_send_configs row. This bounds
-  // fast-path edits per send to ~1 per window: a replica skips the edit
-  // when the row's last_rendered_at is younger than this. The poll
+  // fast-path edits per send to ~1 per window per replica: a replica
+  // skips the edit when the row's last_rendered_at is younger than this.
+  // (M autoscaled replicas can each read a stale last_rendered_at before
+  // any commits, so the precise worst case is ~M edits/window — still
+  // flat in fan-out, far under Discord's edit rate.) The poll
   // backstop (monitorLinkStatus) is the trailing-edge flush that renders
   // the final count after the burst settles. ~1.5s keeps the counter
   // visibly live while capping edits well under Discord's rate.
