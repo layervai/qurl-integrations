@@ -419,6 +419,7 @@ if (mapCommandMissing.length > 0) {
 
 const detectCommandMissing = missingDetectCommandKeys(config);
 if (detectCommandMissing.length > 0) {
+  const detectMissingVerb = detectCommandMissing.length === 1 ? 'is' : 'are';
   const detectRemediation = [];
   if (detectCommandMissing.includes('QURL_API_KEY')) {
     detectRemediation.push('Seed QURL_API_KEY with a qurl:resolve-capable service credential.');
@@ -429,7 +430,7 @@ if (detectCommandMissing.length > 0) {
     );
   }
   logger.error(
-    `DETECT_COMMAND_ENABLED=true but ${detectCommandMissing.join(', ')} is missing or still the literal "${PLACEHOLDER_SENTINEL}" sentinel. ` +
+    `DETECT_COMMAND_ENABLED=true but ${detectCommandMissing.join(', ')} ${detectMissingVerb} missing or still the literal "${PLACEHOLDER_SENTINEL}" sentinel. ` +
     `${detectRemediation.join(' ')} Re-flip the toggle only after the missing values are seeded.`
   );
   process.exit(1);

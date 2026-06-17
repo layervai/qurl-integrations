@@ -461,6 +461,7 @@ module.exports = {
   missingHotStandbyKeys,
   invalidHotStandbyValues,
   shouldRegisterInteractionListener,
+  missingSecretOrPlaceholder,
   missingMapCommandKeys,
   missingDetectCommandKeys,
   PLACEHOLDER_SENTINEL,

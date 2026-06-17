@@ -2,7 +2,7 @@ const { QurlClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
-const { PLACEHOLDER_SENTINEL } = require('./boot-requirements');
+const { missingSecretOrPlaceholder } = require('./boot-requirements');
 
 // Reuse the security-critical, syntactic private/loopback/link-local IP guard
 // from qurl.js rather than duplicating ~50 lines of IP-literal parsing that
@@ -166,7 +166,7 @@ function isAllowedSourceUrl(sourceUrl) {
  * Uses the provided API key, or falls back to the global config key.
  */
 function connectorAuthHeaders(apiKey) {
-  const key = apiKey || config.QURL_API_KEY;
+  const key = String(apiKey || config.QURL_API_KEY || '').trim();
   const headers = {};
   if (key) {
     headers['Authorization'] = `Bearer ${key}`;
@@ -519,7 +519,8 @@ function assertPublicHttpsTarget(targetUrl) {
  * CALLER'S CURRENT IP, then returns the `target_url` to POST the image to.
  * The caller MUST POST within the knock window from the same IP. The settled
  * target_url is never cached, but simultaneous detect calls share one in-flight
- * resolve so a short burst does not double-fire the same knock.
+ * resolve (success or failure) so a short burst does not double-fire the same
+ * knock.
  * A late-joining caller shares the creator's knock window; a slow resolve can
  * leave less grant time, which is still preferable to double-knocking a burst.
  *
@@ -529,17 +530,14 @@ function assertPublicHttpsTarget(targetUrl) {
  *   guard.
  */
 async function resolveDetectTarget() {
-  const token = config.DETECT_ACCESS_TOKEN?.trim();
-  const qurlApiKey = config.QURL_API_KEY?.trim();
   const missingResolveKeys = [];
-  if (!qurlApiKey || qurlApiKey === PLACEHOLDER_SENTINEL) missingResolveKeys.push('QURL_API_KEY');
-  if (!token || token === PLACEHOLDER_SENTINEL) missingResolveKeys.push('DETECT_ACCESS_TOKEN');
-  if (missingResolveKeys.length === 1) {
-    throw new Error(`${missingResolveKeys[0]} is not configured (required to resolve the detect tunnel target)`);
+  if (missingSecretOrPlaceholder(config.QURL_API_KEY)) missingResolveKeys.push('QURL_API_KEY');
+  if (missingSecretOrPlaceholder(config.DETECT_ACCESS_TOKEN)) missingResolveKeys.push('DETECT_ACCESS_TOKEN');
+  if (missingResolveKeys.length > 0) {
+    const verb = missingResolveKeys.length === 1 ? 'is' : 'are';
+    throw new Error(`${missingResolveKeys.join(', ')} ${verb} not configured (required to resolve the detect tunnel target)`);
   }
-  if (missingResolveKeys.length > 1) {
-    throw new Error(`${missingResolveKeys.join(', ')} are not configured (required to resolve the detect tunnel target)`);
-  }
+  const token = config.DETECT_ACCESS_TOKEN.trim();
   if (inFlightDetectTargetResolve) return inFlightDetectTargetResolve;
 
   // Breadcrumb the two distinct failure modes of this oracle path so an

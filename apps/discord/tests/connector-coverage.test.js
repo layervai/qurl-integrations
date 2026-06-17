@@ -123,6 +123,26 @@ describe('Connector client — coverage boost', () => {
       const uploadHeaders = globalThis.fetch.mock.calls[1][1].headers;
       expect(uploadHeaders['Authorization']).toBe('Bearer test-key-for-connector');
     });
+
+    it('trims explicit connector API keys before building Authorization', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true,
+          headers: { get: jest.fn(() => '10') },
+          arrayBuffer: async () => new ArrayBuffer(10),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true, hash: 'h1', resource_id: 'r1' }),
+        });
+
+      await connector.uploadToConnector(
+        'https://cdn.discordapp.com/file.png', 'file.png', 'image/png', '  explicit-key  ',
+      );
+
+      const uploadHeaders = globalThis.fetch.mock.calls[1][1].headers;
+      expect(uploadHeaders['Authorization']).toBe('Bearer explicit-key');
+    });
   });
 
   describe('viewer_ttl_seconds field forwarding', () => {
@@ -688,6 +708,13 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(opts.headers['Authorization']).toBe('Bearer k-detect');
       expect(opts.headers['Content-Type']).toBe('image/png');
       expect(opts.body).toBe(bytes);
+    });
+
+    it('accepts a trailing-dot qURL tunnel host after hostname normalization', async () => {
+      const target = 'https://detect-tunnel.qurl.site./api/detect';
+      const get = captureDetect({ detected: false }, { target });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(get().url).toBe(target);
     });
 
     it('falls back to octet-stream content-type and global QURL_API_KEY for the POST Bearer', async () => {

@@ -416,6 +416,12 @@ describe('missingMapCommandKeys', () => {
         GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
       }),
     ).toEqual(['GOOGLE_MAPS_API_KEY']);
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: true,
+        GOOGLE_MAPS_API_KEY: ` ${GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL} `,
+      }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
   });
 
   it('returns empty when toggle is on AND the key is a real value', () => {
