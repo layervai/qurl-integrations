@@ -182,6 +182,95 @@ func TestCheckRateLimit_DeniesAtFutureWindowLimit(t *testing.T) {
 	}
 }
 
+func TestCheckRateLimit_DeniesFutureWindowRaceAfterRead(t *testing.T) {
+	now := time.Date(2026, 6, 17, 12, 59, 59, 0, time.UTC)
+	window := time.Hour
+	localWindowUnix := now.Truncate(window).Unix()
+	futureWindowUnix := localWindowUnix + int64(window/time.Second)
+	limit := 2
+	newerWindowUnix := futureWindowUnix + int64(window/time.Second)
+
+	for _, tc := range []struct {
+		name         string
+		secondWindow int64
+		wantWindow   int64
+	}{
+		{
+			name:         "same future window consumed capacity",
+			secondWindow: futureWindowUnix,
+			wantWindow:   futureWindowUnix,
+		},
+		{
+			name:         "newer future window wins retry hint",
+			secondWindow: newerWindowUnix,
+			wantWindow:   newerWindowUnix,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			updates := 0
+			store := newRateLimitStore(&stubDDB{
+				getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+					if rateLimitTestKey(in.Key) != testRateLimitTeamID {
+						t.Fatalf("unexpected GetItem key %#v", in.Key)
+					}
+					return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+						attrSlackTeamID: stringAttr(testRateLimitTeamID),
+					}}, nil
+				},
+				updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+					updates++
+					switch updates {
+					case 1:
+						if got := readNumber(in.ExpressionAttributeValues, ":window"); got != localWindowUnix {
+							t.Fatalf("first update window = %d, want local %d", got, localWindowUnix)
+						}
+						return nil, &ddbtypes.ConditionalCheckFailedException{
+							Message: aws.String("future window"),
+							Item: map[string]ddbtypes.AttributeValue{
+								attrRateLimitWindow: numberAttr(futureWindowUnix),
+								attrRateLimitCount:  numberAttr(int64(limit - 1)),
+							},
+						}
+					case 2:
+						if got := readNumber(in.ExpressionAttributeValues, ":window"); got != futureWindowUnix {
+							t.Fatalf("second update window = %d, want future %d", got, futureWindowUnix)
+						}
+						return nil, &ddbtypes.ConditionalCheckFailedException{
+							Message: aws.String("future race"),
+							Item: map[string]ddbtypes.AttributeValue{
+								attrRateLimitWindow: numberAttr(tc.secondWindow),
+								attrRateLimitCount:  numberAttr(int64(limit)),
+							},
+						}
+					default:
+						t.Fatalf("unexpected UpdateItem call %d", updates)
+						return nil, errors.New("unreachable")
+					}
+				},
+			})
+			store.RateLimitEnabled = true
+			store.RateLimitLimit = limit
+			store.RateLimitWindow = window
+			store.Now = func() time.Time { return now }
+
+			allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+			if err != nil {
+				t.Fatalf("CheckRateLimit future-window race: %v", err)
+			}
+			if allowed {
+				t.Fatal("future-window race allowed, want denied")
+			}
+			wantRetry := time.Unix(tc.wantWindow, 0).UTC().Add(window).Sub(now)
+			if retry != wantRetry {
+				t.Fatalf("retry = %s, want %s", retry, wantRetry)
+			}
+			if updates != 2 {
+				t.Fatalf("updates = %d, want 2", updates)
+			}
+		})
+	}
+}
+
 func TestCheckRateLimit_RepairsConcurrentInitializeRace(t *testing.T) {
 	ddb := newRateLimitDDB(true)
 	ddb.raceInitializeWindow = true

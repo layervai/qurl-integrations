@@ -412,8 +412,12 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 	}
 	table[key] = existing
 	out := &dynamodb.UpdateItemOutput{}
-	if in.ReturnValues == ddbtypes.ReturnValueAllNew || in.ReturnValues == ddbtypes.ReturnValueUpdatedNew {
+	switch in.ReturnValues {
+	case ddbtypes.ReturnValueAllNew:
 		out.Attributes = cloneItem(existing)
+	case ddbtypes.ReturnValueUpdatedNew:
+		out.Attributes = cloneUpdatedNewAttributes(existing, aws.ToString(in.UpdateExpression), in.ExpressionAttributeNames)
+	case "", ddbtypes.ReturnValueNone, ddbtypes.ReturnValueAllOld, ddbtypes.ReturnValueUpdatedOld:
 	}
 	return out, nil
 }
@@ -486,6 +490,55 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 	out := make(map[string]ddbtypes.AttributeValue, len(item))
 	for k, v := range item {
 		out[k] = v
+	}
+	return out
+}
+
+func cloneUpdatedNewAttributes(item map[string]ddbtypes.AttributeValue, expr string, names map[string]string) map[string]ddbtypes.AttributeValue {
+	out := map[string]ddbtypes.AttributeValue{}
+	for _, attr := range updatedTopLevelAttrs(expr, names) {
+		if v, ok := item[attr]; ok {
+			out[attr] = v
+		}
+	}
+	return out
+}
+
+func updatedTopLevelAttrs(expr string, names map[string]string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(path string) {
+		parts := resolvePath(strings.TrimSuffix(strings.TrimSpace(path), ","), names)
+		if len(parts) == 0 {
+			return
+		}
+		attr := parts[0]
+		if _, ok := seen[attr]; ok {
+			return
+		}
+		seen[attr] = struct{}{}
+		out = append(out, attr)
+	}
+	for _, c := range splitUpdateClauses(expr) {
+		switch c.verb {
+		case "SET":
+			for _, p := range splitTopLevelCommas(c.body) {
+				if eq := strings.Index(p, "="); eq >= 0 {
+					add(p[:eq])
+				}
+			}
+		case "ADD", "DELETE":
+			for _, p := range splitTopLevelCommas(c.body) {
+				fields := strings.Fields(p)
+				if len(fields) > 0 {
+					add(fields[0])
+				}
+			}
+		case "REMOVE":
+			for _, field := range strings.Fields(c.body) {
+				add(field)
+			}
+		}
 	}
 	return out
 }

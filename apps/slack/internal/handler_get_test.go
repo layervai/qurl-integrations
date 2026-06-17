@@ -1006,6 +1006,7 @@ func TestHumanizeRetry(t *testing.T) {
 		{59500 * time.Millisecond, "1m"},
 		{60 * time.Second, "1m"},
 		{2 * time.Minute, "2m"},
+		{59*time.Minute + 30*time.Second, "1h"},
 		{60 * time.Minute, "1h"},
 		{61 * time.Minute, "1h1m"},
 		{90 * time.Minute, "1h30m"},

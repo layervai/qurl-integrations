@@ -375,11 +375,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	// still spends an attempt; see apps/slack/docs/operating.md.
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
-		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID)
+		log.Warn("get: rate-limit check failed", "error", err, "user_id", args.userID)
 		return "", &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
-		log.Info("get: rate-limit denied mint", "team_id", args.teamID, "channel_id", args.channelID, "user_id", args.userID, "retry_after_ms", retry.Milliseconds())
+		log.Info("get: rate-limit denied mint", "user_id", args.userID, "retry_after_ms", retry.Milliseconds())
 		return "", &userError{msg: rateLimitMessage(retry, "")}
 	}
 
