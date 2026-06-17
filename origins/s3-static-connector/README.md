@@ -38,7 +38,7 @@ This contract is frozen — additive only once published.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `S3_BUCKET` | Yes | none | Private bucket to serve from. Must be a non-dotted, DNS-compatible name using lowercase letters, numbers, and hyphens. |
+| `S3_BUCKET` | Yes | none | Private bucket to serve from. Must be a non-dotted, DNS-compatible 3-63 character name using lowercase letters, numbers, and hyphens. |
 | `S3_PREFIX` | No | empty | Key prefix; normalized to a single leading slash, no trailing slash; empty internal path segments (`//`) are rejected. |
 | `LISTEN_ADDR` | No | `127.0.0.1:8080` | nginx listen address; matches `protect-connector`'s default `port:8080`. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
 | `ENVOY_LISTEN_ADDR` | No | `127.0.0.1:9090` | Internal signer listener; never exposed outside the container. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |

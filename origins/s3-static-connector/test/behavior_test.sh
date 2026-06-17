@@ -47,7 +47,7 @@ fi
 # (including SAN verification) are caught on every supported architecture.
 docker run --rm --platform "$PLATFORM" --entrypoint sh \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
-  "$IMG" -c 'set -eu; RENDER_DIR=/tmp/rendered render.sh; envoy --mode validate -c /tmp/rendered/envoy.yaml >/dev/null'
+  "$IMG" -c 'set -eu; envoy --version >/dev/null; RENDER_DIR=/tmp/rendered render.sh; envoy --mode validate -c /tmp/rendered/envoy.yaml >/dev/null'
 
 docker network create "$NET" >/dev/null
 
