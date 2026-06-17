@@ -17,12 +17,19 @@ render() {
 
 render default S3_BUCKET=example-bucket AWS_REGION=us-east-1
 render prefix  S3_BUCKET=example-bucket AWS_REGION=us-west-2 S3_PREFIX=site/ INDEX_DOCUMENT=home.htm CACHE_DEFAULT_TTL=60s
+render composite-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_TTL=1h30m
 
 if render invalid-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_TTL='60s; include /etc/passwd' 2>"$TMP/invalid-ttl.err"; then
   echo "MISMATCH: invalid CACHE_DEFAULT_TTL rendered successfully" >&2
   exit 1
 fi
 grep -q "CACHE_DEFAULT_TTL must be an nginx time literal" "$TMP/invalid-ttl.err"
+
+if render duplicate-ttl-unit S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_TTL=5m5m 2>"$TMP/duplicate-ttl-unit.err"; then
+  echo "MISMATCH: duplicate-unit CACHE_DEFAULT_TTL rendered successfully" >&2
+  exit 1
+fi
+grep -q "CACHE_DEFAULT_TTL must be an nginx time literal" "$TMP/duplicate-ttl-unit.err"
 
 if render invalid-cache-size S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_MAX_SIZE='1g; include /etc/passwd' 2>"$TMP/invalid-cache-size.err"; then
   echo "MISMATCH: invalid CACHE_MAX_SIZE rendered successfully" >&2

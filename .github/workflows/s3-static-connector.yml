@@ -118,10 +118,9 @@ jobs:
         with:
           context: origins/s3-static-connector
           platforms: linux/amd64,linux/arm64
-          push: true
           provenance: true
           sbom: true
-          tags: ${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: |
             type=gha,scope=s3-static-connector-amd64
             type=gha,scope=s3-static-connector-arm64

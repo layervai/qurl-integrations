@@ -257,7 +257,8 @@ if [ -n "$CACHE_DEFAULT_TTL" ]; then
       exit 1
       ;;
   esac
-  if ! printf '%s\n' "$CACHE_DEFAULT_TTL" | grep -Eq '^([0-9]+(ms|s|m|h|d|w|M|y)?)+$'; then
+  ttl_literal_re='^([0-9]+y)?([0-9]+M)?([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?$|^[0-9]+$'
+  if ! printf '%s\n' "$CACHE_DEFAULT_TTL" | grep -Eq "$ttl_literal_re"; then
     echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60s, 5m, or 1h30m" >&2
     exit 1
   fi

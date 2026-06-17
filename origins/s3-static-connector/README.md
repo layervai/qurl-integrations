@@ -101,6 +101,10 @@ verbatim. These security headers are set on **every** response (200/404/405/5xx)
 - `Referrer-Policy: no-referrer`
 - `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet, noimageindex`
 
+`Strict-Transport-Security` is intentionally emitted by this loopback HTTP
+origin because the image mirrors the CloudFront `ResponseHeadersPolicy` it
+replaces; viewer TLS is terminated before traffic reaches nginx.
+
 ## Error mapping
 
 | Condition | Client status | Body | Observability |
@@ -206,10 +210,10 @@ the supervisor intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
   returns `AccessDenied` (403) instead of `NoSuchKey` (404), muddying the
   signing-failure signal.
 - IMDSv2 from inside a container requires **hop-limit 2** on the host.
-- Passing `AWS_REGION` explicitly is preferred. When it is omitted, the image
-  uses `curl` at startup for the IMDSv2 region fallback; a region-less,
-  non-EC2/non-ECS environment can spend up to roughly 4s probing IMDS before
-  failing validation.
+- Passing `AWS_REGION` explicitly is the deployment path. The IMDSv2 region
+  fallback exists for ad-hoc/diagnostic runs; a region-less, non-EC2/non-ECS
+  environment can spend up to roughly 4s probing IMDS before failing
+  validation.
 - The bucket stays private; this image needs no bucket-policy change.
 
 ## Out of scope
