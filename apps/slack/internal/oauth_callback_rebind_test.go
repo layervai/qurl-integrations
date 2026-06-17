@@ -32,6 +32,8 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 		},
 	})
 	adminStore := newStoreFromFake(t, ddb, names, nil)
+	// Only AdminStore needs the real slackdata.Store here; the API-key
+	// provider/minter are stubs so any call into them is caught by counters.
 	workspaceStore := &oauthRebindWorkspaceStore{}
 	minter := &oauthRebindMinter{}
 	secret := []byte("01234567890123456789012345678901")
