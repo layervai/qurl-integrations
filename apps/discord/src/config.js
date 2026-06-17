@@ -522,8 +522,10 @@ module.exports = {
   // flat in fan-out, far under Discord's edit rate.) A coalesced first
   // view schedules a trailing flush after the remaining window, so even
   // the final view in a burst is rendered by the webhook fast-path in
-  // under a second instead of waiting for the poll backstop.
-  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 500, { minPositive: true, max: 900 }),
+  // under a second instead of waiting for the poll backstop. Default to
+  // the largest sub-second window (900ms) to maximize Discord edit-rate
+  // headroom while preserving the operator's sub-second requirement.
+  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 900, { minPositive: true, max: 900 }),
 
   SHARD_ID,
 
