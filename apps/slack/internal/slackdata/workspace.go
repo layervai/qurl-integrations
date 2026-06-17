@@ -81,6 +81,9 @@ const (
 	// installer; demoting them via the bot would leave the workspace
 	// in a half-claimed state. Re-install OAuth to transfer ownership.
 	ErrCodeCannotRemoveOwner = "cannot_remove_owner"
+	// ErrCodeOwnerTransferNotOwner is surfaced by TransferOwnership
+	// when the conditional owner_id = :current_owner check fails.
+	ErrCodeOwnerTransferNotOwner = "owner_transfer_not_owner"
 )
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
@@ -120,12 +123,11 @@ const addAdminDisambiguationBudget = 300 * time.Millisecond
 // user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid) prefix
 // followed by 8-63 uppercase-alphanumeric chars (9-64 chars total).
 //
-// This is the single source of truth for the Slack-ID shape check; the
-// handler package's looksLikeSlackUserID delegates here. Two callers
-// depend on it: the handler interpolates owner_id into `<@%s>` mrkdwn
-// mentions (a malformed value must not break out of the mention
-// surface), and BindWorkspace uses it to detect a pre-pivot Auth0-sub
-// owner_id so it can self-heal a legacy row (see BindWorkspace).
+// This is the single source of truth for the Slack-ID shape check. Two callers
+// depend on it: the handler interpolates owner_id into `<@%s>` mrkdwn mentions
+// (a malformed value must not break out of the mention surface), and
+// BindWorkspace uses it to detect a pre-pivot Auth0-sub owner_id so it can
+// self-heal a legacy row (see BindWorkspace).
 func LooksLikeSlackUserID(s string) bool {
 	if len(s) < 9 || len(s) > 64 {
 		return false
@@ -656,11 +658,10 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 // conditional UpdateItem so the 400 cannot_remove_owner surfaces
 // before any mutation attempt.
 //
-// TODO(ownership-transfer): if/when an OAuth-re-install path lands
-// that mutates owner_id, consider folding the owner check into the
-// conditional UpdateItem (`AND owner_id <> :uid`) to save the
-// extra round-trip. The strong-read above already keeps the safety
-// margin intact in the meantime.
+// TransferOwnership can move owner_id outside the OAuth callback, so keep this
+// read-before-write explicit: it returns the specific cannot_remove_owner error
+// before any mutation attempt. A concurrent transfer after the read remains
+// safe because the owner grant is derived from owner_id, not only this set.
 //
 // CCFE on the UpdateItem maps to 404 admin_not_found — either the row
 // vanished (race with a concurrent OAuth re-install) or the target
@@ -749,6 +750,76 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		StatusCode: http.StatusNotFound,
 		Code:       ErrCodeAdminNotFound,
 		Title:      "RemoveAdmin: target user is not on the admin set",
+	}
+}
+
+// TransferOwnership moves the Slack-side workspace owner gate from
+// currentOwnerID to newOwnerID. It preserves currentOwnerID and adds newOwnerID
+// in admin_slack_user_ids so the handoff is not also an implicit demotion. It
+// does not touch qurl-service workspace_keys/auth0_subject; the stored workspace
+// credential remains as-is until the new owner runs /qurl setup, where the
+// existing rotate/repoint flow decides whether the qURL account can stay put or
+// needs operator assistance.
+func (s *Store) TransferOwnership(ctx context.Context, teamID, currentOwnerID, newOwnerID string) error {
+	if teamID == "" || currentOwnerID == "" || newOwnerID == "" {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "TransferOwnership: team_id, current_owner_id, and new_owner_id are required",
+		}
+	}
+	if !LooksLikeSlackUserID(newOwnerID) {
+		return &Error{
+			StatusCode: http.StatusBadRequest,
+			Title:      "TransferOwnership: new_owner_id must be a Slack user ID",
+		}
+	}
+	ownerSet := []string{currentOwnerID}
+	if newOwnerID != currentOwnerID {
+		ownerSet = append(ownerSet, newOwnerID)
+	}
+	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+		UpdateExpression:    aws.String("SET " + attrOwnerID + " = :new_owner, " + attrUpdatedAt + " = " + exprNow + " ADD " + attrAdminSlackUserIDs + " :owner_set"),
+		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ") AND " + attrOwnerID + " = :current_owner"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":current_owner": stringAttr(currentOwnerID),
+			":new_owner":     stringAttr(newOwnerID),
+			":owner_set":     &ddbtypes.AttributeValueMemberSS{Value: ownerSet},
+			exprNow:          stringAttr(nowISO),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if !errors.As(err, &ccfe) {
+		return ddbToError("TransferOwnership", err)
+	}
+	out, getErr := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:      aws.String(s.WorkspaceMappingsName),
+		ConsistentRead: aws.Bool(true),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if getErr != nil {
+		return ddbToError("TransferOwnership.disambiguate", getErr)
+	}
+	if len(out.Item) == 0 {
+		return &Error{
+			StatusCode: http.StatusNotFound,
+			Code:       ErrCodeWorkspaceNotBound,
+			Title:      "TransferOwnership: workspace is not bound",
+		}
+	}
+	return &Error{
+		StatusCode: http.StatusConflict,
+		Code:       ErrCodeOwnerTransferNotOwner,
+		Title:      "TransferOwnership: caller is not the current workspace owner",
 	}
 }
 
