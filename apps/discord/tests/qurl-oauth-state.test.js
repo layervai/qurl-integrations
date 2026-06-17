@@ -169,6 +169,31 @@ describe('qurl-oauth-state', () => {
       }
     });
 
+    it('checks every configured secret even when the primary secret matches', async () => {
+      const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
+      const savedShared = process.env.OAUTH_STATE_SECRET;
+      process.env.QURL_OAUTH_STATE_SECRET = 'q'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+      try {
+        await jest.isolateModulesAsync(async () => {
+          // eslint-disable-next-line global-require
+          const { signQurlOAuthState: sign, verifyQurlOAuthState: verify } = require('../src/utils/qurl-oauth-state');
+          const state = sign('guild-1', 'user-2');
+          const createHmacSpy = jest.spyOn(crypto, 'createHmac');
+          try {
+            expect(verify(state).ok).toBe(true);
+            expect(createHmacSpy).toHaveBeenCalledTimes(2);
+          } finally {
+            createHmacSpy.mockRestore();
+          }
+        });
+      } finally {
+        if (savedQurl === undefined) delete process.env.QURL_OAUTH_STATE_SECRET;
+        else process.env.QURL_OAUTH_STATE_SECRET = savedQurl;
+        process.env.OAUTH_STATE_SECRET = savedShared;
+      }
+    });
+
     it('falls back to OAUTH_STATE_SECRET when QURL_OAUTH_STATE_SECRET is unset', async () => {
       const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
       delete process.env.QURL_OAUTH_STATE_SECRET;

@@ -173,12 +173,13 @@ function verifyQurlOAuthState(state) {
   }
   let sigOk;
   try {
-    sigOk = secrets.some(secret => {
+    sigOk = false;
+    for (const secret of secrets) {
       const expected = crypto.createHmac('sha256', secret)
         .update(encoded)
         .digest('hex');
-      return crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'));
-    });
+      if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) sigOk = true;
+    }
   } catch {
     return { ok: false, reason: 'sig_compare_threw' };
   }

@@ -122,5 +122,19 @@ describe('oauth-state-secrets helpers', () => {
         expect.stringContaining('QURL_OAUTH_STATE_SECRET matches legacy OAUTH_STATE_SECRET'),
       ]);
     });
+
+    it('warns when a short legacy secret is ignored behind a dedicated secret', () => {
+      const warnings = productionOAuthStateSecretWarnings({
+        legacy: 'short',
+        github: 'g'.repeat(64),
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: false,
+      });
+
+      expect(warnings).toEqual([
+        expect.stringContaining('OAUTH_STATE_SECRET is shorter than 32 chars and will be ignored'),
+      ]);
+    });
   });
 });

@@ -110,6 +110,13 @@ function productionOAuthStateSecretWarnings(secrets, { isOpenNHPActive, isQurlOA
   if (isQurlOAuthConfigured && legacy && !qurl) {
     warnings.push('qURL OAuth state is using legacy OAUTH_STATE_SECRET; provision QURL_OAUTH_STATE_SECRET to close the migration window.');
   }
+  if (legacy && legacy.length < MIN_OAUTH_STATE_SECRET_LENGTH
+      && ((isOpenNHPActive && github) || (isQurlOAuthConfigured && qurl))) {
+    warnings.push(
+      `OAUTH_STATE_SECRET is shorter than ${MIN_OAUTH_STATE_SECRET_LENGTH} chars and will be ignored `
+      + 'while dedicated OAuth state secrets are active.'
+    );
+  }
   if (github && qurl && github === qurl) {
     warnings.push('GITHUB_OAUTH_STATE_SECRET and QURL_OAUTH_STATE_SECRET are identical; use distinct values to preserve rotation isolation.');
   }

@@ -271,12 +271,14 @@ function verifyStateBinding(state, discordId) {
     return false;
   }
   try {
-    return secrets.some(secret => {
+    let sigOk = false;
+    for (const secret of secrets) {
       const expected = crypto.createHmac('sha256', secret)
         .update(`${discordId}:${nonce}`)
         .digest('hex');
-      return crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'));
-    });
+      if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) sigOk = true;
+    }
+    return sigOk;
   } catch { return false; }
 }
 

@@ -109,6 +109,20 @@ describe('verifyStateBinding', () => {
       expect(verifyStateBinding(legacyState, '12345')).toBe(false);
     });
 
+    it('checks every configured secret even when the primary secret matches', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'g'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+      const state = makeState('12345', process.env.GITHUB_OAUTH_STATE_SECRET);
+      const createHmacSpy = jest.spyOn(crypto, 'createHmac');
+
+      try {
+        expect(verifyStateBinding(state, '12345')).toBe(true);
+        expect(createHmacSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        createHmacSpy.mockRestore();
+      }
+    });
+
     it('falls back to OAUTH_STATE_SECRET before the GitHub-specific secret exists', () => {
       delete process.env.GITHUB_OAUTH_STATE_SECRET;
       process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
