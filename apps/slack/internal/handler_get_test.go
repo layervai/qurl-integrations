@@ -1385,3 +1385,55 @@ func TestHandleGet_DollarSlugAdminAlsoChannelScoped(t *testing.T) {
 		}
 	})
 }
+
+// TestHandleGet_RateLimited fences the in-bot per-Slack-user mint rate
+// limiter (slackdata.CheckRateLimit). After a user spends their full
+// fixed-window budget on real mints, the next `/qurl get` is denied
+// with the "Rate limit hit" copy and never reaches the upstream mint —
+// closing issue #400 where the gate was a no-op stub.
+//
+// The handler's AdminStore clock is pinned to fixedNow (see
+// newAdminTestHandler), so the fixed window never rolls over across
+// the burst: the (budget+1)th call is deterministically over budget.
+// A fresh invoker per call gives each async reply its own response_url
+// capture (the shared handler and its DDB-backed Store persist across
+// them).
+func TestHandleGet_RateLimited(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/ok", testResourceIDFix)
+	})
+
+	h := newAdminTestHandler(t, ts)
+
+	// Drain the user's full fixed-window budget on real, successful mints.
+	// Derive the budget from the Store's source of truth rather than
+	// mirroring the literal, so this tracks the real default (30/hr) and
+	// won't break confusingly if slackdata changes it.
+	budget := h.cfg.AdminStore.MintRatePerHour
+	for i := 0; i < budget; i++ {
+		inv := newAdminSlashInvoker(t, h)
+		_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+		if !strings.Contains(async, "https://qurl.link/ok") {
+			t.Fatalf("mint %d/%d should have succeeded, got: %q", i+1, budget, async)
+		}
+	}
+	if got := mintHits.Load(); got != int32(budget) {
+		t.Fatalf("expected %d upstream mints to drain the budget, got %d", budget, got)
+	}
+
+	// One more from the SAME user must now be rate-limited — and must
+	// not burn an upstream mint.
+	inv := newAdminSlashInvoker(t, h)
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, "Rate limit hit") {
+		t.Errorf("over-budget reply missing rate-limit message: %q", async)
+	}
+	if got := mintHits.Load(); got != int32(budget) {
+		t.Errorf("over-budget request reached the mint (hits = %d, want %d)", got, budget)
+	}
+}

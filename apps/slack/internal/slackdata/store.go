@@ -99,6 +99,14 @@ type Store struct {
 	// updated_at assertions without poking a package-global.
 	// Defaults to time.Now.
 	Now func() time.Time
+
+	// MintRatePerHour is the per-(Slack workspace, Slack user) mint budget
+	// enforced by [Store.CheckRateLimit] for each fixed one-hour window.
+	// [NewStore] defaults it to mintRatePerHour; a non-positive value falls
+	// back to that default at check time. Exposed as a field so tests can grant
+	// headroom to flows whose intent is orthogonal to rate limiting. It is a
+	// code-level policy, not a runtime-tunable operator knob.
+	MintRatePerHour int
 }
 
 // StoreOption configures [NewStore].
@@ -164,6 +172,7 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 		WorkspaceMappingsName: o.workspaceMappingsName,
 		ChannelPoliciesName:   o.channelPoliciesName,
 		Now:                   time.Now,
+		MintRatePerHour:       mintRatePerHour,
 	}, nil
 }
 

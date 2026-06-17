@@ -371,6 +371,12 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	// so an undeliverable privacy request consumes nothing either. (Resolution
 	// work for unknown aliases is instead bounded by Slack's own per-user
 	// slash-command throttle, not by spending the user's mint quota on typos.)
+	//
+	// A token is spent per ATTEMPT, here, BEFORE the upstream mint — by
+	// design, as an abuse backstop: (a) a transient upstream mint failure
+	// below does not become a free retry vector, and (b) duplicate/idempotent
+	// attempts (incl. Slack slash-command retries) each spend a token even
+	// though they collapse to a single mint upstream via IdempotencyKey.
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
@@ -454,7 +460,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 // fat-fingered alias" tradeoff — don't "optimize" it away by short-circuiting the
 // fallbacks on a binding miss in a configured channel. Each scan is bounded by
 // listResourcesScanLimit and Slack's own per-user slash-command throttle bounds
-// the request rate; if the in-bot limiter (CheckRateLimit, a stub today) ever
+// the request rate; if the in-bot limiter (CheckRateLimit) ever
 // needs to shed this resolution cost too, add a cheap token-shape pre-filter
 // before the alias scan rather than moving the gate back ahead of resolution.
 //
