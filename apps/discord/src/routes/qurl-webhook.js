@@ -513,8 +513,14 @@ async function handleQurlExpired(req, res, { data, eventId }) {
 //   - the eventual qurl.expired event (which fires regardless of prior
 //     consume state — see the EventQurlExpired contract) is the
 //     last-resort flip, skipping only when consumed_edited_at is set.
-// So a transiently-failed flip that rolls its marker back is recovered;
-// nothing is permanently stuck on the no-await path.
+// So a transiently-failed flip that rolls its marker back is recovered
+// with the consumed copy on the next delivery. The one degraded case is
+// a process bounce (deploy/crash) after the 200 but before the deferred
+// flip runs: the consumed marker was never claimed, so the qurl.expired
+// backstop is what eventually flips the DM — to the less-specific
+// "expired" copy, not "you opened it". Self-heals to a correct "closed"
+// state either way; only the copy specificity degrades, bounded by the
+// 30m TTL.
 function flipConsumedDMInBackground({ qurlId, eventId }) {
   // Defer into the microtask queue so a future sync-throw refactor of
   // the flip surfaces as a rejection instead of escaping the handler.
