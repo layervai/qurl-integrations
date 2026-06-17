@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior test: build the image and run it against a local stub S3, asserting
-# the runtime contract — clean URLs, the exact security headers (on 200 and
-# 404), query-string-tolerant caching, 403->404 / 5xx->502 error mapping,
+# the runtime contract — clean URLs, the exact security headers (on
+# 200/404/405/5xx), query-string-tolerant caching, 403->404 / 5xx->502 error mapping,
 # Content-Type/Cache-Control passthrough, Range + HEAD, and that Envoy attaches
 # a SigV4 Authorization header over the correctly-canonicalized path.
 #
@@ -61,6 +61,7 @@ fi
 pass=0; fail=0
 fetch() { curl -s -D "$H" -o "$B" "$@"; }   # populates $H (headers) + $B (body)
 hval() { tr -d '\r' < "$H" | awk -F': ' -v k="$1" 'tolower($1)==tolower(k){print $2}'; }
+status_code() { tr -d '\r' < "$H" | awk 'NR==1{print $2}'; }
 cache_entries() {
   docker exec "$ORIGIN" qurl-origin-cachectl status \
     | sed -n 's/.*"entries":\([0-9][0-9]*\).*/\1/p'
@@ -77,6 +78,14 @@ stub_get_count() {
 ok() { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
 no() { fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else no "$1 (got '$2', want '$3')"; fi; }
+expect_security_headers() {
+  label="$1"
+  expect_eq "HSTS ($label)" "$(hval Strict-Transport-Security)" "max-age=31536000; includeSubDomains"
+  expect_eq "X-Frame-Options ($label)" "$(hval X-Frame-Options)" "DENY"
+  expect_eq "X-Content-Type-Options ($label)" "$(hval X-Content-Type-Options)" "nosniff"
+  expect_eq "Referrer-Policy ($label)" "$(hval Referrer-Policy)" "no-referrer"
+  expect_eq "X-Robots-Tag ($label)" "$(hval X-Robots-Tag)" "noindex, nofollow, noarchive, nosnippet, noimageindex"
+}
 expect_stub_gets() {
   label="$1"
   pattern="$2"
@@ -175,11 +184,7 @@ expect_stub_gets "missing key is not negative-cached" 'GET /future-object.json '
 # 7. exact security header set on 200 and on 404
 for path in "/" "/definitely-missing"; do
   fetch "$base$path"
-  expect_eq "HSTS ($path)" "$(hval Strict-Transport-Security)" "max-age=31536000; includeSubDomains"
-  expect_eq "X-Frame-Options ($path)" "$(hval X-Frame-Options)" "DENY"
-  expect_eq "X-Content-Type-Options ($path)" "$(hval X-Content-Type-Options)" "nosniff"
-  expect_eq "Referrer-Policy ($path)" "$(hval Referrer-Policy)" "no-referrer"
-  expect_eq "X-Robots-Tag ($path)" "$(hval X-Robots-Tag)" "noindex, nofollow, noarchive, nosnippet, noimageindex"
+  expect_security_headers "$path"
 done
 
 # 8. missing key -> clean 404 (no S3 XML leak)
@@ -194,11 +199,14 @@ if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"403"'; then ok "forb
 
 # 10. upstream 5xx -> 502 Bad Gateway
 fetch "$base/boom.json"
-expect_eq "boom status" "$(curl -s -o /dev/null -w '%{http_code}' "$base/boom.json")" 502
+expect_eq "boom status" "$(status_code)" 502
 expect_eq "boom body" "$(cat "$B")" "Bad Gateway"
+expect_security_headers "/boom.json"
 
 # 11. method not allowed
-expect_eq "POST / -> 405" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$base/")" 405
+fetch -X POST "$base/"
+expect_eq "POST / -> 405" "$(status_code)" 405
+expect_security_headers "POST /"
 
 # 12. HEAD -> headers, no body
 hb=$(curl -s -I "$base/metrics.json" | tr -d '\r')
