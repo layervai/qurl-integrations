@@ -5,6 +5,8 @@ set -eu
 
 CACHE_DIR="${CACHE_DIR:-/tmp/s3cache}"
 CACHE_KEY_METHODS="${CACHE_KEY_METHODS:-GET HEAD}"
+# Must match templates/nginx.conf.template's proxy_cache_key:
+# "$request_method$scheme$proxy_host$uri".
 CACHE_KEY_SCHEME="${CACHE_KEY_SCHEME:-http}"
 CACHE_KEY_PROXY_HOST="${CACHE_KEY_PROXY_HOST:-envoy_upstream}"
 INDEX_DOCUMENT="${INDEX_DOCUMENT:-index.html}"
@@ -187,6 +189,7 @@ cache_file_for_key() {
 }
 
 purge_one_path() {
+  path_removed=0
   candidates="$(emit_path_candidates "$1")"
   while IFS= read -r candidate; do
     for method in $CACHE_KEY_METHODS; do
@@ -194,26 +197,28 @@ purge_one_path() {
       file="$(cache_file_for_key "$key")"
       if [ -f "$file" ]; then
         rm -f "$file"
+        path_removed=$((path_removed + 1))
         rmdir "$(dirname "$file")" "$(dirname "$(dirname "$file")")" 2>/dev/null || true
       fi
     done
   done <<EOF
 $candidates
 EOF
+  printf '%s\n' "$path_removed"
 }
 
 purge_cache() {
-  before="$(entry_count)"
+  removed=0
   mkdir -p "$CACHE_DIR"
   if [ "$#" -eq 0 ]; then
+    removed="$(entry_count)"
     find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   else
     for path in "$@"; do
-      purge_one_path "$path"
+      path_removed="$(purge_one_path "$path")"
+      removed=$((removed + path_removed))
     done
   fi
-  after="$(entry_count)"
-  removed=$((before - after))
 }
 
 case "${1:-}" in

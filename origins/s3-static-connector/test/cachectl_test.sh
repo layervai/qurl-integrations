@@ -164,6 +164,12 @@ expect_file "$(entry_file GET /metrics.json)" "targeted purge preserves unrelate
 out="$(run_ctl purge /cacheprobe.json)"
 expect_eq "targeted purge is idempotent" "$(printf '%s\n' "$out" | json_num entries_removed)" 0
 
+reset_cache
+seed_entry GET /cacheprobe.json
+seed_entry HEAD /cacheprobe.json
+out="$(run_ctl purge /cacheprobe.json /cacheprobe.json)"
+expect_eq "targeted purge duplicate path counts existing files once" "$(printf '%s\n' "$out" | json_num entries_removed)" 2
+
 # Connector-scoped purge is still a local replica operation, but it fails closed
 # unless deploy automation addresses the connector this replica declares. This is
 # the contract that lets an orchestrator fan the same purge out across active
