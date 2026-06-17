@@ -96,7 +96,7 @@ func TestHandleAliases_InBotRateLimitDeniesBeforeListing(t *testing.T) {
 	}
 
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("aliases", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "1h") {
 		t.Fatalf("second aliases reply = %q, want in-bot rate-limit copy with retry hint", second)
 	}
 	if got := fetches.Load(); got != 1 {

@@ -114,6 +114,74 @@ func TestCheckRateLimit_UsesSyntheticCounterItemAndResetsWindow(t *testing.T) {
 	}
 }
 
+func TestCheckRateLimit_FollowsFutureWindowUnderClockSkew(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
+	store.RateLimitLimit = 2
+	store.RateLimitWindow = time.Hour
+
+	now := time.Date(2026, 6, 17, 12, 59, 59, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	localWindowUnix := now.Truncate(time.Hour).Unix()
+	futureWindowUnix := localWindowUnix + int64(time.Hour/time.Second)
+	counterKey := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+	ddb.items[counterKey] = map[string]ddbtypes.AttributeValue{
+		attrSlackTeamID:        stringAttr(counterKey),
+		attrRateLimitWindow:    numberAttr(futureWindowUnix),
+		attrRateLimitCount:     numberAttr(1),
+		attrRateLimitExpiresAt: numberAttr(time.Unix(futureWindowUnix, 0).Add(2 * time.Hour).Unix()),
+	}
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+	if err != nil {
+		t.Fatalf("CheckRateLimit future window: %v", err)
+	}
+	if !allowed || retry != 0 {
+		t.Fatalf("CheckRateLimit future window = allowed %v retry %s, want allowed/no retry", allowed, retry)
+	}
+	if got := readNumber(ddb.items[counterKey], attrRateLimitWindow); got != futureWindowUnix {
+		t.Fatalf("counter window = %d, want future window %d (must not reset backward to %d)", got, futureWindowUnix, localWindowUnix)
+	}
+	if got := readNumber(ddb.items[counterKey], attrRateLimitCount); got != 2 {
+		t.Fatalf("counter count = %d, want 2", got)
+	}
+}
+
+func TestCheckRateLimit_DeniesAtFutureWindowLimit(t *testing.T) {
+	ddb := newRateLimitDDB(true)
+	store := newRateLimitStore(ddb)
+	store.RateLimitEnabled = true
+	store.RateLimitLimit = 2
+	store.RateLimitWindow = time.Hour
+
+	now := time.Date(2026, 6, 17, 12, 59, 59, 0, time.UTC)
+	store.Now = func() time.Time { return now }
+	futureWindowUnix := now.Truncate(time.Hour).Add(time.Hour).Unix()
+	counterKey := rateLimitKey(testRateLimitTeamID, testRateLimitUserID)
+	ddb.items[counterKey] = map[string]ddbtypes.AttributeValue{
+		attrSlackTeamID:        stringAttr(counterKey),
+		attrRateLimitWindow:    numberAttr(futureWindowUnix),
+		attrRateLimitCount:     numberAttr(2),
+		attrRateLimitExpiresAt: numberAttr(time.Unix(futureWindowUnix, 0).Add(2 * time.Hour).Unix()),
+	}
+
+	allowed, retry, err := store.CheckRateLimit(context.Background(), testRateLimitUserID, testRateLimitTeamID)
+	if err != nil {
+		t.Fatalf("CheckRateLimit future window at limit: %v", err)
+	}
+	if allowed {
+		t.Fatal("future-window at-limit call allowed, want denied")
+	}
+	wantRetry := time.Unix(futureWindowUnix, 0).Add(time.Hour).Sub(now)
+	if retry != wantRetry {
+		t.Fatalf("retry = %s, want %s", retry, wantRetry)
+	}
+	if got := readNumber(ddb.items[counterKey], attrRateLimitWindow); got != futureWindowUnix {
+		t.Fatalf("counter window = %d, want future window %d", got, futureWindowUnix)
+	}
+}
+
 func TestCheckRateLimit_RepairsConcurrentInitializeRace(t *testing.T) {
 	ddb := newRateLimitDDB(true)
 	ddb.raceInitializeWindow = true

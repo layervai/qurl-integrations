@@ -334,7 +334,7 @@ func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
 	}
 
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "1h") {
 		t.Fatalf("second get = %q, want in-bot rate-limit copy with retry hint", second)
 	}
 	if got := mintHits.Load(); got != 1 {

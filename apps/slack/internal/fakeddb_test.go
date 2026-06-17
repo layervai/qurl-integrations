@@ -782,9 +782,9 @@ func splitTopLevelKeyword(s, keyword string) []string {
 
 // evalCondition supports the exact ConditionExpression shapes the
 // production code emits: subexpressions joined by top-level " AND " plus the
-// reset path's top-level " OR ". Mixed or nested boolean trees
-// beyond that are intentionally out of scope for this test fake. Each
-// subexpression is one of:
+// simple top-level " OR " conditions used by optimistic writes. Mixed or nested
+// boolean trees beyond that are intentionally out of scope for this test fake.
+// Each subexpression is one of:
 //
 //	attribute_exists(<attr>)
 //	attribute_not_exists(<attr>)
@@ -793,7 +793,6 @@ func splitTopLevelKeyword(s, keyword string) []string {
 //	<attr> = :val
 //	<attr> < :val
 //	<attr> > :val
-//	<attr> < :val
 //
 // Returns (true, nil) when every subexpression is satisfied.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {

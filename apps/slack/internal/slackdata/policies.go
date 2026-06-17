@@ -426,9 +426,8 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 // row makes resourceID available — i.e. resourceID is in
 // [AllowedResourceIDsForChannel] for that channel (the union of
 // `allowed_resource_ids` and `alias_bindings.values()`). It backs the
-// `/qurl list` Edit modal's "expose to channels" pre-fill and the
-// `/qurl revoke` channel-binding sweep. For Edit, it lets an admin see every
-// channel a tunnel already reaches before adding more — and ensures the
+// `/qurl list` Edit modal's "expose to channels" pre-fill so an admin sees
+// every channel a tunnel already reaches before adding more — and so the
 // submit-side reconcile only revokes channels the admin actually saw.
 //
 // Issues a Query on the partition key (slack_team_id) and pages over

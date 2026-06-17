@@ -661,6 +661,11 @@ hour boundary; treat the practical short-term ceiling as roughly 2x the hourly
 limit. The 30/hour budget and 1-hour window are code-level defaults, not
 operator-tunable environment variables.
 
+If one task observes a counter row already advanced into a future window
+(hour-boundary race or clock skew), it follows that stored window rather than
+resetting the item backward. A future-window denial can therefore report a retry
+hint longer than one hour.
+
 The gate is staged behind `QURL_SLACK_RATE_LIMIT_ENABLED`. Leave it unset in
 sandbox/open-gate deployments; set it to `true` in production after confirming
 the task role can read and update `workspace_mappings` and that native TTL is
