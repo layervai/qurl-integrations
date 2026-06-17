@@ -12,7 +12,9 @@ const (
 
 // setupLinkRateLimiter is a per-process fixed-window throttle for setup-link
 // minting. It bounds accidental or hostile repeats on each running task without
-// making first-claim setup depend on DynamoDB-backed admin storage.
+// making first-claim setup depend on DynamoDB-backed admin storage. Entries are
+// keyed from Slack-signed team/user IDs and swept once per window instead of
+// capped globally, so this stays best-effort rather than a hard cross-task cap.
 type setupLinkRateLimiter struct {
 	mu        sync.Mutex
 	entries   map[string]setupLinkRateLimitEntry
@@ -44,11 +46,7 @@ func (l *setupLinkRateLimiter) allow(teamID, userID string, now time.Time) (bool
 		return true, 0
 	}
 	if entry.count >= setupLinkRateLimitMax {
-		retry := entry.windowStart.Add(setupLinkRateLimitWindow).Sub(now)
-		if retry < 0 {
-			retry = 0
-		}
-		return false, retry
+		return false, entry.windowStart.Add(setupLinkRateLimitWindow).Sub(now)
 	}
 	entry.count++
 	l.entries[key] = entry
