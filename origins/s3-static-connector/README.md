@@ -126,8 +126,9 @@ cache.
 
 ## Logging
 
-Both processes log JSON to the container's stdout/stderr, tagged with a `layer`
-field (`nginx` / `envoy` / `origin`) so a shared log stream stays filterable:
+Runtime access and lifecycle events log JSON to the container's stdout/stderr,
+tagged with a `layer` field (`nginx` / `envoy` / `origin`) so a shared log
+stream stays filterable:
 
 - nginx access lines: `{"layer":"nginx","status":<num>,"upstream_status":"<str>","cache":"<HIT|MISS|...>",…}`.
 - `entrypoint.sh` emits `{"layer":"origin","msg":"origin_started"}` once per start
@@ -135,6 +136,8 @@ field (`nginx` / `envoy` / `origin`) so a shared log stream stays filterable:
 - `qurl-origin-cachectl purge` emits
   `{"layer":"origin","msg":"cache_purged",...}` when deploy automation clears
   the local proxy cache.
+- nginx `error_log` lines are plain text; metric filters should key on
+  `$.layer` so non-JSON diagnostic lines are ignored.
 
 ## Cache control
 
