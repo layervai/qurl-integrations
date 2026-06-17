@@ -42,51 +42,70 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 //      kind-binding on the state token already prevents cross-purpose
 //      forgery, so sharing was secure; the precedence here is purely
 //      operational hygiene per PR #177 review (issue #184).
-//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for env-parity with
-//      the GitHub OAuth flow's signer.
+//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for old/dev env-parity.
 //   4. Test fallback          — per-process random secret for jest only.
 //
-// Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM, deploy
-// (the dual-read happens automatically); once every replica has the
-// new var, drop OAUTH_STATE_SECRET. The 5-minute state TTL bounds the
-// "old links don't validate against the new key" window — no separate
-// dual-key reader needed.
+// Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM while leaving
+// OAUTH_STATE_SECRET present, deploy, wait longer than STATE_TTL_SECONDS,
+// then drop OAUTH_STATE_SECRET. Verification accepts both configured keys
+// during that window; after the legacy key is removed it stops validating.
 // Minimum acceptable secret length — per round-9 #4. 32 chars is the
 // floor for an HMAC-SHA256 secret with adequate entropy (matches the
 // `0`.repeat(64) test fixture's order of magnitude, well below the
 // 128-char hex secrets ops actually provisions). A 4-char accidental
 // value would HMAC just fine with no security; reject upfront.
 const MIN_STATE_SECRET_LENGTH = 32;
+const SSM_PLACEHOLDER_SECRET = 'PLACEHOLDER';
 
-function stateSecret() {
-  const dedicated = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
-  if (dedicated) {
-    if (dedicated.length < MIN_STATE_SECRET_LENGTH) {
-      throw new Error(`Refusing to mint qURL OAuth state: state-signing secret is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${dedicated.length}). Provision a 64+ char value in SSM.`);
-    }
-    return dedicated;
+function envSecret(name) {
+  const value = process.env[name];
+  if (!value || !value.trim() || value === SSM_PLACEHOLDER_SECRET) return undefined;
+  return value;
+}
+
+function addSecret(secrets, value, label) {
+  if (!value) return;
+  if (value.length < MIN_STATE_SECRET_LENGTH) {
+    throw new Error(
+      `Refusing to mint qURL OAuth state: ${label} is shorter than ${MIN_STATE_SECRET_LENGTH} chars `
+      + `(got ${value.length}). Provision a 64+ char value in SSM.`
+    );
   }
+  if (!secrets.includes(value)) secrets.push(value);
+}
+
+function stateSecrets() {
+  const secrets = [];
+  addSecret(secrets, envSecret('QURL_OAUTH_STATE_SECRET'), 'QURL_OAUTH_STATE_SECRET');
+  addSecret(secrets, envSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET');
+  if (secrets.length > 0) return secrets;
+
   if (!config.GITHUB_CLIENT_SECRET) {
     const inTestHarness = process.env.NODE_ENV === 'test'
       && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
     if (!inTestHarness) {
-      throw new Error('Refusing to mint qURL OAuth state: QURL_OAUTH_STATE_SECRET or OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
+      throw new Error(
+        'Refusing to mint qURL OAuth state: QURL_OAUTH_STATE_SECRET, OAUTH_STATE_SECRET, '
+        + 'or GITHUB_CLIENT_SECRET must be set.'
+      );
     }
     if (!_warnedFallback) {
       // eslint-disable-next-line no-console
       console.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
       _warnedFallback = true;
     }
-    return _testFallbackSecret;
+    return [_testFallbackSecret];
   }
   // GITHUB_CLIENT_SECRET fallback is also length-checked — Auth0 /
   // GitHub provision 32+ char client secrets by default, but a manual
   // /placeholder env on a misconfigured dev box would slip past
   // otherwise.
-  if (config.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
-    throw new Error(`Refusing to mint qURL OAuth state: GITHUB_CLIENT_SECRET fallback is shorter than ${MIN_STATE_SECRET_LENGTH} chars.`);
-  }
-  return config.GITHUB_CLIENT_SECRET;
+  addSecret(secrets, config.GITHUB_CLIENT_SECRET, 'GITHUB_CLIENT_SECRET fallback');
+  return secrets;
+}
+
+function stateSecret() {
+  return stateSecrets()[0];
 }
 
 function b64urlEncode(buf) {
@@ -135,14 +154,20 @@ function verifyQurlOAuthState(state) {
   if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[0-9a-f]{64}$/.test(sig)) {
     return { ok: false, reason: 'malformed_chars' };
   }
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(encoded)
-    .digest('hex');
+  const sigBuf = Buffer.from(sig, 'hex');
   let sigOk = false;
-  try {
-    sigOk = crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  } catch {
-    return { ok: false, reason: 'sig_compare_threw' };
+  for (const secret of stateSecrets()) {
+    const expected = crypto.createHmac('sha256', secret)
+      .update(encoded)
+      .digest('hex');
+    try {
+      if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) {
+        sigOk = true;
+        break;
+      }
+    } catch {
+      return { ok: false, reason: 'sig_compare_threw' };
+    }
   }
   if (!sigOk) return { ok: false, reason: 'sig_mismatch' };
 

@@ -69,4 +69,59 @@ describe('verifyStateBinding', () => {
     const state = makeState('12345', 'other-secret');
     expect(verifyStateBinding(state, '12345')).toBe(false);
   });
+
+  describe('secret precedence (#184)', () => {
+    let savedGitHubStateSecret;
+    let savedSharedStateSecret;
+
+    beforeEach(() => {
+      savedGitHubStateSecret = process.env.GITHUB_OAUTH_STATE_SECRET;
+      savedSharedStateSecret = process.env.OAUTH_STATE_SECRET;
+    });
+
+    afterEach(() => {
+      if (savedGitHubStateSecret === undefined) delete process.env.GITHUB_OAUTH_STATE_SECRET;
+      else process.env.GITHUB_OAUTH_STATE_SECRET = savedGitHubStateSecret;
+      if (savedSharedStateSecret === undefined) delete process.env.OAUTH_STATE_SECRET;
+      else process.env.OAUTH_STATE_SECRET = savedSharedStateSecret;
+    });
+
+    it('signs GitHub OAuth state with GITHUB_OAUTH_STATE_SECRET when set', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'g'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+
+      const state = makeState('12345', process.env.GITHUB_OAUTH_STATE_SECRET);
+      expect(verifyStateBinding(state, '12345')).toBe(true);
+      expect(verifyStateBinding(makeState('12345', 'test-client-secret'), '12345')).toBe(false);
+    });
+
+    it('accepts OAUTH_STATE_SECRET during cutover and rejects it after removal', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'g'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+      const legacyState = makeState('12345', process.env.OAUTH_STATE_SECRET);
+
+      expect(verifyStateBinding(legacyState, '12345')).toBe(true);
+      delete process.env.OAUTH_STATE_SECRET;
+      expect(verifyStateBinding(legacyState, '12345')).toBe(false);
+    });
+
+    it('falls back to OAUTH_STATE_SECRET before the GitHub-specific secret exists', () => {
+      delete process.env.GITHUB_OAUTH_STATE_SECRET;
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+
+      const state = makeState('12345', process.env.OAUTH_STATE_SECRET);
+      expect(verifyStateBinding(state, '12345')).toBe(true);
+    });
+
+    it('treats the Terraform SSM placeholder as unset', () => {
+      process.env.GITHUB_OAUTH_STATE_SECRET = 'PLACEHOLDER';
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+
+      const legacyState = makeState('12345', process.env.OAUTH_STATE_SECRET);
+      const placeholderState = makeState('12345', process.env.GITHUB_OAUTH_STATE_SECRET);
+
+      expect(verifyStateBinding(legacyState, '12345')).toBe(true);
+      expect(verifyStateBinding(placeholderState, '12345')).toBe(false);
+    });
+  });
 });

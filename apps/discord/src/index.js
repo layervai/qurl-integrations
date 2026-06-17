@@ -161,6 +161,10 @@ if (isMultiTenant) {
   logger.info(`Single-guild plain mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP features dormant; only /qurl registered.`);
 }
 
+function hasSeededSecret(value) {
+  return Boolean(value && value.trim() && value !== 'PLACEHOLDER');
+}
+
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
@@ -204,14 +208,27 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
+  // GITHUB_OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
   // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). Require it only when that surface is live.
-  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
-    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
-    // rotating GitHub's client secret would invalidate all in-flight
-    // OAuth states and vice versa. A prod deploy must set this explicitly.
-    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+  // /webhook routes). OAUTH_STATE_SECRET remains accepted during the
+  // migration window so a code deploy can land before the new SSM parameter.
+  if (config.isOpenNHPActive
+    && !hasSeededSecret(process.env.GITHUB_OAUTH_STATE_SECRET)
+    && !hasSeededSecret(process.env.OAUTH_STATE_SECRET)) {
+    logger.error(
+      'GITHUB_OAUTH_STATE_SECRET must be set in production '
+      + '(or legacy OAUTH_STATE_SECRET during migration). Generate with: openssl rand -hex 32'
+    );
+    process.exit(1);
+  }
+
+  if (config.isQurlOAuthConfigured
+    && !hasSeededSecret(process.env.QURL_OAUTH_STATE_SECRET)
+    && !hasSeededSecret(process.env.OAUTH_STATE_SECRET)) {
+    logger.error(
+      'QURL_OAUTH_STATE_SECRET must be set in production when qURL OAuth is configured '
+      + '(or legacy OAUTH_STATE_SECRET during migration). Generate with: openssl rand -hex 32'
+    );
     process.exit(1);
   }
 }
