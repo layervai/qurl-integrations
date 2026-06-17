@@ -57,6 +57,16 @@ const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 
 const originalFetch = globalThis.fetch;
 
+function extractStyleNonce(res) {
+  const csp = res.headers['content-security-policy'];
+  expect(csp).toBeDefined();
+  expect(csp).not.toContain('unsafe-inline');
+
+  const nonceMatch = csp.match(/style-src 'nonce-([A-Za-z0-9_-]+)'/);
+  expect(nonceMatch).not.toBeNull();
+  return nonceMatch[1];
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   globalThis.fetch = originalFetch;
@@ -90,18 +100,19 @@ describe('Discord install callback', () => {
       const res = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
       expect(res.status).toBe(400);
 
-      const csp = res.headers['content-security-policy'];
-      expect(csp).toBeDefined();
-      expect(csp).not.toContain('unsafe-inline');
-
-      const nonceMatch = csp.match(/style-src 'nonce-([A-Za-z0-9_-]+)'/);
-      expect(nonceMatch).not.toBeNull();
-      const nonce = nonceMatch[1];
+      const nonce = extractStyleNonce(res);
       expect(nonce).toHaveLength(22);
 
       expect(res.text).toContain(`style-src 'nonce-${nonce}'`);
       expect(res.text).toContain(`<style nonce="${nonce}">`);
       expect(res.text).not.toContain('unsafe-inline');
+    });
+
+    it('generates a fresh CSP nonce for each response', async () => {
+      const first = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
+      const second = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
+
+      expect(extractStyleNonce(first)).not.toBe(extractStyleNonce(second));
     });
 
     it('400s on missing guild_id (admin abandoned mid-install)', async () => {
