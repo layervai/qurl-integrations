@@ -1418,6 +1418,134 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     }
   });
 
+  it('does NOT delete a cross-host sub with last_delivery_success=false but failure_count below the transient-failure floor', async () => {
+    // The compound liveness gate (last_delivery_success === false AND
+    // failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES) tolerates a
+    // single transient delivery failure on an otherwise-healthy
+    // sibling. Without the floor, a network blip on one delivery would
+    // flip last_delivery_success to false and a peer reboot in that
+    // window would DELETE the live sub.
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_transient',
+          url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          failure_count: 1, // below MIN_FAILURES (3)
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_transient': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('does NOT delete when failure_count is missing or non-numeric (fails closed on schema drift)', async () => {
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_no_count',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          last_delivery_success: false,
+          // failure_count omitted — qurl-service contract drift
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_no_count': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
+  it('logs the liveness-gated near-miss count for CloudWatch observability', async () => {
+    // Pin the observability seam: when a host+path+description matches
+    // but the liveness gate held the row back, surface the count so an
+    // operator can grep CloudWatch instead of inspecting subs by hand.
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          // Two near-miss rows (healthy, transient) — neither gets deleted.
+          {
+            webhook_id: 'wh_healthy',
+            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 0,
+            last_delivery_success: true,
+          },
+          {
+            webhook_id: 'wh_transient',
+            url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 1,
+            last_delivery_success: false,
+          },
+        ] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      const nearMissLine = logSpy.mock.calls
+        .map(c => c[0])
+        .find(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLine).toBeDefined();
+      const meta = JSON.parse(nearMissLine.slice(nearMissLine.indexOf('{')));
+      expect(meta).toMatchObject({
+        near_miss_count: 2,
+        orphan_deletes: 0,
+        url: NEW_URL,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('does NOT emit the near-miss log when there are zero candidates (steady state, no noise)', async () => {
+    // Avoid log spam on every healthy boot — only emit when we actually
+    // saw a candidate-but-not-orphan row.
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          // Sibling-service sub — doesn't match description-prefix, so
+          // not a near-miss either.
+          { webhook_id: 'wh_connector', url: 'https://s3-connector.example/webhooks/qurl', description: 'qurl-s3-connector ...', events: [], failure_count: 0, last_delivery_success: true },
+        ] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      const nearMissLine = logSpy.mock.calls
+        .map(c => c[0])
+        .find(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLine).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('skips a row with a malformed URL gracefully (urlHost/urlPathname return null)', async () => {
+    // Defensive: a future qurl-service contract drift that lets a junk
+    // URL through (or a manual sub created with an unparseable URL)
+    // must not crash the sweep — it just skips that row.
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_junk_url', url: 'not://a valid url with spaces', description: BOT_DESC, events: [], failure_count: 999, last_delivery_success: false },
+      ] } }),
+      'POST /v1/webhooks': () => { createCalled = true; return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }; },
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(createCalled).toBe(true);
+  });
+
   it('skips the sweep when description is empty (cannot derive a safe prefix)', async () => {
     // Defensive: an empty description would derive an empty prefix,
     // which would match LITERALLY every sub via startsWith(''). The
@@ -1432,6 +1560,83 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     });
     await ensureWebhookSubscription({ ...BOT_OPTS, description: '' });
     expect(deleted).toBe(false);
+  });
+});
+
+describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () => {
+  const { buildUrlMigrationOrphanFilter, ORPHAN_FILTER_RESULTS, URL_MIGRATION_ORPHAN_MIN_FAILURES } = _internals;
+
+  it('returns null when descriptionPrefix is empty (sweep disabled)', () => {
+    expect(buildUrlMigrationOrphanFilter({ bridgeUrl: 'https://bot.example/webhooks/qurl', descriptionPrefix: '' })).toBeNull();
+  });
+
+  it('returns null when bridgeUrl is unparseable (sweep disabled, no false-positive deletes possible)', () => {
+    expect(buildUrlMigrationOrphanFilter({ bridgeUrl: 'not://a real url', descriptionPrefix: 'X' })).toBeNull();
+  });
+
+  it('classifies a healthy cross-host candidate as NEAR_MISS_LIVENESS (not MATCH)', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: 0,
+      last_delivery_success: true,
+    })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
+  });
+
+  it('classifies a transient-failure cross-host candidate as NEAR_MISS_LIVENESS (failure_count under threshold)', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: URL_MIGRATION_ORPHAN_MIN_FAILURES - 1, // just under
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
+  });
+
+  it('classifies a confirmed orphan (cross-host + matching desc + dead + many failures) as MATCH', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: URL_MIGRATION_ORPHAN_MIN_FAILURES,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.MATCH);
+  });
+
+  it('classifies a same-host candidate as NO_MATCH regardless of liveness', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://bot.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: 9999,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
+  });
+
+  it('classifies a sibling-service candidate (non-matching description prefix) as NO_MATCH', () => {
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'qurl-s3-connector resource.closed subscription',
+      failure_count: 9999,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
   });
 });
 

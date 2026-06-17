@@ -154,17 +154,20 @@ function canonicalUrl(u) {
 // requested explicitly; loop bounded at 50 iterations (5000 subs)
 // so a misbehaving cursor can't spin forever.
 //
-// Always returns `{ matches, orphans }`. `orphans` is the subset of
-// the walk's rows that satisfy `orphanFilter(s)` when one is provided
-// (URL-migration leftovers, see buildUrlMigrationOrphanFilter); when
-// no filter is provided OR the filter rejects every row, `orphans` is
-// empty. Co-collecting in the same cursor walk avoids paying a second
-// full-scan on the create-fresh path.
+// Always returns `{ matches, orphans, nearMissCount }`. `orphans` is
+// the subset of the walk's rows that the `orphanFilter(s)` classifies
+// as a full match (URL-migration leftovers, see
+// buildUrlMigrationOrphanFilter). `nearMissCount` is the count of rows
+// that matched host+path+description but failed the liveness gate —
+// useful observability: if the sweep DELETEs nothing despite a known
+// rename, an operator can grep CloudWatch for the near-miss log to
+// distinguish "qurl-service schema drifted (field missing)" from
+// "everything looks alive."
 //
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
-//     {matches, orphans}, possibly empty. Caller takes create-fresh on
-//     empty matches.
+//     {matches, orphans, nearMissCount}, possibly empty. Caller takes
+//     create-fresh on empty matches.
 //   - 50-page cap hit (cursor never ends) → THROWS, refuses to fall
 //     through to create-fresh which would silently compound
 //     duplicates on every restart.
@@ -172,6 +175,7 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
   const target = canonicalUrl(bridgeUrl);
   const matches = [];
   const orphans = [];
+  let nearMissCount = 0;
   let cursor = '';
   for (let i = 0; i < 50; i++) {
     // Explicit limit=100 (vs relying on a server default that could
@@ -185,11 +189,16 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
     // a confusing way and silently treat them as subscription objects.
     const subs = Array.isArray(resp?.data) ? resp.data : [];
     for (const s of subs) {
-      if (canonicalUrl(s.url) === target) matches.push(s);
-      else if (orphanFilter && orphanFilter(s)) orphans.push(s);
+      if (canonicalUrl(s.url) === target) {
+        matches.push(s);
+      } else if (orphanFilter) {
+        const verdict = orphanFilter(s);
+        if (verdict === ORPHAN_FILTER_RESULTS.MATCH) orphans.push(s);
+        else if (verdict === ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS) nearMissCount += 1;
+      }
     }
     const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return { matches, orphans };
+    if (!next) return { matches, orphans, nearMissCount };
     cursor = next;
   }
   throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
@@ -233,6 +242,13 @@ async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
 // CURRENT shape), but it means: if you ever edit the pre-`(` portion
 // of the bot's description, every pre-edit orphan becomes permanently
 // uncatchable. Pair any such edit with a one-off cleanup pass.
+//
+// PARSING FRAGILITY: the prefix is derived by splitting on the FIRST
+// ` (`. If the stable segment ever grows its own parenthetical
+// (e.g. `Discord bot (beta) view counter (env=...)`), the derived
+// prefix silently shrinks to `Discord bot` and widens the match set
+// dramatically. Keep the stable segment paren-free; if you need to
+// embed parens, sharpen this parser at the same time.
 //
 // Falls back to the whole string if no ` (` present, so a caller passing
 // a description without parens still gets a sensible match (string-exact).
@@ -294,41 +310,82 @@ function urlPathname(u) {
 //      `qurl-s3-connector resource.closed subscription`) out of the
 //      deletion set even though they share owner_id with the bot under
 //      today's bot-API-key-shared model.
-//   4. Liveness gate: `last_delivery_success === false`. The motivating
-//      orphan had `last_delivery_success: false` + `failure_count: 1475`.
-//      Without this gate, an active-active multi-region deploy that
-//      ever shares the same `QURL_API_KEY` across regions (same owner_id,
-//      different `BASE_URL` hosts) would self-cannibalize — region A
-//      boots, finds no sub at host A, sweeps region B's healthy sub
-//      because everything else matches (host≠, path=, description-prefix=).
-//      The liveness signal asymmetrically protects a healthy sub
-//      (last_delivery_success: true OR null/undefined) while still
-//      catching the unambiguously-dead orphan we're targeting.
+//   4. Liveness gate: BOTH `last_delivery_success === false` AND
+//      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
+//      compound check tolerates a single transient delivery failure on
+//      an otherwise-healthy cross-host sibling (most relevant to an
+//      active-active multi-region deploy that ever shares one
+//      `QURL_API_KEY` across regions — same owner_id, different
+//      `BASE_URL` hosts). A single network blip on the most recent
+//      delivery flips `last_delivery_success` to false; without the
+//      `failure_count` floor, a sibling reboot during that window
+//      would DELETE a healthy peer. The threshold value 3 is a small
+//      number consistent with "more than one transient failure"; the
+//      motivating orphan had 1475, comfortably above it.
 //      Strictness on `=== false` (vs `!== true`): a brand-new sub with
 //      no deliveries yet typically reports null/undefined — treat that
 //      as "presumed alive, do not delete."
+//
+//      First-boot-after-rename caveat: the *old* sub's last delivery
+//      may have been a success (the one that completed just before the
+//      rename). `last_delivery_success` only flips to false once the
+//      first post-rename delivery attempt fails sig verification at
+//      the bot. So the immediate first post-rename boot may not sweep
+//      the orphan — it gets caught on a subsequent boot once a real
+//      delivery has been attempted + failed. Acceptable because the
+//      hoisted sweep retries every boot (not gated on create-fresh).
+//
+//      TODO(upstream-contract): field names `last_delivery_success` and
+//      `failure_count` are pinned against qurl-service's webhook list
+//      response shape. If qurl-service ever renames or changes their
+//      types (e.g. serializes booleans as strings), the strict-equality
+//      check fails safe (no wrong deletions) but the feature silently
+//      becomes a no-op — track these names so `git grep` finds them
+//      when the schema drifts.
 //
 // Returned as a closure so it composes into `findExistingSubscriptions`
 // as the `orphanFilter` arg: one cursor walk produces both the matches
 // AND the orphan candidates, avoiding a second full-scan on every
 // create-fresh boot. Returns null when no safe prefix can be derived —
 // callers treat that as "skip the sweep".
+const URL_MIGRATION_ORPHAN_MIN_FAILURES = 3;
+// Tri-state return so a caller (findExistingSubscriptions) can both
+// collect confirmed orphans AND record near-miss observability —
+// "matched everything except the liveness gate" is the case we WANT
+// to surface in CloudWatch so an operator can grep CloudWatch for
+// "schema field is missing" (TODO upstream-contract above) vs "field
+// is present but says alive" without staring at qurl-service directly.
+const ORPHAN_FILTER_RESULTS = Object.freeze({
+  MATCH: 'match',
+  NEAR_MISS_LIVENESS: 'near-miss-liveness',
+  NO_MATCH: false,
+});
 function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
   if (!descriptionPrefix) return null;
   const targetHost = urlHost(bridgeUrl);
   const targetPath = urlPathname(bridgeUrl);
   if (!targetHost || !targetPath) return null;
   const prefixWithBoundary = `${descriptionPrefix} (`;
-  return function isUrlMigrationOrphan(s) {
+  return function classifyOrphanCandidate(s) {
     const subHost = urlHost(s.url);
     const subPath = urlPathname(s.url);
-    if (subHost === null || subPath === null) return false;
-    if (subPath !== targetPath) return false;
-    if (subHost === targetHost) return false;
+    if (subHost === null || subPath === null) return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    if (subPath !== targetPath) return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    if (subHost === targetHost) return ORPHAN_FILTER_RESULTS.NO_MATCH;
     const subDesc = typeof s.description === 'string' ? s.description : '';
-    if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) return false;
-    if (s.last_delivery_success !== false) return false;
-    return true;
+    if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) {
+      return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    }
+    // From here on: host + path + description all match (a "candidate").
+    // Liveness gate decides match vs near-miss. `failure_count` is
+    // checked as `typeof === 'number'` so an unparseable / missing
+    // field fails closed (skip), avoiding accidental deletion if
+    // qurl-service ever omits the field.
+    if (s.last_delivery_success !== false) return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
+    if (typeof s.failure_count !== 'number' || s.failure_count < URL_MIGRATION_ORPHAN_MIN_FAILURES) {
+      return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
+    }
+    return ORPHAN_FILTER_RESULTS.MATCH;
   };
 }
 
@@ -548,7 +605,7 @@ async function ensureWebhookSubscription(opts) {
     bridgeUrl,
     descriptionPrefix: deriveDescriptionPrefix(description),
   });
-  const { matches, orphans } = await findExistingSubscriptions({
+  const { matches, orphans, nearMissCount } = await findExistingSubscriptions({
     apiEndpoint, apiKey, bridgeUrl, orphanFilter,
   });
 
@@ -563,6 +620,18 @@ async function ensureWebhookSubscription(opts) {
   // finds, regardless of whether it then takes existing/reuse/rotate/create.
   if (orphans.length > 0) {
     await cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans });
+  }
+  // Observability: a cross-host sub matching host+path+description but
+  // failing the liveness gate is the most common "sweep did nothing"
+  // class. Surface it so an operator can distinguish "qurl-service
+  // schema drift (field missing)" from "sibling still alive, do not
+  // sweep" without inspecting subs by hand.
+  if (nearMissCount > 0) {
+    logger.info('URL-migration orphan sweep — liveness-gated near-misses', {
+      near_miss_count: nearMissCount,
+      orphan_deletes: orphans.length,
+      url: bridgeUrl,
+    });
   }
 
   const existing = pickSurvivor(matches);
@@ -730,5 +799,7 @@ module.exports = {
     deriveDescriptionPrefix,
     buildUrlMigrationOrphanFilter,
     cleanupUrlMigrationOrphans,
+    ORPHAN_FILTER_RESULTS,
+    URL_MIGRATION_ORPHAN_MIN_FAILURES,
   },
 };
