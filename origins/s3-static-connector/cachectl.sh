@@ -187,7 +187,6 @@ cache_file_for_key() {
 }
 
 purge_one_path() {
-  removed=0
   candidates="$(emit_path_candidates "$1")"
   while IFS= read -r candidate; do
     for method in $CACHE_KEY_METHODS; do
@@ -195,14 +194,12 @@ purge_one_path() {
       file="$(cache_file_for_key "$key")"
       if [ -f "$file" ]; then
         rm -f "$file"
-        removed=$((removed + 1))
         rmdir "$(dirname "$file")" "$(dirname "$(dirname "$file")")" 2>/dev/null || true
       fi
     done
   done <<EOF
 $candidates
 EOF
-  printf '%s' "$removed"
 }
 
 purge_cache() {
@@ -212,7 +209,7 @@ purge_cache() {
     find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   else
     for path in "$@"; do
-      purge_one_path "$path" >/dev/null
+      purge_one_path "$path"
     done
   fi
   after="$(entry_count)"

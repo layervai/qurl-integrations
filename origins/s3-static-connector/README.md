@@ -1,6 +1,6 @@
 # s3-static-connector
 
-Reusable origin image for a **private S3 static site behind qURL Connector**.
+Reusable origin image for a **private S3 static site behind qURL™ Connector**.
 It serves a private S3 bucket over plain HTTP on **loopback only**, so the qURL
 Connector (running as a sidecar in the same network namespace) is the sole
 reachable path and applies access control before any traffic reaches the
@@ -36,10 +36,11 @@ This contract is frozen — additive only once published.
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `S3_BUCKET` | Yes | none | Private bucket to serve from. |
+| `S3_BUCKET` | Yes | none | Private bucket to serve from. Dotted bucket names are rejected because this image uses virtual-hosted-style S3 TLS/SNI. |
 | `S3_PREFIX` | No | empty | Key prefix; normalized to a single leading slash, no trailing slash. |
-| `LISTEN_ADDR` | No | `127.0.0.1:8080` | nginx listen address; matches `protect-connector`'s default `port:8080`. |
-| `ENVOY_LISTEN_ADDR` | No | `127.0.0.1:9090` | Internal signer listener; never exposed outside the container. |
+| `LISTEN_ADDR` | No | `127.0.0.1:8080` | nginx listen address; matches `protect-connector`'s default `port:8080`. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
+| `ENVOY_LISTEN_ADDR` | No | `127.0.0.1:9090` | Internal signer listener; never exposed outside the container. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
+| `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback. Do not set in protected deployments. |
 | `INDEX_DOCUMENT` | No | `index.html` | Powers clean URLs; empty is invalid when explicitly set. |
 | `AWS_REGION` | Usually | env / IMDS | Region for the S3 endpoint host and SigV4. Resolved from IMDSv2 when unset. |
 | `CACHE_MAX_SIZE` | No | `1g` | nginx `proxy_cache_path` max size. |
@@ -90,6 +91,10 @@ verbatim. These security headers are set on **every** response (200/404/405/5xx)
 
 S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
 distinction is preserved in the access log for alarming.
+
+Range serving is intended for uncompressed objects. nginx gzip can take
+precedence for compressible content types such as CSS, JS, JSON, SVG, and XML,
+so byte-range behavior for those assets is not part of the contract.
 
 ## Logging
 

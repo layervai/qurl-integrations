@@ -12,6 +12,7 @@ RENDER_DIR="${RENDER_DIR:-/etc/qurl/rendered}"
 S3_PREFIX="${S3_PREFIX:-}"
 LISTEN_ADDR="${LISTEN_ADDR:-127.0.0.1:8080}"
 ENVOY_LISTEN_ADDR="${ENVOY_LISTEN_ADDR:-127.0.0.1:9090}"
+ALLOW_NON_LOOPBACK_LISTEN="${ALLOW_NON_LOOPBACK_LISTEN:-false}"
 INDEX_DOCUMENT="${INDEX_DOCUMENT:-index.html}"
 CACHE_MAX_SIZE="${CACHE_MAX_SIZE:-1g}"
 # Unset → defer to the object's Cache-Control / nginx default (cache only what
@@ -19,9 +20,32 @@ CACHE_MAX_SIZE="${CACHE_MAX_SIZE:-1g}"
 CACHE_DEFAULT_TTL="${CACHE_DEFAULT_TTL:-}"
 : "${AWS_REGION:?AWS_REGION is required (pass it, or let entrypoint resolve it from IMDS)}"
 
+if [ "${S3_BUCKET#*.}" != "$S3_BUCKET" ]; then
+  echo "S3_BUCKET must not contain dots; this image uses virtual-hosted-style S3 TLS/SNI, which is incompatible with dotted bucket names" >&2
+  exit 1
+fi
+
 if [ -z "$INDEX_DOCUMENT" ]; then
   echo "INDEX_DOCUMENT must not be empty" >&2
   exit 1
+fi
+
+assert_loopback_listener() {
+  name="$1"
+  addr="$2"
+  host="${addr%:*}"
+  case "$host" in
+    127.*|localhost)
+      return
+      ;;
+  esac
+  echo "$name must bind loopback by default (got $addr); set ALLOW_NON_LOOPBACK_LISTEN=true only for local tests or diagnostics" >&2
+  exit 1
+}
+
+if [ "$ALLOW_NON_LOOPBACK_LISTEN" != "true" ]; then
+  assert_loopback_listener LISTEN_ADDR "$LISTEN_ADDR"
+  assert_loopback_listener ENVOY_LISTEN_ADDR "$ENVOY_LISTEN_ADDR"
 fi
 
 # --- derived values ---

@@ -30,6 +30,20 @@ if render zero-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_T
 fi
 grep -q "CACHE_DEFAULT_TTL must be greater than zero" "$TMP/zero-ttl.err"
 
+if render dotted-bucket S3_BUCKET=my.static.site AWS_REGION=us-east-1 2>"$TMP/dotted-bucket.err"; then
+  echo "MISMATCH: dotted S3_BUCKET rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_BUCKET must not contain dots" "$TMP/dotted-bucket.err"
+
+if render public-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 2>"$TMP/public-listen.err"; then
+  echo "MISMATCH: non-loopback LISTEN_ADDR rendered successfully" >&2
+  exit 1
+fi
+grep -q "LISTEN_ADDR must bind loopback" "$TMP/public-listen.err"
+
+render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 ALLOW_NON_LOOPBACK_LISTEN=true
+
 map_golden() {
   case "$1" in
     default/nginx.conf) echo nginx.default.conf ;;
