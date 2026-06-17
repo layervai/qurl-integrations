@@ -399,6 +399,9 @@ describe('missingMapCommandKeys', () => {
     expect(
       missingMapCommandKeys({ MAP_COMMAND_ENABLED: true, GOOGLE_MAPS_API_KEY: '' }),
     ).toEqual(['GOOGLE_MAPS_API_KEY']);
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true, GOOGLE_MAPS_API_KEY: '   ' }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
   });
 
   it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is still the PLACEHOLDER sentinel', () => {

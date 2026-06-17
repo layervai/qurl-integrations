@@ -489,6 +489,8 @@ function assertPublicHttpsTarget(targetUrl) {
   if (!ALLOWED_DETECT_TARGET_HOST_SUFFIXES.some(suffix => hostname.endsWith(suffix))) {
     throw new Error('Detect tunnel target host is not an allowed qURL tunnel host');
   }
+  // Node normalizes explicit https :443 to an empty port; allow both shapes so
+  // the intent survives parser/refactor differences.
   if (
     (parsed.port !== '' && parsed.port !== '443')
     || parsed.pathname !== '/api/detect'
@@ -509,6 +511,8 @@ function assertPublicHttpsTarget(targetUrl) {
  * The caller MUST POST within the knock window from the same IP. The settled
  * target_url is never cached, but simultaneous detect calls share one in-flight
  * resolve so a short burst does not double-fire the same knock.
+ * A late-joining caller shares the creator's knock window; a slow resolve can
+ * leave less grant time, which is still preferable to double-knocking a burst.
  *
  * @returns {Promise<string>} the SSRF-validated public https target_url.
  * @throws if DETECT_ACCESS_TOKEN is unset, or the resolved target fails the
