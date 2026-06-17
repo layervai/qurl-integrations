@@ -13,5 +13,9 @@ describe('@layervai/qurl export contract', () => {
   it('exports QURLClient as a constructor', () => {
     const sdk = require('@layervai/qurl');
     expect(typeof sdk.QURLClient).toBe('function');
+    // The bug imported `QurlClient` (undefined). Pin that the typo'd name stays
+    // unexported, so a regressed import couldn't silently work even if the SDK
+    // ever added it as an alias.
+    expect(sdk.QurlClient).toBeUndefined();
   });
 });
