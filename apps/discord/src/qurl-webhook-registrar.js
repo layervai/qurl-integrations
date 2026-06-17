@@ -332,15 +332,15 @@ function urlPathname(u) {
 //      `qurl-s3-connector resource.closed subscription`) out of the
 //      deletion set even though they share owner_id with the bot under
 //      today's bot-API-key-shared model.
-//      Per-guild safety: per-guild subs from guild-webhook-link.js share
-//      the same `Discord bot view counter` prefix (different parenthetical
-//      content). They're protected by criterion 2 (host equality) because
-//      `guild-webhook-link.bridgeUrl()` uses the same `config.BASE_URL`
-//      as the central registrar — i.e. per-guild and central subs always
-//      register against the SAME host. If per-guild registration ever
-//      moves to a different host, this safety dissolves and the central
-//      registrar's sweep could classify a still-needed per-guild sub as
-//      a cross-host orphan.
+//      Per-guild interaction: guild-webhook-link.js's ensureWebhookSubscription
+//      calls use the SAME `config.BASE_URL/webhooks/qurl` as the central
+//      registrar — they all converge on one owner-scoped subscription
+//      (qurl-service's owner-scoped semantics + this file's dedupe path
+//      ensure single-sub-per-owner-per-URL). So "per-guild subs" aren't
+//      a separate class of live row to protect; whatever description
+//      landed first sticks. After a rename, that one old-host sub IS
+//      the orphan this sweep targets — regardless of whether the first-
+//      to-register was the central Lambda or a guild link.
 //   4. Liveness gate: BOTH `last_delivery_success === false` AND
 //      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
 //      compound check tolerates a single transient delivery failure on
