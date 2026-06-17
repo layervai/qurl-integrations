@@ -1714,7 +1714,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// repeated local mint failures still get throttled instead of retrying
 	// without bound.
 	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, h.now()); !ok {
-		slog.Warn("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
+		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
 		retryCommand := "`/qurl setup <email>`"
 		if setupCmd.mode.Explicit() {
 			retryCommand = fmt.Sprintf("`/qurl setup <email> %s`", setupModeFlag(setupCmd.mode))
