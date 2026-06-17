@@ -60,6 +60,8 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
 // `consumed: false`, never true. So consumed===true strictly implies a
 // one-time link here. If that emit-side invariant ever changes, this
 // copy must change with it.
+// TODO(upstream-contract): consumed===true implies the one-time-use
+// branch in qurl-service; keep this copy in lockstep if that changes.
 //
 // COPY IS DELIBERATELY MARKER-FREE (past/perfect tense, no <t:N:R>):
 // at consumption time the link's `expires_at` is still ~minutes in the

@@ -228,6 +228,24 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip happy path', () =>
     // "expired in N minutes" — the future-tense bug this change kills.
     expect(desc).not.toMatch(/<t:\d+:[a-zA-Z]>/);
   });
+
+  it('still flips when recordQurlView dedups the event (gated on consumed, NOT dbResult)', async () => {
+    // Headline design decision: the flip is gated on `consumed === true`,
+    // not `dbResult === 'recorded'`. A REDELIVERED qurl.accessed (same
+    // event_id → recordQurlView returns 'dedup') must still re-enter the
+    // flip so a transiently-missed edit is recovered; the
+    // consumed_edited_at marker is what short-circuits the redundant
+    // edit, not the view-dedup result. If the gate ever regresses to
+    // dbResult-based, this fails.
+    mockRecordQurlView.mockResolvedValue('dedup');
+    const res = await signedRequest(VALID_PAYLOAD);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'dedup' });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'edited', transient: false });
+    expect(mockMarkConsumedDMEdited).toHaveBeenCalledWith(SEND_ID, RECIPIENT_ID);
+    expect(mockEditDM).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('POST /webhooks/qurl — qurl.accessed does NOT flip when not consumed', () => {
