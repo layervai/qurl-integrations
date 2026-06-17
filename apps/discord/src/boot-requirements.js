@@ -86,8 +86,11 @@ function missingKekRequiredKeys(env) {
 // OpenNHP mode specifically. The check parses BASE_URL (new URL) rather
 // than prefix-matching: parsing normalizes the case-insensitive scheme
 // (RFC 3986) and rejects a bare "https://" with no host that would still
-// build a broken redirect. The localhost default parses as http:// so it's
-// not usable, catching both "unset → localhost" and explicit http://. The
+// build a broken redirect. It validates scheme + parseability, NOT
+// reachability — an https://localhost (or other private) origin passes here
+// yet still can't serve an external OAuth redirect, but reachability isn't
+// knowable at boot. The localhost default parses as http:// so it's not
+// usable, catching both "unset → localhost" and explicit http://. The
 // message names only the active surface(s) so an OpenNHP-only operator (no
 // Auth0) isn't sent chasing a qURL-OAuth red herring.
 //
@@ -108,8 +111,6 @@ function missingKekRequiredKeys(env) {
 // false-positive. Caller gates on NODE_ENV==='production'; string-or-null
 // mirrors unsupportedRoleShipperCombo et al.
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
-  // Parse rather than prefix-match (see header for why): a valid https
-  // origin short-circuits the common good case.
   let usableHttps = false;
   try {
     usableHttps = new URL(cfg.BASE_URL).protocol === 'https:';
