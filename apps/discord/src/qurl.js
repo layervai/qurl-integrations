@@ -81,12 +81,13 @@ function makeClient(apiKey) {
  *     request headers or tokens). So for any positive status we log only status
  *     + code and re-throw a status-only Error (callers such as the revoke path
  *     log the thrown `.message`, so the body must not reach it). At status 0,
- *     only SDK-synthesized, body-free errors (network / timeout / client-
- *     validation — see SAFE_STATUS0_CODES) propagate verbatim; any other
- *     status-0 error (e.g. an unexpected-response shape error that could embed a
- *     body snippet) is re-wrapped to a code-only message, so the invariant holds
- *     structurally rather than by trusting SDK internals. Pinned by
- *     tests/qurl-coverage.test.js.
+ *     a coded SDK error outside the body-free SAFE set (see SAFE_STATUS0_CODES)
+ *     — e.g. an unexpected-response shape error that could embed a body snippet
+ *     — is re-wrapped to a code-only message, so the invariant holds structurally
+ *     rather than by trusting SDK internals. Body-free SDK errors (network /
+ *     timeout / client-validation) and non-SDK throws (programming errors, which
+ *     carry no server body) propagate verbatim so their stack survives. Pinned
+ *     by tests/qurl-coverage.test.js.
  */
 async function callQurl(method, path, fn) {
   try {
@@ -111,13 +112,17 @@ async function callQurl(method, path, fn) {
     if (status > 0) {
       throw new Error(`qURL API ${method} ${path} failed (${status})`);
     }
-    // status 0: surface only SDK-synthesized, body-free errors verbatim;
-    // re-wrap anything else to a code-only message (defense-in-depth — the SDK
-    // doesn't embed bodies in status-0 messages today, but we don't rely on it).
-    if (err && SAFE_STATUS0_CODES.has(err.code)) {
-      throw err;
+    // status 0: re-wrap ONLY a coded SDK error outside the body-free SAFE set —
+    // i.e. one whose synthesized message could embed a body snippet (e.g.
+    // `unexpected_response`). Defense-in-depth: the SDK doesn't embed bodies in
+    // status-0 messages today, but we don't rely on it. A body-free SDK error
+    // (network / timeout / client-validation) or a non-SDK throw (a programming
+    // error like a TypeError, which carries no server body) propagates verbatim,
+    // so its message and stack survive for debugging.
+    if (typeof err?.code === 'string' && !SAFE_STATUS0_CODES.has(err.code)) {
+      throw new Error(`qURL API ${method} ${path} failed (${err.code})`);
     }
-    throw new Error(`qURL API ${method} ${path} failed (${err?.code || 'unknown error'})`);
+    throw err;
   }
 }
 
