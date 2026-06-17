@@ -1174,6 +1174,146 @@ describe('qurl sends', () => {
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 
+  // ── View-counter render state (cross-replica fast-path, PR-B) ──
+
+  test('saveSendConfig: omitting render-state fields leaves them null (behavior-neutral for existing callers)', async () => {
+    // The existing /qurl send caller passes none of the new params; they
+    // must land null (not undefined → DDB ValidationException without
+    // removeUndefinedValues, and not silently dropped) so the row behaves
+    // exactly as it did pre-PR. last_rendered_count stays ABSENT at write.
+    ddbMock.on(PutCommand).resolves({});
+    await store.saveSendConfig({
+      sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
+      connectorResourceId: 'conn', actualUrl: null, expiresIn: '24h',
+      personalMessage: null, locationName: null, attachmentName: null,
+      attachmentContentType: null, attachmentUrl: null,
+    });
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(item.interaction_token).toBeNull();
+    expect(item.interaction_app_id).toBeNull();
+    expect(item.expected_count).toBeNull();
+    expect(item.confirm_expires_at).toBeNull();
+    expect(item.last_rendered_count).toBeUndefined(); // absent → "0 rendered"
+  });
+
+  test('saveSendConfig: persists render-state fields when passed (interaction_token included)', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await store.saveSendConfig({
+      sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
+      connectorResourceId: 'conn', actualUrl: null, expiresIn: '24h',
+      personalMessage: null, locationName: null, attachmentName: null,
+      attachmentContentType: null, attachmentUrl: null,
+      interactionToken: 'tok-abc', interactionAppId: 'app-1',
+      expectedCount: 5, confirmExpiresAt: 1234567890,
+    });
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(item.interaction_token).toBe('tok-abc');
+    expect(item.interaction_app_id).toBe('app-1');
+    expect(item.expected_count).toBe(5);
+    expect(item.confirm_expires_at).toBe(1234567890);
+  });
+
+  test('getSendRenderState: maps row fields, derives terminal/showAll defaults, no ownership filter', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        send_id: 's1', sender_discord_id: 'sender',
+        interaction_token: 'tok-abc', interaction_app_id: 'app-1',
+        expected_count: 5, last_rendered_count: 2,
+      },
+    });
+    // No senderDiscordId arg — PR-B's webhook path has no sender context.
+    const state = await store.getSendRenderState('s1');
+    expect(state).toEqual({
+      interactionToken: 'tok-abc', interactionAppId: 'app-1',
+      expectedCount: 5, lastRenderedCount: 2,
+      baseMsg: undefined, terminal: false, showAll: false,
+    });
+  });
+
+  test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; showAll from flag', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', revoked_at: 'when', show_all_recipients: true },
+    });
+    const viaRevoke = await store.getSendRenderState('s1');
+    expect(viaRevoke.terminal).toBe(true);
+    expect(viaRevoke.showAll).toBe(true);
+    // defaults when fields absent
+    expect(viaRevoke.expectedCount).toBe(0);
+    expect(viaRevoke.lastRenderedCount).toBe(0);
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's2', confirm_terminal: true } });
+    const viaTerminalFlag = await store.getSendRenderState('s2');
+    expect(viaTerminalFlag.terminal).toBe(true);
+  });
+
+  test('getSendRenderState: returns null on missing row / empty sendId', async () => {
+    ddbMock.on(GetCommand).resolves({}); // no Item
+    expect(await store.getSendRenderState('nope')).toBeNull();
+    expect(await store.getSendRenderState('')).toBeNull();
+    expect(await store.getSendRenderState(undefined)).toBeNull();
+  });
+
+  test('tryAdvanceRenderedCount: monotonic guard — advances up, rejects equal/lower', async () => {
+    // first advance 0→1 true; re-advance to 1 false; advance 1→2 true;
+    // lower 2→1 false. The store layer is stateless across calls (the
+    // CAS lives in DDB), so we drive the ConditionExpression verdict via
+    // the mock: success resolves, a no-advance CCFEs.
+    const ccfe = new Error('cond');
+    ccfe.name = 'ConditionalCheckFailedException';
+
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(true); // 0→1
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toMatch(/SET last_rendered_count = :n/);
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
+    );
+    expect(input.ExpressionAttributeValues[':n']).toBe(1);
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(false); // re-advance to 1
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.tryAdvanceRenderedCount('s1', 2)).toBe(true); // 1→2
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(false); // lower 2→1
+  });
+
+  test('tryAdvanceRenderedCount: non-CCFE errors propagate', async () => {
+    const boom = new Error('throughput');
+    boom.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(UpdateCommand).rejects(boom);
+    await expect(store.tryAdvanceRenderedCount('s1', 1)).rejects.toThrow('throughput');
+  });
+
+  test('markConfirmTerminal: idempotent SET confirm_terminal = true, no condition', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.markConfirmTerminal('s1');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toMatch(/SET confirm_terminal = :t/);
+    expect(input.ExpressionAttributeValues[':t']).toBe(true);
+    expect(input.ConditionExpression).toBeUndefined(); // sticky kill-switch, no guard
+  });
+
+  test('setConfirmShowAll: SET show_all_recipients = :v with a coerced boolean', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setConfirmShowAll('s1', true);
+    let input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toMatch(/SET show_all_recipients = :v/);
+    expect(input.ExpressionAttributeValues[':v']).toBe(true);
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.setConfirmShowAll('s1', 0); // falsy non-bool → coerced false
+    input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues[':v']).toBe(false);
+  });
+
   test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret' },

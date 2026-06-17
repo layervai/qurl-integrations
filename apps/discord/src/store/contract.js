@@ -100,6 +100,14 @@ const STORE_METHODS = Object.freeze([
   'markConsumedDMEdited',
   'clearConsumedDMEdited',
 
+  // View-counter confirmation render state (cross-replica fast-path).
+  // saveSendConfig (above) also persists the render-state fields; these
+  // are the read + mutate surface PR-B's webhook fast-path drives.
+  'getSendRenderState',
+  'tryAdvanceRenderedCount',
+  'markConfirmTerminal',
+  'setConfirmShowAll',
+
   // QURL views (webhook-fed view counter)
   'recordQurlView',
   'getQurlViews',

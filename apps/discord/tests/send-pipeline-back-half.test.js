@@ -228,6 +228,7 @@ const {
   revokeAllLinks,
   renderRevokeMsg,
   renderSendConfirm,
+  renderViewCounter,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
   mintLinksInBatches,
@@ -1380,6 +1381,39 @@ describe('persistDispatchResult — divergence guard', () => {
       expect.stringContaining('qurl_sends write failed'),
       expect.objectContaining({ sendId: 's', recipientDiscordId: 'r', delivered: false }),
     );
+  });
+});
+
+describe('renderViewCounter — pure "👀 N viewed / M pending" line', () => {
+  // This is the byte-identity anchor: both the in-memory monitor's
+  // buildStatusMsg() and PR-B's off-monitor fast-path render through this
+  // pure fn, so pinning its exact output here guarantees the two render
+  // sites can't drift. The strings below MUST match what the pre-extraction
+  // buildStatusMsg() produced (PR-A is behavior-neutral).
+  it('degraded → baseMsg alone (no counter line)', () => {
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 3 users', viewed: 1, expectedCount: 3, degraded: true,
+    })).toBe('Sent to 3 users');
+  });
+
+  it('normal → "<base>\\n👀 X viewed / Y pending"', () => {
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 3 users', viewed: 1, expectedCount: 3, degraded: false,
+    })).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
+  });
+
+  it('all viewed → 0 pending', () => {
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 2 users', viewed: 2, expectedCount: 2, degraded: false,
+    })).toBe('Sent to 2 users\n👀 2 viewed / 0 pending');
+  });
+
+  it('pending floors at 0 when viewed > expectedCount (no negative pending)', () => {
+    // Race shape: a webhook double-fire / a count landing before
+    // expectedCount is bumped by /qurl add. Must never render "-1 pending".
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 1 user', viewed: 3, expectedCount: 1, degraded: false,
+    })).toBe('Sent to 1 user\n👀 3 viewed / 0 pending');
   });
 });
 

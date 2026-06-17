@@ -1532,10 +1532,19 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // expired explicitly via upstream polling; the webhook-only world
   // can't observe expiration without a separate qurl.expired
   // subscription (out of scope).
+  // Delegates to the pure renderViewCounter so the monitor's render and
+  // PR-B's off-monitor fast-path render stay byte-identical. The closure
+  // still owns the LIVE inputs (currentBaseMsg/viewed/expectedCount
+  // mutate across ticks + addRecipients; viewCounterDegraded can flip
+  // mid-life) — buildStatusMsg snapshots them at call time and hands them
+  // to the pure fn.
   function buildStatusMsg() {
-    if (viewCounterDegraded) return currentBaseMsg;
-    const pending = Math.max(0, expectedCount - viewed);
-    return `${currentBaseMsg}\n👀 ${viewed} viewed / ${pending} pending`;
+    return renderViewCounter({
+      baseMsg: currentBaseMsg,
+      viewed,
+      expectedCount,
+      degraded: viewCounterDegraded,
+    });
   }
 
   // Non-overlapping ticks: arm()/tick() below reschedule the NEXT tick
@@ -7818,6 +7827,28 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
   return { ...data, row };
 }
 
+// Pure render of the sender's live "👀 N viewed / M pending" counter
+// line. Extracted from monitorLinkStatus's buildStatusMsg() closure so
+// the SAME byte-for-byte output can be produced off-monitor by the
+// cross-replica webhook fast-path (PR-B): any replica can rebuild the
+// confirmation body from the persisted render state (baseMsg +
+// last_rendered_count + expected_count) without the in-memory monitor's
+// linkStatus map. Keeping it pure (plain args in, string out — no
+// closure refs) is what lets both the monitor and the fast-path call it
+// and guarantees they can't drift.
+//
+// `degraded` mirrors viewCounterDegraded: when ANY tracked link is
+// missing a qurl_id the counter would mis-attribute, so we render the
+// baseMsg alone rather than a partial count. pending floors at 0 so a
+// race where viewed transiently exceeds expectedCount (e.g. a webhook
+// double-fire landing before expectedCount is bumped by /qurl add)
+// never renders a negative "pending".
+function renderViewCounter({ baseMsg, viewed, expectedCount, degraded }) {
+  if (degraded) return baseMsg;
+  const pending = Math.max(0, expectedCount - viewed);
+  return `${baseMsg}\n👀 ${viewed} viewed / ${pending} pending`;
+}
+
 // Builds the post-send confirmation body. When the full inline render
 // would exceed Discord's 2000-char content cap, falls back to a
 // `recipients.txt` attachment; "(see attached)" is appended only to
@@ -9754,6 +9785,12 @@ module.exports = {
       revokeAllLinks,
       renderRevokeMsg,
       renderSendConfirm,
+      // Pure view-counter render, exposed so the wording/floor contract
+      // is pinned directly (degraded→baseMsg, normal→counter line,
+      // pending floors at 0) rather than only via the monitor closure.
+      // PR-B's fast-path also calls this; the unit test is the byte-
+      // identity anchor both render sites lean on.
+      renderViewCounter,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
       activeMonitors,

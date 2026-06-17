@@ -1565,6 +1565,12 @@ async function saveSendConfig({
   sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl,
   expiresIn, personalMessage, locationName, attachmentName,
   attachmentContentType, attachmentUrl, selfDestructSeconds,
+  // View-counter render-state fields (feat: cross-replica fast-path).
+  // All optional — the existing /qurl send caller omits them, so they
+  // land absent/null and the row behaves exactly as before. PR-B's
+  // send-pipeline wiring passes them so any replica can rebuild + edit
+  // the sender's "👀 N viewed" confirmation off the monitor.
+  interactionToken, interactionAppId, expectedCount, confirmExpiresAt,
 }) {
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
   await ddb.send(new PutCommand({
@@ -1582,6 +1588,28 @@ async function saveSendConfig({
       attachment_content_type: attachmentContentType ?? null,
       attachment_url: encryptedUrl,
       self_destruct_seconds: selfDestructSeconds ?? null,
+      // SENSITIVE: interaction_token is a live Discord interaction-webhook
+      // bearer cred (~15 min). NEVER log it; the qurl_send_configs row is
+      // logged nowhere as a whole (audited: the qurl.expired/consumed
+      // webhook paths read qurl_sends, not this table, and getSendConfig's
+      // consumers — handleAddRecipients, getRecentSends — read named
+      // fields, never the token). confirm_expires_at is the row's DDB TTL
+      // value so the token self-reaps just past the 14-min monitor cap.
+      // INFRA NOTE: qurl-send-configs has NO TTL attribute configured
+      // today (see scripts/provision-ddb-local.js — the table spec has no
+      // `ttlAttribute`, unlike qurl-views/orphaned-oauth-tokens which use
+      // `expires_at`). For the token to actually self-expire, the
+      // qurl-bot-ddb terraform module + provisioner must enable TimeToLive
+      // on `confirm_expires_at` for this table. Writing the attribute is
+      // harmless until then (DDB ignores a TTL value on a non-TTL table);
+      // it just won't reap. DO NOT change infra from this repo.
+      interaction_token: interactionToken ?? null,
+      interaction_app_id: interactionAppId ?? null,
+      expected_count: expectedCount ?? null,
+      confirm_expires_at: confirmExpiresAt ?? null,
+      // last_rendered_count intentionally absent at write → "0 rendered"
+      // semantics (getSendRenderState defaults it to 0). tryAdvanceRenderedCount
+      // SETs it on the first confirmed edit.
       created_at: nowIso(),
     },
   }));
@@ -1598,6 +1626,103 @@ async function getSendConfig(sendId, senderDiscordId) {
   return row.attachment_url
     ? { ...row, attachment_url: decrypt(row.attachment_url) }
     : row;
+}
+
+// View-counter render state for the cross-replica fast-path (PR-B).
+// Returns ONLY the fields the off-monitor renderer needs to rebuild +
+// edit the sender's confirmation — NOT the full row — so the SENSITIVE
+// interaction_token never leaks into a logged/returned shape by accident
+// (the token is read directly by PR-B's editReply call, not surfaced
+// here). Keyed by send_id alone: unlike getSendConfig there is NO
+// sender_discord_id ownership filter, because PR-B's webhook path has no
+// Discord sender context — the send_id (an unguessable UUID minted
+// server-side) is the only key it carries. Returns null when no row
+// exists (legacy send predating render-state persistence, or a
+// saveSendConfig that failed — both leave the fast-path inert and the
+// in-memory monitor as the sole renderer).
+//
+// `terminal` is derived (not stored as one flag): the display is dead
+// once the sender revoked (revoked_at) OR a window-close/expired path
+// set confirm_terminal — either way a late fast-path edit must NOT
+// resurrect a live-looking counter. `showAll` reflects the expand/
+// collapse toggle (show_all_recipients), defaulting false.
+async function getSendRenderState(sendId) {
+  if (typeof sendId !== 'string' || sendId.length === 0) return null;
+  const res = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+  }));
+  const row = res.Item;
+  if (!row) return null;
+  return {
+    // SENSITIVE: a live Discord bearer cred (~15 min), TTL'd via
+    // confirm_expires_at. NEVER log this value — callers use it only as
+    // the editReply credential.
+    interactionToken: row.interaction_token ?? null,
+    interactionAppId: row.interaction_app_id ?? null,
+    expectedCount: row.expected_count ?? 0,
+    lastRenderedCount: row.last_rendered_count ?? 0,
+    baseMsg: row.confirm_base_msg ?? undefined,
+    terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
+    showAll: row.show_all_recipients === true,
+  };
+}
+
+// Monotonic AFTER-edit commit for the view counter (PR-B calls this
+// ONLY after a Discord edit confirmed the new count is displayed).
+// Conditional UpdateItem: SET last_rendered_count = :n guarded by
+// "never set yet OR strictly less than :n", so two replicas racing to
+// advance the same send can't move the displayed count backwards —
+// whichever confirms the higher count wins, the loser CCFEs. Returns
+// true when this call advanced the count, false on
+// ConditionalCheckFailedException (a concurrent/stale advance — the
+// caller treats it as "someone already showed an equal-or-higher count,
+// nothing to do"). Same CCFE-as-control-flow shape as
+// markExpiredDMEdited / flipRevokedAt.
+async function tryAdvanceRenderedCount(sendId, n) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET last_rendered_count = :n',
+      ConditionExpression: 'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
+      ExpressionAttributeValues: { ':n': n },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+// Freezes the confirmation display. Called by the revoke / window-close
+// / expired paths so a late fast-path edit (a webhook landing after the
+// monitor stopped) can't resurrect a live-looking "👀 N viewed" counter
+// — getSendRenderState reads confirm_terminal into its derived
+// `terminal`, which PR-B checks before editing. Idempotent SET (no
+// condition): re-running just re-writes `true`, and there's no value to
+// guard against — unlike the markExpired/Consumed markers this isn't an
+// at-most-once edit claim, just a sticky kill-switch.
+async function markConfirmTerminal(sendId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    UpdateExpression: 'SET confirm_terminal = :t',
+    ExpressionAttributeValues: { ':t': true },
+  }));
+}
+
+// Persists the recipient-list expand/collapse choice for the fast-path
+// renderer (PR-B's Show/Hide Recipients toggle handler) so a re-render
+// from any replica honors the last toggle. Plain SET — last write wins,
+// which matches a user toggling: the most recent click is the truth.
+async function setConfirmShowAll(sendId, showAll) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    UpdateExpression: 'SET show_all_recipients = :v',
+    ExpressionAttributeValues: { ':v': Boolean(showAll) },
+  }));
 }
 
 // Deduped resource_id list. Currently only used by tests; src/ uses
@@ -2076,6 +2201,8 @@ module.exports = {
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
   markConsumedDMEdited, clearConsumedDMEdited,
+  // View-counter render state (cross-replica fast-path, PR-B)
+  getSendRenderState, tryAdvanceRenderedCount, markConfirmTerminal, setConfirmShowAll,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
