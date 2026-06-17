@@ -418,7 +418,13 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
     // toward `nearMissCount` so the schema-drift case surfaces in the
     // observability log, rather than silently disappearing into NO_MATCH.
     if (s.last_delivery_success !== false) return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
-    if (typeof s.failure_count !== 'number' || s.failure_count < URL_MIGRATION_ORPHAN_MIN_FAILURES) {
+    // Number.isFinite (not typeof === 'number') because NaN is
+    // typeof 'number' AND NaN < anything is false — a NaN failure_count
+    // would slip through `typeof` check then fail the `<` comparison and
+    // classify as MATCH (delete), contradicting the stated fail-closed
+    // invariant. isFinite rejects NaN, +/-Infinity, and non-numbers
+    // uniformly.
+    if (!Number.isFinite(s.failure_count) || s.failure_count < URL_MIGRATION_ORPHAN_MIN_FAILURES) {
       return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
     }
     return ORPHAN_FILTER_RESULTS.MATCH;

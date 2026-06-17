@@ -1445,6 +1445,33 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     expect(deleted).toBe(false);
   });
 
+  it('does NOT delete when failure_count is negative (fails closed)', async () => {
+    // JSON.stringify maps NaN/Infinity to null, so those can't reach
+    // the predicate through a normal qurl-service JSON response. We
+    // still pin the predicate-level invariant against NaN/Infinity in
+    // the _internals unit tests below (where we can hand-construct the
+    // exact value); here we cover the only end-to-end shape that the
+    // wire could deliver and still slip past `< MIN_FAILURES` — a
+    // negative number (typeof 'number', not non-finite).
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_negative',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          last_delivery_success: false,
+          failure_count: -1,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_negative': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+  });
+
   it('does NOT delete when failure_count is missing or non-numeric (fails closed on schema drift)', async () => {
     let deleted = false;
     mockFetchResponses({
@@ -1625,6 +1652,33 @@ describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () =>
       failure_count: 9999,
       last_delivery_success: false,
     })).toBe(ORPHAN_FILTER_RESULTS.NO_MATCH);
+  });
+
+  it.each([
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+    ['-Infinity', -Infinity],
+  ])('classifies a candidate with non-finite failure_count (%s) as NEAR_MISS_LIVENESS (fail-closed against latent fail-open)', (_label, failureCount) => {
+    // JSON.stringify maps these to null at the wire boundary so a
+    // normal qurl-service response can't deliver them, but a
+    // non-JSON-parsed path (raw Node fetch with a non-JSON SDK, a
+    // future contract migration, an in-process injection bug) could.
+    // `Number.isFinite` rejects all three uniformly, matching the
+    // stated fail-closed invariant. Without it, NaN/Infinity would
+    // slip through `typeof === 'number'` AND the `< 3` comparison
+    // (NaN < 3 is false; Infinity < 3 is false) → classify as MATCH
+    // → DELETE. This unit test makes the predicate-level guarantee
+    // wire-independent.
+    const f = buildUrlMigrationOrphanFilter({
+      bridgeUrl: 'https://bot.test.example/webhooks/qurl',
+      descriptionPrefix: 'X',
+    });
+    expect(f({
+      url: 'https://other.test.example/webhooks/qurl',
+      description: 'X (env=prod)',
+      failure_count: failureCount,
+      last_delivery_success: false,
+    })).toBe(ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS);
   });
 
   it('classifies a sibling-service candidate (non-matching description prefix) as NO_MATCH', () => {
