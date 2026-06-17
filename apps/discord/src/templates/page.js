@@ -22,7 +22,7 @@ const TYPE_COLORS = {
   info: { bg: hexToColor(COLORS.PRIMARY), icon: hexToColor(COLORS.PRIMARY) },
 };
 
-const CSP_NONCE_PATTERN = /^[A-Za-z0-9+/_=-]+$/;
+const CSP_NONCE_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Render a styled HTML page.
@@ -52,7 +52,6 @@ function renderPage({ title, icon, heading, message, subtext, details, type = 'i
 
   const color = TYPE_COLORS[type] || TYPE_COLORS.info;
   const escapedCspNonce = escapeHtml(cspNonce);
-  const pageCsp = `default-src 'none'; style-src 'nonce-${escapedCspNonce}'; img-src data:`;
 
   const detailsHtml = Array.isArray(details) && details.length > 0
     ? `<dl class="details">${details.map((d) => `
@@ -68,7 +67,6 @@ function renderPage({ title, icon, heading, message, subtext, details, type = 'i
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
-      <meta http-equiv="Content-Security-Policy" content="${pageCsp}">
       <title>${escapeHtml(title)} - qURL</title>
       <style nonce="${escapedCspNonce}">
         * { box-sizing: border-box; }

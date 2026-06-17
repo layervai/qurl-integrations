@@ -57,8 +57,8 @@ if (process.env.TRUST_PROXY) {
 }
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
-// Policy, X-DNS-Prefetch-Control, etc. Keep the HTTP CSP nonce aligned with
-// renderPage's meta CSP so OAuth surfaces never need 'unsafe-inline'.
+// Policy, X-DNS-Prefetch-Control, etc. The HTTP CSP is the single source of
+// truth for allowing renderPage's nonce'd inline stylesheet.
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: false,

@@ -96,15 +96,16 @@ describe('Discord install callback', () => {
       expect(res.text).toContain('Missing authorization code');
     });
 
-    it('uses one CSP nonce in the HTTP header, meta policy, and style tag', async () => {
+    it('uses one CSP nonce in the HTTP header and style tag', async () => {
       const res = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
       expect(res.status).toBe(400);
 
       const nonce = extractStyleNonce(res);
+      // 16 random bytes encoded as unpadded base64url.
       expect(nonce).toHaveLength(22);
 
-      expect(res.text).toContain(`style-src 'nonce-${nonce}'`);
       expect(res.text).toContain(`<style nonce="${nonce}">`);
+      expect(res.text).not.toContain('Content-Security-Policy');
       expect(res.text).not.toContain('unsafe-inline');
     });
 

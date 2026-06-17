@@ -38,7 +38,7 @@ describe('server error handler and startServer', () => {
 });
 
 describe('renderPage', () => {
-  it('renders a nonce-based CSP for its inline stylesheet', () => {
+  it('renders a nonce on its inline stylesheet', () => {
     const html = renderTestPage({
       title: 'Test',
       icon: '✅',
@@ -46,8 +46,8 @@ describe('renderPage', () => {
       message: 'M',
     });
 
-    expect(html).toContain('Content-Security-Policy" content="default-src \'none\'; style-src \'nonce-test-nonce\'; img-src data:">');
     expect(html).toContain('<style nonce="test-nonce">');
+    expect(html).not.toContain('Content-Security-Policy');
     expect(html).not.toContain('unsafe-inline');
   });
 
