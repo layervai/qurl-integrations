@@ -125,10 +125,9 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
     ].filter(Boolean).join(' and ');
     return (
       'BASE_URL must be a complete https:// URL (scheme + host) in production ' +
-      `— it builds the OAuth redirect for ${surfaces}, and the ` +
-      `http://localhost:3000 default would dead-end setup at the redirect. ` +
-      `Got: ${cfg.BASE_URL}. Set BASE_URL to the bot's public https:// origin ` +
-      'in the deployment template.'
+      `— it builds the OAuth redirect for ${surfaces}, and a non-https value ` +
+      `dead-ends setup at the redirect. Got: ${cfg.BASE_URL}. Set BASE_URL to ` +
+      "the bot's public https:// origin in the deployment template."
     );
   }
   if (baseUrlExplicitlySet) {
