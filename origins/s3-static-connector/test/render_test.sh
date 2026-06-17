@@ -73,6 +73,8 @@ fi
 grep -q "LISTEN_ADDR port must be numeric" "$TMP/invalid-listen.err"
 
 render ipv6-loopback S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR='[::1]:8080' ENVOY_LISTEN_ADDR='[::1]:9090'
+grep -q 'server \[::1\]:9090;' "$TMP/ipv6-loopback/nginx.conf"
+grep -q 'socket_address: { address: "::1", port_value: 9090 }' "$TMP/ipv6-loopback/envoy.yaml"
 render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 ALLOW_NON_LOOPBACK_LISTEN=true
 
 map_golden() {

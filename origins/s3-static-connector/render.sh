@@ -134,7 +134,7 @@ if [ -n "$S3_PREFIX_NORMALIZED" ]; then
 fi
 
 # Envoy's socket_address needs host + port split out.
-ENVOY_LISTEN_HOST="${ENVOY_LISTEN_ADDR%:*}"
+ENVOY_LISTEN_HOST="$(listener_host "$ENVOY_LISTEN_ADDR")"
 ENVOY_LISTEN_PORT="${ENVOY_LISTEN_ADDR##*:}"
 
 # Upstream Envoy dials. Defaults to the real S3 vhost over TLS; the behavior
