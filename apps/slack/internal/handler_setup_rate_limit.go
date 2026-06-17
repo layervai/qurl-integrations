@@ -12,9 +12,11 @@ const (
 
 // setupLinkRateLimiter is a per-process fixed-window throttle for setup-link
 // minting. It bounds accidental or hostile repeats on each running task without
-// making first-claim setup depend on DynamoDB-backed admin storage. Entries are
-// keyed from Slack-signed team/user IDs and swept once per window instead of
-// capped globally, so this stays best-effort rather than a hard cross-task cap.
+// making first-claim setup depend on DynamoDB-backed admin storage. Like any
+// fixed window it can allow a boundary burst, but the goal is dampening repeat
+// minting rather than an exact sliding limit. Entries are keyed from
+// Slack-signed team/user IDs and swept once per window instead of capped
+// globally, so this stays best-effort rather than a hard cross-task cap.
 type setupLinkRateLimiter struct {
 	mu        sync.Mutex
 	entries   map[string]setupLinkRateLimitEntry

@@ -1708,7 +1708,11 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	}
 	// This is deliberately a minting throttle, not a general slash-command
 	// request shield: the owner gate above still runs first so refused setup
-	// attempts do not consume quota.
+	// attempts do not consume quota. That means repeat non-owner attempts can
+	// still spend the owner-gate read; avoiding that would need a separate
+	// request shield above this gate. The quota is consumed before MintState so
+	// repeated local mint failures still get throttled instead of retrying
+	// without bound.
 	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, h.now()); !ok {
 		slog.Warn("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
 		retryCommand := "`/qurl setup <email>`"
