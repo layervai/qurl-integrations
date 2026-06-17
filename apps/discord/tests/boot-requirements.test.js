@@ -169,11 +169,20 @@ describe('baseUrlHttpsProblem', () => {
   });
 
   it('accepts an uppercase HTTPS:// scheme (URL scheme is case-insensitive)', () => {
-    // Pre-#619 the inline check was case-sensitive; the helper normalizes
-    // so a valid HTTPS:// origin isn't falsely rejected at boot.
+    // The parse-based check normalizes the scheme, so a valid HTTPS:// origin
+    // isn't falsely rejected at boot (the pre-#619 prefix check was case-sensitive).
     expect(
       baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'HTTPS://bot.example.com' }), true),
     ).toBeNull();
+  });
+
+  it('rejects a host-less "https://" BASE_URL (would build a broken redirect)', () => {
+    // new URL('https://') throws — a scheme with no host can't be a usable
+    // redirect base, so a consuming deploy must still fail fast rather than
+    // pass a prefix check.
+    const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://' }), true);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('https://');
   });
 
   // The #619 headline regression: a customer (non-OpenNHP) deploy with the

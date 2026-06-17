@@ -83,11 +83,13 @@ function missingKekRequiredKeys(env) {
 //
 // So the trigger is "an OAuth surface that builds a BASE_URL-derived
 // redirect is active" (isOpenNHPActive || isQurlOAuthConfigured), not
-// OpenNHP mode specifically. The https-prefix test subsumes the unset case
-// — the localhost default is http:// — catching both "unset → localhost"
-// and explicit http://. The message names only the active surface(s) so an
-// OpenNHP-only operator (no Auth0) isn't sent chasing a qURL-OAuth red
-// herring.
+// OpenNHP mode specifically. The check parses BASE_URL (new URL) rather
+// than prefix-matching: parsing normalizes the case-insensitive scheme
+// (RFC 3986) and rejects a bare "https://" with no host that would still
+// build a broken redirect. The localhost default parses as http:// so it's
+// not usable, catching both "unset → localhost" and explicit http://. The
+// message names only the active surface(s) so an OpenNHP-only operator (no
+// Auth0) isn't sent chasing a qURL-OAuth red herring.
 //
 // Intentionally NOT gated on: the per-guild webhook bridge
 // (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
@@ -106,19 +108,28 @@ function missingKekRequiredKeys(env) {
 // false-positive. Caller gates on NODE_ENV==='production'; string-or-null
 // mirrors unsupportedRoleShipperCombo et al.
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
-  // https is always acceptable — short-circuit the common good case. The
-  // URL scheme is case-insensitive (RFC 3986), so normalize before testing.
-  if (cfg.BASE_URL.toLowerCase().startsWith('https://')) return null;
+  // A usable redirect base is a parseable https:// URL with a host. Parsing
+  // (not a string prefix) normalizes the case-insensitive scheme and treats
+  // a bare "https://" — which throws — as not usable; a valid https origin
+  // short-circuits the common good case.
+  let usableHttps = false;
+  try {
+    usableHttps = new URL(cfg.BASE_URL).protocol === 'https:';
+  } catch {
+    // Malformed BASE_URL (incl. a host-less "https://") is not usable.
+  }
+  if (usableHttps) return null;
   if (cfg.isOpenNHPActive || cfg.isQurlOAuthConfigured) {
     const surfaces = [
       cfg.isOpenNHPActive && 'OpenNHP community features',
       cfg.isQurlOAuthConfigured && 'the qURL guided setup flow',
     ].filter(Boolean).join(' and ');
     return (
-      'BASE_URL must be set to an https:// URL in production — it builds the ' +
-      `OAuth redirect for ${surfaces}, and the http://localhost:3000 default ` +
-      `would dead-end setup at the redirect. Got: ${cfg.BASE_URL}. Set BASE_URL ` +
-      "to the bot's public https:// origin in the deployment template."
+      'BASE_URL must be a complete https:// URL (scheme + host) in production ' +
+      `— it builds the OAuth redirect for ${surfaces}, and the ` +
+      `http://localhost:3000 default would dead-end setup at the redirect. ` +
+      `Got: ${cfg.BASE_URL}. Set BASE_URL to the bot's public https:// origin ` +
+      'in the deployment template.'
     );
   }
   if (baseUrlExplicitlySet) {
