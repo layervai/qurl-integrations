@@ -338,6 +338,23 @@ describe('editInteractionReply via webhook token (cross-replica view-counter pri
     expect(JSON.stringify(fields)).not.toContain(TOKEN);
   });
 
+  it('SECURITY: also scrubs a percent-encoded token form from the message', async () => {
+    // Real interaction tokens are URL-safe (raw === encoded), so to
+    // exercise the encoded-form branch use a fixture with a char that
+    // percent-encodes. The helper must redact the encoded form too, since
+    // undici can surface the encoded URL in .message.
+    const encToken = 'tok needs/encoding';            // space + slash → %20, %2F
+    const encoded = encodeURIComponent(encToken);     // 'tok%20needs%2Fencoding'
+    const leaky = new Error(`fetch to https://discord.com/api/v10/webhooks/${APP_ID}/${encoded}/messages/@original failed`);
+    restMock.patch.mockRejectedValueOnce(leaky);
+    const result = await editInteractionReply(APP_ID, encToken, { content: 'x' });
+    expect(result.ok).toBe(false);
+    const [, fields] = logger.warn.mock.calls[0];
+    expect(fields.errorMessage).not.toContain(encoded);
+    expect(fields.errorMessage).toContain('[redacted-token]');
+    expect(JSON.stringify(fields)).not.toContain(encoded);
+  });
+
   it('never logs the token even when the error message is non-string', async () => {
     const weird = { status: 500, code: undefined, message: undefined };
     restMock.patch.mockRejectedValueOnce(weird);

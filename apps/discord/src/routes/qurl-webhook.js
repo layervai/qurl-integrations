@@ -584,10 +584,8 @@ const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 // new view (dbResult === 'recorded'), edits the sender's "/qurl send"
 // confirmation to "👀 N viewed / M pending" from ANY replica using the
 // persisted interaction-webhook token — no Gateway, no in-memory monitor
-// needed. This SUPERSEDES the SQS view-update push (which the recorded-
-// view block no longer calls): two editors fighting on one message (the
-// monitor replica's full-payload safeEdit + this content-only edit) would
-// race; the fast-path wins and the poll backstop self-heals any miss.
+// needed. (Supersedes the old SQS view-update push — see the call site's
+// SUPERSESSION note for why the two editors can't coexist.)
 //
 // FIRE-AND-FORGET (mirrors flipConsumedDMInBackground): the view is
 // already recorded and the 200 already returned, so a counter-edit miss

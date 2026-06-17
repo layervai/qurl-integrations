@@ -148,6 +148,13 @@ const mockDb = {
   // mockResolvedValueOnce drives the status-transition assertions.
   getQurlViews: jest.fn(async () => new Map()),
   recordQurlView: jest.fn(),
+  // Shared monotonic floor between the poll and the webhook fast-path.
+  // The poll now advances it after a confirmed counter render (so the
+  // fast-path can't step backwards). Default resolves true (advanced);
+  // tests asserting commit-after-edit override per-case. MUST exist on
+  // the mock — without it runTick's call throws, gets swallowed by the
+  // floor-advance try/catch, and the assertions below go vacuous.
+  tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -330,6 +337,9 @@ beforeEach(() => {
   // test starts from a known baseline regardless of tick count.
   mockDb.getQurlViews.mockReset();
   mockDb.getQurlViews.mockResolvedValue(new Map());
+  // Same one-shot-bleed reset for the shared-floor advance.
+  mockDb.tryAdvanceRenderedCount.mockReset();
+  mockDb.tryAdvanceRenderedCount.mockResolvedValue(true);
   // Drain any monitors a prior test left registered. activeMonitors is the
   // module-private set; clearing it prevents the LRU-cap eviction test
   // from being polluted by happy-path leftovers.
@@ -423,6 +433,82 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
     expect(logger.error).toHaveBeenCalledWith('Link monitor poll failed', expect.any(Object));
     // No editReply because the BatchGet failed before any status diff.
     expect(interaction.editReply).not.toHaveBeenCalled();
+    monitor.stop();
+  });
+});
+
+describe('monitorLinkStatus — shared monotonic floor with the webhook fast-path', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  it('advances last_rendered_count to the DISPLAYED count after a confirmed counter render', async () => {
+    // The poll is now a first-class renderer (coalescing makes the burst
+    // tail poll-only), so it must share the monotonic floor — else a
+    // stale fast-path read could step the display backwards. After it
+    // renders "1 viewed" it advances the floor to 1.
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      TWO_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+      '1m', 'Sent to 2 users', { components: [] }, 2,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalled();
+    // Floor advanced to exactly what was displayed (1), AFTER the edit.
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 1);
+    const editOrder = interaction.editReply.mock.invocationCallOrder[0];
+    const advOrder = mockDb.tryAdvanceRenderedCount.mock.invocationCallOrder[0];
+    expect(editOrder).toBeLessThan(advOrder);
+    monitor.stop();
+  });
+
+  it('COMMIT-AFTER-EDIT: a failed poll render does NOT advance the floor (mirror of the fast-path fence)', async () => {
+    // If the poll advanced the floor on a render that DIDN'T land, the
+    // fast-path's N<=L skip would strand a count never displayed —
+    // stuck-counter, round two. So advance only on a confirmed edit.
+    const interaction = makeInteraction({
+      editReply: jest.fn().mockRejectedValue(new Error('Discord 500')),
+    });
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalled(); // attempted…
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled(); // …but failed → no advance
+    monitor.stop();
+  });
+
+  it('does NOT advance the floor on a degraded send (no counter displayed)', async () => {
+    // Degraded sends render bare baseMsg (no counter) and the fast-path
+    // is disarmed; advancing the floor here would strand a counter that
+    // was never shown. The degraded early-return skips getQurlViews AND
+    // the advance.
+    const interaction = makeInteraction();
+    const DEGRADED_SET = [
+      { resourceId: 'res-1', qurlId: '', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+    ];
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      DEGRADED_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1,
+    );
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(mockDb.getQurlViews).not.toHaveBeenCalled();
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
     monitor.stop();
   });
 });

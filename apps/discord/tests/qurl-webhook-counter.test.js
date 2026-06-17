@@ -249,6 +249,31 @@ describe('sender view-counter fast-path — pre-read compare (N <= L)', () => {
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
   });
+
+  it('NO BACKWARDS STEP: after the poll advanced the shared floor to 3, a stale fast-path read of N=2 does NOT edit', async () => {
+    // cr-found gap, now closed by the shared monotonic floor: the poll
+    // renders the settled count (e.g. 3) and advances last_rendered_count
+    // to 3 (monitorLinkStatus → tryAdvanceRenderedCount). A later
+    // fast-path event whose eventually-consistent getQurlViews reads a
+    // stale N=2 must NOT PATCH "2 viewed" over the displayed "3 viewed".
+    // The step-6 N<=L guard (L=3 from the persisted floor the poll wrote)
+    // is exactly what fences it — without the poll sharing the floor, L
+    // would lag at the last FAST-PATH-rendered value and this would edit
+    // backwards.
+    mockGetSendRenderState.mockResolvedValue(armedState({
+      lastRenderedCount: 3,
+      qurlIds: ['q_a', 'q_b', 'q_c'],
+    }));
+    mockGetQurlViews.mockResolvedValue(new Map([
+      ['q_a', { accessCount: 1, consumed: false }],
+      ['q_b', { accessCount: 1, consumed: false }],
+      // q_c not yet visible to this replica's stale read → N = 2 < L = 3
+    ]));
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+  });
 });
 
 describe('sender view-counter fast-path — FAILED-EDIT SELF-HEAL (load-bearing)', () => {

@@ -274,9 +274,17 @@ async function editInteractionReply(applicationId, token, payload) {
     // logging, and never log `err.url`/`err.stack` (which carry it
     // verbatim). DiscordAPIError/HTTPError messages contain no token so
     // this is a no-op on the common paths; it only bites the network throw.
-    const safeMessage = typeof err.message === 'string'
-      ? err.message.split(token).join('[redacted-token]')
-      : undefined;
+    // Scrub BOTH the raw token and its percent-encoded form: undici may
+    // surface the request URL (where the token can appear encoded) in
+    // .message on the network-throw path. Interaction tokens are URL-safe
+    // so the two forms are usually identical, but encoding the second
+    // pass is free belt-and-suspenders for a flagged credential.
+    let safeMessage;
+    if (typeof err.message === 'string') {
+      safeMessage = err.message.split(token).join('[redacted-token]');
+      const encoded = encodeURIComponent(token);
+      if (encoded !== token) safeMessage = safeMessage.split(encoded).join('[redacted-token]');
+    }
     logger[expired ? 'info' : 'warn']('editInteractionReply via webhook token failed', {
       applicationId, status: err.status, code: err.code, expired, errorMessage: safeMessage,
     });

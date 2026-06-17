@@ -1542,9 +1542,19 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // logIgnoredDiscordErr swallows it. Recipients see status from
   // their DM, so the sender's frozen counter past cap is just a
   // dashboard nicety, not a load-bearing surface.
+  // Returns true ONLY when the edit confirmed. The runTick counter path
+  // gates its monotonic-floor advance (tryAdvanceRenderedCount) on this —
+  // commit-after-edit, same invariant the webhook fast-path holds — so a
+  // failed render must NOT advance the floor (else the fast-path's N<=L
+  // skip would strand a count that was never displayed: stuck-counter).
+  // The terminal/expand callers ignore the return, so this stays
+  // non-breaking for them.
   async function safeEdit(payload) {
-    if (!interaction) return;
-    await interaction.editReply(payload).catch(logIgnoredDiscordErr);
+    if (!interaction) return false;
+    return interaction.editReply(payload).then(() => true).catch((err) => {
+      logIgnoredDiscordErr(err);
+      return false;
+    });
   }
 
   // `viewed` already declared above the createHandleViewUpdate factory
@@ -1610,9 +1620,33 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         changed = true;
       }
       if (changed) {
-        const pending = Math.max(0, expectedCount - viewed);
-        await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
+        const rendered = viewed;
+        const pending = Math.max(0, expectedCount - rendered);
+        const ok = await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
         if (pending === 0) { allDone = true; clearTimeout(timer); }
+        // Share the monotonic floor with the webhook fast-path. The poll
+        // is now a first-class renderer of the settled count (coalescing
+        // makes the burst tail poll-only), so advance last_rendered_count
+        // to what we just DISPLAYED — only on a confirmed edit (`ok`),
+        // mirroring the fast-path's commit-after-edit. Without this the
+        // fast-path could read a stale lower N after the poll showed a
+        // higher count and step the display BACKWARDS until the next tick.
+        // CCFE is the normal "a concurrent fast-path already advanced
+        // higher" case (returns false, ignored). Best-effort + wrapped so
+        // a non-CCFE DDB throw can't surface as a misleading "poll failed"
+        // or skip the allDone bookkeeping above. (tryAdvanceRenderedCount
+        // also stamps last_rendered_at, arming the coalesce clock — benign
+        // here: ticks are ≥15s apart vs the ~1.5s window, so it never
+        // actually suppresses a fast-path edit.) NOT advanced on the
+        // degraded early-return or the terminal-freeze render — neither
+        // displays a live counter, so advancing would strand it.
+        if (ok) {
+          try {
+            await db.tryAdvanceRenderedCount(sendId, rendered);
+          } catch (advErr) {
+            logger.debug('Monitor floor-advance failed (non-CCFE); fast-path/poll self-heal on next tick', { sendId, error: advErr.message });
+          }
+        }
       }
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });
