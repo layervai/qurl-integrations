@@ -20,6 +20,8 @@ package oauth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -164,9 +166,14 @@ type AsyncTracker interface {
 //     OwnerID in BindWorkspace. Returns ("", err) on verify-failure;
 //     callers MUST surface the error (an empty sub can't legitimately
 //     bind a workspace).
+//
+//   - VerifyNonce verifies the id_token `nonce` claim against the
+//     HMAC-recovered state nonce before the callback trusts any other
+//     id_token-derived claim.
 type IDTokenVerifier interface {
 	VerifyEmail(ctx context.Context, idToken string) (email string, err error)
 	VerifySub(ctx context.Context, idToken string) (sub string, err error)
+	VerifyNonce(ctx context.Context, idToken, nonce string) error
 }
 
 // WorkspaceMapping is the value BindWorkspace persists. Re-declared
@@ -434,6 +441,13 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 	q.Set("scope", strings.Join(apiKeyScopes(), " ")+" openid email")
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
+	if verified.Nonce != "" {
+		q.Set("nonce", verified.Nonce)
+	}
+	if verified.CodeVerifier != "" {
+		q.Set("code_challenge", pkceCodeChallenge(verified.CodeVerifier))
+		q.Set("code_challenge_method", "S256")
+	}
 	q.Set("prompt", "consent")
 	if verified.Email != "" {
 		if connection := strings.TrimSpace(cfg.Auth0EmailConnection); connection != "" {
@@ -443,4 +457,9 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func pkceCodeChallenge(codeVerifier string) string {
+	sum := sha256.Sum256([]byte(codeVerifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }

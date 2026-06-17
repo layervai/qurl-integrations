@@ -78,6 +78,22 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("state") != state {
 		t.Errorf("state: got %q want %q (must pass through the signed state)", q.Get("state"), state)
 	}
+	verified, err := VerifyState(cfg.OAuthStateSecret, state, cfg.Now())
+	if err != nil {
+		t.Fatalf("VerifyState: %v", err)
+	}
+	if q.Get("nonce") != verified.Nonce {
+		t.Errorf("nonce: got %q want signed state nonce %q", q.Get("nonce"), verified.Nonce)
+	}
+	if q.Get("code_challenge") != pkceCodeChallenge(verified.CodeVerifier) {
+		t.Errorf("code_challenge: got %q want S256 challenge", q.Get("code_challenge"))
+	}
+	if q.Get("code_challenge_method") != "S256" {
+		t.Errorf("code_challenge_method: got %q want S256", q.Get("code_challenge_method"))
+	}
+	if q.Get("code_verifier") != "" {
+		t.Errorf("code_verifier must not be sent to /authorize, got %q", q.Get("code_verifier"))
+	}
 
 	// Cookie set with the same state, HttpOnly + Lax.
 	var stateCookie *http.Cookie

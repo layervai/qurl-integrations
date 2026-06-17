@@ -228,13 +228,16 @@ type auth0TokenResponse struct {
 	IDToken     string `json:"id_token"`
 }
 
+var errMissingPKCEVerifier = errors.New("auth0 token exchange missing PKCE verifier")
+
 // Callback returns the http.HandlerFunc for GET /oauth/qurl/callback.
 //
 // Steps:
 //  1. Validate cookie + query.state via timing-safe compare; verify the
 //     state's HMAC + expiry; recover (teamID, userID).
-//  2. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
-//  3. Verify id_token signature against Auth0 JWKS — extract `sub`
+//  2. POST to Auth0 /oauth/token with the state-bound PKCE verifier to
+//     exchange code → access_token + id_token.
+//  3. Verify id_token signature + nonce against Auth0 JWKS — extract `sub`
 //     (workspace OwnerID; mandatory) and `email` (best-effort for the
 //     success-page readout).
 //  4. If setup state carried an email, require the verified Auth0
@@ -284,8 +287,15 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code)
+		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code, verified.CodeVerifier)
 		if err != nil {
+			if errors.Is(err, errMissingPKCEVerifier) {
+				slog.Warn("oauth/callback rejected state without PKCE verifier")
+				renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is out of date",
+					"This qURL™ setup link was started before the current authorization flow was available.",
+					"Return to Slack and run /qurl setup <email> again.")
+				return
+			}
 			slog.Error("oauth/callback Auth0 token exchange failed", "error", err)
 			renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't connect qURL",
 				"Slack finished its handoff, but qURL™ could not complete authorization.",
@@ -293,8 +303,14 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
-		if !checkSetupEmailMatches(w, verified, qurlEmail) {
+		qurlEmail, qurlSub, claimsOK := verifyIDTokenClaims(r.Context(), cfg, idToken, verified.Nonce)
+		if !claimsOK {
+			renderOAuthErrorPage(w, http.StatusBadRequest, "Authorization couldn't be verified",
+				"qURL™ could not verify the authorization response for this setup request.",
+				"Return to Slack and run /qurl setup <email> again.")
+			return
+		}
+		if !checkSetupEmailMatches(w, verified.Email, qurlEmail) {
 			return
 		}
 
@@ -334,12 +350,12 @@ func Callback(cfg Config) http.HandlerFunc {
 	}
 }
 
-func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlEmail string) bool {
-	if verified.Email == "" {
+func checkSetupEmailMatches(w http.ResponseWriter, setupEmail, qurlEmail string) bool {
+	if setupEmail == "" {
 		return true
 	}
 	normalized, err := NormalizeEmail(qurlEmail)
-	if err != nil || normalized != verified.Email {
+	if err != nil || normalized != setupEmail {
 		slog.Warn("oauth/callback email mismatch for setup flow")
 		renderOAuthErrorPage(w, http.StatusBadRequest, "qURL account mismatch",
 			"The signed-in qURL™ account did not match the email used to start setup.",
@@ -435,8 +451,8 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 // is best-effort for legacy setup (failure logged, returned ""), but
 // becomes mandatory when the signed setup state carries an email; sub
 // is mandatory for the downstream bind (failure returned as "" so
-// checkBindAllowed can fail-closed). Both verifies are skipped cleanly
-// when idToken is empty or the verifier is unwired.
+// checkBindAllowed can fail-closed). Nonce/email/sub verifies all share the
+// same skip boundary when idToken is empty or the verifier is unwired.
 //
 // In production the verifier is non-nil by construction —
 // cmd/main.go's buildOAuthConfig fails-fast at boot when AdminStore
@@ -446,7 +462,7 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 // the (empty) sub anyway.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
-func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {
+func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce string) (email, sub string, ok bool) {
 	if idToken == "" {
 		// Auth0 should always return an id_token when openid is in
 		// the scope set (see authorizeURL). An empty id_token here
@@ -456,11 +472,18 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 		// downstream 500 doesn't dig through JWKS logs that never
 		// fired.
 		slog.Warn("oauth/callback Auth0 returned empty id_token — sub-verify will be skipped (likely Auth0 application misconfigured without openid scope)")
-		return "", ""
+		return "", "", true
 	}
 	if cfg.IDTokenVerifier == nil {
-		return "", ""
+		return "", "", true
 	}
+	if err := cfg.IDTokenVerifier.VerifyNonce(ctx, idToken, expectedNonce); err != nil {
+		slog.Warn("oauth/callback id_token nonce-verify failed", "error", err)
+		return "", "", false
+	}
+	// Keep these calls split even though JWKSVerifier parses the token for each:
+	// setup is rare, and the split preserves the intentional error contract
+	// (nonce/sub fail closed, email remains success-page best-effort).
 	if e, verr := cfg.IDTokenVerifier.VerifyEmail(ctx, idToken); verr != nil {
 		slog.Warn("oauth/callback id_token email-verify failed (non-fatal)", "error", verr)
 	} else {
@@ -471,7 +494,7 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 	} else {
 		sub = s
 	}
-	return email, sub
+	return email, sub, true
 }
 
 // checkBindAllowed runs the BindWorkspace pre-flight. Returns true to
@@ -1142,10 +1165,14 @@ func truncateForLog(s string, limit int) string {
 // /oauth/token and returns (access_token, id_token, err).
 //
 //nolint:gocritic // hugeParam: see Callback above — value-passing is intentional.
-func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config, code string) (accessToken, idToken string, err error) {
+func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config, code, codeVerifier string) (accessToken, idToken string, err error) {
+	if codeVerifier == "" {
+		return "", "", errMissingPKCEVerifier
+	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
+	form.Set("code_verifier", codeVerifier)
 	form.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	form.Set("client_id", cfg.Auth0ClientID)
 	form.Set("client_secret", cfg.Auth0ClientSecret)

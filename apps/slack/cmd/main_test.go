@@ -33,6 +33,10 @@ func (noopVerifier) VerifySub(_ context.Context, _ string) (string, error) {
 	return "", errors.New("noopVerifier: unused in env-var tests")
 }
 
+func (noopVerifier) VerifyNonce(_ context.Context, _, _ string) error {
+	return errors.New("noopVerifier: unused in env-var tests")
+}
+
 // newFakeProvider builds the minimum-viable DDBProvider buildOAuthConfig
 // will accept. The test only inspects the (cfg, ok) return — no DDB or
 // KMS calls are made through the returned provider.

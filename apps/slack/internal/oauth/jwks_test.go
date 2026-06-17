@@ -296,6 +296,54 @@ func TestJWKSVerifierVerifySubReturnsSub(t *testing.T) {
 	}
 }
 
+func TestJWKSVerifierVerifyNonceAcceptsMatchingClaim(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	const wantNonce = "state-bound-nonce"
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    "auth0|abc123def456",
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		"nonce":           wantNonce,
+	})
+	if err := f.verifier.VerifyNonce(context.Background(), string(signed), wantNonce); err != nil {
+		t.Fatalf("VerifyNonce: %v", err)
+	}
+}
+
+func TestJWKSVerifierVerifyNonceRejectsMismatch(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    "auth0|abc123def456",
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		"nonce":           "other-nonce",
+	})
+	if err := f.verifier.VerifyNonce(context.Background(), string(signed), "state-bound-nonce"); err == nil {
+		t.Fatal("VerifyNonce must reject a nonce claim from a different authorization request")
+	}
+}
+
+func TestJWKSVerifierVerifyNonceRejectsMissingClaim(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    "auth0|abc123def456",
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+	})
+	if err := f.verifier.VerifyNonce(context.Background(), string(signed), "state-bound-nonce"); err == nil {
+		t.Fatal("VerifyNonce must reject a token without a nonce claim")
+	}
+}
+
 // TestJWKSVerifierVerifySubRejectsEmptySub fences the misconfigured-
 // federation posture documented at jwks.go: an empty sub on an otherwise
 // valid token must surface as an error so the callback's checkBindAllowed

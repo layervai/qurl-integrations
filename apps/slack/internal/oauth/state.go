@@ -16,16 +16,25 @@ import (
 
 // State token format:
 //
-//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + hmac_hex )
-//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + hmac_hex )
-//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + mode + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + code_verifier + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + code_verifier + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + mode + "|" + code_verifier + "|" + hmac_hex )
 //
 // where hmac_hex signs every payload field before it.
 //
 // State is integrity-protected, not encrypted: a copied setup link can be
-// base64url-decoded to read the Slack IDs and optional setup email. Keep secrets
-// out of state; the current fields are slash-command verified identifiers and
-// the requester-typed email used only for Auth0 account selection.
+// base64url-decoded to read the Slack IDs, optional setup email, and PKCE
+// verifier. Do not put long-lived credentials here; the PKCE verifier is a
+// short-lived authorization-request value carried in state to keep this Lambda
+// flow stateless. Because the verifier is in the front-channel state, PKCE here
+// binds the authorization request as defense-in-depth for a confidential client
+// rather than providing standards-style verifier confidentiality against a party
+// that can read the authorize/callback URLs.
+//
+// Pre-PKCE state formats are still parsed for the short deploy overlap, but
+// they do not complete end-to-end: Callback requires a state-bound verifier
+// before exchanging the Auth0 code, so a user with an old in-flight link reruns
+// /qurl setup rather than completing a no-PKCE token exchange.
 //
 // teamID + userID are carried in the signed payload (recovered at
 // /callback) so the workspace identity isn't taken from an unsigned
@@ -49,20 +58,21 @@ import (
 // workspace_state plumbing. Acceptable for v1; revisit if install-flow
 // logs show legitimate replay.
 const (
-	stateMaxAge         = 5 * time.Minute
-	stateLegacyParts    = 5
-	stateEmailParts     = 6
-	stateEmailModeParts = 7
-	stateNonceLen       = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
-	StateMinSecret      = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
-	stateFutureSkew     = 30 * time.Second
-	stateSeparator      = "|"
-	stateSeparatorB     = byte('|')
-	stateSeparatorRune  = '|'
-	stateUserIDIndex    = 1
-	stateTeamIDIndex    = 0
-	stateNonceIndex     = 2
-	stateTSIndex        = 3
+	stateMaxAge          = 5 * time.Minute
+	stateLegacyParts     = 5
+	stateEmailParts      = 6
+	stateEmailModeParts  = 7
+	stateNonceLen        = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
+	statePKCEVerifierLen = 32 // 32 bytes base64url-encode to 43 chars, RFC 7636's lower bound.
+	StateMinSecret       = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
+	stateFutureSkew      = 30 * time.Second
+	stateSeparator       = "|"
+	stateSeparatorB      = byte('|')
+	stateSeparatorRune   = '|'
+	stateUserIDIndex     = 1
+	stateTeamIDIndex     = 0
+	stateNonceIndex      = 2
+	stateTSIndex         = 3
 	// Slot 4 is the legacy signature; email states put the email there and
 	// shift the signature to slot 5.
 	stateLegacySigIndex    = 4
@@ -70,6 +80,7 @@ const (
 	stateEmailSigIndex     = 5
 	stateModeIndex         = 5
 	stateEmailModeSigIndex = 6
+	statePKCEVerifierIndex = 4
 )
 
 // SetupMode is the signed /qurl setup intent carried through Auth0.
@@ -171,6 +182,11 @@ func mintState(secret []byte, teamID, userID, email string, mode SetupMode, now 
 		return "", fmt.Errorf("state: read nonce: %w", err)
 	}
 	nonce := hex.EncodeToString(nonceBytes)
+	verifierBytes := make([]byte, statePKCEVerifierLen)
+	if _, err := rand.Read(verifierBytes); err != nil {
+		return "", fmt.Errorf("state: read PKCE verifier: %w", err)
+	}
+	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
 	ts := strconv.FormatInt(now.Unix(), 10)
 	payloadParts := []string{teamID, userID, nonce, ts}
 	if email != "" {
@@ -182,6 +198,7 @@ func mintState(secret []byte, teamID, userID, email string, mode SetupMode, now 
 		}
 		payloadParts = append(payloadParts, string(normalizedMode))
 	}
+	payloadParts = append(payloadParts, codeVerifier)
 	signed := signedPayload(payloadParts...)
 	mac := hmac.New(sha256.New, secret)
 	// hmac.Hash.Write never returns an error (documented in stdlib); the
@@ -220,17 +237,20 @@ func MintStateWithEmailMode(secret []byte, teamID, userID, email string, mode Se
 
 // VerifiedState is the setup identity recovered from a valid state token.
 type VerifiedState struct {
-	TeamID string
-	UserID string
-	Email  string
-	Mode   SetupMode
+	TeamID       string
+	UserID       string
+	Nonce        string
+	CodeVerifier string
+	Email        string
+	Mode         SetupMode
 }
 
 type parsedStateParts struct {
-	email    string
-	mode     SetupMode
-	sigIndex int
-	signed   []byte
+	email        string
+	mode         SetupMode
+	codeVerifier string
+	sigIndex     int
+	signed       []byte
 }
 
 func coreStatePayloadParts(parts [][]byte) []string {
@@ -251,25 +271,31 @@ func parseStateParts(parts [][]byte) (parsedStateParts, error) {
 			signed:   signedPayload(coreStatePayloadParts(parts)...),
 		}, nil
 	case stateEmailParts:
-		email := string(parts[stateEmailIndex])
-		if !stateEmailNormalized(email) {
-			return parsedStateParts{}, errStateMalformed
+		// Six parts can be either a pre-PKCE email state or a new
+		// no-email PKCE state. The PKCE verifier alphabet cannot produce
+		// a normalized email address, so the email check is the delimiter.
+		emailOrVerifier := string(parts[stateEmailIndex])
+		if !stateEmailNormalized(emailOrVerifier) {
+			return parsePKCEStateParts(parts, "", SetupModeReuse, statePKCEVerifierIndex, stateEmailSigIndex)
 		}
-		payload := append(coreStatePayloadParts(parts), email)
+		payload := append(coreStatePayloadParts(parts), emailOrVerifier)
 		return parsedStateParts{
-			email:    email,
+			email:    emailOrVerifier,
 			mode:     SetupModeReuse,
 			sigIndex: stateEmailSigIndex,
 			signed:   signedPayload(payload...),
 		}, nil
 	case stateEmailModeParts:
+		// Seven parts can be either a pre-PKCE email+mode state or a new
+		// email PKCE state. Explicit modes are fixed literals; anything
+		// else in slot 5 is parsed as the PKCE verifier.
 		email := string(parts[stateEmailIndex])
 		if !stateEmailNormalized(email) {
 			return parsedStateParts{}, errStateMalformed
 		}
 		mode, err := normalizeSetupMode(SetupMode(string(parts[stateModeIndex])))
 		if err != nil || mode == SetupModeReuse {
-			return parsedStateParts{}, errStateMalformed
+			return parsePKCEStateParts(parts, email, SetupModeReuse, stateModeIndex, stateEmailModeSigIndex)
 		}
 		payload := append(coreStatePayloadParts(parts), email, string(mode))
 		return parsedStateParts{
@@ -278,9 +304,59 @@ func parseStateParts(parts [][]byte) (parsedStateParts, error) {
 			sigIndex: stateEmailModeSigIndex,
 			signed:   signedPayload(payload...),
 		}, nil
+	case stateEmailModeParts + 1:
+		email := string(parts[stateEmailIndex])
+		if !stateEmailNormalized(email) {
+			return parsedStateParts{}, errStateMalformed
+		}
+		mode, err := normalizeSetupMode(SetupMode(string(parts[stateModeIndex])))
+		if err != nil || mode == SetupModeReuse {
+			return parsedStateParts{}, errStateMalformed
+		}
+		return parsePKCEStateParts(parts, email, mode, stateEmailModeSigIndex, stateEmailModeSigIndex+1)
 	default:
 		return parsedStateParts{}, errStateMalformed
 	}
+}
+
+func parsePKCEStateParts(parts [][]byte, email string, mode SetupMode, verifierIndex, sigIndex int) (parsedStateParts, error) {
+	codeVerifier := string(parts[verifierIndex])
+	if !validPKCEVerifier(codeVerifier) {
+		return parsedStateParts{}, errStateMalformed
+	}
+	payload := coreStatePayloadParts(parts)
+	if email != "" {
+		payload = append(payload, email)
+	}
+	if mode != SetupModeReuse {
+		payload = append(payload, string(mode))
+	}
+	payload = append(payload, codeVerifier)
+	return parsedStateParts{
+		email:        email,
+		mode:         mode,
+		codeVerifier: codeVerifier,
+		sigIndex:     sigIndex,
+		signed:       signedPayload(payload...),
+	}, nil
+}
+
+func validPKCEVerifier(verifier string) bool {
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+	for _, c := range verifier {
+		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+			continue
+		}
+		switch c {
+		case '-', '.', '_', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func stateEmailNormalized(email string) bool {
@@ -337,5 +413,12 @@ func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, e
 	if now.Sub(mintedAt) > stateMaxAge {
 		return VerifiedState{}, errStateExpired
 	}
-	return VerifiedState{TeamID: teamID, UserID: userID, Email: parsed.email, Mode: parsed.mode}, nil
+	return VerifiedState{
+		TeamID:       teamID,
+		UserID:       userID,
+		Nonce:        string(nonce),
+		CodeVerifier: parsed.codeVerifier,
+		Email:        parsed.email,
+		Mode:         parsed.mode,
+	}, nil
 }
