@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# Stage 1: pinned Envoy (Ubuntu base, BoringSSL). We copy only the static
-# /usr/local/bin/envoy binary out — verified to run on the Debian base below.
+# Stage 1: pinned Envoy (Ubuntu base, BoringSSL). We copy only the
+# /usr/local/bin/envoy binary out, so base-image bumps must keep the runtime
+# behavior contract green on both arches to catch glibc/library drift.
 FROM envoyproxy/envoy:v1.32.3@sha256:127e33c48c60be9a148cf9256d52e734ceda28aa344145023933116c7e524beb AS envoy
 
 # Stage 2: pinned nginx-unprivileged (Debian bookworm / glibc) runtime base.

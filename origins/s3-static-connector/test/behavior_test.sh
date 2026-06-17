@@ -249,6 +249,9 @@ fi
 fetch "$base/website"
 expect_eq "S3_PREFIX /website body" "$(cat "$B")" "prefixed"
 expect_eq "S3_PREFIX /website signed path" "$(hval X-Stub-Path)" "/site/website/index.html"
+fetch "$base/"
+expect_eq "S3_PREFIX / body" "$(cat "$B")" "prefixed-index"
+expect_eq "S3_PREFIX / signed path" "$(hval X-Stub-Path)" "/site/index.html"
 curl -s -o /dev/null "$base/website"
 expect_stub_gets "CACHE_DEFAULT_TTL caches metadata-less object" 'GET /site/website/index.html ' 1
 

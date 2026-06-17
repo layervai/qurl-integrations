@@ -43,14 +43,25 @@ jobs:
       - name: Cache-control contract
         run: bash test/cachectl_test.sh
 
-      - name: Runtime behavior contract
-        run: IMG=s3-static-connector:test bash test/behavior_test.sh
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build linux/amd64 image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: origins/s3-static-connector
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: s3-static-connector:test
+          cache-from: type=gha,scope=s3-static-connector
+          cache-to: type=gha,mode=max,scope=s3-static-connector
+
+      - name: Runtime behavior contract (linux/amd64)
+        run: SKIP_BUILD=true PLATFORM=linux/amd64 IMG=s3-static-connector:test bash test/behavior_test.sh
 
       - name: Build linux/arm64 image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
