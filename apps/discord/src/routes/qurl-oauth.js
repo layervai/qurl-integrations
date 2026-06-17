@@ -95,6 +95,11 @@ function renderError(res, statusCode, headline, detail) {
   }));
 }
 
+function clearQurlOAuthCookies(res) {
+  clearQurlOAuthCookie(res);
+  clearQurlOAuthPkceCookie(res);
+}
+
 // /oauth/qurl/start — admin lands here after clicking the link in
 // /qurl setup's ephemeral reply. Validate the state, set a session-bound
 // cookie carrying the same state, then 302 to Auth0 with the state in
@@ -171,6 +176,7 @@ router.get('/start', rateLimit, async (req, res) => {
 // key on qurl-service, persist it via the Store abstraction, DM the admin.
 router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isQurlOAuthConfigured) {
+    clearQurlOAuthCookies(res);
     return renderNotConfigured(res);
   }
   // Same encryption-at-rest guard the legacy modal-paste path enforces in
@@ -183,6 +189,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // is the load-bearing check for non-prod environments.
   if (!process.env.KEY_ENCRYPTION_KEY) {
     logger.error('Refusing /oauth/qurl/callback: KEY_ENCRYPTION_KEY is not set');
+    clearQurlOAuthCookies(res);
     return renderError(res, 503, 'qURL setup not provisioned',
       'The bot operator needs to set KEY_ENCRYPTION_KEY (encryption-at-rest) before qURL setup can store keys safely.');
   }
@@ -199,16 +206,19 @@ router.get('/callback', rateLimit, async (req, res) => {
       errorDescription: singleStringParam(req.query.error_description),
       ip: req.ip,
     });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Auth0 returned an error.');
   }
   const code = singleStringParam(req.query.code);
   const state = singleStringParam(req.query.state);
   if (!code) {
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Missing authorization code', 'Auth0 did not return an authorization code.');
   }
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {
     logger.warn('qURL OAuth callback rejected invalid state', { reason: verified.reason });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired.');
   }
   // Double-submit CSRF cookie check. /start set a cookie carrying the
@@ -219,6 +229,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   const cookieState = readCookie(req, QURL_OAUTH_SESSION_COOKIE);
   if (!cookieState) {
     logger.warn('qURL OAuth callback missing session cookie', { ip: req.ip });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
   // Both inputs are strings (cookieState early-returned if null;
@@ -231,17 +242,23 @@ router.get('/callback', rateLimit, async (req, res) => {
     && crypto.timingSafeEqual(cookieBuf, stateBuf);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
+    clearQurlOAuthCookies(res);
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
   const codeVerifier = readCookie(req, QURL_OAUTH_PKCE_COOKIE);
+  // Shape check keeps malformed cookies out of Auth0; Auth0's stored
+  // challenge/verifier match is the PKCE security boundary. Pre-PKCE
+  // in-flight redirects without this cookie fail here; state TTL bounds
+  // that deploy cutover to 5 minutes.
   if (!isPkceVerifier(codeVerifier)) {
     logger.warn('qURL OAuth callback missing or invalid PKCE verifier cookie', { ip: req.ip });
-    return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
+    clearQurlOAuthCookies(res);
+    return renderError(res, 400, 'Invalid setup link', 'This setup link could not be completed.');
   }
-  // Cookie is consumed — clear it so a refreshed callback URL can't
-  // re-bind. Path-must-match invariant lives in clearQurlOAuthCookie.
-  clearQurlOAuthCookie(res);
-  clearQurlOAuthPkceCookie(res);
+  // Cookies are consumed — clear them so a refreshed callback URL can't
+  // re-bind or replay the verifier. Path-must-match invariant lives in
+  // the clear helpers.
+  clearQurlOAuthCookies(res);
   const { guildId, discordUserId } = verified.payload;
 
   // 1. Exchange the code for an access_token + id_token (Auth0 token
@@ -263,6 +280,8 @@ router.get('/callback', rateLimit, async (req, res) => {
         client_id: config.AUTH0_CLIENT_ID,
         client_secret: config.AUTH0_CLIENT_SECRET,
         code,
+        // Guaranteed valid by the cookie gate above; Auth0 matches it against
+        // the S256 challenge stored for this authorization code.
         code_verifier: codeVerifier,
         redirect_uri: `${config.BASE_URL}/oauth/qurl/callback`,
       }),

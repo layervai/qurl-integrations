@@ -19,6 +19,18 @@ describe('utils/oauth-pkce', () => {
 
   it('rejects malformed verifiers before token exchange', () => {
     expect(isPkceVerifier('short')).toBe(false);
+    expect(isPkceVerifier('a'.repeat(129))).toBe(false);
     expect(() => pkceChallengeForVerifier('short')).toThrow(/code_verifier/);
+    expect(() => pkceChallengeForVerifier('a'.repeat(129))).toThrow(/code_verifier/);
+  });
+
+  it('accepts verifier length boundaries from RFC 7636', () => {
+    const minLengthVerifier = 'a'.repeat(43);
+    const maxLengthVerifier = 'b'.repeat(128);
+
+    expect(isPkceVerifier(minLengthVerifier)).toBe(true);
+    expect(isPkceVerifier(maxLengthVerifier)).toBe(true);
+    expect(pkceChallengeForVerifier(minLengthVerifier)).toHaveLength(43);
+    expect(pkceChallengeForVerifier(maxLengthVerifier)).toHaveLength(43);
   });
 });

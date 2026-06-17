@@ -59,6 +59,7 @@ const {
   QURL_OAUTH_PKCE_COOKIE,
 } = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
+const { cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
 
@@ -70,12 +71,6 @@ function extractStyleNonce(res) {
   const nonceMatch = csp.match(/style-src 'nonce-([A-Za-z0-9_-]+)'/);
   expect(nonceMatch).not.toBeNull();
   return nonceMatch[1];
-}
-
-function cookieValue(setCookie, name) {
-  const header = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie || '';
-  const match = header.match(new RegExp(`${name}=([^;\\n]+)`));
-  return match ? decodeURIComponent(match[1]) : null;
 }
 
 beforeEach(() => {

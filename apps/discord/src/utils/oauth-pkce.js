@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
 
 function b64urlEncode(buf) {
-  return Buffer.from(buf).toString('base64')
+  return buf.toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
@@ -19,6 +19,8 @@ function pkceChallengeForVerifier(codeVerifier) {
 }
 
 function createPkcePair() {
+  // 32 random bytes encode to a 43-char base64url verifier: the RFC 7636
+  // minimum length with 256 bits of entropy.
   const codeVerifier = b64urlEncode(crypto.randomBytes(32));
   return {
     codeVerifier,

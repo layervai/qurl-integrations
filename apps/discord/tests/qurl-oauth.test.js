@@ -72,21 +72,27 @@ const { app } = require('../src/server');
 const db = require('../src/store');
 const discord = require('../src/discord');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
-const { QURL_OAUTH_PKCE_COOKIE } = require('../src/utils/oauth-cookies');
+const {
+  QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_PKCE_COOKIE,
+} = require('../src/utils/oauth-cookies');
 const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
+const { clearedCookieHeader, cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
 const TEST_PKCE_VERIFIER = 'a'.repeat(43);
 
 function cookieFor(state, codeVerifier = TEST_PKCE_VERIFIER) {
-  return `qurl_setup_session=${encodeURIComponent(state)}; `
+  return `${QURL_OAUTH_SESSION_COOKIE}=${encodeURIComponent(state)}; `
     + `${QURL_OAUTH_PKCE_COOKIE}=${encodeURIComponent(codeVerifier)}`;
 }
 
-function cookieValue(setCookie, name) {
-  const header = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie || '';
-  const match = header.match(new RegExp(`${name}=([^;\\n]+)`));
-  return match ? decodeURIComponent(match[1]) : null;
+function expectQurlOAuthCookiesCleared(res) {
+  for (const name of [QURL_OAUTH_SESSION_COOKIE, QURL_OAUTH_PKCE_COOKIE]) {
+    const clearCookie = clearedCookieHeader(res.headers['set-cookie'], name);
+    expect(clearCookie).toBeDefined();
+    expect(clearCookie).toMatch(/Path=\/oauth\/qurl(?:;|$)/);
+  }
 }
 
 beforeEach(() => {
@@ -246,12 +252,29 @@ describe('qurl-oauth routes', () => {
   });
 
   describe('GET /oauth/qurl/callback', () => {
+    it('503s and clears cookies when KEY_ENCRYPTION_KEY is unset', async () => {
+      const saved = process.env.KEY_ENCRYPTION_KEY;
+      delete process.env.KEY_ENCRYPTION_KEY;
+      try {
+        const state = signQurlOAuthState('guild-1', 'admin-2');
+        const res = await request(app)
+          .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+          .set('Cookie', cookieFor(state));
+        expect(res.status).toBe(503);
+        expect(res.text).toMatch(/qURL setup not provisioned|encryption-at-rest/i);
+        expectQurlOAuthCookiesCleared(res);
+      } finally {
+        process.env.KEY_ENCRYPTION_KEY = saved;
+      }
+    });
+
     it('400s on missing code', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app).get(`/oauth/qurl/callback?state=${encodeURIComponent(state)}`)
         .set('Cookie', cookieFor(state));
       expect(res.status).toBe(400);
       expect(res.text).toContain('Missing authorization code');
+      expectQurlOAuthCookiesCleared(res);
     });
 
     it('400s on Auth0 error param (admin declined consent)', async () => {
@@ -261,20 +284,23 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(400);
       expect(res.text).toContain('Authorization declined');
+      expectQurlOAuthCookiesCleared(res);
     });
 
     it('400s on invalid state', async () => {
       const res = await request(app).get('/oauth/qurl/callback?code=auth0-code&state=garbage');
       expect(res.status).toBe(400);
+      expectQurlOAuthCookiesCleared(res);
     });
 
     it('400s on missing PKCE verifier cookie', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app)
         .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
-        .set('Cookie', `qurl_setup_session=${encodeURIComponent(state)}`);
+        .set('Cookie', `${QURL_OAUTH_SESSION_COOKIE}=${encodeURIComponent(state)}`);
       expect(res.status).toBe(400);
-      expect(res.text).toMatch(/same browser tab/i);
+      expect(res.text).toMatch(/could not be completed/i);
+      expectQurlOAuthCookiesCleared(res);
     });
 
     it('400s on missing CSRF cookie (leaked URL opened in different browser)', async () => {
@@ -286,6 +312,7 @@ describe('qurl-oauth routes', () => {
       );
       expect(res.status).toBe(400);
       expect(res.text).toMatch(/same browser tab/i);
+      expectQurlOAuthCookiesCleared(res);
     });
 
     it('cookie value URL-decodes to the same state used in the timingSafeEqual compare (round-9 #8 follow-up)', async () => {
@@ -325,6 +352,7 @@ describe('qurl-oauth routes', () => {
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(stateA)}`,
       ).set('Cookie', cookieFor(stateB));
       expect(res.status).toBe(400);
+      expectQurlOAuthCookiesCleared(res);
     });
 
     it('502s when Auth0 token exchange fails', async () => {
@@ -597,11 +625,11 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
-    it('clears the qurl_setup_session cookie on successful callback (one-shot binding)', async () => {
+    it('clears the qurl_setup_session and PKCE cookies on successful callback (one-shot binding)', async () => {
       // Regression pin — without res.clearCookie, a refreshed callback
-      // URL could re-bind silently. Cookie should be cleared via a
-      // Set-Cookie header that zeroes the value AND uses Path=/oauth/qurl so
-      // the browser actually forgets it (path mismatch = no clear).
+      // URL could re-bind silently. Cookies should be cleared via
+      // Set-Cookie headers that zero the values AND use Path=/oauth/qurl so
+      // the browser actually forgets them (path mismatch = no clear).
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
@@ -616,11 +644,7 @@ describe('qurl-oauth routes', () => {
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
-      const setCookies = res.headers['set-cookie'] || [];
-      const headers = Array.isArray(setCookies) ? setCookies : [setCookies];
-      const clearCookie = headers.find((h) => h.startsWith('qurl_setup_session=') && /Expires=Thu, 01 Jan 1970|Max-Age=0/i.test(h));
-      expect(clearCookie).toBeDefined();
-      expect(clearCookie).toMatch(/Path=\/oauth\/qurl(?:;|$)/);
+      expectQurlOAuthCookiesCleared(res);
     });
   });
 });
@@ -669,18 +693,27 @@ describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
         const supertest = require('supertest');
         // eslint-disable-next-line global-require
         const { app: freshApp } = require('../src/server');
-        const res = await supertest(freshApp).get('/oauth/qurl/start?state=anything');
-        expect(res.status).toBe(503);
-        expect(res.text).toMatch(/not configured/i);
+        const start = await supertest(freshApp).get('/oauth/qurl/start?state=anything');
+        expect(start.status).toBe(503);
+        expect(start.text).toMatch(/not configured/i);
+        const callback = await supertest(freshApp)
+          .get('/oauth/qurl/callback?code=auth0-code&state=anything')
+          .set('Cookie', cookieFor('anything'));
+        expect(callback.status).toBe(503);
+        expect(callback.text).toMatch(/not configured/i);
+        expectQurlOAuthCookiesCleared(callback);
         // Defense-in-depth: qurl-oauth.js renderNotConfigured already
         // doesn't include env-var names (unlike the legacy
         // discord-install.js path that pre-C.4 leaked them). Pin here
         // so a future refactor that adds a reason field can't regress.
         // Env-var-shaped strings only — the literal word "Auth0" is the
         // user-visible service name and is fine in copy.
-        expect(res.text).not.toMatch(/AUTH0_[A-Z_]+/);
-        expect(res.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
-        expect(res.text).not.toMatch(/Reason:/i);
+        expect(start.text).not.toMatch(/AUTH0_[A-Z_]+/);
+        expect(start.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
+        expect(start.text).not.toMatch(/Reason:/i);
+        expect(callback.text).not.toMatch(/AUTH0_[A-Z_]+/);
+        expect(callback.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
+        expect(callback.text).not.toMatch(/Reason:/i);
       });
     } finally {
       // Restore env so subsequent tests run against the configured router.
