@@ -1174,6 +1174,28 @@ describe('qurl sends', () => {
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 
+  test('getSendConfig: SECURITY — strips the SENSITIVE interaction_token from the full-row return', async () => {
+    // PR-B persists the live ~15-min interaction-webhook bearer cred onto
+    // this row. getSendConfig is the full-row getter its (scalar-reading)
+    // callers use, so it must NOT hand the token back — a caller that logs
+    // / audit-ships / error-dumps the config object would otherwise leak
+    // the cred. (The fast-path reads the token via getSendRenderState, the
+    // one return shape that intentionally carries it.)
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        send_id: 's1', sender_discord_id: 'sender',
+        interaction_token: 'tok-LIVE-bearer-cred', interaction_app_id: 'app-1',
+        expires_in: '24h', personal_message: 'hi',
+      },
+    });
+    const result = await store.getSendConfig('s1', 'sender');
+    expect(result).not.toHaveProperty('interaction_token');
+    expect(JSON.stringify(result)).not.toContain('tok-LIVE-bearer-cred');
+    // Non-sensitive config fields the callers DO read survive.
+    expect(result.expires_in).toBe('24h');
+    expect(result.personal_message).toBe('hi');
+  });
+
   // ── View-counter render state (cross-replica fast-path, PR-B) ──
 
   test('saveSendConfig: does NOT write view-counter render-state (that is saveSendConfirmState only)', async () => {

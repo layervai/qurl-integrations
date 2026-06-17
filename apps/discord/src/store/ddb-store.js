@@ -1608,9 +1608,19 @@ async function getSendConfig(sendId, senderDiscordId) {
   const row = res.Item;
   if (!row) return row;
   if (row.sender_discord_id !== senderDiscordId) return undefined; // ownership check
-  return row.attachment_url
-    ? { ...row, attachment_url: decrypt(row.attachment_url) }
-    : row;
+  // SECURITY: never hand the SENSITIVE interaction_token back in the
+  // full-row return. PR-B persists that live ~15-min bearer cred onto
+  // THIS row, but getSendConfig's callers (handleAddRecipients, the
+  // status card) only read scalar config fields — they never need the
+  // token, and returning it risks a caller logging/audit-shipping/error-
+  // dumping the whole config object and leaking the cred. The fast-path
+  // reads the token via getSendRenderState (which is the ONLY return
+  // shape that intentionally carries it, and its sole caller logs only
+  // scalars). Strip it here so the full-row getter is token-free.
+  const { interaction_token: _omit, ...safe } = row;
+  return safe.attachment_url
+    ? { ...safe, attachment_url: decrypt(safe.attachment_url) }
+    : safe;
 }
 
 // View-counter render state for the cross-replica fast-path (PR-B).
