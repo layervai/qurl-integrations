@@ -773,8 +773,10 @@ func splitTopLevelKeyword(s, keyword string) []string {
 }
 
 // evalCondition supports the exact ConditionExpression shapes the
-// production code emits, joined by top-level " AND " and, for reset
-// conditions, parenthesized top-level " OR ". Each subexpression is one of:
+// production code emits: subexpressions joined by top-level " AND " plus the
+// reset path's parenthesized top-level " OR ". Mixed or nested boolean trees
+// beyond that are intentionally out of scope for this test fake. Each
+// subexpression is one of:
 //
 //	attribute_exists(<attr>)
 //	attribute_not_exists(<attr>)
