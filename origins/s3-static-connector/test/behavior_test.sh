@@ -238,6 +238,39 @@ expect_eq "S3_PREFIX /website signed path" "$(hval X-Stub-Path)" "/site/website/
 curl -s -o /dev/null "$base/website"
 expect_stub_gets "CACHE_DEFAULT_TTL caches metadata-less object" 'GET /site/website/index.html ' 1
 
+# 15. The entrypoint supervisor exits the container if either child dies.
+docker exec "$ORIGIN" sh -c '
+found=0
+for comm in /proc/[0-9]*/comm; do
+  if [ "$(cat "$comm")" = "nginx" ]; then
+    pid="${comm%/comm}"
+    pid="${pid##*/}"
+    kill -KILL "$pid"
+    found=1
+  fi
+done
+[ "$found" = "1" ]
+'
+stopped=0
+for _ in $(seq 1 20); do
+  state="$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$ORIGIN" 2>/dev/null || true)"
+  case "$state" in
+    false\ *) stopped=1; break ;;
+  esac
+  sleep 0.5
+done
+if [ "$stopped" = "1" ]; then
+  ok "supervisor stops container after nginx exits"
+else
+  no "supervisor stops container after nginx exits (state '$state')"
+fi
+exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN" 2>/dev/null || echo 0)"
+if [ "$exit_code" != "0" ]; then
+  ok "supervisor exits non-zero after child crash"
+else
+  no "supervisor exits non-zero after child crash"
+fi
+
 echo "-------------------------------------------"
 echo "behavior: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

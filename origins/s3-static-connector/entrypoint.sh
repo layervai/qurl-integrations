@@ -1,9 +1,9 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # PID 1 payload (under tini) for s3-static-connector. Renders configs from the
 # environment, then runs nginx + Envoy together; if either process exits, the
 # container exits non-zero so the orchestrator/systemd restart is a clean,
 # observable event (the OriginRestart alarm keys on the startup marker below).
-set -eu
+set -Eeuo pipefail
 
 RENDER_DIR="${RENDER_DIR:-/etc/qurl/rendered}"
 export RENDER_DIR
@@ -40,25 +40,30 @@ envoy_pid=$!
 nginx_pid=$!
 
 term() { kill -TERM "$envoy_pid" "$nginx_pid" 2>/dev/null || true; }
-trap term TERM INT
+shutdown() {
+  term
+  wait "$envoy_pid" "$nginx_pid" 2>/dev/null || true
+  exit 143
+}
+trap shutdown TERM INT
 
-# Supervisor: exit as soon as EITHER child exits, then stop the other. POSIX
-# poll loop (busybox/dash lack a reliable `wait -n`).
-exit_code=0
-while :; do
-  if ! kill -0 "$envoy_pid" 2>/dev/null; then
-    wait "$envoy_pid" 2>/dev/null || exit_code=$?
-    echo '{"layer":"origin","msg":"envoy_exited"}' >&2
-    break
-  fi
-  if ! kill -0 "$nginx_pid" 2>/dev/null; then
-    wait "$nginx_pid" 2>/dev/null || exit_code=$?
-    echo '{"layer":"origin","msg":"nginx_exited"}' >&2
-    break
-  fi
-  sleep 1
-done
+# Supervisor: `wait -n` reaps the first exited child. A `kill -0` poll loop can
+# miss zombies under dash, which would leave the surviving process running.
+set +e
+wait -n "$envoy_pid" "$nginx_pid"
+exit_code=$?
+set -e
+
+if ! kill -0 "$envoy_pid" 2>/dev/null; then
+  echo '{"layer":"origin","msg":"envoy_exited"}' >&2
+fi
+if ! kill -0 "$nginx_pid" 2>/dev/null; then
+  echo '{"layer":"origin","msg":"nginx_exited"}' >&2
+fi
 
 term
 wait "$envoy_pid" "$nginx_pid" 2>/dev/null || true
+if [ "$exit_code" -eq 0 ]; then
+  exit 1
+fi
 exit "$exit_code"

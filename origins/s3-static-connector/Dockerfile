@@ -10,7 +10,7 @@ FROM nginxinc/nginx-unprivileged:1.27.3@sha256:6d51e4a8e10dfe334f8e2d15bb81b1ed2
 USER root
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl gettext-base tini; \
+    apt-get install -y --no-install-recommends bash ca-certificates curl gettext-base tini; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -o 65532 -g 65532 /etc/qurl/rendered /tmp/s3cache /tmp/client_body /tmp/proxy_temp
 
