@@ -24,20 +24,40 @@ if [ "${S3_BUCKET#*.}" != "$S3_BUCKET" ]; then
   echo "S3_BUCKET must not contain dots; this image uses virtual-hosted-style S3 TLS/SNI, which is incompatible with dotted bucket names" >&2
   exit 1
 fi
-
-if ! printf '%s\n' "$S3_PREFIX" | grep -Eq '^[A-Za-z0-9._/-]*$'; then
-  echo "S3_PREFIX must contain only letters, numbers, dots, underscores, hyphens, and slashes" >&2
+case "$S3_BUCKET" in
+  *[!a-z0-9-]*|-*|*-)
+    echo "S3_BUCKET must use 3-63 lowercase letters, numbers, and hyphens, without leading or trailing hyphens" >&2
+    exit 1
+    ;;
+esac
+if [ "${#S3_BUCKET}" -lt 3 ] || [ "${#S3_BUCKET}" -gt 63 ]; then
+  echo "S3_BUCKET must use 3-63 lowercase letters, numbers, and hyphens, without leading or trailing hyphens" >&2
   exit 1
 fi
+case "$AWS_REGION" in
+  *[!a-z0-9-]*|-*|*-|*--*)
+    echo "AWS_REGION must use lowercase letters, numbers, and single hyphen separators" >&2
+    exit 1
+    ;;
+esac
+
+case "$S3_PREFIX" in
+  *[!A-Za-z0-9._/-]*)
+    echo "S3_PREFIX must contain only letters, numbers, dots, underscores, hyphens, and slashes" >&2
+    exit 1
+    ;;
+esac
 
 if [ -z "$INDEX_DOCUMENT" ]; then
   echo "INDEX_DOCUMENT must not be empty" >&2
   exit 1
 fi
-if ! printf '%s\n' "$INDEX_DOCUMENT" | grep -Eq '^[A-Za-z0-9._-]+$'; then
-  echo "INDEX_DOCUMENT must contain only letters, numbers, dots, underscores, and hyphens" >&2
-  exit 1
-fi
+case "$INDEX_DOCUMENT" in
+  *[!A-Za-z0-9._-]*)
+    echo "INDEX_DOCUMENT must contain only letters, numbers, dots, underscores, and hyphens" >&2
+    exit 1
+    ;;
+esac
 
 listener_host() {
   case "$1" in
@@ -67,10 +87,12 @@ validate_listener() {
     echo "$name must be a host:port listener address (got $addr)" >&2
     exit 1
   fi
-  if ! printf '%s\n' "$host" | grep -Eq '^(localhost|[A-Za-z0-9_.-]+|[0-9A-Fa-f:]+)$'; then
-    echo "$name host contains unsupported characters (got $addr)" >&2
-    exit 1
-  fi
+  case "$host" in
+    *[!A-Za-z0-9_.:-]*)
+      echo "$name host contains unsupported characters (got $addr)" >&2
+      exit 1
+      ;;
+  esac
   case "$port" in
     *[!0-9]*)
       echo "$name port must be numeric (got $addr)" >&2
@@ -103,10 +125,24 @@ if [ "$ALLOW_NON_LOOPBACK_LISTEN" != "true" ]; then
   assert_loopback_listener ENVOY_LISTEN_ADDR "$ENVOY_LISTEN_ADDR"
 fi
 
-if ! printf '%s\n' "$CACHE_MAX_SIZE" | grep -Eq '^[0-9]+[kKmMgG]?$'; then
-  echo "CACHE_MAX_SIZE must be an nginx size literal such as 128m, 1g, or 1024" >&2
-  exit 1
-fi
+case "$CACHE_MAX_SIZE" in
+  ""|*[!0-9kKmMgG]*)
+    echo "CACHE_MAX_SIZE must be an nginx size literal such as 128m, 1g, or 1024" >&2
+    exit 1
+    ;;
+  *[kKmMgG])
+    cache_max_size_digits="${CACHE_MAX_SIZE%?}"
+    ;;
+  *)
+    cache_max_size_digits="$CACHE_MAX_SIZE"
+    ;;
+esac
+case "$cache_max_size_digits" in
+  ""|*[!0-9]*)
+    echo "CACHE_MAX_SIZE must be an nginx size literal such as 128m, 1g, or 1024" >&2
+    exit 1
+    ;;
+esac
 case "$CACHE_MAX_SIZE" in
   *[1-9]*) ;;
   *)
@@ -146,6 +182,12 @@ S3_TLS="${S3_TLS:-true}"
 # Forced-fallback caching is opt-in: only emit proxy_cache_valid for successful
 # object responses when CACHE_DEFAULT_TTL is set. Unset = object Cache-Control.
 if [ -n "$CACHE_DEFAULT_TTL" ]; then
+  case "$CACHE_DEFAULT_TTL" in
+    *[!0-9A-Za-z]*)
+      echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60s, 5m, or 1h30m" >&2
+      exit 1
+      ;;
+  esac
   if ! printf '%s\n' "$CACHE_DEFAULT_TTL" | grep -Eq '^([0-9]+(ms|s|m|h|d|w|M|y)?)+$'; then
     echo "CACHE_DEFAULT_TTL must be an nginx time literal such as 60s, 5m, or 1h30m" >&2
     exit 1

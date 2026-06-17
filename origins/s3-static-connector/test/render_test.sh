@@ -60,6 +60,30 @@ if render dotted-bucket S3_BUCKET=my.static.site AWS_REGION=us-east-1 2>"$TMP/do
 fi
 grep -q "S3_BUCKET must not contain dots" "$TMP/dotted-bucket.err"
 
+if render invalid-bucket S3_BUCKET='Example_Bucket' AWS_REGION=us-east-1 2>"$TMP/invalid-bucket.err"; then
+  echo "MISMATCH: invalid S3_BUCKET rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_BUCKET must use 3-63 lowercase" "$TMP/invalid-bucket.err"
+
+if render injected-bucket S3_BUCKET=$'example-bucket\ninclude /etc/passwd' AWS_REGION=us-east-1 2>"$TMP/injected-bucket.err"; then
+  echo "MISMATCH: injected S3_BUCKET rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_BUCKET must use 3-63 lowercase" "$TMP/injected-bucket.err"
+
+if render invalid-region S3_BUCKET=example-bucket AWS_REGION='us-east-1;include' 2>"$TMP/invalid-region.err"; then
+  echo "MISMATCH: invalid AWS_REGION rendered successfully" >&2
+  exit 1
+fi
+grep -q "AWS_REGION must use lowercase" "$TMP/invalid-region.err"
+
+if render injected-region S3_BUCKET=example-bucket AWS_REGION=$'us-east-1\ninclude' 2>"$TMP/injected-region.err"; then
+  echo "MISMATCH: injected AWS_REGION rendered successfully" >&2
+  exit 1
+fi
+grep -q "AWS_REGION must use lowercase" "$TMP/injected-region.err"
+
 if render public-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 2>"$TMP/public-listen.err"; then
   echo "MISMATCH: non-loopback LISTEN_ADDR rendered successfully" >&2
   exit 1
