@@ -17,6 +17,7 @@ process.env.AUTH0_CLIENT_SECRET = 'test-auth0-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.DISCORD_CLIENT_ID = 'test-discord-client-id';
 process.env.DISCORD_CLIENT_SECRET = 'test-discord-secret';
+process.env.DISCORD_INSTALL_STATE_SECRET = '2'.repeat(64);
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.GUILD_ID = '123456789012345678';
@@ -51,7 +52,9 @@ jest.mock('../src/commands', () => ({
 }));
 
 const request = require('supertest');
+const crypto = require('crypto');
 const { app } = require('../src/server');
+const config = require('../src/config');
 const db = require('../src/store');
 const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 
@@ -70,7 +73,24 @@ function extractStyleNonce(res) {
 beforeEach(() => {
   jest.clearAllMocks();
   globalThis.fetch = originalFetch;
+  config.DISCORD_INSTALL_STATE_SECRET = '2'.repeat(64);
+  config.DISCORD_INSTALL_STATE_REQUIRED = false;
 });
+
+function signMarketingState(payload = {}) {
+  const body = {
+    k: 'discord-install',
+    n: 'nonce-1',
+    e: Math.floor(Date.now() / 1000) + 60,
+    ...payload,
+  };
+  const encoded = Buffer.from(JSON.stringify(body)).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const sig = crypto.createHmac('sha256', config.DISCORD_INSTALL_STATE_SECRET)
+    .update(encoded)
+    .digest('hex');
+  return `${encoded}.${sig}`;
+}
 
 describe('Discord install callback', () => {
   describe('GET /oauth/discord/callback', () => {
@@ -128,6 +148,71 @@ describe('Discord install callback', () => {
       );
       expect(res.status).toBe(400);
       expect(res.text).toContain('Authorization declined');
+    });
+
+    it('accepts missing marketing state during rollout', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'disc-token', token_type: 'Bearer' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+      const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      expect(res.status).toBe(302);
+    });
+
+    it('400s on missing marketing state after required-state rollout flag flips', async () => {
+      config.DISCORD_INSTALL_STATE_REQUIRED = true;
+      globalThis.fetch = jest.fn();
+      const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Install link expired');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('400s when marketing state is present but invalid', async () => {
+      globalThis.fetch = jest.fn();
+      const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=bad-state');
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Install link expired');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('400s before Discord token exchange when signed marketing state arrives before the bot secret is deployed', async () => {
+      const state = signMarketingState();
+      config.DISCORD_INSTALL_STATE_SECRET = '';
+      globalThis.fetch = jest.fn();
+      const res = await request(app).get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Install link expired');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('400s when signed marketing state is expired', async () => {
+      globalThis.fetch = jest.fn();
+      const state = signMarketingState({ e: Math.floor(Date.now() / 1000) - 120 });
+      const res = await request(app).get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Install link expired');
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it('accepts a signed marketing state when present', async () => {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'disc-token', token_type: 'Bearer' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+      const state = signMarketingState();
+      const res = await request(app).get(`/oauth/discord/callback?code=ok-code&guild_id=guild-1&state=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(302);
     });
 
     it('502s when Discord token exchange fails', async () => {

@@ -103,6 +103,44 @@ function missingViewUpdatePushKeys(cfg) {
   return cfg.QURL_BOT_VIEW_UPDATES_QUEUE_URL ? [] : ['QURL_BOT_VIEW_UPDATES_QUEUE_URL'];
 }
 
+// Discord install signed-state rollout. Missing state is accepted until
+// DISCORD_INSTALL_STATE_REQUIRED=true; once the flag flips, the secret
+// becomes a boot-time requirement so a bad deploy does not turn every
+// public "Add to Discord" click into a 400.
+function discordInstallStateConfigProblems(cfg) {
+  if (!cfg.DISCORD_INSTALL_STATE_REQUIRED) return [];
+  if (!cfg.DISCORD_INSTALL_STATE_SECRET) {
+    return ['DISCORD_INSTALL_STATE_SECRET is required when DISCORD_INSTALL_STATE_REQUIRED=true'];
+  }
+  const minChars = cfg.DISCORD_INSTALL_STATE_SECRET_MIN_CHARS;
+  if (cfg.DISCORD_INSTALL_STATE_SECRET.length < minChars) {
+    return [`DISCORD_INSTALL_STATE_SECRET must be at least ${minChars} characters when DISCORD_INSTALL_STATE_REQUIRED=true`];
+  }
+  return [];
+}
+
+// Pre-required rollout warnings. While DISCORD_INSTALL_STATE_REQUIRED=false,
+// callbacks that omit state still work, but state-bearing layerv.ai links
+// fail closed unless the verifier has a usable secret. Warn at boot so a
+// marketing-before-secret deploy is visible before public installs 400.
+function discordInstallStateConfigWarnings(cfg) {
+  if (!cfg.isDiscordInstallConfigured || cfg.DISCORD_INSTALL_STATE_REQUIRED) return [];
+  if (!cfg.DISCORD_INSTALL_STATE_SECRET) {
+    return [
+      'DISCORD_INSTALL_STATE_SECRET is unset. Missing Discord install state remains accepted while ' +
+      'DISCORD_INSTALL_STATE_REQUIRED=false, but state-bearing layerv.ai install links will fail closed until the secret is deployed.',
+    ];
+  }
+  const minChars = cfg.DISCORD_INSTALL_STATE_SECRET_MIN_CHARS;
+  if (cfg.DISCORD_INSTALL_STATE_SECRET.length < minChars) {
+    return [
+      `DISCORD_INSTALL_STATE_SECRET is shorter than ${minChars} characters. Missing Discord install state remains accepted while ` +
+      'DISCORD_INSTALL_STATE_REQUIRED=false, but state-bearing layerv.ai install links will fail closed until a valid secret is deployed.',
+    ];
+  }
+  return [];
+}
+
 // PROCESS_ROLE=combined paired with ENABLE_EVENT_SHIPPER=true is
 // unsupported and rejected at boot. In combined mode both `isGateway`
 // and `isHttp` evaluate true, which derives `isWorker=true`, which
@@ -438,6 +476,8 @@ module.exports = {
   missingKekRequiredKeys,
   missingEventShipperKeys,
   missingViewUpdatePushKeys,
+  discordInstallStateConfigProblems,
+  discordInstallStateConfigWarnings,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
