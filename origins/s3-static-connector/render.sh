@@ -25,17 +25,70 @@ if [ "${S3_BUCKET#*.}" != "$S3_BUCKET" ]; then
   exit 1
 fi
 
+if ! printf '%s\n' "$S3_PREFIX" | grep -Eq '^[A-Za-z0-9._/-]*$'; then
+  echo "S3_PREFIX must contain only letters, numbers, dots, underscores, hyphens, and slashes" >&2
+  exit 1
+fi
+
 if [ -z "$INDEX_DOCUMENT" ]; then
   echo "INDEX_DOCUMENT must not be empty" >&2
   exit 1
 fi
+if ! printf '%s\n' "$INDEX_DOCUMENT" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+  echo "INDEX_DOCUMENT must contain only letters, numbers, dots, underscores, and hyphens" >&2
+  exit 1
+fi
+
+listener_host() {
+  case "$1" in
+    \[*\]:*)
+      host="${1%%]:*}"
+      printf '%s' "${host#\[}"
+      ;;
+    *)
+      printf '%s' "${1%:*}"
+      ;;
+  esac
+}
+
+validate_listener() {
+  name="$1"
+  addr="$2"
+  case "$addr" in
+    \[*\]:*|*:*) ;;
+    *)
+      echo "$name must be a host:port listener address (got $addr)" >&2
+      exit 1
+      ;;
+  esac
+  host="$(listener_host "$addr")"
+  port="${addr##*:}"
+  if [ -z "$host" ] || [ -z "$port" ]; then
+    echo "$name must be a host:port listener address (got $addr)" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$host" | grep -Eq '^(localhost|[A-Za-z0-9_.-]+|[0-9A-Fa-f:]+)$'; then
+    echo "$name host contains unsupported characters (got $addr)" >&2
+    exit 1
+  fi
+  case "$port" in
+    *[!0-9]*)
+      echo "$name port must be numeric (got $addr)" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    echo "$name port must be between 1 and 65535 (got $addr)" >&2
+    exit 1
+  fi
+}
 
 assert_loopback_listener() {
   name="$1"
   addr="$2"
-  host="${addr%:*}"
+  host="$(listener_host "$addr")"
   case "$host" in
-    127.*|localhost)
+    127.*|localhost|::1)
       return
       ;;
   esac
@@ -43,10 +96,24 @@ assert_loopback_listener() {
   exit 1
 }
 
+validate_listener LISTEN_ADDR "$LISTEN_ADDR"
+validate_listener ENVOY_LISTEN_ADDR "$ENVOY_LISTEN_ADDR"
 if [ "$ALLOW_NON_LOOPBACK_LISTEN" != "true" ]; then
   assert_loopback_listener LISTEN_ADDR "$LISTEN_ADDR"
   assert_loopback_listener ENVOY_LISTEN_ADDR "$ENVOY_LISTEN_ADDR"
 fi
+
+if ! printf '%s\n' "$CACHE_MAX_SIZE" | grep -Eq '^[0-9]+[kKmMgG]?$'; then
+  echo "CACHE_MAX_SIZE must be an nginx size literal such as 128m, 1g, or 1024" >&2
+  exit 1
+fi
+case "$CACHE_MAX_SIZE" in
+  *[1-9]*) ;;
+  *)
+    echo "CACHE_MAX_SIZE must be greater than zero" >&2
+    exit 1
+    ;;
+esac
 
 # --- derived values ---
 # Virtual-hosted-style S3 endpoint: this is the Host we sign and the SNI we send.

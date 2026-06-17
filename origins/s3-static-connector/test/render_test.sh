@@ -24,6 +24,30 @@ if render invalid-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAUL
 fi
 grep -q "CACHE_DEFAULT_TTL must be an nginx time literal" "$TMP/invalid-ttl.err"
 
+if render invalid-cache-size S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_MAX_SIZE='1g; include /etc/passwd' 2>"$TMP/invalid-cache-size.err"; then
+  echo "MISMATCH: invalid CACHE_MAX_SIZE rendered successfully" >&2
+  exit 1
+fi
+grep -q "CACHE_MAX_SIZE must be an nginx size literal" "$TMP/invalid-cache-size.err"
+
+if render zero-cache-size S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_MAX_SIZE=0 2>"$TMP/zero-cache-size.err"; then
+  echo "MISMATCH: zero CACHE_MAX_SIZE rendered successfully" >&2
+  exit 1
+fi
+grep -q "CACHE_MAX_SIZE must be greater than zero" "$TMP/zero-cache-size.err"
+
+if render invalid-index S3_BUCKET=example-bucket AWS_REGION=us-east-1 INDEX_DOCUMENT='index.html; include /etc/passwd' 2>"$TMP/invalid-index.err"; then
+  echo "MISMATCH: invalid INDEX_DOCUMENT rendered successfully" >&2
+  exit 1
+fi
+grep -q "INDEX_DOCUMENT must contain only" "$TMP/invalid-index.err"
+
+if render invalid-prefix S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_PREFIX='site"; include /etc/passwd' 2>"$TMP/invalid-prefix.err"; then
+  echo "MISMATCH: invalid S3_PREFIX rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_PREFIX must contain only" "$TMP/invalid-prefix.err"
+
 if render zero-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_TTL=0s 2>"$TMP/zero-ttl.err"; then
   echo "MISMATCH: zero CACHE_DEFAULT_TTL rendered successfully" >&2
   exit 1
@@ -42,6 +66,13 @@ if render public-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADD
 fi
 grep -q "LISTEN_ADDR must bind loopback" "$TMP/public-listen.err"
 
+if render invalid-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR='127.0.0.1:8080;include' 2>"$TMP/invalid-listen.err"; then
+  echo "MISMATCH: invalid LISTEN_ADDR rendered successfully" >&2
+  exit 1
+fi
+grep -q "LISTEN_ADDR port must be numeric" "$TMP/invalid-listen.err"
+
+render ipv6-loopback S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR='[::1]:8080' ENVOY_LISTEN_ADDR='[::1]:9090'
 render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 ALLOW_NON_LOOPBACK_LISTEN=true
 
 map_golden() {

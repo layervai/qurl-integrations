@@ -48,7 +48,7 @@ shutdown() {
 trap shutdown TERM INT
 
 # Supervisor: `wait -n` reaps the first exited child. A `kill -0` poll loop can
-# miss zombies under dash, which would leave the surviving process running.
+# miss zombies under dash; PID-scoped `wait -n` requires bash >= 5.1 (bookworm has 5.2).
 set +e
 wait -n "$envoy_pid" "$nginx_pid"
 exit_code=$?
