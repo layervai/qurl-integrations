@@ -1739,14 +1739,25 @@ async function touchRenderedAt(sendId) {
   }));
 }
 
-// Freezes the confirmation display. Called by the revoke / window-close
-// / expired paths so a late fast-path edit (a webhook landing after the
-// monitor stopped) can't resurrect a live-looking "👀 N viewed" counter
-// — getSendRenderState reads confirm_terminal into its derived
-// `terminal`, which PR-B checks before editing. Idempotent SET (no
-// condition): re-running just re-writes `true`, and there's no value to
-// guard against — unlike the markExpired/Consumed markers this isn't an
-// at-most-once edit claim, just a sticky kill-switch.
+// Disarms the fast-path for this send by setting confirm_terminal, which
+// getSendRenderState reads into its derived `terminal` and PR-B checks
+// before editing. The flag ONLY gates the fast-path — it does not stop
+// the poll — so two DISTINCT lifecycle intents share it:
+//   (a) revoke / window-close / expired — display FROZEN, monitor.stop()
+//       already called, poll halted; the flag stops a late webhook from
+//       resurrecting a live-looking "👀 N viewed" counter.
+//   (b) mid-life /qurl add degrade — display still ALIVE, monitor still
+//       polling BARE baseMsg; the flag only disarms the fast-path (which
+//       can't see the degrade) so it won't stamp a partial-attribution
+//       counter, leaving the bare poll render as the sole renderer.
+// Both want "fast-path hands off", so one flag is correct — but note that
+// "terminal" reading as "alive but hands-off" in case (b) is a latent
+// trip-hazard: anything NEW that keys off confirm_terminal must
+// distinguish (a) from (b) (e.g. via revoked_at, which only (a) sets).
+// Idempotent SET (no condition): re-running just re-writes `true`, and
+// there's no value to guard against — unlike the markExpired/Consumed
+// markers this isn't an at-most-once edit claim, just a sticky
+// kill-switch.
 async function markConfirmTerminal(sendId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_send_configs,

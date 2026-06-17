@@ -1635,11 +1635,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         // higher" case (returns false, ignored). Best-effort + wrapped so
         // a non-CCFE DDB throw can't surface as a misleading "poll failed"
         // or skip the allDone bookkeeping above. (tryAdvanceRenderedCount
-        // also stamps last_rendered_at, arming the coalesce clock — benign
-        // here: ticks are ≥15s apart vs the ~1.5s window, so it never
-        // actually suppresses a fast-path edit.) NOT advanced on the
-        // degraded early-return or the terminal-freeze render — neither
-        // displays a live counter, so advancing would strand it.
+        // also stamps last_rendered_at, arming the coalesce clock — so a
+        // genuine NEW view landing within QURL_VIEW_COUNTER_COALESCE_MS
+        // (~1.5s) AFTER this tick IS coalesced by the fast-path's step 4b
+        // and deferred to the next poll tick. Benign: the poll just
+        // rendered the current count, and the ≤15s backstop catches the
+        // follower — the window is far shorter than the tick spacing, so
+        // this only shifts a sub-1.5s-after-tick view from fast-path to
+        // poll, never strands it.) NOT advanced on the degraded
+        // early-return or the terminal-freeze render — neither displays a
+        // live counter, so advancing would strand it.
         if (ok) {
           try {
             await db.tryAdvanceRenderedCount(sendId, rendered);
