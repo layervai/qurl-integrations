@@ -1,99 +1,91 @@
+const { QURLClient } = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
 /**
- * Lightweight qURL API client using fetch. Predates the @layervai/qurl SDK,
- * which the bot now also uses (connector.js, detect-over-tunnel #1101). The two
- * clients coexist pending consolidation onto the SDK — see #830. (This client
- * originally avoided the SDK over ESM/CJS interop; that blocker is resolved.)
+ * qURL API client for the bot's link create / status / revoke calls, backed by
+ * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
+ * the prior hand-rolled `qurlFetch` is gone); the detect path in connector.js
+ * uses the same SDK. This module adds only the concerns the SDK doesn't own:
+ *   - the DEPENDENCY_AUTH_FAILURE audit emit on 401/403 (emit-once) and
+ *     error-body redaction in logs — see callQurl();
+ *   - the SSRF guards for the user-supplied create target (isPrivateHost +
+ *     assertNotPrivateAfterResolve), which are client-independent.
  */
 
-// Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
-// (transient server-side). 401/403/404/409 are NOT retried — those are
-// auth/validation failures and retrying won't help.
-const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+// Per-attempt timeout + retry budget. Pins the SDK's resilience to the budget
+// the hand-rolled client documented before this consolidation: "3 attempts
+// total (initial + 2 retries)". `maxRetries` counts RETRIES, so 2 ⇒ 3 total
+// attempts; `timeout` is the per-attempt deadline (matching the old
+// AbortSignal.timeout(30000)). We pin both rather than inherit SDK defaults so
+// a future default drift can't silently change this path's behavior.
+// (connector.js's resolve path pins maxRetries:3 — a separate call site we
+// deliberately leave untouched here.)
+const REQUEST_TIMEOUT_MS = 30000;
+const MAX_RETRIES = 2;
+// User-Agent the qURL service sees for the bot's calls. Preserved verbatim
+// across the SDK migration (a literal wire identifier — see CLAUDE.md).
+const USER_AGENT = 'qurl-discord-bot/1.0';
 
-async function qurlFetch(method, path, body, apiKey) {
+// Construct a per-call SDK client. Per-call (not cached) because each call
+// carries its own apiKey (the bot is multi-tenant) and because these are rare
+// control-plane calls, not a hot path; constructing here also means the client
+// binds the live globalThis.fetch at call time. baseUrl is the bare API origin
+// — the SDK prepends `/v1/...` itself.
+function makeClient(apiKey) {
   const key = apiKey || config.QURL_API_KEY;
   if (!key) {
     throw new Error('QURL_API_KEY is not configured');
   }
-  const url = `${config.QURL_ENDPOINT}/v1${path}`;
-  const baseOpts = {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${key}`,
-      'User-Agent': 'qurl-discord-bot/1.0',
-    },
-  };
-  if (body) baseOpts.body = JSON.stringify(body);
+  return new QURLClient({
+    apiKey: key,
+    baseUrl: config.QURL_ENDPOINT,
+    timeout: REQUEST_TIMEOUT_MS,
+    maxRetries: MAX_RETRIES,
+    userAgent: USER_AGENT,
+  });
+}
 
-  // Up to 3 attempts total (initial + 2 retries) with exponential backoff
-  // plus jitter. A single transient 503 or network blip from qURL's infra
-  // no longer fails a whole send. Non-retryable statuses + non-network
-  // errors throw immediately.
-  const maxAttempts = 3;
-  let lastErr = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const opts = { ...baseOpts, signal: AbortSignal.timeout(30000) };
-    let resp;
-    try {
-      resp = await fetch(url, opts);
-    } catch (err) {
-      // Network/timeout error: retry if we have attempts left.
-      lastErr = err;
-      if (attempt < maxAttempts - 1) {
-        const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        logger.warn('qURL API network error, retrying', { method, path, attempt, delay, error: err.message });
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      throw err;
-    }
-
-    if (!resp.ok) {
-      // Log only status + body length. Including the raw body would be
-      // dangerous: the qURL API error response may echo request headers or
-      // tokens, and anyone flipping LOG_LEVEL=debug during an incident would
-      // then tail those into logs.
-      let bodyLen = 0;
-      try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
-      logger.debug('qURL API error', { method, path, status: resp.status, bodyLen, attempt });
-      // Emit BEFORE the throw so a caller's catch path can't suppress
-      // the audit — the metric stays independent of caller error
-      // handling.
-      //
-      // EMIT-ONCE INVARIANT: 401/403 must stay OUT of
-      // RETRYABLE_STATUSES (declared at the top of this file). If a
-      // future change adds them, this emit fires per attempt and the
-      // alarm count multiplies. Pinned by tests/qurl-coverage.test.js.
-      if (resp.status === 401 || resp.status === 403) {
+/**
+ * Run an SDK call, layering on the bot-specific behaviors the SDK doesn't own.
+ * `method`/`path` are labels for the audit/log payload (the same
+ * dependency/method/path shape the pre-SDK client emitted) — the SDK owns the
+ * actual wire path.
+ *
+ *   - AUDIT: emit DEPENDENCY_AUTH_FAILURE on a 401/403 so the dependency-auth
+ *     alarm fires independently of any caller's catch path.
+ *   - EMIT-ONCE INVARIANT: the SDK never retries 401/403 (its retryable set is
+ *     {429, 502, 503, 504}), so this fires once per request, not once per
+ *     attempt. If that ever changes, the audit count would multiply on a single
+ *     auth failure. Pinned by tests/qurl-coverage.test.js.
+ *   - REDACTION: log only status + error code, never the SDK error's message or
+ *     detail — a qURL error body can echo request headers or tokens, and an
+ *     operator running LOG_LEVEL=debug during an incident must not tail those
+ *     into logs. Pinned by tests/qurl-coverage.test.js.
+ */
+async function callQurl(method, path, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    // A real HTTP status from the API. The SDK uses status 0 for its
+    // client-side validation / network / timeout errors — those are not API
+    // auth failures and get neither the audit emit nor the error breadcrumb.
+    const status = Number.isInteger(err && err.status) && err.status > 0 ? err.status : null;
+    if (status !== null) {
+      logger.debug('qURL API error', { method, path, status, code: err.code });
+      if (status === 401 || status === 403) {
         logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
           dependency: 'qurl_service',
-          status: resp.status,
+          status,
           method,
           path,
         });
       }
-      if (RETRYABLE_STATUSES.has(resp.status) && attempt < maxAttempts - 1) {
-        const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        logger.warn('qURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      throw new Error(`qURL API ${method} ${path} failed (${resp.status})`);
     }
-
-    if (resp.status === 204) return null;
-    const envelope = await resp.json();
-    return envelope.data || envelope;
+    throw err;
   }
-  // Unreachable in practice — the loop either returns or throws — but keeps
-  // the control flow explicit for reviewers.
-  throw lastErr || new Error(`qURL API ${method} ${path} exhausted retries`);
 }
 
 // Reject hostnames that resolve (by syntax) to loopback, link-local, or
@@ -210,19 +202,27 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
     throw new Error(`Invalid target URL: ${err.message}`);
   }
 
-  const result = await qurlFetch('POST', '/qurls', {
-    target_url: targetUrl,
-    one_time_use: true,
-    expires_in: expiresIn,
-    // The create endpoint uses `label`, not `description` (qurl-service
-    // CreateQurlRequest); a `description` sent here is silently dropped.
-    label,
-  }, apiKey);
+  const client = makeClient(apiKey);
+  const result = await callQurl('POST', '/qurls', () =>
+    client.create({
+      target_url: targetUrl,
+      one_time_use: true,
+      expires_in: expiresIn,
+      // The create endpoint uses `label`, not `description` (qurl-service
+      // CreateQurlRequest); the SDK rejects a `description` here as an unknown
+      // field, so don't send one.
+      label,
+    }),
+  );
 
   logger.info('Created one-time qURL', { resource_id: result.resource_id, expires_in: expiresIn });
   return result;
 }
 
+// Bot-side charset guard on the resource ID, independent of the SDK client (in
+// the same defense-in-depth spirit as the SSRF guards): rejects malformed IDs
+// with a stable bot-side message before any network work. The SDK's delete()
+// adds the semantic `r_` resource-ID check on top.
 function validateResourceId(resourceId) {
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -231,13 +231,19 @@ function validateResourceId(resourceId) {
 
 async function deleteLink(resourceId, apiKey) {
   validateResourceId(resourceId);
-  await qurlFetch('DELETE', `/qurls/${resourceId}`, null, apiKey);
+  const client = makeClient(apiKey);
+  // delete() requires a qurl-service resource ID (r_ prefix); the bot's send
+  // rows store exactly that, so the revoke path satisfies it.
+  await callQurl('DELETE', `/qurls/${resourceId}`, () => client.delete(resourceId));
   logger.info('Revoked qURL', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {
   validateResourceId(resourceId);
-  return qurlFetch('GET', `/qurls/${resourceId}`, null, apiKey);
+  const client = makeClient(apiKey);
+  // Returns the SDK's QURL shape — access tokens are under `access_tokens`
+  // (the SDK renames the API's wire-format `qurls` field).
+  return callQurl('GET', `/qurls/${resourceId}`, () => client.get(resourceId));
 }
 
 module.exports = { createOneTimeLink, deleteLink, getResourceStatus, isPrivateHost };
