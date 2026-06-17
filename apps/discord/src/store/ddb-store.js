@@ -16,10 +16,11 @@
 // allow data-plane verbs on the specific table ARNs + GSI ARNs —
 // scoping happens infra-side, not here.
 //
-// App-layer encryption: the three sensitive fields
+// App-layer encryption: sensitive fields
 // (`guild_configs.qurl_api_key`, `orphaned_oauth_tokens.access_token`,
-// `qurl_send_configs.attachment_url`) are envelope-encrypted via
-// `utils/crypto.encrypt`. Ciphertext is stored as a regular `S` string.
+// `qurl_send_configs.attachment_url`, `qurl_send_configs.interaction_token`)
+// are envelope-encrypted via `utils/crypto.encrypt`. Ciphertext is stored
+// as a regular `S` string.
 // DDB server-side encryption (AWS-managed aws/dynamodb CMK,
 // configured at the table level) is defense-in-
 // depth — the primary encryption is the app-layer envelope.
@@ -1093,11 +1094,11 @@ const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 // qurl-service ever needs to un-consume a row, that's a separate
 // API contract change.
 async function recordQurlView({
-  qurlId, accessCount, consumed, eventId, returnMeta = false,
+  qurlId, accessCount, consumed, eventId,
 }) {
   if (!qurlId) throw new Error('recordQurlView: qurlId is required');
-  if (typeof accessCount !== 'number' || accessCount < 0) {
-    throw new Error(`recordQurlView: accessCount must be a non-negative number (got ${accessCount})`);
+  if (typeof accessCount !== 'number' || accessCount <= 0) {
+    throw new Error(`recordQurlView: accessCount must be a positive number (got ${accessCount})`);
   }
   if (!eventId) throw new Error('recordQurlView: eventId is required for replay protection');
   const nowMs = Date.now();
@@ -1126,9 +1127,8 @@ async function recordQurlView({
         ':false': false,
         ':true': true,
       },
-      ReturnValues: returnMeta ? 'ALL_OLD' : undefined,
+      ReturnValues: 'ALL_OLD',
     }));
-    if (!returnMeta) return 'recorded';
     return {
       result: 'recorded',
       firstView: !(res.Attributes?.access_count > 0),
@@ -1137,7 +1137,7 @@ async function recordQurlView({
     if (err.name === 'ConditionalCheckFailedException') {
       // Replay (same event_id) OR out-of-order (lower-or-equal count
       // with no consumed flip). Row already reflects a >= state.
-      return returnMeta ? { result: 'dedup', firstView: false } : 'dedup';
+      return { result: 'dedup', firstView: false };
     }
     throw err;
   }
@@ -1147,10 +1147,10 @@ async function recordQurlView({
 // keys per request, so this chunks at 100. That chunking is LOAD-BEARING,
 // not defensive: max recipients is QURL_SEND_MAX_RECIPIENTS (default
 // 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
-// The sender-counter fast-path now renders from qurl_send_configs.viewed_count,
-// so this BatchGet-all path is not on the normal sub-second render path.
-// It remains the monitor poll reader and a legacy fallback for live rows
-// created before viewed_count existed.
+// The sender-counter fast-path now renders from fixed-size sharded
+// counters in this same table, so this BatchGet-all path is not on the
+// normal sub-second render path. It remains the monitor poll reader and a
+// legacy fallback for live rows created before the aggregate existed.
 async function getQurlViews(qurlIds) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
   // Drop empties defensively — an empty qurl_id is a collision attractor.
@@ -1644,13 +1644,13 @@ async function getSendConfig(sendId, senderDiscordId) {
 // saveSendConfig that failed — both leave the fast-path inert and the
 // in-memory monitor as the sole renderer).
 //
-// `viewedCount` is an O(1) aggregate of distinct qurl_ids viewed for
-// this send, incremented only after recordQurlView proves this webhook
-// is the first recorded view for that qurl_id. The fast-path renders
-// from it instead of BatchGetting every qurl_id, so max-fanout sends keep
-// the same sub-second shape as small sends. `lastRenderedCount` remains
-// the commit-after-edit floor: viewed_count can run ahead when a view
-// records but the Discord edit is coalesced or transiently fails.
+// `viewedCount` is the legacy single-row aggregate retained only as a
+// rollout floor for rows created before the sharded counter path below.
+// New fast-path renders sum qurl_views counter shards instead of
+// BatchGetting every qurl_id or hot-writing qurl_send_configs. The
+// `lastRenderedCount` field remains the commit-after-edit floor: the
+// sharded total can run ahead when a view records but the Discord edit is
+// coalesced or transiently fails.
 //
 // `terminal` is derived (not stored as one flag): the display is dead
 // once the sender revoked (revoked_at) OR a window-close/expired path
@@ -1685,7 +1685,7 @@ async function getSendRenderState(sendId) {
   return {
     // SENSITIVE: a live Discord bearer cred (~15 min). NEVER log this
     // value — callers use it only as the editReply credential.
-    interactionToken: row.interaction_token ?? null,
+    interactionToken: row.interaction_token ? decrypt(row.interaction_token) : null,
     interactionAppId: row.interaction_app_id ?? null,
     expectedCount: row.expected_count ?? 0,
     viewedCount: typeof row.viewed_count === 'number' ? row.viewed_count : null,
@@ -1705,18 +1705,67 @@ async function getSendRenderState(sendId) {
   };
 }
 
-async function incrementSendViewedCount(sendId, floor = 0) {
-  const safeFloor = Number.isSafeInteger(floor) && floor > 0 ? floor : 0;
-  const res = await ddb.send(new UpdateCommand({
-    TableName: TABLES.qurl_send_configs,
-    Key: { send_id: sendId },
-    // Initialize from last_rendered_count for live rows created before
-    // viewed_count existed, then add exactly one distinct first-view.
-    UpdateExpression: 'SET viewed_count = if_not_exists(viewed_count, :floor) + :one',
-    ExpressionAttributeValues: { ':floor': safeFloor, ':one': 1 },
-    ReturnValues: 'UPDATED_NEW',
+const SEND_VIEW_COUNTER_SHARDS = 64;
+const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
+
+function sendViewedCountShard(qurlId) {
+  return crypto.createHash('sha256').update(String(qurlId)).digest()[0] % SEND_VIEW_COUNTER_SHARDS;
+}
+
+function sendViewedCountKey(sendId, shard) {
+  return `${SEND_VIEW_COUNTER_PREFIX}${sendId}#${String(shard).padStart(2, '0')}`;
+}
+
+function sendViewedCountKeys(sendId) {
+  return Array.from({ length: SEND_VIEW_COUNTER_SHARDS }, (_, shard) => ({
+    qurl_id: sendViewedCountKey(sendId, shard),
   }));
-  return res.Attributes?.viewed_count ?? safeFloor + 1;
+}
+
+// First-view aggregate for the sender counter. This deliberately lives in
+// qurl_views as 64 synthetic counter rows per send, not on the single
+// qurl_send_configs row. A 20k-recipient burst then spreads writes across
+// 64 partition keys instead of funnelling every first view through one
+// hot item; renders read a fixed 64-key shard sum.
+async function incrementSendViewedCount(sendId, qurlId) {
+  if (!sendId) throw new Error('incrementSendViewedCount: sendId is required');
+  if (!qurlId) throw new Error('incrementSendViewedCount: qurlId is required');
+  const shard = sendViewedCountShard(qurlId);
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_views,
+    Key: { qurl_id: sendViewedCountKey(sendId, shard) },
+    UpdateExpression: 'SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one',
+    ExpressionAttributeValues: {
+      ':sid': sendId,
+      ':shard': shard,
+      ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
+      ':one': 1,
+    },
+  }));
+}
+
+async function getSendViewedCount(sendId) {
+  if (!sendId) return 0;
+  const keys = sendViewedCountKeys(sendId);
+  const res = await ddb.send(new BatchGetCommand({
+    RequestItems: { [TABLES.qurl_views]: { Keys: keys, ConsistentRead: true } },
+  }));
+  let total = 0;
+  const collect = (batch) => {
+    for (const item of (batch.Responses && batch.Responses[TABLES.qurl_views]) || []) {
+      if (typeof item.viewed_count === 'number' && item.viewed_count > 0) {
+        total += item.viewed_count;
+      }
+    }
+  };
+  collect(res);
+  const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
+  if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
+    collect(await ddb.send(new BatchGetCommand({
+      RequestItems: { [TABLES.qurl_views]: { ...unprocessed, ConsistentRead: true } },
+    })));
+  }
+  return total;
 }
 
 // Monotonic AFTER-edit commit for the view counter (PR-B calls this
@@ -1817,7 +1866,7 @@ async function saveSendConfirmState(sendId, {
   // Map of attribute → provided value, keeping only the keys the caller
   // actually passed so an omitted field is left untouched (never nulled).
   const fields = {
-    interaction_token: interactionToken,
+    interaction_token: interactionToken === undefined ? undefined : encrypt(interactionToken),
     interaction_app_id: interactionAppId,
     expected_count: expectedCount,
     confirm_base_msg: confirmBaseMsg,
@@ -2327,7 +2376,8 @@ module.exports = {
   markConsumedDMEdited, clearConsumedDMEdited,
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
-  getSendRenderState, incrementSendViewedCount, tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
+  getSendRenderState, incrementSendViewedCount, getSendViewedCount,
+  tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

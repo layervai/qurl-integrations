@@ -614,8 +614,10 @@ function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = fal
 }
 
 // COALESCING (step 4b): leading-edge debounce per send. It bounds
-// Discord edits, not viewed_count writes; those remain one DDB UpdateItem
-// per distinct first view and fall back to the poll reader if throttled.
+// Discord edits; distinct first-view aggregate writes are sharded across
+// qurl_views counter rows so high-fanout sends avoid a single hot DDB
+// item. If a shard write or shard sum fails, the poll reader is still the
+// correctness backstop.
 // Multiple replicas can still each pass a stale/unwritten last_rendered_at
 // and PATCH once; the CAS keeps count monotonic, while discord.js 429
 // backoff is the final safety net.
@@ -670,12 +672,11 @@ function editSenderCounterInBackground({
         return { status: 'absent' };
       }
 
-      let viewedCount = state.viewedCount;
       if (firstView) {
         try {
-          viewedCount = await db.incrementSendViewedCount(sendId, state.lastRenderedCount);
+          await db.incrementSendViewedCount(sendId, qurlId);
         } catch (err) {
-          logger.warn('qURL webhook sender-counter: aggregate increment failed; poll backstop will count qurl views', {
+          logger.warn('qURL webhook sender-counter: sharded aggregate increment failed; poll backstop will count qurl views', {
             qurl_id: qurlId, send_id: sendId, error: err?.message,
           });
           return { status: 'aggregate-update-error' };
@@ -687,14 +688,17 @@ function editSenderCounterInBackground({
       //    qurl.accessed per recipient's first view; un-coalesced each
       //    would PATCH this confirmation. Skip the edit if the last
       //    CONFIRMED edit is younger than the cooldown. Placed before the
-      //    legacy getQurlViews fallback so normal coalesced events stay
-      //    O(1): a first distinct view already advanced viewed_count
-      //    above, and the delayed flush reads that aggregate. Leading-edge
-      //    keeps the counter visibly live; the trailing flush renders
-      //    rapid followers inside the same sub-second window.
+      //    legacy getQurlViews fallback and before the fixed-size shard
+      //    sum so normal coalesced events stay constant-shape: a first
+      //    distinct view already advanced its shard above, and the
+      //    delayed flush reads the aggregate. Leading-edge keeps the
+      //    counter visibly live; the trailing flush renders rapid
+      //    followers inside the same sub-second window.
       const sinceLastEditMs = Date.now() - state.lastRenderedAt;
       if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
-        const pendingCount = typeof viewedCount === 'number' ? viewedCount : state.lastRenderedCount;
+        const pendingCount = firstView
+          ? state.lastRenderedCount + 1
+          : (typeof state.viewedCount === 'number' ? state.viewedCount : state.lastRenderedCount);
         if (pendingCount > state.lastRenderedCount) {
           const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
           scheduleSenderCounterFlush({ sendId, qurlId, delayMs });
@@ -711,14 +715,23 @@ function editSenderCounterInBackground({
 
       // 5. Compute N — the count of DISTINCT viewed qurl_ids across the
       //    WHOLE send (NOT this event's per-qurl access_count). New rows
-      //    carry viewed_count, an O(1) aggregate advanced only when
-      //    recordQurlView reports this qurl_id's first recorded view. That
-      //    keeps a 20k-recipient send on the same sub-second path as a
-      //    one-recipient send; the old BatchGet-all-qurl_ids path is now a
-      //    legacy fallback for live rows created before viewed_count
-      //    existed.
-      let N = viewedCount;
-      if (typeof N !== 'number') {
+      //    render from a fixed 64-shard counter sum in qurl_views, advanced
+      //    only when recordQurlView proves this qurl_id's first recorded
+      //    view. That keeps a 20k-recipient burst sub-second without
+      //    funnelling every first-view write into one qurl_send_configs
+      //    item. The old BatchGet-all-qurl_ids path is now a legacy
+      //    fallback for live rows created before the aggregate existed.
+      let N = null;
+      try {
+        const shardedCount = await db.getSendViewedCount(sendId);
+        const legacyFloor = typeof state.viewedCount === 'number' ? state.viewedCount : 0;
+        N = Math.max(shardedCount, legacyFloor);
+      } catch (err) {
+        logger.warn('qURL webhook sender-counter: sharded aggregate read failed; falling back to qurl views', {
+          qurl_id: qurlId, send_id: sendId, error: err?.message,
+        });
+      }
+      if (typeof N !== 'number' || (N === 0 && typeof state.viewedCount !== 'number')) {
         let qurlIds;
         if (state.qurlIds.length > 0) {
           qurlIds = state.qurlIds;
@@ -950,7 +963,6 @@ router.post('/qurl', async (req, res) => {
       accessCount,
       consumed,
       eventId,
-      returnMeta: true,
     });
     const { result: dbResult, firstView } = viewRecord;
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result: dbResult });

@@ -1223,7 +1223,8 @@ describe('qurl sends', () => {
     ddbMock.on(GetCommand).resolves({
       Item: {
         send_id: 's1', sender_discord_id: 'sender',
-        interaction_token: 'tok-abc', interaction_app_id: 'app-1',
+        interaction_token: `enc:v1:IV:TAG:${Buffer.from('tok-abc').toString('hex')}`,
+        interaction_app_id: 'app-1',
         expected_count: 5, last_rendered_count: 2,
       },
     });
@@ -1341,15 +1342,57 @@ describe('qurl sends', () => {
     await expect(store.tryAdvanceRenderedCount('s1', 1)).rejects.toThrow('throughput');
   });
 
-  test('incrementSendViewedCount: atomically initializes from rendered floor, increments, and returns updated viewed_count', async () => {
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { viewed_count: 6 } });
-    await expect(store.incrementSendViewedCount('s1', 5)).resolves.toBe(6);
+  test('incrementSendViewedCount: increments a sharded qurl_views counter row, not the send config hot row', async () => {
+    const before = Math.floor(Date.now() / 1000);
+    ddbMock.on(UpdateCommand).resolves({});
+    await expect(store.incrementSendViewedCount('s1', 'q_a')).resolves.toBeUndefined();
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.TableName).toBe('test-prefix-qurl-send-configs');
-    expect(input.Key).toEqual({ send_id: 's1' });
-    expect(input.UpdateExpression).toBe('SET viewed_count = if_not_exists(viewed_count, :floor) + :one');
-    expect(input.ExpressionAttributeValues).toEqual({ ':floor': 5, ':one': 1 });
-    expect(input.ReturnValues).toBe('UPDATED_NEW');
+    expect(input.TableName).toBe('test-prefix-qurl-views');
+    expect(input.Key.qurl_id).toMatch(/^__send_view_count__s1#\d{2}$/);
+    expect(input.UpdateExpression).toBe('SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one');
+    expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
+      ':sid': 's1',
+      ':one': 1,
+    }));
+    expect(input.ExpressionAttributeValues[':shard']).toBeGreaterThanOrEqual(0);
+    expect(input.ExpressionAttributeValues[':shard']).toBeLessThan(64);
+    expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60);
+    expect(input.ReturnValues).toBeUndefined();
+  });
+
+  test('getSendViewedCount: sums the fixed 64 shard keys and retries unprocessed shard reads once', async () => {
+    let attempt = 0;
+    ddbMock.on(BatchGetCommand).callsFake((input) => {
+      attempt += 1;
+      if (attempt === 1) {
+        return Promise.resolve({
+          Responses: {
+            'test-prefix-qurl-views': [
+              { qurl_id: '__send_view_count__s1#00', viewed_count: 3 },
+              { qurl_id: '__send_view_count__s1#01', viewed_count: 2 },
+              { qurl_id: '__send_view_count__s1#02', viewed_count: 0 },
+            ],
+          },
+          UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: input.RequestItems['test-prefix-qurl-views'].Keys.slice(63) } },
+        });
+      }
+      return Promise.resolve({
+        Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#63', viewed_count: 4 }] },
+      });
+    });
+    await expect(store.getSendViewedCount('s1')).resolves.toBe(9);
+    const first = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input;
+    const request = first.RequestItems['test-prefix-qurl-views'];
+    const keys = request.Keys;
+    expect(request.ConsistentRead).toBe(true);
+    expect(keys).toHaveLength(64);
+    expect(keys[0].qurl_id).toBe('__send_view_count__s1#00');
+    expect(keys[63].qurl_id).toBe('__send_view_count__s1#63');
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(2);
+    const retry = ddbMock.commandCalls(BatchGetCommand)[1].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(retry.ConsistentRead).toBe(true);
+    expect(retry.Keys).toEqual([{ qurl_id: '__send_view_count__s1#63' }]);
   });
 
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
@@ -1392,8 +1435,10 @@ describe('qurl sends', () => {
     // Every present field lands; the placeholder values carry the data.
     const vals = Object.values(input.ExpressionAttributeValues);
     expect(vals).toEqual(expect.arrayContaining([
-      'tok-live', 'app-1', 3, 'Sent to 3 users', 1234567890, 0,
+      `enc:v1:IV:TAG:${Buffer.from('tok-live').toString('hex')}`,
+      'app-1', 3, 'Sent to 3 users', 1234567890, 0,
     ]));
+    expect(vals).not.toContain('tok-live');
     for (const attr of ['interaction_token', 'interaction_app_id', 'expected_count', 'confirm_base_msg', 'confirm_expires_at', 'viewed_count']) {
       expect(input.UpdateExpression).toContain(attr);
     }
@@ -1616,7 +1661,7 @@ describe('qurl views', () => {
     const result = await store.recordQurlView({
       qurlId: 'q_aaaaaaaaaa1', accessCount: 3, consumed: false, eventId: 'evt-1',
     });
-    expect(result).toBe('recorded');
+    expect(result).toEqual({ result: 'recorded', firstView: true });
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key).toEqual({ qurl_id: 'q_aaaaaaaaaa1' });
@@ -1645,18 +1690,18 @@ describe('qurl views', () => {
     const THIRTY_DAYS = 30 * 24 * 60 * 60;
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
     expect(input.ExpressionAttributeValues[':exp']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
-    expect(input.ReturnValues).toBeUndefined();
+    expect(input.ReturnValues).toBe('ALL_OLD');
   });
 
-  test('recordQurlView: returnMeta reports firstView from ALL_OLD access_count', async () => {
+  test('recordQurlView: reports firstView from ALL_OLD access_count', async () => {
     ddbMock.on(UpdateCommand).resolvesOnce({});
     await expect(store.recordQurlView({
-      qurlId: 'q_new', accessCount: 2, consumed: false, eventId: 'evt-new', returnMeta: true,
+      qurlId: 'q_new', accessCount: 2, consumed: false, eventId: 'evt-new',
     })).resolves.toEqual({ result: 'recorded', firstView: true });
 
     ddbMock.on(UpdateCommand).resolves({ Attributes: { access_count: 1 } });
     await expect(store.recordQurlView({
-      qurlId: 'q_repeat', accessCount: 2, consumed: false, eventId: 'evt-repeat', returnMeta: true,
+      qurlId: 'q_repeat', accessCount: 2, consumed: false, eventId: 'evt-repeat',
     })).resolves.toEqual({ result: 'recorded', firstView: false });
     const input = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
     expect(input.ReturnValues).toBe('ALL_OLD');
@@ -1669,7 +1714,7 @@ describe('qurl views', () => {
     const result = await store.recordQurlView({
       qurlId: 'q_x', accessCount: 1, consumed: false, eventId: 'evt-1',
     });
-    expect(result).toBe('dedup');
+    expect(result).toEqual({ result: 'dedup', firstView: false });
   });
 
   test('recordQurlView: rejects qurlId="" so an empty-id collision attractor never lands in DDB', async () => {
@@ -1678,13 +1723,16 @@ describe('qurl views', () => {
     ).rejects.toThrow(/qurlId is required/);
   });
 
-  test('recordQurlView: rejects negative or non-numeric accessCount', async () => {
+  test('recordQurlView: rejects non-positive or non-numeric accessCount', async () => {
     await expect(
       store.recordQurlView({ qurlId: 'q_x', accessCount: -1, consumed: false, eventId: 'e' }),
-    ).rejects.toThrow(/non-negative/);
+    ).rejects.toThrow(/positive/);
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: 0, consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/positive/);
     await expect(
       store.recordQurlView({ qurlId: 'q_x', accessCount: 'two', consumed: false, eventId: 'e' }),
-    ).rejects.toThrow(/non-negative/);
+    ).rejects.toThrow(/positive/);
   });
 
   test('recordQurlView: rejects missing eventId (replay protection requires a key)', async () => {

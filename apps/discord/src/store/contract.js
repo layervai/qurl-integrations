@@ -108,6 +108,7 @@ const STORE_METHODS = Object.freeze([
   'saveSendConfirmState',
   'getSendRenderState',
   'incrementSendViewedCount',
+  'getSendViewedCount',
   'tryAdvanceRenderedCount',
   'touchRenderedAt',
   'markConfirmTerminal',

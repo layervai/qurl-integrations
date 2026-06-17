@@ -1484,8 +1484,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // Dense early-poll phase. The webhook fast-path
   // (routes/qurl-webhook.js) owns sub-second latency: it edits the
   // sender's confirmation from any replica the instant a qurl.accessed
-  // view records, keeps viewed_count as an O(1) aggregate, and schedules
-  // its own trailing flush for coalesced bursts. This poll is now a
+  // view records, keeps distinct-view counts in sharded qurl_views
+  // counters, and schedules its own trailing flush for coalesced bursts.
+  // This poll is now a
   // BACKSTOP / self-heal floor: it covers a legacy/pre-feature send (no
   // persisted token), a fast-path edit that transiently failed (it
   // deliberately does NOT advance last_rendered_count on a failed edit,

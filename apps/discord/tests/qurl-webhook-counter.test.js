@@ -40,6 +40,7 @@ const mockGetSendRenderState = jest.fn();
 const mockGetSendItems = jest.fn();
 const mockGetQurlViews = jest.fn();
 const mockIncrementSendViewedCount = jest.fn();
+const mockGetSendViewedCount = jest.fn();
 const mockTryAdvanceRenderedCount = jest.fn();
 const mockTouchRenderedAt = jest.fn();
 jest.mock('../src/store', () => ({
@@ -49,6 +50,7 @@ jest.mock('../src/store', () => ({
   getSendItems: (...args) => mockGetSendItems(...args),
   getQurlViews: (...args) => mockGetQurlViews(...args),
   incrementSendViewedCount: (...args) => mockIncrementSendViewedCount(...args),
+  getSendViewedCount: (...args) => mockGetSendViewedCount(...args),
   tryAdvanceRenderedCount: (...args) => mockTryAdvanceRenderedCount(...args),
   // Failure-path debounce stamp — MUST be on the mock or the new
   // touchRenderedAt call on the !r.ok branch throws into the fast-path's
@@ -185,7 +187,8 @@ beforeEach(() => {
   // carries qurlIds, so this normally isn't reached.
   mockGetSendItems.mockResolvedValue([{ qurl_id: QURL_ID, recipient_discord_id: 'r1' }]);
   mockGetQurlViews.mockResolvedValue(new Map([[QURL_ID, { accessCount: 1, consumed: false }]]));
-  mockIncrementSendViewedCount.mockResolvedValue(1);
+  mockIncrementSendViewedCount.mockResolvedValue(undefined);
+  mockGetSendViewedCount.mockResolvedValue(1);
   mockTryAdvanceRenderedCount.mockResolvedValue(true);
   mockTouchRenderedAt.mockResolvedValue(undefined);
   mockEditInteractionReply.mockResolvedValue({ ok: true });
@@ -209,7 +212,8 @@ describe('sender view-counter fast-path — happy path', () => {
     expect(appId).toBe(APP_ID);
     expect(token).toBe(TOKEN);
     expect(payload.content).toContain('👀 1 viewed');
-    expect(mockIncrementSendViewedCount).toHaveBeenCalledWith(SEND_ID, 0);
+    expect(mockIncrementSendViewedCount).toHaveBeenCalledWith(SEND_ID, QURL_ID);
+    expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
     // Commit AFTER the edit — a count-before-edit inversion is the
     // stuck-counter regression. Assert the call ORDER.
@@ -334,19 +338,20 @@ describe('sender view-counter fast-path — FAILED-EDIT SELF-HEAL (load-bearing)
 });
 
 describe('sender view-counter fast-path — N is the distinct viewed-count aggregate, not the event access_count', () => {
-  it('renders viewed_count from the send row (2 of 3 viewed → "👀 2 viewed")', async () => {
-    mockGetSendRenderState.mockResolvedValue(armedState({ viewedCount: 2, qurlIds: ['q_a', 'q_b', 'q_c'] }));
-    mockIncrementSendViewedCount.mockResolvedValue(2);
+  it('renders the sharded viewed-count aggregate (2 of 3 viewed → "👀 2 viewed")', async () => {
+    mockGetSendRenderState.mockResolvedValue(armedState({ viewedCount: 0, qurlIds: ['q_a', 'q_b', 'q_c'] }));
+    mockGetSendViewedCount.mockResolvedValue(2);
     await signedRequest();
     await flushCounter();
     const payload = mockEditInteractionReply.mock.calls[0][2];
     expect(payload.content).toContain('👀 2 viewed');
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 2);
+    expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
     expect(mockGetSendItems).not.toHaveBeenCalled();
   });
 
-  it('aggregate increment throttle skips the fast-path and leaves the poll backstop to count qurl views', async () => {
+  it('sharded aggregate increment throttle skips the fast-path and leaves the poll backstop to count qurl views', async () => {
     mockIncrementSendViewedCount.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
     await signedRequest();
     await flushCounter();
@@ -354,7 +359,7 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
     expect(mockGetQurlViews).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
-      'qURL webhook sender-counter: aggregate increment failed; poll backstop will count qurl views',
+      'qURL webhook sender-counter: sharded aggregate increment failed; poll backstop will count qurl views',
       expect.objectContaining({ qurl_id: QURL_ID, send_id: SEND_ID }),
     );
     expect(logger.debug).toHaveBeenCalledWith(
@@ -366,6 +371,7 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
   it('legacy fallback: uses getSendItems/getQurlViews when viewed_count and qurl_ids are absent', async () => {
     mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     mockGetSendRenderState.mockResolvedValue(armedState({ viewedCount: null, qurlIds: [] }));
+    mockGetSendViewedCount.mockResolvedValue(0);
     mockGetSendItems.mockResolvedValue([
       { qurl_id: 'q_a', recipient_discord_id: 'r1' },
       { qurl_id: 'q_b', recipient_discord_id: 'r2' },
@@ -393,21 +399,21 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   it('a 2nd view within the coalesce window is SKIPPED before the BatchGet and schedules a trailing flush', async () => {
     // The send already rendered ~200ms ago (well inside the sub-second
     // window). A fresh view must NOT edit — it would storm Discord on a
-    // high-fan-out send. Crucially the skip happens BEFORE getQurlViews,
-    // so the coalesced event skips that read too, while the O(1)
-    // viewed_count aggregate lets the route schedule a trailing flush.
+    // high-fan-out send. Crucially the skip happens BEFORE any aggregate
+    // read or getQurlViews fallback; the first-view shard write is enough
+    // to know a trailing flush has work to render.
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 1,
       lastRenderedAt: Date.now() - 200,
       viewedCount: 2,
       qurlIds: ['q_a', 'q_b', 'q_c'],
     }));
-    mockIncrementSendViewedCount.mockResolvedValue(2);
     await signedRequest();
     await flushCounter();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
     expect(mockGetQurlViews).not.toHaveBeenCalled();
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
     expect(mockGetSendItems).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith(
       'qURL webhook sender-counter: coalesced — scheduled trailing flush',
@@ -435,7 +441,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
       viewedCount: 2,
       qurlIds: ['q_a', 'q_b'],
     }));
-    mockIncrementSendViewedCount.mockResolvedValue(2);
+    mockGetSendViewedCount.mockResolvedValue(2);
 
     await signedRequest();
     await flushCounter();
@@ -471,7 +477,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
         viewedCount: 2,
         qurlIds: ['q_a', 'q_b', 'q_c'],
       }));
-    mockIncrementSendViewedCount.mockResolvedValue(2);
+    mockGetSendViewedCount.mockResolvedValue(2);
     mockTryAdvanceRenderedCount.mockResolvedValue(false);
 
     await signedRequest();
@@ -486,29 +492,27 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   it('BURST: many views in a short window → bounded edit count (≤3, not N), final render correct', async () => {
     // Simulate a high-fan-out send: a wave of qurl.accessed webhooks for
     // DISTINCT recipients arriving inside one coalesce window. The store
-    // mocks share a single in-test "row" that mirrors the real DDB
-    // qurl_send_configs row — getSendRenderState reads its viewed_count,
-    // last_rendered_count / last_rendered_at, and
-    // tryAdvanceRenderedCount CAS-updates the rendered floor
-    // (commit-after-edit). This exercises the REAL
+    // mocks share in-test state that mirrors the real split: render floor
+    // and coalesce clock live on qurl_send_configs, while distinct first
+    // views advance sharded qurl_views counters. This exercises the REAL
     // leading-edge gate end-to-end across replicas, not a mocked verdict.
     const TRACKED = Array.from({ length: 30 }, (_, i) => `q_burst_${i}`);
     // The row as the store sees it. last_rendered_at starts 0 (never
     // edited) so the first webhook is NOT debounced.
-    const row = { viewedCount: 0, lastRenderedCount: 0, lastRenderedAt: 0 };
+    const row = { shardedCount: 0, lastRenderedCount: 0, lastRenderedAt: 0 };
 
     mockFindSendsByQurlId.mockResolvedValue([{ send_id: SEND_ID, sender_discord_id: SENDER_ID }]);
     mockGetSendRenderState.mockImplementation(async () => armedState({
       expectedCount: TRACKED.length,
-      viewedCount: row.viewedCount,
+      viewedCount: 0,
       lastRenderedCount: row.lastRenderedCount,
       lastRenderedAt: row.lastRenderedAt,
       qurlIds: TRACKED,
     }));
     mockIncrementSendViewedCount.mockImplementation(async () => {
-      row.viewedCount = Math.max(row.viewedCount, row.lastRenderedCount) + 1;
-      return row.viewedCount;
+      row.shardedCount += 1;
     });
+    mockGetSendViewedCount.mockImplementation(async () => row.shardedCount);
     // Commit-after-edit CAS: advance only if strictly higher; stamp the
     // debounce clock to "now" so subsequent webhooks in the window skip.
     mockTryAdvanceRenderedCount.mockImplementation(async (_sendId, n) => {
@@ -521,10 +525,11 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     });
 
     // Fire 30 distinct-recipient views back-to-back within one window.
-    // incrementSendViewedCount advances BEFORE each render decision, so every chain sees a
-    // strictly higher N than the last committed last_rendered_count — i.e.
-    // every event is edit-ELIGIBLE on the N>L pre-read (step 6) and the
-    // monotonic CAS (step 8). Only the 4b coalesce gate suppresses them.
+    // incrementSendViewedCount advances a shard BEFORE each render
+    // decision, so every chain would see a strictly higher N than the
+    // last committed last_rendered_count if it performed the shard sum.
+    // Only the 4b coalesce gate suppresses most edit attempts before
+    // that read.
     // That makes this a genuine discriminator for the GATE, not the
     // pre-existing dedup: with the gate disabled this asserts 30 edits
     // (verified red), with it ~1. (If a future edit lets the N<=L skip
@@ -560,9 +565,9 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     // header). Do not read <=3 here as a cross-replica guarantee.
     expect(mockEditInteractionReply.mock.calls.length).toBeLessThanOrEqual(3);
     expect(mockEditInteractionReply.mock.calls.length).toBeGreaterThanOrEqual(1);
-    // The whole point: the normal fast-path is O(1) now. It increments
-    // viewed_count and never BatchGets the full qurl_id set, so max-size
-    // sends keep the same latency shape as small sends.
+    // The whole point: the normal fast-path is constant-shape now. It
+    // increments sharded counters and never BatchGets the full qurl_id
+    // set, so max-size sends keep the same latency shape as small sends.
     expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(TRACKED.length);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
 

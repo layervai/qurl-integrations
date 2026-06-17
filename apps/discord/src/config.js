@@ -515,10 +515,10 @@ module.exports = {
   // first view fires a qurl.accessed webhook; un-coalesced, each would
   // PATCH the sender confirmation, storming Discord's per-message edit
   // budget (429s). This bounds fast-path edits per send to ~1 per window
-  // per replica; the per-view viewed_count aggregate write still happens
-  // once per distinct first view and falls back to the poll reader if DDB
-  // throttles. Default to the largest sub-second window (900ms); larger
-  // env overrides are rejected back to that default rather than clamped.
+  // per replica; distinct first-view aggregate writes are sharded in
+  // qurl_views so they do not funnel through one send row. Default to the
+  // largest sub-second window (900ms); larger env overrides are rejected
+  // back to that default rather than clamped.
   QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 900, { minPositive: true, max: 900 }),
 
   SHARD_ID,
