@@ -33,6 +33,7 @@ const {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingViewUpdatePushKeys,
   missingMapCommandKeys,
@@ -176,31 +177,21 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // BASE_URL https check: unconditional in OpenNHP mode. An OpenNHP
-  // prod deploy that forgets to set BASE_URL in its task-def would
-  // otherwise fall through to the "http://localhost:3000" default in
-  // config.js — which would boot successfully but fail at the first
-  // OAuth callback, exactly the deferred-error mode this fail-fast
-  // exists to prevent. In non-OpenNHP modes BASE_URL is unused
-  // (no /auth or /webhook routes mounted), so we only enforce https
-  // there if the operator explicitly set it — lets single-guild-plain
-  // and multi-tenant deployments ignore BASE_URL without a false-
-  // positive failure, while still catching a stale http:// SSM value
-  // if a future code path re-enables BASE_URL use.
-  if (config.isOpenNHPActive && !config.BASE_URL.startsWith('https://')) {
-    logger.error(`BASE_URL must use https:// in production (OpenNHP mode). Got: ${config.BASE_URL}`);
-    process.exit(1);
-  }
-  // Treat "" and whitespace-only as unset (matches GUILD_ID's normalization
-  // robustness). An operator who parameterized the SSM value but seeded it
-  // with "" or " " should not silently escape the https check — but they
-  // also shouldn't get a false-positive boot failure from an accidentally-
-  // empty param, since config.BASE_URL falls through to the localhost
-  // default in that case and the downstream "http://localhost:3000" is
-  // caught by the OpenNHP https check above anyway.
+  // BASE_URL https check — fail fast at boot when an OAuth surface that
+  // builds a BASE_URL-derived redirect (OpenNHP mode or the qURL guided-
+  // setup flow) is active but BASE_URL isn't https, so it can't dead-end at
+  // the OAuth redirect later (#619). The earlier comment here claimed
+  // BASE_URL was "unused in non-OpenNHP modes" — true for the legacy
+  // GitHub-OAuth routes, but stale since the qURL OAuth router landed. See
+  // baseUrlHttpsProblem for the full consumer inventory + the operator-
+  // facing messages. baseUrlExplicitlySet treats "" / whitespace-only as
+  // unset (matches GUILD_ID normalization) so an accidentally-empty SSM
+  // param neither escapes the check nor false-positives a non-consuming
+  // deploy.
   const baseUrlExplicitlySet = Boolean(process.env.BASE_URL?.trim());
-  if (!config.isOpenNHPActive && baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
-    logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
+  const baseUrlProblem = baseUrlHttpsProblem(config, baseUrlExplicitlySet);
+  if (baseUrlProblem) {
+    logger.error(baseUrlProblem);
     process.exit(1);
   }
 

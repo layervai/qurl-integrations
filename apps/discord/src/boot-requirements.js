@@ -17,9 +17,9 @@
 //     17-20 digit value. Re-checking truthiness here would never catch
 //     a missing GUILD_ID — the upstream check is the authority.
 //   - BASE_URL: config.js supplies an unconditional "http://localhost:3000"
-//     default, so `cfg.BASE_URL` is always truthy. The real enforcement
-//     is the https-startswith check in index.js, which runs regardless
-//     of this required-list membership.
+//     default, so `cfg.BASE_URL` is always truthy. The real enforcement is
+//     baseUrlHttpsProblem (below), called from index.js's production block,
+//     which runs regardless of this required-list membership.
 // Listing either would be decorative — the downstream checks are the
 // authority. Keeping this list to the keys whose absence is actually a
 // boot blocker.
@@ -63,6 +63,66 @@ function missingProdKeys(env, isOpenNHPActive) {
 function missingKekRequiredKeys(env) {
   if (!env.GITHUB_CLIENT_SECRET) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
+}
+
+// BASE_URL https guardrail. Several surfaces build absolute URLs from
+// config.BASE_URL. The ones that HARD-fail setup when BASE_URL silently
+// falls back to the http://localhost:3000 default (config.js) are the
+// OAuth redirect/callback builders, and they gate this check:
+//
+//   - OpenNHP mode (isOpenNHPActive): the /auth/github start (commands.js)
+//     + callback redirect_uri + OAuth state (routes/oauth.js).
+//   - qURL guided setup (isQurlOAuthConfigured): the /oauth/qurl/start link
+//     (commands.js) + /oauth/qurl/callback redirect_uri (routes/qurl-oauth.js).
+//     That router mounts UNCONDITIONALLY in server.js — independent of
+//     OpenNHP mode — so /qurl setup dead-ends on a localhost BASE_URL in
+//     plain single-guild and multi-tenant deploys too (#619).
+//   - Stage-2 Discord install (routes/discord-install.js) embeds BASE_URL
+//     too, but isDiscordInstallConfigured ⟹ isQurlOAuthConfigured
+//     (config.js), so the qURL OAuth term already covers it.
+//
+// So the trigger is "an OAuth surface that builds a BASE_URL-derived
+// redirect is active" (isOpenNHPActive || isQurlOAuthConfigured), not
+// OpenNHP mode specifically. The single !startsWith('https://') test then
+// subsumes the unset case — the localhost default is http:// — catching
+// both "unset → localhost fallback" and an explicit http:// value.
+//
+// Intentionally NOT gated on: the per-guild webhook bridge
+// (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
+// BASE_URL, but it's fire-and-forget and non-fatal — a wrong bridge URL
+// degrades qURL view-count delivery from push to the existing poll
+// fallback, it doesn't dead-end a user flow. Blocking boot on it would
+// force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
+// ignore it. A future consumer that DOES hard-fail belongs in the
+// condition below (and this list), not a fresh ad-hoc check.
+//
+// Outside those surfaces BASE_URL is unused for redirects, but a stale
+// explicit http:// value is still rejected — the original canary.
+// `baseUrlExplicitlySet` (caller-computed from process.env, treating
+// "" / whitespace-only as unset) separates "operator set a bad value"
+// from "fell back to the localhost default", so an accidentally-empty SSM
+// param in such a deploy doesn't false-positive.
+//
+// Caller gates on NODE_ENV==='production' (localhost stays convenient in
+// dev) and routes the message through the same log + exit(1) shape as the
+// sibling checks. Returns the operator-facing message or null (string-or-
+// null mirrors unsupportedRoleShipperCombo et al.).
+function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
+  // https is always acceptable — short-circuit the common good case.
+  if (cfg.BASE_URL.startsWith('https://')) return null;
+  if (cfg.isOpenNHPActive || cfg.isQurlOAuthConfigured) {
+    return (
+      'BASE_URL must be set to an https:// URL in production when the qURL OAuth ' +
+      'setup flow (AUTH0_* configured) or OpenNHP community features are active — ' +
+      'it builds the OAuth callback URL, and the http://localhost:3000 default ' +
+      `dead-ends guided setup at the redirect. Got: ${cfg.BASE_URL}. Set BASE_URL ` +
+      "to the bot's public https:// origin in the deployment template."
+    );
+  }
+  if (baseUrlExplicitlySet) {
+    return `BASE_URL must use https:// in production (got ${cfg.BASE_URL})`;
+  }
+  return null;
 }
 
 // QURL_BOT_EVENTS_QUEUE_URL is the load-bearing piece of the event-
@@ -436,6 +496,7 @@ module.exports = {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingViewUpdatePushKeys,
   unsupportedRoleShipperCombo,
