@@ -706,11 +706,16 @@ function editSenderCounterInBackground({ qurlId }) {
       //    WHOLE send (NOT this event's per-qurl access_count). The send's
       //    qurl_id set is persisted on the config row (state.qurlIds), so
       //    it comes for free off the step-2 GetItem — no extra recipient
-      //    Query. BatchGet their view rows, count those with accessCount
-      //    > 0 (`views.get(id)?.accessCount` — the map is sparse, only
-      //    accessed qurls have a row). Fallback to the recipient-row Query
-      //    only if the set wasn't persisted (a pre-confirm-qurl-ids row
-      //    that somehow still cleared the absent-guard).
+      //    Query. getQurlViews reads their view rows and counts those with
+      //    accessCount > 0 (`views.get(id)?.accessCount` — the map is
+      //    sparse, only accessed qurls have a row). NOTE this is a CHUNKED
+      //    BatchGet (⌈N/100⌉ sequential requests, up to ~200 at the 20000
+      //    cap), not a single read — the coalesce gate above keeps it to
+      //    ~1/window/replica, but a non-coalesced edit on a large send
+      //    pays the full chunk count (see getQurlViews). Fallback to the
+      //    recipient-row Query only if the set wasn't persisted (a
+      //    pre-confirm-qurl-ids row that somehow still cleared the
+      //    absent-guard).
       const qurlIds = state.qurlIds.length > 0
         ? state.qurlIds
         : (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);

@@ -1137,7 +1137,15 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
 }
 
 // Returns a Map<qurl_id, {accessCount, consumed}>. BatchGet caps at 100
-// keys per request; today max recipients is 50 so chunking is defensive.
+// keys per request, so this chunks at 100. That chunking is LOAD-BEARING,
+// not defensive: max recipients is QURL_SEND_MAX_RECIPIENTS (default
+// 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
+// On the view-counter fast-path this read is off the webhook's 200
+// response (fire-and-forget) and coalescing bounds it to ~1/window/
+// replica, but for a large send a single non-coalesced edit still pays
+// the full chunk count — the counter's "sub-second" is per-edit network
+// latency, which degrades with N. (Counter-sharding would cap this; out
+// of scope under the realistic recipient cap.)
 async function getQurlViews(qurlIds) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
   // Drop empties defensively — an empty qurl_id is a collision attractor.
