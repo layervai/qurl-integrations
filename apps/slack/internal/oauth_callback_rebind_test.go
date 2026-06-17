@@ -67,9 +67,16 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	startResult := startRec.Result()
 	defer func() { _ = startResult.Body.Close() }()
 
+	stateCookieName := ""
 	callbackReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	for _, c := range startResult.Cookies() {
+		if c.Value == state {
+			stateCookieName = c.Name
+		}
 		callbackReq.AddCookie(c)
+	}
+	if stateCookieName == "" {
+		t.Fatal("start response did not include the OAuth state cookie")
 	}
 	callbackRec := httptest.NewRecorder()
 	oauth.Callback(cfg)(callbackRec, callbackReq)
@@ -85,6 +92,11 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	}
 	if minter.mintCalls != 0 {
 		t.Fatalf("MintWorkspaceAPIKey calls: got %d want 0", minter.mintCalls)
+	}
+	callbackResult := callbackRec.Result()
+	defer func() { _ = callbackResult.Body.Close() }()
+	if !oauthRebindCookieCleared(callbackResult.Cookies(), stateCookieName) {
+		t.Fatal("callback did not clear OAuth state cookie on refused rebind")
 	}
 
 	isAdmin, ownerID, err := adminStore.CheckAdmin(context.Background(), oauthRebindTestTeamID, oauthRebindOwnerUserID)
@@ -109,6 +121,15 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	}
 }
 
+func oauthRebindCookieCleared(cookies []*http.Cookie, name string) bool {
+	for _, c := range cookies {
+		if c.Name == name && c.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
 type oauthAdminStoreAdapter struct {
 	store *slackdata.Store
 }
@@ -121,6 +142,9 @@ func (a oauthAdminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.Work
 	}, seedAdmin)
 }
 
+// Keep this mapping in lockstep with apps/slack/cmd/main.go's classifyBindError;
+// package main cannot be imported here, but the callback needs the same
+// production classification to route real slackdata.Store conflicts correctly.
 func classifyOAuthRebindTestBindError(err error) oauth.BindConflictCode {
 	var ae *slackdata.Error
 	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
