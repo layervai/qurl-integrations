@@ -54,7 +54,7 @@ http {
     map $uri $clean_suffix {
         default        "";
         "~/$"          "${INDEX_DOCUMENT}";
-        "~^[^.]*[^/]$" "/${INDEX_DOCUMENT}";
+        "~^[^.]+$"     "/${INDEX_DOCUMENT}";
     }
 
     upstream envoy_upstream {

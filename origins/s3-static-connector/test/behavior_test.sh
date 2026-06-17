@@ -165,6 +165,9 @@ fetch "$base/website/"; expect_eq "GET /website/ body" "$(cat "$B")" "website"
 fetch "$base/v1.2/docs"
 expect_eq "GET /v1.2/docs body" "$(cat "$B")" "docs"
 expect_eq "GET /v1.2/docs signed path" "$(hval X-Stub-Path)" "/v1.2/docs"
+fetch "$base/about."
+expect_eq "GET /about. body" "$(cat "$B")" "trailing-dot"
+expect_eq "GET /about. signed path" "$(hval X-Stub-Path)" "/about."
 
 # 5. metrics.json with cache-buster: 200, passthrough headers, query stripped
 fetch "$base/metrics.json?_t=1718000000000"

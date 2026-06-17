@@ -28,6 +28,7 @@
 /metrics.json             -> /metrics.json                              [behavior]
 /metrics.json?_t=123      -> /metrics.json   (query stripped)           [behavior: query string]
 /v1.2/docs                -> /v1.2/docs      (dot suppresses rewrite)   [behavior]
+/about.                   -> /about.         (trailing dot suppresses)  [behavior]
 /deep/path                -> /deep/path/index.html  (extensionless)     [behavior: extensionless]
 GET /range.bin Range: 0-3 -> 206 partial     (range request)           [behavior: range]
 HEAD /metrics.json        -> 200 no body      (HEAD request)            [behavior: HEAD]

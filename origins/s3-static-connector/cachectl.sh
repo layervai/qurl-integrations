@@ -210,8 +210,14 @@ cache_file_for_key() {
 }
 
 purge_one_path() {
+  # POSIX sh has no local variables; path_removed is function-scoped by
+  # convention and returned on stdout to purge_cache.
   path_removed=0
   candidates="$(emit_path_candidates "$1")"
+  if [ -z "$candidates" ]; then
+    printf '0\n'
+    return
+  fi
   while IFS= read -r candidate; do
     for method in $CACHE_KEY_METHODS; do
       key="${method}${CACHE_KEY_SCHEME}${CACHE_KEY_PROXY_HOST}${candidate}"
@@ -229,6 +235,7 @@ EOF
 }
 
 purge_cache() {
+  # Intentionally global: the command case arms report this after purge_cache.
   removed=0
   mkdir -p "$CACHE_DIR"
   if [ "$#" -eq 0 ]; then

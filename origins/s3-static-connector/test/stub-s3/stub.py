@@ -23,6 +23,7 @@ FIXTURES = {
     "metrics.json": ("application/json", "max-age=300", b'{"ok":true}'),
     "cacheprobe.json": ("application/json", "max-age=300", b'{"probe":1}'),
     "v1.2/docs": ("text/plain", None, b"docs"),
+    "about.": ("text/plain", None, b"trailing-dot"),
     "styles/app.css": ("text/css", None, b"body{}"),
     "deep/path/index.html": ("text/html", None, b"deep"),
     # octet-stream (not in nginx gzip_types): gzip would disable byte ranges.
