@@ -243,6 +243,8 @@ function stateSecret() {
 }
 function generateState(discordId) {
   const nonce = crypto.randomBytes(16).toString('hex');
+  // By design this throws on unusable signing config; production boot validates
+  // state secrets before serving, so a sign-time throw is a dev/test signal.
   const sig = crypto.createHmac('sha256', stateSecret())
     .update(`${discordId}:${nonce}`)
     .digest('hex');

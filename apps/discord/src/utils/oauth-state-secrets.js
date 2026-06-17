@@ -17,6 +17,14 @@ function isUsableOAuthStateSecret(value) {
   return Boolean(secret && secret.length >= MIN_OAUTH_STATE_SECRET_LENGTH);
 }
 
+function normalizeProductionOAuthStateSecrets(env) {
+  return {
+    legacy: normalizeSecretValue(env.OAUTH_STATE_SECRET),
+    github: normalizeSecretValue(env.GITHUB_OAUTH_STATE_SECRET),
+    qurl: normalizeSecretValue(env.QURL_OAUTH_STATE_SECRET),
+  };
+}
+
 function collectStateSecrets(candidates, { errorPrefix, warnShortOptional } = {}) {
   const secrets = [];
   for (const { value, label, optionalAfterPrimary = false } of candidates) {
@@ -44,11 +52,11 @@ function shortSecretMessage(name, value) {
 }
 
 function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuthConfigured }) {
+  const secrets = normalizeProductionOAuthStateSecrets(env);
   const errors = [];
 
-  function requireFlowSecret(primaryName, flowLabel) {
-    const primary = normalizeSecretValue(env[primaryName]);
-    const legacy = normalizeSecretValue(env.OAUTH_STATE_SECRET);
+  function requireFlowSecret(primaryName, primary, flowLabel) {
+    const legacy = secrets.legacy;
     const primaryShort = shortSecretMessage(primaryName, primary);
     const legacyShort = shortSecretMessage('OAUTH_STATE_SECRET', legacy);
 
@@ -73,13 +81,13 @@ function validateProductionOAuthStateSecrets(env, { isOpenNHPActive, isQurlOAuth
   }
 
   if (isOpenNHPActive) {
-    requireFlowSecret('GITHUB_OAUTH_STATE_SECRET', 'GitHub');
+    requireFlowSecret('GITHUB_OAUTH_STATE_SECRET', secrets.github, 'GitHub');
   }
   if (isQurlOAuthConfigured) {
-    requireFlowSecret('QURL_OAUTH_STATE_SECRET', 'qURL/Auth0');
+    requireFlowSecret('QURL_OAUTH_STATE_SECRET', secrets.qurl, 'qURL/Auth0');
   }
 
-  return errors;
+  return { errors, secrets };
 }
 
 module.exports = {
@@ -88,6 +96,5 @@ module.exports = {
   collectStateSecrets,
   normalizeSecretValue,
   readEnvSecret,
-  isUsableOAuthStateSecret,
   validateProductionOAuthStateSecrets,
 };

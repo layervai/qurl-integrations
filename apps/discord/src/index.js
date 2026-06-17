@@ -1,10 +1,7 @@
 const config = require('./config');
 const logger = require('./logger');
 const { isPositiveFinite } = require('./utils/time');
-const {
-  normalizeSecretValue,
-  validateProductionOAuthStateSecrets,
-} = require('./utils/oauth-state-secrets');
+const { validateProductionOAuthStateSecrets } = require('./utils/oauth-state-secrets');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -212,17 +209,20 @@ if (process.env.NODE_ENV === 'production') {
   // OAUTH_STATE_SECRET remains accepted only during the migration window, and
   // all accepted state-secret envs must be real 32+ char values rather than the
   // Terraform SSM PLACEHOLDER sentinel.
-  const oauthStateSecretErrors = validateProductionOAuthStateSecrets(process.env, {
+  const oauthStateSecretValidation = validateProductionOAuthStateSecrets(process.env, {
     isOpenNHPActive: config.isOpenNHPActive,
     isQurlOAuthConfigured: config.isQurlOAuthConfigured,
   });
+  const { errors: oauthStateSecretErrors, secrets: oauthStateSecrets } = oauthStateSecretValidation;
   if (oauthStateSecretErrors.length > 0) {
     oauthStateSecretErrors.forEach(error => logger.error(error));
     process.exit(1);
   }
-  const legacyOAuthStateSecret = normalizeSecretValue(process.env.OAUTH_STATE_SECRET);
-  const githubOAuthStateSecret = normalizeSecretValue(process.env.GITHUB_OAUTH_STATE_SECRET);
-  const qurlOAuthStateSecret = normalizeSecretValue(process.env.QURL_OAUTH_STATE_SECRET);
+  const {
+    legacy: legacyOAuthStateSecret,
+    github: githubOAuthStateSecret,
+    qurl: qurlOAuthStateSecret,
+  } = oauthStateSecrets;
   if (config.isOpenNHPActive && legacyOAuthStateSecret && !githubOAuthStateSecret) {
     logger.warn('GitHub OAuth state is using legacy OAUTH_STATE_SECRET; provision GITHUB_OAUTH_STATE_SECRET to close the migration window.');
   }

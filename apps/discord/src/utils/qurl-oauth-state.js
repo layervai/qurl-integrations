@@ -55,7 +55,8 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 // OAUTH_STATE_SECRET present, deploy, wait longer than STATE_TTL_SECONDS, then
 // replace OAUTH_STATE_SECRET with the SSM PLACEHOLDER sentinel. Verification
 // accepts both configured keys during that window; after the legacy key is
-// disabled it stops validating.
+// disabled it stops validating. If rotating both GitHub and qURL OAuth state
+// together, pace legacy removal by the longer GitHub pending-link window.
 // Minimum acceptable secret length — per round-9 #4. 32 chars is the
 // floor for an HMAC-SHA256 secret with adequate entropy (matches the
 // `0`.repeat(64) test fixture's order of magnitude, well below the
@@ -143,6 +144,8 @@ function signQurlOAuthState(guildId, discordUserId) {
     e: expirySec,
   };
   const encoded = b64urlEncode(JSON.stringify(payload));
+  // By design this throws on unusable signing config; production boot validates
+  // state secrets before serving, so a sign-time throw is a dev/test signal.
   const sig = crypto.createHmac('sha256', stateSecret())
     .update(encoded)
     .digest('hex');

@@ -15,7 +15,7 @@ describe('oauth-state-secrets helpers', () => {
 
   describe('validateProductionOAuthStateSecrets', () => {
     it('accepts legacy OAUTH_STATE_SECRET during the GitHub migration window', () => {
-      const errors = validateProductionOAuthStateSecrets({
+      const { errors, secrets } = validateProductionOAuthStateSecrets({
         OAUTH_STATE_SECRET: 's'.repeat(64),
       }, {
         isOpenNHPActive: true,
@@ -23,10 +23,11 @@ describe('oauth-state-secrets helpers', () => {
       });
 
       expect(errors).toEqual([]);
+      expect(secrets.legacy).toBe('s'.repeat(64));
     });
 
     it('rejects missing or placeholder GitHub OAuth state secrets in OpenNHP mode', () => {
-      const errors = validateProductionOAuthStateSecrets({
+      const { errors } = validateProductionOAuthStateSecrets({
         GITHUB_OAUTH_STATE_SECRET: 'PLACEHOLDER',
         OAUTH_STATE_SECRET: ' ',
       }, {
@@ -39,7 +40,7 @@ describe('oauth-state-secrets helpers', () => {
     });
 
     it('rejects a short dedicated qURL/Auth0 state secret at boot', () => {
-      const errors = validateProductionOAuthStateSecrets({
+      const { errors } = validateProductionOAuthStateSecrets({
         QURL_OAUTH_STATE_SECRET: 'q'.repeat(MIN_OAUTH_STATE_SECRET_LENGTH - 1),
         OAUTH_STATE_SECRET: 's'.repeat(64),
       }, {
@@ -52,7 +53,7 @@ describe('oauth-state-secrets helpers', () => {
     });
 
     it('does not fail a valid dedicated secret because a legacy secret is short', () => {
-      const errors = validateProductionOAuthStateSecrets({
+      const { errors } = validateProductionOAuthStateSecrets({
         QURL_OAUTH_STATE_SECRET: 'q'.repeat(64),
         OAUTH_STATE_SECRET: 'short',
       }, {
@@ -64,7 +65,7 @@ describe('oauth-state-secrets helpers', () => {
     });
 
     it('rejects a short legacy secret when it is the only configured state secret', () => {
-      const errors = validateProductionOAuthStateSecrets({
+      const { errors } = validateProductionOAuthStateSecrets({
         OAUTH_STATE_SECRET: 'short',
       }, {
         isOpenNHPActive: false,
