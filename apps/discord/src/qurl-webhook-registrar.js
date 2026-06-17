@@ -454,6 +454,15 @@ function urlPathname(u) {
 // orphan-confirmed (MATCH). Sized small (3) because a single transient
 // failure is plausible but several in a row indicates sustained dead-
 // path; the motivating orphan had failure_count=1475, well above.
+//
+// TODO(upstream-contract): the threshold value assumes qurl-service
+// increments `failure_count` ONCE PER FAILED DELIVERY (not per retry
+// attempt within a delivery). If the increment semantics ever change
+// to count attempts, a single genuinely-transient blip could already
+// land failure_count >= 3, and a peer reboot in that window would
+// DELETE a healthy sibling — the false-positive the gate exists to
+// prevent. If qurl-service publishes a counter-semantics doc, pin
+// this against it; absent that, the assumption is observational.
 const URL_MIGRATION_ORPHAN_MIN_FAILURES = 3;
 // ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
 // only consumer) so the tri-state predicate composes cleanly. The
