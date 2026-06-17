@@ -7,8 +7,11 @@ FROM envoyproxy/envoy:v1.32.3@sha256:127e33c48c60be9a148cf9256d52e734ceda28aa344
 
 # Stage 2: pinned nginx-unprivileged (Debian bookworm / glibc) runtime base.
 FROM nginxinc/nginx-unprivileged:1.27.3@sha256:6d51e4a8e10dfe334f8e2d15bb81b1ed2580ea9cb874b644acc720eda7022b54
+LABEL org.opencontainers.image.source="https://github.com/layervai/qurl-integrations"
 
 USER root
+# curl is runtime-only for the IMDSv2 AWS_REGION fallback when deployments do not
+# pass AWS_REGION explicitly.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends bash ca-certificates curl gettext-base tini; \

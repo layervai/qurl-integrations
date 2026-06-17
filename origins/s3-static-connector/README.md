@@ -48,7 +48,7 @@ This contract is frozen — additive only once published.
 | `S3_ENDPOINT_ADDR` | No | bucket S3 vhost | Test/diagnostic override for the Envoy cluster address. Leave unset for real S3. Must be a DNS name, IPv4 address, or unbracketed IPv6 address. |
 | `S3_ENDPOINT_PORT` | No | `443` | Test/diagnostic override for the Envoy cluster port. Must be numeric and in `1..65535`. |
 | `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_PLAINTEXT_S3=true` for plaintext local tests or diagnostics. |
-| `CACHE_MAX_SIZE` | No | `1g` | nginx `proxy_cache_path` max size. |
+| `CACHE_MAX_SIZE` | No | `1g` | nginx `proxy_cache_path` max size. Entries still use the image's fixed `inactive=24h` idle eviction, so an object not requested for 24h can refetch even when its object TTL is longer. |
 | `CACHE_DEFAULT_TTL` | No | (unset) | Unset = cache per the object's `Cache-Control` / nginx default. Set it to force a fallback TTL for objects S3 returns without cache metadata. Must be a non-zero nginx time literal such as `60s`, `5m`, or `1h30m`. |
 | `CACHE_CONNECTOR_ID` | No | `QURL_CONNECTOR_ID`, then empty | Logical connector/site label used by `qurl-origin-cachectl purge-connector` as a fail-closed deployment guard. Set it to the stable customer-provided connector ID/slug used by your deploy automation. |
 | `CACHE_REPLICA_ID` | No | container `HOSTNAME` when set | Physical origin/cache replica label emitted in cache-control JSON so fan-out jobs can account for every replica they touched. |
@@ -106,7 +106,10 @@ verbatim. These security headers are set on **every** response (200/404/405/5xx)
 | Method other than GET/HEAD | 405 | (nginx default) | access log only |
 
 S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
-distinction is preserved in the access log for alarming.
+distinction is preserved in the access log for alarming. Production deployments
+must wire the SigV4-denied alarm on `upstream_status:403` before relying on this
+image, because a signing or IAM failure intentionally looks like a normal 404 to
+viewers.
 
 Range serving is intended for uncompressed objects. nginx gzip takes precedence
 for compressible content types such as CSS, JS, JSON, SVG, and XML, so text
@@ -193,6 +196,8 @@ the supervisor intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
   returns `AccessDenied` (403) instead of `NoSuchKey` (404), muddying the
   signing-failure signal.
 - IMDSv2 from inside a container requires **hop-limit 2** on the host.
+- Passing `AWS_REGION` explicitly is preferred. When it is omitted, the image
+  uses `curl` at startup for the IMDSv2 region fallback.
 - The bucket stays private; this image needs no bucket-policy change.
 
 ## Out of scope
