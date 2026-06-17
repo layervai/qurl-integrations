@@ -72,8 +72,22 @@ const { app } = require('../src/server');
 const db = require('../src/store');
 const discord = require('../src/discord');
 const { signQurlOAuthState } = require('../src/utils/qurl-oauth-state');
+const { QURL_OAUTH_PKCE_COOKIE } = require('../src/utils/oauth-cookies');
+const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
 
 const originalFetch = globalThis.fetch;
+const TEST_PKCE_VERIFIER = 'a'.repeat(43);
+
+function cookieFor(state, codeVerifier = TEST_PKCE_VERIFIER) {
+  return `qurl_setup_session=${encodeURIComponent(state)}; `
+    + `${QURL_OAUTH_PKCE_COOKIE}=${encodeURIComponent(codeVerifier)}`;
+}
+
+function cookieValue(setCookie, name) {
+  const header = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie || '';
+  const match = header.match(new RegExp(`${name}=([^;\\n]+)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -104,6 +118,12 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('prompt')).toBe('consent');
       expect(loc.searchParams.get('state')).toBe(state);
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
+
+      const codeVerifier = cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE);
+      expect(codeVerifier).not.toBeNull();
+      expect(loc.searchParams.get('code_challenge_method')).toBe('S256');
+      expect(loc.searchParams.get('code_challenge')).toBe(pkceChallengeForVerifier(codeVerifier));
+      expect(loc.searchParams.get('code_challenge')).not.toBe(codeVerifier);
     });
 
     it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
@@ -226,13 +246,6 @@ describe('qurl-oauth routes', () => {
   });
 
   describe('GET /oauth/qurl/callback', () => {
-    // Helper: build the Cookie header value the double-submit CSRF check
-    // expects on /callback. /start sets `qurl_setup_session=<state>`
-    // (URL-encoded so `.` and `=` survive); the verifier reads it back
-    // via decodeURIComponent. Tests skip the /start round-trip and set
-    // the cookie directly to keep each callback test independent.
-    const cookieFor = (state) => `qurl_setup_session=${encodeURIComponent(state)}`;
-
     it('400s on missing code', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app).get(`/oauth/qurl/callback?state=${encodeURIComponent(state)}`)
@@ -253,6 +266,15 @@ describe('qurl-oauth routes', () => {
     it('400s on invalid state', async () => {
       const res = await request(app).get('/oauth/qurl/callback?code=auth0-code&state=garbage');
       expect(res.status).toBe(400);
+    });
+
+    it('400s on missing PKCE verifier cookie', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const res = await request(app)
+        .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', `qurl_setup_session=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(400);
+      expect(res.text).toMatch(/same browser tab/i);
     });
 
     it('400s on missing CSRF cookie (leaked URL opened in different browser)', async () => {
@@ -291,7 +313,7 @@ describe('qurl-oauth routes', () => {
         });
       const res = await request(app)
         .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
-        .set('Cookie', `qurl_setup_session=${encodeURIComponent(state)}`);
+        .set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
     });
@@ -318,6 +340,27 @@ describe('qurl-oauth routes', () => {
       expect(res.status).toBe(502);
       expect(res.text).toContain('Authorization failed');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
+    });
+
+    it('sends the PKCE verifier cookie on the Auth0 token exchange', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const codeVerifier = 'b'.repeat(43);
+      const fetchSpy = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      globalThis.fetch = fetchSpy;
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state, codeVerifier));
+      expect(res.status).toBe(200);
+      const tokenBody = new URLSearchParams(fetchSpy.mock.calls[0][1].body.toString());
+      expect(tokenBody.get('code_verifier')).toBe(codeVerifier);
     });
 
     it('502s when qurl-service mint fails', async () => {
@@ -557,7 +600,7 @@ describe('qurl-oauth routes', () => {
     it('clears the qurl_setup_session cookie on successful callback (one-shot binding)', async () => {
       // Regression pin — without res.clearCookie, a refreshed callback
       // URL could re-bind silently. Cookie should be cleared via a
-      // Set-Cookie header that zeroes the value AND uses Path=/oauth so
+      // Set-Cookie header that zeroes the value AND uses Path=/oauth/qurl so
       // the browser actually forgets it (path mismatch = no clear).
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()

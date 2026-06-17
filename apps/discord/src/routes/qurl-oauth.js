@@ -13,6 +13,7 @@ const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie } = require('../utils/cookies');
+const { createPkcePair, isPkceVerifier } = require('../utils/oauth-pkce');
 const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
@@ -42,8 +43,11 @@ const router = express.Router();
 // follow-up C.1.
 const {
   QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_PKCE_COOKIE,
   setQurlOAuthCookie,
+  setQurlOAuthPkceCookie,
   clearQurlOAuthCookie,
+  clearQurlOAuthPkceCookie,
 } = require('../utils/oauth-cookies');
 
 // 503 not-configured surface — shared with discord-install.js via
@@ -131,9 +135,11 @@ router.get('/start', rateLimit, async (req, res) => {
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
   // Same-browser flows pass; leaked URLs in other browsers fail.
-  // Cookie shape (path=/oauth so it spans Stage-2 chain, HttpOnly,
-  // SameSite=Lax, Secure-when-HTTPS) lives in utils/oauth-cookies.js.
+  // Cookie shape (path=/oauth/qurl, HttpOnly, SameSite=Lax,
+  // Secure-when-HTTPS) lives in utils/oauth-cookies.js.
+  const { codeVerifier, codeChallenge } = createPkcePair();
   setQurlOAuthCookie(res, req, state);
+  setQurlOAuthPkceCookie(res, req, codeVerifier);
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -149,6 +155,8 @@ router.get('/start', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
   // prompt=consent only on re-run (key-rotation flow) — without it
   // Auth0 silently re-uses prior consent and re-running /qurl setup
   // can't actually issue a new key. On first install, omit so the
@@ -225,9 +233,15 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
+  const codeVerifier = readCookie(req, QURL_OAUTH_PKCE_COOKIE);
+  if (!isPkceVerifier(codeVerifier)) {
+    logger.warn('qURL OAuth callback missing or invalid PKCE verifier cookie', { ip: req.ip });
+    return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
+  }
   // Cookie is consumed — clear it so a refreshed callback URL can't
   // re-bind. Path-must-match invariant lives in clearQurlOAuthCookie.
   clearQurlOAuthCookie(res);
+  clearQurlOAuthPkceCookie(res);
   const { guildId, discordUserId } = verified.payload;
 
   // 1. Exchange the code for an access_token + id_token (Auth0 token
@@ -249,6 +263,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         client_id: config.AUTH0_CLIENT_ID,
         client_secret: config.AUTH0_CLIENT_SECRET,
         code,
+        code_verifier: codeVerifier,
         redirect_uri: `${config.BASE_URL}/oauth/qurl/callback`,
       }),
       signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
