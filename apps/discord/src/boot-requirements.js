@@ -91,8 +91,8 @@ function missingKekRequiredKeys(env) {
 // yet still can't serve an external OAuth redirect, but reachability isn't
 // knowable at boot. The localhost default parses as http:// so it's not
 // usable, catching both "unset → localhost" and explicit http://. The
-// message names only the active surface(s) so an OpenNHP-only operator (no
-// Auth0) isn't sent chasing a qURL-OAuth red herring.
+// message names only the active OAuth surface(s) so a GitHub-OAuth-only
+// operator (no Auth0) isn't sent chasing a qURL-OAuth red herring.
 //
 // Intentionally NOT gated on: the per-guild webhook bridge
 // (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
@@ -120,7 +120,7 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
   if (usableHttps) return null;
   if (cfg.isOpenNHPActive || cfg.isQurlOAuthConfigured) {
     const surfaces = [
-      cfg.isOpenNHPActive && 'OpenNHP community features',
+      cfg.isOpenNHPActive && 'the GitHub OAuth flow',
       cfg.isQurlOAuthConfigured && 'the qURL guided setup flow',
     ].filter(Boolean).join(' and ');
     return (

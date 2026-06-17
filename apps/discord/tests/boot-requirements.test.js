@@ -198,33 +198,34 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).toMatch(/BASE_URL/);
     expect(msg).toMatch(/https:\/\//);
     // qURL-only deploy: the message names the qURL flow, and must NOT name
-    // OpenNHP (an operator with no OpenNHP features shouldn't chase it).
+    // the GitHub OAuth flow (an operator with no GitHub OAuth surface
+    // shouldn't chase it).
     expect(msg).toMatch(/qURL/);
-    expect(msg).not.toMatch(/OpenNHP/);
+    expect(msg).not.toMatch(/GitHub OAuth/);
     // Echoes the offending value so an operator pasting the log line sees it.
     expect(msg).toContain(LOCALHOST);
   });
 
-  it('preserves the OpenNHP fail-fast with an OpenNHP-precise message (no qURL red herring)', () => {
+  it('preserves the GitHub OAuth fail-fast with a precise message (no qURL red herring)', () => {
     // Pre-#619 behavior (the old index.js OpenNHP check) must be unchanged,
-    // and an OpenNHP-only deploy (no Auth0) must see an OpenNHP-named message
+    // and a GitHub-OAuth-only deploy (no Auth0) must see a GitHub-named message
     // rather than one led by "qURL OAuth (AUTH0_* configured)".
     const msg = baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: LOCALHOST }), false);
     expect(msg).not.toBeNull();
-    expect(msg).toMatch(/OpenNHP/);
+    expect(msg).toMatch(/GitHub OAuth/);
     expect(msg).not.toMatch(/qURL/);
     // Explicit http:// in OpenNHP mode is rejected too.
     expect(baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: 'http://x.example.com' }), true)).not.toBeNull();
   });
 
-  it('joins both surfaces in the message when OpenNHP and qURL OAuth are both active', () => {
+  it('joins both surfaces in the message when GitHub OAuth and qURL OAuth are both active', () => {
     // The only logic unique to both-true is the surfaces `.join(' and ')`;
     // assert the joined phrasing rather than substrings covered elsewhere.
     const msg = baseUrlHttpsProblem(
       cfg({ isOpenNHPActive: true, isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
       false,
     );
-    expect(msg).toMatch(/OpenNHP community features and the qURL guided setup flow/);
+    expect(msg).toMatch(/the GitHub OAuth flow and the qURL guided setup flow/);
   });
 
   // The non-consuming false-positive guard: a plain single-guild / multi-
