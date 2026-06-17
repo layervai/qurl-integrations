@@ -833,6 +833,58 @@ func splitTopLevelKeyword(s, keyword string) []string {
 	return out
 }
 
+func stripOuterParens(s string) string {
+	for {
+		s = strings.TrimSpace(s)
+		if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+			return s
+		}
+		depth := 0
+		enclosesWholeTerm := true
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				depth++
+			case ')':
+				if depth > 0 {
+					depth--
+				}
+				if depth == 0 && i != len(s)-1 {
+					enclosesWholeTerm = false
+				}
+			}
+			if !enclosesWholeTerm {
+				break
+			}
+		}
+		if !enclosesWholeTerm || depth != 0 {
+			return s
+		}
+		s = s[1 : len(s)-1]
+	}
+}
+
+func TestFakeDDBEvalConditionParenthesizedTopLevelOR(t *testing.T) {
+	item := map[string]ddbtypes.AttributeValue{
+		"count": &ddbtypes.AttributeValueMemberN{Value: "2"},
+	}
+	vals := map[string]ddbtypes.AttributeValue{
+		":one":   &ddbtypes.AttributeValueMemberN{Value: "1"},
+		":three": &ddbtypes.AttributeValueMemberN{Value: "3"},
+	}
+	names := map[string]string{
+		"#count": "count",
+	}
+
+	ok, err := evalCondition("(#count = :one) OR (#count < :three)", item, true, vals, names)
+	if err != nil {
+		t.Fatalf("evalCondition parenthesized OR: %v", err)
+	}
+	if !ok {
+		t.Fatal("evalCondition parenthesized OR = false, want true")
+	}
+}
+
 // evalCondition supports the exact ConditionExpression shapes the
 // production code emits: subexpressions joined by top-level " AND " plus the
 // simple top-level " OR " conditions used by optimistic writes. Mixed or nested
@@ -864,10 +916,7 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
-	inner := term
-	if strings.HasPrefix(inner, "(") && strings.HasSuffix(inner, ")") {
-		inner = strings.TrimSuffix(strings.TrimPrefix(inner, "("), ")")
-	}
+	inner := stripOuterParens(term)
 	if parts := splitTopLevelKeyword(inner, "OR"); len(parts) > 1 {
 		for _, part := range parts {
 			ok, err := evalConditionTerm(strings.TrimSpace(part), item, present, vals, names)
