@@ -100,14 +100,20 @@ describe('qURL client — getResourceStatus', () => {
     await expect(qurl.getResourceStatus('bad-id')).rejects.toThrow(/qURL API GET.*failed.*404/);
   });
 
-  it('throws on an unexpected 204 (a status read expects a body)', async () => {
-    // The pre-SDK client returned null here; the SDK treats a body-less GET as
-    // a contract violation and throws. A real status read always returns a body.
-    // Assert only that it rejects — not the SDK's internal message wording, and
-    // there's no src/ caller of this path to depend on the shape anyway.
+  it('re-wraps an unexpected 204 to a code-only error (status-0 redaction allowlist)', async () => {
+    // The pre-SDK client returned null here; the SDK treats a body-less GET as a
+    // contract violation (status 0, code `unexpected_response`). That code is
+    // NOT in SAFE_STATUS0_CODES, so callQurl re-wraps it to a code-only message
+    // and the SDK's own text never escapes — exercising the status-0 allowlist's
+    // re-wrap branch (the network-error test below exercises the verbatim branch).
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(204, undefined));
 
-    await expect(qurl.getResourceStatus('res-empty')).rejects.toThrow();
+    const thrown = await qurl.getResourceStatus('res-empty').then(
+      () => { throw new Error('expected rejection'); },
+      (e) => e,
+    );
+    expect(thrown.message).toMatch(/qURL API GET .*failed \(unexpected_response\)/);
+    expect(thrown.message).not.toMatch(/Unexpected 204|No Content/);
   });
 });
 

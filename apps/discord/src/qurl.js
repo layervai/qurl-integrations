@@ -1,4 +1,9 @@
-const { QURLClient } = require('@layervai/qurl');
+const {
+  QURLClient,
+  ERROR_CODE_NETWORK,
+  ERROR_CODE_TIMEOUT,
+  ERROR_CODE_CLIENT_VALIDATION,
+} = require('@layervai/qurl');
 const config = require('./config');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
@@ -28,6 +33,16 @@ const MAX_RETRIES = 2;
 // User-Agent the qURL service sees for the bot's calls. Preserved verbatim
 // across the SDK migration (a literal wire identifier — see CLAUDE.md).
 const USER_AGENT = 'qurl-discord-bot/1.0';
+
+// status-0 SDK error codes whose message the SDK synthesizes itself (no server
+// body) — the only status-0 errors callQurl surfaces verbatim. See its
+// REDACTION note: anything else at status 0 is re-wrapped, so the no-body-leak
+// invariant holds structurally rather than by trusting SDK internals.
+const SAFE_STATUS0_CODES = new Set([
+  ERROR_CODE_NETWORK,
+  ERROR_CODE_TIMEOUT,
+  ERROR_CODE_CLIENT_VALIDATION,
+]);
 
 // Construct a per-call SDK client. Per-call (not cached) because each call
 // carries its own apiKey (the bot is multi-tenant) and because these are rare
@@ -65,11 +80,13 @@ function makeClient(apiKey) {
  *     detail`, where `detail` is parsed from the server body (which can echo
  *     request headers or tokens). So for any positive status we log only status
  *     + code and re-throw a status-only Error (callers such as the revoke path
- *     log the thrown `.message`, so the body must not reach it). status-0 errors
- *     propagate unchanged: the SDK uses status 0 only for network / timeout /
- *     client-validation / unexpected-shape errors, whose messages it synthesizes
- *     itself (never from a server body), so they're safe to surface and more
- *     useful than a generic string. Pinned by tests/qurl-coverage.test.js.
+ *     log the thrown `.message`, so the body must not reach it). At status 0,
+ *     only SDK-synthesized, body-free errors (network / timeout / client-
+ *     validation — see SAFE_STATUS0_CODES) propagate verbatim; any other
+ *     status-0 error (e.g. an unexpected-response shape error that could embed a
+ *     body snippet) is re-wrapped to a code-only message, so the invariant holds
+ *     structurally rather than by trusting SDK internals. Pinned by
+ *     tests/qurl-coverage.test.js.
  */
 async function callQurl(method, path, fn) {
   try {
@@ -90,11 +107,17 @@ async function callQurl(method, path, fn) {
     }
     // A real HTTP status means the SDK error wraps a server response body — throw
     // a status-only error so that body can't leak through a caller that logs
-    // `err.message`. status 0 (no server body) propagates unchanged.
+    // `err.message`.
     if (status > 0) {
       throw new Error(`qURL API ${method} ${path} failed (${status})`);
     }
-    throw err;
+    // status 0: surface only SDK-synthesized, body-free errors verbatim;
+    // re-wrap anything else to a code-only message (defense-in-depth — the SDK
+    // doesn't embed bodies in status-0 messages today, but we don't rely on it).
+    if (err && SAFE_STATUS0_CODES.has(err.code)) {
+      throw err;
+    }
+    throw new Error(`qURL API ${method} ${path} failed (${err?.code || 'unknown error'})`);
   }
 }
 
