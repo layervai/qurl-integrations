@@ -1773,34 +1773,11 @@ async function touchRenderedAt(sendId) {
   }));
 }
 
-// Disarms the fast-path for this send by setting confirm_terminal, which
-// getSendRenderState reads into its derived `terminal` and PR-B checks
-// before editing. The flag ONLY gates the fast-path — it does not stop
-// the poll — so two DISTINCT lifecycle intents share it:
-//   (a) revoke / window-close / expired — display FROZEN, monitor.stop()
-//       already called, poll halted; the flag stops a late webhook from
-//       resurrecting a live-looking "👀 N viewed" counter.
-//   (b) mid-life /qurl add degrade — display still ALIVE, monitor still
-//       polling BARE baseMsg; the flag only disarms the fast-path (which
-//       can't see the degrade) so it won't stamp a partial-attribution
-//       counter, leaving the bare poll render as the sole renderer.
-// Both want "fast-path hands off", so one flag is correct — but note that
-// "terminal" reading as "alive but hands-off" in case (b) is a latent
-// trip-hazard. The intents are NOT fully separable at rest: only REVOKE
-// sets revoked_at, so revoked_at distinguishes revoke from {window-close,
-// degrade} — but window-close (display FROZEN) and degrade (display
-// ALIVE) are indistinguishable on the row (both set confirm_terminal
-// alone; the frozen-vs-alive fact lives only in whether monitor.stop()
-// ran, in-memory on one replica). Anything NEW that needs the display-
-// liveness axis must add its own signal, not infer it from this flag.
-// (Follow-up: rename this column to confirm_fast_path_off — the mechanism
-// it actually gates — so no future reader infers liveness from
-// "terminal"; deferred because sandbox rows already carry confirm_terminal
-// and a rename needs a read-both-write-new migration, out of scope here.)
-// Idempotent SET (no condition): re-running just re-writes `true`, and
-// there's no value to guard against — unlike the markExpired/Consumed
-// markers this isn't an at-most-once edit claim, just a sticky
-// kill-switch.
+// Sticky fast-path kill-switch. Revoke/window-close use it for frozen
+// displays; mid-life /qurl add degrade uses it for an alive-but-bare poll
+// display. New code that needs display liveness must add its own signal,
+// not infer it from confirm_terminal. Follow-up #875 renames this to the
+// mechanism it actually gates: confirm_fast_path_off.
 async function markConfirmTerminal(sendId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_send_configs,

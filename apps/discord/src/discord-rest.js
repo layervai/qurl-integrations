@@ -261,29 +261,10 @@ async function editInteractionReply(applicationId, token, payload) {
     // anomaly; the counter just freezes, which the monitor cap already
     // accepts.
     const expired = err.code === 10015 || err.code === 50027 || err.status === 401 || err.status === 404;
-    // TOKEN-LEAK DEFENSE. The token lives in the request URL path
-    // (/webhooks/{appId}/{token}/messages/@original). @discordjs/rest's
-    // DiscordAPIError.message is the API error string and HTTPError.message
-    // is the HTTP statusText — both URL-free — but on a LOW-LEVEL NETWORK
-    // throw (undici/fetch failing before a response) the raw error is
-    // re-thrown verbatim (rest/index.js makeNetworkRequest `throw error`),
-    // and some failure modes embed the request URL in `.message`. Since
-    // `token` is a live bearer cred (the operator's explicit constraint:
-    // treat like a secret), don't trust the message to be URL-free across
-    // every reachable error class: scrub any token occurrence before
-    // logging, and never log `err.url`/`err.stack` (which carry it
-    // verbatim). DiscordAPIError/HTTPError messages contain no token so
-    // this is a no-op on the common paths; it only bites the network throw.
-    // Scrub BOTH the raw token and its percent-encoded form: undici may
-    // surface the request URL (where the token can appear encoded) in
-    // .message on the network-throw path. Interaction tokens are URL-safe
-    // so the two forms are usually identical, but encoding the second
-    // pass is free belt-and-suspenders for a flagged credential.
-    // `token &&` (hoisted once) guards the degenerate empty-token case:
-    // ''.split('') would explode the message char-by-char. Unreachable
-    // today (the fast-path's absent-guard requires a non-empty token
-    // before this is called), but cheap defense. The DOUBLE pass (raw +
-    // percent-encoded) stays: undici can surface either form of the URL.
+    // TOKEN-LEAK DEFENSE. Low-level network errors can include the
+    // webhook URL path, which contains the live interaction token. Scrub
+    // raw and percent-encoded forms before logging, and never log err.url
+    // or err.stack.
     let safeMessage = typeof err.message === 'string' ? err.message : undefined;
     if (safeMessage !== undefined && token) {
       safeMessage = safeMessage.split(token).join('[redacted-token]');

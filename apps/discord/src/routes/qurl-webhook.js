@@ -615,9 +615,12 @@ function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = fal
 
 // COALESCING (step 4b): the fast-path is leading-edge-debounced per send
 // (~1 edit per QURL_VIEW_COUNTER_COALESCE_MS per replica) so a high-fan-
-// out send can't storm Discord's per-message edit budget or hot-write the
-// config row. The gate is the PRIMARY coalescer — it collapses a burst to
-// roughly the replica count's worth of edits per window, flat in fan-out.
+// out send can't storm Discord's per-message edit budget. The gate is the
+// PRIMARY edit coalescer: it collapses a burst to roughly the replica
+// count's worth of edits per window, flat in fan-out. It does not bound
+// viewed_count writes; those remain one DDB UpdateItem per distinct first
+// view so the render path can stay O(1). If that hot item throttles, the
+// fast-path skips and the poll backstop renders from qurl_view rows.
 // It is NOT a hard "no 429 by construction" guarantee, though: the gate
 // reads an eventually-consistent last_rendered_at via a plain GetItem, and
 // in the read→edit→commit window a leader's stamp is genuinely unwritten,
@@ -686,28 +689,26 @@ function editSenderCounterInBackground({
 
       let viewedCount = state.viewedCount;
       if (firstView) {
-        viewedCount = await db.incrementSendViewedCount(sendId, state.lastRenderedCount);
+        try {
+          viewedCount = await db.incrementSendViewedCount(sendId, state.lastRenderedCount);
+        } catch (err) {
+          logger.warn('qURL webhook sender-counter: aggregate increment failed; poll backstop will count qurl views', {
+            qurl_id: qurlId, send_id: sendId, error: err?.message,
+          });
+          return { status: 'aggregate-update-error' };
+        }
       }
 
       // 4b. COALESCE (leading-edge debounce). A high-fan-out send (cap
       //    QURL_SEND_MAX_RECIPIENTS, default 20000) fires one
       //    qurl.accessed per recipient's first view; un-coalesced each
-      //    would PATCH this confirmation, storming Discord's per-message
-      //    edit budget (429s) and hot-writing the config row. Skip the
-      //    edit if the last CONFIRMED edit (state.lastRenderedAt, epoch
-      //    MS, advanced only after a successful PATCH in step 8) is
-      //    younger than the cooldown. This caps fast-path edits to ~1 per
-      //    window per replica — flat in fan-out (M autoscaled replicas can
-      //    each fire one stale-read edit per window, so ~M/window worst
-      //    case, still far under Discord's edit rate). Placed before the
+      //    would PATCH this confirmation. Skip the edit if the last
+      //    CONFIRMED edit is younger than the cooldown. Placed before the
       //    legacy getQurlViews fallback so normal coalesced events stay
-      //    O(1): a first distinct view has already advanced viewed_count
-      //    above, and the delayed flush below reads that aggregate instead
-      //    of walking every qurl_id. Leading-edge keeps the counter visibly
-      //    live (first view renders immediately); the scheduled trailing
-      //    flush renders rapid followers inside the same sub-second window.
-      //    lastRenderedAt === 0 (never edited) is always older than the
-      //    window, so the first edit is never debounced.
+      //    O(1): a first distinct view already advanced viewed_count
+      //    above, and the delayed flush reads that aggregate. Leading-edge
+      //    keeps the counter visibly live; the trailing flush renders
+      //    rapid followers inside the same sub-second window.
       const sinceLastEditMs = Date.now() - state.lastRenderedAt;
       if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
         const pendingCount = typeof viewedCount === 'number' ? viewedCount : state.lastRenderedCount;

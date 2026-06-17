@@ -346,6 +346,23 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
     expect(mockGetSendItems).not.toHaveBeenCalled();
   });
 
+  it('aggregate increment throttle skips the fast-path and leaves the poll backstop to count qurl views', async () => {
+    mockIncrementSendViewedCount.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: aggregate increment failed; poll backstop will count qurl views',
+      expect.objectContaining({ qurl_id: QURL_ID, send_id: SEND_ID }),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      VERDICT_MSG,
+      expect.objectContaining({ qurl_id: QURL_ID, status: 'aggregate-update-error' }),
+    );
+  });
+
   it('legacy fallback: uses getSendItems/getQurlViews when viewed_count and qurl_ids are absent', async () => {
     mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     mockGetSendRenderState.mockResolvedValue(armedState({ viewedCount: null, qurlIds: [] }));
