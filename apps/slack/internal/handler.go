@@ -1548,14 +1548,14 @@ func setupModeFlag(mode oauth.SetupMode) string {
 }
 
 // setupModeAction is the user-facing verb for an explicit setup mode, for copy.
-//
-//nolint:exhaustive // default maps SetupModeReuse and the empty mode to the plain "setup" verb.
 func setupModeAction(mode oauth.SetupMode) string {
 	switch mode {
 	case oauth.SetupModeRotate:
 		return "key rotation"
 	case oauth.SetupModeRepoint:
 		return "key repoint"
+	case oauth.SetupModeReuse:
+		return "setup"
 	default:
 		return "setup"
 	}
