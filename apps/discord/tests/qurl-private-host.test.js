@@ -17,7 +17,7 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-const { createOneTimeLink } = require('../src/qurl');
+const { createOneTimeLink, isPrivateHost } = require('../src/qurl');
 
 async function expectBlocked(url) {
   await expect(createOneTimeLink(url, '1h', 'test', 'key'))
@@ -68,4 +68,25 @@ describe('createOneTimeLink SSRF / private-host blocklist', () => {
     await expectBlocked('http://[fd00::1]/x');
   });
 
+});
+
+// isPrivateHost is now exported (consumed by connector.js's detect-tunnel SSRF
+// guard as well as createOneTimeLink), so pin its prefix logic directly. The
+// fc/fd ULA check must NOT misclassify a public DNS name that merely starts
+// with those letters — a false positive there would silently break /qurl detect
+// (the tunnel target comes from qURL infra, not user input).
+describe('isPrivateHost — IPv6 ULA prefix vs. public DNS', () => {
+  it('classifies real IPv6 ULA / link-local literals as private', () => {
+    expect(isPrivateHost('fd00::1')).toBe(true);   // unique-local
+    expect(isPrivateHost('fc00::1')).toBe(true);   // unique-local
+    expect(isPrivateHost('fe80::1')).toBe(true);   // link-local
+  });
+
+  it('does NOT misclassify public DNS names starting with fc/fd as private', () => {
+    // No colon ⇒ a hostname, not an IPv6 ULA literal. Pre-fix these were
+    // falsely blocked by the bare `startsWith('fc'|'fd')` check.
+    expect(isPrivateHost('fd-detect.qurl.link')).toBe(false);
+    expect(isPrivateHost('fcdn.example.com')).toBe(false);
+    expect(isPrivateHost('detect-tunnel.qurl.link')).toBe(false);
+  });
 });

@@ -813,5 +813,34 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(mockResolve).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
     });
+
+    it('throws "unparseable target URL" when resolve() returns no target_url, and does NOT POST', async () => {
+      // A resolve() success envelope missing target_url (e.g. {} or {resource_id}
+      // only): assertPublicHttpsTarget(undefined) → new URL(undefined) throws →
+      // caught → the graceful "unparseable target URL". Pins that a future shape
+      // change (or a different destructure) can't silently POST to undefined.
+      mockResolve.mockResolvedValue({ resource_id: 'res_detect' });
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/unparseable target URL/);
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('propagates a resolve() failure (knock/transport) and does NOT POST', async () => {
+      // A resolve() rejection — the knock or transport failing after the SDK's
+      // own retries — propagates to the handler (intended); crucially NO POST is
+      // attempted, so a failed knock never leaks an un-knocked request.
+      mockResolve.mockRejectedValue(new Error('resolve transport failure'));
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/resolve transport failure/);
+      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
   });
 });
