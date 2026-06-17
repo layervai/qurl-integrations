@@ -76,6 +76,8 @@ http {
         # this origin replaces. Set at server scope (no child context adds its
         # own header, so these are inherited everywhere) with `always` so they
         # apply to 404/405/5xx responses too.
+        # nginx drops inherited add_header values if a child location defines
+        # any add_header; behavior_test.sh asserts this set across statuses.
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
@@ -115,6 +117,7 @@ http {
             ${CACHE_FALLBACK_DIRECTIVE}
             proxy_cache_revalidate on;
             proxy_cache_lock on;
+            proxy_cache_lock_timeout 30s;
             proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
             proxy_cache_background_update on;
             # Honor object Cache-Control/Expires for TTL; ignore Set-Cookie/Vary.

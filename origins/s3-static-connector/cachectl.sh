@@ -12,7 +12,7 @@ CACHE_KEY_PROXY_HOST="${CACHE_KEY_PROXY_HOST:-envoy_upstream}"
 INDEX_DOCUMENT="${INDEX_DOCUMENT:-index.html}"
 S3_PREFIX="${S3_PREFIX:-}"
 CACHE_CONNECTOR_ID="${CACHE_CONNECTOR_ID:-${QURL_CONNECTOR_ID:-}}"
-CACHE_REPLICA_ID="${CACHE_REPLICA_ID:-$(hostname 2>/dev/null || true)}"
+CACHE_REPLICA_ID="${CACHE_REPLICA_ID:-}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -60,13 +60,22 @@ json_escape() {
   '
 }
 
+cache_replica_id() {
+  if [ -n "$CACHE_REPLICA_ID" ]; then
+    printf '%s' "$CACHE_REPLICA_ID"
+    return
+  fi
+  hostname 2>/dev/null || true
+}
+
 json_common_fields() {
+  replica_id="$(cache_replica_id)"
   printf ',"cache_dir":"%s"' "$(json_escape "$CACHE_DIR")"
   if [ -n "$CACHE_CONNECTOR_ID" ]; then
     printf ',"connector_id":"%s"' "$(json_escape "$CACHE_CONNECTOR_ID")"
   fi
-  if [ -n "$CACHE_REPLICA_ID" ]; then
-    printf ',"replica_id":"%s"' "$(json_escape "$CACHE_REPLICA_ID")"
+  if [ -n "$replica_id" ]; then
+    printf ',"replica_id":"%s"' "$(json_escape "$replica_id")"
   fi
 }
 

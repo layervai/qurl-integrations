@@ -114,7 +114,8 @@ jobs:
 
       # The PR test job's loaded images are intentionally throwaway. Publishing
       # builds a fresh multi-arch candidate, then tests that exact digest before
-      # promoting tags.
+      # promoting tags. Failed candidates remain unpromoted by digest only;
+      # cleanup is package-retention housekeeping, not deploy state.
       - name: Build candidate image
         id: candidate
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0

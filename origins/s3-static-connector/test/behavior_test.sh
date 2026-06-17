@@ -44,7 +44,8 @@ fi
 
 # The live stub path below renders plaintext S3 so it can run locally without
 # AWS. Validate the real TLS render path separately so Envoy schema changes
-# (including SAN verification) are caught on every supported architecture.
+# (including host_rewrite/SAN verification) are caught on every supported
+# architecture and on pinned Envoy base bumps.
 docker run --rm --platform "$PLATFORM" --entrypoint sh \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
   "$IMG" -c 'set -eu; envoy --version >/dev/null; RENDER_DIR=/tmp/rendered render.sh; envoy --mode validate -c /tmp/rendered/envoy.yaml >/dev/null'
