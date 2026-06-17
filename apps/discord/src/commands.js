@@ -185,10 +185,11 @@ let _warnedShortLegacyStateSecret = false;
 // GITHUB_OAUTH_STATE_SECRET explicitly in their own mocks.
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
-function warnShortLegacyStateSecret(label) {
+function warnShortLegacyStateSecret(label, length) {
   if (!_warnedShortLegacyStateSecret) {
     logger.warn(
-      `Ignoring ${label} for GitHub OAuth state: secret is too short while a dedicated secret is active.`
+      `Ignoring ${label} for GitHub OAuth state: secret is too short `
+      + `(got ${length}) while a dedicated secret is active.`
     );
     _warnedShortLegacyStateSecret = true;
   }

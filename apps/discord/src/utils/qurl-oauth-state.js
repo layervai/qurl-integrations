@@ -62,12 +62,13 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 // `0`.repeat(64) test fixture's order of magnitude, well below the
 // 128-char hex secrets ops actually provisions). A 4-char accidental
 // value would HMAC just fine with no security; reject upfront.
-function warnShortLegacySecret(label) {
+function warnShortLegacySecret(label, length) {
   if (!_warnedShortLegacy) {
     // Keep this utility logger-free; commands.js imports it during module load.
     // eslint-disable-next-line no-console
     console.warn(
-      `Ignoring ${label} for qURL OAuth state: secret is too short while a dedicated secret is active.`
+      `Ignoring ${label} for qURL OAuth state: secret is too short `
+      + `(got ${length}) while a dedicated secret is active.`
     );
     _warnedShortLegacy = true;
   }
