@@ -97,6 +97,8 @@ const STORE_METHODS = Object.freeze([
   'findSendsByQurlId',
   'markExpiredDMEdited',
   'clearExpiredDMEdited',
+  'markConsumedDMEdited',
+  'clearConsumedDMEdited',
 
   // QURL views (webhook-fed view counter)
   'recordQurlView',

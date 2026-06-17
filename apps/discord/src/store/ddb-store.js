@@ -1273,6 +1273,59 @@ async function clearExpiredDMEdited(sendId, recipientDiscordId) {
   }));
 }
 
+// Idempotency marker for the qurl.accessed consumed-flip DM-edit path.
+// Separate attribute from expired_edited_at by design: the two flips can
+// both legitimately reach the same row (a one-time qURL is consumed,
+// THEN its 30m TTL elapses and qurl-service still emits qurl.expired —
+// see the EventQurlExpired contract, "fires regardless of prior state").
+// Distinct markers let each path short-circuit its own redelivery
+// without one suppressing the other, and let the expired handler detect
+// "consumed already flipped the DM" via a cheap read of this attribute
+// off the row it already fetched (findSendsByQurlId projects ALL).
+//
+// Same conditional-UpdateItem-on-attribute_not_exists shape as
+// markExpiredDMEdited: first call wins, repeats throw
+// ConditionalCheckFailedException which the caller reads as
+// "already flipped, skip the DM PATCH". Returns true on first-flip,
+// false if already-flipped.
+async function markConsumedDMEdited(sendId, recipientDiscordId) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      UpdateExpression: 'SET consumed_edited_at = :t',
+      ConditionExpression: 'attribute_not_exists(consumed_edited_at)',
+      ExpressionAttributeValues: { ':t': nowIso() },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+// Rollback of the consumed-flip marker — counterpart to
+// clearExpiredDMEdited. Only called when editDM reported a TRANSIENT
+// failure on the consumed-flip path: rolling the marker back lets a
+// REDELIVERED qurl.accessed (or, failing that, the eventual
+// qurl.expired backstop — which skips when consumed_edited_at is set)
+// re-attempt the flip. On a PERMANENT failure (recipient blocked the
+// bot / deleted the DM) the marker MUST stay so a redelivery
+// short-circuits.
+//
+// Best-effort, same contract as clearExpiredDMEdited: a throw here isn't
+// a control-flow signal — it means the marker stays, the redelivery (or
+// expired backstop) sees it and skips, and the missed flip falls back to
+// the qurl.expired edit only if THAT path's marker is also clear. We
+// surface the throw so the caller can log it.
+async function clearConsumedDMEdited(sendId, recipientDiscordId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_sends,
+    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+    UpdateExpression: 'REMOVE consumed_edited_at',
+  }));
+}
+
 // Sender-revoke check for the qurl.expired handler. A send whose
 // sender ran /qurl revoke has its DM already edited to "Alice closed
 // the door" — re-editing to "Closed N ago" would overwrite that copy
@@ -2022,6 +2075,7 @@ module.exports = {
   getRecentSends, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
+  markConsumedDMEdited, clearConsumedDMEdited,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs
