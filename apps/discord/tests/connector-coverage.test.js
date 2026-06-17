@@ -16,11 +16,11 @@ jest.mock('../src/logger', () => ({
 // flow can be driven without a real /v1/resolve round-trip. `mockResolve` is a
 // shared jest.fn the detect tests configure per case (returns {target_url} or
 // throws). The `mock`-prefix lets the factory reference it past jest's hoist.
-// Only resolveDetectTarget() constructs a QurlClient (lazily), so the upload /
+// Only resolveDetectTarget() constructs a QURLClient (lazily), so the upload /
 // mint describes never touch this — they don't reach the detect path.
 const mockResolve = jest.fn();
 jest.mock('@layervai/qurl', () => ({
-  QurlClient: jest.fn().mockImplementation(() => ({ resolve: mockResolve })),
+  QURLClient: jest.fn().mockImplementation(() => ({ resolve: mockResolve })),
 }));
 
 const originalFetch = globalThis.fetch;

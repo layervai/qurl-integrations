@@ -1,4 +1,4 @@
-const { QurlClient } = require('@layervai/qurl');
+const { QURLClient } = require('@layervai/qurl');
 
 const config = require('./config');
 const logger = require('./logger');
@@ -430,8 +430,8 @@ let _qurlClient = null;
 function getQurlClient() {
   if (!_qurlClient) {
     // baseUrl is the bare qURL API base (no `/v1`) — the SDK prepends
-    // `/v1/resolve` itself. Same base qurl.js uses for qurlFetch
-    // (`${config.QURL_ENDPOINT}/v1${path}`).
+    // `/v1/resolve` itself. Same base the bot's other qurl.js qURL calls use
+    // (config.QURL_ENDPOINT, with `/v1` appended per request).
     //
     // timeout / maxRetries: explicitly bound and harden the resolve()
     // control-plane call. The SDK already defaults to timeout 30s/attempt and
@@ -440,12 +440,12 @@ function getQurlClient() {
     //   - timeout bounds a stalled qURL endpoint so it degrades like the detect
     //     POST's AbortSignal.timeout instead of hanging with no upper bound.
     //   - maxRetries gives resolve the same transient-failure resilience that
-    //     qurlFetch's 3-attempt backoff gives the other qURL calls, so a single
+    //     qurl.js's retry budget gives the other qURL calls, so a single
     //     blip doesn't fail the whole detect interaction.
     // resolve() is a fast knock+lookup, so 30s sits well under the POST's 60s;
     // the retry worst case is timeout*(maxRetries+1)+backoff, still inside
     // Discord's 15-min deferred-interaction window.
-    _qurlClient = new QurlClient({
+    _qurlClient = new QURLClient({
       apiKey: config.QURL_API_KEY,
       baseUrl: config.QURL_ENDPOINT,
       timeout: 30000,
@@ -501,7 +501,7 @@ function assertPublicHttpsTarget(targetUrl) {
 /**
  * Resolve the qURL reverse-tunnel target for the watermark-detect endpoint.
  *
- * Calls `QurlClient.resolve({ access_token: config.DETECT_ACCESS_TOKEN })`,
+ * Calls `QURLClient.resolve({ access_token: config.DETECT_ACCESS_TOKEN })`,
  * which (per the SDK) triggers an NHP knock granting network access for the
  * CALLER'S CURRENT IP, then returns the `target_url` to POST the image to.
  * The caller MUST POST within the knock window from the same IP — hence this

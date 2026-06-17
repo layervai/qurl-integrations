@@ -433,7 +433,7 @@ module.exports = {
 
   // Multi-use qURL access token (`at_...`) the bot resolves to reach the
   // watermark-detect endpoint over the qURL reverse-tunnel (PR-3, #1101).
-  // connector.js's resolveDetectTarget() calls QurlClient.resolve({
+  // connector.js's resolveDetectTarget() calls QURLClient.resolve({
   // access_token: DETECT_ACCESS_TOKEN }) — which issues an NHP knock for the
   // bot's current IP — immediately before each /api/detect POST. Secret-
   // shaped (read verbatim from env like QURL_API_KEY / QURL_WEBHOOK_SECRET);
