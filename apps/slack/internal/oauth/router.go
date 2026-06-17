@@ -375,13 +375,18 @@ var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API surface friction.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
+	registerRoutes(mux, cfg, defaultOAuthRateLimiter)
+}
+
+//nolint:gocritic // hugeParam: see RegisterRoutes.
+func registerRoutes(mux *http.ServeMux, cfg Config, limiter *oauthRateLimiter) {
 	if err := cfg.Validate(); err != nil {
 		panic("oauth.RegisterRoutes: " + err.Error())
 	}
-	mux.Handle(StartPath, http.TimeoutHandler(
-		Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
-	mux.Handle(callbackPath, http.TimeoutHandler(
-		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
+	mux.Handle(StartPath, rateLimitOAuth(limiter, http.TimeoutHandler(
+		Start(cfg), oauthHandlerTimeout, "oauth/start timed out")))
+	mux.Handle(callbackPath, rateLimitOAuth(limiter, http.TimeoutHandler(
+		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out")))
 }
 
 // Validate checks the cross-field invariants that the callback's
