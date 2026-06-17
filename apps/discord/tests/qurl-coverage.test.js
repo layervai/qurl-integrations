@@ -103,9 +103,11 @@ describe('qURL client — getResourceStatus', () => {
   it('throws on an unexpected 204 (a status read expects a body)', async () => {
     // The pre-SDK client returned null here; the SDK treats a body-less GET as
     // a contract violation and throws. A real status read always returns a body.
+    // Assert only that it rejects — not the SDK's internal message wording, and
+    // there's no src/ caller of this path to depend on the shape anyway.
     globalThis.fetch = jest.fn().mockResolvedValue(apiOk(204, undefined));
 
-    await expect(qurl.getResourceStatus('res-empty')).rejects.toThrow(/204|Unexpected/);
+    await expect(qurl.getResourceStatus('res-empty')).rejects.toThrow();
   });
 });
 
@@ -279,6 +281,17 @@ describe('qURL client — retry + audit behavior', () => {
       .mockResolvedValueOnce(apiOk(200, {}));
     await qurl.getResourceStatus('res-429');
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does NOT retry GET on 500 or 408 (SDK narrows the retry set)', async () => {
+    // The pre-SDK client retried {408, 429, 500, 502, 503, 504}; the SDK's
+    // non-mutating set is {429, 502, 503, 504}, so 500 and 408 are attempted
+    // exactly once. Pins the narrowing alongside the 503/429 retried-set tests.
+    for (const status of [500, 408]) {
+      globalThis.fetch = jest.fn().mockResolvedValue(apiError(status));
+      await expect(qurl.getResourceStatus(`res-${status}`)).rejects.toThrow(new RegExp(String(status)));
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('retries DELETE on 503 then succeeds (revoke shares the GET/DELETE retry budget)', async () => {

@@ -60,14 +60,16 @@ function makeClient(apiKey) {
  *     {429, 502, 503, 504}), so this fires once per request, not once per
  *     attempt. If that ever changes, the audit count would multiply on a single
  *     auth failure. Pinned by tests/qurl-coverage.test.js.
- *   - REDACTION: never let a qURL error body escape this module. The SDK's
- *     QURLError.message is `Title (status): detail`, and `detail` can echo
- *     request headers or tokens — so on a real HTTP-status failure we log only
- *     status + code and re-throw a status-only Error (callers such as the revoke
- *     path log the thrown `.message`, so the body must not reach it). status-0
- *     errors (network / timeout / client-validation) carry no server body, so
- *     they propagate unchanged — their message is transport/SDK text and is
- *     useful. Pinned by tests/qurl-coverage.test.js.
+ *   - REDACTION: never let a qURL error body escape this module. On an
+ *     HTTP-status failure the SDK's `QURLError.message` is `Title (status):
+ *     detail`, where `detail` is parsed from the server body (which can echo
+ *     request headers or tokens). So for any positive status we log only status
+ *     + code and re-throw a status-only Error (callers such as the revoke path
+ *     log the thrown `.message`, so the body must not reach it). status-0 errors
+ *     propagate unchanged: the SDK uses status 0 only for network / timeout /
+ *     client-validation / unexpected-shape errors, whose messages it synthesizes
+ *     itself (never from a server body), so they're safe to surface and more
+ *     useful than a generic string. Pinned by tests/qurl-coverage.test.js.
  */
 async function callQurl(method, path, fn) {
   try {
@@ -75,9 +77,9 @@ async function callQurl(method, path, fn) {
   } catch (err) {
     // The SDK uses status 0 for its client-side validation / network / timeout
     // errors; a positive status is a real HTTP status from the API.
-    const status = Number.isInteger(err && err.status) ? err.status : 0;
+    const status = Number.isInteger(err?.status) ? err.status : 0;
     // Redaction: status + error code only — never err.message / err.detail.
-    logger.debug('qURL API error', { method, path, status, code: err && err.code });
+    logger.debug('qURL API error', { method, path, status, code: err?.code });
     if (status === 401 || status === 403) {
       logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
         dependency: 'qurl_service',
