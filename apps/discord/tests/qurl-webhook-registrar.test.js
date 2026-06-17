@@ -1033,6 +1033,343 @@ describe('ensureWebhookSubscription — ownerId return field (per-guild receiver
   });
 });
 
+describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host sweep before create)', () => {
+  // Symptom motivating this block: sandbox `base_url` rename from
+  // `discord.layerv.xyz` → `discord.connector.layerv.xyz` left an
+  // orphan sub (wh_s6wOhbKLPYSk--Jv) alive forever. qurl-service
+  // kept delivering to the old host (DNS still resolved to the same
+  // ALB) and every delivery failed sig-verification at the bot.
+  //
+  // The sweep runs ONLY when findExistingSubscriptions(newUrl) returned
+  // empty (i.e. the create-fresh branch) and matches on a stable
+  // description prefix. Description-prefix safety keeps sibling-service
+  // subs (e.g. qurl-s3-connector) out of the deletion set even though
+  // they share owner_id with the bot under today's bot-API-key-shared
+  // model (see project_qurl_api_key_blast_radius).
+  const NEW_URL = 'https://discord.connector.layerv.xyz/webhooks/qurl';
+  const OLD_URL = 'https://discord.layerv.xyz/webhooks/qurl';
+  const BOT_DESC = 'Discord bot view counter (region=us-east-2, env=sandbox)';
+  const BOT_OPTS = { ...BASE_OPTS, bridgeUrl: NEW_URL, description: BOT_DESC };
+
+  it('deletes a cross-host orphan with matching description before creating fresh at the new URL', async () => {
+    let orphanDeleted = false;
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        // Cross-host, same path, matching description prefix → orphan.
+        {
+          webhook_id: 'wh_orphan',
+          url: OLD_URL,
+          description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
+          events: ['qurl.accessed', 'qurl.expired'],
+          failure_count: 1475,
+          last_delivery_success: false,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_orphan': () => { orphanDeleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => {
+        createCalled = true;
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(orphanDeleted).toBe(true);
+    expect(createCalled).toBe(true);
+    expect(result.action).toBe('created');
+    expect(result.webhookId).toBe('wh_new');
+  });
+
+  it('does NOT delete a cross-host sub with a DIFFERENT description (sibling-service safety)', async () => {
+    // The bot's QURL_API_KEY today provisions BOTH the view-counter sub
+    // (this bot) AND sibling-service subs (e.g. qurl-s3-connector's
+    // `resource.closed` subscription). They share owner_id. The
+    // description-prefix filter is the load-bearing safety that keeps
+    // the orphan sweep from deleting them.
+    let connectorDeleted = false;
+    let createCalled = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_connector',
+          url: 'https://s3-connector.layerv.xyz/webhooks/qurl', // different host, same path
+          description: 'qurl-s3-connector resource.closed subscription',
+          events: ['qurl.accessed'],
+          failure_count: 0,
+          last_delivery_success: true,
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_connector': () => { connectorDeleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => {
+        createCalled = true;
+        return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(connectorDeleted).toBe(false); // critical: connector sub untouched
+    expect(createCalled).toBe(true);
+    expect(result.action).toBe('created');
+  });
+
+  it('does NOT touch other-host subs when an existing sub is found at the new URL (no migration in progress)', async () => {
+    // Existence at the requested URL means we're in the normal find-or-
+    // update path, not a migration. Skip the orphan sweep entirely —
+    // a cross-host sub at that point is intentional dual-host config or
+    // a co-existing legacy sub the operator deliberately retained, not
+    // something for this code path to garbage-collect.
+    let deleted = false;
+    let secretEndpointHit = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        // Match at the new URL (with matching description) — reuse path.
+        {
+          webhook_id: 'wh_current',
+          url: NEW_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+          owner_id: 'auth0|bot',
+        },
+        // Cross-host, matching description — WOULD be a sweep target,
+        // but the sweep must not run since a current-URL match exists.
+        {
+          webhook_id: 'wh_other_host',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_other_host': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks/wh_current/secret': () => {
+        secretEndpointHit = true;
+        return { body: { data: { webhook_id: 'wh_current', secret: 'whsec_rot' } } };
+      },
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false); // sweep did not run
+    expect(secretEndpointHit).toBe(true); // normal rotate path ran
+    expect(result.webhookId).toBe('wh_current');
+  });
+
+  it('continues with create when a DELETE fails (5xx) so the bot still registers; next run retries the orphan', async () => {
+    // Load-bearing failure semantics: blocking the create on a stale-
+    // orphan DELETE failure would leave the bot UN-registered AND
+    // orphaned — strictly worse than the orphan-only state we started
+    // in. Log + continue + create.
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let createCalled = false;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_orphan_5xx',
+            url: OLD_URL,
+            description: BOT_DESC,
+            events: ['qurl.accessed', 'qurl.expired'],
+          },
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan_5xx': () => ({ status: 503, body: { error: 'transient' } }),
+        'POST /v1/webhooks': () => {
+          createCalled = true;
+          return { status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } };
+        },
+      });
+      const result = await ensureWebhookSubscription(BOT_OPTS);
+      expect(createCalled).toBe(true);
+      expect(result.action).toBe('created');
+      expect(result.webhookId).toBe('wh_new');
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('URL-migration orphan delete failed'));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('treats DELETE 404 as success (concurrent cleanup by another invocation)', async () => {
+    // 404 propagates through deleteSubscription as a no-throw. Two
+    // Lambdas running concurrently (rare; reserved-concurrency=1 in
+    // infra but defense-in-depth) must not crash the sweep.
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_already_gone',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(result.action).toBe('created');
+    expect(result.webhookId).toBe('wh_new');
+  });
+
+  it('does NOT touch same-host subs at a DIFFERENT path (path filter)', async () => {
+    // A bot rev that ever served `/webhooks/qurl/v2` (hypothetical)
+    // could collide here. Pin that the path filter excludes any sub
+    // whose pathname differs from the new bridge URL's pathname.
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        {
+          webhook_id: 'wh_other_path',
+          url: 'https://example.test/webhooks/something-else',
+          description: BOT_DESC, // same prefix
+          events: ['qurl.accessed'],
+        },
+      ] } }),
+      'DELETE /v1/webhooks/wh_other_path': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deleted).toBe(false);
+    expect(result.action).toBe('created');
+  });
+
+  it('logs each deletion at INFO with old_url + webhook_id + description + failure_count + last_delivery_success', async () => {
+    // The runbook-grep contract for "what got cleaned up" — pin the
+    // field set so a future log-shape regression surfaces here. The
+    // logger emits `[ts] INFO: <msg> <json-of-meta>` via console.log,
+    // so we capture console.log and parse the meta JSON tail.
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_orphan_log',
+            url: OLD_URL,
+            description: BOT_DESC,
+            events: ['qurl.accessed', 'qurl.expired'],
+            failure_count: 99,
+            last_delivery_success: false,
+          },
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan_log': () => ({ status: 204, body: '' }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      const orphanLine = logSpy.mock.calls
+        .map(c => c[0])
+        .find(line => typeof line === 'string' && line.includes('URL-migration orphan deleted'));
+      expect(orphanLine).toBeDefined();
+      // Pull the JSON meta off the end of the formatted line and verify
+      // every required field is present with the expected value.
+      const jsonStart = orphanLine.indexOf('{');
+      const meta = JSON.parse(orphanLine.slice(jsonStart));
+      expect(meta).toMatchObject({
+        old_url: OLD_URL,
+        webhook_id: 'wh_orphan_log',
+        description: BOT_DESC,
+        failure_count: 99,
+        last_delivery_success: false,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('paginates through orphan candidates (cursor walk on the sweep list, same as findExistingSubscriptions)', async () => {
+    // Sweep uses the same list endpoint; if the bot's owner_id has many
+    // subs, the orphan could be on page 2+. Pin the cursor walk.
+    let deletedIds = [];
+    mockFetchResponses({
+      'GET /v1/webhooks?limit=100': () => ({ body: {
+        data: [{ webhook_id: 'wh_unrelated', url: 'https://other.example/hook', description: 'other service', events: [] }],
+        meta: { next_cursor: 'page2', has_more: true },
+      } }),
+      'GET /v1/webhooks?cursor=page2&limit=100': () => ({ body: {
+        data: [{
+          webhook_id: 'wh_orphan_paged',
+          url: OLD_URL,
+          description: BOT_DESC,
+          events: ['qurl.accessed', 'qurl.expired'],
+        }],
+        meta: { next_cursor: '', has_more: false },
+      } }),
+      'DELETE /v1/webhooks/wh_orphan_paged': () => { deletedIds.push('wh_orphan_paged'); return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deletedIds).toEqual(['wh_orphan_paged']);
+    expect(result.action).toBe('created');
+  });
+
+  it('deletes MULTIPLE cross-host orphans (multi-rename history) before create', async () => {
+    // Two sequential renames in the past — both leave orphans. Sweep
+    // handles both in one pass.
+    const deletedIds = [];
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_orphan_a', url: 'https://oldhost-a.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
+        { webhook_id: 'wh_orphan_b', url: 'https://oldhost-b.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
+      ] } }),
+      'DELETE /v1/webhooks/wh_orphan_a': () => { deletedIds.push('wh_orphan_a'); return { status: 204, body: '' }; },
+      'DELETE /v1/webhooks/wh_orphan_b': () => { deletedIds.push('wh_orphan_b'); return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    const result = await ensureWebhookSubscription(BOT_OPTS);
+    expect(deletedIds.sort()).toEqual(['wh_orphan_a', 'wh_orphan_b']);
+    expect(result.action).toBe('created');
+  });
+
+  it('a single DELETE 5xx does not prevent the OTHER orphan from being deleted in the same sweep', async () => {
+    // Per-orphan failure isolation — one bad apple shouldn't shadow the
+    // rest. Sequential loop with per-iteration catch is the design.
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const deletedIds = [];
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          { webhook_id: 'wh_5xx', url: 'https://oldhost-a.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
+          { webhook_id: 'wh_ok',  url: 'https://oldhost-b.example/webhooks/qurl', description: BOT_DESC, events: ['qurl.accessed'] },
+        ] } }),
+        'DELETE /v1/webhooks/wh_5xx': () => ({ status: 503, body: { error: 'transient' } }),
+        'DELETE /v1/webhooks/wh_ok':  () => { deletedIds.push('wh_ok');  return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await ensureWebhookSubscription(BOT_OPTS);
+      expect(deletedIds).toEqual(['wh_ok']);
+      expect(result.action).toBe('created');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('skips the sweep when description is empty (cannot derive a safe prefix)', async () => {
+    // Defensive: an empty description would derive an empty prefix,
+    // which would match LITERALLY every sub via startsWith(''). The
+    // sweep must short-circuit and never delete in that case.
+    let deleted = false;
+    mockFetchResponses({
+      'GET /v1/webhooks': () => ({ body: { data: [
+        { webhook_id: 'wh_anything', url: OLD_URL, description: 'literally anything', events: [] },
+      ] } }),
+      'DELETE /v1/webhooks/wh_anything': () => { deleted = true; return { status: 204, body: '' }; },
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+    });
+    await ensureWebhookSubscription({ ...BOT_OPTS, description: '' });
+    expect(deleted).toBe(false);
+  });
+});
+
+describe('deriveDescriptionPrefix — internal helper (orphan-sweep safety net)', () => {
+  const { deriveDescriptionPrefix } = _internals;
+  it('returns the prefix up to the first " ("', () => {
+    expect(deriveDescriptionPrefix('Discord bot view counter (region=us-east-2, env=sandbox)'))
+      .toBe('Discord bot view counter');
+    expect(deriveDescriptionPrefix('Discord bot view counter (guild=123, via=oauth)'))
+      .toBe('Discord bot view counter');
+  });
+  it('returns the whole string when no " (" is present', () => {
+    expect(deriveDescriptionPrefix('just a flat description')).toBe('just a flat description');
+  });
+  it('returns "" for empty / non-string inputs', () => {
+    expect(deriveDescriptionPrefix('')).toBe('');
+    expect(deriveDescriptionPrefix(undefined)).toBe('');
+    expect(deriveDescriptionPrefix(null)).toBe('');
+    expect(deriveDescriptionPrefix(42)).toBe('');
+  });
+});
+
 // Pinned to keep webhook-subscriptions.js::discoverDefaultOwnerId
 // from breaking silently if a future registrar refactor changes
 // callQurlService's signature. The external caller relies on
