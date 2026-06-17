@@ -45,7 +45,7 @@ This contract is frozen — additive only once published.
 | `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback. Do not set in protected deployments. |
 | `ALLOW_PLAINTEXT_S3` | No | `false` | Explicit local-test/diagnostic escape hatch required before setting `S3_TLS=false`. Do not set in protected deployments. |
 | `INDEX_DOCUMENT` | No | `index.html` | Powers clean URLs; empty is invalid when explicitly set. |
-| `AWS_REGION` | Usually | env / IMDS | Region for the S3 endpoint host and SigV4. Resolved from IMDSv2 when unset; validated as lowercase letters, numbers, and hyphen-separated segments. |
+| `AWS_REGION` | Yes | `AWS_DEFAULT_REGION` | Region for the S3 endpoint host and SigV4. Set it directly in deployments; the entrypoint copies `AWS_DEFAULT_REGION` when only that is supplied. Validated as lowercase letters, numbers, and hyphen-separated segments. |
 | `S3_ENDPOINT_ADDR` | No | bucket S3 vhost | Test/diagnostic override for the Envoy cluster address. Leave unset for real S3. Must be a DNS name, IPv4 address, or unbracketed IPv6 address. |
 | `S3_ENDPOINT_PORT` | No | `443` | Test/diagnostic override for the Envoy cluster port. Must be numeric and in `1..65535`. |
 | `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_PLAINTEXT_S3=true` for plaintext local tests or diagnostics. |
@@ -194,7 +194,10 @@ Deployment order matters: sync new/changed S3 objects first, then purge the
 matching local cache entries. Missing-key 404s are intentionally not cached:
 OSS nginx file-deletion purges cannot reliably invalidate intercepted 404s from
 the shared cache zone, so a newly synced S3 key must not be hidden behind an
-unpurgeable local negative cache.
+unpurgeable local negative cache. That contract is tested for standard AWS S3
+404 behavior; custom S3-compatible endpoints that attach cacheable headers to
+4xx responses need separate hardening before reuse, tracked in GitHub issue
+#874.
 
 ## Process model
 
@@ -210,10 +213,9 @@ the supervisor intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
   returns `AccessDenied` (403) instead of `NoSuchKey` (404), muddying the
   signing-failure signal.
 - IMDSv2 from inside a container requires **hop-limit 2** on the host.
-- Passing `AWS_REGION` explicitly is the deployment path. The IMDSv2 region
-  fallback exists for ad-hoc/diagnostic runs; a region-less, non-EC2/non-ECS
-  environment can spend up to roughly 4s probing IMDS before failing
-  validation.
+- Passing `AWS_REGION` explicitly is the deployment path. The image does not
+  probe IMDS for region discovery; `AWS_DEFAULT_REGION` is copied into
+  `AWS_REGION` only when `AWS_REGION` is unset.
 - The bucket stays private; this image needs no bucket-policy change.
 
 ## Out of scope

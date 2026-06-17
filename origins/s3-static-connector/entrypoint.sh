@@ -8,19 +8,10 @@ set -Eeuo pipefail
 RENDER_DIR="${RENDER_DIR:-/etc/qurl/rendered}"
 export RENDER_DIR
 
-# Resolve AWS_REGION from IMDSv2 when not supplied (EC2). Envoy needs a concrete
-# region for the S3 endpoint host and SigV4. Our CDK deployment always passes
-# AWS_REGION; this is the convenience fallback the env contract documents.
+# Envoy needs a concrete region for the S3 endpoint host and SigV4. Prefer
+# AWS_REGION, but accept AWS_DEFAULT_REGION for local/provider parity.
 if [ -z "${AWS_REGION:-}" ] && [ -n "${AWS_DEFAULT_REGION:-}" ]; then
   AWS_REGION="$AWS_DEFAULT_REGION"
-fi
-if [ -z "${AWS_REGION:-}" ]; then
-  _tok="$(curl -fsS -m 2 -X PUT 'http://169.254.169.254/latest/api/token' \
-    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
-  if [ -n "$_tok" ]; then
-    AWS_REGION="$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $_tok" \
-      'http://169.254.169.254/latest/meta-data/placement/region' 2>/dev/null || true)"
-  fi
 fi
 if [ -n "${AWS_REGION:-}" ] && [ -z "${AWS_DEFAULT_REGION:-}" ]; then
   AWS_DEFAULT_REGION="$AWS_REGION"
