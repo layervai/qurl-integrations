@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -20,6 +21,20 @@ const (
 	testKeyMeta                 = "meta"
 	testKeyRequestID            = "request_id"
 )
+
+func TestRateLimitErrorMessage(t *testing.T) {
+	notBound := &slackdata.Error{
+		StatusCode: http.StatusNotFound,
+		Code:       slackdata.ErrCodeWorkspaceNotBound,
+		Title:      "CheckRateLimit: workspace is not bound",
+	}
+	if got := rateLimitErrorMessage(notBound); got != workspaceUnboundReply {
+		t.Fatalf("workspace-not-bound copy = %q, want %q", got, workspaceUnboundReply)
+	}
+	if got := rateLimitErrorMessage(errors.New("ddb timeout")); got != serviceUnreachableMessage {
+		t.Fatalf("generic copy = %q, want %q", got, serviceUnreachableMessage)
+	}
+}
 
 // writeCreateFixture writes a POST /v1/qurls success envelope.
 func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID string) {
@@ -298,6 +313,32 @@ func TestHandleGet_MintRateLimit(t *testing.T) {
 	}
 	if strings.Contains(async, "internal API") {
 		t.Errorf("async reply leaked upstream rate-limit title: %q", async)
+	}
+}
+
+func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	var mintHits atomic.Int32
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		mintHits.Add(1)
+		writeCreateFixture(t, w, "https://qurl.link/allowed", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	enableAdminStoreRateLimit(t, h, 1)
+
+	_, _, first := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(first, "https://qurl.link/allowed") {
+		t.Fatalf("first get did not mint: %q", first)
+	}
+
+	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+		t.Fatalf("second get = %q, want in-bot rate-limit copy with retry hint", second)
+	}
+	if got := mintHits.Load(); got != 1 {
+		t.Fatalf("mint hits = %d, want only the under-limit call to reach qURL", got)
 	}
 }
 

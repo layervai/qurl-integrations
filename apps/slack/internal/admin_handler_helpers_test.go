@@ -119,6 +119,16 @@ func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	return h
 }
 
+func enableAdminStoreRateLimit(t *testing.T, h *Handler, limit int) {
+	t.Helper()
+	if h.cfg.AdminStore == nil {
+		t.Fatal("enableAdminStoreRateLimit: AdminStore is nil")
+	}
+	h.cfg.AdminStore.RateLimitEnabled = true
+	h.cfg.AdminStore.RateLimitLimit = limit
+	h.cfg.AdminStore.RateLimitWindow = time.Hour
+}
+
 // adminSlashInvoker bundles the captured response_url and provides
 // invokeAdmin* helpers. The captured response_url is necessary for
 // async verbs (policies, revoke-all) — the synchronous ack is just
