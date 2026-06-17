@@ -1349,6 +1349,36 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     }
   });
 
+  it('routes 429 DELETE failures to the transient/ERROR branch (rate-limit is NOT a persistent client error)', async () => {
+    // 429 is rate-limiting — transient, retry-with-backoff is the
+    // right behavior. Don't suppress after the first log or a
+    // sustained rate-limit would silently mask itself. The cr-bot's
+    // edge case.
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_persistent_429' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_persistent_429': () => ({ status: 429, body: { error: 'rate-limited' } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const errorLines = errorSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed (continuing'));
+      const warnLines = warnSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string' && l.includes('URL-migration orphan delete failed with persistent 4xx'));
+      expect(errorLines).toHaveLength(2); // 429 → ERROR on each call (transient)
+      expect(warnLines).toHaveLength(0); // never suppressed at WARN
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
   it('logs a 5xx DELETE failure at ERROR on every invocation (transient — repeating IS the signal)', async () => {
     // 5xx is transient by convention; we want the repeating log line
     // to be the alarm signal, not a one-shot WARN that gets lost.
@@ -1606,6 +1636,8 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     // Pin the observability seam: when a host+path+description matches
     // but the liveness gate held the row back, surface the count so an
     // operator can grep CloudWatch instead of inspecting subs by hand.
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockFetchResponses({
@@ -1643,6 +1675,89 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       });
     } finally {
       logSpy.mockRestore();
+    }
+  });
+
+  it('dedupes the near-miss log per process (steady-state perpetual near-miss does not spam every boot)', async () => {
+    // Active-active hypothetical (#827): a healthy cross-host sibling
+    // is a PERPETUAL near-miss. Without the dedupe cache, on the bot
+    // path the line would emit on every guild-link event many times/day.
+    // Pin: first invocation emits; subsequent invocations with the
+    // SAME (bridgeUrl, count) suppress.
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_healthy',
+            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 0,
+            last_delivery_success: true,
+          },
+        ] } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS);
+      await ensureWebhookSubscription(BOT_OPTS);
+      const nearMissLines = logSpy.mock.calls
+        .map(c => c[0])
+        .filter(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLines).toHaveLength(1); // suppressed on second invocation
+    } finally {
+      logSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
+    }
+  });
+
+  it('re-fires the near-miss log when the count CHANGES (something new became sweep-eligible)', async () => {
+    // Count is part of the dedupe key, so an increase / decrease in
+    // near-misses re-emits — operators see when the cohort changes.
+    const { _resetUrlMigrationOrphanDeleteSuppressionCache } = _internals;
+    _resetUrlMigrationOrphanDeleteSuppressionCache();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    let listCallCount = 0;
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => {
+          listCallCount += 1;
+          // First two invocations: 1 healthy sibling = count 1.
+          // Third invocation: 2 healthy siblings = count 2 (re-fires).
+          const subs = [{
+            webhook_id: 'wh_healthy_a',
+            url: 'https://discord.eu-central-1.layerv.xyz/webhooks/qurl',
+            description: BOT_DESC,
+            events: ['qurl.accessed'],
+            failure_count: 0,
+            last_delivery_success: true,
+          }];
+          if (listCallCount >= 3) {
+            subs.push({
+              webhook_id: 'wh_healthy_b',
+              url: 'https://discord.eu-west-1.layerv.xyz/webhooks/qurl',
+              description: BOT_DESC,
+              events: ['qurl.accessed'],
+              failure_count: 0,
+              last_delivery_success: true,
+            });
+          }
+          return { body: { data: subs } };
+        },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await ensureWebhookSubscription(BOT_OPTS); // count=1, fires
+      await ensureWebhookSubscription(BOT_OPTS); // count=1, suppressed
+      await ensureWebhookSubscription(BOT_OPTS); // count=2, re-fires
+      const nearMissLines = logSpy.mock.calls
+        .map(c => c[0])
+        .filter(line => typeof line === 'string' && line.includes('liveness-gated near-misses'));
+      expect(nearMissLines).toHaveLength(2); // first + third
+    } finally {
+      logSpy.mockRestore();
+      _resetUrlMigrationOrphanDeleteSuppressionCache();
     }
   });
 

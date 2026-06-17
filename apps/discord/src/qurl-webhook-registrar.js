@@ -412,9 +412,9 @@ function urlPathname(u) {
 //      owner_id scope (subscriptions are listed via the API key's
 //      owner_id). If sandbox and prod (or any two envs) ever share
 //      ONE `QURL_API_KEY` — i.e. resolve to the same `owner_id` in
-//      qurl-service — then a sandbox boot during a prod transient
-//      incident (`last_delivery_success: false` + `failure_count` past
-//      3) would DELETE prod's live subscription. Today's deployment
+//      qurl-service — then a sandbox boot during a prod outage
+//      (`last_delivery_success: false` + `failure_count` past 30)
+//      would DELETE prod's live subscription. Today's deployment
 //      uses per-env SSM `QURL_API_KEY` parameters (one per env), each
 //      backed by a distinct qurl-service API key tied to a distinct
 //      owner_id — confirmed via the infra terraform's per-env
@@ -555,8 +555,23 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
 // Sequential DELETEs because orphan counts are typically 0-1; parallel
 // would buy nothing and hurt per-orphan log isolation.
 const persistentClientErrorSuppressionCache = new Set();
-function isClientError(status) {
-  return typeof status === 'number' && status >= 400 && status < 500 && status !== 404;
+// Same dedupe pattern for the near-miss observability log, keyed on
+// (bridgeUrl, count) so an INCREASE in near-misses re-fires the log
+// (something new became sweep-eligible) while a steady-state perpetual
+// near-miss (e.g. multi-region healthy sibling) emits the line ONCE
+// per process and stays quiet thereafter.
+const nearMissLogSuppressionCache = new Set();
+// 4xx other than 404 → "persistent client error" → suppress repeated
+// logs. 404 is success (DELETE_OUTCOMES.ALREADY_ABSENT, handled upstream).
+// 429 is rate-limiting — transient by nature, retrying with backoff is
+// the right behavior — route to the 5xx/transient branch (log every
+// time) so a sustained rate-limit doesn't silently mask itself after
+// the first log.
+function isPersistentClientError(status) {
+  if (typeof status !== 'number') return false;
+  if (status < 400 || status >= 500) return false;
+  if (status === 404 || status === 429) return false;
+  return true;
 }
 async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
   for (const orphan of orphans) {
@@ -583,7 +598,7 @@ async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
       // on the bot path where the sweep runs many times/day. 5xx and
       // network errors log every time (transient → repeating is the
       // signal).
-      if (isClientError(err.status)) {
+      if (isPersistentClientError(err.status)) {
         const cacheKey = `${orphan.webhook_id}:${err.status}`;
         if (!persistentClientErrorSuppressionCache.has(cacheKey)) {
           persistentClientErrorSuppressionCache.add(cacheKey);
@@ -608,11 +623,12 @@ async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
   }
 }
 
-// Test seam — the persistent-4xx suppression cache is process-scoped
-// (module-level Set), so unit tests that exercise the suppression
-// across multiple invocations need a way to reset between cases.
+// Test seam — the suppression caches are process-scoped (module-level
+// Sets), so unit tests that exercise the suppression across multiple
+// invocations need a way to reset between cases.
 function _resetUrlMigrationOrphanDeleteSuppressionCache() {
   persistentClientErrorSuppressionCache.clear();
+  nearMissLogSuppressionCache.clear();
 }
 
 // Pick a deterministic survivor across replicas so two replicas racing
@@ -828,20 +844,27 @@ async function ensureWebhookSubscription(opts) {
   // Observability: surface "matched host+path+description but failed
   // the liveness gate" so an operator can distinguish qurl-service
   // schema drift from a still-alive sibling without inspecting subs
-  // by hand. (Multi-region under a shared API key would make this a
-  // per-boot log line — non-issue today, see #827.)
+  // by hand. Deduped per-process by (bridgeUrl, nearMissCount) so a
+  // perpetual near-miss (e.g. a healthy cross-host sibling under a
+  // hypothetical shared-API-key multi-region rollout, #827) doesn't
+  // emit a log line on every guild-link event. The count is part of
+  // the dedupe key so an INCREASE in near-misses re-fires the log.
   if (nearMissCount > 0) {
-    // orphan_delete_attempts (not _deletes): a 5xx'd DELETE still
-    // counts here, since the per-orphan INFO/ERROR lines are the
-    // authoritative success/failure record. Naming it _deletes would
-    // mislead an operator reading "orphan_delete_attempts: 2" when
-    // only one corresponding "URL-migration orphan deleted" line
-    // exists.
-    logger.info('URL-migration orphan sweep — liveness-gated near-misses', {
-      near_miss_count: nearMissCount,
-      orphan_delete_attempts: orphans.length,
-      url: bridgeUrl,
-    });
+    const nearMissCacheKey = `${bridgeUrl}:${nearMissCount}`;
+    if (!nearMissLogSuppressionCache.has(nearMissCacheKey)) {
+      nearMissLogSuppressionCache.add(nearMissCacheKey);
+      // orphan_delete_attempts (not _deletes): a 5xx'd DELETE still
+      // counts here, since the per-orphan INFO/ERROR lines are the
+      // authoritative success/failure record. Naming it _deletes would
+      // mislead an operator reading "orphan_delete_attempts: 2" when
+      // only one corresponding "URL-migration orphan deleted" line
+      // exists.
+      logger.info('URL-migration orphan sweep — liveness-gated near-misses', {
+        near_miss_count: nearMissCount,
+        orphan_delete_attempts: orphans.length,
+        url: bridgeUrl,
+      });
+    }
   }
 
   const existing = pickSurvivor(matches);
