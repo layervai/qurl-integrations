@@ -271,8 +271,10 @@ function deriveDescriptionPrefix(description) {
 
 // Pull the host from a URL string. Returns null on parse failure so the
 // caller can skip the row defensively (same fallback shape as canonicalUrl).
+// `URL.host` is already lowercased by the WHATWG URL parser, so no
+// explicit fold needed.
 function urlHost(u) {
-  try { return new URL(u).host.toLowerCase(); } catch { return null; }
+  try { return new URL(u).host; } catch { return null; }
 }
 
 // Pull the pathname from a URL string with trailing-slash normalization
@@ -330,54 +332,48 @@ function urlPathname(u) {
 //      `qurl-s3-connector resource.closed subscription`) out of the
 //      deletion set even though they share owner_id with the bot under
 //      today's bot-API-key-shared model.
+//      Per-guild safety: per-guild subs from guild-webhook-link.js share
+//      the same `Discord bot view counter` prefix (different parenthetical
+//      content). They're protected by criterion 2 (host equality) because
+//      `guild-webhook-link.bridgeUrl()` uses the same `config.BASE_URL`
+//      as the central registrar — i.e. per-guild and central subs always
+//      register against the SAME host. If per-guild registration ever
+//      moves to a different host, this safety dissolves and the central
+//      registrar's sweep could classify a still-needed per-guild sub as
+//      a cross-host orphan.
 //   4. Liveness gate: BOTH `last_delivery_success === false` AND
 //      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
 //      compound check tolerates a single transient delivery failure on
-//      an otherwise-healthy cross-host sibling (most relevant to an
-//      active-active multi-region deploy that ever shares one
-//      `QURL_API_KEY` across regions — same owner_id, different
-//      `BASE_URL` hosts). A single network blip on the most recent
-//      delivery flips `last_delivery_success` to false; without the
-//      `failure_count` floor, a sibling reboot during that window
-//      would DELETE a healthy peer. The threshold value 3 is a small
-//      number consistent with "more than one transient failure"; the
-//      motivating orphan had 1475, comfortably above it.
-//      Strictness on `=== false` (vs `!== true`): a brand-new sub with
-//      no deliveries yet typically reports null/undefined — treat that
-//      as "presumed alive, do not delete."
+//      an otherwise-healthy cross-host sibling — without the
+//      `failure_count` floor, a sibling reboot during a single-blip
+//      window would DELETE a healthy peer. Strictness on `=== false`
+//      (vs `!== true`): a brand-new sub with no deliveries yet
+//      typically reports null/undefined — treat that as
+//      "presumed alive, do not delete."
 //
-//      The gate is NOT a general "alive sibling" detector — it only
-//      separates transient failures from sustained ones. A genuinely-
-//      DOWN sibling (bot crash, secret desync 401ing every delivery)
-//      produces the same `last_delivery_success === false` +
-//      `failure_count >> 3` signal as a true URL-migration orphan, so
-//      a sibling in a sustained outage WOULD get swept here. These
-//      signals fundamentally cannot distinguish "dead orphan" from
-//      "region down hard." If active-active under a shared
-//      `QURL_API_KEY` ever ships (today's deployment is single-host so
-//      this is hypothetical), the durable fix is a non-signal-based
-//      discriminator — e.g. an explicit allowlist of "valid current
-//      hosts" or an "old-host marker" set at rename time — NOT a
-//      higher failure_count floor.
-//      TODO(active-active-cannibalization, #827): track the durable
-//      fix before any multi-region rollout under a shared API key.
-//
-//      First-boot-after-rename caveat: the *old* sub's last delivery
-//      may have been a success (the one that completed just before the
-//      rename). `last_delivery_success` only flips to false once the
-//      first post-rename delivery attempt fails sig verification at
-//      the bot. So the immediate first post-rename boot may not sweep
-//      the orphan — it gets caught on a subsequent boot once a real
-//      delivery has been attempted + failed. Acceptable because the
-//      hoisted sweep retries every boot (not gated on create-fresh).
+//      Limitations the gate does NOT cover (see #827 for the durable
+//      fix tracking issue):
+//        - Sustained-outage cannibalization: a sibling in a hard outage
+//          produces the same `last_delivery_success=false` + climbing
+//          `failure_count` signal as a true orphan. These signals
+//          fundamentally can't distinguish the two cases — the durable
+//          fix is a non-signal-based discriminator (host allowlist,
+//          explicit old-host marker, region-tagged description).
+//          Today's deployment is single-host so this is hypothetical.
+//        - First-boot-after-rename: the old sub's `last_delivery_success`
+//          may still be `true` (last delivery before the rename
+//          succeeded). It flips to false only after the first post-
+//          rename delivery fails sig verification. So the immediate
+//          first post-rename boot may not sweep — caught on a
+//          subsequent boot once a real delivery has been attempted.
+//          Acceptable because the hoisted sweep retries every boot.
 //
 //      TODO(upstream-contract): field names `last_delivery_success` and
 //      `failure_count` are pinned against qurl-service's webhook list
-//      response shape. If qurl-service ever renames or changes their
-//      types (e.g. serializes booleans as strings), the strict-equality
-//      check fails safe (no wrong deletions) but the feature silently
-//      becomes a no-op — track these names so `git grep` finds them
-//      when the schema drifts.
+//      response shape. If qurl-service drifts those names/types, the
+//      strict-equality check fails closed (no wrong deletions) but the
+//      feature silently becomes a no-op — surfaced via the near-miss
+//      observability log.
 //
 // Returned as a closure so it composes into `findExistingSubscriptions`
 // as the `orphanFilter` arg: one cursor walk produces both the matches
@@ -429,26 +425,18 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
   };
 }
 
-// Best-effort DELETE for each URL-migration orphan. A 5xx on one orphan
-// logs an error and continues to the next + to the normal create path.
-// Next invocation retries the orphan delete idempotently. We deliberately
-// do NOT propagate the failure: blocking the create on a stale-orphan
-// delete failure would leave the bot UN-registered (no new sub) AND
-// still-orphaned (old sub undeleted) — strictly worse than the orphan-
-// only state we started in.
+// Best-effort DELETE for each URL-migration orphan. A failure on one
+// orphan logs at error level and continues to the next + to the normal
+// create path. Blocking the create on a stale-orphan delete failure
+// would leave the bot UN-registered (no new sub) AND still-orphaned
+// (old sub undeleted) — strictly worse than the orphan-only state we
+// started in.
 //
-// Failure-class symmetry: every non-404 DELETE outcome (transient 5xx,
-// persistent 4xx like a 403 auth misconfig, gateway timeout) is logged
-// at error level and skipped. We intentionally do NOT escalate or
-// alarm-tier-differentiate here — the registrar's job is "register
-// successfully or fail loudly," not "diagnose orphan-DELETE root cause."
-// If the same orphan-delete error repeats across many boots, the
-// repeating log line itself is the signal (CloudWatch alarm pattern on
-// `URL-migration orphan delete failed` is the runbook hook).
-//
-// Sequential DELETEs (vs parallel like the dedupe path) — orphan counts
-// are typically 0-1 per migration, and serial gives the cleanest
-// per-orphan failure isolation in the logs.
+// Every non-404 outcome (transient 5xx, persistent 4xx, gateway timeout)
+// is logged + skipped identically; we deliberately don't alarm-tier-
+// differentiate here. A repeating log line on the same orphan IS the
+// signal (CloudWatch alarm pattern on `URL-migration orphan delete
+// failed`). Sequential DELETEs because orphan counts are typically 0-1.
 async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
   for (const orphan of orphans) {
     try {
@@ -670,15 +658,11 @@ async function ensureWebhookSubscription(opts) {
   if (orphans.length > 0) {
     await cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans });
   }
-  // Observability: a cross-host sub matching host+path+description but
-  // failing the liveness gate is the most common "sweep did nothing"
-  // class. Surface it so an operator can distinguish "qurl-service
-  // schema drift (field missing)" from "sibling still alive, do not
-  // sweep" without inspecting subs by hand. Steady-state noise note:
-  // if active-active multi-region ever ships under a shared API key
-  // (today's deploy is single-host), a healthy cross-host sibling is
-  // a PERPETUAL near-miss → this log would emit every boot. Today
-  // that's a non-issue; if it lands, downgrade to debug or rate-limit.
+  // Observability: surface "matched host+path+description but failed
+  // the liveness gate" so an operator can distinguish qurl-service
+  // schema drift from a still-alive sibling without inspecting subs
+  // by hand. (Multi-region under a shared API key would make this a
+  // per-boot log line — non-issue today, see #827.)
   if (nearMissCount > 0) {
     // orphan_delete_attempts (not _deletes): a 5xx'd DELETE still
     // counts here, since the per-orphan INFO/ERROR lines are the
