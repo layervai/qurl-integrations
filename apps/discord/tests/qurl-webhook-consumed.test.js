@@ -95,6 +95,7 @@ process.env.BASE_URL = 'http://localhost:3000';
 const request = require('supertest');
 const { app } = require('../src/server');
 const logger = require('../src/logger');
+const flip = require('./helpers/consumed-flip');
 
 function signBody(rawJson, secret = 'test-qurl-secret') {
   return crypto.createHmac('sha256', secret).update(rawJson).digest('hex');
@@ -137,46 +138,14 @@ function signedRequest(payload) {
     .send(raw);
 }
 
-// The flip is deferred via Promise.resolve().then(...) and chains
-// several awaits (GSI Query, isSendRevoked GetItem, mark UpdateItem,
-// editDM). The chain ALWAYS terminates by logging a single
-// 'flip verdict' debug line (flipConsumedDMInBackground), on every
-// branch — success, skip, OR transient. Drain the macrotask queue until
-// that line lands; it's the uniform terminal signal, so the same helper
-// fences happy-path, skip, and transient cases without per-branch
-// special-casing. Bounded tick budget so a path that genuinely never
-// schedules the flip (consumed:false) returns instead of hanging.
-async function flushFlip() {
-  for (let i = 0; i < 50; i += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-    if (flipVerdictLog() !== null) return;
-  }
-}
-
-// Pull the {status, transient} the background flip logged as its
-// terminal verdict, or null if it hasn't logged one (e.g. the flip was
-// never scheduled because consumed !== true). Asserts the observability
-// seam the consumed path has in place of an HTTP status.
-function flipVerdictLog() {
-  const call = logger.debug.mock.calls.find(
-    ([msg]) => msg === 'qURL webhook qurl.accessed-consumed: flip verdict',
-  );
-  if (!call) return null;
-  // Project just the outcome fields — the log line also carries
-  // qurl_id/event_id, which aren't what these assertions are fencing.
-  const { status, transient } = call[1];
-  return { status, transient };
-}
-
-// For the consumed:false / stringified-"true" cases the flip is NEVER
-// scheduled, so there is no verdict to wait for — just drain a few ticks
-// so any (incorrectly-scheduled) work would have run, then assert the
-// negative.
-async function drainTicks(n = 5) {
-  for (let i = 0; i < n; i += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-}
+// Thin binds over the shared tests/helpers/consumed-flip utilities so
+// the call sites below read `flushFlip()` / `flipVerdictLog()` /
+// `drainTicks()` against this file's mocked logger. See that helper for
+// what each does (drain-until-verdict vs. fixed-tick drain, verdict
+// projection).
+const flushFlip = () => flip.flushFlip(logger);
+const flipVerdictLog = () => flip.flipVerdict(logger);
+const { drainTicks } = flip;
 
 beforeEach(() => {
   jest.clearAllMocks();

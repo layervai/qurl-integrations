@@ -95,6 +95,7 @@ process.env.BASE_URL = 'http://localhost:3000';
 const request = require('supertest');
 const { app } = require('../src/server');
 const logger = require('../src/logger');
+const flip = require('./helpers/consumed-flip');
 
 const QURL_ID = 'q_aaaaaaaaaa1';
 const SEND_ID = 'snd-1';
@@ -122,18 +123,8 @@ function signedRequest(payload) {
     .send(raw);
 }
 
-async function drainTicks(n = 8) {
-  for (let i = 0; i < n; i += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-}
-
-function flipVerdict() {
-  const call = logger.debug.mock.calls.find(
-    ([msg]) => msg === 'qURL webhook qurl.accessed-consumed: flip verdict',
-  );
-  return call ? { status: call[1].status, transient: call[1].transient } : null;
-}
+const { drainTicks } = flip;
+const flipVerdict = () => flip.flipVerdict(logger);
 
 beforeEach(() => {
   jest.clearAllMocks();
