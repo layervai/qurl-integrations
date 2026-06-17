@@ -294,6 +294,18 @@ async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, bui
   // sibling marker is already on `row` (zero extra read). Read straight
   // off the row rather than the marker function so a redelivery sees a
   // marker the local UpdateItem already wrote.
+  //
+  // TOCTOU window (same shape as the revoke race below): if the
+  // consumed and expired events run their GSI lookup before EITHER
+  // marker is written, both pass this check, both claim their own
+  // (distinct) marker, and both editDM — last writer wins. End state is
+  // still "closed" either way, just possibly the less-specific copy.
+  // Vanishingly rare here: a one-time link is consumed well before its
+  // 30m TTL fires qurl.expired, so the two events are almost never
+  // in-flight together. (A single shared marker would serialize the two
+  // paths at the conditional write and close this, but that's a schema
+  // migration of the pre-existing expired_edited_at attribute; not worth
+  // it for a race whose worst case is the less-specific copy.)
   if (skipIfAttr && row[skipIfAttr]) {
     logger.debug(`qURL webhook ${label}: sibling path already flipped the DM; skipping`, {
       qurl_id: qurlId, send_id: sendId, skip_attr: skipIfAttr, event_id: eventId,
@@ -513,9 +525,7 @@ function flipConsumedDMInBackground({ qurlId, eventId }) {
       label: 'qurl.accessed-consumed',
       // Don't overwrite a sender-revoke or expired flip already on the DM.
       skipIfAttr: 'expired_edited_at',
-      // Static past-tense copy — NO expiry marker. At consumption time
-      // the link's expires_at is still in the future, so a <t:N:R>
-      // marker would render "expired in N minutes". See buildConsumedDMPayload.
+      // Static past-tense copy — no expiry marker (see buildConsumedDMPayload for why).
       buildPayload: () => buildConsumedDMPayload(),
       markEdited: db.markConsumedDMEdited,
       clearEdited: db.clearConsumedDMEdited,

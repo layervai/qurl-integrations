@@ -94,6 +94,7 @@ process.env.BASE_URL = 'http://localhost:3000';
 
 const request = require('supertest');
 const { app } = require('../src/server');
+const logger = require('../src/logger');
 
 function signBody(rawJson, secret = 'test-qurl-secret') {
   return crypto.createHmac('sha256', secret).update(rawJson).digest('hex');
@@ -138,21 +139,42 @@ function signedRequest(payload) {
 
 // The flip is deferred via Promise.resolve().then(...) and chains
 // several awaits (GSI Query, isSendRevoked GetItem, mark UpdateItem,
-// editDM). Drain the microtask + macrotask queues until the flip has
-// settled. Poll on editDM being called (the terminal happy-path step)
-// with a setImmediate-based macrotask flush so we don't race the chain;
-// fall through after a bounded number of ticks for the skip paths where
-// editDM never fires.
-async function flushFlip({ expectEdit = true } = {}) {
+// editDM). The chain ALWAYS terminates by logging a single
+// 'flip verdict' debug line (flipConsumedDMInBackground), on every
+// branch — success, skip, OR transient. Drain the macrotask queue until
+// that line lands; it's the uniform terminal signal, so the same helper
+// fences happy-path, skip, and transient cases without per-branch
+// special-casing. Bounded tick budget so a path that genuinely never
+// schedules the flip (consumed:false) returns instead of hanging.
+async function flushFlip() {
   for (let i = 0; i < 50; i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
-    if (expectEdit && mockEditDM.mock.calls.length > 0) return;
-    if (!expectEdit && (mockMarkConsumedDMEdited.mock.calls.length > 0 || mockFindSendsByQurlId.mock.calls.length > 0)) {
-      // give a couple extra ticks for the skip branch to settle
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      return;
-    }
+    if (flipVerdictLog() !== null) return;
+  }
+}
+
+// Pull the {status, transient} the background flip logged as its
+// terminal verdict, or null if it hasn't logged one (e.g. the flip was
+// never scheduled because consumed !== true). Asserts the observability
+// seam the consumed path has in place of an HTTP status.
+function flipVerdictLog() {
+  const call = logger.debug.mock.calls.find(
+    ([msg]) => msg === 'qURL webhook qurl.accessed-consumed: flip verdict',
+  );
+  if (!call) return null;
+  // Project just the outcome fields — the log line also carries
+  // qurl_id/event_id, which aren't what these assertions are fencing.
+  const { status, transient } = call[1];
+  return { status, transient };
+}
+
+// For the consumed:false / stringified-"true" cases the flip is NEVER
+// scheduled, so there is no verdict to wait for — just drain a few ticks
+// so any (incorrectly-scheduled) work would have run, then assert the
+// negative.
+async function drainTicks(n = 5) {
+  for (let i = 0; i < n; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
   }
 }
 
@@ -215,7 +237,8 @@ describe('POST /webhooks/qurl — qurl.accessed does NOT flip when not consumed'
       data: { qurl_id: QURL_ID, resource_id: RESOURCE_ID, access_count: 1, consumed: false },
     });
     expect(res.status).toBe(200);
-    await flushFlip({ expectEdit: false });
+    await drainTicks();
+    expect(flipVerdictLog()).toBeNull(); // flip never even scheduled
     expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
@@ -227,7 +250,8 @@ describe('POST /webhooks/qurl — qurl.accessed does NOT flip when not consumed'
       data: { qurl_id: QURL_ID, resource_id: RESOURCE_ID, access_count: 1, consumed: 'true' },
     });
     expect(res.status).toBe(200);
-    await flushFlip({ expectEdit: false });
+    await drainTicks();
+    expect(flipVerdictLog()).toBeNull();
     expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
@@ -237,7 +261,8 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip skips', () => {
   it('skips when no recipient row matches the qurl_id (pre-rollout / missing-from-mint)', async () => {
     mockFindSendsByQurlId.mockResolvedValue([]);
     await signedRequest(VALID_PAYLOAD);
-    await flushFlip({ expectEdit: false });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'no-recipient-row', transient: false });
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
@@ -245,14 +270,16 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip skips', () => {
   it('skips when the GSI returns multiple rows (write-path invariant breach)', async () => {
     mockFindSendsByQurlId.mockResolvedValue([READY_ROW, { ...READY_ROW, recipient_discord_id: 'usr-other' }]);
     await signedRequest(VALID_PAYLOAD);
-    await flushFlip({ expectEdit: false });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'ambiguous-recipient', transient: false });
     expect(mockEditDM).not.toHaveBeenCalled();
   });
 
   it('skips (does NOT clobber the revoke copy) when the send was already revoked', async () => {
     mockIsSendRevoked.mockResolvedValue(true);
     await signedRequest(VALID_PAYLOAD);
-    await flushFlip({ expectEdit: false });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'send-revoked', transient: false });
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
@@ -262,7 +289,8 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip skips', () => {
     // row). Don't overwrite it with the consumed copy.
     mockFindSendsByQurlId.mockResolvedValue([{ ...READY_ROW, expired_edited_at: '2026-05-19T12:25:00.000Z' }]);
     await signedRequest(VALID_PAYLOAD);
-    await flushFlip({ expectEdit: false });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'sibling-already-flipped', transient: false });
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
@@ -270,14 +298,16 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip skips', () => {
   it('skips (idempotent) when the consumed marker is already claimed (redelivery)', async () => {
     mockMarkConsumedDMEdited.mockResolvedValue(false);
     await signedRequest(VALID_PAYLOAD);
-    await flushFlip({ expectEdit: false });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'already-edited', transient: false });
     expect(mockEditDM).not.toHaveBeenCalled();
   });
 
   it('skips when dm_status !== sent (DM never delivered)', async () => {
     mockFindSendsByQurlId.mockResolvedValue([{ ...READY_ROW, dm_status: 'failed' }]);
     await signedRequest(VALID_PAYLOAD);
-    await flushFlip({ expectEdit: false });
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'dm-not-editable', transient: false });
     expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
@@ -288,6 +318,7 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip edit failure handl
     mockEditDM.mockResolvedValue({ ok: false, expected: true });
     await signedRequest(VALID_PAYLOAD);
     await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'edit-failed-expected', transient: false });
     expect(mockMarkConsumedDMEdited).toHaveBeenCalledTimes(1);
     expect(mockClearConsumedDMEdited).not.toHaveBeenCalled();
   });
@@ -296,6 +327,9 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip edit failure handl
     mockEditDM.mockResolvedValue({ ok: false, expected: false });
     await signedRequest(VALID_PAYLOAD);
     await flushFlip();
+    // transient:true is the observability signal that the flip didn't
+    // land but is recoverable (marker was rolled back).
+    expect(flipVerdictLog()).toEqual({ status: 'edit-failed-transient', transient: true });
     expect(mockMarkConsumedDMEdited).toHaveBeenCalledTimes(1);
     expect(mockClearConsumedDMEdited).toHaveBeenCalledWith(SEND_ID, RECIPIENT_ID);
   });
@@ -304,6 +338,7 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip edit failure handl
     mockEditDM.mockRejectedValue(new Error('network'));
     await signedRequest(VALID_PAYLOAD);
     await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'edit-failed-transient', transient: true });
     expect(mockClearConsumedDMEdited).toHaveBeenCalledWith(SEND_ID, RECIPIENT_ID);
   });
 
@@ -315,6 +350,44 @@ describe('POST /webhooks/qurl — qurl.accessed consumed-flip edit failure handl
     await signedRequest(VALID_PAYLOAD);
     await flushFlip();
     expect(mockClearConsumedDMEdited).toHaveBeenCalledWith(SEND_ID, RECIPIENT_ID);
+  });
+
+  // The transient verdicts below have NO HTTP mapping on the consumed
+  // path (the 200 already returned for the view) — they exist purely as
+  // the observability seam + the marker-state contract that lets a
+  // redelivery / the qurl.expired backstop recover. Fence them so a
+  // future refactor that drops the rollback or mislabels the verdict
+  // surfaces here.
+  it('GSI lookup throw → lookup-error verdict, no marker claimed (recoverable by redelivery)', async () => {
+    mockFindSendsByQurlId.mockRejectedValue(new Error('throttle'));
+    await signedRequest(VALID_PAYLOAD);
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'lookup-error', transient: true });
+    expect(mockMarkConsumedDMEdited).not.toHaveBeenCalled();
+    expect(mockEditDM).not.toHaveBeenCalled();
+  });
+
+  it('marker-claim throw (non-CCFE) → mark-error verdict, edit not attempted (recoverable by redelivery)', async () => {
+    mockMarkConsumedDMEdited.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
+    await signedRequest(VALID_PAYLOAD);
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'mark-error', transient: true });
+    expect(mockEditDM).not.toHaveBeenCalled();
+  });
+
+  it('transient editDM failure + rollback ALSO fails → edit-failed-rollback-failed (non-transient terminal; falls back to expired backstop)', async () => {
+    // Belt-and-suspenders: if the rollback itself throws, the marker
+    // stays, a redelivery short-circuits at already-edited, and the
+    // consumed flip is permanently missed — recovered only if the
+    // qurl.expired backstop's own marker is still clear. Reported
+    // non-transient so nothing loops on the doomed attempt.
+    mockEditDM.mockResolvedValue({ ok: false, expected: false });
+    mockClearConsumedDMEdited.mockRejectedValue(new Error('throttle'));
+    await signedRequest(VALID_PAYLOAD);
+    await flushFlip();
+    expect(flipVerdictLog()).toEqual({ status: 'edit-failed-rollback-failed', transient: false });
+    expect(mockMarkConsumedDMEdited).toHaveBeenCalledTimes(1);
+    expect(mockClearConsumedDMEdited).toHaveBeenCalledTimes(1);
   });
 });
 

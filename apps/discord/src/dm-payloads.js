@@ -63,12 +63,9 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
 // `<t:now:R>` "opened just now" anchor is possible but adds nothing —
 // the recipient just clicked, they know when.)
 //
-// UX choices mirror buildExpiredDMPayload: the embed wholly replaces
-// the original delivery embed (PATCH only supports whole-array embed
-// replacement, and the "tap to step through" framing is misleading once
-// the one-time content is gone), color stays on QURL_BRAND for symmetry
-// with the expired/revoke paths, and `components: []` clears the now-
-// dead Step Through button (see module CONTRACT above).
+// UX choices (whole-embed replacement, QURL_BRAND color, `components: []`
+// to clear the now-dead Step Through button) mirror buildExpiredDMPayload
+// — see that function's comment for the why.
 function buildConsumedDMPayload() {
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
