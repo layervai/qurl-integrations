@@ -72,3 +72,7 @@ static_resources:
           validation_context:
             trusted_ca:
               filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+            - san_type: DNS
+              matcher:
+                exact: example-bucket.s3.us-east-1.amazonaws.com

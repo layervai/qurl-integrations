@@ -131,6 +131,12 @@ grep -q 'server \[::1\]:9090;' "$TMP/ipv6-loopback/nginx.conf"
 grep -q 'socket_address: { address: "::1", port_value: 9090 }' "$TMP/ipv6-loopback/envoy.yaml"
 render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 ALLOW_NON_LOOPBACK_LISTEN=true
 render plaintext-s3-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=false S3_ENDPOINT_ADDR=stub S3_ENDPOINT_PORT=9000 ALLOW_NON_LOOPBACK_LISTEN=true
+grep -q 'match_typed_subject_alt_names:' "$TMP/default/envoy.yaml"
+grep -q 'exact: example-bucket.s3.us-east-1.amazonaws.com' "$TMP/default/envoy.yaml"
+if grep -q 'match_typed_subject_alt_names:' "$TMP/plaintext-s3-allowed/envoy.yaml"; then
+  echo "MISMATCH: plaintext S3 render included TLS SAN validation" >&2
+  exit 1
+fi
 
 map_golden() {
   case "$1" in

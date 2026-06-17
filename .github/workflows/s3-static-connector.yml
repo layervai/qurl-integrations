@@ -57,8 +57,8 @@ jobs:
           push: false
           load: true
           tags: s3-static-connector:test
-          cache-from: type=gha,scope=s3-static-connector
-          cache-to: type=gha,mode=max,scope=s3-static-connector
+          cache-from: type=gha,scope=s3-static-connector-amd64
+          cache-to: type=gha,mode=max,scope=s3-static-connector-amd64
 
       - name: Runtime behavior contract (linux/amd64)
         run: SKIP_BUILD=true PLATFORM=linux/amd64 IMG=s3-static-connector:test bash test/behavior_test.sh
@@ -71,8 +71,8 @@ jobs:
           push: false
           load: true
           tags: s3-static-connector:test-arm64
-          cache-from: type=gha,scope=s3-static-connector
-          cache-to: type=gha,mode=max,scope=s3-static-connector
+          cache-from: type=gha,scope=s3-static-connector-arm64
+          cache-to: type=gha,mode=max,scope=s3-static-connector-arm64
 
       - name: Runtime behavior contract (linux/arm64)
         run: SKIP_BUILD=true PLATFORM=linux/arm64 IMG=s3-static-connector:test-arm64 bash test/behavior_test.sh
@@ -111,5 +111,8 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:main
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha,scope=s3-static-connector
-          cache-to: type=gha,mode=max,scope=s3-static-connector
+          cache-from: |
+            type=gha,scope=s3-static-connector-amd64
+            type=gha,scope=s3-static-connector-arm64
+            type=gha,scope=s3-static-connector-publish
+          cache-to: type=gha,mode=max,scope=s3-static-connector-publish

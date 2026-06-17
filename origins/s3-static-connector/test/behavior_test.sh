@@ -35,6 +35,14 @@ else
   echo "==> building $IMG ($PLATFORM)"
   docker build --platform "$PLATFORM" -t "$IMG" "$DIR"
 fi
+
+# The live stub path below renders plaintext S3 so it can run locally without
+# AWS. Validate the real TLS render path separately so Envoy schema changes
+# (including SAN verification) are caught on every supported architecture.
+docker run --rm --platform "$PLATFORM" --entrypoint sh \
+  -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
+  "$IMG" -c 'set -eu; RENDER_DIR=/tmp/rendered render.sh; envoy --mode validate -c /tmp/rendered/envoy.yaml >/dev/null'
+
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$STUB" --network "$NET" \

@@ -97,7 +97,9 @@ distinction is preserved in the access log for alarming.
 
 Range serving is intended for uncompressed objects. nginx gzip can take
 precedence for compressible content types such as CSS, JS, JSON, SVG, and XML,
-so byte-range behavior for those assets is not part of the contract.
+so byte-range behavior for those assets is not part of the contract. Viewer
+headers are stripped before the Envoy/S3 hop, so a cold range request can fetch
+and cache the full object; subsequent ranges can be served from nginx's cache.
 
 ## Logging
 
