@@ -774,7 +774,7 @@ func splitTopLevelKeyword(s, keyword string) []string {
 
 // evalCondition supports the exact ConditionExpression shapes the
 // production code emits: subexpressions joined by top-level " AND " plus the
-// reset path's parenthesized top-level " OR ". Mixed or nested boolean trees
+// reset path's top-level " OR ". Mixed or nested boolean trees
 // beyond that are intentionally out of scope for this test fake. Each
 // subexpression is one of:
 //
@@ -784,6 +784,7 @@ func splitTopLevelKeyword(s, keyword string) []string {
 //	NOT contains(<attr>, :val)
 //	<attr> = :val
 //	<attr> > :val
+//	<attr> < :val
 //
 // Returns (true, nil) when every subexpression is satisfied.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
@@ -912,7 +913,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		return false, nil
 	}
 	// Binary comparison: `<attr> <op> :val`. The only operators in
-	// production use are `=` and `>`.
+	// production use are `=`, `>`, and `<`.
 	for _, op := range []string{">=", "<=", "<>", "=", ">", "<"} {
 		idx := strings.Index(term, " "+op+" ")
 		if idx < 0 {
