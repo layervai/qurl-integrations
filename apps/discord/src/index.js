@@ -44,6 +44,7 @@ const {
   shouldRegisterInteractionListener,
   resolveProcessRole,
   missingDetectCommandKeys,
+  PLACEHOLDER_SENTINEL,
 } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
@@ -407,7 +408,7 @@ if (config.ENABLE_GATEWAY_HOT_STANDBY) {
 const mapCommandMissing = missingMapCommandKeys(config);
 if (mapCommandMissing.length > 0) {
   logger.error(
-    `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
+    `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "${PLACEHOLDER_SENTINEL}" sentinel. ` +
     'Seed a real Google Maps Platform API key (Places API enabled, no HTTP-referrer restriction) into the ' +
     '/qurl-bot-discord/GOOGLE_MAPS_API_KEY SSM parameter before re-flipping the toggle.'
   );
@@ -417,7 +418,7 @@ if (mapCommandMissing.length > 0) {
 const detectCommandMissing = missingDetectCommandKeys(config);
 if (detectCommandMissing.length > 0) {
   logger.error(
-    `DETECT_COMMAND_ENABLED=true but ${detectCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
+    `DETECT_COMMAND_ENABLED=true but ${detectCommandMissing.join(', ')} is missing or still the literal "${PLACEHOLDER_SENTINEL}" sentinel. ` +
     'Seed QURL_API_KEY with a qurl:resolve-capable service credential and seed ' +
     '/qurl-bot-discord/DETECT_ACCESS_TOKEN with a multi-use at_ token minted for target_path=/api/detect before re-flipping the toggle.'
   );

@@ -596,10 +596,6 @@ async function resolveDetectTarget() {
  * @returns {Promise<{detected: boolean, qurl_id: string|null, match_pct: number|null, confidence: number}>}
  */
 async function detectWatermark(imageBytes, { guildId, contentType, apiKey } = {}) {
-  // resolve() always uses the global config.QURL_API_KEY (see getQurlClient), so
-  // this leg requires it even when a per-call `apiKey` is set — the apiKey
-  // overrides only the POST Bearer, not the resolve Bearer.
-  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!guildId) throw new Error('detectWatermark requires a guildId (attribution is guild-scoped)');
 
   // Resolve-per-call — never cache the target_url (rationale in the REACH MODEL
