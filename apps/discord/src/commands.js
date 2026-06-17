@@ -1345,7 +1345,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     logger,
   });
   // Hoist the flag read once per monitor — registerViewUpdateFor
-  // is called up to QURL_SEND_MAX_RECIPIENTS times (50 today) on
+  // is called up to QURL_SEND_MAX_RECIPIENTS times (default 20000) on
   // construction + once per /qurl add. Re-reading config on every
   // call is negligible but the hoist reads cleaner.
   const viewUpdatePushEnabled = config.ENABLE_VIEW_UPDATE_PUSH;
