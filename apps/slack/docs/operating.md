@@ -664,7 +664,9 @@ operator-tunable environment variables.
 If one task observes a counter row already advanced into a future window
 (hour-boundary race or clock skew), it follows that stored window rather than
 resetting the item backward. A future-window denial can therefore report a retry
-hint longer than one hour.
+hint longer than one hour. In a narrow race where another task has already moved
+the row back to the local window, a caller may still receive the conservative
+future-window retry hint once; the next call re-reads the settled row.
 
 The gate is staged behind `QURL_SLACK_RATE_LIMIT_ENABLED`. Leave it unset in
 sandbox/open-gate deployments; set it to `true` in production after confirming
