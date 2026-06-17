@@ -12,11 +12,11 @@ Published image:
 ghcr.io/layervai/qurl-integrations/s3-static-connector
 ```
 
-The publish workflow rebuilds the multi-arch image from the same Dockerfile
-after PR tests, then pushes `:main` and `:<git-sha>` tags after merges to
-`qurl-integrations/main`. The published digest is rebuilt rather than the
-byte-identical per-arch image loaded during PR behavior tests, so deployments
-should pin the resolved image digest once the published image has soaked.
+On `qurl-integrations/main`, the publish workflow builds a GHCR candidate,
+runs the behavior contract against that exact candidate digest for both
+`linux/amd64` and `linux/arm64`, and only then promotes the tested digest to
+`:main` and `:<git-sha>`. Deployments should pin the resolved image digest
+once the published image has soaked in the target environment.
 
 The image packages two pinned processes:
 
