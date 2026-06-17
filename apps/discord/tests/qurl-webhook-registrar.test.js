@@ -1282,20 +1282,31 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
     expect(result.action).toBe('reused');
   });
 
-  it('treats DELETE 404 as success (concurrent cleanup by another invocation)', async () => {
-    // 404 propagates through deleteSubscription as a no-throw. Two
-    // Lambdas running concurrently (rare; reserved-concurrency=1 in
-    // infra but defense-in-depth) must not crash the sweep.
-    mockFetchResponses({
-      'GET /v1/webhooks': () => ({ body: { data: [
-        deadOrphan({ webhook_id: 'wh_already_gone' }),
-      ] } }),
-      'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
-      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
-    });
-    const result = await ensureWebhookSubscription(BOT_OPTS);
-    expect(result.action).toBe('created');
-    expect(result.webhookId).toBe('wh_new');
+  it('treats DELETE 404 as success AND distinguishes the log line (concurrent cleanup by another invocation)', async () => {
+    // 404 propagates through deleteSubscription as a no-throw. The
+    // log line is the "already-absent" variant so the runbook-grep
+    // on `URL-migration orphan deleted` doesn't get false-attributed
+    // to this invocation when another beat us to the DELETE.
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetchResponses({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          deadOrphan({ webhook_id: 'wh_already_gone' }),
+        ] } }),
+        'DELETE /v1/webhooks/wh_already_gone': () => ({ status: 404, body: { error: 'not found' } }),
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await ensureWebhookSubscription(BOT_OPTS);
+      expect(result.action).toBe('created');
+      expect(result.webhookId).toBe('wh_new');
+      const lines = logSpy.mock.calls.map(c => c[0]).filter(l => typeof l === 'string');
+      const absentLine = lines.find(l => l.includes('URL-migration orphan already absent'));
+      const deletedLine = lines.find(l => l.includes('URL-migration orphan deleted'));
+      expect(absentLine).toBeDefined();
+      expect(deletedLine).toBeUndefined(); // critical: no false attribution
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it('does NOT touch same-host subs at a DIFFERENT path (path filter)', async () => {

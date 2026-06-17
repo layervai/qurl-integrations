@@ -230,6 +230,16 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orpha
   throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
 }
 
+// Returns the outcome shape so a logging caller can distinguish
+// "we actually deleted this row" from "the row was already absent
+// (404)" without re-throwing on 404. The dedupe path doesn't care
+// about the distinction; the URL-migration orphan-sweep path does
+// (the runbook-grep contract on `URL-migration orphan deleted`
+// should be true to that, not silently covering already-absent rows).
+const DELETE_OUTCOMES = Object.freeze({
+  DELETED: 'deleted',
+  ALREADY_ABSENT: 'already-absent',
+});
 async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
   try {
     await callQurlService({
@@ -238,10 +248,14 @@ async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
       apiEndpoint,
       apiKey,
     });
+    return DELETE_OUTCOMES.DELETED;
   } catch (err) {
     // 404 = another replica deleted it concurrently. Treat as
-    // success — the goal state ("this duplicate is gone") is met.
-    if (err.status !== 404) throw err;
+    // success — the goal state ("this duplicate is gone") is met —
+    // and signal the distinction so an observability caller can
+    // pick the right log message.
+    if (err.status === 404) return DELETE_OUTCOMES.ALREADY_ABSENT;
+    throw err;
   }
 }
 
@@ -366,6 +380,28 @@ function urlPathname(u) {
 //      typically reports null/undefined — treat that as
 //      "presumed alive, do not delete."
 //
+//      LOAD-BEARING ENVIRONMENT-ISOLATION ASSUMPTION:
+//      The description prefix is identical across environments
+//      (`Discord bot view counter`), so the ONLY structural separator
+//      between this sweep and another live environment's sub is the
+//      owner_id scope (subscriptions are listed via the API key's
+//      owner_id). If sandbox and prod (or any two envs) ever share
+//      ONE `QURL_API_KEY` — i.e. resolve to the same `owner_id` in
+//      qurl-service — then a sandbox boot during a prod transient
+//      incident (`last_delivery_success: false` + `failure_count` past
+//      3) would DELETE prod's live subscription. Today's deployment
+//      uses per-env SSM `QURL_API_KEY` parameters (one per env), each
+//      backed by a distinct qurl-service API key tied to a distinct
+//      owner_id — confirmed via the infra terraform's per-env
+//      `apiKeySsmParamName` wiring + the API key creation procedure
+//      (each env's key is minted separately). The owner-isolation
+//      invariant is therefore established by configuration, not
+//      enforced in code here. Anything that lets two envs share an
+//      owner_id (key migration, accidental SSM cross-mount, a future
+//      "shared key for stage and prod" decision) MUST flip the
+//      kill-switch BEFORE landing, or the sweep must gain an explicit
+//      env-discriminator first (#827 covers the latter durable fix).
+//
 //      Limitations the gate does NOT cover (see #827 for the durable
 //      fix tracking issue):
 //        - Sustained-outage cannibalization: a sibling in a hard outage
@@ -461,8 +497,16 @@ function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
 async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
   for (const orphan of orphans) {
     try {
-      await deleteSubscription({ apiEndpoint, apiKey, webhookId: orphan.webhook_id });
-      logger.info('URL-migration orphan deleted', {
+      const outcome = await deleteSubscription({ apiEndpoint, apiKey, webhookId: orphan.webhook_id });
+      // Distinguish "this code's DELETE landed" from "another invocation
+      // beat us to it (404)" so the runbook-grep on
+      // `URL-migration orphan deleted` stays accurate to who actually
+      // removed the row. Both are success states for cleanup; only
+      // the log line differs.
+      const msg = outcome === DELETE_OUTCOMES.ALREADY_ABSENT
+        ? 'URL-migration orphan already absent (concurrent cleanup)'
+        : 'URL-migration orphan deleted';
+      logger.info(msg, {
         old_url: orphan.url,
         webhook_id: orphan.webhook_id,
         description: orphan.description,
@@ -863,6 +907,7 @@ module.exports = {
   buildSsmPersistSecret,
   WEBHOOK_ACTIONS,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
+  DELETE_OUTCOMES,
   // Exposed for webhook-subscriptions.js so the registry's
   // discoverDefaultOwnerId tick goes through the same QurlServiceError /
   // op-tagged transport as the rest of the registrar surface — kept off
