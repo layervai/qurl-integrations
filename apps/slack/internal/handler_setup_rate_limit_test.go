@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -34,6 +35,55 @@ func TestSetupLinkRateLimiterAllow_RetryDuration(t *testing.T) {
 	}
 	if want := 3 * time.Minute; retry != want {
 		t.Fatalf("retry = %s, want %s", retry, want)
+	}
+}
+
+func TestSetupLinkRateLimiterAllow_WindowBoundaryResets(t *testing.T) {
+	limiter := newSetupLinkRateLimiter()
+	now := fixedNow
+	for i := 0; i < setupLinkRateLimitMax; i++ {
+		if ok, retry := limiter.allow("T123ABCDEF", "U123ABCDEF", now); !ok || retry != 0 {
+			t.Fatalf("attempt %d: allow = %v, retry = %s; want allowed with retry 0", i+1, ok, retry)
+		}
+	}
+
+	ok, retry := limiter.allow("T123ABCDEF", "U123ABCDEF", now.Add(setupLinkRateLimitWindow))
+
+	if !ok {
+		t.Fatal("attempt exactly at setup-link window boundary should be allowed")
+	}
+	if retry != 0 {
+		t.Fatalf("retry at setup-link window boundary = %s, want 0", retry)
+	}
+}
+
+func TestSetupLinkRateLimiterAllow_ConcurrentCap(t *testing.T) {
+	limiter := newSetupLinkRateLimiter()
+	results := make(chan bool, setupLinkRateLimitMax*4)
+	var wg sync.WaitGroup
+
+	for i := 0; i < cap(results); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, retry := limiter.allow("T123ABCDEF", "U123ABCDEF", fixedNow)
+			if !ok && retry != setupLinkRateLimitWindow {
+				t.Errorf("retry for concurrent refused attempt = %s, want %s", retry, setupLinkRateLimitWindow)
+			}
+			results <- ok
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	allowed := 0
+	for ok := range results {
+		if ok {
+			allowed++
+		}
+	}
+	if allowed != setupLinkRateLimitMax {
+		t.Fatalf("concurrent allowed attempts = %d, want %d", allowed, setupLinkRateLimitMax)
 	}
 }
 
