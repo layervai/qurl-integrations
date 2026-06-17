@@ -33,7 +33,6 @@
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
-const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { setQurlOAuthCookie } = require('../utils/oauth-cookies');
@@ -57,10 +56,10 @@ function renderNotConfigured(res, reason) {
 // `detail` describes the immediate failure; we append a remediation
 // hint that fits AFTER a Discord OAuth handshake failure (bot is
 // already installed, retry through /qurl setup in-Discord). Other
-// surfaces (the encryption-at-rest 503) use renderPage directly with
+// surfaces (the encryption-at-rest 503) use res.renderPage directly with
 // surface-specific copy — see the inline call site.
 function renderError(res, statusCode, headline, detail) {
-  return res.status(statusCode).send(renderPage({
+  return res.status(statusCode).send(res.renderPage({
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
@@ -89,7 +88,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Inline copy: the standard renderError tail ("run /qurl setup
     // directly") would fail too — same env-var gap. Specific copy
     // tells the admin to wait for the operator.
-    return res.status(503).send(renderPage({
+    return res.status(503).send(res.renderPage({
       title: 'Discord Install Failed',
       icon: '❌',
       heading: 'qURL setup not provisioned',

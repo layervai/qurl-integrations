@@ -86,6 +86,24 @@ describe('Discord install callback', () => {
       expect(res.text).toContain('Missing authorization code');
     });
 
+    it('uses one CSP nonce in the HTTP header, meta policy, and style tag', async () => {
+      const res = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
+      expect(res.status).toBe(400);
+
+      const csp = res.headers['content-security-policy'];
+      expect(csp).toBeDefined();
+      expect(csp).not.toContain('unsafe-inline');
+
+      const nonceMatch = csp.match(/style-src 'nonce-([A-Za-z0-9_-]+)'/);
+      expect(nonceMatch).not.toBeNull();
+      const nonce = nonceMatch[1];
+      expect(nonce).toHaveLength(22);
+
+      expect(res.text).toContain(`style-src 'nonce-${nonce}'`);
+      expect(res.text).toContain(`<style nonce="${nonce}">`);
+      expect(res.text).not.toContain('unsafe-inline');
+    });
+
     it('400s on missing guild_id (admin abandoned mid-install)', async () => {
       const res = await request(app).get('/oauth/discord/callback?code=disc-code');
       expect(res.status).toBe(400);

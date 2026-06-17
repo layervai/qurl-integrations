@@ -8,7 +8,6 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { renderPage } = require('../templates/page');
 const { sendDM } = require('../discord');
 const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
@@ -69,7 +68,7 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   if (keyPrefix) details.push({ label: 'API key prefix', value: keyPrefix });
   // Cache-Control: no-store is set as a router-level default in
   // server.js for every /oauth/* response — see noStoreHeaders.
-  return res.status(200).send(renderPage({
+  return res.status(200).send(res.renderPage({
     title: 'qURL Connected',
     icon: '✅',
     heading: 'qURL is connected to your Discord server.',
@@ -83,7 +82,7 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
 }
 
 function renderError(res, statusCode, headline, detail) {
-  return res.status(statusCode).send(renderPage({
+  return res.status(statusCode).send(res.renderPage({
     title: 'qURL Setup Failed',
     icon: '❌',
     heading: headline,
