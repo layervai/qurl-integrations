@@ -1501,7 +1501,7 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
       const meta = JSON.parse(nearMissLine.slice(nearMissLine.indexOf('{')));
       expect(meta).toMatchObject({
         near_miss_count: 2,
-        orphan_deletes: 0,
+        orphan_delete_attempts: 0,
         url: NEW_URL,
       });
     } finally {

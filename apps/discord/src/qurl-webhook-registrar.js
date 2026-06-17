@@ -275,6 +275,15 @@ function urlHost(u) {
 // query-string equality. The bot's bridge URL is unparametrized today
 // so the divergence is moot in practice; if a query string ever enters
 // the bridge URL, re-evaluate whether sweep needs to consider it.
+//
+// Same-host query-string variant: a sub at `<bridgeUrl>?x=1` is NEITHER
+// matched by `canonicalUrl` (query preserved → strict-eq miss) NOR
+// classified as orphan (same host → filter rejects). So it's neither
+// reused nor swept — it just sits there. Intentional: today the bot
+// only registers the unparametrized form, and a hypothetical `?x=1`
+// variant would belong to a different consumer (or an obsolete
+// experiment) we shouldn't touch. If the bridge URL ever gains a query
+// param, revisit the canonicalization too.
 function urlPathname(u) {
   try {
     const url = new URL(u);
@@ -339,6 +348,8 @@ function urlPathname(u) {
 //      discriminator — e.g. an explicit allowlist of "valid current
 //      hosts" or an "old-host marker" set at rename time — NOT a
 //      higher failure_count floor.
+//      TODO(active-active-cannibalization, #827): track the durable
+//      fix before any multi-region rollout under a shared API key.
 //
 //      First-boot-after-rename caveat: the *old* sub's last delivery
 //      may have been a success (the one that completed just before the
@@ -654,9 +665,15 @@ async function ensureWebhookSubscription(opts) {
   // a PERPETUAL near-miss → this log would emit every boot. Today
   // that's a non-issue; if it lands, downgrade to debug or rate-limit.
   if (nearMissCount > 0) {
+    // orphan_delete_attempts (not _deletes): a 5xx'd DELETE still
+    // counts here, since the per-orphan INFO/ERROR lines are the
+    // authoritative success/failure record. Naming it _deletes would
+    // mislead an operator reading "orphan_delete_attempts: 2" when
+    // only one corresponding "URL-migration orphan deleted" line
+    // exists.
     logger.info('URL-migration orphan sweep — liveness-gated near-misses', {
       near_miss_count: nearMissCount,
-      orphan_deletes: orphans.length,
+      orphan_delete_attempts: orphans.length,
       url: bridgeUrl,
     });
   }
