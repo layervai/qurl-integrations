@@ -1713,7 +1713,8 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// request shield above this gate. The quota is consumed before MintState so
 	// repeated local mint failures still get throttled instead of retrying
 	// without bound.
-	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, h.now()); !ok {
+	now := h.now()
+	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
 		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
 		retryCommand := "`/qurl setup <email>`"
 		if setupCmd.mode.Explicit() {
@@ -1722,7 +1723,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
 		return
 	}
-	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
 		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
