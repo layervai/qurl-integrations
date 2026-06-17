@@ -290,10 +290,14 @@ async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, bui
   // and the expired marker ("expired N ago") describe the same dead
   // door, but whichever landed first is the truthful one for the
   // recipient — re-editing would overwrite it with a redundant or
-  // less-accurate message. `findSendsByQurlId` projects ALL, so the
-  // sibling marker is already on `row` (zero extra read). Read straight
-  // off the row rather than the marker function so a redelivery sees a
-  // marker the local UpdateItem already wrote.
+  // less-accurate message. `findSendsByQurlId` projects ALL (the
+  // qurl_id-index GSI, see ddb-store.js), so the sibling marker is
+  // already on `row` (zero extra read) — same pre-existing dependency
+  // the expired path leans on for created_at/dm_status. If that GSI's
+  // projection ever narrows to KEYS_ONLY/INCLUDE, this cross-check
+  // silently always-misses and starts clobbering the sibling copy. Read
+  // straight off the row rather than the marker function so a redelivery
+  // sees a marker the local UpdateItem already wrote.
   //
   // TOCTOU window (same shape as the revoke race below): if the
   // consumed and expired events run their GSI lookup before EITHER
@@ -498,7 +502,7 @@ async function handleQurlExpired(req, res, { data, eventId }) {
 // ONE-TIME qURL and consumes it (`data.consumed === true`), the link is
 // dead for them even though its 30m TTL hasn't elapsed. Flip their DM
 // from the present-tense "🕐 Closes <t:...:R>" embed to the past-tense
-// "🔓 You opened this one-time qURL … no longer active" copy so they
+// "🔒 You opened this one-time qURL … no longer active" copy so they
 // don't see "Closes in ~25m" on a link they can no longer reach.
 //
 // FIRE-AND-FORGET by design (mirrors the view-counter publish above, NOT
@@ -722,6 +726,13 @@ router.post('/qurl', async (req, res) => {
     // is the idempotency layer, so attempting on any consumed event lets
     // a redelivery recover a transiently-missed flip while the marker
     // short-circuits the redundant edit.
+    //
+    // Reached only after the access_count gate above (a consumed event
+    // with a malformed/zero access_count short-circuits at
+    // invalid-payload and never flips here — by contract a consumed
+    // qurl.accessed always carries access_count >= 1, so that's
+    // theoretical; if it ever weren't, the qurl.expired backstop still
+    // flips the DM, just with the less-specific copy).
     if (consumed) {
       flipConsumedDMInBackground({ qurlId: data.qurl_id, eventId });
     }

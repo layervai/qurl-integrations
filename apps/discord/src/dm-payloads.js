@@ -79,7 +79,7 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
 function buildConsumedDMPayload() {
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setDescription('🔓 You opened this one-time qURL.\nIt has been used and is no longer active.');
+    .setDescription('🔒 You opened this one-time qURL.\nIt has been used and is no longer active.');
   return { embeds: [embed], components: [] };
 }
 
