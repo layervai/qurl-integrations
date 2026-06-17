@@ -182,6 +182,6 @@ skip this image entirely.
 ```sh
 bash test/render_test.sh                      # render configs, diff goldens
 bash test/cachectl_test.sh                    # cache-control path/safety tests
-docker buildx build --platform linux/arm64 .  # compile the t4g target image
 bash test/behavior_test.sh                    # run the host-arch image against a stub S3
+PLATFORM=linux/arm64 bash test/behavior_test.sh # run the t4g target image under QEMU
 ```

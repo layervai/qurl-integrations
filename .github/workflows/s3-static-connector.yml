@@ -58,8 +58,13 @@ jobs:
           context: origins/s3-static-connector
           platforms: linux/arm64
           push: false
+          load: true
+          tags: s3-static-connector:test-arm64
           cache-from: type=gha,scope=s3-static-connector
           cache-to: type=gha,mode=max,scope=s3-static-connector
+
+      - name: Runtime behavior contract (linux/arm64)
+        run: SKIP_BUILD=true PLATFORM=linux/arm64 IMG=s3-static-connector:test-arm64 bash test/behavior_test.sh
 
   publish:
     name: s3-static-connector / publish

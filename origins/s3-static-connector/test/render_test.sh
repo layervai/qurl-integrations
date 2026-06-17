@@ -48,6 +48,12 @@ if render invalid-prefix S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_PREFIX
 fi
 grep -q "S3_PREFIX must contain only" "$TMP/invalid-prefix.err"
 
+if render dotdot-prefix S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_PREFIX='site/../assets' 2>"$TMP/dotdot-prefix.err"; then
+  echo "MISMATCH: dot-dot S3_PREFIX rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_PREFIX must not contain dot or dot-dot" "$TMP/dotdot-prefix.err"
+
 if render zero-ttl S3_BUCKET=example-bucket AWS_REGION=us-east-1 CACHE_DEFAULT_TTL=0s 2>"$TMP/zero-ttl.err"; then
   echo "MISMATCH: zero CACHE_DEFAULT_TTL rendered successfully" >&2
   exit 1

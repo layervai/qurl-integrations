@@ -29,8 +29,12 @@ trap cleanup EXIT
 cleanup
 
 set -e
-echo "==> building $IMG ($PLATFORM)"
-docker build --platform "$PLATFORM" -t "$IMG" "$DIR"
+if [ "${SKIP_BUILD:-false}" = "true" ]; then
+  echo "==> using existing $IMG ($PLATFORM)"
+else
+  echo "==> building $IMG ($PLATFORM)"
+  docker build --platform "$PLATFORM" -t "$IMG" "$DIR"
+fi
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$STUB" --network "$NET" \

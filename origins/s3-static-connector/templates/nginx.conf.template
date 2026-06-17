@@ -39,6 +39,8 @@ http {
     # Cache key excludes the query string, so `?_t=` cache-busters collapse to a
     # single entry — matching CloudFront's CACHING_OPTIMIZED query-excluded key.
     # $request_method keeps GET and HEAD entries distinct.
+    # Keep this in sync with cachectl.sh's CACHE_KEY_* defaults; targeted purge
+    # reconstructs nginx's on-disk cache key from those values.
     proxy_cache_key "$request_method$scheme$proxy_host$uri";
 
     # Clean-URL rewrite — the CloudFront viewer-request function, rule for rule:

@@ -47,6 +47,12 @@ case "$S3_PREFIX" in
     exit 1
     ;;
 esac
+case "/$S3_PREFIX/" in
+  */./*|*/../*)
+    echo "S3_PREFIX must not contain dot or dot-dot path segments" >&2
+    exit 1
+    ;;
+esac
 
 if [ -z "$INDEX_DOCUMENT" ]; then
   echo "INDEX_DOCUMENT must not be empty" >&2
