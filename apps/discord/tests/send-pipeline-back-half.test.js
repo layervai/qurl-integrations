@@ -315,6 +315,16 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks resets call records but NOT queued one-shot
+  // implementations, so a `mockResolvedValueOnce` a test queues but the
+  // monitor never consumes would bleed into the next test's first
+  // getQurlViews. The monitor's poll cadence (and thus how many
+  // getQurlViews calls a `advanceTimersByTimeAsync` drains) is an
+  // implementation detail tests shouldn't be coupled to — reset the
+  // implementation queue and restore the "no views yet" default so each
+  // test starts from a known baseline regardless of tick count.
+  mockDb.getQurlViews.mockReset();
+  mockDb.getQurlViews.mockResolvedValue(new Map());
   // Drain any monitors a prior test left registered. activeMonitors is the
   // module-private set; clearing it prevents the LRU-cap eviction test
   // from being polluted by happy-path leftovers.
@@ -412,6 +422,58 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
   });
 });
 
+describe('monitorLinkStatus — early-poll latency (long-expiry sends tick within seconds)', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  // Regression for the "👀 0 viewed" latency bug (operator-confirmed
+  // 2026-06-17): the sub-second SQS push silent-drops on the replicas
+  // that don't host the monitor (load-bearing by design — see
+  // view-update-registry.js), so the polling fallback is the path that
+  // actually renders the counter on most sends. Before the early-poll
+  // ramp, a long-expiry send polled on the flat steady interval
+  // (max(15s, min(60s, expiryMs/10)) = 60s for a 30m expiry), so a view
+  // that landed seconds after the send wasn't reflected until the next
+  // 60s tick — "far too much latency" for a counter the product calls
+  // sub-second. The dense early phase polls every few seconds for the
+  // first window of the monitor's life, so the view renders within
+  // seconds regardless of expiry.
+  //
+  // 30m expiry is load-bearing: at the old code's steady interval this
+  // is 60s, so advancing only ~20s would read 0 — that's the regression
+  // this test guards. (A short '1m' expiry already polled at 15s, so it
+  // would not exercise the bug.)
+  it('a view recorded seconds after a 30m-expiry send is reflected within seconds, not ~60s', async () => {
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-latency', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '30m', 'Sent to 1 user', { components: [] }, 1,
+    );
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
+
+    // First tick (~3s) runs before the view lands — counter stays 0.
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
+
+    // The recipient opens the link a few seconds into the send.
+    mockDb.getQurlViews.mockResolvedValue(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: true }],
+    ]));
+
+    // Advance well short of the old 60s steady interval. The dense
+    // early phase must have caught the view by now.
+    await jest.advanceTimersByTimeAsync(15000);
+
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('👀 1 viewed / 0 pending'),
+    }));
+    monitor.stop();
+  });
+});
+
 describe('monitorLinkStatus — empty-qurl_id boundary guard', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
@@ -464,23 +526,34 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
     monitor.stop();
   });
 
-  it('subsequent ticks honor standard pollInterval after the fast first tick', async () => {
+  it('polls densely (~5s) during the early window, then decays to the steady interval', async () => {
+    // 30m expiry → steady interval = 60s; early phase = every 5s for the
+    // first 90s. Pins both halves of the ramp: dense early so a view
+    // renders within seconds, then sparse so an idle monitor isn't a
+    // sustained DDB cost. (The early-poll-latency describe above pins
+    // the user-visible render; this pins the cadence shape.)
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1,
+      '30m', 'Sent', { components: [] }, 1,
     );
 
+    // First tick at ~3s.
     await jest.advanceTimersByTimeAsync(3000);
-    const callsAfterFirstTick = mockDb.getQurlViews.mock.calls.length;
-    expect(callsAfterFirstTick).toBeGreaterThanOrEqual(1);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
 
-    await jest.advanceTimersByTimeAsync(3000); // t=6s — no tick due
-    expect(mockDb.getQurlViews.mock.calls.length).toBe(callsAfterFirstTick);
+    // Dense early phase: ~3 more ticks over the next 15s (at 8s, 13s, 18s).
+    await jest.advanceTimersByTimeAsync(15000);
+    const callsAfterEarly = mockDb.getQurlViews.mock.calls.length;
+    expect(callsAfterEarly).toBeGreaterThanOrEqual(4);
 
-    await jest.advanceTimersByTimeAsync(12500); // cross t=18s
-    expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(callsAfterFirstTick);
+    // After the 90s early window, cadence decays to the 60s steady
+    // interval: a 30s advance well past the window yields no new tick.
+    await jest.advanceTimersByTimeAsync(90000); // past earlyPhaseUntil; drains remaining early ticks
+    const callsAtWindowEnd = mockDb.getQurlViews.mock.calls.length;
+    await jest.advanceTimersByTimeAsync(30000); // 30s < 60s steady interval
+    expect(mockDb.getQurlViews.mock.calls.length).toBe(callsAtWindowEnd);
     monitor.stop();
   });
 });
@@ -669,6 +742,66 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       'Link monitor poll failed',
       expect.any(Object),
     );
+  });
+
+  it('re-arm racing a mid-await tick keeps a single poll chain (loopGen guard)', async () => {
+    // The race cr flagged: a tick suspended inside `await getQurlViews`
+    // resumes AFTER the push path flipped the last link (allDone) and a
+    // /qurl add re-armed the loop with a fresh timer. Without the loopGen
+    // guard the stale resumed tick also arm()s, leaving TWO concurrent
+    // poll chains (double the BatchGet rate) until stop()/the 14-min cap.
+    // (Bounded + self-healing — stop() nulls the closure refs, so there's
+    // no leak past stop — but the guard keeps the "single timer handle"
+    // invariant exact rather than commented-around.)
+    //
+    // Driving allDone REQUIRES the push path: only handleViewUpdate →
+    // onAllDone() sets allDone from outside a running tick. So this test
+    // enables the push and dispatches through the real registry.
+    const config = require('../src/config');
+    const registry = require('../src/view-update-registry');
+    const prevFlag = config.ENABLE_VIEW_UPDATE_PUSH;
+    config.ENABLE_VIEW_UPDATE_PUSH = true;
+    try {
+      const interaction = makeInteraction();
+      // First tick blocks until released — simulates a tick suspended in
+      // its getQurlViews await across the re-arm; later ticks are instant.
+      let releaseFirstTick;
+      mockDb.getQurlViews
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseFirstTick = () => resolve(new Map()); }));
+
+      const monitor = monitorLinkStatus(
+        'send-rearm-race', interaction,
+        ONE_LINK_SET,
+        [{ id: 'r1', username: 'Alice' }],
+        '1m', 'Sent to 1 user', { components: [] }, 1,
+      );
+
+      // First tick (~3s) suspends inside getQurlViews.
+      await jest.advanceTimersByTimeAsync(3000);
+      expect(typeof releaseFirstTick).toBe('function');
+
+      // Push path flips the only link → onAllDone() sets allDone, then
+      // /qurl add re-arms the loop (allDone → false, fresh timer).
+      registry.dispatch('q_aaaaaaaaaa1', { accessCount: 1 });
+      monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+      // Resume the now-stale first tick. The guard must suppress its
+      // reschedule so only the re-arm's chain remains.
+      releaseFirstTick();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Measure the poll RATE over one dense window. One chain ticks
+      // every 5s (~3 ticks in 15s); a stale-tick orphan would double it.
+      const callsBefore = mockDb.getQurlViews.mock.calls.length;
+      await jest.advanceTimersByTimeAsync(15000);
+      const ticksInWindow = mockDb.getQurlViews.mock.calls.length - callsBefore;
+      expect(ticksInWindow).toBeLessThanOrEqual(4); // single chain; two would be ~6+
+      monitor.stop();
+    } finally {
+      config.ENABLE_VIEW_UPDATE_PUSH = prevFlag;
+      registry._test._resetForTest();
+    }
   });
 });
 

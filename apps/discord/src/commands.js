@@ -1248,7 +1248,7 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
 
 // --- Link status monitor ---
 // Track live monitors so a burst of `/qurl send` + `/qurl map` commands
-// can't stack more than MAX_CONCURRENT_MONITORS setIntervals. When we
+// can't stack more than MAX_CONCURRENT_MONITORS poll loops. When we
 // cross the cap, the oldest monitor is stopped to make room (the user
 // can still `/qurl revoke`; they just stop seeing live status updates in
 // the original message).
@@ -1259,14 +1259,14 @@ const activeMonitors = new Set();
 // not via bot-token channel PATCH. Both /qurl send and /qurl map
 // deferReply ephemeral, so the confirmation is unreachable once the
 // token expires. There's no cross-token fallback — we just cap the
-// monitor below the 15-min cliff so we don't waste setIntervals
+// monitor below the 15-min cliff so we don't waste poll loops
 // against a dead token.
 
 function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered) {
   // Rebind params as closure-mutable so stop() can null them out for GC.
   // Long-running monitors (up to MAX_MONITOR_DURATION_MS ×
   // MAX_CONCURRENT_MONITORS=50) otherwise pin interaction/recipients/
-  // buttonRow in the setInterval closure.
+  // buttonRow in the poll-loop closure.
   let interaction = interactionArg;
   let qurlLinks = qurlLinksArg;
   let recipients = recipientsArg;
@@ -1332,7 +1332,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     safeEdit,
     onAllDone: () => {
       allDone = true;
-      clearInterval(timer);
+      clearTimeout(timer);
     },
     logger,
   });
@@ -1398,34 +1398,38 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         }
       }
       trackingGeneration++;
-      // If the monitor had already settled (all initial recipients viewed
-      // → setInterval cleared), re-arm it so the new recipients' views
-      // get a chance to flip. Without this, /qurl add on an already-
-      // resolved send leaves the counter frozen for the rest of the
-      // monitor lifetime. Reset pollCount too — the throttling decay
-      // (every-other / every-4th) is meant for an idle send; /qurl add
-      // is the explicit signal that the send is NOT steady-state.
-      // Re-uses the construction-time setTimeout→setInterval pattern
-      // so the first post-add tick fires at FIRST_POLL_DELAY_MS (3s),
-      // not at pollInterval (15-60s) — the same sub-second-click
-      // catching rationale applies to /qurl add recipients too.
+      // /qurl add is an explicit signal the send is NOT idle, so re-enter
+      // the dense early phase. Refreshing earlyPhaseUntil (NOT startTime,
+      // which governs the 14-min life cap) speeds the cadence back up
+      // without extending the monitor's lifetime. nextPollDelay() reads
+      // this at the NEXT reschedule.
+      earlyPhaseUntil = Date.now() + EARLY_POLL_WINDOW_MS;
+      // Two cases:
+      //   - Monitor already settled (all initial recipients viewed → the
+      //     loop stopped rescheduling on allDone): re-arm via arm() so the
+      //     new recipients' views can flip — without this, /qurl add on a
+      //     resolved send leaves the counter frozen for the monitor's life.
+      //     First post-add tick fires at FIRST_POLL_DELAY_MS (3s).
+      //   - Monitor still pending (loop still running): we deliberately do
+      //     NOT clearTimeout+re-arm. The live tick already owns `timer`;
+      //     restarting would either fire a redundant extra tick or (if a
+      //     tick is mid-await) need the loopGen guard to avoid orphaning a
+      //     timer. The running loop already picks up the refreshed
+      //     earlyPhaseUntil at its next reschedule, so a /qurl add past the
+      //     90s window waits at most one in-flight steady interval (≤60s)
+      //     before the dense cadence resumes — an accepted, bounded
+      //     asymmetry vs. paying the double-timer complexity for the rarer
+      //     pending-add case.
       if (allDone && !stopped) {
         allDone = false;
-        pollCount = 0;
-        clearInterval(timer);
-        timer = setTimeout(async () => {
-          await runTick();
-          if (isTerminated()) return;
-          timer = setInterval(runTick, pollInterval);
-          if (timer && timer.unref) timer.unref();
-        }, FIRST_POLL_DELAY_MS);
-        if (timer && timer.unref) timer.unref();
+        clearTimeout(timer);
+        arm(FIRST_POLL_DELAY_MS);
       }
     },
     stop() {
       if (stopped) return;
       stopped = true;
-      clearInterval(timer);
+      clearTimeout(timer);
       activeMonitors.delete(control);
       // Unregister the shared callback from every tracked qurl_id so
       // the registry doesn't pin this monitor's closure state past
@@ -1453,7 +1457,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // webhook token expires at ~15 min from interaction creation; both
   // /qurl send + /qurl map deferReply ephemeral, and ephemeral
   // messages can't be edited via any other token. Past the cap the
-  // setInterval would only burn cycles against a dead token. Store-
+  // poll loop would only burn cycles against a dead token. Store-
   // side view recording (recordQurlView) is unaffected — webhooks
   // keep landing for the link's full lifetime; the sender's confirm-
   // message counter just freezes after the cap. Links themselves
@@ -1461,11 +1465,49 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   const MAX_MONITOR_DURATION_MS = 14 * 60 * 1000;
   const maxMonitorMs = Math.min(expiryMs + 60000, MAX_MONITOR_DURATION_MS);
 
-  const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
+  // Steady-state cadence once a send has been live past the early
+  // window — bounds the sustained cost of an idle monitor (one DDB
+  // BatchGet per tick). Floored at 15s, capped at 60s, scaled to 1/10
+  // of the link's expiry so short-lived links poll more often.
+  const steadyPollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
   // Fast first tick catches sub-second self-destruct sends where the
-  // recipient burns the link before the standard interval would fire.
+  // recipient burns the link before any interval would fire.
   const FIRST_POLL_DELAY_MS = 3000;
+  // Dense early-poll phase. The sub-second SQS view-update push is
+  // best-effort and silent-drops on the N-1/N replicas that don't host
+  // this monitor (view-update-registry.js's SILENT DROP doc), so on
+  // most sends the polling tick below is what actually renders the
+  // counter. Polling on the flat steadyPollInterval (60s for a 30m+
+  // expiry) meant a view that landed seconds after the send wasn't
+  // reflected for up to a minute — "far too much latency" for a counter
+  // the product surfaces as live. Recipients overwhelmingly open within
+  // the first minute or two, so poll every EARLY_POLL_INTERVAL_MS for
+  // the first EARLY_POLL_WINDOW_MS of the monitor's life, then fall back
+  // to steadyPollInterval.
+  //
+  // Cost: this replaces the old pollCount decay (which throttled an idle
+  // monitor toward every-4th-tick), so the steady phase is now a flat
+  // steadyPollInterval (≤60s) — a few × more idle BatchGets than before,
+  // bounded by MAX_CONCURRENT_MONITORS and trivially cheap (a ≤50-key
+  // BatchGet on eventually-consistent small items). Discord-edit volume
+  // does NOT scale with poll rate: runTick edits ONLY on a real
+  // pending→opened transition (`changed`) and each link flips once, so
+  // total edits over the monitor's life are bounded by recipient count
+  // (≤50). Denser polling can split transitions a slow tick would have
+  // coalesced into one edit, but at ≥5s spacing that's far under
+  // Discord's editReply rate limit — no 429 exposure.
+  const EARLY_POLL_INTERVAL_MS = 5000;
+  const EARLY_POLL_WINDOW_MS = 90000;
   const startTime = Date.now();
+  // Anchor for the dense early phase. Distinct from startTime (which
+  // governs the 14-min life cap via maxMonitorMs) so addRecipients can
+  // refresh the dense phase for newly-added recipients WITHOUT extending
+  // the monitor's life past the interaction-token TTL.
+  let earlyPhaseUntil = startTime + EARLY_POLL_WINDOW_MS;
+  // Delay until the next tick: dense while inside the early window,
+  // steady after. Read at each reschedule so a mid-life addRecipients
+  // re-entry into the dense phase takes effect immediately.
+  const nextPollDelay = () => (Date.now() < earlyPhaseUntil ? EARLY_POLL_INTERVAL_MS : steadyPollInterval);
   const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
 
   // Best-effort edit through the interaction webhook token. After the
@@ -1496,26 +1538,16 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     return `${currentBaseMsg}\n👀 ${viewed} viewed / ${pending} pending`;
   }
 
-  let pollCount = 0;
-  // Concurrent-tick safety: runTick has one `await` (db.getQurlViews).
-  // Two ticks queued from setInterval can both be in-flight, both
-  // iterating `views` after their respective resolves. The
-  // `if (current.status === 'opened') continue;` guard at the flip
-  // site is synchronous JS, so the second tick observes the first
-  // tick's flip and no-ops — `viewed++` doesn't double-count, the
-  // BatchGet path is idempotent on already-flipped status.
+  // Non-overlapping ticks: arm()/tick() below reschedule the NEXT tick
+  // only after the current runTick (including its single `await
+  // db.getQurlViews`) resolves, so two ticks can never be in flight at
+  // once — the self-destruct-era setInterval concurrency race is gone.
+  // The synchronous `status === 'opened'` guard at the flip site stays
+  // as defense-in-depth (and to no-op the view-update push path racing
+  // a poll), so `viewed++` still can't double-count.
   const runTick = async () => {
-    pollCount++;
-    // Decay tick rate to bound sustained cost of an idle monitor.
-    //   pollCount 1–5:    every tick fires (fast ramp)
-    //   pollCount 6–20:   every other tick (even-only)
-    //   pollCount 21+:    every 4th tick (multiple-of-4)
-    // The else-if chain reads in the same order: 21+ throttle first,
-    // then 6–20 throttle.
-    if (pollCount > 20 && pollCount % 4 !== 0) return;
-    else if (pollCount > 5 && pollCount % 2 !== 0) return;
     if (isTerminated()) {
-      clearInterval(timer);
+      clearTimeout(timer);
       if (!interaction) return;
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
       await safeEdit({ content: finalMsg, components: [] });
@@ -1543,40 +1575,48 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
       }
       if (changed) {
         const pending = Math.max(0, expectedCount - viewed);
-        // Render-order analysis: two concurrent ticks both reaching
-        // this branch is bounded by the `=== 'opened' continue` guard
-        // at the flip site. A slower tick whose snapshot pre-dates a
-        // faster tick's flip can't double-flip the same qurl_id, so
-        // `viewed` never regresses across ticks. A truly stale tick
-        // would observe all-opened and exit with `changed=false`
-        // (no safeEdit). The remaining theoretical flicker — DDB
-        // eventual-consistency returning newer data to the older
-        // tick than to the newer one — is sub-ms in practice and
-        // self-corrects on the next tick. Acceptable cost for not
-        // adding a render-generation counter on top of the existing
-        // trackingGeneration.
         await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
-        if (pending === 0) { allDone = true; clearInterval(timer); }
+        if (pending === 0) { allDone = true; clearTimeout(timer); }
       }
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });
     }
   };
-  // Two-phase scheduling: fast first tick at FIRST_POLL_DELAY_MS, then
-  // standard setInterval cadence. clearInterval in Node handles both
-  // setTimeout and setInterval handles (Timeout objects share a class),
-  // so control.stop()'s existing clearInterval(timer) cancels either
-  // phase. The post-tick isTerminated() re-check skips the setInterval
-  // when the first tick already terminated the monitor (e.g., all
-  // links resolved instantly) — otherwise we'd create an interval that
-  // immediately self-clears on its first fire.
-  timer = setTimeout(async () => {
-    await runTick();
-    if (isTerminated()) return;
-    timer = setInterval(runTick, pollInterval);
+  // Self-rescheduling poll loop. A single `setTimeout` handle (never a
+  // setInterval) reschedules the NEXT tick only after the current one
+  // resolves — that's what makes ticks non-overlapping (see runTick's
+  // comment) and lets the cadence shift between the dense early phase
+  // and the steady phase at each reschedule via nextPollDelay(). One
+  // handle means control.stop()'s clearTimeout(timer) always cancels
+  // the live timer; the post-tick isTerminated() guard skips
+  // rescheduling when a tick already terminated the monitor (e.g. all
+  // links resolved instantly). `arm()` is the single .unref() site,
+  // shared by construction, the first tick's reschedule, and the
+  // addRecipients re-arm.
+  //
+  // loopGen makes the single-handle invariant hold across an await.
+  // arm() bumps it and the scheduled tick captures it; a tick that
+  // resumes from `await runTick()` only reschedules if its capture still
+  // matches. Without this, an addRecipients re-arm (which calls arm() →
+  // a fresh timer) landing while a tick is suspended in its await would
+  // leave the resumed stale tick to arm() a SECOND chain — two
+  // concurrent poll loops (≈2× the BatchGet rate) until stop()/the
+  // 14-min cap. It self-heals (stop() nulls interaction + linkStatus, so
+  // the orphan's next runTick short-circuits and doesn't re-arm), so
+  // there's no leak past stop — the guard just keeps the single-handle
+  // invariant exact instead of relying on that self-heal.
+  let loopGen = 0;
+  function arm(delayMs) {
+    const gen = ++loopGen;
+    timer = setTimeout(() => tick(gen), delayMs);
     if (timer && timer.unref) timer.unref();
-  }, FIRST_POLL_DELAY_MS);
-  if (timer && timer.unref) timer.unref();
+  }
+  async function tick(gen) {
+    await runTick();
+    if (isTerminated() || gen !== loopGen) return;
+    arm(nextPollDelay());
+  }
+  arm(FIRST_POLL_DELAY_MS);
 
   // Register this monitor in the global set. If we're over the cap, stop
   // the oldest-inserted monitor first (Set iteration order = insertion
@@ -2330,7 +2370,7 @@ async function executeSendPipeline(interaction, {
 
     // Collector arms AFTER the editReply (it needs `response` as anchor).
     // On collector-setup throw we must stop the already-running monitor
-    // — without that the setInterval would leak the interaction +
+    // — without that the poll loop would leak the interaction +
     // recipients + buttonRow closure for up to an hour.
     let collector;
     try {
@@ -2391,7 +2431,7 @@ async function executeSendPipeline(interaction, {
         // Sync dedup before any await (Node single-threaded).
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeInFlight = true;
-        // Stop monitor BEFORE any editReply — its setInterval can
+        // Stop monitor BEFORE any editReply — its poll loop can
         // overwrite the revoke-result message otherwise. Bare call
         // (no `if (monitor)`) — we're inside the `if (monitor) { ... }`
         // collector-setup block; the guard above already proved truthy.
