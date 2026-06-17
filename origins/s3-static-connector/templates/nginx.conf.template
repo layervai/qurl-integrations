@@ -92,6 +92,10 @@ http {
             # Signing happens AFTER this rewrite, so the path Envoy signs is the
             # path S3 receives (avoids the SignatureDoesNotMatch class).
             proxy_pass http://envoy_upstream$s3_target;
+            # Viewer headers are not part of the static-origin contract. Forward
+            # only the explicit headers below so stray x-amz-* headers never
+            # reach the SigV4 signer.
+            proxy_pass_request_headers off;
             # Host the signer signs and S3 sees — must equal the cluster SNI.
             proxy_set_header Host ${S3_HOST};
             proxy_set_header Authorization "";

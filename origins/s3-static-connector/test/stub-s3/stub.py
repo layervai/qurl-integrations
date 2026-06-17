@@ -52,6 +52,10 @@ class Handler(BaseHTTPRequestHandler):
             "X-Stub-Amz-Content-Sha256",
             self.headers.get("x-amz-content-sha256", "absent"),
         )
+        self.send_header(
+            "X-Stub-Client-Amz-Meta",
+            self.headers.get("x-amz-meta-client", "absent"),
+        )
 
     def _send(self, status, body=b"", ctype=None, cache=None, head_only=False,
               extra=None):

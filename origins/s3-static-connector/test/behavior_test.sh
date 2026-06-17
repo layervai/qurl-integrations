@@ -113,6 +113,8 @@ expect_eq "GET /website signed path" "$(hval X-Stub-Path)" "/website/index.html"
 expect_eq "GET /website auth attached" "$(hval X-Stub-Authorization)" "present"
 expect_eq "GET /website host rewritten" "$(hval X-Stub-Host)" "example-bucket.s3.us-east-1.amazonaws.com"
 expect_eq "GET /website unsigned-payload" "$(hval X-Stub-Amz-Content-Sha256)" "UNSIGNED-PAYLOAD"
+fetch -H "x-amz-meta-client: should-not-pass" "$base/styles/app.css"
+expect_eq "client x-amz header stripped before signer" "$(hval X-Stub-Client-Amz-Meta)" "absent"
 
 # 3. trailing slash -> index
 fetch "$base/website/"; expect_eq "GET /website/ body" "$(cat "$B")" "website"
