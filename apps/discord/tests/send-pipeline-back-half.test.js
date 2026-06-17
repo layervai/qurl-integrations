@@ -234,6 +234,8 @@ const {
   activeMonitors,
   executeSendPipeline,
   persistDispatchResult,
+  clearCooldown,
+  revokingSendLocks,
 } = _test;
 
 // ---------------------------------------------------------------------------
@@ -281,6 +283,32 @@ function makePipelineParams(overrides = {}) {
   };
 }
 
+function defer() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForMicrotaskExpectation(assertion, attempts = 10) {
+  // The Add click should reach the picker in a couple of microtasks; 10 keeps
+  // this deterministic without hiding a path that stopped reaching the picker.
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      lastError = err;
+      await Promise.resolve();
+    }
+  }
+  throw lastError;
+}
+
 // Accept-path verifier: pin that the named gate did NOT reject the
 // given params. Two branches both count as success:
 //   - executeSendPipeline throws something downstream → assert the
@@ -315,6 +343,7 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  revokingSendLocks.clear();
   // clearAllMocks resets call records but NOT queued one-shot
   // implementations, so a `mockResolvedValueOnce` a test queues but the
   // monitor never consumes would bleed into the next test's first
@@ -989,6 +1018,21 @@ describe('revokeAllLinks', () => {
     await expect(
       revokeAllLinks('send-throw', 'sender-1', 'apikey'),
     ).rejects.toThrow('DDB throttled');
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).not.toContain('revoke_success');
+    expect(events).not.toContain('revoke_failed');
+  });
+
+  it('does not delete links when recording the revoked state fails', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB write failed'));
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    await expect(
+      revokeAllLinks('send-mark-fail', 'sender-1', 'apikey'),
+    ).rejects.toThrow('DDB write failed');
 
     expect(mockDeleteLink).not.toHaveBeenCalled();
     const events = logger.audit.mock.calls.map(c => c[0]);
@@ -1721,6 +1765,25 @@ describe('handleAddRecipients — pre-flight guards', () => {
     expect(result.msg).toMatch(/incomplete/i);
   });
 
+  it('refuses before minting when the send was revoked while Add Recipients was pending', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      revoked_at: '2026-06-17T20:00:00Z',
+    });
+
+    const result = await handleAddRecipients(
+      'send-revoked', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
   // newRecipients carries {id, username} so callers can render added
   // users by name on a post-Add revoke. Renaming/dropping the field
   // would break that wiring silently.
@@ -2100,6 +2163,339 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
       reason: 'upstream_4xx',
       status_code: 422,
     }));
+  });
+});
+
+describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
+  async function setupRevocableSend() {
+    const collectHandlers = {};
+    const response = {
+      createMessageComponentCollector: jest.fn(() => ({
+        on: jest.fn((event, handler) => {
+          collectHandlers[event] = handler;
+        }),
+      })),
+    };
+    const interaction = makeInteraction({
+      editReply: jest.fn().mockResolvedValue(response),
+    });
+    const revokeStarted = defer();
+    const finishRevoke = defer();
+
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-initial', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/original', resource_id: 'res-initial', qurl_id: 'q_original' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    mockDb.saveSendConfig.mockResolvedValue(undefined);
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { recipient_discord_id: 'u1', resource_id: 'res-initial', dm_channel_id: 'dm-c', dm_message_id: 'dm-m' },
+    ]);
+    mockDb.markSendRevoked.mockResolvedValue(undefined);
+    mockDeleteLink.mockReset();
+    mockDeleteLink.mockImplementationOnce(async () => {
+      revokeStarted.resolve();
+      await finishRevoke.promise;
+      return undefined;
+    });
+
+    await executeSendPipeline(interaction, makePipelineParams({
+      recipients: [{ id: 'u1', username: 'Alice' }],
+    }));
+    expect(collectHandlers.collect).toEqual(expect.any(Function));
+    const sendId = mockDb.saveSendConfig.mock.calls[0][0].sendId;
+    const makeClick = (action) => ({
+      customId: `qurl_${action}_${sendId}`,
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+      reply: jest.fn().mockResolvedValue(undefined),
+    });
+
+    return {
+      collect: collectHandlers.collect,
+      finishRevoke,
+      interaction,
+      makeClick,
+      revokeStarted,
+      sendId,
+    };
+  }
+
+  it('rejects Add Recipients while Revoke is in flight so post-revoke mints cannot survive', async () => {
+    const {
+      collect, finishRevoke, interaction, makeClick, revokeStarted,
+    } = await setupRevocableSend();
+    const revokeClick = makeClick('revoke');
+    const addClick = makeClick('add');
+
+    const revokePromise = collect(revokeClick);
+    await revokeStarted.promise;
+    await collect(addClick);
+    finishRevoke.resolve();
+    await revokePromise;
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Already revoking links for this send.',
+      ephemeral: true,
+    });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+    }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked for: Alice'),
+    }));
+  });
+
+  it('rejects Add Recipients while another collector is revoking the same send', async () => {
+    const { collect, makeClick, sendId } = await setupRevocableSend();
+    revokingSendLocks.add(sendId);
+
+    try {
+      const addClick = makeClick('add');
+      await collect(addClick);
+
+      expect(addClick.reply).toHaveBeenCalledWith({
+        content: 'Already revoking links for this send.',
+        ephemeral: true,
+      });
+      expect(mockMintLinks).toHaveBeenCalledTimes(1);
+      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+      expect(mockDeleteLink).not.toHaveBeenCalled();
+    } finally {
+      revokingSendLocks.delete(sendId);
+    }
+  });
+
+  it('tells Revoke clicks when another collector is already revoking the send', async () => {
+    const { collect, makeClick, sendId } = await setupRevocableSend();
+    revokingSendLocks.add(sendId);
+
+    try {
+      const revokeClick = makeClick('revoke');
+      await collect(revokeClick);
+
+      expect(revokeClick.reply).toHaveBeenCalledWith({
+        content: 'Already revoking links for this send.',
+        ephemeral: true,
+      });
+      expect(revokeClick.deferUpdate).not.toHaveBeenCalled();
+      expect(mockDeleteLink).not.toHaveBeenCalled();
+    } finally {
+      revokingSendLocks.delete(sendId);
+    }
+  });
+
+  it('does not re-delete and uses generic Add wording when a stale collector sees the send already revoked', async () => {
+    const { collect, interaction, makeClick } = await setupRevocableSend();
+    mockDb.getSendConfig.mockResolvedValueOnce({ revoked_at: '2026-06-17T00:00:00.000Z' });
+    mockDeleteLink.mockReset();
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(revokeClick.deferUpdate).toHaveBeenCalled();
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: 'Links for this send have already been revoked.',
+      components: [],
+    });
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'This send has already been revoked. Add Recipients is disabled.',
+      ephemeral: true,
+    });
+  });
+
+  it('continues button revoke when the revoked-state pre-check fails', async () => {
+    const {
+      collect, finishRevoke, interaction, makeClick, revokeStarted, sendId,
+    } = await setupRevocableSend();
+    mockDb.getSendConfig.mockRejectedValueOnce(new Error('DDB read failed'));
+
+    const revokePromise = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await revokePromise;
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Could not pre-check send revoked state before button revoke',
+      { sendId, error: 'DDB read failed' },
+    );
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'sender-1');
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+    }));
+  });
+
+  it('rejects Add Recipients after Revoke succeeds so stale clicks cannot mint new links', async () => {
+    const {
+      collect, finishRevoke, makeClick, revokeStarted, sendId,
+    } = await setupRevocableSend();
+    const revokePromise = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await revokePromise;
+    expect(revokingSendLocks.has(sendId)).toBe(false);
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Links for this send have already been revoked.',
+      ephemeral: true,
+    });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses no-live-links wording when stale Add clicks follow an empty revoke', async () => {
+    const { collect, makeClick } = await setupRevocableSend();
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockResolvedValueOnce([]);
+    mockDeleteLink.mockReset();
+
+    await collect(makeClick('revoke'));
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'No live links remain for this send.',
+      ephemeral: true,
+    });
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses partial-revoke wording when stale Add clicks follow a partial revoke', async () => {
+    const { collect, makeClick } = await setupRevocableSend();
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { recipient_discord_id: 'u1', resource_id: 'res-ok', dm_channel_id: 'dm-c', dm_message_id: 'dm-m', dm_status: 'sent' },
+      { recipient_discord_id: 'u2', resource_id: 'res-failed', dm_channel_id: 'dm-c2', dm_message_id: 'dm-m2', dm_status: 'sent' },
+    ]);
+    mockDeleteLink.mockReset();
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('delete failed'));
+
+    await collect(makeClick('revoke'));
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Revoke already ran for this send. Add Recipients is disabled.',
+      ephemeral: true,
+    });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows Add Recipients after Revoke fails because links still exist', async () => {
+    const { collect, makeClick, interaction } = await setupRevocableSend();
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'Failed to revoke links. Try `/qurl revoke` instead.',
+      components: [],
+    }));
+    mockDeleteLink.mockReset();
+
+    const selectInteraction = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const selectReply = {
+      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
+    };
+    const addClick = makeClick('add');
+    addClick.reply.mockResolvedValueOnce(selectReply);
+
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-initial', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([
+      {
+        qurl_link: 'https://q.test/added',
+        qurl_id: 'q_added',
+        resource_id: 'res-added',
+      },
+    ]);
+
+    try {
+      await collect(addClick);
+
+      expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: 'Select additional recipients:',
+        fetchReply: true,
+      }));
+      expect(selectInteraction.deferUpdate).toHaveBeenCalled();
+      expect(mockMintLinks).toHaveBeenCalledTimes(2);
+      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
+      expect(selectInteraction.editReply).toHaveBeenCalledWith({
+        content: 'Added 1 recipient',
+        components: [],
+      });
+    } finally {
+      // Add sets the per-user send cooldown before opening the picker; clear it
+      // as test teardown so later tests do not inherit this sender's cooldown.
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('rejects Revoke while Add Recipients is waiting on selection', async () => {
+    const {
+      collect, finishRevoke, makeClick, revokeStarted,
+    } = await setupRevocableSend();
+    const selectPending = defer();
+    const selectReply = {
+      awaitMessageComponent: jest.fn(() => selectPending.promise),
+    };
+    const addClick = makeClick('add');
+    addClick.reply.mockResolvedValueOnce(selectReply);
+    const addPromise = collect(addClick);
+    await waitForMicrotaskExpectation(() => {
+      expect(selectReply.awaitMessageComponent).toHaveBeenCalled();
+    });
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(revokeClick.reply).toHaveBeenCalledWith({
+      content: 'Already processing an "Add Recipients" action. Finish the current selection or try again in a moment.',
+      ephemeral: true,
+    });
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+
+    selectPending.reject(Object.assign(new Error('time'), { code: 'InteractionCollectorError' }));
+    await addPromise;
+
+    const retryClick = makeClick('revoke');
+    const retryPromise = collect(retryClick);
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await retryPromise;
+
+    expect(retryClick.deferUpdate).toHaveBeenCalled();
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -2923,13 +3319,12 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     // U+202E (RIGHT-TO-LEFT OVERRIDE) in a public post would flip the
     // announcement RTL for every viewer in the channel.
     const interaction = makeInteraction({
-      member: { displayName: 'Alice‮Evil' },
+      member: { displayName: 'Alice\u202EEvil' },
       user: { id: 'sender-1', username: 'Alice' },
     });
     await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' }));
     expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
     const [, message] = mockSendChannelMessage.mock.calls[0];
-    expect(message.content).not.toMatch(/‮/);
+    expect(message.content).not.toMatch(/\u202E/u);
   });
 });
-
