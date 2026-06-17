@@ -44,6 +44,16 @@ function collectStateSecrets(candidates, { errorPrefix, warnShortOptional } = {}
   return secrets;
 }
 
+function collectOAuthFlowStateSecrets({ primaryEnvName, errorPrefix, warnShortOptional }) {
+  return collectStateSecrets([
+    { value: readEnvSecret(primaryEnvName), label: primaryEnvName },
+    { value: readEnvSecret('OAUTH_STATE_SECRET'), label: 'OAUTH_STATE_SECRET', optionalAfterPrimary: true },
+  ], {
+    errorPrefix,
+    warnShortOptional,
+  });
+}
+
 function shortSecretMessage(name, value) {
   const secret = normalizeSecretValue(value);
   if (!secret || secret.length >= MIN_OAUTH_STATE_SECRET_LENGTH) return null;
@@ -130,10 +140,25 @@ function productionOAuthStateSecretWarnings(secrets, { isOpenNHPActive, isQurlOA
   return warnings;
 }
 
+function enforceProductionOAuthStateSecrets(env, flags, { logger = console, exit = process.exit } = {}) {
+  const { errors, secrets } = validateProductionOAuthStateSecrets(env, flags);
+  if (errors.length > 0) {
+    errors.forEach(error => logger.error(error));
+    exit(1);
+    return { ok: false, errors, warnings: [], secrets };
+  }
+
+  const warnings = productionOAuthStateSecretWarnings(secrets, flags);
+  warnings.forEach(warning => logger.warn(warning));
+  return { ok: true, errors: [], warnings, secrets };
+}
+
 module.exports = {
   SSM_PLACEHOLDER_SECRET,
   MIN_OAUTH_STATE_SECRET_LENGTH,
+  collectOAuthFlowStateSecrets,
   collectStateSecrets,
+  enforceProductionOAuthStateSecrets,
   normalizeSecretValue,
   productionOAuthStateSecretWarnings,
   readEnvSecret,

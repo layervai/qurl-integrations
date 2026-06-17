@@ -29,8 +29,8 @@ const crypto = require('crypto');
 const config = require('../config');
 const logger = require('../logger');
 const {
+  collectOAuthFlowStateSecrets,
   collectStateSecrets,
-  readEnvSecret,
 } = require('./oauth-state-secrets');
 
 const STATE_KIND = 'qurl-oauth';
@@ -77,10 +77,8 @@ function warnShortLegacySecret(label, length) {
 function stateSecrets() {
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
-  const secrets = collectStateSecrets([
-    { value: readEnvSecret('QURL_OAUTH_STATE_SECRET'), label: 'QURL_OAUTH_STATE_SECRET' },
-    { value: readEnvSecret('OAUTH_STATE_SECRET'), label: 'OAUTH_STATE_SECRET', optionalAfterPrimary: true },
-  ], {
+  const secrets = collectOAuthFlowStateSecrets({
+    primaryEnvName: 'QURL_OAUTH_STATE_SECRET',
     errorPrefix: 'Refusing to mint qURL OAuth state',
     warnShortOptional: warnShortLegacySecret,
   });

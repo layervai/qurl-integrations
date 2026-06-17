@@ -36,8 +36,8 @@ const {
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const {
+  collectOAuthFlowStateSecrets,
   collectStateSecrets,
-  readEnvSecret,
 } = require('./utils/oauth-state-secrets');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
@@ -207,10 +207,8 @@ function stateSecrets() {
   // directly from GITHUB_CLIENT_SECRET fallback can invalidate in-flight links.
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
-  const secrets = collectStateSecrets([
-    { value: readEnvSecret('GITHUB_OAUTH_STATE_SECRET'), label: 'GITHUB_OAUTH_STATE_SECRET' },
-    { value: readEnvSecret('OAUTH_STATE_SECRET'), label: 'OAUTH_STATE_SECRET', optionalAfterPrimary: true },
-  ], {
+  const secrets = collectOAuthFlowStateSecrets({
+    primaryEnvName: 'GITHUB_OAUTH_STATE_SECRET',
     errorPrefix: 'Refusing to mint OAuth state',
     warnShortOptional: warnShortLegacyStateSecret,
   });

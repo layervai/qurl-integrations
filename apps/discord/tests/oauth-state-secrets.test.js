@@ -1,4 +1,5 @@
 const {
+  enforceProductionOAuthStateSecrets,
   MIN_OAUTH_STATE_SECRET_LENGTH,
   normalizeSecretValue,
   productionOAuthStateSecretWarnings,
@@ -135,6 +136,50 @@ describe('oauth-state-secrets helpers', () => {
       expect(warnings).toEqual([
         expect.stringContaining('OAUTH_STATE_SECRET is shorter than 32 chars and will be ignored'),
       ]);
+    });
+  });
+
+  describe('enforceProductionOAuthStateSecrets', () => {
+    it('logs validation errors and exits before emitting warnings', () => {
+      const logger = { error: jest.fn(), warn: jest.fn() };
+      const exit = jest.fn();
+
+      const result = enforceProductionOAuthStateSecrets({
+        GITHUB_OAUTH_STATE_SECRET: 'short',
+        OAUTH_STATE_SECRET: 's'.repeat(64),
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: false,
+      }, {
+        logger,
+        exit,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('GITHUB_OAUTH_STATE_SECRET must be at least 32 chars'));
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledWith(1);
+    });
+
+    it('logs production warnings without exiting after validation succeeds', () => {
+      const logger = { error: jest.fn(), warn: jest.fn() };
+      const exit = jest.fn();
+
+      const result = enforceProductionOAuthStateSecrets({
+        GITHUB_OAUTH_STATE_SECRET: 'g'.repeat(64),
+        OAUTH_STATE_SECRET: 'short',
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: false,
+      }, {
+        logger,
+        exit,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('OAUTH_STATE_SECRET is shorter than 32 chars'));
+      expect(exit).not.toHaveBeenCalled();
     });
   });
 });

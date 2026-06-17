@@ -2,8 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 const { isPositiveFinite } = require('./utils/time');
 const {
-  productionOAuthStateSecretWarnings,
-  validateProductionOAuthStateSecrets,
+  enforceProductionOAuthStateSecrets,
 } = require('./utils/oauth-state-secrets');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
@@ -212,19 +211,12 @@ if (process.env.NODE_ENV === 'production') {
   // OAUTH_STATE_SECRET remains accepted only during the migration window, and
   // all accepted state-secret envs must be real 32+ char values rather than the
   // Terraform SSM PLACEHOLDER sentinel.
-  const oauthStateSecretValidation = validateProductionOAuthStateSecrets(process.env, {
+  enforceProductionOAuthStateSecrets(process.env, {
     isOpenNHPActive: config.isOpenNHPActive,
     isQurlOAuthConfigured: config.isQurlOAuthConfigured,
+  }, {
+    logger,
   });
-  const { errors: oauthStateSecretErrors, secrets: oauthStateSecrets } = oauthStateSecretValidation;
-  if (oauthStateSecretErrors.length > 0) {
-    oauthStateSecretErrors.forEach(error => logger.error(error));
-    process.exit(1);
-  }
-  productionOAuthStateSecretWarnings(oauthStateSecrets, {
-    isOpenNHPActive: config.isOpenNHPActive,
-    isQurlOAuthConfigured: config.isQurlOAuthConfigured,
-  }).forEach(warning => logger.warn(warning));
 }
 
 // Any deploy that issues real GitHub OAuth tokens must encrypt persisted
