@@ -84,6 +84,8 @@ function addSecret(secrets, value, label, { optionalAfterPrimary = false } = {})
 }
 
 function stateSecrets() {
+  // If a dedicated secret is present but too short, fail closed instead of
+  // silently falling back; the production boot guard catches that before serve.
   const secrets = [];
   addSecret(secrets, readEnvSecret('QURL_OAUTH_STATE_SECRET'), 'QURL_OAUTH_STATE_SECRET');
   addSecret(secrets, readEnvSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET', { optionalAfterPrimary: true });
@@ -170,19 +172,19 @@ function verifyQurlOAuthState(state) {
   } catch {
     return { ok: false, reason: 'config_error' };
   }
-  let sigOk = false;
-  for (const secret of secrets) {
-    const expected = crypto.createHmac('sha256', secret)
-      .update(encoded)
-      .digest('hex');
-    try {
+  let sigOk;
+  try {
+    sigOk = secrets.some(secret => {
+      const expected = crypto.createHmac('sha256', secret)
+        .update(encoded)
+        .digest('hex');
       if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) {
-        sigOk = true;
-        break;
+        return true;
       }
-    } catch {
-      return { ok: false, reason: 'sig_compare_threw' };
-    }
+      return false;
+    });
+  } catch {
+    return { ok: false, reason: 'sig_compare_threw' };
   }
   if (!sigOk) return { ok: false, reason: 'sig_mismatch' };
 

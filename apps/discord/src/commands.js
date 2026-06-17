@@ -203,13 +203,15 @@ function addStateSecret(secrets, value, label, { optionalAfterPrimary = false } 
       + `(got ${value.length}). Provision a 64+ char value in SSM.`
     );
   }
-  if (value && !secrets.includes(value)) secrets.push(value);
+  if (!secrets.includes(value)) secrets.push(value);
 }
 
 function stateSecrets() {
   // Prefer a GitHub-flow secret, with OAUTH_STATE_SECRET as the legacy shared
   // reader during cutover. Once OAUTH_STATE_SECRET is removed, old shared-key
   // states stop validating after the pending-link TTL has elapsed.
+  // If a dedicated secret is present but too short, fail closed instead of
+  // silently falling back; the production boot guard catches that before serve.
   const secrets = [];
   addStateSecret(secrets, readEnvSecret('GITHUB_OAUTH_STATE_SECRET'), 'GITHUB_OAUTH_STATE_SECRET');
   addStateSecret(secrets, readEnvSecret('OAUTH_STATE_SECRET'), 'OAUTH_STATE_SECRET', { optionalAfterPrimary: true });
@@ -237,7 +239,8 @@ function stateSecrets() {
     }
     return [_testFallbackSecret];
   }
-  return [config.GITHUB_CLIENT_SECRET];
+  addStateSecret(secrets, config.GITHUB_CLIENT_SECRET, 'GITHUB_CLIENT_SECRET fallback');
+  return secrets;
 }
 
 function stateSecret() {

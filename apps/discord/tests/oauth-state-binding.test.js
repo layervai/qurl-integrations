@@ -5,7 +5,7 @@
 
 jest.mock('../src/config', () => ({
   GITHUB_CLIENT_ID: 'client',
-  GITHUB_CLIENT_SECRET: 'test-client-secret',
+  GITHUB_CLIENT_SECRET: 'c'.repeat(64),
   ALLOWED_GITHUB_ORGS: ['opennhp'],
   QURL_SEND_MAX_RECIPIENTS: 10,
   PENDING_LINK_EXPIRY_MINUTES: 10,
@@ -28,7 +28,7 @@ const crypto = require('crypto');
 
 // Re-implement generateState locally so we can sign test states without
 // going through the full /link command path.
-function makeState(discordId, secret = 'test-client-secret') {
+function makeState(discordId, secret = 'c'.repeat(64)) {
   const nonce = crypto.randomBytes(16).toString('hex');
   const sig = crypto.createHmac('sha256', secret)
     .update(`${discordId}:${nonce}`).digest('hex');
@@ -96,7 +96,7 @@ describe('verifyStateBinding', () => {
 
       const state = makeState('12345', process.env.GITHUB_OAUTH_STATE_SECRET);
       expect(verifyStateBinding(state, '12345')).toBe(true);
-      expect(verifyStateBinding(makeState('12345', 'test-client-secret'), '12345')).toBe(false);
+      expect(verifyStateBinding(makeState('12345', 'c'.repeat(64)), '12345')).toBe(false);
     });
 
     it('accepts OAUTH_STATE_SECRET during cutover and rejects it after removal', () => {
