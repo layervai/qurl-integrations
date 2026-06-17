@@ -262,6 +262,13 @@ expect_eq "badrequest client status" "$(status_code)" 404
 expect_eq "badrequest body" "$(cat "$B")" "Not Found"
 if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"400"'; then ok "badrequest logged upstream_status 400"; else no "badrequest not logged as upstream 400"; fi
 
+# 9c. throttle-class responses are retryable upstream failures, not missing
+# objects, and still never leak S3 XML.
+fetch "$base/throttle.json"
+expect_eq "throttle status" "$(status_code)" 502
+expect_eq "throttle body" "$(cat "$B")" "Bad Gateway"
+if docker logs "$ORIGIN" 2>&1 | grep -q '"upstream_status":"429"'; then ok "throttle logged upstream_status 429"; else no "throttle not logged as upstream 429"; fi
+
 # 10. upstream 5xx -> 502 Bad Gateway
 fetch "$base/boom.json"
 expect_eq "boom status" "$(status_code)" 502
@@ -324,38 +331,63 @@ curl -s -o /dev/null "$base/website"
 expect_stub_gets_since "CACHE_DEFAULT_TTL caches metadata-less object" "$mark" 'GET /site/website/index.html ' 0
 
 # 15. The entrypoint supervisor exits the container if either child dies.
-docker exec "$ORIGIN" sh -c '
-found=0
-for comm in /proc/[0-9]*/comm; do
-  name="$(cat "$comm" 2>/dev/null || true)"
-  if [ "$name" = "nginx" ]; then
-    pid="${comm%/comm}"
-    pid="${pid##*/}"
-    kill -KILL "$pid"
-    found=1
+for child in envoy nginx; do
+  docker rm -f "$ORIGIN" >/dev/null 2>&1
+  docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
+    -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
+    -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
+    -e ALLOW_PLAINTEXT_S3=true \
+    -e S3_TLS=false -e S3_ENDPOINT_ADDR="$STUB" -e S3_ENDPOINT_PORT=9000 \
+    -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+    "$IMG" >/dev/null
+
+  child_ready=0
+  for _ in $(seq 1 40); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' "$(origin_base_url)/")" = "200" ]; then child_ready=1; break; fi
+    sleep 1
+  done
+  if [ "$child_ready" != "1" ]; then
+    no "supervisor $child test origin became ready"
+    docker logs "$ORIGIN" 2>&1 | tail -40
+    continue
+  fi
+
+  docker exec "$ORIGIN" sh -c '
+  target="$1"
+  found=0
+  for comm in /proc/[0-9]*/comm; do
+    name="$(cat "$comm" 2>/dev/null || true)"
+    if [ "$name" = "$target" ]; then
+      pid="${comm%/comm}"
+      pid="${pid##*/}"
+      kill -KILL "$pid"
+      found=1
+      break
+    fi
+  done
+  [ "$found" = "1" ]
+  ' sh "$child"
+
+  stopped=0
+  for _ in $(seq 1 20); do
+    state="$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$ORIGIN" 2>/dev/null || true)"
+    case "$state" in
+      false\ *) stopped=1; break ;;
+    esac
+    sleep 0.5
+  done
+  if [ "$stopped" = "1" ]; then
+    ok "supervisor stops container after $child exits"
+  else
+    no "supervisor stops container after $child exits (state '$state')"
+  fi
+  exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN" 2>/dev/null || echo 0)"
+  if [ "$exit_code" != "0" ]; then
+    ok "supervisor exits non-zero after $child crash"
+  else
+    no "supervisor exits non-zero after $child crash"
   fi
 done
-[ "$found" = "1" ]
-'
-stopped=0
-for _ in $(seq 1 20); do
-  state="$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$ORIGIN" 2>/dev/null || true)"
-  case "$state" in
-    false\ *) stopped=1; break ;;
-  esac
-  sleep 0.5
-done
-if [ "$stopped" = "1" ]; then
-  ok "supervisor stops container after nginx exits"
-else
-  no "supervisor stops container after nginx exits (state '$state')"
-fi
-exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN" 2>/dev/null || echo 0)"
-if [ "$exit_code" != "0" ]; then
-  ok "supervisor exits non-zero after child crash"
-else
-  no "supervisor exits non-zero after child crash"
-fi
 
 echo "-------------------------------------------"
 echo "behavior: $pass passed, $fail failed"

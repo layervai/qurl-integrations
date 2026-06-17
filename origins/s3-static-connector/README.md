@@ -111,7 +111,8 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 | --- | ---: | --- | --- |
 | Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404` |
 | Signing / auth failure (S3 `403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) |
-| Other expected S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`, `416`, `429`) | 404 | `Not Found` | access log preserves the exact `upstream_status` |
+| Other expected non-throttle S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`) | 404 | `Not Found` | access log preserves the exact `upstream_status` |
+| S3 throttle (`429`) | 502 | `Bad Gateway` | access log `upstream_status:429` |
 | Upstream 5xx / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
 | Method other than GET/HEAD | 405 | (nginx default) | access log only |
 

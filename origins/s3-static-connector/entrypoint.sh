@@ -5,6 +5,11 @@
 # observable event (the OriginRestart alarm keys on the startup marker below).
 set -Eeuo pipefail
 
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+  echo '{"layer":"origin","msg":"unsupported_bash","required":"5.1"}' >&2
+  exit 1
+fi
+
 RENDER_DIR="${RENDER_DIR:-/etc/qurl/rendered}"
 export RENDER_DIR
 
