@@ -1147,7 +1147,7 @@ async function recordQurlView({
 // keys per request, so this chunks at 100. That chunking is LOAD-BEARING,
 // not defensive: max recipients is QURL_SEND_MAX_RECIPIENTS (default
 // 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
-// The sender-counter fast-path now renders from fixed-size sharded
+// The sender-counter fast-path now renders from fanout-scaled sharded
 // counters in this same table, so this BatchGet-all path is not on the
 // normal sub-second render path. It remains the monitor poll reader and a
 // legacy fallback for live rows created before the aggregate existed.
@@ -1705,32 +1705,46 @@ async function getSendRenderState(sendId) {
   };
 }
 
-const SEND_VIEW_COUNTER_SHARDS = 64;
+const SEND_VIEW_COUNTER_MAX_SHARDS = 64;
+const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
 const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
 
-function sendViewedCountShard(qurlId) {
-  return crypto.createHash('sha256').update(String(qurlId)).digest()[0] % SEND_VIEW_COUNTER_SHARDS;
+function sendViewedCountShardCount(expectedCount) {
+  const count = Number.isSafeInteger(expectedCount) && expectedCount > 0
+    ? expectedCount
+    : SEND_VIEW_COUNTER_MAX_SHARDS;
+  const needed = Math.ceil(count / SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD);
+  let shards = 1;
+  while (shards < needed && shards < SEND_VIEW_COUNTER_MAX_SHARDS) shards *= 2;
+  return shards;
+}
+
+function sendViewedCountShard(qurlId, shardCount) {
+  return crypto.createHash('sha256').update(String(qurlId)).digest()[0] % shardCount;
 }
 
 function sendViewedCountKey(sendId, shard) {
   return `${SEND_VIEW_COUNTER_PREFIX}${sendId}#${String(shard).padStart(2, '0')}`;
 }
 
-function sendViewedCountKeys(sendId) {
-  return Array.from({ length: SEND_VIEW_COUNTER_SHARDS }, (_, shard) => ({
+function sendViewedCountKeys(sendId, shardCount) {
+  return Array.from({ length: shardCount }, (_, shard) => ({
     qurl_id: sendViewedCountKey(sendId, shard),
   }));
 }
 
 // First-view aggregate for the sender counter. This deliberately lives in
-// qurl_views as 64 synthetic counter rows per send, not on the single
-// qurl_send_configs row. A 20k-recipient burst then spreads writes across
-// 64 partition keys instead of funnelling every first view through one
-// hot item; renders read a fixed 64-key shard sum.
-async function incrementSendViewedCount(sendId, qurlId) {
+// qurl_views as synthetic counter rows per send, not on the single
+// qurl_send_configs row. Small sends use one shard; high-fanout sends
+// scale up to 64 shards so a 20k-recipient burst spreads writes instead
+// of funnelling every first view through one hot item. /qurl add only
+// grows expected_count, so later renders that read more shards still
+// include earlier counts written to the lower shard range.
+async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
   if (!sendId) throw new Error('incrementSendViewedCount: sendId is required');
   if (!qurlId) throw new Error('incrementSendViewedCount: qurlId is required');
-  const shard = sendViewedCountShard(qurlId);
+  const shardCount = sendViewedCountShardCount(expectedCount);
+  const shard = sendViewedCountShard(qurlId, shardCount);
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_views,
     Key: { qurl_id: sendViewedCountKey(sendId, shard) },
@@ -1744,9 +1758,9 @@ async function incrementSendViewedCount(sendId, qurlId) {
   }));
 }
 
-async function getSendViewedCount(sendId) {
+async function getSendViewedCount(sendId, expectedCount) {
   if (!sendId) return 0;
-  const keys = sendViewedCountKeys(sendId);
+  const keys = sendViewedCountKeys(sendId, sendViewedCountShardCount(expectedCount));
   const res = await ddb.send(new BatchGetCommand({
     RequestItems: { [TABLES.qurl_views]: { Keys: keys, ConsistentRead: true } },
   }));
@@ -1761,6 +1775,9 @@ async function getSendViewedCount(sendId) {
   collect(res);
   const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
   if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
+    // Single retry by design: if sustained DDB throttling still leaves a
+    // partial sum, the next non-coalesced render and the poll backstop
+    // re-read from source-of-truth qurl_views rows and correct the count.
     collect(await ddb.send(new BatchGetCommand({
       RequestItems: { [TABLES.qurl_views]: { ...unprocessed, ConsistentRead: true } },
     })));

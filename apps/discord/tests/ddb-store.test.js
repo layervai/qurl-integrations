@@ -1345,22 +1345,32 @@ describe('qurl sends', () => {
   test('incrementSendViewedCount: increments a sharded qurl_views counter row, not the send config hot row', async () => {
     const before = Math.floor(Date.now() / 1000);
     ddbMock.on(UpdateCommand).resolves({});
-    await expect(store.incrementSendViewedCount('s1', 'q_a')).resolves.toBeUndefined();
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).resolves.toBeUndefined();
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.TableName).toBe('test-prefix-qurl-views');
-    expect(input.Key.qurl_id).toMatch(/^__send_view_count__s1#\d{2}$/);
+    expect(input.Key.qurl_id).toBe('__send_view_count__s1#00');
     expect(input.UpdateExpression).toBe('SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one');
     expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
       ':sid': 's1',
       ':one': 1,
     }));
-    expect(input.ExpressionAttributeValues[':shard']).toBeGreaterThanOrEqual(0);
-    expect(input.ExpressionAttributeValues[':shard']).toBeLessThan(64);
+    expect(input.ExpressionAttributeValues[':shard']).toBe(0);
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60);
     expect(input.ReturnValues).toBeUndefined();
   });
 
-  test('getSendViewedCount: sums the fixed 64 shard keys and retries unprocessed shard reads once', async () => {
+  test('getSendViewedCount: small sends read one strong shard key', async () => {
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#00', viewed_count: 1 }] },
+    });
+    await expect(store.getSendViewedCount('s1', 1)).resolves.toBe(1);
+    const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(request.ConsistentRead).toBe(true);
+    expect(request.Keys).toEqual([{ qurl_id: '__send_view_count__s1#00' }]);
+  });
+
+  test('getSendViewedCount: max-fanout sends read 64 strong shard keys and retry unprocessed shards once', async () => {
     let attempt = 0;
     ddbMock.on(BatchGetCommand).callsFake((input) => {
       attempt += 1;
@@ -1380,7 +1390,7 @@ describe('qurl sends', () => {
         Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#63', viewed_count: 4 }] },
       });
     });
-    await expect(store.getSendViewedCount('s1')).resolves.toBe(9);
+    await expect(store.getSendViewedCount('s1', 20000)).resolves.toBe(9);
     const first = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input;
     const request = first.RequestItems['test-prefix-qurl-views'];
     const keys = request.Keys;

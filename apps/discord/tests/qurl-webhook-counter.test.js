@@ -212,8 +212,8 @@ describe('sender view-counter fast-path — happy path', () => {
     expect(appId).toBe(APP_ID);
     expect(token).toBe(TOKEN);
     expect(payload.content).toContain('👀 1 viewed');
-    expect(mockIncrementSendViewedCount).toHaveBeenCalledWith(SEND_ID, QURL_ID);
-    expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID);
+    expect(mockIncrementSendViewedCount).toHaveBeenCalledWith(SEND_ID, QURL_ID, 3);
+    expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID, 3);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
     // Commit AFTER the edit — a count-before-edit inversion is the
     // stuck-counter regression. Assert the call ORDER.
@@ -346,7 +346,7 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
     const payload = mockEditInteractionReply.mock.calls[0][2];
     expect(payload.content).toContain('👀 2 viewed');
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 2);
-    expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID);
+    expect(mockGetSendViewedCount).toHaveBeenCalledWith(SEND_ID, 3);
     expect(mockGetQurlViews).not.toHaveBeenCalled();
     expect(mockGetSendItems).not.toHaveBeenCalled();
   });
