@@ -7,6 +7,11 @@ const mockDeleteSubscription = jest.fn();
 jest.mock('../src/qurl-webhook-registrar', () => ({
   ensureWebhookSubscription: mockEnsureWebhookSubscription,
   deleteSubscription: mockDeleteSubscription,
+  // Expose the real constant so guild-webhook-link's description
+  // interpolation produces a wire-correct string in tests too. Keep
+  // in sync with the real module — a future rename would break the
+  // description-prefix invariant if the mock drifted.
+  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX: 'Discord bot view counter',
 }));
 
 const mockSetGuildWebhookSubscription = jest.fn();
@@ -125,6 +130,45 @@ describe('linkGuildWebhookSubscription — partial-failure rollback', () => {
       AUDIT_EVENTS.QURL_WEBHOOK_SUBSCRIPTION_REGISTERED,
       expect.objectContaining({ guild_id: 'g_happy', action: 'created' }),
     );
+  });
+});
+
+describe('linkGuildWebhookSubscription — URL-migration sweep kill-switch (#827)', () => {
+  // Bot HTTP fleet is exactly the active-active multi-region topology
+  // that would cannibalize healthy peers if the sweep ran on every
+  // replica. The Lambda wrapper reads QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+  // the bot path MUST honor the same env-var so a single flip
+  // disables the sweep everywhere.
+  it('passes urlMigrationSweepEnabled=true when the env var is unset (default safe for single-host)', async () => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    try {
+      await linkGuildWebhookSubscription({ guildId: 'g_default', apiKey: 'lv_x' });
+      const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+      expect(call.urlMigrationSweepEnabled).toBe(true);
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it('passes urlMigrationSweepEnabled=false when the env var is set (kill-switch covers the bot path)', async () => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '1';
+    try {
+      await linkGuildWebhookSubscription({ guildId: 'g_disabled', apiKey: 'lv_x' });
+      const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+      expect(call.urlMigrationSweepEnabled).toBe(false);
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it('interpolates the shared DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX into the description (drift safety)', async () => {
+    await linkGuildWebhookSubscription({ guildId: 'g_desc', apiKey: 'lv_x', descriptionContext: 'via=test' });
+    const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+    expect(call.description).toBe('Discord bot view counter (guild=g_desc, via=test)');
   });
 });
 
