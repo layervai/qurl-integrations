@@ -83,9 +83,11 @@ function missingKekRequiredKeys(env) {
 //
 // So the trigger is "an OAuth surface that builds a BASE_URL-derived
 // redirect is active" (isOpenNHPActive || isQurlOAuthConfigured), not
-// OpenNHP mode specifically. The single !startsWith('https://') test then
-// subsumes the unset case — the localhost default is http:// — catching
-// both "unset → localhost fallback" and an explicit http:// value.
+// OpenNHP mode specifically. The https-prefix test subsumes the unset case
+// — the localhost default is http:// — catching both "unset → localhost"
+// and explicit http://. The message names only the active surface(s) so an
+// OpenNHP-only operator (no Auth0) isn't sent chasing a qURL-OAuth red
+// herring.
 //
 // Intentionally NOT gated on: the per-guild webhook bridge
 // (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
@@ -94,28 +96,28 @@ function missingKekRequiredKeys(env) {
 // fallback, it doesn't dead-end a user flow. Blocking boot on it would
 // force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
 // ignore it. A future consumer that DOES hard-fail belongs in the
-// condition below (and this list), not a fresh ad-hoc check.
+// condition below (and the surface inventory above), not a fresh ad-hoc check.
 //
 // Outside those surfaces BASE_URL is unused for redirects, but a stale
-// explicit http:// value is still rejected — the original canary.
+// explicit http:// value is still rejected (the original canary).
 // `baseUrlExplicitlySet` (caller-computed from process.env, treating
-// "" / whitespace-only as unset) separates "operator set a bad value"
-// from "fell back to the localhost default", so an accidentally-empty SSM
-// param in such a deploy doesn't false-positive.
-//
-// Caller gates on NODE_ENV==='production' (localhost stays convenient in
-// dev) and routes the message through the same log + exit(1) shape as the
-// sibling checks. Returns the operator-facing message or null (string-or-
-// null mirrors unsupportedRoleShipperCombo et al.).
+// "" / whitespace-only as unset) separates "operator set a bad value" from
+// "fell back to the localhost default" so an empty SSM param doesn't
+// false-positive. Caller gates on NODE_ENV==='production'; string-or-null
+// mirrors unsupportedRoleShipperCombo et al.
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
-  // https is always acceptable — short-circuit the common good case.
-  if (cfg.BASE_URL.startsWith('https://')) return null;
+  // https is always acceptable — short-circuit the common good case. The
+  // URL scheme is case-insensitive (RFC 3986), so normalize before testing.
+  if (cfg.BASE_URL.toLowerCase().startsWith('https://')) return null;
   if (cfg.isOpenNHPActive || cfg.isQurlOAuthConfigured) {
+    const surfaces = [
+      cfg.isOpenNHPActive && 'OpenNHP community features',
+      cfg.isQurlOAuthConfigured && 'the qURL guided setup flow',
+    ].filter(Boolean).join(' and ');
     return (
-      'BASE_URL must be set to an https:// URL in production when the qURL OAuth ' +
-      'setup flow (AUTH0_* configured) or OpenNHP community features are active — ' +
-      'it builds the OAuth callback URL, and the http://localhost:3000 default ' +
-      `dead-ends guided setup at the redirect. Got: ${cfg.BASE_URL}. Set BASE_URL ` +
+      'BASE_URL must be set to an https:// URL in production — it builds the ' +
+      `OAuth redirect for ${surfaces}, and the http://localhost:3000 default ` +
+      `would dead-end setup at the redirect. Got: ${cfg.BASE_URL}. Set BASE_URL ` +
       "to the bot's public https:// origin in the deployment template."
     );
   }

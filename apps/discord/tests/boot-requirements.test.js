@@ -168,6 +168,14 @@ describe('baseUrlHttpsProblem', () => {
     expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: HTTPS }), true)).toBeNull();
   });
 
+  it('accepts an uppercase HTTPS:// scheme (URL scheme is case-insensitive)', () => {
+    // Pre-#619 the inline check was case-sensitive; the helper normalizes
+    // so a valid HTTPS:// origin isn't falsely rejected at boot.
+    expect(
+      baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'HTTPS://bot.example.com' }), true),
+    ).toBeNull();
+  });
+
   // The #619 headline regression: a customer (non-OpenNHP) deploy with the
   // qURL OAuth setup flow configured (AUTH0_* set) but BASE_URL left unset
   // silently falls back to localhost and dead-ends /qurl setup at the OAuth
@@ -180,7 +188,10 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/BASE_URL/);
     expect(msg).toMatch(/https:\/\//);
-    expect(msg).toMatch(/qURL OAuth/);
+    // qURL-only deploy: the message names the qURL flow, and must NOT name
+    // OpenNHP (an operator with no OpenNHP features shouldn't chase it).
+    expect(msg).toMatch(/qURL/);
+    expect(msg).not.toMatch(/OpenNHP/);
     // Echoes the offending value so an operator pasting the log line sees it.
     expect(msg).toContain(LOCALHOST);
   });
@@ -194,10 +205,26 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).toContain('http://bot.example.com');
   });
 
-  it('preserves the OpenNHP fail-fast: BASE_URL not https in OpenNHP mode → rejected', () => {
-    // Pre-#619 behavior (the old index.js OpenNHP check) must be unchanged.
-    expect(baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: LOCALHOST }), false)).not.toBeNull();
+  it('preserves the OpenNHP fail-fast with an OpenNHP-precise message (no qURL red herring)', () => {
+    // Pre-#619 behavior (the old index.js OpenNHP check) must be unchanged,
+    // and an OpenNHP-only deploy (no Auth0) must see an OpenNHP-named message
+    // rather than one led by "qURL OAuth (AUTH0_* configured)".
+    const msg = baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: LOCALHOST }), false);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/OpenNHP/);
+    expect(msg).not.toMatch(/qURL/);
+    // Explicit http:// in OpenNHP mode is rejected too.
     expect(baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: 'http://x.example.com' }), true)).not.toBeNull();
+  });
+
+  it('joins both surfaces in the message when OpenNHP and qURL OAuth are both active', () => {
+    // The only logic unique to both-true is the surfaces `.join(' and ')`;
+    // assert the joined phrasing rather than substrings covered elsewhere.
+    const msg = baseUrlHttpsProblem(
+      cfg({ isOpenNHPActive: true, isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
+      false,
+    );
+    expect(msg).toMatch(/OpenNHP community features and the qURL guided setup flow/);
   });
 
   // The non-consuming false-positive guard: a plain single-guild / multi-
@@ -222,8 +249,8 @@ describe('baseUrlHttpsProblem', () => {
   it('uses the OAuth-aware message for consuming surfaces and the terse canary otherwise', () => {
     const consuming = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }), false);
     const canary = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://x.example.com' }), true);
-    expect(consuming).toMatch(/OAuth callback URL/);
-    expect(canary).not.toMatch(/OAuth callback URL/);
+    expect(consuming).toMatch(/OAuth redirect/);
+    expect(canary).not.toMatch(/OAuth redirect/);
     expect(canary).toMatch(/BASE_URL must use https:\/\/ in production/);
   });
 });
