@@ -484,14 +484,15 @@ function assertPublicHttpsTarget(targetUrl) {
     throw new Error('Detect tunnel target points to a private/internal address');
   }
   // Host-pin (defense-in-depth on this Bearer-carrying oracle leg): the resolved
-  // target MUST be under the qURL reverse-tunnel domain, qurl.site. The tunnel
-  // resource host is `r_<id>.qurl.site` (qurl-service resourceIDPattern); we pin
-  // the `.qurl.site` suffix so a compromised or spoofed resolve() that returned a
-  // public NON-qURL host can't be POSTed the image bytes + our API-key Bearer.
-  // (NOT qurl.link — that's the short-link/ALB domain, not the tunnel.) Once the
+  // target MUST be a SUBDOMAIN of the qURL reverse-tunnel domain. The tunnel
+  // resource host is `r_<id>.qurl.site` (qurl-service resourceIDPattern) — always
+  // a subdomain, so we require the `.qurl.site` suffix; the bare apex is never a
+  // detect target. A compromised or spoofed resolve() returning a public NON-qURL
+  // host then can't be POSTed the image bytes + our API-key Bearer. (NOT
+  // qurl.link — that's the short-link/ALB domain, not the tunnel.) Once the
   // sandbox soak confirms the observed host, tighten to /^r_[a-z0-9_-]{11}\.qurl\.site$/.
   const host = parsed.hostname.toLowerCase();
-  if (host !== 'qurl.site' && !host.endsWith('.qurl.site')) {
+  if (!host.endsWith('.qurl.site')) {
     throw new Error('Detect tunnel target host is not under the expected qURL tunnel domain (qurl.site)');
   }
   return targetUrl;
