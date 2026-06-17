@@ -1083,9 +1083,10 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   // between description and expiry. Folding also strips addFields'
   // vertical padding, keeping the Step Through button close.
   //
-  // `<t:N:R>` is Discord's client-side relative-time markdown: the
-  // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
-  // and "1 hour ago" once expired. No bot-side editing needed.
+  // `<t:N:R>` is Discord's client-side relative-time markdown. Pick
+  // the verb at render time so already-expired rows read naturally
+  // ("Closed 3 days ago") while future rows keep the live countdown
+  // copy ("Closes in 1 day").
   //
   // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl send`
   // and `/qurl map` pipe raw input through `sanitizeMessage`
@@ -1131,7 +1132,8 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
     const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
-  descLines.push(`🕐 Closes <t:${expiresAt}:R>`);
+  const expiryVerb = expiresAt <= Math.floor(Date.now() / 1000) ? 'Closed' : 'Closes';
+  descLines.push(`🕐 ${expiryVerb} <t:${expiresAt}:R>`);
 
   // Author row is the embed's "address bar" — anchored top, visually
   // distinct from the description, the closest analog Discord offers
