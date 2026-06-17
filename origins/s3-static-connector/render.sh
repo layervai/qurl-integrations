@@ -71,6 +71,22 @@ listener_host() {
   esac
 }
 
+validate_port() {
+  port_label="$1"
+  port_value="$2"
+  port_got="$3"
+  case "$port_value" in
+    ""|*[!0-9]*)
+      echo "$port_label must be numeric (got $port_got)" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$port_value" -lt 1 ] || [ "$port_value" -gt 65535 ]; then
+    echo "$port_label must be between 1 and 65535 (got $port_got)" >&2
+    exit 1
+  fi
+}
+
 validate_listener() {
   name="$1"
   addr="$2"
@@ -93,16 +109,7 @@ validate_listener() {
       exit 1
       ;;
   esac
-  case "$port" in
-    *[!0-9]*)
-      echo "$name port must be numeric (got $addr)" >&2
-      exit 1
-      ;;
-  esac
-  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-    echo "$name port must be between 1 and 65535 (got $addr)" >&2
-    exit 1
-  fi
+  validate_port "$name port" "$port" "$addr"
 }
 
 assert_loopback_listener() {
@@ -178,6 +185,24 @@ ENVOY_LISTEN_PORT="${ENVOY_LISTEN_ADDR##*:}"
 S3_ENDPOINT_ADDR="${S3_ENDPOINT_ADDR:-$S3_HOST}"
 S3_ENDPOINT_PORT="${S3_ENDPOINT_PORT:-443}"
 S3_TLS="${S3_TLS:-true}"
+case "$S3_ENDPOINT_ADDR" in
+  ""|*[!A-Za-z0-9_.:-]*)
+    echo "S3_ENDPOINT_ADDR must be a DNS name, IPv4 address, or unbracketed IPv6 address" >&2
+    exit 1
+    ;;
+esac
+validate_port "S3_ENDPOINT_PORT" "$S3_ENDPOINT_PORT" "$S3_ENDPOINT_PORT"
+case "$S3_TLS" in
+  true|false) ;;
+  *)
+    echo "S3_TLS must be true or false" >&2
+    exit 1
+    ;;
+esac
+if [ "$S3_TLS" = "false" ] && [ "$ALLOW_NON_LOOPBACK_LISTEN" != "true" ]; then
+  echo "S3_TLS=false is only allowed with ALLOW_NON_LOOPBACK_LISTEN=true for local tests or diagnostics" >&2
+  exit 1
+fi
 
 # Forced-fallback caching is opt-in: only emit proxy_cache_valid for successful
 # object responses when CACHE_DEFAULT_TTL is set. Unset = object Cache-Control.

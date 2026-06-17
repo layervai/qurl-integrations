@@ -84,6 +84,30 @@ if render injected-region S3_BUCKET=example-bucket AWS_REGION=$'us-east-1\ninclu
 fi
 grep -q "AWS_REGION must use lowercase" "$TMP/injected-region.err"
 
+if render invalid-endpoint-addr S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_ENDPOINT_ADDR=$'stub\ninclude' 2>"$TMP/invalid-endpoint-addr.err"; then
+  echo "MISMATCH: invalid S3_ENDPOINT_ADDR rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_ENDPOINT_ADDR must be" "$TMP/invalid-endpoint-addr.err"
+
+if render invalid-endpoint-port S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_ENDPOINT_PORT='9000;include' 2>"$TMP/invalid-endpoint-port.err"; then
+  echo "MISMATCH: invalid S3_ENDPOINT_PORT rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_ENDPOINT_PORT must be numeric" "$TMP/invalid-endpoint-port.err"
+
+if render invalid-s3-tls S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=maybe 2>"$TMP/invalid-s3-tls.err"; then
+  echo "MISMATCH: invalid S3_TLS rendered successfully" >&2
+  exit 1
+fi
+grep -q "S3_TLS must be true or false" "$TMP/invalid-s3-tls.err"
+
+if render plaintext-s3-no-escape S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=false S3_ENDPOINT_ADDR=stub S3_ENDPOINT_PORT=9000 2>"$TMP/plaintext-s3-no-escape.err"; then
+  echo "MISMATCH: plaintext S3 endpoint rendered without escape hatch" >&2
+  exit 1
+fi
+grep -q "S3_TLS=false is only allowed" "$TMP/plaintext-s3-no-escape.err"
+
 if render public-listen S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 2>"$TMP/public-listen.err"; then
   echo "MISMATCH: non-loopback LISTEN_ADDR rendered successfully" >&2
   exit 1
@@ -100,6 +124,7 @@ render ipv6-loopback S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR='
 grep -q 'server \[::1\]:9090;' "$TMP/ipv6-loopback/nginx.conf"
 grep -q 'socket_address: { address: "::1", port_value: 9090 }' "$TMP/ipv6-loopback/envoy.yaml"
 render public-listen-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 LISTEN_ADDR=0.0.0.0:8080 ALLOW_NON_LOOPBACK_LISTEN=true
+render plaintext-s3-allowed S3_BUCKET=example-bucket AWS_REGION=us-east-1 S3_TLS=false S3_ENDPOINT_ADDR=stub S3_ENDPOINT_PORT=9000 ALLOW_NON_LOOPBACK_LISTEN=true
 
 map_golden() {
   case "$1" in

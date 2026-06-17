@@ -40,9 +40,12 @@ This contract is frozen — additive only once published.
 | `S3_PREFIX` | No | empty | Key prefix; normalized to a single leading slash, no trailing slash. |
 | `LISTEN_ADDR` | No | `127.0.0.1:8080` | nginx listen address; matches `protect-connector`'s default `port:8080`. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
 | `ENVOY_LISTEN_ADDR` | No | `127.0.0.1:9090` | Internal signer listener; never exposed outside the container. Must be loopback unless `ALLOW_NON_LOOPBACK_LISTEN=true`. |
-| `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback. Do not set in protected deployments. |
+| `ALLOW_NON_LOOPBACK_LISTEN` | No | `false` | Explicit local-test/diagnostic escape hatch for binding either listener off-loopback and for plaintext S3 endpoint diagnostics. Do not set in protected deployments. |
 | `INDEX_DOCUMENT` | No | `index.html` | Powers clean URLs; empty is invalid when explicitly set. |
 | `AWS_REGION` | Usually | env / IMDS | Region for the S3 endpoint host and SigV4. Resolved from IMDSv2 when unset; validated as lowercase letters, numbers, and hyphen-separated segments. |
+| `S3_ENDPOINT_ADDR` | No | bucket S3 vhost | Test/diagnostic override for the Envoy cluster address. Leave unset for real S3. Must be a DNS name, IPv4 address, or unbracketed IPv6 address. |
+| `S3_ENDPOINT_PORT` | No | `443` | Test/diagnostic override for the Envoy cluster port. Must be numeric and in `1..65535`. |
+| `S3_TLS` | No | `true` | Keep `true` for real S3. `false` is accepted only with `ALLOW_NON_LOOPBACK_LISTEN=true` for plaintext local tests or diagnostics. |
 | `CACHE_MAX_SIZE` | No | `1g` | nginx `proxy_cache_path` max size. |
 | `CACHE_DEFAULT_TTL` | No | (unset) | Unset = cache per the object's `Cache-Control` / nginx default. Set it to force a fallback TTL for objects S3 returns without cache metadata. Must be a non-zero nginx time literal such as `60s`, `5m`, or `1h30m`. |
 | `CACHE_CONNECTOR_ID` | No | `QURL_CONNECTOR_ID`, then empty | Logical connector/site label used by `qurl-origin-cachectl purge-connector` as a fail-closed deployment guard. Set it to the stable customer-provided connector ID/slug used by your deploy automation. |
