@@ -177,17 +177,15 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // BASE_URL https check — fail fast at boot when an OAuth surface that
-  // builds a BASE_URL-derived redirect (OpenNHP mode or the qURL guided-
-  // setup flow) is active but BASE_URL isn't https, so it can't dead-end at
-  // the OAuth redirect later (#619). The earlier comment here claimed
-  // BASE_URL was "unused in non-OpenNHP modes" — true for the legacy
-  // GitHub-OAuth routes, but stale since the qURL OAuth router landed. See
-  // baseUrlHttpsProblem for the full consumer inventory + the operator-
-  // facing messages. baseUrlExplicitlySet treats "" / whitespace-only as
-  // unset (matches GUILD_ID normalization) so an accidentally-empty SSM
-  // param neither escapes the check nor false-positives a non-consuming
-  // deploy.
+  // BASE_URL https check — fail fast at boot when the qURL guided setup flow
+  // is configured (isQurlOAuthConfigured) but BASE_URL isn't a usable https
+  // origin, so /qurl setup can't dead-end at the OAuth redirect later (#619).
+  // The qURL OAuth router (server.js) mounts unconditionally, so this applies
+  // to plain single-guild and multi-tenant deploys, not just one mode. See
+  // baseUrlHttpsProblem for the consumer inventory + the operator-facing
+  // message. baseUrlExplicitlySet treats "" / whitespace-only as unset
+  // (matches GUILD_ID normalization) so an accidentally-empty SSM param
+  // neither escapes the check nor false-positives a non-consuming deploy.
   const baseUrlExplicitlySet = Boolean(process.env.BASE_URL?.trim());
   const baseUrlProblem = baseUrlHttpsProblem(config, baseUrlExplicitlySet);
   if (baseUrlProblem) {

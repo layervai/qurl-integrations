@@ -154,17 +154,15 @@ describe('baseUrlHttpsProblem', () => {
   const LOCALHOST = 'http://localhost:3000'; // config.js BASE_URL default
   function cfg(overrides = {}) {
     return {
-      isOpenNHPActive: false,
       isQurlOAuthConfigured: false,
       BASE_URL: LOCALHOST,
       ...overrides,
     };
   }
 
-  it('accepts any https:// BASE_URL regardless of mode (the good prod case)', () => {
+  it('accepts any https:// BASE_URL (the good prod case)', () => {
     const HTTPS = 'https://bot.example.com';
     expect(baseUrlHttpsProblem(cfg({ BASE_URL: HTTPS }), true)).toBeNull();
-    expect(baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: HTTPS }), true)).toBeNull();
     expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: HTTPS }), true)).toBeNull();
   });
 
@@ -185,11 +183,11 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).toContain('https://');
   });
 
-  // The #619 headline regression: a customer (non-OpenNHP) deploy with the
-  // qURL OAuth setup flow configured (AUTH0_* set) but BASE_URL left unset
-  // silently falls back to localhost and dead-ends /qurl setup at the OAuth
-  // redirect. Boot must reject — fail-fast at deploy, not at setup time.
-  it('rejects customer mode + qURL OAuth configured + BASE_URL unset (localhost fallback)', () => {
+  // The #619 headline regression: a deploy with the qURL OAuth setup flow
+  // configured (AUTH0_* set) but BASE_URL left unset silently falls back to
+  // localhost and dead-ends /qurl setup at the OAuth redirect. Boot must
+  // reject — fail-fast at deploy, not at setup time.
+  it('rejects qURL OAuth configured + BASE_URL unset (localhost fallback)', () => {
     const msg = baseUrlHttpsProblem(
       cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
       false, // not explicitly set — fell back to the localhost default
@@ -197,35 +195,9 @@ describe('baseUrlHttpsProblem', () => {
     expect(msg).not.toBeNull();
     expect(msg).toMatch(/BASE_URL/);
     expect(msg).toMatch(/https:\/\//);
-    // qURL-only deploy: the message names the qURL flow, and must NOT name
-    // the GitHub OAuth flow (an operator with no GitHub OAuth surface
-    // shouldn't chase it).
     expect(msg).toMatch(/qURL/);
-    expect(msg).not.toMatch(/GitHub OAuth/);
     // Echoes the offending value so an operator pasting the log line sees it.
     expect(msg).toContain(LOCALHOST);
-  });
-
-  it('preserves the GitHub OAuth fail-fast with a precise message (no qURL red herring)', () => {
-    // Pre-#619 behavior (the old index.js OpenNHP check) must be unchanged,
-    // and a GitHub-OAuth-only deploy (no Auth0) must see a GitHub-named message
-    // rather than one led by "qURL OAuth (AUTH0_* configured)".
-    const msg = baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: LOCALHOST }), false);
-    expect(msg).not.toBeNull();
-    expect(msg).toMatch(/GitHub OAuth/);
-    expect(msg).not.toMatch(/qURL/);
-    // Explicit http:// in OpenNHP mode is rejected too.
-    expect(baseUrlHttpsProblem(cfg({ isOpenNHPActive: true, BASE_URL: 'http://x.example.com' }), true)).not.toBeNull();
-  });
-
-  it('joins both surfaces in the message when GitHub OAuth and qURL OAuth are both active', () => {
-    // The only logic unique to both-true is the surfaces `.join(' and ')`;
-    // assert the joined phrasing rather than substrings covered elsewhere.
-    const msg = baseUrlHttpsProblem(
-      cfg({ isOpenNHPActive: true, isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
-      false,
-    );
-    expect(msg).toMatch(/the GitHub OAuth flow and the qURL guided setup flow/);
   });
 
   // The non-consuming false-positive guard: a plain single-guild / multi-

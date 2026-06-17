@@ -65,34 +65,25 @@ function missingKekRequiredKeys(env) {
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
 }
 
-// BASE_URL https guardrail. Several surfaces build absolute URLs from
-// config.BASE_URL. The ones that HARD-fail setup when BASE_URL silently
-// falls back to the http://localhost:3000 default (config.js) are the
-// OAuth redirect/callback builders, and they gate this check:
+// BASE_URL https guardrail. The qURL guided setup flow builds an absolute
+// OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
+// (commands.js) and the /oauth/qurl/callback redirect_uri
+// (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
+// and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
+// localhost BASE_URL silently dead-ends setup at the redirect — in plain
+// single-guild and multi-tenant deploys alike (#619). The Stage-2 Discord
+// install callback (routes/discord-install.js) embeds BASE_URL too, but
+// isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
+// isQurlOAuthConfigured gate already covers it.
 //
-//   - OpenNHP mode (isOpenNHPActive): the /auth/github start (commands.js)
-//     + callback redirect_uri + OAuth state (routes/oauth.js).
-//   - qURL guided setup (isQurlOAuthConfigured): the /oauth/qurl/start link
-//     (commands.js) + /oauth/qurl/callback redirect_uri (routes/qurl-oauth.js).
-//     That router mounts UNCONDITIONALLY in server.js — independent of
-//     OpenNHP mode — so /qurl setup dead-ends on a localhost BASE_URL in
-//     plain single-guild and multi-tenant deploys too (#619).
-//   - Stage-2 Discord install (routes/discord-install.js) embeds BASE_URL
-//     too, but isDiscordInstallConfigured ⟹ isQurlOAuthConfigured
-//     (config.js), so the qURL OAuth term already covers it.
-//
-// So the trigger is "an OAuth surface that builds a BASE_URL-derived
-// redirect is active" (isOpenNHPActive || isQurlOAuthConfigured), not
-// OpenNHP mode specifically. The check parses BASE_URL (new URL) rather
-// than prefix-matching: parsing normalizes the case-insensitive scheme
-// (RFC 3986) and rejects a bare "https://" with no host that would still
-// build a broken redirect. It validates scheme + parseability, NOT
-// reachability — an https://localhost (or other private) origin passes here
-// yet still can't serve an external OAuth redirect, but reachability isn't
-// knowable at boot. The localhost default parses as http:// so it's not
-// usable, catching both "unset → localhost" and explicit http://. The
-// message names only the active OAuth surface(s) so a GitHub-OAuth-only
-// operator (no Auth0) isn't sent chasing a qURL-OAuth red herring.
+// The check parses BASE_URL (new URL) rather than prefix-matching: parsing
+// normalizes the case-insensitive scheme (RFC 3986) and rejects a bare
+// "https://" with no host that would still build a broken redirect. It
+// validates scheme + parseability, NOT reachability — an https://localhost
+// (or other private) origin passes here yet still can't serve an external
+// OAuth redirect, but reachability isn't knowable at boot. The localhost
+// default parses as http:// so it's not usable, catching both
+// "unset → localhost" and explicit http://.
 //
 // Intentionally NOT gated on: the per-guild webhook bridge
 // (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
@@ -100,10 +91,9 @@ function missingKekRequiredKeys(env) {
 // degrades qURL view-count delivery from push to the existing poll
 // fallback, it doesn't dead-end a user flow. Blocking boot on it would
 // force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
-// ignore it. A future consumer that DOES hard-fail belongs in the
-// condition below (and the surface inventory above), not a fresh ad-hoc check.
+// ignore it.
 //
-// Outside those surfaces BASE_URL is unused for redirects, but a stale
+// Outside the qURL setup flow BASE_URL is unused for redirects, but a stale
 // explicit http:// value is still rejected (the original canary).
 // `baseUrlExplicitlySet` (caller-computed from process.env, treating
 // "" / whitespace-only as unset) separates "operator set a bad value" from
@@ -118,16 +108,12 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
     // Malformed BASE_URL (incl. a host-less "https://") is not usable.
   }
   if (usableHttps) return null;
-  if (cfg.isOpenNHPActive || cfg.isQurlOAuthConfigured) {
-    const surfaces = [
-      cfg.isOpenNHPActive && 'the GitHub OAuth flow',
-      cfg.isQurlOAuthConfigured && 'the qURL guided setup flow',
-    ].filter(Boolean).join(' and ');
+  if (cfg.isQurlOAuthConfigured) {
     return (
       'BASE_URL must be a complete https:// URL (scheme + host) in production ' +
-      `— it builds the OAuth redirect for ${surfaces}, and a non-https value ` +
-      `dead-ends setup at the redirect. Got: ${cfg.BASE_URL}. Set BASE_URL to ` +
-      "the bot's public https:// origin in the deployment template."
+      '— the qURL guided setup flow builds its OAuth redirect from it, and a ' +
+      `non-https value dead-ends setup at the redirect. Got: ${cfg.BASE_URL}. ` +
+      "Set BASE_URL to the bot's public https:// origin in the deployment template."
     );
   }
   if (baseUrlExplicitlySet) {
