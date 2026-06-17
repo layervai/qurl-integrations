@@ -12,6 +12,7 @@ const {
   ensureWebhookSubscription,
   deleteSubscription,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
+  isTruthyEnvFlag,
 } = require('./qurl-webhook-registrar');
 const subs = require('./webhook-subscriptions');
 
@@ -130,7 +131,7 @@ async function linkGuildWebhookSubscription({ guildId, apiKey, descriptionContex
       // that would cannibalize healthy peers, so this path must
       // respect the override too — Lambda-only coverage would be
       // false safety.
-      urlMigrationSweepEnabled: !process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP,
+      urlMigrationSweepEnabled: !isTruthyEnvFlag(process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP),
     });
   } catch (err) {
     logger.warn('Per-guild webhook subscription registration failed', {

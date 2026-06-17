@@ -12,6 +12,14 @@ jest.mock('../src/qurl-webhook-registrar', () => ({
   // in sync with the real module — a future rename would break the
   // description-prefix invariant if the mock drifted.
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX: 'Discord bot view counter',
+  // Mirror the real isTruthyEnvFlag semantics so the kill-switch
+  // tests below exercise the same normalization the production code
+  // does (=0/=false → false, =1/=true → true).
+  isTruthyEnvFlag: (v) => {
+    if (typeof v !== 'string' || v.length === 0) return false;
+    const n = v.trim().toLowerCase();
+    return n === '1' || n === 'true' || n === 'yes' || n === 'on';
+  },
 }));
 
 const mockSetGuildWebhookSubscription = jest.fn();
@@ -152,13 +160,40 @@ describe('linkGuildWebhookSubscription — URL-migration sweep kill-switch (#827
     }
   });
 
-  it('passes urlMigrationSweepEnabled=false when the env var is set (kill-switch covers the bot path)', async () => {
+  it.each([
+    ['1', false],     // disable
+    ['true', false],  // disable
+    ['TRUE', false],  // case-insensitive
+    ['yes', false],   // disable
+    ['on', false],    // disable
+    [' 1 ', false],   // whitespace tolerated
+  ])('passes urlMigrationSweepEnabled=false when env var is %s (kill-switch covers the bot path)', async (envValue, expectedEnabled) => {
     const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
-    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '1';
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = envValue;
     try {
       await linkGuildWebhookSubscription({ guildId: 'g_disabled', apiKey: 'lv_x' });
       const call = mockEnsureWebhookSubscription.mock.calls[0][0];
-      expect(call.urlMigrationSweepEnabled).toBe(false);
+      expect(call.urlMigrationSweepEnabled).toBe(expectedEnabled);
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it.each([
+    ['0', true],      // intuitive "disabled=0" actually KEEPS sweep enabled (footgun guard)
+    ['false', true],
+    ['no', true],
+    ['off', true],
+    ['', true],
+    ['random-string', true], // not in truthy allowlist
+  ])('treats env var %s as ENABLED (no surprise from non-truthy literals)', async (envValue, expectedEnabled) => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = envValue;
+    try {
+      await linkGuildWebhookSubscription({ guildId: 'g_kept', apiKey: 'lv_x' });
+      const call = mockEnsureWebhookSubscription.mock.calls[0][0];
+      expect(call.urlMigrationSweepEnabled).toBe(expectedEnabled);
     } finally {
       if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
       else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;

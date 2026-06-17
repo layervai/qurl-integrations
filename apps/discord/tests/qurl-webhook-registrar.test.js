@@ -1646,6 +1646,36 @@ describe('ensureWebhookSubscription — URL-migration orphan cleanup (cross-host
   });
 });
 
+describe('isTruthyEnvFlag — env-var normalization (kill-switch semantics)', () => {
+  const { isTruthyEnvFlag } = require('../src/qurl-webhook-registrar');
+  it.each([
+    ['1', true],
+    ['true', true],
+    ['TRUE', true],
+    ['True', true],
+    ['yes', true],
+    ['YES', true],
+    ['on', true],
+    [' on ', true], // whitespace tolerated
+  ])('treats %s as truthy', (value, expected) => {
+    expect(isTruthyEnvFlag(value)).toBe(expected);
+  });
+  it.each([
+    ['0', false],
+    ['false', false],
+    ['FALSE', false],
+    ['no', false],
+    ['off', false],
+    ['', false],
+    ['arbitrary-string', false],
+    [undefined, false],
+    [null, false],
+    [42, false], // non-string
+  ])('treats %s as falsy (no any-non-empty-string footgun)', (value, expected) => {
+    expect(isTruthyEnvFlag(value)).toBe(expected);
+  });
+});
+
 describe('buildUrlMigrationOrphanFilter — predicate factory edge cases', () => {
   const { buildUrlMigrationOrphanFilter, ORPHAN_FILTER_RESULTS, URL_MIGRATION_ORPHAN_MIN_FAILURES } = _internals;
 

@@ -110,6 +110,45 @@ describe('webhook-registrar Lambda — input validation', () => {
       .rejects.toThrow(/description must start with "Discord bot view counter \("/);
   });
 
+  it('KEEPS the sweep enabled when QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=0 (footgun guard, normalize-then-test)', async () => {
+    // An operator typing `=0` intuitively expects sweep ON; without
+    // env-var normalization the previous `!process.env.VAR` would
+    // treat any non-empty string as truthy and DISABLE the sweep —
+    // benign blast radius (no deletions) but surprising. Pin the
+    // normalize-then-test semantics.
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '0';
+    try {
+      ssmMock
+        .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+        .resolves({ Parameter: { Value: 'lv_test_key' } })
+        .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+        .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+        .on(PutParameterCommand)
+        .resolves({});
+      let deleted = false;
+      mockQurlService({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_orphan',
+            url: 'https://oldhost.example/webhooks/qurl',
+            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
+            events: ['qurl.accessed', 'qurl.expired'],
+            failure_count: 1475,
+            last_delivery_success: false,
+          },
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await handler({ ...BASE_EVENT }, CONTEXT);
+      expect(deleted).toBe(true); // sweep ran — `=0` does NOT disable
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
   it('disables the orphan sweep when QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP is set (hard guard for active-active)', async () => {
     const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
     process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '1';

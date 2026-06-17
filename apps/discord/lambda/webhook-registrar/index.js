@@ -93,6 +93,7 @@ const {
   ensureWebhookSubscription,
   buildSsmPersistSecret,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
+  isTruthyEnvFlag,
 } = require('../../src/qurl-webhook-registrar');
 
 // SSM client at module scope — Lambda reuses the same execution
@@ -245,9 +246,13 @@ exports.handler = async (event, context) => {
   // single-host deploy; flip to OFF before any active-active multi-
   // region rollout under a shared `QURL_API_KEY` (#827). Env-var
   // override (no code change required at flip time):
-  //   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=1
-  // Any non-empty value disables; empty / unset leaves it enabled.
-  const urlMigrationSweepEnabled = !process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+  //   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=1   (or true/yes/on)
+  // Only those truthy literals disable; `=0`, `=false`, `=no`, `=off`,
+  // and empty / unset leave the sweep ENABLED. Without this
+  // normalization, an operator typing the intuitive `=0` would
+  // accidentally DISABLE the sweep (any non-empty string is truthy
+  // in JS) — the failure mode is benign (no deletions) but surprising.
+  const urlMigrationSweepEnabled = !isTruthyEnvFlag(process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP);
   if (!urlMigrationSweepEnabled) {
     console.warn(JSON.stringify({
       msg: 'webhook-registrar: URL-migration orphan sweep DISABLED via env override',

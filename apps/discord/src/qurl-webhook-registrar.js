@@ -48,6 +48,23 @@
 const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
 
+// Normalize a string env-var to a boolean using a small allowlist of
+// truthy literals. Used by both call paths (Lambda + bot) so the
+// kill-switch env var has consistent, intuition-matching semantics:
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=1     → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=true  → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=yes   → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=on    → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=0     → false (NOT "any non-empty string is truthy")
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=false → false
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=      → false
+//   (unset)                                                  → false
+function isTruthyEnvFlag(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
 // LOAD-BEARING shared constant — the orphan-sweep description-prefix
 // matcher derives this from the caller's `description`, so every
 // caller of ensureWebhookSubscription whose subs should be co-swept
@@ -908,6 +925,7 @@ module.exports = {
   WEBHOOK_ACTIONS,
   DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
   DELETE_OUTCOMES,
+  isTruthyEnvFlag,
   // Exposed for webhook-subscriptions.js so the registry's
   // discoverDefaultOwnerId tick goes through the same QurlServiceError /
   // op-tagged transport as the rest of the registrar surface — kept off
