@@ -1697,8 +1697,15 @@ async function getSendRenderState(sendId) {
 // guard — it lives in the SET clause, not the condition — so even the
 // degenerate "advance from N to the same N" can't happen (the count
 // condition rejects equal), and a genuine advance always refreshes the
-// debounce clock. Caller advances only after a confirmed edit, so this
-// timestamp tracks displayed reality, not attempts.
+// debounce clock. The SUCCESS path advances the count + stamps the clock
+// together. The FAILURE path stamps the clock alone via touchRenderedAt
+// (below) — so last_rendered_at means "last edit ATTEMPT", while
+// last_rendered_count means "last DISPLAYED count". Splitting the two
+// keeps coalescing alive during an edit outage (a burst against a 5xx-ing
+// Discord would otherwise re-attempt a PATCH per view — every gate sees
+// last_rendered_at=0 since no success ever stamped it) WITHOUT advancing
+// the count on a failed display (which would strand the stuck-counter
+// guard). Same ~M-edits/window bound on both paths.
 async function tryAdvanceRenderedCount(sendId, n) {
   try {
     await ddb.send(new UpdateCommand({
@@ -1713,6 +1720,23 @@ async function tryAdvanceRenderedCount(sendId, n) {
     if (err.name === 'ConditionalCheckFailedException') return false;
     throw err;
   }
+}
+
+// FAILURE-PATH debounce stamp: refresh the coalesce clock WITHOUT touching
+// the count, called when an edit ATTEMPT completed but did NOT confirm
+// (fast-path r.ok === false). Unconditional SET — no count guard, because
+// the whole point is to arm the cooldown even though nothing was
+// displayed. Keeps a high-fan-out burst from re-attempting one PATCH per
+// view during a transient Discord edit outage; the count floor is left
+// untouched so the poll backstop still self-heals the display. Best-
+// effort: the fast-path swallows a throw (the poll covers the miss).
+async function touchRenderedAt(sendId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    UpdateExpression: 'SET last_rendered_at = :now',
+    ExpressionAttributeValues: { ':now': Date.now() },
+  }));
 }
 
 // Freezes the confirmation display. Called by the revoke / window-close
@@ -2271,7 +2295,7 @@ module.exports = {
   markConsumedDMEdited, clearConsumedDMEdited,
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
-  getSendRenderState, tryAdvanceRenderedCount, markConfirmTerminal,
+  getSendRenderState, tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

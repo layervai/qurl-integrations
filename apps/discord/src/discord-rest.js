@@ -281,9 +281,13 @@ async function editInteractionReply(applicationId, token, payload) {
     // pass is free belt-and-suspenders for a flagged credential.
     let safeMessage;
     if (typeof err.message === 'string') {
-      safeMessage = err.message.split(token).join('[redacted-token]');
+      // `token &&` guards the degenerate empty-token case: ''.split('')
+      // would explode the message char-by-char. Unreachable today (the
+      // fast-path's absent-guard requires a non-empty token before this
+      // is called), but cheap defense.
+      safeMessage = token ? err.message.split(token).join('[redacted-token]') : err.message;
       const encoded = encodeURIComponent(token);
-      if (encoded !== token) safeMessage = safeMessage.split(encoded).join('[redacted-token]');
+      if (token && encoded !== token) safeMessage = safeMessage.split(encoded).join('[redacted-token]');
     }
     logger[expired ? 'info' : 'warn']('editInteractionReply via webhook token failed', {
       applicationId, status: err.status, code: err.code, expired, errorMessage: safeMessage,

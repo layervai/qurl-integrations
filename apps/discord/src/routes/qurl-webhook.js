@@ -714,9 +714,22 @@ function editSenderCounterInBackground({ qurlId }) {
       //    recipient-row Query only if the set wasn't persisted (a
       //    pre-confirm-qurl-ids row that somehow still cleared the
       //    absent-guard).
-      const qurlIds = state.qurlIds.length > 0
-        ? state.qurlIds
-        : (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);
+      // The getSendItems fallback needs senderId (the send-config range
+      // key), which we read off the GSI row above — only populated because
+      // qurl_id-index projects ALL. If that projection ever narrows to
+      // KEYS_ONLY/INCLUDE, senderId goes undefined and getSendItems would
+      // silently scope to the wrong key; skip + log instead so the
+      // dependency is explicit rather than latent (the persisted-qurlIds
+      // primary path doesn't hit this, which is why mocks hide it).
+      let qurlIds;
+      if (state.qurlIds.length > 0) {
+        qurlIds = state.qurlIds;
+      } else if (!senderId) {
+        logger.debug('qURL webhook sender-counter: skip — no persisted qurlIds and senderId missing (GSI projection narrowed?)', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'no-qurl-ids' };
+      } else {
+        qurlIds = (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);
+      }
       const views = await db.getQurlViews(qurlIds);
       const N = qurlIds.filter(id => views.get(id)?.accessCount > 0).length;
 
@@ -753,7 +766,24 @@ function editSenderCounterInBackground({ qurlId }) {
       //    do NOT advance — the poll backstop will re-render and self-heal
       //    (this is THE invariant that prevents the stuck-counter
       //    regression on a transient edit failure).
+      //
+      //    BUT still refresh the debounce clock on failure (touchRenderedAt
+      //    stamps last_rendered_at WITHOUT advancing the count). Otherwise
+      //    coalescing would collapse precisely when it's needed most: a
+      //    burst against a transiently-erroring Discord never stamps
+      //    last_rendered_at (it's success-only), so every view in the burst
+      //    re-attempts a PATCH — the exact 429 storm the gate exists to
+      //    prevent, with only discord.js's backoff as the floor. Stamping
+      //    on attempt keeps the failure path at ~M/window like the success
+      //    path. Best-effort + logged-swallowed (the poll covers the miss).
       if (!r.ok) {
+        try {
+          await db.touchRenderedAt(sendId);
+        } catch (touchErr) {
+          logger.debug('qURL webhook sender-counter: touchRenderedAt failed (coalesce clock not refreshed; rate limiter is the floor)', {
+            qurl_id: qurlId, send_id: sendId, error: touchErr?.message,
+          });
+        }
         return { status: 'edit-failed', n: N };
       }
       await db.tryAdvanceRenderedCount(sendId, N);

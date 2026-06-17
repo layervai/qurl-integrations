@@ -108,6 +108,7 @@ const STORE_METHODS = Object.freeze([
   'saveSendConfirmState',
   'getSendRenderState',
   'tryAdvanceRenderedCount',
+  'touchRenderedAt',
   'markConfirmTerminal',
 
   // QURL views (webhook-fed view counter)

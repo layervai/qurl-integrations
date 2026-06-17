@@ -1317,6 +1317,24 @@ describe('qurl sends', () => {
     await expect(store.tryAdvanceRenderedCount('s1', 1)).rejects.toThrow('throughput');
   });
 
+  test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
+    // Refreshes the coalesce clock on a FAILED edit attempt without
+    // advancing the count (which would strand the stuck-counter guard).
+    const before = Date.now();
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.touchRenderedAt('s1');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // Only last_rendered_at — NOT last_rendered_count.
+    expect(input.UpdateExpression).toBe('SET last_rendered_at = :now');
+    expect(input.UpdateExpression).not.toMatch(/last_rendered_count/);
+    // Unconditional — the whole point is to stamp even though nothing was
+    // displayed, so there's no count guard.
+    expect(input.ConditionExpression).toBeUndefined();
+    const stamped = input.ExpressionAttributeValues[':now'];
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+  });
+
   test('markConfirmTerminal: idempotent SET confirm_terminal = true, no condition', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.markConfirmTerminal('s1');

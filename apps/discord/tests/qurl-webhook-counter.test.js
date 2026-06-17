@@ -40,6 +40,7 @@ const mockGetSendRenderState = jest.fn();
 const mockGetSendItems = jest.fn();
 const mockGetQurlViews = jest.fn();
 const mockTryAdvanceRenderedCount = jest.fn();
+const mockTouchRenderedAt = jest.fn();
 jest.mock('../src/store', () => ({
   recordQurlView: (...args) => mockRecordQurlView(...args),
   findSendsByQurlId: (...args) => mockFindSendsByQurlId(...args),
@@ -47,6 +48,10 @@ jest.mock('../src/store', () => ({
   getSendItems: (...args) => mockGetSendItems(...args),
   getQurlViews: (...args) => mockGetQurlViews(...args),
   tryAdvanceRenderedCount: (...args) => mockTryAdvanceRenderedCount(...args),
+  // Failure-path debounce stamp — MUST be on the mock or the new
+  // touchRenderedAt call on the !r.ok branch throws into the fast-path's
+  // .catch and the coalescing-on-failure test goes vacuous.
+  touchRenderedAt: (...args) => mockTouchRenderedAt(...args),
   // consumed/expired markers are imported by the route module but unused
   // on the not-consumed accessed path these tests drive.
   markConsumedDMEdited: jest.fn(),
@@ -178,6 +183,7 @@ beforeEach(() => {
   mockGetSendItems.mockResolvedValue([{ qurl_id: QURL_ID, recipient_discord_id: 'r1' }]);
   mockGetQurlViews.mockResolvedValue(new Map([[QURL_ID, { accessCount: 1, consumed: false }]]));
   mockTryAdvanceRenderedCount.mockResolvedValue(true);
+  mockTouchRenderedAt.mockResolvedValue(undefined);
   mockEditInteractionReply.mockResolvedValue({ ok: true });
 });
 
@@ -277,9 +283,9 @@ describe('sender view-counter fast-path — pre-read compare (N <= L)', () => {
 });
 
 describe('sender view-counter fast-path — FAILED-EDIT SELF-HEAL (load-bearing)', () => {
-  it('editInteractionReply {ok:false} → tryAdvanceRenderedCount is NOT called (count stays; poll re-renders)', async () => {
+  it('editInteractionReply {ok:false} → tryAdvanceRenderedCount NOT called (count stays), but touchRenderedAt IS (debounce armed)', async () => {
     // THE invariant that prevents the stuck-counter regression: on a
-    // transient edit failure the rendered count must NOT advance, so
+    // transient edit failure the rendered COUNT must NOT advance, so
     // last_rendered_count stays at L and the poll backstop will re-render
     // and self-heal. If the advance ever moved before/independent of the
     // edit's success, this fails.
@@ -288,6 +294,34 @@ describe('sender view-counter fast-path — FAILED-EDIT SELF-HEAL (load-bearing)
     await flushCounter();
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+    // …but the debounce CLOCK is still stamped (touchRenderedAt), so a
+    // burst against an erroring Discord coalesces instead of re-attempting
+    // a PATCH per view.
+    expect(mockTouchRenderedAt).toHaveBeenCalledWith(SEND_ID);
+  });
+
+  it('COALESCES ON FAILURE: a 2nd view within the window after a failed edit is debounced (not re-attempted)', async () => {
+    // The failure-path bug the gate would otherwise have: last_rendered_at
+    // is success-only, so during an edit outage every burst view sees
+    // last_rendered_at=0 and re-PATCHes — the exact 429 storm the gate
+    // prevents. touchRenderedAt arms the clock on the failed attempt; the
+    // 2nd view (render state now reflects the stamp) must skip.
+    mockEditInteractionReply.mockResolvedValue({ ok: false, status: 500 });
+    // View 1: lastRenderedAt=0 → gate passes → edit fails → touchRenderedAt.
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    expect(mockTouchRenderedAt).toHaveBeenCalledTimes(1);
+
+    // Now the row's last_rendered_at is fresh (the touch landed). Model
+    // that: the next getSendRenderState reflects a recent stamp.
+    logger.debug.mockClear();
+    mockGetSendRenderState.mockResolvedValue(armedState({ lastRenderedAt: Date.now() }));
+    // View 2 within the window → coalesced: no 2nd edit, no 2nd BatchGet.
+    await signedRequest({ ...VALID_PAYLOAD, id: 'evt-counter-2' });
+    await flushCounter();
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1); // still just the 1st
+    expect(mockTouchRenderedAt).toHaveBeenCalledTimes(1);      // no 2nd attempt to stamp
   });
 });
 
