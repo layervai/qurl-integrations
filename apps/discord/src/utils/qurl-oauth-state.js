@@ -59,11 +59,6 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 // accepts both configured keys during that window; after the legacy key is
 // disabled it stops validating. If rotating both GitHub and qURL OAuth state
 // together, pace legacy removal by the longer GitHub pending-link window.
-// Minimum acceptable secret length — per round-9 #4. 32 chars is the
-// floor for an HMAC-SHA256 secret with adequate entropy (matches the
-// `0`.repeat(64) test fixture's order of magnitude, well below the
-// 128-char hex secrets ops actually provisions). A 4-char accidental
-// value would HMAC just fine with no security; reject upfront.
 function warnShortLegacySecret(label, length) {
   if (!_warnedShortLegacy) {
     logger.warn(
@@ -77,6 +72,8 @@ function warnShortLegacySecret(label, length) {
 function stateSecrets() {
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
+  // Production boot intentionally rejects the GITHUB_CLIENT_SECRET fallback;
+  // keep this dev/test escape hatch in sync with enforceProductionOAuthStateSecrets().
   const secrets = collectOAuthFlowStateSecrets({
     primaryEnvName: 'QURL_OAUTH_STATE_SECRET',
     errorPrefix: 'Refusing to mint qURL OAuth state',

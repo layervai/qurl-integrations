@@ -207,6 +207,8 @@ function stateSecrets() {
   // directly from GITHUB_CLIENT_SECRET fallback can invalidate in-flight links.
   // If a dedicated secret is present but too short, fail closed instead of
   // silently falling back; the production boot guard catches that before serve.
+  // Production boot intentionally rejects the GITHUB_CLIENT_SECRET fallback;
+  // keep this dev/test escape hatch in sync with enforceProductionOAuthStateSecrets().
   const secrets = collectOAuthFlowStateSecrets({
     primaryEnvName: 'GITHUB_OAUTH_STATE_SECRET',
     errorPrefix: 'Refusing to mint OAuth state',

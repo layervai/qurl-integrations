@@ -181,5 +181,30 @@ describe('oauth-state-secrets helpers', () => {
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('OAUTH_STATE_SECRET is shorter than 32 chars'));
       expect(exit).not.toHaveBeenCalled();
     });
+
+    it('returns ok without logging when production state secrets are clean', () => {
+      const logger = { error: jest.fn(), warn: jest.fn() };
+      const exit = jest.fn();
+
+      const result = enforceProductionOAuthStateSecrets({
+        GITHUB_OAUTH_STATE_SECRET: 'g'.repeat(64),
+        QURL_OAUTH_STATE_SECRET: 'q'.repeat(64),
+      }, {
+        isOpenNHPActive: true,
+        isQurlOAuthConfigured: true,
+      }, {
+        logger,
+        exit,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        errors: [],
+        warnings: [],
+      });
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(exit).not.toHaveBeenCalled();
+    });
   });
 });

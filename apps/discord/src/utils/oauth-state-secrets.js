@@ -1,5 +1,7 @@
 const SSM_PLACEHOLDER_SECRET = 'PLACEHOLDER';
 const MIN_OAUTH_STATE_SECRET_LENGTH = 32;
+// 32 chars is the floor for an HMAC-SHA256 secret with adequate entropy;
+// the rollout playbooks provision 64-char hex strings via openssl rand -hex 32.
 
 function normalizeSecretValue(value) {
   if (typeof value !== 'string') return undefined;
