@@ -680,6 +680,10 @@ type Handler struct {
 	// missing env vars) — /qurl setup returns a "not configured"
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
+	// setupLinkRateLimits bounds signed setup-link minting per Slack workspace/user.
+	// The owner/rebind checks still run first so invalid or refused setup attempts
+	// do not consume the caller's small retry budget.
+	setupLinkRateLimits *setupLinkRateLimiter
 	// aliasStore persists per-channel alias bindings for the
 	// `/qurl-admin set-alias` / `/qurl-admin unset-alias` verbs. nil when not
 	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
@@ -861,6 +865,7 @@ func NewHandler(cfg Config) *Handler {
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),
 		channelMembers:        newChannelMembershipCache(channelMembershipTTL),
+		setupLinkRateLimits:   newSetupLinkRateLimiter(),
 	}
 }
 
@@ -1700,6 +1705,11 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			}
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
+	}
+	if ok, retry := h.setupLinkRateLimits.allow(teamID, userID, h.now()); !ok {
+		slog.Warn("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
+		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run `/qurl setup <email>` again.", humanizeRetry(retry)))
+		return
 	}
 	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
 	if err != nil {
