@@ -457,8 +457,9 @@ function getQurlClient() {
 
 // SSRF guard for the resolve()-returned tunnel target. Must be a PUBLIC
 // `https:` URL; reject any non-https scheme, embedded userinfo (the
-// `https://good@127.0.0.1/` hostname-confusion bypass), and any
-// private/loopback/link-local host (reusing qurl.js's syntactic isPrivateHost).
+// `https://good@127.0.0.1/` hostname-confusion bypass), any
+// private/loopback/link-local host (reusing qurl.js's syntactic isPrivateHost),
+// and any host NOT under the qURL reverse-tunnel domain (qurl.site).
 // Deliberately NOT port-locked (the tunnel target may sit on a non-standard
 // port) and NOT DNS-resolved — a syntactic check ONLY, unlike the link-minting
 // path's assertNotPrivateAfterResolve in qurl.js, which adds a DNS-level
@@ -481,6 +482,17 @@ function assertPublicHttpsTarget(targetUrl) {
   }
   if (isPrivateHost(parsed.hostname)) {
     throw new Error('Detect tunnel target points to a private/internal address');
+  }
+  // Host-pin (defense-in-depth on this Bearer-carrying oracle leg): the resolved
+  // target MUST be under the qURL reverse-tunnel domain, qurl.site. The tunnel
+  // resource host is `r_<id>.qurl.site` (qurl-service resourceIDPattern); we pin
+  // the `.qurl.site` suffix so a compromised or spoofed resolve() that returned a
+  // public NON-qURL host can't be POSTed the image bytes + our API-key Bearer.
+  // (NOT qurl.link — that's the short-link/ALB domain, not the tunnel.) Once the
+  // sandbox soak confirms the observed host, tighten to /^r_[a-z0-9_-]{11}\.qurl\.site$/.
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'qurl.site' && !host.endsWith('.qurl.site')) {
+    throw new Error('Detect tunnel target host is not under the expected qURL tunnel domain (qurl.site)');
   }
   return targetUrl;
 }
