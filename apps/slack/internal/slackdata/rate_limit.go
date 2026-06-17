@@ -52,6 +52,19 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 	}
 	storedWindow := readNumber(item, attrMintWindowStart)
 	count := readNumber(item, attrMintCount)
+	// If another task has already advanced the counter into a later window
+	// (hour-boundary race or clock skew), follow that authoritative item instead
+	// of resetting it backward or denying while capacity remains.
+	if storedWindow > windowUnix {
+		futureWindowEnd := time.Unix(storedWindow, 0).UTC().Add(mintRateLimitWindow)
+		if count >= mintRateLimitMax {
+			return false, futureWindowEnd.Sub(now), nil
+		}
+		if allowed, err := mintCounterWriteResult(s.incrementMintCounter(ctx, teamID, counterKey, storedWindow)); allowed || err != nil {
+			return allowed, 0, err
+		}
+		return false, futureWindowEnd.Sub(now), nil
+	}
 	if storedWindow == windowUnix && count >= mintRateLimitMax {
 		return false, windowEnd.Sub(now), nil
 	}
