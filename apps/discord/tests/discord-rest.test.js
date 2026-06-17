@@ -42,13 +42,21 @@ jest.mock('../src/discord', () => {
 
 const restMock = require('../src/discord').__mockRestInstance;
 
-const { sendDM, editDM, sendChannelMessage, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
+const { sendDM, editDM, sendChannelMessage, addRoleToMember, removeRoleFromMember, editInteractionReply } = require('../src/discord-rest');
+const logger = require('../src/logger');
 
 beforeEach(() => {
   restMock.post.mockReset();
   restMock.put.mockReset();
   restMock.delete.mockReset();
   restMock.patch.mockReset();
+  // editInteractionReply's tests assert on logger call-counts /
+  // not-called, so the logger spies must start clean each test (no
+  // global clearMocks in this project's jest config).
+  logger.info.mockClear();
+  logger.warn.mockClear();
+  logger.error.mockClear();
+  logger.debug.mockClear();
 });
 
 // Shared-rate-limit-bucket invariant: every helper reads `client.rest.X`
@@ -270,5 +278,73 @@ describe('sendChannelMessage via REST', () => {
     const result = await sendChannelMessage('channel-1', { content: 'x' });
     expect(result.ok).toBe(false);
     expect(result.status).toBe(502);
+  });
+});
+
+describe('editInteractionReply via webhook token (cross-replica view-counter primitive)', () => {
+  const APP_ID = 'app-xyz';
+  // A token-shaped fixture. SENSITIVE in prod — these tests pin that it
+  // never reaches the logs, including on the network-error path.
+  const TOKEN = 'tok-LIVE-bearer-cred-abc123';
+
+  it('PATCHes /webhooks/{app}/{token}/messages/@original with the payload, returns ok:true', async () => {
+    restMock.patch.mockResolvedValueOnce({});
+    const result = await editInteractionReply(APP_ID, TOKEN, { content: '👀 1 viewed' });
+    expect(result).toEqual({ ok: true });
+    expect(restMock.patch).toHaveBeenCalledTimes(1);
+    // The Routes.webhookMessage path carries the token — verify the call
+    // targets the @original message of this app+token.
+    const [route, opts] = restMock.patch.mock.calls[0];
+    // discord.js URL-encodes the @original segment → %40original.
+    expect(route).toBe(`/webhooks/${APP_ID}/${TOKEN}/messages/%40original`);
+    expect(opts).toEqual({ body: { content: '👀 1 viewed' } });
+  });
+
+  it('returns ok:false {status,code} on an expired token (logs at info, not warn)', async () => {
+    const err = new Error('Invalid Webhook Token');
+    err.code = 50027;
+    err.status = 401;
+    restMock.patch.mockRejectedValueOnce(err);
+    const result = await editInteractionReply(APP_ID, TOKEN, { content: 'x' });
+    expect(result).toEqual({ ok: false, status: 401, code: 50027 });
+    // Expected terminal state past the ~15-min TTL → info, not warn.
+    expect(logger.info).toHaveBeenCalledWith(
+      'editInteractionReply via webhook token failed',
+      expect.objectContaining({ expired: true, status: 401, code: 50027 }),
+    );
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('SECURITY: scrubs the token from a network-error message before logging', async () => {
+    // The low-level network throw path (undici/fetch failing pre-response)
+    // re-throws the raw error verbatim, and some failure modes embed the
+    // request URL — which contains the token — in `.message`. The helper
+    // must redact the token before logging it.
+    const leaky = new Error(`request to https://discord.com/api/v10/webhooks/${APP_ID}/${TOKEN}/messages/@original failed, reason: ECONNRESET`);
+    // no .status/.code → not classified expired → logged at warn
+    restMock.patch.mockRejectedValueOnce(leaky);
+    const result = await editInteractionReply(APP_ID, TOKEN, { content: 'x' });
+    expect(result).toEqual({ ok: false, status: undefined, code: undefined });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const [, fields] = logger.warn.mock.calls[0];
+    // The token must NOT appear anywhere in the logged message…
+    expect(fields.errorMessage).not.toContain(TOKEN);
+    // …it's replaced with the redaction sentinel, and the non-sensitive
+    // remainder (the failure reason) is preserved for debugging.
+    expect(fields.errorMessage).toContain('[redacted-token]');
+    expect(fields.errorMessage).toContain('ECONNRESET');
+    // Belt-and-suspenders: the token never leaks via ANY logged field.
+    expect(JSON.stringify(fields)).not.toContain(TOKEN);
+  });
+
+  it('never logs the token even when the error message is non-string', async () => {
+    const weird = { status: 500, code: undefined, message: undefined };
+    restMock.patch.mockRejectedValueOnce(weird);
+    const result = await editInteractionReply(APP_ID, TOKEN, { content: 'x' });
+    expect(result).toEqual({ ok: false, status: 500, code: undefined });
+    const [, fields] = logger.warn.mock.calls[0];
+    expect(fields.errorMessage).toBeUndefined();
+    expect(JSON.stringify(fields)).not.toContain(TOKEN);
   });
 });
