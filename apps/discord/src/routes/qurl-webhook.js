@@ -675,6 +675,9 @@ function editSenderCounterInBackground({
           // makes this exactly one shard increment per distinct qurl_id.
           await db.incrementSendViewedCount(sendId, qurlId, state.expectedCount);
         } catch (err) {
+          // Best-effort aggregate: recordQurlView already persisted the
+          // source qurl_views row, so the poll/floor path repairs a missed
+          // shard increment instead of retrying it on the webhook response.
           logger.warn('qURL webhook sender-counter: sharded aggregate increment failed; poll backstop will count qurl views', {
             qurl_id: qurlId, send_id: sendId, error: err?.message,
           });

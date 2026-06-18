@@ -234,10 +234,9 @@ async function removeRoleFromMember(guildId, userId, roleId) {
  * that created the reply or the one running the in-memory monitor.
  *
  * Endpoint: PATCH /webhooks/{application_id}/{token}/messages/@original.
- * The token in the URL path IS the auth for webhook routes (the bot
- * token header @discordjs/rest also attaches is ignored here), which is
- * what makes this work from a replica with no relationship to the
- * original interaction.
+ * The token in the URL path IS the auth for webhook routes; pass
+ * `auth:false` so @discordjs/rest does not attach the bot Authorization
+ * header to this webhook-token request.
  *
  * CAVEAT — token TTL: the interaction token expires ~15 min after the
  * interaction was created. Past that, Discord returns 401/404
@@ -253,7 +252,7 @@ async function removeRoleFromMember(guildId, userId, roleId) {
  */
 async function editInteractionReply(applicationId, token, payload) {
   try {
-    await client.rest.patch(Routes.webhookMessage(applicationId, token, '@original'), { body: payload });
+    await client.rest.patch(Routes.webhookMessage(applicationId, token, '@original'), { body: payload, auth: false });
     return { ok: true };
   } catch (err) {
     // info (not warn) on the expired-token codes — past the ~15-min TTL

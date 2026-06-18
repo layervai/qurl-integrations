@@ -297,7 +297,7 @@ describe('editInteractionReply via webhook token (cross-replica view-counter pri
     const [route, opts] = restMock.patch.mock.calls[0];
     // discord.js URL-encodes the @original segment → %40original.
     expect(route).toBe(`/webhooks/${APP_ID}/${TOKEN}/messages/%40original`);
-    expect(opts).toEqual({ body: { content: '👀 1 viewed' } });
+    expect(opts).toEqual({ body: { content: '👀 1 viewed' }, auth: false });
   });
 
   it('returns ok:false {status,code} on an expired token (logs at info, not warn)', async () => {

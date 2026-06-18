@@ -1712,9 +1712,12 @@ const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
 const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
 
 function sendViewedCountShardCount(expectedCount) {
+  // Invalid/legacy expected_count falls back to the one-shard floor. The
+  // persisted value should be positive and only grow; choosing the floor keeps
+  // later repaired reads a superset of earlier writes.
   const count = Number.isSafeInteger(expectedCount) && expectedCount > 0
     ? expectedCount
-    : SEND_VIEW_COUNTER_MAX_SHARDS;
+    : 1;
   const needed = Math.ceil(count / SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD);
   let shards = 1;
   while (shards < needed && shards < SEND_VIEW_COUNTER_MAX_SHARDS) shards *= 2;

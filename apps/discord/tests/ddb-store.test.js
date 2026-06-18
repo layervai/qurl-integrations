@@ -1401,6 +1401,16 @@ describe('qurl sends', () => {
     expect(request.Keys).toEqual([{ qurl_id: '__send_view_count__s1#00' }]);
   });
 
+  test('getSendViewedCount: invalid expectedCount falls back to the one-shard floor', async () => {
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#00', viewed_count: 2 }] },
+    });
+    await expect(store.getSendViewedCount('s1', 0)).resolves.toBe(2);
+    const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(request.Keys).toEqual([{ qurl_id: '__send_view_count__s1#00' }]);
+  });
+
   test('getSendViewedCount: max-fanout sends read 64 strong shard keys and retry unprocessed shards once', async () => {
     let attempt = 0;
     ddbMock.on(BatchGetCommand).callsFake((input) => {
