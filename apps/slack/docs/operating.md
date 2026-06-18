@@ -543,14 +543,14 @@ AUTH0_DOMAIN=layerv.us.auth0.com \
 AUTH0_CLIENT_ID=... \
 AUTH0_CLIENT_SECRET=... \
 AUTH0_AUDIENCE=https://api.layerv.ai \
-AUTH0_EXPECTED_AUDIENCE=https://api.layerv.ai \
 SLACK_BASE_URL=https://slack-bot.example \
 OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
   go run ./apps/slack/cmd/
 ```
 
-`AUTH0_EXPECTED_AUDIENCE` is optional for local runs; set it when you want the
-same audience drift check that managed deployments receive from infra.
+`AUTH0_EXPECTED_AUDIENCE` is optional for local runs; set it to the expected
+Auth0 audience when you want the same drift check that managed deployments
+receive from infra.
 
 ```bash
 # Build the production container (linux/arm64 to match the deploy target)
@@ -700,7 +700,7 @@ that accidentally carried a numeric value.
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the Secure Access Agent |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
-| `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
+| `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API. Must not contain surrounding whitespace. |
 | `AUTH0_EXPECTED_AUDIENCE` | No | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |

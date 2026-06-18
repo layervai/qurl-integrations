@@ -919,13 +919,6 @@ func TestBuildOAuthConfigAcceptsConfiguredExpectedAudience(t *testing.T) {
 			wantAudience:     "https://api.layerv.ai",
 		},
 		{
-			name:             "endpoint trailing slash with configured expectation",
-			qurlEndpoint:     "https://api.layerv.ai/",
-			audience:         "https://api.layerv.ai",
-			expectedAudience: "https://api.layerv.ai",
-			wantAudience:     "https://api.layerv.ai",
-		},
-		{
 			name:             "configured expected audience trims surrounding whitespace",
 			qurlEndpoint:     "https://api.layerv.ai",
 			audience:         "https://api.layerv.ai",

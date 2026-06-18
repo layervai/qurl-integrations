@@ -874,6 +874,7 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 // check, preserving local/self-hosted deployments that own their own audience
 // contract.
 func validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience string) error {
+	expectedAudience = strings.TrimSpace(expectedAudience)
 	if expectedAudience == "" || audience == expectedAudience {
 		return nil
 	}
@@ -923,7 +924,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	audience := os.Getenv("AUTH0_AUDIENCE")
 	// TODO(upstream-contract): private infra owns the QURL_ENDPOINT ->
 	// Auth0 audience mapping and sets this env var for managed deployments.
-	expectedAudience := strings.TrimSpace(os.Getenv(envAuth0ExpectedAudience))
+	expectedAudience := os.Getenv(envAuth0ExpectedAudience)
 	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
 	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
