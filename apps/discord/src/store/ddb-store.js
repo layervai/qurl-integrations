@@ -1733,6 +1733,9 @@ function sendViewedCountShardCount(expectedCount) {
   // Invalid/legacy expected_count falls back to the one-shard floor. The
   // persisted value should be positive and only grow; choosing the floor keeps
   // later repaired reads a superset of earlier writes.
+  // A view racing a /qurl add re-persist can briefly read the old shard count;
+  // that can undercount newer wider-shard writes until the next strong render
+  // state read or poll backstop, but the monotonic floor prevents regression.
   const count = Number.isSafeInteger(expectedCount) && expectedCount > 0
     ? expectedCount
     : 1;
