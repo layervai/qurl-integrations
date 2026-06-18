@@ -1,0 +1,180 @@
+name: "origins/s3-static-connector: Build and Publish"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'origins/s3-static-connector/**'
+      - '.github/workflows/s3-static-connector.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'origins/s3-static-connector/**'
+      - '.github/workflows/s3-static-connector.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/s3-static-connector
+
+jobs:
+  test:
+    name: s3-static-connector / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: origins/s3-static-connector
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Ensure shell tools
+        run: |
+          if ! command -v envsubst >/dev/null || ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base shellcheck
+          fi
+
+      - name: Render config goldens
+        run: bash test/render_test.sh
+
+      - name: Shell lint
+        run: shellcheck -S warning render.sh cachectl.sh entrypoint.sh test/render_test.sh test/cachectl_test.sh test/behavior_test.sh
+
+      - name: Cache-control contract
+        run: bash test/cachectl_test.sh
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build linux/amd64 image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: origins/s3-static-connector
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: s3-static-connector:test
+          cache-from: type=gha,scope=s3-static-connector-amd64
+          cache-to: type=gha,mode=max,scope=s3-static-connector-amd64
+
+      - name: Runtime behavior contract (linux/amd64)
+        run: SKIP_BUILD=true PLATFORM=linux/amd64 IMG=s3-static-connector:test bash test/behavior_test.sh
+
+      - name: Build linux/arm64 image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: origins/s3-static-connector
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: s3-static-connector:test-arm64
+          cache-from: type=gha,scope=s3-static-connector-arm64
+          cache-to: type=gha,mode=max,scope=s3-static-connector-arm64
+
+      - name: Runtime behavior contract (linux/arm64)
+        run: SKIP_BUILD=true PLATFORM=linux/arm64 IMG=s3-static-connector:test-arm64 bash test/behavior_test.sh
+
+  publish:
+    name: s3-static-connector / publish
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: origins/s3-static-connector
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The PR test job's loaded images are intentionally throwaway. Publishing
+      # builds a fresh multi-arch candidate, then tests that exact digest before
+      # promoting tags. Failed candidates remain unpromoted by digest only;
+      # cleanup is package-retention housekeeping, not deploy state.
+      - name: Build candidate image
+        id: candidate
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: origins/s3-static-connector
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=s3-static-connector-amd64
+            type=gha,scope=s3-static-connector-arm64
+            type=gha,scope=s3-static-connector-publish
+          cache-to: type=gha,mode=max,scope=s3-static-connector-publish
+
+      - name: Runtime behavior contract (candidate linux/amd64)
+        env:
+          CANDIDATE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.candidate.outputs.digest }}
+        run: SKIP_BUILD=true PLATFORM=linux/amd64 IMG="$CANDIDATE_IMAGE" bash test/behavior_test.sh
+
+      - name: Runtime behavior contract (candidate linux/arm64)
+        env:
+          CANDIDATE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.candidate.outputs.digest }}
+        run: SKIP_BUILD=true PLATFORM=linux/arm64 IMG="$CANDIDATE_IMAGE" bash test/behavior_test.sh
+
+      - name: Promote tested image tags
+        env:
+          CANDIDATE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.candidate.outputs.digest }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:main" \
+            --tag "${IMAGE_NAME}:${GITHUB_SHA}" \
+            "$CANDIDATE_IMAGE"
+
+      - name: Verify promoted tags reference tested manifests
+        env:
+          CANDIDATE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.candidate.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect --raw "$CANDIDATE_IMAGE" > /tmp/candidate.json
+          docker buildx imagetools inspect --raw "${IMAGE_NAME}:main" > /tmp/main.json
+          docker buildx imagetools inspect --raw "${IMAGE_NAME}:${GITHUB_SHA}" > /tmp/sha.json
+
+          # Verify the load-bearing platform manifests. The build-push-action
+          # publish step owns provenance/SBOM attestation emission for the
+          # candidate digest.
+          extract_platform_manifests() {
+            jq -S '
+              [
+                .manifests[]
+                | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))
+                | {architecture: .platform.architecture, digest: .digest}
+              ]
+              | sort_by(.architecture)
+            ' "$1"
+          }
+
+          extract_platform_manifests /tmp/candidate.json > /tmp/tested-manifests.json
+          extract_platform_manifests /tmp/main.json > /tmp/main-manifests.json
+          extract_platform_manifests /tmp/sha.json > /tmp/sha-manifests.json
+
+          diff -u /tmp/tested-manifests.json /tmp/main-manifests.json
+          diff -u /tmp/tested-manifests.json /tmp/sha-manifests.json
