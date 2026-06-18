@@ -3017,6 +3017,24 @@ describe('mintLinksInBatches', () => {
     expect(result).toHaveLength(2);
   });
 
+  it('rethrows a cap error on a single-link retry instead of spinning', async () => {
+    mockMintLinks
+      .mockRejectedValueOnce(makeBatchCapExceededError())
+      .mockRejectedValueOnce(makeBatchCapExceededError());
+
+    await expect(mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    })).rejects.toMatchObject({ apiCode: 'batch_cap_exceeded' });
+
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 2 }));
+    expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-1', expect.objectContaining({ n: 1 }));
+  });
+
   it('keeps the cap fallback across a re-upload boundary', async () => {
     mockMintLinks.mockRejectedValueOnce(makeBatchCapExceededError());
     for (let i = 0; i < 12; i++) {
