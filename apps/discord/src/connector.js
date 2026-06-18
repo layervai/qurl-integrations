@@ -428,9 +428,9 @@ let _detectResourceId = null;
 // boots even when QURL_API_KEY is unset in non-detect deployments, and so tests
 // can inject a mocked @layervai/qurl before the first call.
 //
-// CACHE THE CLIENT, NEVER THE RESOLVED target_url: resolve() issues a fresh NHP
-// knock per call (see resolveDetectTarget) — a stale target_url's network access
-// was granted to a previous IP/knock-window and must not be reused.
+// Cache the client, never the resolved target_url — resolve() re-knocks per
+// call (the full no-cache invariant + rationale live on _detectResourceId
+// above and in resolveDetectTarget's docstring).
 //
 // NOTE: createQurlForResource's `target_path` option needs @layervai/qurl
 // >= 0.3.0 (it landed in qurl-typescript#145); package.json pins ~0.3.0.
@@ -447,16 +447,10 @@ function getQurlClient() {
     // baseUrl is the bare qURL API base (no `/v1`) — the SDK prepends the
     // versioned path itself.
     //
-    // timeout / maxRetries: explicitly bound and harden the mint+resolve
-    // control-plane calls. The SDK already defaults to timeout 30s/attempt and
-    // maxRetries 3 (on 429/5xx + transport errors), but pinning both keeps the
-    // detect legs' resilience visible and stable against SDK-default drift:
-    //   - timeout bounds a stalled qURL endpoint so it degrades like the detect
-    //     POST's AbortSignal.timeout instead of hanging with no upper bound.
-    //   - maxRetries gives the mint+resolve legs transient-failure resilience so
-    //     a single blip doesn't fail the whole detect interaction.
-    // resolve() is a fast knock+lookup, so 30s sits well under the POST's 60s;
-    // the retry worst case is timeout*(maxRetries+1)+backoff, still inside
+    // timeout / maxRetries match the SDK's current defaults but are pinned
+    // explicitly so the detect legs' resilience stays stable against
+    // SDK-default drift. resolve() is a fast knock+lookup, so 30s sits well
+    // under the detect POST's 60s and the retry worst case stays inside
     // Discord's 15-min deferred-interaction window.
     _qurlClient = new QURLClient({
       apiKey: config.QURL_API_KEY,
@@ -569,11 +563,10 @@ async function resolveDetectTarget() {
       logger.warn('Detect tunnel slug lookup failed', { error: err.message });
       throw err;
     }
-    const rid = resources?.[0]?.id;
-    if (!rid) {
+    resourceId = resources?.[0]?.id;
+    if (!resourceId) {
       throw new Error('Detect tunnel resource not found for slug');
     }
-    resourceId = rid;
     _detectResourceId = resourceId;
   }
 
