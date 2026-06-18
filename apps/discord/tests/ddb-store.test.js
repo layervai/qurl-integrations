@@ -1796,16 +1796,20 @@ describe('qurl views', () => {
   });
 
   test('recordQurlView: reports firstView from ALL_OLD access_count', async () => {
-    ddbMock.on(UpdateCommand).resolvesOnce({});
-    await expect(store.recordQurlView({
-      qurlId: 'q_new', accessCount: 2, consumed: false, eventId: 'evt-new',
-    })).resolves.toEqual({ result: 'recorded', firstView: true });
-
-    ddbMock.on(UpdateCommand).resolves({ Attributes: { access_count: 1 } });
-    await expect(store.recordQurlView({
-      qurlId: 'q_repeat', accessCount: 2, consumed: false, eventId: 'evt-repeat',
-    })).resolves.toEqual({ result: 'recorded', firstView: false });
-    const input = ddbMock.commandCalls(UpdateCommand)[1].args[0].input;
+    const cases = [
+      { response: {}, qurlId: 'q_new', accessCount: 2, eventId: 'evt-new', firstView: true },
+      { response: { Attributes: { access_count: 0 } }, qurlId: 'q_zero', accessCount: 1, eventId: 'evt-zero', firstView: true },
+      { response: { Attributes: { access_count: 1 } }, qurlId: 'q_repeat', accessCount: 2, eventId: 'evt-repeat', firstView: false },
+      { response: { Attributes: { qurl_id: 'q_legacy', last_updated: 'legacy' } }, qurlId: 'q_legacy', accessCount: 1, eventId: 'evt-legacy', firstView: false },
+    ];
+    for (const c of cases) {
+      ddbMock.reset();
+      ddbMock.on(UpdateCommand).resolves(c.response);
+      await expect(store.recordQurlView({
+        qurlId: c.qurlId, accessCount: c.accessCount, consumed: false, eventId: c.eventId,
+      })).resolves.toEqual({ result: 'recorded', firstView: c.firstView });
+    }
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.ReturnValues).toBe('ALL_OLD');
   });
 

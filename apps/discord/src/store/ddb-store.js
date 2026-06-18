@@ -1093,6 +1093,10 @@ const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 // self-destruct semantics ("once consumed, always consumed"). If
 // qurl-service ever needs to un-consume a row, that's a separate
 // API contract change.
+//
+// accessCount must be >=1. The webhook route rejects zero before calling
+// this shared store method; keep the store gate too so a future direct
+// caller cannot persist a row that the view counter would treat as unseen.
 async function recordQurlView({
   qurlId, accessCount, consumed, eventId,
 }) {
@@ -1129,9 +1133,10 @@ async function recordQurlView({
       },
       ReturnValues: 'ALL_OLD',
     }));
+    const old = res?.Attributes;
     return {
       result: 'recorded',
-      firstView: !(res.Attributes?.access_count > 0),
+      firstView: !old || old.access_count === 0,
     };
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException') {
@@ -1817,15 +1822,12 @@ async function getSendRenderedCount(sendId) {
 // nothing to do"). Same CCFE-as-control-flow shape as
 // markExpiredDMEdited / flipRevokedAt.
 //
-// COALESCING: last_rendered_at (epoch MS) is stamped in the SAME write,
-// in the SET clause NOT the condition — so the count guard rejecting an
-// equal advance can't suppress the clock refresh, and the next webhook's
-// leading-edge debounce (getSendRenderState → lastRenderedAt) always sees
-// this edit's instant. This is the SUCCESS-path stamp (count + clock
-// together); the FAILURE path stamps the clock alone via touchRenderedAt
-// (below). So last_rendered_at = "last edit ATTEMPT", last_rendered_count
-// = "last DISPLAYED count" — the split's why lives at the route's step-8
-// (qurl-webhook.js), the only caller.
+// COALESCING: last_rendered_at (epoch MS) is stamped in the SAME
+// successful conditional write as last_rendered_count. If another replica
+// already committed an equal-or-higher count, the whole write CCFEs and
+// that winning replica's timestamp is the debounce clock. The FAILURE path
+// stamps the clock alone via touchRenderedAt (below), so retry storms still
+// coalesce without claiming a count was displayed.
 async function tryAdvanceRenderedCount(sendId, n) {
   try {
     await ddb.send(new UpdateCommand({
@@ -1930,6 +1932,10 @@ async function saveSendConfirmState(sendId, {
     ExpressionAttributeValues: values,
   };
   if (expectedCountPlaceholder) {
+    // Fail closed on stale lower totals. The only production add path
+    // serializes growth; if a future/stale caller tries to lower the
+    // fanout, keep the matching baseMsg/qurlIds from landing too so the
+    // render state stays internally consistent.
     update.ConditionExpression = `attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`;
   }
   await ddb.send(new UpdateCommand(update));
