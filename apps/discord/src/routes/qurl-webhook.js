@@ -585,8 +585,7 @@ const senderCounterFlushTimers = new Map();
 // new view (dbResult === 'recorded'), edits the sender's "/qurl send"
 // confirmation to "👀 N viewed / M pending" from ANY replica using the
 // persisted interaction-webhook token — no Gateway, no in-memory monitor
-// needed. (Supersedes the old SQS view-update push — see the call site's
-// SUPERSESSION note for why the two editors can't coexist.)
+// needed.
 //
 // FIRE-AND-FORGET (mirrors flipConsumedDMInBackground): the view is
 // already recorded and the 200 already returned, so a counter-edit miss
@@ -646,9 +645,8 @@ function editSenderCounterInBackground({
       const sendId = rows[0].send_id;
       const senderId = rows[0].sender_discord_id;
 
-      // 2. Render state for this send. Absent → no persisted confirm row
-      //    (legacy send predating the feature, or a saveSendConfirmState
-      //    that failed); the poll backstop is the sole renderer.
+      // 2. Render state for this send. Absent means legacy/unarmed send;
+      //    the poll backstop is the renderer.
       const state = await db.getSendRenderState(sendId);
       if (!state) {
         logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
@@ -665,9 +663,7 @@ function editSenderCounterInBackground({
       }
 
       // 4. ABSENT-GUARD. No token / app id / base means this send predates
-      //    the persistence window (or the token TTL'd away) — the
-      //    fast-path has nothing to edit with, so the poll backstop
-      //    covers it. (PR-A maps confirm_base_msg → state.baseMsg.)
+      //    the persistence window (or the token TTL'd away).
       if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
         logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
         return { status: 'absent' };
@@ -780,21 +776,10 @@ function editSenderCounterInBackground({
       });
       const r = await editInteractionReply(state.interactionAppId, state.interactionToken, { content });
 
-      // 8. COMMIT AFTER SUCCESS ONLY. Advance last_rendered_count via the
-      //    monotonic CAS only when the edit confirmed. On a failed edit we
-      //    do NOT advance — the poll backstop will re-render and self-heal
-      //    (this is THE invariant that prevents the stuck-counter
-      //    regression on a transient edit failure).
-      //
-      //    BUT still refresh the debounce clock on failure (touchRenderedAt
-      //    stamps last_rendered_at WITHOUT advancing the count). Otherwise
-      //    coalescing would collapse precisely when it's needed most: a
-      //    burst against a transiently-erroring Discord never stamps
-      //    last_rendered_at (it's success-only), so every view in the burst
-      //    re-attempts a PATCH — the exact 429 storm the gate exists to
-      //    prevent, with only discord.js's backoff as the floor. Stamping
-      //    on attempt keeps the failure path at ~M/window like the success
-      //    path. Best-effort + logged-swallowed (the poll covers the miss).
+      // 8. COMMIT AFTER SUCCESS ONLY. Advance last_rendered_count only when
+      //    Discord confirmed the edit; a failed edit must not move the floor.
+      //    Still refresh last_rendered_at on failed attempts so an outage
+      //    burst remains coalesced while the poll backstop repairs display.
       if (!r.ok) {
         try {
           await db.touchRenderedAt(sendId);
@@ -981,10 +966,7 @@ router.post('/qurl', async (req, res) => {
     // already-decided 200 — the polling backstop in monitorLinkStatus
     // re-renders anything this edit misses.
     //
-    // SUPERSESSION: do not also publish to the old SQS view-update path.
-    // Two editors would fight over the same confirmation; the content-only
-    // interaction-token edit is now the single fast-path. Follow-up #875
-    // removes the dead publisher/consumer/registry wiring.
+    // Keep the old SQS view-update path off; #875 removes that dead wiring.
     if (dbResult === 'recorded') {
       editSenderCounterInBackground({ qurlId: data.qurl_id, firstView });
     }

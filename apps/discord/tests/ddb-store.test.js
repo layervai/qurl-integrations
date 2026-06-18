@@ -16,6 +16,9 @@
  *     those are DDB-side guarantees, not our code.
  */
 
+const fs = require('fs');
+const path = require('path');
+
 jest.mock('../src/config', () => ({
   PENDING_LINK_EXPIRY_MINUTES: 10,
 }));
@@ -1197,6 +1200,34 @@ describe('qurl sends', () => {
   });
 
   // ── View-counter render state (cross-replica fast-path, PR-B) ──
+
+  test('getSendRenderState: SECURITY - decrypted token has one production caller', () => {
+    const srcRoot = path.join(__dirname, '../src');
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.isFile() && entry.name.endsWith('.js')) {
+          files.push(full);
+        }
+      }
+    };
+    walk(srcRoot);
+
+    const callers = files
+      .map(file => ({
+        rel: path.relative(srcRoot, file).replace(/\\/g, '/'),
+        text: fs.readFileSync(file, 'utf8'),
+      }))
+      .filter(({ rel }) => !['store/ddb-store.js', 'store/contract.js'].includes(rel))
+      .filter(({ text }) => /\bgetSendRenderState\s*\(/.test(text))
+      .map(({ rel }) => rel)
+      .sort();
+
+    expect(callers).toEqual(['routes/qurl-webhook.js']);
+  });
 
   test('saveSendConfig: does NOT write view-counter render-state (that is saveSendConfirmState only)', async () => {
     // saveSendConfig runs BEFORE the token/confirmMsg/delivered exist, so
