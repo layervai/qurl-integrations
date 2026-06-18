@@ -40,7 +40,7 @@
  *     delay the failure (tracked in qurl-integrations-infra#1091).
  *   - Deterministic 4xx (400/401/404/409) fail fast — real failures or test bugs.
  *   - Does NOT catch fetch REJECTIONS (DNS / ECONNREFUSED / the sustained
- *     fileviewer.layerv.xyz:443 ConnectTimeout the ticket calls out). Those
+ *     legacy sandbox fileviewer host ConnectTimeout the ticket calls out). Those
  *     propagate immediately so a genuine outage fails fast.
  *   - Keeps the attempt budget bounded, so even a SUSTAINED 5xx eventually
  *     surfaces: the final Response is returned for the caller's own `!ok` throw.

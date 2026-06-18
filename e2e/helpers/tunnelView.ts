@@ -2,7 +2,7 @@
  * Headless-browser viewer for the fileviewer reverse-tunnel (render-at-mint).
  *
  * WHY a browser and not `fetch`/curl: PR qurl-integrations-infra#1111
- * decommissioned the legacy EC2 fileviewer host (fileviewer.layerv.xyz). Under
+ * decommissioned the legacy EC2 fileviewer host. Under
  * render-at-mint + the NHP tunnel a recipient NEVER hits a fetchable view URL
  * directly. The flow is entirely JS-driven:
  *
@@ -30,7 +30,7 @@
 import { chromium, type Browser } from 'playwright';
 
 /** Matches the tunnel view URL on ANY environment:
- *   https://r_<id>.qurl.site<.layerv.xyz|.layerv.ai|…>/views/<mint-id>
+ *   https://r_<id>.qurl.site<environment suffix>/views/<mint-id>
  * Pinned to the `.qurl.site` host segment + the `/views/` path so it can't match
  * the `qurl.link` knock redirect or the top-frame SPA. Host-suffix-agnostic so
  * the same helper works against sandbox and prod. The FIRST response matching
