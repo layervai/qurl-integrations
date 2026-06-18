@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,15 +20,48 @@ const (
 	testDescription   = "updated"
 	testAlias         = "dev-dashboard"
 	testAliasAlt      = "prod-grafana"
+	testExampleURL    = "https://example.com"
+	testPrimaryQURLID = "r_abc123test"
+	testLookupQURLID  = "r_test"
+	testQURLLink      = "https://qurl.link/at_abc123"
 	testResourceID    = "r_existing01"
 	testResourceIDAlt = "r_dev_dash01"
+	testQURLPath      = "/v1/qurls/" + testPrimaryQURLID
+	testExtendBy      = "24h"
 	testTargetURL     = "https://internal.example.com"
 	testTunnelSlug    = "prod-dashboard"
+
+	fieldAlias      = "alias"
+	fieldCode       = "code"
+	fieldData       = "data"
+	fieldDetail     = "detail"
+	fieldError      = "error"
+	fieldMeta       = "meta"
+	fieldQURLLink   = "qurl_link"
+	fieldRequestID  = "request_id"
+	fieldResourceID = "resource_id"
+	fieldStatus     = "status"
+	fieldTargetURL  = "target_url"
+	fieldTitle      = "title"
+	fieldType       = "type"
+
+	testRequestID            = "req_test"
+	titleBadRequest          = "Bad Request"
+	detailInvalidTargetURL   = "The target_url field must be a valid HTTPS URL"
+	invalidFieldTargetURLMsg = "must be a valid HTTPS URL"
 )
 
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
 	return New(url, key, WithRetry(0))
+}
+
+type recordingLogger struct {
+	messages []string
+}
+
+func (l *recordingLogger) Printf(format string, args ...any) {
+	l.messages = append(l.messages, fmt.Sprintf(format, args...))
 }
 
 // withDelaysForTest collapses retry/backoff delays to 1ns. Reaches into
@@ -46,8 +80,8 @@ func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]any{
-		"data": data,
-		"meta": map[string]string{"request_id": "req_test"},
+		fieldData: data,
+		fieldMeta: map[string]string{fieldRequestID: testRequestID},
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		t.Fatalf("encode response: %v", err)
@@ -70,29 +104,29 @@ func TestCreate(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if input.TargetURL != "https://example.com" {
-			t.Errorf("expected target_url https://example.com, got %s", input.TargetURL)
+		if input.TargetURL != testExampleURL {
+			t.Errorf("expected target_url %s, got %s", testExampleURL, input.TargetURL)
 		}
 
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_abc123test",
-			"qurl_link":   "https://qurl.link/at_abc123",
-			"qurl_site":   "https://r_abc123test.qurl.site",
+			fieldResourceID: testPrimaryQURLID,
+			fieldQURLLink:   testQURLLink,
+			"qurl_site":     "https://r_abc123test.qurl.site",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
+	got, err := c.Create(context.Background(), CreateInput{TargetURL: testExampleURL})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if got.ResourceID != "r_abc123test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_abc123test")
+	if got.ResourceID != testPrimaryQURLID {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, testPrimaryQURLID)
 	}
-	if got.QURLLink != "https://qurl.link/at_abc123" {
-		t.Errorf("got QURLLink %q, want %q", got.QURLLink, "https://qurl.link/at_abc123")
+	if got.QURLLink != testQURLLink {
+		t.Errorf("got QURLLink %q, want %q", got.QURLLink, testQURLLink)
 	}
 }
 
@@ -103,15 +137,15 @@ func TestUserAgent(t *testing.T) {
 			t.Errorf("expected User-Agent 'qurl-cli/1.0.0', got %q", ua)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_test",
-			"target_url":  "https://example.com",
-			"status":      "active",
+			fieldResourceID: testLookupQURLID,
+			fieldTargetURL:  testExampleURL,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL, "test-key", WithRetry(0), WithUserAgent("qurl-cli/1.0.0"))
-	_, err := c.Get(context.Background(), "r_test")
+	_, err := c.Get(context.Background(), testLookupQURLID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -119,29 +153,29 @@ func TestUserAgent(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/qurls/r_abc123test" {
-			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
+		if r.URL.Path != testQURLPath {
+			t.Errorf("expected %s, got %s", testQURLPath, r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id":  "r_abc123test",
-			"target_url":   "https://example.com",
-			"status":       "active",
-			"one_time_use": false,
+			fieldResourceID: testPrimaryQURLID,
+			fieldTargetURL:  testExampleURL,
+			fieldStatus:     StatusActive,
+			"one_time_use":  false,
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.Get(context.Background(), "r_abc123test")
+	got, err := c.Get(context.Background(), testPrimaryQURLID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 
-	if got.ResourceID != "r_abc123test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_abc123test")
+	if got.ResourceID != testPrimaryQURLID {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, testPrimaryQURLID)
 	}
-	if got.Status != "active" {
-		t.Errorf("got Status %q, want %q", got.Status, "active")
+	if got.Status != StatusActive {
+		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
 	}
 }
 
@@ -150,21 +184,21 @@ func TestList(t *testing.T) {
 		if r.URL.Query().Get("limit") != "5" {
 			t.Errorf("expected limit=5, got %s", r.URL.Query().Get("limit"))
 		}
-		if r.URL.Query().Get("status") != "active" {
+		if r.URL.Query().Get("status") != StatusActive {
 			t.Errorf("expected status=active, got %s", r.URL.Query().Get("status"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
-			"data": []map[string]any{
-				{"resource_id": "r_1", "target_url": "https://a.com", "status": "active"},
-				{"resource_id": "r_2", "target_url": "https://b.com", "status": "active"},
+			fieldData: []map[string]any{
+				{fieldResourceID: "r_1", fieldTargetURL: "https://a.com", fieldStatus: StatusActive},
+				{fieldResourceID: "r_2", fieldTargetURL: "https://b.com", fieldStatus: StatusActive},
 			},
-			"meta": map[string]any{
-				"request_id":  "req_test",
-				"page_size":   2,
-				"has_more":    true,
-				"next_cursor": "cursor_abc",
+			fieldMeta: map[string]any{
+				fieldRequestID: testRequestID,
+				"page_size":    2,
+				"has_more":     true,
+				"next_cursor":  "cursor_abc",
 			},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -174,7 +208,7 @@ func TestList(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.List(context.Background(), ListInput{Limit: 5, Status: "active"})
+	got, err := c.List(context.Background(), ListInput{Limit: 5, Status: StatusActive})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -198,8 +232,8 @@ func TestListCursorEscaping(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
-			"data": []map[string]any{},
-			"meta": map[string]any{"request_id": "req_test"},
+			fieldData: []map[string]any{},
+			fieldMeta: map[string]any{fieldRequestID: testRequestID},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Fatalf("encode: %v", err)
@@ -232,8 +266,8 @@ func TestResolve(t *testing.T) {
 		}
 
 		apiEnvelope(t, w, map[string]any{
-			"target_url":  "https://api.example.com/data",
-			"resource_id": "r_abc123test",
+			fieldTargetURL:  "https://api.example.com/data",
+			fieldResourceID: testPrimaryQURLID,
 			"access_grant": map[string]any{
 				"expires_in": 305,
 				"granted_at": "2026-03-09T15:30:00Z",
@@ -266,13 +300,13 @@ func TestMintLink(t *testing.T) {
 			t.Errorf("expected mint_link path, got %s", r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"qurl_link": "https://qurl.link/at_newtoken",
+			fieldQURLLink: "https://qurl.link/at_newtoken",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.MintLink(context.Background(), "r_abc123test")
+	got, err := c.MintLink(context.Background(), testPrimaryQURLID)
 	if err != nil {
 		t.Fatalf("MintLink: %v", err)
 	}
@@ -313,8 +347,8 @@ func TestUpdate(t *testing.T) {
 		if r.Method != http.MethodPatch {
 			t.Errorf("expected PATCH, got %s", r.Method)
 		}
-		if r.URL.Path != "/v1/qurls/r_abc123test" {
-			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
+		if r.URL.Path != testQURLPath {
+			t.Errorf("expected %s, got %s", testQURLPath, r.URL.Path)
 		}
 
 		var input UpdateInput
@@ -326,17 +360,17 @@ func TestUpdate(t *testing.T) {
 		}
 
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_abc123test",
-			"target_url":  "https://example.com",
-			"status":      "active",
-			"description": testDescription,
+			fieldResourceID: testPrimaryQURLID,
+			fieldTargetURL:  testExampleURL,
+			fieldStatus:     StatusActive,
+			"description":   testDescription,
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	desc := testDescription
-	got, err := c.Update(context.Background(), "r_abc123test", UpdateInput{Description: &desc})
+	got, err := c.Update(context.Background(), testPrimaryQURLID, UpdateInput{Description: &desc})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -345,22 +379,97 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
+func TestExtend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
+		}
+		if r.URL.Path != testQURLPath {
+			t.Errorf("expected %s, got %s", testQURLPath, r.URL.Path)
+		}
+
+		var input ExtendInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.ExtendBy != testExtendBy {
+			t.Errorf("ExtendBy = %q, want %s", input.ExtendBy, testExtendBy)
+		}
+
+		apiEnvelope(t, w, map[string]any{
+			fieldResourceID: testResourceID,
+			fieldTargetURL:  testTargetURL,
+			fieldStatus:     StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.Extend(context.Background(), testPrimaryQURLID, ExtendInput{ExtendBy: testExtendBy})
+	if err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if got.ResourceID != testResourceID {
+		t.Errorf("ResourceID = %q, want %q", got.ResourceID, testResourceID)
+	}
+}
+
+func TestOptionsWithHTTPClientAndLogger(t *testing.T) {
+	httpClient := &http.Client{}
+	logger := &recordingLogger{}
+	c := New("https://api.example.test", "test-key", WithHTTPClient(httpClient), WithLogger(logger))
+
+	if c.httpClient != httpClient {
+		t.Fatal("WithHTTPClient did not install provided client")
+	}
+	c.logf("request %s", "started")
+	if len(logger.messages) != 1 || logger.messages[0] != "request started" {
+		t.Fatalf("logger messages = %v", logger.messages)
+	}
+}
+
+func TestAPIErrorErrorString(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *APIError
+		want string
+	}{
+		{
+			name: "title and status",
+			err:  &APIError{Title: "Not Found", StatusCode: http.StatusNotFound},
+			want: "Not Found (404)",
+		},
+		{
+			name: "detail included",
+			err:  &APIError{Title: titleBadRequest, StatusCode: http.StatusBadRequest, Detail: "invalid target_url"},
+			want: titleBadRequest + " (400): invalid target_url",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAPIErrorRFC7807(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusBadRequest)
 		resp := map[string]any{
-			"error": map[string]any{
-				"type":   "https://api.qurl.link/problems/invalid_request",
-				"title":  "Bad Request",
-				"status": 400,
-				"detail": "The target_url field must be a valid HTTPS URL",
-				"code":   "invalid_request",
+			fieldError: map[string]any{
+				fieldType:   "https://api.qurl.link/problems/invalid_request",
+				fieldTitle:  titleBadRequest,
+				fieldStatus: 400,
+				fieldDetail: detailInvalidTargetURL,
+				fieldCode:   "invalid_request",
 				"invalid_fields": map[string]string{
-					"target_url": "must be a valid HTTPS URL",
+					fieldTargetURL: invalidFieldTargetURLMsg,
 				},
 			},
-			"meta": map[string]string{"request_id": "req_abc"},
+			fieldMeta: map[string]string{fieldRequestID: "req_abc"},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Fatalf("encode: %v", err)
@@ -369,7 +478,7 @@ func TestAPIErrorRFC7807(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Get(context.Background(), "r_abc123test")
+	_, err := c.Get(context.Background(), testPrimaryQURLID)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -384,13 +493,13 @@ func TestAPIErrorRFC7807(t *testing.T) {
 	if apiErr.Code != "invalid_request" {
 		t.Errorf("got code %q, want %q", apiErr.Code, "invalid_request")
 	}
-	if apiErr.Detail != "The target_url field must be a valid HTTPS URL" {
+	if apiErr.Detail != detailInvalidTargetURL {
 		t.Errorf("got detail %q", apiErr.Detail)
 	}
 	if apiErr.RequestID != "req_abc" {
 		t.Errorf("got request_id %q, want %q", apiErr.RequestID, "req_abc")
 	}
-	if apiErr.InvalidFields["target_url"] != "must be a valid HTTPS URL" {
+	if apiErr.InvalidFields[fieldTargetURL] != invalidFieldTargetURLMsg {
 		t.Errorf("got invalid_fields %v", apiErr.InvalidFields)
 	}
 }
@@ -400,11 +509,11 @@ func TestAPIErrorRateLimit(t *testing.T) {
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
 		resp := map[string]any{
-			"error": map[string]any{
-				"title":  "Too Many Requests",
-				"status": 429,
-				"detail": "Rate limit exceeded",
-				"code":   "rate_limited",
+			fieldError: map[string]any{
+				fieldTitle:  "Too Many Requests",
+				fieldStatus: 429,
+				fieldDetail: "Rate limit exceeded",
+				fieldCode:   "rate_limited",
 			},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -414,7 +523,7 @@ func TestAPIErrorRateLimit(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Get(context.Background(), "r_abc123test")
+	_, err := c.Get(context.Background(), testPrimaryQURLID)
 
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -435,9 +544,9 @@ func TestRetryOn503(t *testing.T) {
 			return
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_test",
-			"target_url":  "https://example.com",
-			"status":      "active",
+			fieldResourceID: testLookupQURLID,
+			fieldTargetURL:  testExampleURL,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -447,12 +556,12 @@ func TestRetryOn503(t *testing.T) {
 		// Use very short delays for test speed.
 		withDelaysForTest(),
 	)
-	got, err := c.Get(context.Background(), "r_test")
+	got, err := c.Get(context.Background(), testLookupQURLID)
 	if err != nil {
 		t.Fatalf("Get after retries: %v", err)
 	}
-	if got.ResourceID != "r_test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_test")
+	if got.ResourceID != testLookupQURLID {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, testLookupQURLID)
 	}
 	if attempts.Load() != 3 {
 		t.Errorf("expected 3 attempts, got %d", attempts.Load())
@@ -472,7 +581,7 @@ func TestRetryExhausted(t *testing.T) {
 		WithRetry(2),
 		withDelaysForTest(),
 	)
-	_, err := c.Get(context.Background(), "r_test")
+	_, err := c.Get(context.Background(), testLookupQURLID)
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
@@ -502,7 +611,7 @@ func TestNoRetryOn4xx(t *testing.T) {
 		WithRetry(3),
 		withDelaysForTest(),
 	)
-	_, err := c.Get(context.Background(), "r_test")
+	_, err := c.Get(context.Background(), testLookupQURLID)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -521,7 +630,7 @@ func TestDelete(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if err := c.Delete(context.Background(), "r_abc123test"); err != nil {
+	if err := c.Delete(context.Background(), testPrimaryQURLID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 }
@@ -531,15 +640,15 @@ func TestCreateIdempotencyKeyHeaderSet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotHeader = r.Header.Get(HeaderIdempotencyKey)
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_idem_test",
-			"qurl_link":   "https://qurl.link/idem",
+			fieldResourceID: "r_idem_test",
+			fieldQURLLink:   "https://qurl.link/idem",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	_, err := c.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
+		TargetURL:      testExampleURL,
 		IdempotencyKey: "slack:T123:trig_456",
 	})
 	if err != nil {
@@ -562,12 +671,12 @@ func TestCreateIdempotencyKeyAbsentWhenEmpty(t *testing.T) {
 				headerValue = vs[0]
 			}
 		}
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_no_idem"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_no_idem"})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
+	_, err := c.Create(context.Background(), CreateInput{TargetURL: testExampleURL})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -584,16 +693,16 @@ func TestCreateBodyByteIdenticalWithAndWithoutIdempotencyKey(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		bodies = append(bodies, b)
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_body_test"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_body_test"})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: testExampleURL}); err != nil {
 		t.Fatalf("Create #1: %v", err)
 	}
 	if _, err := c.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
+		TargetURL:      testExampleURL,
 		IdempotencyKey: "slack:T999:trig_xyz",
 	}); err != nil {
 		t.Fatalf("Create #2: %v", err)
@@ -626,7 +735,7 @@ func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_retry_idem"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_retry_idem"})
 	}))
 	defer srv.Close()
 
@@ -635,7 +744,7 @@ func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
 		withDelaysForTest(),
 	)
 	_, err := c.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
+		TargetURL:      testExampleURL,
 		IdempotencyKey: "slack:T1:trig_retry",
 	})
 	if err != nil {
@@ -665,7 +774,7 @@ func TestCreateIdempotencyKeyTooLong(t *testing.T) {
 	c := testClient(srv.URL, "test-key")
 	tooLong := strings.Repeat("a", MaxIdempotencyKeyLength+1)
 	_, err := c.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
+		TargetURL:      testExampleURL,
 		IdempotencyKey: tooLong,
 	})
 	if !errors.Is(err, ErrIdempotencyKeyTooLong) {
@@ -684,13 +793,13 @@ func TestCreateIdempotencyKeyAtMaxBoundary(t *testing.T) {
 		if got := r.Header.Get(HeaderIdempotencyKey); got != atMax {
 			t.Errorf("header got len=%d, want %q (len=%d)", len(got), atMax, len(atMax))
 		}
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_boundary"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_boundary"})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	if _, err := c.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
+		TargetURL:      testExampleURL,
 		IdempotencyKey: atMax,
 	}); err != nil {
 		t.Errorf("at-max boundary (%d bytes exactly): unexpected error %v", MaxIdempotencyKeyLength, err)
@@ -756,7 +865,7 @@ func TestCreateIdempotencyKeyRejectsInvalidBytes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := c.Create(context.Background(), CreateInput{
-				TargetURL:      "https://example.com",
+				TargetURL:      testExampleURL,
 				IdempotencyKey: tc.key,
 			})
 			if !errors.Is(err, ErrIdempotencyKeyInvalid) {
@@ -777,7 +886,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get(HeaderIdempotencyKey)
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_valid"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_valid"})
 	}))
 	defer srv.Close()
 	c := testClient(srv.URL, "test-key")
@@ -793,7 +902,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 		}
 		want := b.String()
 		if _, err := c.Create(context.Background(), CreateInput{
-			TargetURL:      "https://example.com",
+			TargetURL:      testExampleURL,
 			IdempotencyKey: want,
 		}); err != nil {
 			t.Errorf("unexpected error %v", err)
@@ -808,7 +917,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 		// triggers OWS-trim by the wire.
 		want := "key with spaces"
 		if _, err := c.Create(context.Background(), CreateInput{
-			TargetURL:      "https://example.com",
+			TargetURL:      testExampleURL,
 			IdempotencyKey: want,
 		}); err != nil {
 			t.Errorf("unexpected error %v", err)
@@ -822,7 +931,7 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 		// Mid-key tab is permitted by the validator; pin it.
 		want := "key\twith\ttabs"
 		if _, err := c.Create(context.Background(), CreateInput{
-			TargetURL:      "https://example.com",
+			TargetURL:      testExampleURL,
 			IdempotencyKey: want,
 		}); err != nil {
 			t.Errorf("unexpected error %v", err)
@@ -858,8 +967,8 @@ func TestListResourcesLimitClamp(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				if err := json.NewEncoder(w).Encode(map[string]any{
-					"data": []map[string]any{},
-					"meta": map[string]string{"request_id": "req_test"},
+					fieldData: []map[string]any{},
+					fieldMeta: map[string]string{fieldRequestID: testRequestID},
 				}); err != nil {
 					t.Fatalf("encode: %v", err)
 				}
@@ -885,13 +994,13 @@ func TestListResourcesSlugFilter(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{{
-				"resource_id": "r_prod_dash01",
-				"type":        ResourceTypeTunnel,
-				"slug":        slug,
-				"status":      StatusActive,
+			fieldData: []map[string]any{{
+				fieldResourceID: "r_prod_dash01",
+				fieldType:       ResourceTypeTunnel,
+				"slug":          slug,
+				fieldStatus:     StatusActive,
 			}},
-			"meta": map[string]string{"request_id": "req_test"},
+			fieldMeta: map[string]string{fieldRequestID: testRequestID},
 		}); err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -919,14 +1028,14 @@ func TestCreatePathIsPlural(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_path_test",
-			"qurl_link":   "https://qurl.link/path",
+			fieldResourceID: "r_path_test",
+			fieldQURLLink:   "https://qurl.link/path",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: testExampleURL}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if gotPath != "/v1/qurls" {
@@ -950,8 +1059,8 @@ func TestCreateResourceIDFlow(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
-			"qurl_link":   "https://qurl.link/at_existing",
+			fieldResourceID: testResourceID,
+			fieldQURLLink:   "https://qurl.link/at_existing",
 		})
 	}))
 	defer srv.Close()
@@ -968,10 +1077,10 @@ func TestCreateResourceIDFlow(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v (body=%s)", err, gotBody)
 	}
-	if _, ok := raw["resource_id"]; ok {
+	if _, ok := raw[fieldResourceID]; ok {
 		t.Errorf("resource_id must NOT appear in body (rides in URL path); body=%s", gotBody)
 	}
-	if _, ok := raw["target_url"]; ok {
+	if _, ok := raw[fieldTargetURL]; ok {
 		t.Errorf("target_url must NOT appear in body on resource-scoped mint; body=%s", gotBody)
 	}
 }
@@ -987,22 +1096,22 @@ func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_url_only"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_url_only"})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: testExampleURL}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if got, ok := raw["target_url"]; !ok || got != "https://example.com" {
+	if got, ok := raw[fieldTargetURL]; !ok || got != testExampleURL {
 		t.Errorf("target_url should be present and set; got %v", got)
 	}
-	if _, ok := raw["resource_id"]; ok {
+	if _, ok := raw[fieldResourceID]; ok {
 		t.Errorf("resource_id must be omitted when empty; body=%s", gotBody)
 	}
 }
@@ -1016,14 +1125,14 @@ func TestCreateSessionDurationOnWire(t *testing.T) {
 		name  string
 		input CreateInput
 	}{
-		{"target_url form", CreateInput{TargetURL: "https://example.com", SessionDuration: "1h"}},
+		{"target_url form", CreateInput{TargetURL: testExampleURL, SessionDuration: "1h"}},
 		{"resource_id form", CreateInput{ResourceID: "r_tunnel", SessionDuration: "1h"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotBody []byte
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
-				apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+				apiEnvelope(t, w, map[string]any{fieldResourceID: "r_x"})
 			}))
 			defer srv.Close()
 			c := testClient(srv.URL, "test-key")
@@ -1047,11 +1156,11 @@ func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBody, _ = io.ReadAll(r.Body)
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: "r_x"})
 	}))
 	defer srv.Close()
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: testExampleURL}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var raw map[string]any
@@ -1074,14 +1183,14 @@ func TestCreateLabelOnWire(t *testing.T) {
 		name  string
 		input CreateInput
 	}{
-		{"target_url form", CreateInput{TargetURL: "https://example.com", Label: wantLabel}},
+		{"target_url form", CreateInput{TargetURL: testExampleURL, Label: wantLabel}},
 		{"resource_id form", CreateInput{ResourceID: "r_tunnel", Label: wantLabel}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotBody []byte
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
-				apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+				apiEnvelope(t, w, map[string]any{fieldResourceID: testResourceID})
 			}))
 			defer srv.Close()
 			c := testClient(srv.URL, "test-key")
@@ -1111,7 +1220,7 @@ func TestCreateLabelOnWire(t *testing.T) {
 func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.Create(context.Background(), CreateInput{
-		TargetURL:  "https://example.com",
+		TargetURL:  testExampleURL,
 		ResourceID: testResourceID,
 	})
 	if !errors.Is(err, ErrCreateTargetResourceExclusive) {
@@ -1158,7 +1267,7 @@ func TestCreateNoTargetBeatsInvalidIdempotencyKey(t *testing.T) {
 func TestCreateBothPopulatedBeatsInvalidIdempotencyKey(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
+		TargetURL:      testExampleURL,
 		ResourceID:     testResourceID,
 		IdempotencyKey: "bad\nkey",
 	})
@@ -1188,12 +1297,12 @@ func TestCreateResource(t *testing.T) {
 			t.Errorf("got Alias %q, want %q", input.Alias, testAlias)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceIDAlt,
-			"target_url":  testTargetURL,
-			"alias":       testAlias,
-			"type":        ResourceTypeURL,
-			"status":      StatusActive,
-			"updated_at":  "2026-05-10T07:30:00Z",
+			fieldResourceID: testResourceIDAlt,
+			fieldTargetURL:  testTargetURL,
+			fieldAlias:      testAlias,
+			fieldType:       ResourceTypeURL,
+			fieldStatus:     StatusActive,
+			"updated_at":    "2026-05-10T07:30:00Z",
 		})
 	}))
 	defer srv.Close()
@@ -1241,10 +1350,10 @@ func TestCreateResourceURLTypeExplicit(t *testing.T) {
 			t.Errorf("got Type %q, want %q", input.Type, ResourceTypeURL)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_url_explicit",
-			"target_url":  testTargetURL,
-			"type":        ResourceTypeURL,
-			"status":      StatusActive,
+			fieldResourceID: "r_url_explicit",
+			fieldTargetURL:  testTargetURL,
+			fieldType:       ResourceTypeURL,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -1280,9 +1389,9 @@ func TestCreateResourceUnknownTypePassesThrough(t *testing.T) {
 			t.Errorf("got Type %q, want %q", input.Type, futureType)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_future",
-			"type":        futureType,
-			"status":      StatusActive,
+			fieldResourceID: "r_future",
+			fieldType:       futureType,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -1334,9 +1443,9 @@ func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_tunnel01",
-			"type":        ResourceTypeTunnel,
-			"status":      StatusActive,
+			fieldResourceID: "r_tunnel01",
+			fieldType:       ResourceTypeTunnel,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -1359,10 +1468,10 @@ func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if got := raw["type"]; got != ResourceTypeTunnel {
+	if got := raw[fieldType]; got != ResourceTypeTunnel {
 		t.Errorf("type: got %v, want %q", got, ResourceTypeTunnel)
 	}
-	if _, ok := raw["target_url"]; ok {
+	if _, ok := raw[fieldTargetURL]; ok {
 		t.Errorf("target_url must be omitted on tunnel creates; body=%s", gotBody)
 	}
 }
@@ -1376,10 +1485,10 @@ func TestCreateResourceTunnelFindOrCreateSlug(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id":       "r_tunnel01",
-			"type":              ResourceTypeTunnel,
+			fieldResourceID:     "r_tunnel01",
+			fieldType:           ResourceTypeTunnel,
 			"slug":              testTunnelSlug,
-			"status":            StatusActive,
+			fieldStatus:         StatusActive,
 			"knock_resource_id": "qurl-tunnel-server",
 		})
 	}))
@@ -1441,7 +1550,7 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 			"api_key":     "lv_live_secret",
 			"name":        testTunnelSlug + " bootstrap",
 			"scopes":      []string{"qurl:agent", "qurl:write"},
-			"status":      StatusActive,
+			fieldStatus:   StatusActive,
 			"purpose":     APIKeyPurposeTunnelBootstrap,
 			"tunnel_slug": testTunnelSlug,
 			"expires_at":  "2026-05-28T00:00:00Z",
@@ -1455,7 +1564,7 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 		Scopes:         []string{"qurl:agent", "qurl:write"},
 		Purpose:        APIKeyPurposeTunnelBootstrap,
 		TunnelSlug:     testTunnelSlug,
-		ExpiresIn:      "24h",
+		ExpiresIn:      testExtendBy,
 		IdempotencyKey: "bootstrap-key-12345678901234567890",
 	})
 	if err != nil {
@@ -1534,7 +1643,7 @@ func TestDeleteResource(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if err := c.DeleteResource(context.Background(), "r_abc123test"); err != nil {
+	if err := c.DeleteResource(context.Background(), testPrimaryQURLID); err != nil {
 		t.Fatalf("DeleteResource: %v", err)
 	}
 	if gotMethod != http.MethodDelete || gotPath != "/v1/resources/r_abc123test" {
@@ -1618,9 +1727,9 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 			t.Errorf("GeoDenylist: got %v", input.AccessPolicy.GeoDenylist)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_policy01",
-			"target_url":  testTargetURL,
-			"status":      StatusActive,
+			fieldResourceID: "r_policy01",
+			fieldTargetURL:  testTargetURL,
+			fieldStatus:     StatusActive,
 			"access_policy": map[string]any{
 				"ip_allowlist":  []string{"10.0.0.0/8", "192.168.0.0/16"},
 				"ip_denylist":   []string{"203.0.113.0/24"},
@@ -1684,9 +1793,9 @@ func TestCreateResourceRetryPreservesBody(t *testing.T) {
 			return
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceIDAlt,
-			"target_url":  testTargetURL,
-			"status":      StatusActive,
+			fieldResourceID: testResourceIDAlt,
+			fieldTargetURL:  testTargetURL,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -1813,8 +1922,8 @@ func TestUpdateResourceSetAlias(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
-			"alias":       testAliasAlt,
+			fieldResourceID: testResourceID,
+			fieldAlias:      testAliasAlt,
 		})
 	}))
 	defer srv.Close()
@@ -1837,7 +1946,7 @@ func TestUpdateResourceSetAlias(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if got := raw["alias"]; got != testAliasAlt {
+	if got := raw[fieldAlias]; got != testAliasAlt {
 		t.Errorf("alias: got %v, want %q", got, testAliasAlt)
 	}
 	if _, ok := raw["clear_alias"]; ok {
@@ -1859,8 +1968,8 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 		// Server responds with the cleared resource — alias absent on
 		// the wire, decoding to Resource.Alias == "".
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
-			"status":      StatusActive,
+			fieldResourceID: testResourceID,
+			fieldStatus:     StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -1886,7 +1995,7 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 	}
 	// Symmetric pin: clearing must NOT also send a stale `alias` key.
 	// Mirror of the assertion in TestUpdateResourceSetAlias.
-	if _, ok := raw["alias"]; ok {
+	if _, ok := raw[fieldAlias]; ok {
 		t.Errorf("alias must elide when ClearAlias=true; body=%s", gotBody)
 	}
 }
@@ -1915,7 +2024,7 @@ func TestUpdateResourceRetryPreservesBody(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: testResourceID})
 	}))
 	defer srv.Close()
 
@@ -1955,7 +2064,7 @@ func TestUpdateResourceClearDescriptionByEmptyString(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
+			fieldResourceID: testResourceID,
 		})
 	}))
 	defer srv.Close()
@@ -1993,7 +2102,7 @@ func TestUpdateResourceClearCustomDomainByEmptyString(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
+			fieldResourceID: testResourceID,
 		})
 	}))
 	defer srv.Close()
@@ -2035,7 +2144,7 @@ func TestUpdateResourceClearAccessPolicyByEmptyStruct(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": testResourceID,
+			fieldResourceID: testResourceID,
 		})
 	}))
 	defer srv.Close()
@@ -2092,7 +2201,7 @@ func TestUpdateResourceTrimsSurroundingWhitespace(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: testResourceID})
 	}))
 	defer srv.Close()
 
@@ -2122,7 +2231,7 @@ func TestUpdateResourceTrimsAliasPointer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: testResourceID})
 	}))
 	defer srv.Close()
 
@@ -2138,7 +2247,7 @@ func TestUpdateResourceTrimsAliasPointer(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if got := raw["alias"]; got != testAliasAlt {
+	if got := raw[fieldAlias]; got != testAliasAlt {
 		t.Errorf("alias on wire: got %v, want %q", got, testAliasAlt)
 	}
 
@@ -2182,7 +2291,7 @@ func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {
 	var gotEscapedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEscapedPath = r.URL.EscapedPath()
-		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+		apiEnvelope(t, w, map[string]any{fieldResourceID: testResourceID})
 	}))
 	defer srv.Close()
 
@@ -2207,11 +2316,11 @@ func TestCreateResourceAliasInUse(t *testing.T) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusConflict)
 		resp := map[string]any{
-			"error": map[string]any{
-				"title":  "Conflict",
-				"status": 409,
-				"detail": "alias already in use",
-				"code":   "alias_in_use",
+			fieldError: map[string]any{
+				fieldTitle:  "Conflict",
+				fieldStatus: 409,
+				fieldDetail: "alias already in use",
+				fieldCode:   "alias_in_use",
 			},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -2249,13 +2358,13 @@ func TestUpdateResourceInvalidAlias(t *testing.T) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusBadRequest)
 		resp := map[string]any{
-			"error": map[string]any{
-				"title":  "Bad Request",
-				"status": 400,
-				"detail": "alias must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
-				"code":   "invalid_alias",
+			fieldError: map[string]any{
+				fieldTitle:  titleBadRequest,
+				fieldStatus: 400,
+				fieldDetail: "alias must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+				fieldCode:   "invalid_alias",
 				"invalid_fields": map[string]string{
-					"alias": "must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+					fieldAlias: "must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
 				},
 			},
 		}
@@ -2283,7 +2392,7 @@ func TestUpdateResourceInvalidAlias(t *testing.T) {
 	if apiErr.Code != "invalid_alias" {
 		t.Errorf("got code %q, want invalid_alias", apiErr.Code)
 	}
-	if got, ok := apiErr.InvalidFields["alias"]; !ok || got == "" {
+	if got, ok := apiErr.InvalidFields[fieldAlias]; !ok || got == "" {
 		t.Errorf("InvalidFields[\"alias\"] should be populated; got %v (ok=%v)", got, ok)
 	}
 }

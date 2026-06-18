@@ -9,9 +9,11 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 )
 
+const configCmdName = "config"
+
 func configCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "config",
+		Use:   configCmdName,
 		Short: "Manage CLI configuration",
 		Long: fmt.Sprintf(`Manage CLI configuration stored at ~/.config/qurl/config.yaml.
 
@@ -31,7 +33,7 @@ func configSetCmd() *cobra.Command {
 	var profile string
 
 	cmd := &cobra.Command{
-		Use:   "set <key> <value>",
+		Use:   "set KEY VALUE",
 		Short: "Set a configuration value",
 		Example: `  qurl config set api_key lv_live_xxx
   qurl config set --profile staging api_key lv_live_yyy`,
@@ -73,7 +75,7 @@ func configGetCmd() *cobra.Command {
 	var profile string
 
 	cmd := &cobra.Command{
-		Use:     "get <key>",
+		Use:     "get KEY",
 		Short:   "Get a configuration value",
 		Example: "  qurl config get endpoint",
 		Args:    cobra.ExactArgs(1),
@@ -138,7 +140,7 @@ func configListProfilesCmd() *cobra.Command {
 				return err
 			}
 			if len(profiles) == 0 {
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), "No profiles configured. Create one with: qurl config set --profile <name> api_key <key>")
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "No profiles configured. Create one with: qurl config set --profile NAME api_key KEY")
 				return err
 			}
 			for _, p := range profiles {

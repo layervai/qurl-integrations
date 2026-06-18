@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,10 +19,16 @@ type Config struct {
 	Output   string `yaml:"output,omitempty"`
 }
 
+const (
+	keyAPIKey   = "api_key"
+	keyEndpoint = "endpoint"
+	keyOutput   = "output"
+)
+
 var validKeys = map[string]bool{
-	"api_key":  true,
-	"endpoint": true,
-	"output":   true,
+	keyAPIKey:   true,
+	keyEndpoint: true,
+	keyOutput:   true,
 }
 
 var profileNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -41,11 +48,11 @@ func IsValidKey(key string) bool {
 // Get returns a config value by key.
 func (c *Config) Get(key string) string {
 	switch key {
-	case "api_key":
+	case keyAPIKey:
 		return c.APIKey
-	case "endpoint":
+	case keyEndpoint:
 		return c.Endpoint
-	case "output":
+	case keyOutput:
 		return c.Output
 	default:
 		return ""
@@ -55,14 +62,14 @@ func (c *Config) Get(key string) string {
 // Set sets a config value by key.
 func (c *Config) Set(key, value string) error {
 	if !validKeys[key] {
-		return fmt.Errorf("unknown key %q (valid: api_key, endpoint, output)", key)
+		return fmt.Errorf("unknown key %q (valid: %s)", key, strings.Join(ValidKeys(), ", "))
 	}
 	switch key {
-	case "api_key":
+	case keyAPIKey:
 		c.APIKey = value
-	case "endpoint":
+	case keyEndpoint:
 		c.Endpoint = value
-	case "output":
+	case keyOutput:
 		c.Output = value
 	}
 	return nil
@@ -70,7 +77,7 @@ func (c *Config) Set(key, value string) error {
 
 // ValidKeys returns the list of valid configuration keys.
 func ValidKeys() []string {
-	return []string{"api_key", "endpoint", "output"}
+	return []string{keyAPIKey, keyEndpoint, keyOutput}
 }
 
 // configDir returns the base config directory (~/.config/qurl).

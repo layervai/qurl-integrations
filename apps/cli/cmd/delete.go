@@ -15,7 +15,7 @@ func deleteCmd(opts *globalOpts) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:               "delete <resource-id>",
+		Use:               "delete RESOURCE_ID",
 		Short:             "Revoke/delete a qURL",
 		Example:           "  qurl delete r_k8xqp9h2sj9 --yes",
 		Args:              cobra.ExactArgs(1),

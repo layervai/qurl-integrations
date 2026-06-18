@@ -8,7 +8,7 @@ import (
 
 func mintCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
-		Use:   "mint <resource-id>",
+		Use:   "mint RESOURCE_ID",
 		Short: "Mint a new access link for a qURL",
 		Long: `Creates a new access token and link for an existing qURL resource.
 Useful for multi-use qURLs where you want to generate additional access links.`,
