@@ -696,7 +696,7 @@ that accidentally carried a numeric value.
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the Secure Access Agent |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
-| `AUTH0_EXPECTED_AUDIENCE` | OAuth | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
+| `AUTH0_EXPECTED_AUDIENCE` | No | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
