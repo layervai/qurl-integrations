@@ -55,7 +55,7 @@ const {
 const TOKENS_PER_RESOURCE = 10;
 // Process-local connector capability cache. Start optimistic so legacy/prod
 // connectors keep batched mints; once this worker observes the meta-seal
-// cap-1 response, future sends avoid burning one known-failing batch probe.
+// cap-1 response, later sends avoid burning one known-failing batch probe.
 let connectorMintLinksPerRequest = TOKENS_PER_RESOURCE;
 
 // Absolute floor above which a single send earns a `WARN`-level

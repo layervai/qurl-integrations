@@ -83,10 +83,10 @@ async function throwConnectorError(label, response) {
         const errStr = typeof parsed.error === 'string' ? parsed.error : '';
         if (BATCH_CAP_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
           apiCode = 'batch_cap_exceeded';
-          apiDetail = errStr || null;
+          apiDetail = errStr;
         } else if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
           apiCode = 'quota_exceeded';
-          apiDetail = errStr || null;
+          apiDetail = errStr;
         }
       } catch { /* not JSON, ignore */ }
     }
