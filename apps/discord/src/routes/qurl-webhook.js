@@ -580,6 +580,64 @@ function flipConsumedDMInBackground({ qurlId, eventId }) {
 // fire-and-forget caller and the unit tests have a uniform drain anchor.
 const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 const senderCounterFlushTimers = new Map();
+const senderCounterRenderStateCache = new Map();
+
+function senderCounterRenderStateCacheTtlMs() {
+  // Keep this much shorter than the edit coalesce window: it collapses a
+  // same-replica webhook burst onto one strong render-state read without
+  // extending terminal/revoke/expiry staleness by more than a request-scale
+  // interval.
+  return Math.max(1, Math.min(50, Math.floor(config.QURL_VIEW_COUNTER_COALESCE_MS / 4) || 1));
+}
+
+function cacheSenderCounterRenderState(sendId, state, now = Date.now()) {
+  if (!sendId) return;
+  if (!state) {
+    // Do not cache misses: a send can be armed just after the first webhook.
+    senderCounterRenderStateCache.delete(sendId);
+    return;
+  }
+  senderCounterRenderStateCache.set(sendId, {
+    state,
+    expiresAt: now + senderCounterRenderStateCacheTtlMs(),
+  });
+}
+
+async function getSenderCounterRenderState(sendId) {
+  const now = Date.now();
+  const cached = senderCounterRenderStateCache.get(sendId);
+  if (cached && cached.expiresAt > now) {
+    if (cached.state) return cached.state;
+    if (cached.promise) return cached.promise;
+  } else if (cached) {
+    senderCounterRenderStateCache.delete(sendId);
+  }
+
+  let promise;
+  promise = db.getSendRenderState(sendId)
+    .then((state) => {
+      cacheSenderCounterRenderState(sendId, state);
+      return state;
+    })
+    .catch((err) => {
+      const current = senderCounterRenderStateCache.get(sendId);
+      if (current && current.promise === promise) {
+        senderCounterRenderStateCache.delete(sendId);
+      }
+      throw err;
+    });
+  senderCounterRenderStateCache.set(sendId, {
+    promise,
+    expiresAt: now + senderCounterRenderStateCacheTtlMs(),
+  });
+  return promise;
+}
+
+function patchCachedSenderCounterRenderState(sendId, patch) {
+  const cached = senderCounterRenderStateCache.get(sendId);
+  if (!cached || !cached.state) return;
+  cacheSenderCounterRenderState(sendId, { ...cached.state, ...patch });
+}
 
 // Sub-second sender view-counter fast-path (feat #60, PR-B). On a real
 // new view (dbResult === 'recorded'), edits the sender's "/qurl send"
@@ -663,7 +721,7 @@ function editSenderCounterInBackground({
 
       // 2. Render state for this send. Absent means legacy/unarmed send;
       //    the poll backstop is the renderer.
-      const state = await db.getSendRenderState(sendId);
+      const state = await getSenderCounterRenderState(sendId);
       if (!state) {
         logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
         return { status: 'no-state' };
@@ -807,6 +865,7 @@ function editSenderCounterInBackground({
       if (!r.ok) {
         try {
           await db.touchRenderedAt(sendId);
+          patchCachedSenderCounterRenderState(sendId, { lastRenderedAt: Date.now() });
         } catch (touchErr) {
           logger.debug('qURL webhook sender-counter: touchRenderedAt failed (coalesce clock not refreshed; rate limiter is the floor)', {
             qurl_id: qurlId, send_id: sendId, error: touchErr?.message,
@@ -815,6 +874,15 @@ function editSenderCounterInBackground({
         return { status: 'edit-failed', n: N };
       }
       const advanced = await db.tryAdvanceRenderedCount(sendId, N);
+      if (advanced) {
+        patchCachedSenderCounterRenderState(sendId, {
+          lastRenderedCount: N,
+          lastRenderedAt: Date.now(),
+          viewedCount: Math.max(typeof state.viewedCount === 'number' ? state.viewedCount : 0, N),
+        });
+      } else {
+        senderCounterRenderStateCache.delete(sendId);
+      }
       if (!repairFloor && !advanced && N < state.expectedCount) {
         // One-shot repair may be a redundant PATCH when another replica
         // already displayed N, but the same CCFE also covers the stale-edit
@@ -1029,5 +1097,6 @@ router.stopIntervals = function stopIntervals() {
   unknownOwnerLimiter.stopSweep();
   for (const timer of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();
+  senderCounterRenderStateCache.clear();
 };
 module.exports = router;

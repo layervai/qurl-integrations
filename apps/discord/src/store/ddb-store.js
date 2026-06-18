@@ -1956,7 +1956,15 @@ async function saveSendConfirmState(sendId, {
     // render state stays internally consistent.
     update.ConditionExpression = `attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`;
   }
-  await ddb.send(new UpdateCommand(update));
+  try {
+    await ddb.send(new UpdateCommand(update));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException' && expectedCountPlaceholder) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 // Deduped resource_id list. Currently only used by tests; src/ uses

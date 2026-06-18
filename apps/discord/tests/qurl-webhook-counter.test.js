@@ -222,6 +222,31 @@ describe('sender view-counter fast-path — happy path', () => {
     const advanceOrder = mockTryAdvanceRenderedCount.mock.invocationCallOrder[0];
     expect(editOrder).toBeLessThan(advanceOrder);
   });
+
+  it('caches render state inside a burst and refreshes the cached debounce clock after an edit', async () => {
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    expect(mockGetSendRenderState).toHaveBeenCalledTimes(1);
+    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+
+    logger.debug.mockClear();
+    await signedRequest({
+      ...VALID_PAYLOAD,
+      id: 'evt-counter-cache-2',
+      data: { ...VALID_PAYLOAD.data, qurl_id: 'q_cache_2' },
+    });
+    await flushCounter();
+
+    expect(mockGetSendRenderState).toHaveBeenCalledTimes(1);
+    expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(2);
+    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+      expect.objectContaining({ send_id: SEND_ID, qurl_id: 'q_cache_2' }),
+    );
+  });
 });
 
 describe('sender view-counter fast-path — content-only (buttons preserved)', () => {
@@ -602,8 +627,9 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     // DISTINCT recipients arriving inside one coalesce window. The store
     // mocks share in-test state that mirrors the real split: render floor
     // and coalesce clock live on qurl_send_configs, while distinct first
-    // views advance sharded qurl_views counters. This exercises the REAL
-    // leading-edge gate end-to-end across replicas, not a mocked verdict.
+    // views advance sharded qurl_views counters. This exercises the real
+    // leading-edge gate and per-replica render-state cache end-to-end, not a
+    // mocked verdict.
     const TRACKED = Array.from({ length: 30 }, (_, i) => `q_burst_${i}`);
     // The row as the store sees it. last_rendered_at starts 0 (never
     // edited) so the first webhook is NOT debounced.
@@ -664,13 +690,11 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     // than pinning the exact count, since real wall-clock could straddle
     // the window and admit a second leading edge.
     //
-    // SCOPE OF THIS BOUND: the mock makes tryAdvanceRenderedCount's stamp
-    // synchronously visible to the next getSendRenderState, so this proves
-    // single-replica SEQUENTIAL coalescing. It does NOT prove the
-    // distributed bound — in prod, M replicas reading an eventually-
-    // consistent last_rendered_at before any commits can each fire one
-    // leading edge per window (~M/window, see the route's COALESCING
-    // header). Do not read <=3 here as a cross-replica guarantee.
+    // SCOPE OF THIS BOUND: the route refreshes its per-replica cache after a
+    // successful tryAdvanceRenderedCount, so this proves single-process
+    // sequential coalescing. It does NOT prove the distributed bound; in
+    // prod, M replicas can each fire one leading edge per window before
+    // their local cache/strong-read view sees another replica's commit.
     expect(mockEditInteractionReply.mock.calls.length).toBeLessThanOrEqual(3);
     expect(mockEditInteractionReply.mock.calls.length).toBeGreaterThanOrEqual(1);
     // The whole point: the normal fast-path is constant-shape now. It

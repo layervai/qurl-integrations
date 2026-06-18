@@ -1578,6 +1578,19 @@ describe('qurl sends', () => {
     expect(input.ConditionExpression).toBeUndefined();
   });
 
+  test('saveSendConfirmState: stale lower expected_count condition miss is a quiet no-op', async () => {
+    ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('stale fanout'), {
+      name: 'ConditionalCheckFailedException',
+    }));
+    await expect(store.saveSendConfirmState('s1', {
+      expectedCount: 2,
+      confirmBaseMsg: 'Sent to 2 users',
+    })).resolves.toBe(false);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toMatch(/expected_count <= :v/);
+  });
+
   test('saveSendConfirmState: no recognized field → no write at all (not an empty SET)', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.saveSendConfirmState('s1', {});
