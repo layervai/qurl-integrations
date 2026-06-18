@@ -632,6 +632,17 @@ function editSenderCounterInBackground({
   // as flipConsumedDMInBackground).
   Promise.resolve()
     .then(async () => {
+      // Repeat accesses on an already-viewed qurl_id cannot change the
+      // sender's DISTINCT viewed count. Skip before the send lookup so
+      // multi-use link reopens don't pay a GSI Query + render-state Get
+      // only to end in N<=L. The poll backstop handles any rare self-heal
+      // from a previous missed first-view edit; force=true trailing/repair
+      // flushes still render.
+      if (!firstView && !force) {
+        logger.debug('qURL webhook sender-counter: skip — no distinct-view advance', { qurl_id: qurlId });
+        return { status: 'no-distinct-view' };
+      }
+
       // 1. GSI lookup → the single send owning this qurl_id. Defensive
       //    skip on != 1 (0 = pre-rollout / no persisted send; > 1 =
       //    ambiguous duplicate key) — same shape as the expired handler.
@@ -669,15 +680,6 @@ function editSenderCounterInBackground({
         return { status: 'absent' };
       }
 
-      // Repeat accesses on an already-viewed qurl_id cannot change the
-      // sender's DISTINCT viewed count. Let the poll backstop handle any
-      // rare self-heal from a previous missed first-view edit; avoid a
-      // strong shard-sum read that can only end in N<=L.
-      if (!firstView && !force) {
-        logger.debug('qURL webhook sender-counter: skip — no distinct-view advance', { qurl_id: qurlId, send_id: sendId });
-        return { status: 'no-distinct-view' };
-      }
-
       if (firstView) {
         try {
           // Intentional two-write split: recordQurlView is the source of
@@ -710,20 +712,11 @@ function editSenderCounterInBackground({
       //    followers inside the same sub-second window.
       const sinceLastEditMs = Date.now() - state.lastRenderedAt;
       if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
-        const pendingCount = firstView
-          ? state.lastRenderedCount + 1
-          : (typeof state.viewedCount === 'number' ? state.viewedCount : state.lastRenderedCount);
-        if (pendingCount > state.lastRenderedCount) {
-          const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
-          scheduleSenderCounterFlush({ sendId, qurlId, delayMs });
-          logger.debug('qURL webhook sender-counter: coalesced — scheduled trailing flush', {
-            qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs, delay_ms: delayMs,
-          });
-        } else {
-          logger.debug('qURL webhook sender-counter: skip — within coalesce window (no distinct advance)', {
-            qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs,
-          });
-        }
+        const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
+        scheduleSenderCounterFlush({ sendId, qurlId, delayMs });
+        logger.debug('qURL webhook sender-counter: coalesced — scheduled trailing flush', {
+          qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs, delay_ms: delayMs,
+        });
         return { status: 'coalesced' };
       }
 
@@ -750,6 +743,9 @@ function editSenderCounterInBackground({
       const haveAggregateSignal = typeof N === 'number'
         && (N > 0 || typeof state.viewedCount === 'number');
       if (!haveAggregateSignal) {
+        // New armed sends seed viewedCount=0, so shardSum=0 still counts
+        // as an aggregate signal. This BatchGet-all fallback is for
+        // legacy/no-floor rows or explicit shard-read failure above.
         let qurlIds;
         if (state.qurlIds.length > 0) {
           qurlIds = state.qurlIds;

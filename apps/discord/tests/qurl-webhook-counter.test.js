@@ -297,13 +297,15 @@ describe('sender view-counter fast-path — repeat access skip', () => {
     mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     await signedRequest();
     await flushCounter();
+    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
+    expect(mockGetSendRenderState).not.toHaveBeenCalled();
     expect(mockIncrementSendViewedCount).not.toHaveBeenCalled();
     expect(mockGetSendViewedCount).not.toHaveBeenCalled();
     expect(mockGetQurlViews).not.toHaveBeenCalled();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith(
       'qURL webhook sender-counter: skip — no distinct-view advance',
-      expect.objectContaining({ qurl_id: QURL_ID, send_id: SEND_ID }),
+      { qurl_id: QURL_ID },
     );
     expect(logger.debug).toHaveBeenCalledWith(
       VERDICT_MSG,
