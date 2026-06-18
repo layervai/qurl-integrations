@@ -901,6 +901,23 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(mockClient.resolve).toHaveBeenCalledWith({ access_token: 'at_tok123' });
     });
 
+    it('redacts any at_ token from the resolve-failure breadcrumb', async () => {
+      // Defense-in-depth: even if a future SDK error echoed the resolve request
+      // body (the token), the breadcrumb must never log it.
+      const get = captureDetect({ detected: false });
+      mockClient.resolve.mockRejectedValue(new Error('knock failed for at_secretXYZ789: timeout'));
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow();
+      const warn = logger.warn.mock.calls.find(
+        (c) => c[0] === 'Detect tunnel resolve failed (knock/transport)',
+      );
+      expect(warn).toBeTruthy();
+      expect(warn[1].error).not.toMatch(/at_secretXYZ789/);
+      expect(warn[1].error).toContain('at_[REDACTED]');
+      expect(get()).toBeNull(); // resolve failed → no POST
+    });
+
     it('SSRF guard: a private/loopback resolved target_url throws and NO POST happens', async () => {
       const get = captureDetect({ detected: false }, { target: 'https://127.0.0.1/api/detect' });
       await expect(

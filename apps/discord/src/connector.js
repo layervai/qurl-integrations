@@ -563,9 +563,11 @@ async function resolveDetectTarget() {
       logger.warn('Detect tunnel slug lookup failed', { error: err.message });
       throw err;
     }
-    // listResources({slug}) filters by EXACT slug (qurl-service slug semantics),
-    // so an active slug resolves to exactly one resource — [0] is that resource,
-    // not an arbitrary prefix/substring co-match.
+    // TODO(upstream-contract): listResources({slug}) filters by EXACT slug
+    // (qurl-service slug semantics), so an active slug resolves to exactly one
+    // resource — [0] is that resource, not a prefix/substring co-match. If
+    // qurl-service ever makes slug matching fuzzy, [0] could resolve the wrong
+    // tunnel — update in lockstep.
     resourceId = resources?.[0]?.id;
     if (!resourceId) {
       throw new Error('Detect tunnel resource not found for slug');
@@ -612,7 +614,14 @@ async function resolveDetectTarget() {
   try {
     ({ target_url: targetUrl } = await getQurlClient().resolve({ access_token: accessToken }));
   } catch (err) {
-    logger.warn('Detect tunnel resolve failed (knock/transport)', { error: err.message });
+    // Defense-in-depth: scrub any `at_…` token before logging. resolve() sends
+    // the ephemeral token in its request body; QURLError messages are built from
+    // the response envelope, not the request, as of @layervai/qurl 0.3.0 — so
+    // this keeps the never-log-the-token invariant from depending on SDK-internal
+    // error construction across versions.
+    logger.warn('Detect tunnel resolve failed (knock/transport)', {
+      error: String(err.message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]'),
+    });
     throw err;
   }
   try {
