@@ -926,6 +926,13 @@ func TestBuildOAuthConfigAcceptsConfiguredExpectedAudience(t *testing.T) {
 			wantAudience:     "https://api.layerv.ai",
 		},
 		{
+			name:             "configured expected audience trims surrounding whitespace",
+			qurlEndpoint:     "https://api.layerv.ai",
+			audience:         "https://api.layerv.ai",
+			expectedAudience: " \t\nhttps://api.layerv.ai\n ",
+			wantAudience:     "https://api.layerv.ai",
+		},
+		{
 			name:             "private endpoint uses infra-provided audience",
 			qurlEndpoint:     "https://sandbox.example.invalid",
 			audience:         "https://audience.example.invalid",
@@ -1008,6 +1015,13 @@ func TestBuildOAuthConfigRejectsConfiguredExpectedAudienceMismatch(t *testing.T)
 			name:              "public endpoint with host case audience",
 			qurlEndpoint:      "https://api.layerv.ai",
 			audience:          "https://API.layerv.ai",
+			expectedAudience:  "https://api.layerv.ai",
+			wantExpectedInErr: "https://api.layerv.ai",
+		},
+		{
+			name:              "public endpoint with surrounding whitespace audience",
+			qurlEndpoint:      "https://api.layerv.ai",
+			audience:          " https://api.layerv.ai ",
 			expectedAudience:  "https://api.layerv.ai",
 			wantExpectedInErr: "https://api.layerv.ai",
 		},
