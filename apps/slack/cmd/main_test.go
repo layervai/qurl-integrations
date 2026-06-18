@@ -1018,13 +1018,6 @@ func TestBuildOAuthConfigRejectsConfiguredExpectedAudienceMismatch(t *testing.T)
 			expectedAudience:  "https://api.layerv.ai",
 			wantExpectedInErr: "https://api.layerv.ai",
 		},
-		{
-			name:              "public endpoint with surrounding whitespace audience",
-			qurlEndpoint:      "https://api.layerv.ai",
-			audience:          " https://api.layerv.ai ",
-			expectedAudience:  "https://api.layerv.ai",
-			wantExpectedInErr: "https://api.layerv.ai",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1044,6 +1037,35 @@ func TestBuildOAuthConfigRejectsConfiguredExpectedAudienceMismatch(t *testing.T)
 				!strings.Contains(err.Error(), "QURL_ENDPOINT") ||
 				!strings.Contains(err.Error(), tc.wantExpectedInErr) {
 				t.Fatalf("buildOAuthConfig() err = %v, want mismatch error naming expected audience %q", err, tc.wantExpectedInErr)
+			}
+		})
+	}
+}
+
+func TestBuildOAuthConfigRejectsAuth0AudienceSurroundingWhitespace(t *testing.T) {
+	stubJWKSVerifier(t)
+	cases := []struct {
+		name     string
+		audience string
+	}{
+		{name: "leading space", audience: " https://api.layerv.ai"},
+		{name: "trailing space", audience: "https://api.layerv.ai "},
+		{name: "newline and tab", audience: "\nhttps://api.layerv.ai\t"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env["AUTH0_AUDIENCE"] = tc.audience
+			applyEnv(t, env)
+
+			_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
+			if ok {
+				t.Fatal("expected ok=false for AUTH0_AUDIENCE surrounding whitespace")
+			}
+			if err == nil ||
+				!strings.Contains(err.Error(), "AUTH0_AUDIENCE") ||
+				!strings.Contains(err.Error(), "surrounding whitespace") {
+				t.Fatalf("buildOAuthConfig() err = %v, want surrounding whitespace error", err)
 			}
 		})
 	}

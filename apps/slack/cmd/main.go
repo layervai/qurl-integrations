@@ -946,6 +946,9 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		slog.Warn("OAuth routes NOT registered — required env vars unset", "missing", missing)
 		return oauth.Config{}, false, nil
 	}
+	if strings.TrimSpace(audience) != audience {
+		return oauth.Config{}, false, fmt.Errorf("AUTH0_AUDIENCE must not contain surrounding whitespace (got %q)", audience)
+	}
 	if err := validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience); err != nil {
 		return oauth.Config{}, false, err
 	}

@@ -547,7 +547,12 @@ AUTH0_EXPECTED_AUDIENCE=https://api.layerv.ai \
 SLACK_BASE_URL=https://slack-bot.example \
 OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
   go run ./apps/slack/cmd/
+```
 
+`AUTH0_EXPECTED_AUDIENCE` is optional for local runs; set it when you want the
+same audience drift check that managed deployments receive from infra.
+
+```bash
 # Build the production container (linux/arm64 to match the deploy target)
 docker buildx build --platform linux/arm64 \
   -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
