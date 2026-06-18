@@ -449,7 +449,7 @@ describe('Connector client — coverage boost', () => {
       } catch (e) {
         expect(e.status).toBe(500);
         expect(e.apiCode).toBeNull();
-        expect(e.apiDetail).toBe('Internal server error');
+        expect(e.apiDetail).toBeNull();
       }
     });
 

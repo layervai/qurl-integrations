@@ -59,6 +59,8 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // typed value instead of substring-matching the human-readable message (which
 // the connector / upstream API can rephrase without notice).
 const BATCH_CAP_EXCEEDED_PATTERNS = [
+  // TODO(upstream-contract): keep this in lockstep with qurl-s3-connector's
+  // meta-seal batch-cap error until the connector returns a typed code.
   /n must not exceed 1 when invisible watermarking is enabled/i,
 ];
 const QUOTA_EXCEEDED_PATTERNS = [
@@ -79,11 +81,12 @@ async function throwConnectorError(label, response) {
         // Connector wraps upstream API errors as `{success:false, error:"..."}`.
         // The wrapped string is what we pattern-match for known codes.
         const errStr = typeof parsed.error === 'string' ? parsed.error : '';
-        apiDetail = errStr || null;
         if (BATCH_CAP_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
           apiCode = 'batch_cap_exceeded';
+          apiDetail = errStr || null;
         } else if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
           apiCode = 'quota_exceeded';
+          apiDetail = errStr || null;
         }
       } catch { /* not JSON, ignore */ }
     }

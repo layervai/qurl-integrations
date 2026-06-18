@@ -244,6 +244,7 @@ const {
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
   mintLinksInBatches,
+  _resetConnectorMintLinksPerRequest,
   activeMonitors,
   executeSendPipeline,
   persistDispatchResult,
@@ -356,6 +357,7 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  _resetConnectorMintLinksPerRequest();
   revokingSendLocks.clear();
   // clearAllMocks resets call records but NOT queued one-shot
   // implementations, so a `mockResolvedValueOnce` a test queues but the
@@ -3009,6 +3011,43 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 2 }));
     expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-1', expect.objectContaining({ n: 1 }));
     expect(mockMintLinks).toHaveBeenNthCalledWith(3, 'res-1', expect.objectContaining({ n: 1 }));
+    expect(result).toHaveLength(2);
+  });
+
+  it('remembers the observed meta-seal batch cap for later sends in the same process', async () => {
+    const capErr = Object.assign(new Error('Connector mint_link failed (400)'), {
+      status: 400,
+      apiCode: 'batch_cap_exceeded',
+    });
+    mockMintLinks
+      .mockRejectedValueOnce(capErr)
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/2' }]);
+
+    await mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    });
+
+    mockMintLinks.mockClear();
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/3' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/4' }]);
+
+    const result = await mintLinksInBatches({
+      initialResourceId: 'res-2',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    });
+
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-2', expect.objectContaining({ n: 1 }));
+    expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-2', expect.objectContaining({ n: 1 }));
     expect(result).toHaveLength(2);
   });
 

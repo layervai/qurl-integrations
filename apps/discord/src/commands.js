@@ -53,6 +53,10 @@ const {
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
+// Process-local connector capability cache. Start optimistic so legacy/prod
+// connectors keep batched mints; once this worker observes the meta-seal
+// cap-1 response, future sends avoid burning one known-failing batch probe.
+let connectorMintLinksPerRequest = TOKENS_PER_RESOURCE;
 
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
@@ -1741,7 +1745,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
-  let linksPerRequest = TOKENS_PER_RESOURCE;
+  let linksPerRequest = connectorMintLinksPerRequest;
   let tokensUsed = 0;
 
   // Keep fallback cap-1 mints serial. Parallel calls against one resource
@@ -1771,6 +1775,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       });
     } catch (err) {
       if (batchSize > 1 && err?.apiCode === 'batch_cap_exceeded') {
+        connectorMintLinksPerRequest = 1;
         linksPerRequest = 1;
         continue;
       }
@@ -10078,6 +10083,7 @@ module.exports = {
       renderViewCounter,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
+      _resetConnectorMintLinksPerRequest: () => { connectorMintLinksPerRequest = TOKENS_PER_RESOURCE; },
       activeMonitors,
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
