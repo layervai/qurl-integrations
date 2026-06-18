@@ -435,10 +435,14 @@ let _detectResourceId = null;
 // NOTE: createQurlForResource's `target_path` option needs @layervai/qurl
 // >= 0.3.0 (it landed in qurl-typescript#145); package.json pins ~0.3.0.
 //
-// Bearer note: the SDK's `apiKey` is the qURL API Bearer for the listResources /
-// createQurlForResource / resolve calls and MUST carry the `qurl:resolve` scope
-// (enforced server-side by qURL, NOT by this code — it's a key-provisioning step
-// for the bot's QURL_API_KEY). This is intentionally the global
+// Bearer note: the SDK's `apiKey` is the qURL API Bearer for the listResources
+// (read) / createQurlForResource (mint/write) / resolve calls, so QURL_API_KEY
+// MUST carry all three scopes — `qurl:read` + `qurl:write` + `qurl:resolve`. A key
+// with only `qurl:resolve` passes the mocked tests but 403s at runtime on the
+// first listResources/mint. (Enforced server-side by qURL — a key-provisioning
+// step; the bot already holds read+write for /qurl send, so resolve is the scope
+// detect adds. TODO(upstream-contract): confirm the scope→endpoint mapping in the
+// soak.) This is intentionally the global
 // config.QURL_API_KEY, decoupled from the per-call `apiKey` that detectWatermark
 // threads only into the detect POST's Bearer via connectorAuthHeaders.
 let _qurlClient = null;
@@ -670,8 +674,9 @@ async function resolveDetectTarget() {
  *
  * Contract:
  *   - Reach: resolveDetectTarget() self-mints + resolves using the bot's own
- *     `config.QURL_API_KEY` (the SDK Bearer; needs `qurl:resolve` scope)
- *     against the DETECT_TUNNEL_SLUG resource. No pre-seeded access token.
+ *     `config.QURL_API_KEY` (the SDK Bearer; needs `qurl:read` + `qurl:write` +
+ *     `qurl:resolve` — list / mint / resolve) against the DETECT_TUNNEL_SLUG
+ *     resource. No pre-seeded access token.
  *   - POST headers: Authorization: Bearer <apiKey>, X-Guild-Id: <guildId>,
  *     Content-Type: <imageContentType || 'application/octet-stream'>.
  *   - Body: the raw image bytes (Buffer / ArrayBuffer / Uint8Array).
