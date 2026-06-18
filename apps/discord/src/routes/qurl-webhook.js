@@ -609,8 +609,8 @@ async function getSenderCounterRenderState(sendId) {
   const now = Date.now();
   const cached = senderCounterRenderStateCache.get(sendId);
   if (cached && cached.expiresAt > now) {
-    if (cached.state) return cached.state;
-    if (cached.promise) return cached.promise;
+    if (cached.state) return { state: cached.state, cached: true };
+    if (cached.promise) return { state: await cached.promise, cached: true };
   } else if (cached) {
     senderCounterRenderStateCache.delete(sendId);
   }
@@ -632,7 +632,7 @@ async function getSenderCounterRenderState(sendId) {
     promise,
     expiresAt: now + config.QURL_VIEW_COUNTER_COALESCE_MS,
   });
-  return promise;
+  return { state: await promise, cached: false };
 }
 
 function patchCachedSenderCounterRenderState(sendId, patch) {
@@ -688,14 +688,6 @@ if (typeof senderCounterCacheSweepTimer.unref === 'function') senderCounterCache
 // runs inside the deferred chain and a .catch keeps a throw out of
 // Express.
 //
-// ORDERING IS LOAD-BEARING — DO NOT REORDER. The advance-the-count step
-// (8) commits ONLY after a confirmed edit (7). Advancing before the edit
-// would re-introduce the stuck-counter regression: on a transient edit
-// failure last_rendered_count would move forward without the display
-// moving, and the poll backstop's pre-read compare would then skip the
-// re-render forever. Each step's skip is intentional defense — see the
-// inline notes.
-//
 function scheduleSenderCounterFlush({
   sendId, qurlId, delayMs, repairFloor = false, forceSource = false,
 }) {
@@ -725,6 +717,14 @@ function scheduleSenderCounterFlush({
 //
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
+//
+// ORDERING IS LOAD-BEARING — DO NOT REORDER. The advance-the-count step
+// (8) commits ONLY after a confirmed edit (7). Advancing before the edit
+// would re-introduce the stuck-counter regression: on a transient edit
+// failure last_rendered_count would move forward without the display
+// moving, and the poll backstop's pre-read compare would then skip the
+// re-render forever. Each step's skip is intentional defense — see the
+// inline notes.
 function editSenderCounterInBackground({
   qurlId, firstView = false, force = false, repairFloor = false, forceSource = false,
 }) {
@@ -759,7 +759,7 @@ function editSenderCounterInBackground({
 
       // 2. Render state for this send. Absent means legacy/unarmed send;
       //    the poll backstop is the renderer.
-      const state = await getSenderCounterRenderState(sendId);
+      let { state, cached: renderStateCached } = await getSenderCounterRenderState(sendId);
       if (!state) {
         logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
         return { status: 'no-state' };
@@ -881,6 +881,33 @@ function editSenderCounterInBackground({
           qurl_id: qurlId, send_id: sendId, n: N, last_rendered: L,
         });
         return { status: 'no-advance', n: N };
+      }
+
+      if (renderStateCached) {
+        const latestState = await db.getSendRenderState(sendId);
+        if (!latestState) {
+          senderCounterRenderStateCache.delete(sendId);
+          logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'no-state' };
+        }
+        cacheSenderCounterRenderState(sendId, latestState);
+        state = latestState;
+        renderStateCached = false;
+        if (state.terminal) {
+          logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'terminal' };
+        }
+        if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
+          logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'absent' };
+        }
+        const latestL = state.lastRenderedCount;
+        if (N <= latestL && !(repairFloor && N === latestL && N > 0)) {
+          logger.debug('qURL webhook sender-counter: skip — N <= last rendered (redelivery / already-rendered)', {
+            qurl_id: qurlId, send_id: sendId, n: N, last_rendered: latestL,
+          });
+          return { status: 'no-advance', n: N };
+        }
       }
 
       // 7. Render the SAME pure body the monitor renders (byte-identical),

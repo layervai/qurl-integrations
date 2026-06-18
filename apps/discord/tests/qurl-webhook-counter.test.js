@@ -599,6 +599,38 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 2);
   });
 
+  it('cached trailing flush refreshes terminal state before editing', async () => {
+    mockGetSendRenderState
+      .mockResolvedValueOnce(armedState({
+        lastRenderedCount: 1,
+        lastRenderedAt: Date.now() - 890,
+        viewedCount: 2,
+        qurlIds: ['q_a', 'q_b'],
+      }))
+      .mockResolvedValueOnce(armedState({
+        lastRenderedCount: 1,
+        lastRenderedAt: Date.now(),
+        viewedCount: 2,
+        qurlIds: ['q_a', 'q_b'],
+        terminal: true,
+      }));
+
+    await signedRequest();
+    await flushCounter();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+
+    logger.debug.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await flushCounter();
+
+    expect(mockGetSendRenderState).toHaveBeenCalledTimes(2);
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: skip — terminal',
+      expect.objectContaining({ send_id: SEND_ID }),
+    );
+  });
+
   it('aggregate increment failure inside the coalesce window schedules one source fallback flush', async () => {
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 1,
