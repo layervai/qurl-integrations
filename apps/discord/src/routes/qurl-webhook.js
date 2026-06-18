@@ -711,9 +711,10 @@ function scheduleSenderCounterFlush({
 // read. If a shard write fails inside the debounce window, the trailing
 // flush is forced to count source qurl_views so the fallback stays
 // coalesced instead of amplifying load.
-// Multiple replicas can still each pass a stale/unwritten last_rendered_at
-// and PATCH once; the CAS keeps count monotonic, while discord.js 429
-// backoff is the final safety net.
+// Before the expensive count read/PATCH, a DDB-conditional shared attempt
+// claim collapses the distributed leading edge too: only one replica per
+// send/window renders, and the trailing flush displays the settled value
+// inside the sub-second window.
 //
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
@@ -758,7 +759,10 @@ function editSenderCounterInBackground({
       const senderId = rows[0].sender_discord_id;
 
       // 2. Render state for this send. Absent means legacy/unarmed send;
-      //    the poll backstop is the renderer.
+      //    the poll backstop is the renderer. A first view that lands
+      //    before saveSendConfirmState arms this row is still recorded in
+      //    source qurl_views; the poll advances the displayed floor from
+      //    source, while the shard aggregate remains a fast-path cache.
       let { state, cached: renderStateCached } = await getSenderCounterRenderState(sendId);
       if (!state) {
         logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
@@ -825,6 +829,30 @@ function editSenderCounterInBackground({
         });
         return { status: 'coalesced' };
       }
+
+      // 4c. DISTRIBUTED CLAIM. Step 4b is an advisory local/row-clock
+      // read; this conditional write is the cross-replica arbiter. Place
+      // it before the shard-sum read so losing replicas skip both the
+      // Discord PATCH and the expensive count read for this window.
+      if (!repairFloor) {
+        const claimed = await db.tryClaimRenderAttempt(
+          sendId,
+          Date.now() - config.QURL_VIEW_COUNTER_COALESCE_MS,
+        );
+        if (!claimed) {
+          scheduleSenderCounterFlush({
+            sendId, qurlId, delayMs: config.QURL_VIEW_COUNTER_COALESCE_MS, forceSource: aggregateWriteFailed,
+          });
+          logger.debug('qURL webhook sender-counter: coalesced — distributed edit attempt already fresh', {
+            qurl_id: qurlId, send_id: sendId, delay_ms: config.QURL_VIEW_COUNTER_COALESCE_MS, force_source: aggregateWriteFailed,
+          });
+          return { status: 'coalesced' };
+        }
+      }
+      // Mirror the shared claim locally before any downstream await, so
+      // tightly clustered first-views on this replica skip without paying
+      // another store read.
+      stampSenderCounterLocalAttempt(sendId);
 
       // 5. Compute N — the count of DISTINCT viewed qurl_ids across the
       //    WHOLE send (NOT this event's per-qurl access_count). New rows
@@ -922,10 +950,6 @@ function editSenderCounterInBackground({
         expectedCount: state.expectedCount,
         degraded: false,
       });
-      // Same-replica burst guard: arm the debounce before the Discord PATCH
-      // round-trip completes so tightly clustered first-views do not all
-      // pass the gate on the same pre-edit render-state snapshot.
-      stampSenderCounterLocalAttempt(sendId);
       const r = await editInteractionReply(state.interactionAppId, state.interactionToken, { content });
 
       // 8. COMMIT AFTER SUCCESS ONLY. Advance last_rendered_count only when

@@ -43,6 +43,7 @@ const mockIncrementSendViewedCount = jest.fn();
 const mockGetSendViewedCount = jest.fn();
 const mockTryAdvanceRenderedCount = jest.fn();
 const mockTouchRenderedAt = jest.fn();
+const mockTryClaimRenderAttempt = jest.fn();
 jest.mock('../src/store', () => ({
   recordQurlView: (...args) => mockRecordQurlView(...args),
   findSendsByQurlId: (...args) => mockFindSendsByQurlId(...args),
@@ -56,6 +57,7 @@ jest.mock('../src/store', () => ({
   // touchRenderedAt call on the !r.ok branch throws into the fast-path's
   // .catch and the coalescing-on-failure test goes vacuous.
   touchRenderedAt: (...args) => mockTouchRenderedAt(...args),
+  tryClaimRenderAttempt: (...args) => mockTryClaimRenderAttempt(...args),
   // consumed/expired markers are imported by the route module but unused
   // on the not-consumed accessed path these tests drive.
   markConsumedDMEdited: jest.fn(),
@@ -200,6 +202,7 @@ beforeEach(() => {
   mockGetSendViewedCount.mockResolvedValue(1);
   mockTryAdvanceRenderedCount.mockResolvedValue(true);
   mockTouchRenderedAt.mockResolvedValue(undefined);
+  mockTryClaimRenderAttempt.mockResolvedValue(true);
   mockEditInteractionReply.mockResolvedValue({ ok: true });
 });
 
@@ -286,6 +289,24 @@ describe('sender view-counter fast-path — happy path', () => {
     resolveEdit({ ok: true });
     await flushCounter();
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 1);
+  });
+
+  it('coalesces when another replica already claimed the shared edit-attempt clock', async () => {
+    mockTryClaimRenderAttempt.mockResolvedValue(false);
+    await signedRequest();
+    await flushCounter();
+
+    expect(mockTryClaimRenderAttempt).toHaveBeenCalledWith(
+      SEND_ID,
+      expect.any(Number),
+    );
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: coalesced — distributed edit attempt already fresh',
+      expect.objectContaining({ send_id: SEND_ID, qurl_id: QURL_ID }),
+    );
   });
 });
 

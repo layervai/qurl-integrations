@@ -1502,6 +1502,36 @@ describe('qurl sends', () => {
     expect(stamped).toBeLessThanOrEqual(Date.now());
   });
 
+  test('tryClaimRenderAttempt: conditionally stamps only when the shared attempt clock is stale', async () => {
+    const before = Date.now();
+    ddbMock.on(UpdateCommand).resolves({});
+    await expect(store.tryClaimRenderAttempt('s1', before - 900)).resolves.toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-qurl-send-configs');
+    expect(input.Key).toEqual({ send_id: 's1' });
+    expect(input.UpdateExpression).toBe('SET last_rendered_at = :now');
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(last_rendered_at) OR last_rendered_at <= :cutoff',
+    );
+    expect(input.ExpressionAttributeValues[':cutoff']).toBe(before - 900);
+    const stamped = input.ExpressionAttributeValues[':now'];
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+
+    const ccfe = new Error('cond');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    await expect(store.tryClaimRenderAttempt('s1', Date.now())).resolves.toBe(false);
+
+    ddbMock.reset();
+    const boom = new Error('throughput');
+    boom.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(UpdateCommand).rejects(boom);
+    await expect(store.tryClaimRenderAttempt('s1', Date.now())).rejects.toThrow('throughput');
+    await expect(store.tryClaimRenderAttempt('', Date.now())).resolves.toBe(false);
+  });
+
   test('markConfirmTerminal: idempotent SET confirm_terminal = true, no condition', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.markConfirmTerminal('s1');

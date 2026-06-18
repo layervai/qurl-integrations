@@ -1877,6 +1877,28 @@ async function touchRenderedAt(sendId) {
   }));
 }
 
+// Distributed leading-edge debounce claim. Unlike tryAdvanceRenderedCount,
+// this does NOT claim the count moved; it only stamps the shared edit-attempt
+// clock when the previous attempt is outside the coalesce window. That turns
+// a cross-replica burst into one Discord PATCH per send/window instead of one
+// per replica/window, while preserving the commit-after-edit count invariant.
+async function tryClaimRenderAttempt(sendId, staleBeforeMs) {
+  if (!sendId) return false;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET last_rendered_at = :now',
+      ConditionExpression: 'attribute_not_exists(last_rendered_at) OR last_rendered_at <= :cutoff',
+      ExpressionAttributeValues: { ':now': Date.now(), ':cutoff': staleBeforeMs },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
 // Sticky fast-path kill-switch. Revoke/window-close use it for frozen
 // displays; mid-life /qurl add degrade uses it for an alive-but-bare poll
 // display. New code that needs display liveness must add its own signal,
@@ -2452,7 +2474,7 @@ module.exports = {
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
   getSendRenderState, incrementSendViewedCount, getSendViewedCount,
-  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
+  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

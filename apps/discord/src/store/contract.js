@@ -112,6 +112,7 @@ const STORE_METHODS = Object.freeze([
   'getSendRenderedCount',
   'tryAdvanceRenderedCount',
   'touchRenderedAt',
+  'tryClaimRenderAttempt',
   'markConfirmTerminal',
 
   // QURL views (webhook-fed view counter)
