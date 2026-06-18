@@ -53,11 +53,6 @@ const {
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
-// Connector mint requests are intentionally single-link. Staging/prod
-// meta-seal mode caps each synchronous render-at-mint request at 1 so the
-// held-open request stays under the ALB idle budget; keep the per-resource
-// pool separate from the per-request count.
-const MINT_LINKS_PER_REQUEST = 1;
 
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
@@ -1713,10 +1708,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at
- * TOKENS_PER_RESOURCE tokens. Each connector mint call requests at most
- * MINT_LINKS_PER_REQUEST links so meta-seal deployments with a cap-1
- * render-at-mint gate accept the request. When a resource is exhausted, the
- * caller's `reuploadFn` is invoked to produce a new one.
+ * TOKENS_PER_RESOURCE tokens. Legacy connectors can mint the whole resource
+ * pool in one request; meta-seal connectors may reject that with a cap-1
+ * render-at-mint gate, in which case this falls back to one link per request
+ * for the rest of the send. When a resource is exhausted, the caller's
+ * `reuploadFn` is invoked to produce a new one.
  *
  * Centralizes the re-upload / batching / quota logic so a fix lands in one
  * place across the send pipeline (file/location) and handleAddRecipients
@@ -1745,26 +1741,41 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
+  let linksPerRequest = TOKENS_PER_RESOURCE;
   let tokensUsed = 0;
 
-  // Keep cap-1 mints serial. Parallel calls against one resource would need
-  // order-restoration and could race the per-resource token pool; sequential
-  // mints preserve the recipient->link mapping and fail closed on a later 5xx
-  // instead of reminting an already-created prefix.
+  // Keep fallback cap-1 mints serial. Parallel calls against one resource
+  // would need order-restoration and could race the per-resource token pool;
+  // sequential mints preserve the recipient->link mapping and fail closed on a
+  // later 5xx instead of reminting an already-created prefix.
   for (let i = 0; i < recipientCount;) {
-    if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+    if (tokensUsed >= TOKENS_PER_RESOURCE) {
       const re = await reuploadFn();
       currentResourceId = re.resource_id;
       tokensUsed = 0;
     }
-    const batchSize = Math.min(MINT_LINKS_PER_REQUEST, TOKENS_PER_RESOURCE - tokensUsed, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, {
-      expiresAt,
-      n: batchSize,
-      apiKey,
-      selfDestructSeconds,
-      guildId,
-    });
+    const batchSize = Math.min(linksPerRequest, TOKENS_PER_RESOURCE - tokensUsed, recipientCount - i);
+    // Future-proof invariant: today's operands are all >= 1 here, but a
+    // later config-driven cap should fail closed instead of spinning.
+    if (batchSize <= 0) {
+      throw new Error('Internal mint batch invariant violated: batchSize must be positive');
+    }
+    let minted;
+    try {
+      minted = await mintLinks(currentResourceId, {
+        expiresAt,
+        n: batchSize,
+        apiKey,
+        selfDestructSeconds,
+        guildId,
+      });
+    } catch (err) {
+      if (batchSize > 1 && err?.apiCode === 'batch_cap_exceeded') {
+        linksPerRequest = 1;
+        continue;
+      }
+      throw err;
+    }
     for (const link of minted) {
       // qurl_id is the join key against qurl.accessed webhooks; empty
       // string degrades the whole monitor to bare base-msg.

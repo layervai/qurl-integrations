@@ -2156,9 +2156,9 @@ describe('handleAddRecipients — file path failure modes', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1' }])
-      .mockResolvedValueOnce([]); // only 1 minted, 2 recipients
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1' }, // only 1 minted, 2 recipients
+    ]);
 
     const result = await handleAddRecipients(
       'send-1', makeUsersCollection([
@@ -2761,9 +2761,10 @@ describe('handleAddRecipients — happy path (location)', () => {
       location_name: 'Eiffel Tower', expires_in: '30m', personal_message: 'check this out',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockMintLinks
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' }])
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' }]);
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
+      { qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+    ]);
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
@@ -2938,9 +2939,10 @@ describe('handleAddRecipients — happy path (location)', () => {
       location_name: 'Eiffel Tower', expires_in: '30m',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockMintLinks
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' }])
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' }]);
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
+      { qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
+    ]);
     // First DM fails, second succeeds.
     mockSendDM.mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-2', messageId: 'dm-m-2' });
@@ -2965,8 +2967,33 @@ describe('handleAddRecipients — happy path (location)', () => {
 // ===========================================================================
 
 describe('mintLinksInBatches', () => {
-  it('mints one link per connector request for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+  it('mints once for recipientCount <= TOKENS_PER_RESOURCE (10)', async () => {
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1' },
+      { qurl_link: 'https://q.test/2' },
+    ]);
+
+    const result = await mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn: jest.fn(),
+      expiresAt: new Date().toISOString(),
+      recipientCount: 2,
+      apiKey: 'apikey',
+    });
+
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).toHaveBeenCalledWith('res-1', expect.objectContaining({ n: 2 }));
+    expect(result).toHaveLength(2);
+    expect(result[0].resourceId).toBe('res-1');
+  });
+
+  it('falls back to single-link mints when the connector reports the meta-seal batch cap', async () => {
+    const capErr = Object.assign(new Error('Connector mint_link failed (400)'), {
+      status: 400,
+      apiCode: 'batch_cap_exceeded',
+    });
     mockMintLinks
+      .mockRejectedValueOnce(capErr)
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1' }])
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/2' }]);
 
@@ -2978,17 +3005,17 @@ describe('mintLinksInBatches', () => {
       apiKey: 'apikey',
     });
 
-    expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 1 }));
+    expect(mockMintLinks).toHaveBeenCalledTimes(3);
+    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 2 }));
     expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-1', expect.objectContaining({ n: 1 }));
+    expect(mockMintLinks).toHaveBeenNthCalledWith(3, 'res-1', expect.objectContaining({ n: 1 }));
     expect(result).toHaveLength(2);
-    expect(result[0].resourceId).toBe('res-1');
   });
 
   it('re-uploads + mints again when recipientCount > TOKENS_PER_RESOURCE', async () => {
-    for (let i = 0; i < 11; i++) {
-      mockMintLinks.mockResolvedValueOnce([{ qurl_link: `https://q.test/${i}` }]);
-    }
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/10' }]);
     const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
 
     const result = await mintLinksInBatches({
@@ -3000,11 +3027,9 @@ describe('mintLinksInBatches', () => {
     });
 
     expect(reuploadFn).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledTimes(11);
-    for (let i = 1; i <= 10; i++) {
-      expect(mockMintLinks).toHaveBeenNthCalledWith(i, 'res-1', expect.objectContaining({ n: 1 }));
-    }
-    expect(mockMintLinks).toHaveBeenNthCalledWith(11, 'res-2', expect.objectContaining({ n: 1 }));
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 10 }));
+    expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-2', expect.objectContaining({ n: 1 }));
     expect(result).toHaveLength(11);
     // First 10 carry res-1, 11th carries res-2.
     expect(result[10].resourceId).toBe('res-2');
@@ -3028,9 +3053,9 @@ describe('mintLinksInBatches', () => {
     // can guild-scope a watermark-attribution lookup. Pin it across a
     // re-upload boundary (>TOKENS_PER_RESOURCE) so a regression that drops
     // it on the second batch is caught too.
-    for (let i = 0; i < 11; i++) {
-      mockMintLinks.mockResolvedValueOnce([{ qurl_link: `https://q.test/${i}` }]);
-    }
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/10' }]);
     const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
 
     await mintLinksInBatches({
@@ -3042,7 +3067,7 @@ describe('mintLinksInBatches', () => {
       guildId: 'guild-77',
     });
 
-    expect(mockMintLinks).toHaveBeenCalledTimes(11);
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
     for (const call of mockMintLinks.mock.calls) {
       expect(call[1]).toEqual(expect.objectContaining({ guildId: 'guild-77' }));
     }

@@ -413,6 +413,26 @@ describe('Connector client — coverage boost', () => {
       }
     });
 
+    it('tags batch_cap_exceeded for the meta-seal mint cap response', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'n must not exceed 1 when invisible watermarking is enabled',
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 10 });
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(400);
+        expect(e.apiCode).toBe('batch_cap_exceeded');
+        expect(e.apiDetail).toMatch(/invisible watermarking/);
+      }
+    });
+
     it('leaves apiCode null for unknown errors (so callers fall through to generic)', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
@@ -429,6 +449,7 @@ describe('Connector client — coverage boost', () => {
       } catch (e) {
         expect(e.status).toBe(500);
         expect(e.apiCode).toBeNull();
+        expect(e.apiDetail).toBe('Internal server error');
       }
     });
 

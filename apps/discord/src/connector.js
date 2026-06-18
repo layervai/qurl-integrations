@@ -54,10 +54,13 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // Log the raw connector body at debug level and throw a body-free Error.
 // Mirrors qurl.js — connector responses may echo request headers/tokens, and
 // upstream callers log err.message into application logs.
-// qURL API error codes the connector can pass back via the `error` string.
-// Surface them as Error.apiCode so the caller can branch on a typed value
-// instead of substring-matching the human-readable message (which the
-// connector / upstream API can rephrase without notice).
+// qURL API / connector error codes the connector can pass back via the
+// `error` string. Surface them as Error.apiCode so the caller can branch on a
+// typed value instead of substring-matching the human-readable message (which
+// the connector / upstream API can rephrase without notice).
+const BATCH_CAP_EXCEEDED_PATTERNS = [
+  /n must not exceed 1 when invisible watermarking is enabled/i,
+];
 const QUOTA_EXCEEDED_PATTERNS = [
   /quota[\s_-]?exceeded/i,
   /token limit per QURL reached/i,
@@ -76,9 +79,11 @@ async function throwConnectorError(label, response) {
         // Connector wraps upstream API errors as `{success:false, error:"..."}`.
         // The wrapped string is what we pattern-match for known codes.
         const errStr = typeof parsed.error === 'string' ? parsed.error : '';
-        if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+        apiDetail = errStr || null;
+        if (BATCH_CAP_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+          apiCode = 'batch_cap_exceeded';
+        } else if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
           apiCode = 'quota_exceeded';
-          apiDetail = errStr;
         }
       } catch { /* not JSON, ignore */ }
     }
