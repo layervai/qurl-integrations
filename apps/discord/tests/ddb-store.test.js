@@ -1557,6 +1557,16 @@ describe('qurl sends', () => {
     expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
   });
 
+  test('saveSendConfirmState: caps oversized inline qurl_id cache to avoid DDB item-size blowup', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', {
+      confirmQurlIds: Array.from({ length: 1001 }, (_, i) => `q_${i}`),
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('confirm_qurl_ids');
+    expect(Object.values(input.ExpressionAttributeValues)).toContainEqual([]);
+  });
+
   test('saveSendConfirmState: token-only partial update has no expected_count monotonic condition', async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await store.saveSendConfirmState('s1', { interactionToken: 'tok-refresh' });

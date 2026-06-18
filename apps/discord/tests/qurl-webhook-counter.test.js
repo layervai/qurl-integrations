@@ -427,6 +427,33 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
       expect.objectContaining({ qurl_id: QURL_ID, send_id: SEND_ID, error: 'DDB aggregate read failed' }),
     );
   });
+
+  it('shard-sum read failure falls back through getSendItems when inline qurlIds are capped empty', async () => {
+    mockGetSendRenderState.mockResolvedValue(armedState({
+      viewedCount: 0,
+      qurlIds: [],
+    }));
+    mockGetSendViewedCount.mockRejectedValue(new Error('DDB aggregate read failed'));
+    mockGetSendItems.mockResolvedValue([
+      { qurl_id: 'q_a', recipient_discord_id: 'r1' },
+      { qurl_id: 'q_b', recipient_discord_id: 'r2' },
+      { qurl_id: 'q_c', recipient_discord_id: 'r3' },
+    ]);
+    mockGetQurlViews.mockResolvedValue(new Map([
+      ['q_a', { accessCount: 1, consumed: false }],
+      ['q_b', { accessCount: 1, consumed: false }],
+      ['q_c', { accessCount: 0, consumed: false }],
+    ]));
+
+    await signedRequest();
+    await flushCounter();
+
+    expect(mockGetSendItems).toHaveBeenCalledWith(SEND_ID, SENDER_ID);
+    expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b', 'q_c']);
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    const payload = mockEditInteractionReply.mock.calls[0][2];
+    expect(payload.content).toContain('👀 2 viewed');
+  });
 });
 
 describe('sender view-counter fast-path — defensive row-count skip', () => {

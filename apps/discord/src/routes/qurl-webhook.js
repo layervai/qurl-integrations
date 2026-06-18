@@ -728,8 +728,9 @@ function editSenderCounterInBackground({
       //    20k-recipient burst sub-second without making small sends pay
       //    64 reads or funnelling every first-view write into one
       //    qurl_send_configs item. The old BatchGet-all-qurl_ids path is
-      //    now a legacy fallback for live rows created before the
-      //    aggregate existed.
+      //    now a legacy / no-inline-cache fallback for live rows created
+      //    before the aggregate existed or large rows whose inline cache
+      //    is intentionally capped to [].
       let N = null;
       try {
         const shardedCount = await db.getSendViewedCount(sendId, state.expectedCount);
@@ -745,7 +746,8 @@ function editSenderCounterInBackground({
       if (!haveAggregateSignal) {
         // New armed sends seed viewedCount=0, so shardSum=0 still counts
         // as an aggregate signal. This BatchGet-all fallback is for
-        // legacy/no-floor rows or explicit shard-read failure above.
+        // legacy/no-floor rows, large sends whose inline qurl_id cache is
+        // capped to [], or explicit shard-read failure above.
         let qurlIds;
         if (state.qurlIds.length > 0) {
           qurlIds = state.qurlIds;

@@ -1660,9 +1660,10 @@ async function getSendConfig(sendId, senderDiscordId) {
 // `terminal` is derived (not stored as one flag): the display is dead
 // once the sender revoked (revoked_at) OR a window-close/expired path
 // set confirm_terminal — either way a late fast-path edit must NOT
-// resurrect a live-looking counter. `qurlIds` is the send's full set of
-// minted qurl_ids (persisted on this row so the fast-path counts views
-// from a single GetItem, with no extra recipient-row Query).
+// resurrect a live-looking counter. `qurlIds` is an optional inline cache
+// of minted qurl_ids for small sends; large sends deliberately store []
+// so the row stays well below DDB's item limit and the rare fallback reads
+// recipient rows via getSendItems instead.
 //
 // EXPIRY SELF-DEFENSE: the qurl_send_configs table has no DDB TTL on
 // confirm_expires_at yet (that needs a qurl-bot-ddb terraform change —
@@ -1715,6 +1716,17 @@ const SEND_VIEW_COUNTER_MAX_SHARDS = 64;
 // burst headroom before the next power-of-two shard step kicks in.
 const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
 const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
+// Keep the optional inline qurl_id cache comfortably below DynamoDB's
+// 400KB item limit. Larger sends fall back to getSendItems when the
+// sharded aggregate is unavailable; normal renders use the aggregate.
+const SEND_CONFIRM_QURL_IDS_INLINE_LIMIT = 1000;
+
+function normalizeConfirmQurlIdsForInlineCache(qurlIds) {
+  if (qurlIds === undefined) return undefined;
+  if (!Array.isArray(qurlIds)) return [];
+  const ids = qurlIds.filter(id => typeof id === 'string' && id.length > 0);
+  return ids.length <= SEND_CONFIRM_QURL_IDS_INLINE_LIMIT ? ids : [];
+}
 
 function sendViewedCountShardCount(expectedCount) {
   // Invalid/legacy expected_count falls back to the one-shard floor. The
@@ -1894,6 +1906,8 @@ async function markConfirmTerminal(sendId) {
 // (its absent-guard skips on a null token). Building the clause from the
 // present keys is what keeps the add re-persist from clobbering the live
 // token. No-op (no write) when no recognized field is present.
+// confirmQurlIds is only an inline fallback cache; cap it before write so
+// max-fanout sends cannot push qurl_send_configs near DDB's item limit.
 //
 // SECURITY: interactionToken is a live Discord interaction-webhook bearer
 // cred (~15 min, TTL'd via confirm_expires_at). NEVER log it — this fn
@@ -1910,7 +1924,7 @@ async function saveSendConfirmState(sendId, {
     expected_count: expectedCount,
     confirm_base_msg: confirmBaseMsg,
     confirm_expires_at: confirmExpiresAt,
-    confirm_qurl_ids: confirmQurlIds,
+    confirm_qurl_ids: normalizeConfirmQurlIdsForInlineCache(confirmQurlIds),
     viewed_count: viewedCount,
   };
   const sets = [];

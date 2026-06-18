@@ -2442,9 +2442,12 @@ async function executeSendPipeline(interaction, {
         // baseMsg, WITHOUT the "👀 …" counter line (confirmMsg is that
         // base; monitor.getFullMsg() would double-stamp the counter).
         confirmBaseMsg: confirmMsg,
-        // The send's full qurl_id set, so the fast-path counts views off
-        // its single GetItem (no recipient-row Query). Filter falsy —
-        // legacy/non-guild links may omit qurlId.
+        // Optional inline qurl_id fallback cache. saveSendConfirmState
+        // caps large sends to [] before writing so qurl_send_configs
+        // never approaches DDB's item-size limit; the normal path renders
+        // from the sharded aggregate, and rare fallback reads recipient
+        // rows via getSendItems. Filter falsy — legacy/non-guild links may
+        // omit qurlId.
         confirmQurlIds: qurlLinks.map(l => l.qurlId).filter(Boolean),
         viewedCount: 0,
         // Epoch seconds. Aligned to the real Discord interaction-token TTL
@@ -2800,7 +2803,8 @@ async function executeSendPipeline(interaction, {
               } else {
                 // Re-arm the fast-path with the post-add totals so a view
                 // landing after /qurl add renders against the new base +
-                // count + qurl_id set. PARTIAL update — omitting
+                // count + optional inline qurl_id fallback cache. PARTIAL
+                // update — omitting
                 // interactionToken/appId leaves them untouched
                 // (saveSendConfirmState skips undefined keys) so it can't
                 // null the live token. Best-effort + logged-swallowed.
