@@ -918,6 +918,22 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(get()).toBeNull(); // resolve failed → no POST
     });
 
+    it('redacts any at_ token from the mint-failure breadcrumb', async () => {
+      // The token originates in the mint RESPONSE, so the mint leg is the more
+      // likely leak vector — it must redact too, not just the resolve leg.
+      const get = captureDetect({ detected: false });
+      mockClient.createQurlForResource.mockRejectedValue(new Error('mint rejected: at_leakedABC123 invalid'));
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow();
+      const warn = logger.warn.mock.calls.find((c) => c[0] === 'Detect tunnel mint failed');
+      expect(warn).toBeTruthy();
+      expect(warn[1].error).not.toMatch(/at_leakedABC123/);
+      expect(warn[1].error).toContain('at_[REDACTED]');
+      expect(mockClient.resolve).not.toHaveBeenCalled(); // mint failed → no resolve
+      expect(get()).toBeNull(); // and no POST
+    });
+
     it('SSRF guard: a private/loopback resolved target_url throws and NO POST happens', async () => {
       const get = captureDetect({ detected: false }, { target: 'https://127.0.0.1/api/detect' });
       await expect(

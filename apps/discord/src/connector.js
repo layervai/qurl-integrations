@@ -505,6 +505,18 @@ function assertPublicHttpsTarget(targetUrl) {
   return targetUrl;
 }
 
+// Scrub any `at_…` access token from a free-text error message before logging.
+// The detect access token originates in the mint RESPONSE (qurl_link fragment)
+// and is echoed back in the resolve REQUEST, so a future @layervai/qurl that
+// surfaced either in a QURLError message would otherwise leak it. As of 0.3.0,
+// errors are built from the RFC-7807 response envelope (errors.js), not bodies —
+// so this is defense-in-depth that keeps the never-log-the-token invariant
+// self-enforced across SDK versions. Applied to the mint + resolve breadcrumbs
+// (the slug-lookup leg is token-free).
+function redactAccessToken(message) {
+  return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
+}
+
 /**
  * Resolve the qURL reverse-tunnel target for the watermark-detect endpoint.
  *
@@ -529,9 +541,10 @@ function assertPublicHttpsTarget(targetUrl) {
  * egress IP reach a tunnel that only admits knocked IPs. Detect is low-frequency
  * so the extra mint+resolve calls are negligible.
  *
- * SECURITY: never log the minted access token or the raw target_url — only
- * `err.message` (the assert messages are static/URL-free; the mint/resolve
- * errors are transport-level).
+ * SECURITY: never log the minted access token or the raw target_url. The mint
+ * + resolve breadcrumbs run `err.message` through `redactAccessToken` (the token
+ * lives in the mint response / resolve request), and the SSRF assert messages
+ * are static/URL-free.
  *
  * @returns {Promise<string>} the SSRF-validated public https target_url.
  * @throws if DETECT_TUNNEL_SLUG is unset, the tunnel resource can't be resolved,
@@ -599,7 +612,7 @@ async function resolveDetectTarget() {
     // mint error (not just 404) is safe — worst case is one extra listResources
     // next call, and a transient failure re-resolves to the same id.
     _detectResourceId = null;
-    logger.warn('Detect tunnel mint failed', { error: err.message });
+    logger.warn('Detect tunnel mint failed', { error: redactAccessToken(err.message) });
     throw err;
   }
 
@@ -614,14 +627,7 @@ async function resolveDetectTarget() {
   try {
     ({ target_url: targetUrl } = await getQurlClient().resolve({ access_token: accessToken }));
   } catch (err) {
-    // Defense-in-depth: scrub any `at_…` token before logging. resolve() sends
-    // the ephemeral token in its request body; QURLError messages are built from
-    // the response envelope, not the request, as of @layervai/qurl 0.3.0 — so
-    // this keeps the never-log-the-token invariant from depending on SDK-internal
-    // error construction across versions.
-    logger.warn('Detect tunnel resolve failed (knock/transport)', {
-      error: String(err.message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]'),
-    });
+    logger.warn('Detect tunnel resolve failed (knock/transport)', { error: redactAccessToken(err.message) });
     throw err;
   }
   try {
