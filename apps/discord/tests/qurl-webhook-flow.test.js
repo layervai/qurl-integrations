@@ -38,6 +38,7 @@ function makeStore() {
       }
       return out;
     },
+    getSendRenderedCount: jest.fn(async () => 0),
     findSendsByQurlId: jest.fn(async () => []),
     healthCheck: jest.fn(),
     getStats: jest.fn(() => ({})),

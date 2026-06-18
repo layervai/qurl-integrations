@@ -1565,10 +1565,10 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // mutate across ticks + addRecipients; viewCounterDegraded can flip
   // mid-life) — buildStatusMsg snapshots them at call time and hands them
   // to the pure fn.
-  function buildStatusMsg() {
+  function buildStatusMsg(viewedOverride = viewed) {
     return renderViewCounter({
       baseMsg: currentBaseMsg,
-      viewed,
+      viewed: viewedOverride,
       expectedCount,
       degraded: viewCounterDegraded,
     });
@@ -1610,9 +1610,18 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         changed = true;
       }
       if (changed) {
-        const rendered = viewed;
+        // Clamp poll renders to the persisted display floor. The fast-path
+        // can strongly read/render N before this replica's eventual
+        // getQurlViews catches up; rendering below last_rendered_count would
+        // create a visible N -> lower -> N flicker.
+        let rendered = viewed;
+        try {
+          rendered = Math.max(rendered, await db.getSendRenderedCount(sendId));
+        } catch (floorErr) {
+          logger.debug('Monitor floor-read failed; rendering local poll count', { sendId, error: floorErr.message });
+        }
         const pending = Math.max(0, expectedCount - rendered);
-        const ok = await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
+        const ok = await safeEdit({ content: buildStatusMsg(rendered), components: pending > 0 ? [buttonRow] : [] });
         if (pending === 0) { allDone = true; clearTimeout(timer); }
         // Share the monotonic floor with the webhook fast-path. The poll
         // is now a first-class renderer of the settled count (coalescing

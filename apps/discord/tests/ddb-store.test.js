@@ -1446,6 +1446,23 @@ describe('qurl sends', () => {
     expect(retry.Keys).toEqual([{ qurl_id: '__send_view_count__s1#63' }]);
   });
 
+  test('getSendRenderedCount: strongly reads only the displayed floor', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { last_rendered_count: 7, interaction_token: 'tok' } });
+    await expect(store.getSendRenderedCount('s1')).resolves.toBe(7);
+    const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(input).toEqual({
+      TableName: 'test-prefix-qurl-send-configs',
+      Key: { send_id: 's1' },
+      ProjectionExpression: 'last_rendered_count',
+      ConsistentRead: true,
+    });
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({});
+    await expect(store.getSendRenderedCount('missing')).resolves.toBe(0);
+    await expect(store.getSendRenderedCount('')).resolves.toBe(0);
+  });
+
   test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
     // Refreshes the coalesce clock on a FAILED edit attempt without
     // advancing the count (which would strand the stuck-counter guard).

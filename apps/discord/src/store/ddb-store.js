@@ -1790,6 +1790,21 @@ async function getSendViewedCount(sendId, expectedCount) {
   return total;
 }
 
+// Strong, token-free read of the displayed counter floor. The poll renderer
+// uses this to avoid rendering below a fast-path edit that already advanced
+// last_rendered_count on another replica.
+async function getSendRenderedCount(sendId) {
+  if (!sendId) return 0;
+  const res = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ProjectionExpression: 'last_rendered_count',
+    ConsistentRead: true,
+  }));
+  const n = res.Item?.last_rendered_count;
+  return typeof n === 'number' && n > 0 ? n : 0;
+}
+
 // Monotonic AFTER-edit commit for the view counter (PR-B calls this
 // ONLY after a Discord edit confirmed the new count is displayed).
 // Conditional UpdateItem: SET last_rendered_count = :n guarded by
@@ -2399,7 +2414,7 @@ module.exports = {
   // View-counter render state (cross-replica fast-path, PR-B)
   saveSendConfirmState,
   getSendRenderState, incrementSendViewedCount, getSendViewedCount,
-  tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
+  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

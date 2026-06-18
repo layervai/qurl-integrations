@@ -155,6 +155,7 @@ const mockDb = {
   // the mock — without it runTick's call throws, gets swallowed by the
   // floor-advance try/catch, and the assertions below go vacuous.
   tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
+  getSendRenderedCount: jest.fn().mockResolvedValue(0),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -340,6 +341,8 @@ beforeEach(() => {
   // Same one-shot-bleed reset for the shared-floor advance.
   mockDb.tryAdvanceRenderedCount.mockReset();
   mockDb.tryAdvanceRenderedCount.mockResolvedValue(true);
+  mockDb.getSendRenderedCount.mockReset();
+  mockDb.getSendRenderedCount.mockResolvedValue(0);
   // Drain any monitors a prior test left registered. activeMonitors is the
   // module-private set; clearing it prevents the LRU-cap eviction test
   // from being polluted by happy-path leftovers.
@@ -464,6 +467,38 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
     const editOrder = interaction.editReply.mock.invocationCallOrder[0];
     const advOrder = mockDb.tryAdvanceRenderedCount.mock.invocationCallOrder[0];
     expect(editOrder).toBeLessThan(advOrder);
+    monitor.stop();
+  });
+
+  it('clamps poll render to the persisted floor so it cannot step backwards after a fast-path edit', async () => {
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      [
+        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa2', qurlLink: 'https://q.test/2', recipientId: 'r2' },
+        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa3', qurlLink: 'https://q.test/3', recipientId: 'r3' },
+      ],
+      [
+        { id: 'r1', username: 'Alice' },
+        { id: 'r2', username: 'Bob' },
+        { id: 'r3', username: 'Carol' },
+      ],
+      '1m', 'Sent to 3 users', { components: [] }, 3,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    mockDb.getSendRenderedCount.mockResolvedValueOnce(2);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('👀 2 viewed / 1 pending'),
+    }));
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 2);
+    // The local counter is not mutated to the floor; it catches up from
+    // source qurl_views rows to avoid double-counting later pending flips.
+    expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
     monitor.stop();
   });
 
