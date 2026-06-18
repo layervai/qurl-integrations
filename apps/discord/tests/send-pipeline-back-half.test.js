@@ -622,12 +622,10 @@ describe('monitorLinkStatus — early-poll latency (long-expiry sends tick withi
   // 30m expiry is load-bearing: at the old code's steady interval this
   // is 60s, so advancing only ~20s would read 0 — that's the regression
   // this test guards. (A short '1m' expiry already polled at 15s, so it
-  // would not exercise the bug.) PR-B relaxed the early ramp from 5s to
-  // ~15s (the fast-path now owns sub-second latency; the poll is a
-  // backstop), so the early backstop catches the view by ~18s here — far
-  // inside the 90s early window and far short of the 60s steady interval
-  // the regression would impose.
-  it('a view recorded seconds after a 30m-expiry send is reflected within ~15s, not ~60s', async () => {
+  // would not exercise the bug.) Keep the early ramp at ~5s until the
+  // live cross-replica PATCH primitive is verified, so a missed fast-path
+  // still cannot regress the backstop below #839.
+  it('a view recorded seconds after a 30m-expiry send is reflected within ~5s, not ~60s', async () => {
     const interaction = makeInteraction();
     const monitor = monitorLinkStatus(
       'send-latency', interaction,
@@ -646,10 +644,10 @@ describe('monitorLinkStatus — early-poll latency (long-expiry sends tick withi
       ['q_aaaaaaaaaa1', { accessCount: 1, consumed: true }],
     ]));
 
-    // Advance into the early window (next tick at ~18s) but well short of
+    // Advance into the early window (next tick at ~8s) but well short of
     // the old 60s steady interval. The early backstop must have caught the
     // view by now — a flat-60s regression would still read 0.
-    await jest.advanceTimersByTimeAsync(20000);
+    await jest.advanceTimersByTimeAsync(6000);
 
     expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
@@ -711,14 +709,11 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
     monitor.stop();
   });
 
-  it('polls modestly (~15s) during the early window, then decays to the steady interval', async () => {
-    // 30m expiry → steady interval = 60s; early phase = every ~15s for the
-    // first 90s. PR-B relaxed #839's 5s dense ramp to this modest 15s one
-    // because the webhook fast-path now owns sub-second latency and the
-    // poll is purely a backstop. Pins both halves of the ramp: a ~15s
-    // early backstop floor, then the sparse 60s steady interval so an idle
-    // monitor isn't a sustained DDB cost. (The early-poll-latency describe
-    // above pins the user-visible render; this pins the cadence shape.)
+  it('keeps the 5s early backstop during the early window, then decays to the steady interval', async () => {
+    // 30m expiry → steady interval = 60s; early phase = every ~5s for the
+    // first 90s. The webhook fast-path owns normal sub-second latency, but
+    // the poll backstop stays at #839's 5s floor until the live
+    // cross-replica PATCH primitive is verified.
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
@@ -730,14 +725,14 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
     await jest.advanceTimersByTimeAsync(3000);
     expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
 
-    // Modest early phase: ~15s spacing → ticks at 18s, 33s, 48s over the
-    // next 45s (3 more on top of the 3s tick). Floor-bound assertion so
+    // Dense early phase: ~5s spacing → several ticks over the next 20s.
+    // Floor-bound assertion so
     // the exact boundary count isn't brittle; the point is the early
     // phase still ticks several times within the window (a regression to
     // the flat 60s steady would yield 0 more here).
-    await jest.advanceTimersByTimeAsync(45000);
+    await jest.advanceTimersByTimeAsync(20000);
     const callsAfterEarly = mockDb.getQurlViews.mock.calls.length;
-    expect(callsAfterEarly).toBeGreaterThanOrEqual(3);
+    expect(callsAfterEarly).toBeGreaterThanOrEqual(4);
 
     // After the 90s early window, cadence decays to the 60s steady
     // interval. Drain past earlyPhaseUntil so the last early tick (~93s)

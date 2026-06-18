@@ -680,6 +680,7 @@ function editSenderCounterInBackground({
         return { status: 'absent' };
       }
 
+      let aggregateWriteFailed = false;
       if (firstView) {
         try {
           // Intentional two-write split: recordQurlView is the source of
@@ -689,13 +690,14 @@ function editSenderCounterInBackground({
           // makes this exactly one shard increment per distinct qurl_id.
           await db.incrementSendViewedCount(sendId, qurlId, state.expectedCount);
         } catch (err) {
+          aggregateWriteFailed = true;
           // Best-effort aggregate: recordQurlView already persisted the
-          // source qurl_views row, so the poll/floor path repairs a missed
-          // shard increment instead of retrying it on the webhook response.
-          logger.warn('qURL webhook sender-counter: sharded aggregate increment failed; poll backstop will count qurl views', {
+          // source qurl_views row. Fall through to the source-of-truth
+          // fallback so a replica without the original monitor can still
+          // repair this render immediately.
+          logger.warn('qURL webhook sender-counter: sharded aggregate increment failed; falling back to qurl views', {
             qurl_id: qurlId, send_id: sendId, error: err?.message,
           });
-          return { status: 'aggregate-update-error' };
         }
       }
 
@@ -711,7 +713,7 @@ function editSenderCounterInBackground({
       //    counter visibly live; the trailing flush renders rapid
       //    followers inside the same sub-second window.
       const sinceLastEditMs = Date.now() - state.lastRenderedAt;
-      if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
+      if (!aggregateWriteFailed && !force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
         const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
         scheduleSenderCounterFlush({ sendId, qurlId, delayMs });
         logger.debug('qURL webhook sender-counter: coalesced — scheduled trailing flush', {
@@ -732,14 +734,16 @@ function editSenderCounterInBackground({
       //    before the aggregate existed or large rows whose inline cache
       //    is intentionally capped to [].
       let N = null;
-      try {
-        const shardedCount = await db.getSendViewedCount(sendId, state.expectedCount);
-        const legacyFloor = typeof state.viewedCount === 'number' ? state.viewedCount : 0;
-        N = Math.max(shardedCount, legacyFloor);
-      } catch (err) {
-        logger.warn('qURL webhook sender-counter: sharded aggregate read failed; falling back to qurl views', {
-          qurl_id: qurlId, send_id: sendId, error: err?.message,
-        });
+      if (!aggregateWriteFailed) {
+        try {
+          const shardedCount = await db.getSendViewedCount(sendId, state.expectedCount);
+          const legacyFloor = typeof state.viewedCount === 'number' ? state.viewedCount : 0;
+          N = Math.max(shardedCount, legacyFloor);
+        } catch (err) {
+          logger.warn('qURL webhook sender-counter: sharded aggregate read failed; falling back to qurl views', {
+            qurl_id: qurlId, send_id: sendId, error: err?.message,
+          });
+        }
       }
       const haveAggregateSignal = typeof N === 'number'
         && (N > 0 || typeof state.viewedCount === 'number');

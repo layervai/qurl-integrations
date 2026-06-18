@@ -1489,24 +1489,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // recipient burns the link before any interval would fire.
   const FIRST_POLL_DELAY_MS = 3000;
   // Dense early-poll phase. The webhook fast-path
-  // (routes/qurl-webhook.js) owns sub-second latency: it edits the
-  // sender's confirmation from any replica the instant a qurl.accessed
-  // view records, keeps distinct-view counts in sharded qurl_views
-  // counters, and schedules its own trailing flush for coalesced bursts.
-  // This poll is now a
-  // BACKSTOP / self-heal floor: it covers a legacy/pre-feature send (no
-  // persisted token), a fast-path edit that transiently failed (it
-  // deliberately does NOT advance last_rendered_count on a failed edit,
-  // so the next poll re-renders and self-heals), and the expand/collapse
-  // toggle the content-only fast-path doesn't restore.
-  //
-  // Because the fast-path carries the latency, #839's aggressive 5s dense
-  // ramp is relaxed back to a MODEST one: the first tick still fires at
-  // ~3s (FIRST_POLL_DELAY_MS), then EARLY_POLL_INTERVAL_MS (~15s) through
-  // the early window, then the flat steadyPollInterval (≤60s). A view the
-  // fast-path missed is still re-rendered within ~15s — fine for a
-  // backstop — at a fraction of the idle BatchGet volume the 5s ramp
-  // incurred.
+  // (routes/qurl-webhook.js) owns normal sub-second latency, but the
+  // cross-replica PATCH primitive is live-only. Keep #839's 5s dense
+  // backstop until that primitive is verified so a bad fast-path
+  // assumption cannot regress send counters below the pre-PR fallback.
+  // The poll also self-heals failed edits and restores expand/collapse
+  // content-only flicker.
   //
   // Cost: this replaces the old pollCount decay (which throttled an idle
   // monitor toward every-4th-tick), so the steady phase is a flat
@@ -1515,12 +1503,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // (`changed`) and each link flips once, so total edits over the
   // monitor's life are bounded by the count of distinct recipient views
   // (≤ QURL_SEND_MAX_RECIPIENTS, default 20000 — NOT 50), spread across
-  // the link's whole lifetime. At ≥15s spacing this is far under
-  // Discord's editReply rate limit — no 429 exposure. (The webhook
+  // the link's whole lifetime. At ≥5s spacing in the early window this is
+  // still far under Discord's editReply rate limit. (The webhook
   // fast-path, which fires per-view rather than per-tick, is the path
   // that needs the burst coalescing above; this poll is naturally rate-
-  // limited by its own ≥15s tick spacing.)
-  const EARLY_POLL_INTERVAL_MS = 15000;
+  // limited by its own poll tick spacing.)
+  const EARLY_POLL_INTERVAL_MS = 5000;
   const EARLY_POLL_WINDOW_MS = 90000;
   const startTime = Date.now();
   // Anchor for the dense early phase. Distinct from startTime (which
@@ -2570,7 +2558,7 @@ async function executeSendPipeline(interaction, {
         // deliberately NOT persisted: the webhook fast-path always renders
         // the persisted COLLAPSED base (content-only edit), so right after
         // an expand a concurrent fast-path counter edit can briefly show
-        // the collapsed list — the next poll tick (≤15s) restores the
+        // the collapsed list — the next early poll tick (≤5s) restores the
         // expanded view off the updated in-memory base. Accepted minor
         // toggle-flicker (option c); the poll is the self-heal floor.
         monitor.updateBaseMsg(confirmMsg);

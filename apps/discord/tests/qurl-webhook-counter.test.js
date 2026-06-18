@@ -371,20 +371,22 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
     expect(mockGetSendItems).not.toHaveBeenCalled();
   });
 
-  it('sharded aggregate increment throttle skips the fast-path and leaves the poll backstop to count qurl views', async () => {
+  it('sharded aggregate increment throttle falls back to qurl views immediately', async () => {
     mockIncrementSendViewedCount.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
+    mockGetQurlViews.mockResolvedValue(new Map([[QURL_ID, { accessCount: 1, consumed: false }]]));
     await signedRequest();
     await flushCounter();
-    expect(mockEditInteractionReply).not.toHaveBeenCalled();
-    expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
-    expect(mockGetQurlViews).not.toHaveBeenCalled();
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).toHaveBeenCalledWith([QURL_ID]);
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 1);
     expect(logger.warn).toHaveBeenCalledWith(
-      'qURL webhook sender-counter: sharded aggregate increment failed; poll backstop will count qurl views',
+      'qURL webhook sender-counter: sharded aggregate increment failed; falling back to qurl views',
       expect.objectContaining({ qurl_id: QURL_ID, send_id: SEND_ID }),
     );
     expect(logger.debug).toHaveBeenCalledWith(
       VERDICT_MSG,
-      expect.objectContaining({ qurl_id: QURL_ID, status: 'aggregate-update-error' }),
+      expect.objectContaining({ qurl_id: QURL_ID, status: 'edited' }),
     );
   });
 
