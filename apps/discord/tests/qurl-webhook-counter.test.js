@@ -262,7 +262,6 @@ describe('sender view-counter fast-path — absent-guard', () => {
 
 describe('sender view-counter fast-path — pre-read compare (N <= L)', () => {
   it('N=1 with lastRenderedCount=2 → no edit (redelivery / higher count already shown)', async () => {
-    mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     mockGetSendRenderState.mockResolvedValue(armedState({ lastRenderedCount: 2, viewedCount: 1 }));
     // Only one qurl viewed → N = 1, which is <= L = 2.
     await signedRequest();
@@ -286,11 +285,30 @@ describe('sender view-counter fast-path — pre-read compare (N <= L)', () => {
       viewedCount: 2,
       qurlIds: ['q_a', 'q_b', 'q_c'],
     }));
-    mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     await signedRequest();
     await flushCounter();
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
     expect(mockTryAdvanceRenderedCount).not.toHaveBeenCalled();
+  });
+});
+
+describe('sender view-counter fast-path — repeat access skip', () => {
+  it('firstView=false exits before shard-sum reads because the distinct count cannot advance', async () => {
+    mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
+    await signedRequest();
+    await flushCounter();
+    expect(mockIncrementSendViewedCount).not.toHaveBeenCalled();
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).not.toHaveBeenCalled();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: skip — no distinct-view advance',
+      expect.objectContaining({ qurl_id: QURL_ID, send_id: SEND_ID }),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      VERDICT_MSG,
+      expect.objectContaining({ qurl_id: QURL_ID, status: 'no-distinct-view' }),
+    );
   });
 });
 
@@ -369,7 +387,6 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
   });
 
   it('legacy fallback: uses getSendItems/getQurlViews when viewed_count and qurl_ids are absent', async () => {
-    mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     mockGetSendRenderState.mockResolvedValue(armedState({ viewedCount: null, qurlIds: [] }));
     mockGetSendViewedCount.mockResolvedValue(0);
     mockGetSendItems.mockResolvedValue([
@@ -385,7 +402,6 @@ describe('sender view-counter fast-path — N is the distinct viewed-count aggre
   });
 
   it('shard-sum read failure falls back to persisted qurlIds/getQurlViews', async () => {
-    mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
     mockGetSendRenderState.mockResolvedValue(armedState({
       viewedCount: null,
       qurlIds: ['q_a', 'q_b'],
@@ -598,15 +614,10 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     expect(mockGetQurlViews).not.toHaveBeenCalled();
 
     // The webhook trailing flush (not the poll backstop) renders the
-    // SETTLED final count after the burst — simulate it by running the
-    // fast-path once more past the window.
-    row.lastRenderedAt = Date.now() - 10_000; // window elapsed
-    mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: false });
-    await signedRequest({
-      ...VALID_PAYLOAD,
-      id: 'evt-burst-flush',
-      data: { ...VALID_PAYLOAD.data, qurl_id: TRACKED[0] },
-    });
+    // SETTLED final count after the burst. Let the real in-memory timer
+    // fire here; it re-enters the fast-path with force=true, so the
+    // repeat-access skip does not suppress the repair render.
+    await new Promise((resolve) => setTimeout(resolve, 950));
     await flushCounter();
     const lastPayload = mockEditInteractionReply.mock.calls.at(-1)[2];
     expect(lastPayload.content).toContain(`👀 ${TRACKED.length} viewed`);

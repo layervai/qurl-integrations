@@ -669,6 +669,15 @@ function editSenderCounterInBackground({
         return { status: 'absent' };
       }
 
+      // Repeat accesses on an already-viewed qurl_id cannot change the
+      // sender's DISTINCT viewed count. Let the poll backstop handle any
+      // rare self-heal from a previous missed first-view edit; avoid a
+      // strong shard-sum read that can only end in N<=L.
+      if (!firstView && !force) {
+        logger.debug('qURL webhook sender-counter: skip — no distinct-view advance', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'no-distinct-view' };
+      }
+
       if (firstView) {
         try {
           // Intentional two-write split: recordQurlView is the source of
