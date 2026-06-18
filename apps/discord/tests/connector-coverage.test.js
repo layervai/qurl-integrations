@@ -341,6 +341,150 @@ describe('Connector client — coverage boost', () => {
           expect('guild_id' in getBody()).toBe(false);
         }
       });
+
+      it('falls back to n=1 mints when meta-seal rejects the requested batch size', async () => {
+        const expiresAt = '2099-01-01T00:00:00Z';
+        const mockLinks = [
+          { qurl_id: 'q_1', qurl_link: 'https://q.test/1', expires_at: expiresAt },
+          { qurl_id: 'q_2', qurl_link: 'https://q.test/2', expires_at: expiresAt },
+          { qurl_id: 'q_3', qurl_link: 'https://q.test/3', expires_at: expiresAt },
+        ];
+        globalThis.fetch = jest.fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 400,
+            text: async () => JSON.stringify({
+              success: false,
+              error: 'n must not exceed 1 when invisible watermarking is enabled',
+              links: [],
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ success: true, links: [mockLinks[0]] }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ success: true, links: [mockLinks[1]] }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ success: true, links: [mockLinks[2]] }),
+          });
+
+        const links = await connector.mintLinks('r_xyz', {
+          expiresAt,
+          n: 3,
+          selfDestructSeconds: 2.3,
+          guildId: 'guild-123',
+        });
+
+        expect(links).toEqual(mockLinks);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+        const bodies = globalThis.fetch.mock.calls.map(([, opts]) => JSON.parse(opts.body));
+        expect(bodies[0]).toEqual(expect.objectContaining({
+          expires_at: expiresAt,
+          n: 3,
+          one_time_use: true,
+          session_duration: '3s',
+          guild_id: 'guild-123',
+        }));
+        for (const body of bodies.slice(1)) {
+          expect(body).toEqual(expect.objectContaining({
+            expires_at: expiresAt,
+            n: 1,
+            one_time_use: true,
+            session_duration: '3s',
+            guild_id: 'guild-123',
+          }));
+        }
+      });
+
+      it('does not fall back for the generic connector batch cap', async () => {
+        globalThis.fetch = jest.fn().mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => JSON.stringify({
+            success: false,
+            error: 'n must not exceed 10',
+            links: [],
+          }),
+        });
+
+        await expect(connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 11 }))
+          .rejects.toThrow(/Connector mint_link failed \(400\)/);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+      });
+
+      it('throws if single-link fallback returns more than one link', async () => {
+        globalThis.fetch = jest.fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 400,
+            text: async () => JSON.stringify({
+              success: false,
+              error: 'n must not exceed 1 when invisible watermarking is enabled',
+              links: [],
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              success: true,
+              links: [
+                { qurl_id: 'q_1', qurl_link: 'https://q.test/1' },
+                { qurl_id: 'q_2', qurl_link: 'https://q.test/2' },
+              ],
+            }),
+          });
+
+        await expect(connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 2 }))
+          .rejects.toThrow('Connector mint_link returned 2 links for single-link fallback');
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+      });
+
+      it('propagates a mid-loop single-link fallback failure', async () => {
+        const logger = require('../src/logger');
+        globalThis.fetch = jest.fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 400,
+            text: async () => JSON.stringify({
+              success: false,
+              error: 'n must not exceed 1 when invisible watermarking is enabled',
+              links: [],
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              success: true,
+              links: [{ qurl_id: 'q_1', qurl_link: 'https://q.test/1' }],
+            }),
+          })
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 502,
+            text: async () => JSON.stringify({
+              success: false,
+              error: 'upstream unavailable',
+              links: [],
+            }),
+          });
+
+        await expect(connector.mintLinks('r_xyz', { expiresAt: '2099-01-01T00:00:00Z', n: 2 }))
+          .rejects.toThrow(/Connector mint_link failed \(502\)/);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+        expect(logger.warn).toHaveBeenCalledWith(
+          'Single-link mint fallback failed after partial mint',
+          expect.objectContaining({
+            resource_id: 'r_xyz',
+            minted_count: 1,
+            qurl_ids: ['q_1'],
+            status: 502,
+          }),
+        );
+      });
     });
 
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
@@ -461,6 +605,26 @@ describe('Connector client — coverage boost', () => {
       } catch (e) {
         expect(e.status).toBe(504);
         expect(e.apiCode).toBeNull();
+      }
+    });
+
+    it('tags meta-seal batch cap errors so mintLinks can retry one at a time', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'n must not exceed 1 when invisible watermarking is enabled',
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 1 });
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(400);
+        expect(e.apiCode).toBe('mint_batch_cap_exceeded');
+        expect(e.apiDetail).toBe('n must not exceed 1 when invisible watermarking is enabled');
       }
     });
   });

@@ -63,6 +63,11 @@ const QUOTA_EXCEEDED_PATTERNS = [
   /token limit per QURL reached/i,
   /per[\s_-]?resource (token|link|mint) (limit|cap)/i,
 ];
+// TODO(upstream-contract): replace this English-string match once the
+// connector exposes a typed meta-seal batch-cap code.
+const META_SEAL_BATCH_CAP_PATTERNS = [
+  /n must not exceed \d+ when invisible watermarking is enabled/i,
+];
 
 async function throwConnectorError(label, response) {
   let bodyText = '';
@@ -78,6 +83,9 @@ async function throwConnectorError(label, response) {
         const errStr = typeof parsed.error === 'string' ? parsed.error : '';
         if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
           apiCode = 'quota_exceeded';
+          apiDetail = errStr;
+        } else if (META_SEAL_BATCH_CAP_PATTERNS.some((rx) => rx.test(errStr))) {
+          apiCode = 'mint_batch_cap_exceeded';
           apiDetail = errStr;
         }
       } catch { /* not JSON, ignore */ }
@@ -376,6 +384,35 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }
+  const body = buildMintLinkBody({ expiresAt, n, selfDestructSeconds, guildId });
+
+  try {
+    const links = await postMintLinks(resourceId, body, apiKey);
+    logger.info('Minted links', { resource_id: resourceId, count: links.length });
+    return links;
+  } catch (err) {
+    if (n > 1 && err?.apiCode === 'mint_batch_cap_exceeded') {
+      // The connector's meta-seal cap gate rejects before minting anything, so
+      // the initial n>1 cap response is not itself a partial-mint source.
+      // Deliberately retry as singles instead of parsing the advertised cap:
+      // n=1 avoids the connector's n>1 partial-success error body contract.
+      // Loop-level partial mints can still happen, so the fallback logs already
+      // minted qURL ids before rethrowing.
+      const links = await mintLinksOneAtATime(resourceId, {
+        expiresAt,
+        n,
+        apiKey,
+        selfDestructSeconds,
+        guildId,
+      });
+      logger.info('Minted links via single-link fallback', { resource_id: resourceId, count: links.length });
+      return links;
+    }
+    throw err;
+  }
+}
+
+function buildMintLinkBody({ expiresAt, n, selfDestructSeconds = null, guildId }) {
   const body = { expires_at: expiresAt, n, one_time_use: true };
   const sessionDuration = formatSessionDurationSeconds(selfDestructSeconds);
   if (sessionDuration !== null) {
@@ -388,6 +425,10 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   if (guildId) {
     body.guild_id = guildId;
   }
+  return body;
+}
+
+async function postMintLinks(resourceId, body, apiKey) {
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
@@ -407,8 +448,45 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
     throw new Error('Connector mint_link returned no links array');
   }
 
-  logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
+}
+
+async function mintLinksOneAtATime(resourceId, {
+  expiresAt,
+  n,
+  apiKey,
+  selfDestructSeconds = null,
+  guildId,
+}) {
+  const links = [];
+  const body = buildMintLinkBody({
+    expiresAt,
+    n: 1,
+    selfDestructSeconds,
+    guildId,
+  });
+  try {
+    for (let i = 0; i < n; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const singleLinks = await postMintLinks(resourceId, body, apiKey);
+      if (singleLinks.length !== 1) {
+        throw new Error(`Connector mint_link returned ${singleLinks.length} links for single-link fallback`);
+      }
+      links.push(singleLinks[0]);
+    }
+  } catch (err) {
+    if (links.length > 0) {
+      logger.warn('Single-link mint fallback failed after partial mint', {
+        resource_id: resourceId,
+        minted_count: links.length,
+        qurl_ids: links.map(link => link.qurl_id).filter(Boolean),
+        status: err?.status,
+        api_code: err?.apiCode,
+      });
+    }
+    throw err;
+  }
+  return links;
 }
 
 const DETECT_TARGET_PATH = '/api/detect';
