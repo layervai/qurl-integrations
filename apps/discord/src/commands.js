@@ -1747,6 +1747,10 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
 
+  // Keep cap-1 mints serial. Parallel calls against one resource would need
+  // order-restoration and could race the per-resource token pool; sequential
+  // mints preserve the recipient->link mapping and fail closed on a later 5xx
+  // instead of reminting an already-created prefix.
   for (let i = 0; i < recipientCount;) {
     if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
       const re = await reuploadFn();
