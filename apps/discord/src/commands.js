@@ -56,6 +56,8 @@ const TOKENS_PER_RESOURCE = 10;
 // Process-local connector capability cache. Start optimistic so legacy/prod
 // connectors keep batched mints; once this worker observes the meta-seal
 // cap-1 response, later sends avoid burning one known-failing batch probe.
+// The ratchet resets only on worker restart; n=1 stays correct if a connector
+// is reconfigured back to legacy before the bot is redeployed.
 let connectorMintLinksPerRequest = TOKENS_PER_RESOURCE;
 
 // Absolute floor above which a single send earns a `WARN`-level
@@ -1745,6 +1747,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
+  // Snapshot per send so a mid-send global downgrade cannot reorder the
+  // recipient->link mapping. Concurrent cold sends may each probe once; later
+  // sends in this worker start at the observed cap.
   let linksPerRequest = connectorMintLinksPerRequest;
   let tokensUsed = 0;
 
@@ -1775,6 +1780,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       });
     } catch (err) {
       if (batchSize > 1 && err?.apiCode === 'batch_cap_exceeded') {
+        // The connector validates this cap before minting, so the rejected
+        // probe consumes zero tokens; retry the same resource/recipient index.
         connectorMintLinksPerRequest = 1;
         linksPerRequest = 1;
         continue;
