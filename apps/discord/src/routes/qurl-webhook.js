@@ -675,6 +675,8 @@ function editSenderCounterInBackground({
 
       if (firstView) {
         try {
+          // Load-bearing: recordQurlView's `firstView` contract is what
+          // makes this exactly one shard increment per distinct qurl_id.
           await db.incrementSendViewedCount(sendId, qurlId, state.expectedCount);
         } catch (err) {
           logger.warn('qURL webhook sender-counter: sharded aggregate increment failed; poll backstop will count qurl views', {
