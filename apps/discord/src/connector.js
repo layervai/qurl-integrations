@@ -563,6 +563,9 @@ async function resolveDetectTarget() {
       logger.warn('Detect tunnel slug lookup failed', { error: err.message });
       throw err;
     }
+    // listResources({slug}) filters by EXACT slug (qurl-service slug semantics),
+    // so an active slug resolves to exactly one resource — [0] is that resource,
+    // not an arbitrary prefix/substring co-match.
     resourceId = resources?.[0]?.id;
     if (!resourceId) {
       throw new Error('Detect tunnel resource not found for slug');
@@ -571,15 +574,19 @@ async function resolveDetectTarget() {
   }
 
   // Mint a fresh ephemeral qURL on the resource (per call). The 201 carries the
-  // `at_…` access token in the `qurl_link` fragment (everything after the first
-  // `#`). Breadcrumb a mint failure (message only — no token, no URL) then
-  // rethrow so an activation-time failure is diagnosable at the handler.
+  // `at_…` access token in the `qurl_link` fragment. Breadcrumb a mint failure
+  // (message only — no token, no URL) then rethrow so an activation-time failure
+  // is diagnosable at the handler.
   let accessToken;
   try {
     const minted = await getQurlClient().createQurlForResource(resourceId, { target_path: '/api/detect' });
     const link = typeof minted?.qurl_link === 'string' ? minted.qurl_link : '';
     const hashIdx = link.indexOf('#');
-    accessToken = hashIdx >= 0 ? link.slice(hashIdx + 1) : '';
+    // Take ONLY the token, not "everything after #": strip any trailing fragment
+    // delimiters (&/?/#) so a future qurl_link carrying extra fragment data can't
+    // thread garbage into resolve(). Today's format is just `#at_<token>`.
+    const fragment = hashIdx >= 0 ? link.slice(hashIdx + 1) : '';
+    accessToken = fragment.split(/[&?#]/)[0];
     if (!accessToken.startsWith('at_')) {
       throw new Error('detect mint did not return an access token');
     }

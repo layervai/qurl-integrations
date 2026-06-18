@@ -889,6 +889,18 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       );
     });
 
+    it('extracts only the at_ token from the mint fragment, stripping trailing params', async () => {
+      // A future qurl_link carrying extra fragment data (&/? params after the
+      // token) must not thread garbage into resolve() — only the at_ token is used.
+      captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      mockClient.createQurlForResource.mockResolvedValue({
+        qurl_id: 'q_x',
+        qurl_link: 'https://qurl.link.layerv.xyz/abc#at_tok123&utm=x',
+      });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(mockClient.resolve).toHaveBeenCalledWith({ access_token: 'at_tok123' });
+    });
+
     it('SSRF guard: a private/loopback resolved target_url throws and NO POST happens', async () => {
       const get = captureDetect({ detected: false }, { target: 'https://127.0.0.1/api/detect' });
       await expect(
