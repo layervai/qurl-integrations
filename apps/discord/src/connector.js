@@ -417,10 +417,9 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 // listResources lookup on every detect. CACHE ONLY THIS, NEVER the minted access
 // token or the resolved target_url: each detect mints a FRESH ephemeral qURL (a
 // short-lived credential — the mint sets expires_in: '5m') and the resolve()/knock
-// grants network access to
-// the caller's CURRENT IP/knock-window — a stale token or target_url would be a
-// long-lived credential to leak / an un-knocked reuse, exactly what the
-// ephemeral-per-call design avoids.
+// grants network access to the caller's CURRENT IP/knock-window. A stale token or
+// target_url would be a long-lived credential to leak / an un-knocked reuse —
+// exactly what the ephemeral-per-call design avoids.
 let _detectResourceId = null;
 
 // Lazily-constructed, cached qURL SDK client used solely by
@@ -512,8 +511,9 @@ function assertPublicHttpsTarget(targetUrl) {
 // surfaced either in a QURLError message would otherwise leak it. As of 0.3.0,
 // errors are built from the RFC-7807 response envelope (errors.js), not bodies —
 // so this is defense-in-depth that keeps the never-log-the-token invariant
-// self-enforced across SDK versions. Applied to the mint + resolve breadcrumbs
-// (the slug-lookup leg is token-free).
+// self-enforced across SDK versions. Applied uniformly to all three breadcrumbs;
+// it's a no-op on the token-free slug-lookup leg but keeps that log line null-safe
+// + consistent (the `String(... ?? '')` guard).
 function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
 }
@@ -575,7 +575,7 @@ async function resolveDetectTarget() {
         status: 'active',
       }));
     } catch (err) {
-      logger.warn('Detect tunnel slug lookup failed', { error: err.message });
+      logger.warn('Detect tunnel slug lookup failed', { error: redactAccessToken(err.message) });
       throw err;
     }
     // TODO(upstream-contract): listResources({slug}) filters by EXACT slug
