@@ -1706,6 +1706,8 @@ async function getSendRenderState(sendId) {
 }
 
 const SEND_VIEW_COUNTER_MAX_SHARDS = 64;
+// Roughly half DynamoDB's ~1k WCU/s single-partition ceiling, leaving
+// burst headroom before the next power-of-two shard step kicks in.
 const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
 const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
 
