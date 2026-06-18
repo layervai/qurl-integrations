@@ -1261,10 +1261,9 @@ describe('handleAddRecipients', () => {
       fileBuffer: new ArrayBuffer(8),
     });
 
-    mockMintLinks.mockResolvedValue([
-      { qurl_link: 'https://q.test/mint-1' },
-      { qurl_link: 'https://q.test/mint-2' },
-    ]);
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/mint-1' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/mint-2' }]);
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
@@ -1285,8 +1284,11 @@ describe('handleAddRecipients', () => {
       // sendConfig has no self_destruct_seconds → null inherits through.
       null,
     );
-    // mintLinks is called against the NEW resource (conn-res-43)
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
+    // mintLinks is called against the NEW resource (conn-res-43), one
+    // connector request per recipient so meta-seal cap-1 connectors accept it.
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'conn-res-43', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'conn-res-43', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
     // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     // DMs should have been sent
@@ -1469,10 +1471,9 @@ describe('handleAddRecipients', () => {
     });
 
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-partial', hash: 'hp', success: true });
-    mockMintLinks.mockResolvedValue([
-      { qurl_link: 'https://q.test/link1' },
-      { qurl_link: 'https://q.test/link2' },
-    ]);
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/link1' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/link2' }]);
 
     // First DM succeeds, second fails
     mockSendDM
@@ -1525,10 +1526,9 @@ describe('handleAddRecipients', () => {
     });
 
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mixed', hash: 'hm', success: true });
-    mockMintLinks.mockResolvedValue([
-      { qurl_link: 'https://q.test/link1' },
-      { qurl_link: 'https://q.test/link2' },
-    ]);
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/link1' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/link2' }]);
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
@@ -1544,7 +1544,8 @@ describe('handleAddRecipients', () => {
     // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
@@ -1585,7 +1586,8 @@ describe('handleAddRecipients', () => {
       attachment_url: 'https://cdn.discordapp.com/attachments/1/2/big.pdf',
     });
 
-    // 12 recipients = 2 batches (10 + 2), each on a fresh resource
+    // 12 recipients = 12 cap-1 mint calls, with a fresh resource after
+    // the first 10 links exhaust the resource token pool.
     const userList = [];
     for (let i = 0; i < 12; i++) {
       userList.push({ id: `rcpt-${i}`, bot: false, username: `User${i}` });
@@ -1595,11 +1597,9 @@ describe('handleAddRecipients', () => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-A', fileBuffer });
     mockReUploadBuffer.mockResolvedValue({ resource_id: 'new-res-B' });
 
-    const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/r-${i}` }));
-    const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_link: `https://q.test/r2-${i}` }));
-    mockMintLinks
-      .mockResolvedValueOnce(batch1Links)
-      .mockResolvedValueOnce(batch2Links);
+    for (let i = 0; i < 12; i++) {
+      mockMintLinks.mockResolvedValueOnce([{ qurl_link: `https://q.test/r-${i}` }]);
+    }
 
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
@@ -1608,9 +1608,12 @@ describe('handleAddRecipients', () => {
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', { expiresAt: expect.any(String), n: 10, apiKey: 'test-api-key', selfDestructSeconds: null });
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', { expiresAt: expect.any(String), n: 2, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledTimes(12);
+    for (let i = 1; i <= 10; i++) {
+      expect(mockMintLinks).toHaveBeenNthCalledWith(i, 'new-res-A', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
+    }
+    expect(mockMintLinks).toHaveBeenNthCalledWith(11, 'new-res-B', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenNthCalledWith(12, 'new-res-B', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
@@ -1633,16 +1636,17 @@ describe('handleAddRecipients', () => {
     }
 
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-C', fileBuffer: new ArrayBuffer(8) });
-    const links = Array.from({ length: 8 }, (_, i) => ({ qurl_link: `https://q.test/l-${i}` }));
-    mockMintLinks.mockResolvedValueOnce(links);
+    for (let i = 0; i < 8; i++) {
+      mockMintLinks.mockResolvedValueOnce([{ qurl_link: `https://q.test/l-${i}` }]);
+    }
     mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     const users = makeUsersCollection(userList);
     const result = await handleAddRecipients('send-ok', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', { expiresAt: expect.any(String), n: 8, apiKey: 'test-api-key', selfDestructSeconds: null });
+    expect(mockMintLinks).toHaveBeenCalledTimes(8);
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', { expiresAt: expect.any(String), n: 1, apiKey: 'test-api-key', selfDestructSeconds: null });
     expect(mockSendDM).toHaveBeenCalledTimes(8);
     expect(result.msg).toMatch(/Added 8 recipients/);
   });

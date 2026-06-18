@@ -53,6 +53,11 @@ const {
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
+// Connector mint requests are intentionally single-link. Staging/prod
+// meta-seal mode caps each synchronous render-at-mint request at 1 so the
+// held-open request stays under the ALB idle budget; keep the per-resource
+// pool separate from the per-request count.
+const MINT_LINKS_PER_REQUEST = 1;
 
 // Absolute floor above which a single send earns a `WARN`-level
 // audit log at executeSendPipeline entry. 1000 chosen as the cliff
@@ -1708,8 +1713,10 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at
- * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
- * `reuploadFn` is invoked to produce a new one.
+ * TOKENS_PER_RESOURCE tokens. Each connector mint call requests at most
+ * MINT_LINKS_PER_REQUEST links so meta-seal deployments with a cap-1
+ * render-at-mint gate accept the request. When a resource is exhausted, the
+ * caller's `reuploadFn` is invoked to produce a new one.
  *
  * Centralizes the re-upload / batching / quota logic so a fix lands in one
  * place across the send pipeline (file/location) and handleAddRecipients
@@ -1740,13 +1747,13 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
 
-  for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
+  for (let i = 0; i < recipientCount;) {
     if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
       const re = await reuploadFn();
       currentResourceId = re.resource_id;
       tokensUsed = 0;
     }
-    const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
+    const batchSize = Math.min(MINT_LINKS_PER_REQUEST, TOKENS_PER_RESOURCE - tokensUsed, recipientCount - i);
     const minted = await mintLinks(currentResourceId, {
       expiresAt,
       n: batchSize,
@@ -1760,6 +1767,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       allLinks.push({ qurl_link: link.qurl_link, qurl_id: link.qurl_id || '', resourceId: currentResourceId });
     }
     tokensUsed += batchSize;
+    i += batchSize;
   }
   return allLinks;
 }
@@ -2074,8 +2082,8 @@ async function executeSendPipeline(interaction, {
       }));
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
     } else {
-      // Location send — upload JSON payload to connector, then mint in batches
-      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
+      // Location send — upload JSON payload to connector, then mint links
+      // one request at a time and re-upload when the resource pool is drained.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       // Note: google-map JSON resources hit the connector's render
       // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
