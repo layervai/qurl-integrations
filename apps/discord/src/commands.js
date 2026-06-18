@@ -1747,9 +1747,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
 async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey, selfDestructSeconds = null, guildId }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
-  // Snapshot per send so a mid-send global downgrade cannot reorder the
-  // recipient->link mapping. Concurrent cold sends may each probe once; later
-  // sends in this worker start at the observed cap.
+  // Snapshot per send for predictable request sizing within one send.
+  // Concurrent cold sends may each probe once; later sends in this worker
+  // start at the observed cap.
   let linksPerRequest = connectorMintLinksPerRequest;
   let tokensUsed = 0;
 
@@ -1776,6 +1776,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
     } catch (err) {
       if (batchSize > 1 && err?.apiCode === 'batch_cap_exceeded') {
         if (connectorMintLinksPerRequest !== 1) {
+          // Best-effort de-dupe: concurrent cold sends can both log before one
+          // writes the ratchet, but steady-state workers stay quiet.
           logger.warn('Connector mint_link batch cap observed; downgrading to single-link mints for this worker', {
             status: err.status,
             requestedBatchSize: batchSize,
