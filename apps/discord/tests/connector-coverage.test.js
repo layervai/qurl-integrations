@@ -851,6 +851,24 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(get()).toBeNull();
     });
 
+    it('breadcrumbs a slug-lookup transport failure, and does NOT mint or POST', async () => {
+      // The listResources leg is the FIRST network call on a cold cache; a
+      // transport failure must be breadcrumbed (message only) like the mint /
+      // resolve legs, not propagate as an undistinguished throw at the handler.
+      mockClient.listResources.mockRejectedValue(new Error('econnreset'));
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/econnreset/);
+      expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel slug lookup failed',
+        expect.objectContaining({ error: 'econnreset' }),
+      );
+    });
+
     it('throws "mint did not return an access token" when the mint qurl_link lacks an at_ fragment, and does NOT POST', async () => {
       // A mint response whose qurl_link has no `#at_…` fragment must hit the
       // clean throw (breadcrumbed), never POST, and never call resolve.

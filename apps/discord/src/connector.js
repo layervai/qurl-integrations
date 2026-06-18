@@ -555,10 +555,20 @@ async function resolveDetectTarget() {
   // listResources returns `{ resources: [...] }` and each resource carries `id`.
   let resourceId = _detectResourceId;
   if (!resourceId) {
-    const { resources } = await getQurlClient().listResources({
-      slug: config.DETECT_TUNNEL_SLUG,
-      status: 'active',
-    });
+    // Breadcrumb a slug-lookup transport failure (message only — no token, no
+    // URL), matching the mint/resolve legs, so a cold-boot activation failure
+    // on the FIRST network call is diagnosable rather than an undistinguished
+    // throw at the handler.
+    let resources;
+    try {
+      ({ resources } = await getQurlClient().listResources({
+        slug: config.DETECT_TUNNEL_SLUG,
+        status: 'active',
+      }));
+    } catch (err) {
+      logger.warn('Detect tunnel slug lookup failed', { error: err.message });
+      throw err;
+    }
     const rid = resources?.[0]?.id;
     if (!rid) {
       throw new Error('Detect tunnel resource not found for slug');
