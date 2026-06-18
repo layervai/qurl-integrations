@@ -151,6 +151,15 @@ async function flushCounter() {
   }
 }
 
+async function waitFor(predicate) {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error('Timed out waiting for test predicate');
+}
+
 // A render state that arms the fast-path (token + appId + baseMsg present,
 // not terminal). lastRenderedCount/expectedCount overridable per test.
 function armedState(overrides = {}) {
@@ -246,6 +255,37 @@ describe('sender view-counter fast-path — happy path', () => {
       'qURL webhook sender-counter: coalesced — scheduled trailing flush',
       expect.objectContaining({ send_id: SEND_ID, qurl_id: 'q_cache_2' }),
     );
+  });
+
+  it('coalesces a same-replica first-view while the leading Discord edit is still in flight', async () => {
+    let resolveEdit;
+    mockEditInteractionReply.mockImplementation(() => new Promise((resolve) => {
+      resolveEdit = resolve;
+    }));
+
+    await signedRequest();
+    await waitFor(() => mockEditInteractionReply.mock.calls.length === 1);
+
+    logger.debug.mockClear();
+    await signedRequest({
+      ...VALID_PAYLOAD,
+      id: 'evt-counter-inflight-2',
+      data: { ...VALID_PAYLOAD.data, qurl_id: 'q_inflight_2' },
+    });
+    await flushCounter();
+
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    expect(mockIncrementSendViewedCount).toHaveBeenCalledTimes(2);
+    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+      expect.objectContaining({ send_id: SEND_ID, qurl_id: 'q_inflight_2' }),
+    );
+
+    logger.debug.mockClear();
+    resolveEdit({ ok: true });
+    await flushCounter();
+    expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 1);
   });
 });
 
@@ -592,6 +632,55 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
     const payload = mockEditInteractionReply.mock.calls[0][2];
     expect(payload.content).toContain('👀 2 viewed');
+  });
+
+  it('repair-floor replacement preserves an already-pending source fallback flush', async () => {
+    mockGetSendRenderState
+      .mockResolvedValueOnce(armedState({
+        lastRenderedCount: 1,
+        lastRenderedAt: Date.now() - 750,
+        viewedCount: 1,
+        qurlIds: ['q_a', 'q_b'],
+      }))
+      .mockResolvedValueOnce(armedState({
+        lastRenderedCount: 1,
+        lastRenderedAt: 0,
+        viewedCount: 1,
+        qurlIds: ['q_a', 'q_b'],
+      }))
+      .mockResolvedValueOnce(armedState({
+        lastRenderedCount: 2,
+        lastRenderedAt: Date.now(),
+        viewedCount: 2,
+        qurlIds: ['q_a', 'q_b'],
+      }));
+    mockIncrementSendViewedCount
+      .mockRejectedValueOnce(new Error('ProvisionedThroughputExceededException'))
+      .mockResolvedValue(undefined);
+    mockGetSendViewedCount.mockResolvedValue(2);
+    mockGetQurlViews.mockResolvedValue(new Map([
+      ['q_a', { accessCount: 1, consumed: false }],
+      ['q_b', { accessCount: 1, consumed: false }],
+    ]));
+    mockTryAdvanceRenderedCount.mockResolvedValue(false);
+
+    await signedRequest({ ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, qurl_id: 'q_a' } });
+    await flushCounter();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+      expect.objectContaining({ send_id: SEND_ID, force_source: true }),
+    );
+
+    logger.debug.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    await signedRequest({ ...VALID_PAYLOAD, id: 'evt-repair-source', data: { ...VALID_PAYLOAD.data, qurl_id: 'q_b' } });
+    await waitFor(() => mockEditInteractionReply.mock.calls.length === 2);
+
+    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+    expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await flushCounter();
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(2);
   });
 
   it('CAS-lost lower edit schedules exactly one repair-floor re-render', async () => {

@@ -581,6 +581,7 @@ function flipConsumedDMInBackground({ qurlId, eventId }) {
 const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
 const senderCounterFlushTimers = new Map();
 const senderCounterRenderStateCache = new Map();
+const senderCounterLocalAttemptAt = new Map();
 
 function senderCounterRenderStateCacheTtlMs() {
   // Keep this much shorter than the edit coalesce window: it collapses a
@@ -639,6 +640,22 @@ function patchCachedSenderCounterRenderState(sendId, patch) {
   cacheSenderCounterRenderState(sendId, { ...cached.state, ...patch });
 }
 
+function getSenderCounterLocalAttemptAt(sendId) {
+  const attemptedAt = senderCounterLocalAttemptAt.get(sendId) || 0;
+  if (!attemptedAt) return 0;
+  if (Date.now() - attemptedAt >= config.QURL_VIEW_COUNTER_COALESCE_MS) {
+    senderCounterLocalAttemptAt.delete(sendId);
+    return 0;
+  }
+  return attemptedAt;
+}
+
+function stampSenderCounterLocalAttempt(sendId) {
+  const now = Date.now();
+  senderCounterLocalAttemptAt.set(sendId, now);
+  patchCachedSenderCounterRenderState(sendId, { lastRenderedAt: now });
+}
+
 // Sub-second sender view-counter fast-path (feat #60, PR-B). On a real
 // new view (dbResult === 'recorded'), edits the sender's "/qurl send"
 // confirmation to "👀 N viewed / M pending" from ANY replica using the
@@ -663,15 +680,16 @@ function scheduleSenderCounterFlush({
   sendId, qurlId, delayMs, repairFloor = false, forceSource = false,
 }) {
   const existing = senderCounterFlushTimers.get(sendId);
-  if (existing) clearTimeout(existing);
+  const shouldForceSource = forceSource || existing?.forceSource === true;
+  if (existing) clearTimeout(existing.timer);
   const timer = setTimeout(() => {
     senderCounterFlushTimers.delete(sendId);
     editSenderCounterInBackground({
-      qurlId, force: true, repairFloor, forceSource,
+      qurlId, force: true, repairFloor, forceSource: shouldForceSource,
     });
   }, Math.max(0, delayMs));
   if (typeof timer.unref === 'function') timer.unref();
-  senderCounterFlushTimers.set(sendId, timer);
+  senderCounterFlushTimers.set(sendId, { timer, forceSource: shouldForceSource });
 }
 
 // COALESCING (step 4b): leading-edge debounce per send. It bounds
@@ -775,7 +793,8 @@ function editSenderCounterInBackground({
       //    delayed flush reads the aggregate. Leading-edge keeps the
       //    counter visibly live; the trailing flush renders rapid
       //    followers inside the same sub-second window.
-      const sinceLastEditMs = Date.now() - state.lastRenderedAt;
+      const coalesceClockAt = Math.max(state.lastRenderedAt, getSenderCounterLocalAttemptAt(sendId));
+      const sinceLastEditMs = Date.now() - coalesceClockAt;
       if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
         const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
         scheduleSenderCounterFlush({
@@ -856,6 +875,10 @@ function editSenderCounterInBackground({
         expectedCount: state.expectedCount,
         degraded: false,
       });
+      // Same-replica burst guard: arm the debounce before the Discord PATCH
+      // round-trip completes so tightly clustered first-views do not all
+      // pass the gate on the same pre-edit render-state snapshot.
+      stampSenderCounterLocalAttempt(sendId);
       const r = await editInteractionReply(state.interactionAppId, state.interactionToken, { content });
 
       // 8. COMMIT AFTER SUCCESS ONLY. Advance last_rendered_count only when
@@ -1095,8 +1118,9 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
-  for (const timer of senderCounterFlushTimers.values()) clearTimeout(timer);
+  for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();
   senderCounterRenderStateCache.clear();
+  senderCounterLocalAttemptAt.clear();
 };
 module.exports = router;
