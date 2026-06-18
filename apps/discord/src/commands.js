@@ -1764,11 +1764,6 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       tokensUsed = 0;
     }
     const batchSize = Math.min(linksPerRequest, TOKENS_PER_RESOURCE - tokensUsed, recipientCount - i);
-    // Future-proof invariant: today's operands are all >= 1 here, but a
-    // later config-driven cap should fail closed instead of spinning.
-    if (batchSize <= 0) {
-      throw new Error('Internal mint batch invariant violated: batchSize must be positive');
-    }
     let minted;
     try {
       minted = await mintLinks(currentResourceId, {
@@ -1780,8 +1775,15 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       });
     } catch (err) {
       if (batchSize > 1 && err?.apiCode === 'batch_cap_exceeded') {
-        // The connector validates this cap before minting, so the rejected
-        // probe consumes zero tokens; retry the same resource/recipient index.
+        if (connectorMintLinksPerRequest !== 1) {
+          logger.warn('Connector mint_link batch cap observed; downgrading to single-link mints for this worker', {
+            status: err.status,
+            requestedBatchSize: batchSize,
+          });
+        }
+        // TODO(upstream-contract): keep aligned with the connector's
+        // validation-before-mint order. The rejected probe consumes zero
+        // tokens, so retry the same resource/recipient index.
         connectorMintLinksPerRequest = 1;
         linksPerRequest = 1;
         continue;

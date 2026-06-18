@@ -3014,6 +3014,10 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 2 }));
     expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-1', expect.objectContaining({ n: 1 }));
     expect(mockMintLinks).toHaveBeenNthCalledWith(3, 'res-1', expect.objectContaining({ n: 1 }));
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Connector mint_link batch cap observed; downgrading to single-link mints for this worker',
+      expect.objectContaining({ status: 400, requestedBatchSize: 2 }),
+    );
     expect(result).toHaveLength(2);
   });
 
@@ -3093,6 +3097,7 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
     expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-2', expect.objectContaining({ n: 1 }));
     expect(mockMintLinks).toHaveBeenNthCalledWith(2, 'res-2', expect.objectContaining({ n: 1 }));
+    expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(2);
   });
 
