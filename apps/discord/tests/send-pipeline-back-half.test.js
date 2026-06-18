@@ -323,6 +323,13 @@ async function waitForMicrotaskExpectation(assertion, attempts = 10) {
   throw lastError;
 }
 
+function makeBatchCapExceededError() {
+  return Object.assign(new Error('Connector mint_link failed (400)'), {
+    status: 400,
+    apiCode: 'batch_cap_exceeded',
+  });
+}
+
 // Accept-path verifier: pin that the named gate did NOT reject the
 // given params. Two branches both count as success:
 //   - executeSendPipeline throws something downstream → assert the
@@ -2990,12 +2997,8 @@ describe('mintLinksInBatches', () => {
   });
 
   it('falls back to single-link mints when the connector reports the meta-seal batch cap', async () => {
-    const capErr = Object.assign(new Error('Connector mint_link failed (400)'), {
-      status: 400,
-      apiCode: 'batch_cap_exceeded',
-    });
     mockMintLinks
-      .mockRejectedValueOnce(capErr)
+      .mockRejectedValueOnce(makeBatchCapExceededError())
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1' }])
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/2' }]);
 
@@ -3014,13 +3017,37 @@ describe('mintLinksInBatches', () => {
     expect(result).toHaveLength(2);
   });
 
-  it('remembers the observed meta-seal batch cap for later sends in the same process', async () => {
-    const capErr = Object.assign(new Error('Connector mint_link failed (400)'), {
-      status: 400,
-      apiCode: 'batch_cap_exceeded',
+  it('keeps the cap fallback across a re-upload boundary', async () => {
+    mockMintLinks.mockRejectedValueOnce(makeBatchCapExceededError());
+    for (let i = 0; i < 12; i++) {
+      mockMintLinks.mockResolvedValueOnce([{ qurl_link: `https://q.test/fallback-${i}` }]);
+    }
+    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
+
+    const result = await mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn,
+      expiresAt: new Date().toISOString(),
+      recipientCount: 12,
+      apiKey: 'apikey',
     });
+
+    expect(reuploadFn).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).toHaveBeenCalledTimes(13);
+    expect(mockMintLinks).toHaveBeenNthCalledWith(1, 'res-1', expect.objectContaining({ n: 10 }));
+    for (let callNumber = 2; callNumber <= 11; callNumber++) {
+      expect(mockMintLinks).toHaveBeenNthCalledWith(callNumber, 'res-1', expect.objectContaining({ n: 1 }));
+    }
+    expect(mockMintLinks).toHaveBeenNthCalledWith(12, 'res-2', expect.objectContaining({ n: 1 }));
+    expect(mockMintLinks).toHaveBeenNthCalledWith(13, 'res-2', expect.objectContaining({ n: 1 }));
+    expect(result).toHaveLength(12);
+    expect(result.slice(0, 10).every((link) => link.resourceId === 'res-1')).toBe(true);
+    expect(result.slice(10).every((link) => link.resourceId === 'res-2')).toBe(true);
+  });
+
+  it('remembers the observed meta-seal batch cap for later sends in the same process', async () => {
     mockMintLinks
-      .mockRejectedValueOnce(capErr)
+      .mockRejectedValueOnce(makeBatchCapExceededError())
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/1' }])
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/2' }]);
 

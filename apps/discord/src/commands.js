@@ -2110,7 +2110,8 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
     } else {
       // Location send — upload JSON payload to connector, then mint links
-      // one request at a time and re-upload when the resource pool is drained.
+      // in batches, downgrading to one-per-request if the connector reports
+      // the meta-seal cap, and re-upload when the resource pool is drained.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       // Note: google-map JSON resources hit the connector's render
       // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
