@@ -162,6 +162,18 @@ async function waitFor(predicate) {
   throw new Error('Timed out waiting for test predicate');
 }
 
+async function waitForCounterFlush(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // eslint-disable-next-line no-await-in-loop
+    await flushCounter();
+    if (predicate()) return;
+  } while (Date.now() < deadline);
+  throw new Error('Timed out waiting for counter flush');
+}
+
 // A render state that arms the fast-path (token + appId + baseMsg present,
 // not terminal). lastRenderedCount/expectedCount overridable per test.
 function armedState(overrides = {}) {
@@ -186,6 +198,19 @@ function armedState(overrides = {}) {
 }
 
 beforeEach(() => {
+  [
+    mockRecordQurlView,
+    mockFindSendsByQurlId,
+    mockGetSendRenderState,
+    mockGetSendItems,
+    mockGetQurlViews,
+    mockIncrementSendViewedCount,
+    mockGetSendViewedCount,
+    mockTryAdvanceRenderedCount,
+    mockTouchRenderedAt,
+    mockTryClaimRenderAttempt,
+    mockEditInteractionReply,
+  ].forEach((mock) => mock.mockReset());
   jest.clearAllMocks();
   mockPrimed = true;
   mockWithinLag = false;
@@ -596,7 +621,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   it('scheduled trailing flush fires and edits the settled aggregate without waiting for the poll', async () => {
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 1,
-      lastRenderedAt: Date.now() - 850,
+      lastRenderedAt: Date.now() - 700,
       viewedCount: 2,
       qurlIds: ['q_a', 'q_b'],
     }));
@@ -611,8 +636,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     );
 
     logger.debug.mockClear();
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    await flushCounter();
+    await waitForCounterFlush(() => mockEditInteractionReply.mock.calls.length === 1);
 
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
     const payload = mockEditInteractionReply.mock.calls[0][2];
@@ -624,7 +648,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     mockGetSendRenderState
       .mockResolvedValueOnce(armedState({
         lastRenderedCount: 1,
-        lastRenderedAt: Date.now() - 890,
+        lastRenderedAt: Date.now() - 700,
         viewedCount: 2,
         qurlIds: ['q_a', 'q_b'],
       }))
@@ -641,8 +665,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
 
     logger.debug.mockClear();
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    await flushCounter();
+    await waitForCounterFlush(() => mockGetSendRenderState.mock.calls.length === 2);
 
     expect(mockGetSendRenderState).toHaveBeenCalledTimes(2);
     expect(mockEditInteractionReply).not.toHaveBeenCalled();
@@ -655,7 +678,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
   it('aggregate increment failure inside the coalesce window schedules one source fallback flush', async () => {
     mockGetSendRenderState.mockResolvedValue(armedState({
       lastRenderedCount: 1,
-      lastRenderedAt: Date.now() - 850,
+      lastRenderedAt: Date.now() - 700,
       viewedCount: 1,
       qurlIds: ['q_a', 'q_b'],
     }));
@@ -677,8 +700,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     );
 
     logger.debug.mockClear();
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    await flushCounter();
+    await waitForCounterFlush(() => mockGetQurlViews.mock.calls.length === 1);
 
     expect(mockGetSendViewedCount).not.toHaveBeenCalled();
     expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
@@ -691,7 +713,7 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     mockGetSendRenderState
       .mockResolvedValueOnce(armedState({
         lastRenderedCount: 1,
-        lastRenderedAt: Date.now() - 750,
+        lastRenderedAt: Date.now(),
         viewedCount: 1,
         qurlIds: ['q_a', 'q_b'],
       }))
@@ -717,22 +739,33 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     ]));
     mockTryAdvanceRenderedCount.mockResolvedValue(false);
 
+    // First event: aggregate increment fails while the row is inside the
+    // coalesce window. It must only arm a pending source-of-truth flush; it
+    // must not edit or read either count source yet.
     await signedRequest({ ...VALID_PAYLOAD, data: { ...VALID_PAYLOAD.data, qurl_id: 'q_a' } });
     await flushCounter();
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith(
       'qURL webhook sender-counter: coalesced — scheduled trailing flush',
       expect.objectContaining({ send_id: SEND_ID, force_source: true }),
     );
 
     logger.debug.mockClear();
-    await new Promise((resolve) => setTimeout(resolve, 70));
-    await signedRequest({ ...VALID_PAYLOAD, id: 'evt-repair-source', data: { ...VALID_PAYLOAD.data, qurl_id: 'q_b' } });
-    await waitFor(() => mockEditInteractionReply.mock.calls.length === 2);
-
-    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
-    expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
+    // Render-state cache TTL is capped at 50ms; wait beyond it but below the
+    // coalesce window so the second event refreshes state and replaces the
+    // still-pending trailing source flush.
     await new Promise((resolve) => setTimeout(resolve, 100));
-    await flushCounter();
+    await signedRequest({ ...VALID_PAYLOAD, id: 'evt-repair-source', data: { ...VALID_PAYLOAD.data, qurl_id: 'q_b' } });
+    await waitForCounterFlush(() => mockGetQurlViews.mock.calls.length === 1);
+
+    // The second event's CAS-lost repair replaces the pending timer but keeps
+    // force_source=true, so the repair render reads source qurl_views instead
+    // of trusting the aggregate counter.
+    expect(mockGetSendViewedCount).toHaveBeenCalledTimes(1);
+    expect(mockGetQurlViews).toHaveBeenCalledTimes(1);
+    expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
     expect(mockEditInteractionReply).toHaveBeenCalledTimes(2);
   });
 
