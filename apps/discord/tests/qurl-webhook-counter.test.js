@@ -534,6 +534,41 @@ describe('sender view-counter fast-path — edit coalescing (leading-edge deboun
     expect(mockTryAdvanceRenderedCount).toHaveBeenCalledWith(SEND_ID, 2);
   });
 
+  it('aggregate increment failure inside the coalesce window schedules one source fallback flush', async () => {
+    mockGetSendRenderState.mockResolvedValue(armedState({
+      lastRenderedCount: 1,
+      lastRenderedAt: Date.now() - 850,
+      viewedCount: 1,
+      qurlIds: ['q_a', 'q_b'],
+    }));
+    mockIncrementSendViewedCount.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
+    mockGetQurlViews.mockResolvedValue(new Map([
+      ['q_a', { accessCount: 1, consumed: false }],
+      ['q_b', { accessCount: 1, consumed: false }],
+    ]));
+
+    await signedRequest();
+    await flushCounter();
+
+    expect(mockEditInteractionReply).not.toHaveBeenCalled();
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      'qURL webhook sender-counter: coalesced — scheduled trailing flush',
+      expect.objectContaining({ send_id: SEND_ID, force_source: true }),
+    );
+
+    logger.debug.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    await flushCounter();
+
+    expect(mockGetSendViewedCount).not.toHaveBeenCalled();
+    expect(mockGetQurlViews).toHaveBeenCalledWith(['q_a', 'q_b']);
+    expect(mockEditInteractionReply).toHaveBeenCalledTimes(1);
+    const payload = mockEditInteractionReply.mock.calls[0][2];
+    expect(payload.content).toContain('👀 2 viewed');
+  });
+
   it('CAS-lost lower edit schedules exactly one repair-floor re-render', async () => {
     mockGetSendRenderState
       .mockResolvedValueOnce(armedState({

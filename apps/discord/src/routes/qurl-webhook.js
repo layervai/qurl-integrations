@@ -601,12 +601,16 @@ const senderCounterFlushTimers = new Map();
 // re-render forever. Each step's skip is intentional defense — see the
 // inline notes.
 //
-function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = false }) {
+function scheduleSenderCounterFlush({
+  sendId, qurlId, delayMs, repairFloor = false, forceSource = false,
+}) {
   const existing = senderCounterFlushTimers.get(sendId);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     senderCounterFlushTimers.delete(sendId);
-    editSenderCounterInBackground({ qurlId, force: true, repairFloor });
+    editSenderCounterInBackground({
+      qurlId, force: true, repairFloor, forceSource,
+    });
   }, Math.max(0, delayMs));
   if (typeof timer.unref === 'function') timer.unref();
   senderCounterFlushTimers.set(sendId, timer);
@@ -616,8 +620,9 @@ function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = fal
 // Discord edits; distinct first-view aggregate writes are sharded across
 // qurl_views counter rows (scaled by expected fan-out) so high-fanout
 // sends avoid a single hot DDB item while small sends keep a one-key
-// read. If a shard write or shard sum fails, the poll reader is still the
-// correctness backstop.
+// read. If a shard write fails inside the debounce window, the trailing
+// flush is forced to count source qurl_views so the fallback stays
+// coalesced instead of amplifying load.
 // Multiple replicas can still each pass a stale/unwritten last_rendered_at
 // and PATCH once; the CAS keeps count monotonic, while discord.js 429
 // backoff is the final safety net.
@@ -625,7 +630,7 @@ function scheduleSenderCounterFlush({ sendId, qurlId, delayMs, repairFloor = fal
 // SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
 // Only sendId / qurlId / counts appear in the verdict log.
 function editSenderCounterInBackground({
-  qurlId, firstView = false, force = false, repairFloor = false,
+  qurlId, firstView = false, force = false, repairFloor = false, forceSource = false,
 }) {
   // Defer into the microtask queue so a future sync-throw refactor
   // surfaces as a rejection instead of escaping the handler (same shape
@@ -680,7 +685,7 @@ function editSenderCounterInBackground({
         return { status: 'absent' };
       }
 
-      let aggregateWriteFailed = false;
+      let aggregateWriteFailed = forceSource === true;
       if (firstView) {
         try {
           // Intentional two-write split: recordQurlView is the source of
@@ -713,11 +718,13 @@ function editSenderCounterInBackground({
       //    counter visibly live; the trailing flush renders rapid
       //    followers inside the same sub-second window.
       const sinceLastEditMs = Date.now() - state.lastRenderedAt;
-      if (!aggregateWriteFailed && !force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
+      if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
         const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
-        scheduleSenderCounterFlush({ sendId, qurlId, delayMs });
+        scheduleSenderCounterFlush({
+          sendId, qurlId, delayMs, forceSource: aggregateWriteFailed,
+        });
         logger.debug('qURL webhook sender-counter: coalesced — scheduled trailing flush', {
-          qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs, delay_ms: delayMs,
+          qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs, delay_ms: delayMs, force_source: aggregateWriteFailed,
         });
         return { status: 'coalesced' };
       }
