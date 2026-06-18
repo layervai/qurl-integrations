@@ -416,7 +416,8 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
 // NON-secret identifier, so caching it across calls is safe and skips a
 // listResources lookup on every detect. CACHE ONLY THIS, NEVER the minted access
 // token or the resolved target_url: each detect mints a FRESH ephemeral qURL (a
-// ~5-min short-lived credential) and the resolve()/knock grants network access to
+// short-lived credential — the mint sets expires_in: '5m') and the resolve()/knock
+// grants network access to
 // the caller's CURRENT IP/knock-window — a stale token or target_url would be a
 // long-lived credential to leak / an un-knocked reuse, exactly what the
 // ephemeral-per-call design avoids.
@@ -535,7 +536,8 @@ function redactAccessToken(message) {
  * The caller MUST POST within the knock window from the same IP — hence this is
  * invoked immediately before each detect POST (mint-and-resolve-per-call), and
  * NEITHER the minted token NOR the resolved target_url is ever cached. A fresh
- * ~5-min qURL per detect means there's no long-lived credential to leak, and a
+ * 5m-expiry qURL per detect (the mint passes expires_in: '5m') means there's no
+ * long-lived credential to leak, and a
  * stale token/target_url's network access was granted to a previous IP/knock-
  * window and must not be reused. This is exactly what lets the bot's dynamic
  * egress IP reach a tunnel that only admits knocked IPs. Detect is low-frequency
@@ -588,13 +590,22 @@ async function resolveDetectTarget() {
     _detectResourceId = resourceId;
   }
 
-  // Mint a fresh ephemeral qURL on the resource (per call). The 201 carries the
-  // `at_…` access token in the `qurl_link` fragment. Breadcrumb a mint failure
-  // (message only — no token, no URL) then rethrow so an activation-time failure
-  // is diagnosable at the handler.
+  // Mint a fresh ephemeral qURL on the resource (per call). `expires_in: '5m'`
+  // bounds the credential lifetime AND caps accumulation of unused mints — the
+  // bot never deletes them, it relies on expiry. Detect uses the token within
+  // seconds (mint → resolve), so 5m is generous margin, not a usage window. The
+  // 201 carries the `at_…` access token in the `qurl_link` fragment. Breadcrumb a
+  // mint failure (message only — no token, no URL) then rethrow so an
+  // activation-time failure is diagnosable at the handler.
+  // TODO(upstream-contract): confirm qurl-service honors `expires_in` on a
+  // resource mint during the sandbox soak (CI mocks the SDK, so this isn't
+  // exercised against the live API here).
   let accessToken;
   try {
-    const minted = await getQurlClient().createQurlForResource(resourceId, { target_path: '/api/detect' });
+    const minted = await getQurlClient().createQurlForResource(resourceId, {
+      target_path: '/api/detect',
+      expires_in: '5m',
+    });
     const link = typeof minted?.qurl_link === 'string' ? minted.qurl_link : '';
     const hashIdx = link.indexOf('#');
     // Take ONLY the token, not "everything after #": strip any trailing fragment

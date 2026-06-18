@@ -719,7 +719,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       // fresh ephemeral qURL on it (target_path /api/detect), resolve that (the
       // NHP knock for our IP) using the at_ token from the minted qurl_link.
       expect(mockClient.listResources).toHaveBeenCalledWith({ slug: 'detect-sandbox', status: 'active' });
-      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, { target_path: '/api/detect' });
+      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, { target_path: '/api/detect', expires_in: '5m' });
       expect(mockClient.resolve).toHaveBeenCalledWith({ access_token: 'at_testtoken123' });
       const { url, opts } = get();
       expect(url).toBe(TUNNEL_TARGET);
