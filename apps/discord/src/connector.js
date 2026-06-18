@@ -433,8 +433,7 @@ let _detectResourceId = null;
 // was granted to a previous IP/knock-window and must not be reused.
 //
 // NOTE: createQurlForResource's `target_path` option needs @layervai/qurl
-// >= 0.2.1; the dep bump to 0.2.1 is a follow-up once that SDK version is
-// published — package.json pins ~0.2.0 for now so CI can resolve the dep.
+// >= 0.3.0 (it landed in qurl-typescript#145); package.json pins ~0.3.0.
 //
 // Bearer note: the SDK's `apiKey` is the qURL API Bearer for the listResources /
 // createQurlForResource / resolve calls and MUST carry the `qurl:resolve` scope
@@ -582,6 +581,12 @@ async function resolveDetectTarget() {
       throw new Error('detect mint did not return an access token');
     }
   } catch (err) {
+    // Self-heal a stale resource_id: if the tunnel resource was deleted/
+    // recreated, the cached id would 404 every mint until process restart.
+    // Drop the cache so the next detect re-resolves the slug. Clearing on any
+    // mint error (not just 404) is safe — worst case is one extra listResources
+    // next call, and a transient failure re-resolves to the same id.
+    _detectResourceId = null;
     logger.warn('Detect tunnel mint failed', { error: err.message });
     throw err;
   }

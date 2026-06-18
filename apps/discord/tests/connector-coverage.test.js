@@ -754,6 +754,28 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(mockClient.resolve).toHaveBeenCalledTimes(2);              // re-knocked per call
     });
 
+    it('clears the cached resource_id when a mint fails so the next detect re-resolves the slug', async () => {
+      // Self-heal: if the tunnel resource is deleted/recreated, the cached id
+      // would 404 on every mint until restart. A mint failure must drop
+      // _detectResourceId so the next detect re-resolves the slug (listResources
+      // runs again) instead of looping on the stale id.
+      captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      mockClient.createQurlForResource
+        .mockResolvedValueOnce({ qurl_id: 'q1', qurl_link: MINT_LINK }) // caches id
+        .mockRejectedValueOnce(new Error('resource not found'))        // clears cache
+        .mockResolvedValueOnce({ qurl_id: 'q3', qurl_link: MINT_LINK }); // after re-resolve
+
+      await connector.detectWatermark(Buffer.from('a'), { guildId: 'g', apiKey: 'k' });
+      await expect(
+        connector.detectWatermark(Buffer.from('b'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow('resource not found');
+      await connector.detectWatermark(Buffer.from('c'), { guildId: 'g', apiKey: 'k' });
+
+      // listResources ran cold on call 1 and AGAIN on call 3 (call 2's mint
+      // failure cleared the cache) — not cached straight through.
+      expect(mockClient.listResources).toHaveBeenCalledTimes(2);
+    });
+
     it('returns the normalized detect result on a detected match', async () => {
       captureDetect({ detected: true, qurl_id: 'q_match1', match_pct: 92, confidence: 0.98 });
       const res = await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
