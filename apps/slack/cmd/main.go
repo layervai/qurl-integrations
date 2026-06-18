@@ -870,9 +870,10 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 // deployment config so sandbox/internal domains are not mirrored in public
 // source. AUTH0_AUDIENCE is compared exactly because Auth0 API identifiers
 // are exact-match strings; only the infra-provided expected value is trimmed
-// before comparison. Leaving the expected value unset disables only this drift
-// check, preserving local/self-hosted deployments that own their own audience
-// contract.
+// before comparison. The caller rejects surrounding whitespace in audience
+// before calling this helper because that raw value is sent to Auth0. Leaving
+// the expected value unset disables only this drift check, preserving
+// local/self-hosted deployments that own their own audience contract.
 func validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience string) error {
 	expectedAudience = strings.TrimSpace(expectedAudience)
 	if expectedAudience == "" || audience == expectedAudience {

@@ -1038,17 +1038,24 @@ func TestBuildOAuthConfigRejectsConfiguredExpectedAudienceMismatch(t *testing.T)
 func TestBuildOAuthConfigRejectsAuth0AudienceSurroundingWhitespace(t *testing.T) {
 	stubJWKSVerifier(t)
 	cases := []struct {
-		name     string
-		audience string
+		name             string
+		audience         string
+		expectedAudience string
 	}{
 		{name: "leading space", audience: " https://api.layerv.ai"},
 		{name: "trailing space", audience: "https://api.layerv.ai "},
 		{name: "newline and tab", audience: "\nhttps://api.layerv.ai\t"},
+		{
+			name:             "configured expected audience",
+			audience:         " https://api.layerv.ai ",
+			expectedAudience: "https://api.layerv.ai",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := validEnv()
 			env["AUTH0_AUDIENCE"] = tc.audience
+			env[envAuth0ExpectedAudience] = tc.expectedAudience
 			applyEnv(t, env)
 
 			_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
