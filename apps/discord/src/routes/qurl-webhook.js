@@ -579,6 +579,7 @@ function flipConsumedDMInBackground({ qurlId, eventId }) {
 // guaranteed end signal on EVERY branch (skip, edited, edit-failed) so a
 // fire-and-forget caller and the unit tests have a uniform drain anchor.
 const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
+const SENDER_COUNTER_CACHE_SWEEP_MS = 250;
 const senderCounterFlushTimers = new Map();
 const senderCounterRenderStateCache = new Map();
 const senderCounterLocalAttemptAt = new Map();
@@ -655,6 +656,25 @@ function stampSenderCounterLocalAttempt(sendId) {
   senderCounterLocalAttemptAt.set(sendId, now);
   patchCachedSenderCounterRenderState(sendId, { lastRenderedAt: now });
 }
+
+function sweepSenderCounterCaches(now = Date.now()) {
+  for (const [sendId, cached] of senderCounterRenderStateCache.entries()) {
+    if (!cached || cached.expiresAt <= now) {
+      senderCounterRenderStateCache.delete(sendId);
+    }
+  }
+  for (const [sendId, attemptedAt] of senderCounterLocalAttemptAt.entries()) {
+    if (!attemptedAt || now - attemptedAt >= config.QURL_VIEW_COUNTER_COALESCE_MS) {
+      senderCounterLocalAttemptAt.delete(sendId);
+    }
+  }
+}
+
+const senderCounterCacheSweepTimer = setInterval(
+  () => sweepSenderCounterCaches(),
+  SENDER_COUNTER_CACHE_SWEEP_MS,
+);
+if (typeof senderCounterCacheSweepTimer.unref === 'function') senderCounterCacheSweepTimer.unref();
 
 // Sub-second sender view-counter fast-path (feat #60, PR-B). On a real
 // new view (dbResult === 'recorded'), edits the sender's "/qurl send"
@@ -1118,6 +1138,7 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  clearInterval(senderCounterCacheSweepTimer);
   for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
   senderCounterFlushTimers.clear();
   senderCounterRenderStateCache.clear();
