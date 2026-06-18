@@ -671,6 +671,9 @@ function editSenderCounterInBackground({
 
       if (firstView) {
         try {
+          // Intentional two-write split: recordQurlView is the source of
+          // truth; this shard ADD is only the fast aggregate. A crash here
+          // leaves the poll/floor path to reconcile from qurl_views rows.
           // Load-bearing: recordQurlView's `firstView` contract is what
           // makes this exactly one shard increment per distinct qurl_id.
           await db.incrementSendViewedCount(sendId, qurlId, state.expectedCount);
@@ -795,6 +798,9 @@ function editSenderCounterInBackground({
       }
       const advanced = await db.tryAdvanceRenderedCount(sendId, N);
       if (!repairFloor && !advanced && N < state.expectedCount) {
+        // One-shot repair may be a redundant PATCH when another replica
+        // already displayed N, but the same CCFE also covers the stale-edit
+        // case where this replica raced a higher display backwards.
         scheduleSenderCounterFlush({ sendId, qurlId, delayMs: 0, repairFloor: true });
       }
       return { status: 'edited', n: N };

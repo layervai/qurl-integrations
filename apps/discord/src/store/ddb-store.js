@@ -1646,11 +1646,11 @@ async function getSendConfig(sendId, senderDiscordId) {
 //
 // `viewedCount` is the legacy single-row aggregate retained only as a
 // rollout floor for rows created before the sharded counter path below.
-// New fast-path renders sum qurl_views counter shards instead of
-// BatchGetting every qurl_id or hot-writing qurl_send_configs. The
-// `lastRenderedCount` field remains the commit-after-edit floor: the
-// sharded total can run ahead when a view records but the Discord edit is
-// coalesced or transiently fails.
+// The new path seeds it at send time but never increments it. New
+// fast-path renders sum qurl_views counter shards instead of BatchGetting
+// every qurl_id or hot-writing qurl_send_configs. The `lastRenderedCount`
+// field remains the commit-after-edit floor: the sharded total can run
+// ahead when a view records but the Discord edit is coalesced or fails.
 //
 // `terminal` is derived (not stored as one flag): the display is dead
 // once the sender revoked (revoked_at) OR a window-close/expired path
