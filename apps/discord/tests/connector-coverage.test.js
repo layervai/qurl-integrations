@@ -12,16 +12,35 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Mock the qURL SDK so connector.detectWatermark's resolve()-then-POST tunnel
-// flow can be driven without a real /v1/resolve round-trip. `mockResolve` is a
-// shared jest.fn the detect tests configure per case (returns {target_url} or
-// throws). The `mock`-prefix lets the factory reference it past jest's hoist.
-// Only resolveDetectTarget() constructs a QurlClient (lazily), so the upload /
-// mint describes never touch this — they don't reach the detect path.
-const mockResolve = jest.fn();
+// Mock the @layervai/qurl SDK so connector.detectWatermark's self-mint-then-
+// resolve tunnel flow can be driven without real /v1 round-trips. `mockClient`
+// carries the three methods resolveDetectTarget() calls — listResources (slug →
+// resource_id), createQurlForResource (mint → at_ token), resolve (NHP knock →
+// target_url) — each a jest.fn the detect tests configure per case (see
+// captureDetect). The `mock`-prefix lets the factory reference it past jest's
+// hoist. Keep the REAL `isPrivateHost` from qurl.js — the host-pin SSRF cases
+// need its IP-literal parsing. Only resolveDetectTarget() builds a QURLClient,
+// so the upload / mint describes never touch this — they don't reach the detect
+// path (they hit globalThis.fetch directly, and the SDK is never invoked there).
+const mockClient = {
+  listResources: jest.fn(),
+  createQurlForResource: jest.fn(),
+  resolve: jest.fn(),
+};
 jest.mock('@layervai/qurl', () => ({
-  QurlClient: jest.fn().mockImplementation(() => ({ resolve: mockResolve })),
+  QURLClient: jest.fn().mockImplementation(() => mockClient),
 }));
+
+// Reset all three SDK method mocks between tests (call counts + implementations).
+// Each detect case re-establishes the legs it needs via captureDetect or an
+// inline mockResolvedValue/mockImplementation, so the default here is a clean
+// slate — the guard cases (guildId-before-mint, slug-unset, key-unset) assert
+// these were NEVER called, which only holds if prior cases' impls are cleared.
+function resetDetectSdkMocks() {
+  mockClient.listResources.mockReset();
+  mockClient.createQurlForResource.mockReset();
+  mockClient.resolve.mockReset();
+}
 
 const originalFetch = globalThis.fetch;
 
@@ -499,14 +518,15 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
 
   beforeEach(() => {
     jest.resetModules();
-    mockResolve.mockReset();
+    resetDetectSdkMocks();
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
       QURL_ENDPOINT: 'https://api.test.local',
       QURL_API_KEY: 'test-key',
-      // resolveDetectTarget() reads this; the detect tests below set it via
-      // the mock and exercise both the configured and unset paths.
-      DETECT_ACCESS_TOKEN: 'at_detect_token',
+      // resolveDetectTarget() reads this; the detect tests below drive the
+      // mint+resolve via the mocked SDK and exercise both the configured and
+      // unset-slug paths.
+      DETECT_TUNNEL_SLUG: 'detect-sandbox',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
@@ -641,24 +661,43 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     assertNoFullHashLeaked();
   });
 
-  // detectWatermark — the bot side of #1101, now over the qURL reverse-tunnel.
-  // The public connector /api/detect path is gone: detectWatermark first
-  // resolve()s the tunnel target (NHP knock for our IP), SSRF-guards it, then
-  // POSTs the raw image bytes with the X-Guild-Id scope header; parses
-  // {detected, qurl_id, match_pct, confidence}. The handler-side guild filter
-  // + cooldown live in commands.js (tested in qurl-send-map.test.js); these
-  // pin the two-leg wire contract this client owns.
-  describe('detectWatermark — resolve-then-POST tunnel contract', () => {
-    // A known-good public https tunnel target the resolve mock hands back —
-    // the real qURL reverse-tunnel host form `r_<id>.qurl.site` (qurl-service
+  // detectWatermark — the bot side of #1101, now over the qURL reverse-tunnel
+  // via an EPHEMERAL self-mint per call. The public connector /api/detect path
+  // is gone: detectWatermark first self-mints a fresh qURL to the detect tunnel
+  // resource (listResources slug → resource_id, createQurlForResource → at_
+  // token, resolve → NHP knock for our IP), SSRF-guards the target, then POSTs
+  // the raw image bytes with the X-Guild-Id scope header; parses {detected,
+  // qurl_id, match_pct, confidence}. The handler-side guild filter + cooldown
+  // live in commands.js (tested in qurl-send-map.test.js); these pin the
+  // multi-leg wire contract this client owns. The mint+resolve legs run through
+  // the mocked @layervai/qurl SDK (mockClient); the image POST runs through
+  // globalThis.fetch — so "no POST happened" = globalThis.fetch not called
+  // (distinct from the SDK mint/resolve legs).
+  describe('detectWatermark — self-mint-then-POST tunnel contract', () => {
+    // A known-good public https tunnel target the resolve leg hands back — the
+    // real qURL reverse-tunnel host form `r_<id>.qurl.site` (qurl-service
     // resourceIDPattern), which the assertPublicHttpsTarget host-pin allows.
     const TUNNEL_TARGET = 'https://r_abc12345678.qurl.site/api/detect';
+    // The resource_id the listResources({slug}) lookup resolves to.
+    const RESOURCE_ID = 'r_abc12345678';
+    // The mint's qurl_link: the at_ access token rides in the fragment.
+    const MINT_LINK = 'https://qurl.link.layerv.xyz/#at_testtoken123';
 
-    // Wire up resolve() → {target_url} AND the subsequent POST to that target.
-    // Returns a getter for the captured POST {url, opts}. Defaults resolve to
-    // TUNNEL_TARGET; pass `target` to exercise the SSRF guard.
-    function captureDetect(jsonResponse, { ok = true, status = 200, target = TUNNEL_TARGET } = {}) {
-      mockResolve.mockResolvedValue({ target_url: target, resource_id: 'res_detect' });
+    // Configure the three SDK legs (listResources → resource list, createQurl-
+    // ForResource → minted qurl_link, resolve → {target_url}) and capture the
+    // image POST (globalThis.fetch). Returns a getter for the captured POST
+    // {url, opts}. Defaults the resolve target to TUNNEL_TARGET; pass `target`
+    // to exercise the SSRF guard. `resources` overrides the listResources shape
+    // (for the not-found case).
+    function captureDetect(jsonResponse, {
+      ok = true,
+      status = 200,
+      target = TUNNEL_TARGET,
+      resources = [{ id: RESOURCE_ID }],
+    } = {}) {
+      mockClient.listResources.mockResolvedValue({ resources });
+      mockClient.createQurlForResource.mockResolvedValue({ qurl_id: 'q_x', qurl_link: MINT_LINK });
+      mockClient.resolve.mockResolvedValue({ target_url: target });
       let captured = null;
       globalThis.fetch = jest.fn(async (url, opts) => {
         captured = { url, opts };
@@ -672,19 +711,21 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       return () => captured;
     }
 
-    it('resolves the tunnel target then POSTs there with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
+    it('self-mints then POSTs to the resolved target with X-Guild-Id, Authorization, Content-Type and raw bytes', async () => {
       const get = captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
       const bytes = Buffer.from('imagedata');
       await connector.detectWatermark(bytes, { guildId: 'guild-9', contentType: 'image/png', apiKey: 'k-detect' });
-      // resolve() is called per-detect with the DETECT_ACCESS_TOKEN (the NHP
-      // knock for our current IP); the POST then goes to the resolved target.
-      expect(mockResolve).toHaveBeenCalledTimes(1);
-      expect(mockResolve).toHaveBeenCalledWith({ access_token: 'at_detect_token' });
+      // The three SDK legs fire: list the active resource for the slug, mint a
+      // fresh ephemeral qURL on it (target_path /api/detect), resolve that (the
+      // NHP knock for our IP) using the at_ token from the minted qurl_link.
+      expect(mockClient.listResources).toHaveBeenCalledWith({ slug: 'detect-sandbox', status: 'active' });
+      expect(mockClient.createQurlForResource).toHaveBeenCalledWith(RESOURCE_ID, { target_path: '/api/detect', expires_in: '5m' });
+      expect(mockClient.resolve).toHaveBeenCalledWith({ access_token: 'at_testtoken123' });
       const { url, opts } = get();
       expect(url).toBe(TUNNEL_TARGET);
       expect(opts.method).toBe('POST');
       expect(opts.headers['X-Guild-Id']).toBe('guild-9');
-      // Per-call apiKey threads into the POST Bearer (NOT the resolve Bearer).
+      // Per-call apiKey threads into the POST Bearer (NOT the SDK Bearer).
       expect(opts.headers['Authorization']).toBe('Bearer k-detect');
       expect(opts.headers['Content-Type']).toBe('image/png');
       expect(opts.body).toBe(bytes);
@@ -696,8 +737,43 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       const { opts } = get();
       expect(opts.headers['Content-Type']).toBe('application/octet-stream');
       // This describe block's config mock sets QURL_API_KEY: 'test-key'
-      // (line ~493); the fallback resolves to it when no apiKey is passed.
+      // (line ~525); the fallback resolves to it when no apiKey is passed.
       expect(opts.headers['Authorization']).toBe('Bearer test-key');
+    });
+
+    it('caches the resource_id — a second detect skips the listResources lookup but re-mints + re-resolves', async () => {
+      // _detectResourceId is module-level cached (stable, non-secret), so the
+      // slug→resource_id listResources call happens ONCE; the ephemeral mint +
+      // the resolve knock still run per call (fresh short-lived token + fresh IP
+      // knock).
+      captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      await connector.detectWatermark(Buffer.from('y'), { guildId: 'g', apiKey: 'k' });
+      expect(mockClient.listResources).toHaveBeenCalledTimes(1);        // cached after the first call
+      expect(mockClient.createQurlForResource).toHaveBeenCalledTimes(2); // re-minted per call
+      expect(mockClient.resolve).toHaveBeenCalledTimes(2);              // re-knocked per call
+    });
+
+    it('clears the cached resource_id when a mint fails so the next detect re-resolves the slug', async () => {
+      // Self-heal: if the tunnel resource is deleted/recreated, the cached id
+      // would 404 on every mint until restart. A mint failure must drop
+      // _detectResourceId so the next detect re-resolves the slug (listResources
+      // runs again) instead of looping on the stale id.
+      captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      mockClient.createQurlForResource
+        .mockResolvedValueOnce({ qurl_id: 'q1', qurl_link: MINT_LINK }) // caches id
+        .mockRejectedValueOnce(new Error('resource not found'))        // clears cache
+        .mockResolvedValueOnce({ qurl_id: 'q3', qurl_link: MINT_LINK }); // after re-resolve
+
+      await connector.detectWatermark(Buffer.from('a'), { guildId: 'g', apiKey: 'k' });
+      await expect(
+        connector.detectWatermark(Buffer.from('b'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow('resource not found');
+      await connector.detectWatermark(Buffer.from('c'), { guildId: 'g', apiKey: 'k' });
+
+      // listResources ran cold on call 1 and AGAIN on call 3 (call 2's mint
+      // failure cleared the cache) — not cached straight through.
+      expect(mockClient.listResources).toHaveBeenCalledTimes(2);
     });
 
     it('returns the normalized detect result on a detected match', async () => {
@@ -723,36 +799,139 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toMatchObject({ status: 400 });
     });
 
-    it('throws when no guildId is given (attribution is guild-scoped) BEFORE resolving', async () => {
+    it('throws when no guildId is given (attribution is guild-scoped) BEFORE minting', async () => {
       // Ordering guard: the guildId check must run before resolveDetectTarget,
-      // so resolve() (the NHP knock) is never issued for a malformed call.
+      // so no list/mint and no resolve (the NHP knock) is ever issued for a
+      // malformed call.
       const get = captureDetect({ detected: false });
       await expect(
         connector.detectWatermark(Buffer.from('x'), { apiKey: 'k' }),
       ).rejects.toThrow(/guild-scoped/);
-      expect(mockResolve).not.toHaveBeenCalled();
+      expect(mockClient.listResources).not.toHaveBeenCalled();
+      expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+      expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(get()).toBeNull();
     });
 
-    it('throws a clear configured-error when DETECT_ACCESS_TOKEN is unset, no POST', async () => {
-      // Re-require connector under a config mock with DETECT_ACCESS_TOKEN unset.
+    it('throws a clear configured-error when DETECT_TUNNEL_SLUG is unset, no mint, no POST', async () => {
+      // Re-require connector under a config mock with DETECT_TUNNEL_SLUG unset.
       jest.resetModules();
-      mockResolve.mockReset();
+      resetDetectSdkMocks();
       jest.doMock('../src/config', () => ({
         CONNECTOR_URL: 'https://connector.test.local',
         QURL_ENDPOINT: 'https://api.test.local',
         QURL_API_KEY: 'test-key',
-        // DETECT_ACCESS_TOKEN intentionally absent.
+        // DETECT_TUNNEL_SLUG intentionally absent.
       }));
-      const connectorNoToken = require('../src/connector');
+      const connectorNoSlug = require('../src/connector');
       const fetchSpy = jest.fn();
       globalThis.fetch = fetchSpy;
       await expect(
-        connectorNoToken.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
-      ).rejects.toThrow(/DETECT_ACCESS_TOKEN is not configured/);
-      // Neither the knock nor the POST is attempted without the token.
-      expect(mockResolve).not.toHaveBeenCalled();
+        connectorNoSlug.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/DETECT_TUNNEL_SLUG is not configured/);
+      // Without the slug, neither the SDK legs nor the POST are attempted.
+      expect(mockClient.listResources).not.toHaveBeenCalled();
+      expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+      expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('throws "resource not found" when the slug resolves to no resource, and does NOT mint or POST', async () => {
+      // An empty resources list (or a list whose [0] has no id) must hit the
+      // clean throw, not a TypeError — and never mint/POST.
+      const get = captureDetect({ detected: false }, { resources: [] });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/resource not found for slug/);
+      // Only the listResources lookup ran; no mint, no resolve.
+      expect(mockClient.listResources).toHaveBeenCalledTimes(1);
+      expect(mockClient.listResources).toHaveBeenCalledWith({ slug: 'detect-sandbox', status: 'active' });
+      expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+      expect(mockClient.resolve).not.toHaveBeenCalled();
+      expect(get()).toBeNull();
+    });
+
+    it('breadcrumbs a slug-lookup transport failure, and does NOT mint or POST', async () => {
+      // The listResources leg is the FIRST network call on a cold cache; a
+      // transport failure must be breadcrumbed (message only) like the mint /
+      // resolve legs, not propagate as an undistinguished throw at the handler.
+      mockClient.listResources.mockRejectedValue(new Error('econnreset'));
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/econnreset/);
+      expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel slug lookup failed',
+        expect.objectContaining({ error: 'econnreset' }),
+      );
+    });
+
+    it('throws "mint did not return an access token" when the mint qurl_link lacks an at_ fragment, and does NOT POST', async () => {
+      // A mint response whose qurl_link has no `#at_…` fragment must hit the
+      // clean throw (breadcrumbed), never POST, and never call resolve.
+      mockClient.listResources.mockResolvedValue({ resources: [{ id: RESOURCE_ID }] });
+      mockClient.createQurlForResource.mockResolvedValue({ qurl_id: 'q_x', qurl_link: 'https://qurl.link.layerv.xyz/no-fragment' });
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/mint did not return an access token/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // No resolve attempted once the mint yields no usable token.
+      expect(mockClient.resolve).not.toHaveBeenCalled();
+      // Breadcrumb: a mint failure is logged (message only — never token/URL).
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel mint failed',
+        expect.objectContaining({ error: expect.stringMatching(/access token/) }),
+      );
+    });
+
+    it('extracts only the at_ token from the mint fragment, stripping trailing params', async () => {
+      // A future qurl_link carrying extra fragment data (&/? params after the
+      // token) must not thread garbage into resolve() — only the at_ token is used.
+      captureDetect({ detected: false, qurl_id: null, match_pct: null, confidence: 0 });
+      mockClient.createQurlForResource.mockResolvedValue({
+        qurl_id: 'q_x',
+        qurl_link: 'https://qurl.link.layerv.xyz/abc#at_tok123&utm=x',
+      });
+      await connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' });
+      expect(mockClient.resolve).toHaveBeenCalledWith({ access_token: 'at_tok123' });
+    });
+
+    it('redacts any at_ token from the resolve-failure breadcrumb', async () => {
+      // Defense-in-depth: even if a future SDK error echoed the resolve request
+      // body (the token), the breadcrumb must never log it.
+      const get = captureDetect({ detected: false });
+      mockClient.resolve.mockRejectedValue(new Error('knock failed for at_secretXYZ789: timeout'));
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow();
+      const warn = logger.warn.mock.calls.find(
+        (c) => c[0] === 'Detect tunnel resolve failed (knock/transport)',
+      );
+      expect(warn).toBeTruthy();
+      expect(warn[1].error).not.toMatch(/at_secretXYZ789/);
+      expect(warn[1].error).toContain('at_[REDACTED]');
+      expect(get()).toBeNull(); // resolve failed → no POST
+    });
+
+    it('redacts any at_ token from the mint-failure breadcrumb', async () => {
+      // The token originates in the mint RESPONSE, so the mint leg is the more
+      // likely leak vector — it must redact too, not just the resolve leg.
+      const get = captureDetect({ detected: false });
+      mockClient.createQurlForResource.mockRejectedValue(new Error('mint rejected: at_leakedABC123 invalid'));
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow();
+      const warn = logger.warn.mock.calls.find((c) => c[0] === 'Detect tunnel mint failed');
+      expect(warn).toBeTruthy();
+      expect(warn[1].error).not.toMatch(/at_leakedABC123/);
+      expect(warn[1].error).toContain('at_[REDACTED]');
+      expect(mockClient.resolve).not.toHaveBeenCalled(); // mint failed → no resolve
+      expect(get()).toBeNull(); // and no POST
     });
 
     it('SSRF guard: a private/loopback resolved target_url throws and NO POST happens', async () => {
@@ -760,8 +939,9 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/private\/internal/);
-      // resolve() ran (the knock), but the SSRF guard rejected before the POST.
-      expect(mockResolve).toHaveBeenCalledTimes(1);
+      // The mint+resolve legs ran (knock issued), but the SSRF guard rejected
+      // before the POST.
+      expect(mockClient.resolve).toHaveBeenCalled();
       expect(get()).toBeNull();
       // Breadcrumb: a rejected target is logged (message only, never the URL).
       expect(logger.warn).toHaveBeenCalledWith(
@@ -790,8 +970,8 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/userinfo/);
-      // resolve() ran (the knock), but the userinfo guard rejected before the POST.
-      expect(mockResolve).toHaveBeenCalledTimes(1);
+      // The resolve leg ran (knock), but the userinfo guard rejected before the POST.
+      expect(mockClient.resolve).toHaveBeenCalled();
       expect(get()).toBeNull();
     });
 
@@ -805,7 +985,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/qurl\.site/);
-      expect(mockResolve).toHaveBeenCalledTimes(1);
+      expect(mockClient.resolve).toHaveBeenCalled();
       expect(get()).toBeNull();
       // And it's logged via the SSRF-rejection breadcrumb (message only).
       expect(logger.warn).toHaveBeenCalledWith(
@@ -827,18 +1007,18 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       expect(get()).toBeNull();
     });
 
-    it('requires config.QURL_API_KEY for the resolve Bearer even when a per-call apiKey is given (no resolve, no POST)', async () => {
-      // resolve() always authenticates with the global QURL_API_KEY (getQurlClient),
-      // so a set per-call apiKey can't substitute for it. With QURL_API_KEY unset
-      // we must fail fast with the clean configured-error BEFORE any knock or POST,
-      // not let resolve go out with an undefined Bearer.
+    it('requires config.QURL_API_KEY for the SDK Bearer even when a per-call apiKey is given (no mint, no POST)', async () => {
+      // The mint+resolve legs always authenticate with the global QURL_API_KEY
+      // (the SDK's apiKey Bearer), so a set per-call apiKey can't substitute for
+      // it. With QURL_API_KEY unset we must fail fast with the clean
+      // configured-error BEFORE any mint or POST.
       jest.resetModules();
-      mockResolve.mockReset();
+      resetDetectSdkMocks();
       jest.doMock('../src/config', () => ({
         CONNECTOR_URL: 'https://connector.test.local',
         QURL_ENDPOINT: 'https://api.test.local',
         // QURL_API_KEY intentionally absent.
-        DETECT_ACCESS_TOKEN: 'at_detect_token',
+        DETECT_TUNNEL_SLUG: 'detect-sandbox',
       }));
       const connectorNoKey = require('../src/connector');
       const fetchSpy = jest.fn();
@@ -846,23 +1026,26 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       await expect(
         connectorNoKey.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k-detect' }),
       ).rejects.toThrow(/QURL_API_KEY is not configured/);
-      // A per-call apiKey can't stand in for the resolve Bearer: no knock, no POST.
-      expect(mockResolve).not.toHaveBeenCalled();
+      // A per-call apiKey can't stand in for the SDK Bearer: no mint, no POST.
+      expect(mockClient.listResources).not.toHaveBeenCalled();
+      expect(mockClient.createQurlForResource).not.toHaveBeenCalled();
+      expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
     it('throws "unparseable target URL" when resolve() returns no target_url, and does NOT POST', async () => {
-      // A resolve() success envelope missing target_url (e.g. {} or {resource_id}
-      // only): assertPublicHttpsTarget(undefined) → new URL(undefined) throws →
-      // caught → the graceful "unparseable target URL". Pins that a future shape
-      // change (or a different destructure) can't silently POST to undefined.
-      mockResolve.mockResolvedValue({ resource_id: 'res_detect' });
+      // A resolve() success envelope missing target_url (e.g. {} or another shape):
+      // assertPublicHttpsTarget(undefined) → new URL(undefined) throws → caught →
+      // the graceful "unparseable target URL". Pins that a future shape change
+      // (or a different destructure) can't silently POST to undefined.
+      mockClient.listResources.mockResolvedValue({ resources: [{ id: RESOURCE_ID }] });
+      mockClient.createQurlForResource.mockResolvedValue({ qurl_id: 'q_x', qurl_link: MINT_LINK });
+      mockClient.resolve.mockResolvedValue({}); // no target_url
       const fetchSpy = jest.fn();
       globalThis.fetch = fetchSpy;
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/unparseable target URL/);
-      expect(mockResolve).toHaveBeenCalledTimes(1);
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
@@ -870,19 +1053,39 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       // A resolve() rejection — the knock or transport failing after the SDK's
       // own retries — propagates to the handler (intended); crucially NO POST is
       // attempted, so a failed knock never leaks an un-knocked request.
-      mockResolve.mockRejectedValue(new Error('resolve transport failure'));
+      mockClient.listResources.mockResolvedValue({ resources: [{ id: RESOURCE_ID }] });
+      mockClient.createQurlForResource.mockResolvedValue({ qurl_id: 'q_x', qurl_link: MINT_LINK });
+      mockClient.resolve.mockRejectedValue(new Error('resolve transport failure'));
       const fetchSpy = jest.fn();
       globalThis.fetch = fetchSpy;
       await expect(
         connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
       ).rejects.toThrow(/resolve transport failure/);
-      expect(mockResolve).toHaveBeenCalledTimes(1);
       expect(fetchSpy).not.toHaveBeenCalled();
       // Breadcrumb: a failed knock/transport is logged distinctly from a
       // rejected target, so activation failures are diagnosable.
       expect(logger.warn).toHaveBeenCalledWith(
         'Detect tunnel resolve failed (knock/transport)',
         expect.objectContaining({ error: 'resolve transport failure' }),
+      );
+    });
+
+    it('propagates a mint failure (transport) and does NOT resolve or POST', async () => {
+      // A createQurlForResource rejection (the mint leg failing after retries) is
+      // breadcrumbed via 'Detect tunnel mint failed' and rethrown — never
+      // reaching resolve or the image POST.
+      mockClient.listResources.mockResolvedValue({ resources: [{ id: RESOURCE_ID }] });
+      mockClient.createQurlForResource.mockRejectedValue(new Error('mint transport failure'));
+      const fetchSpy = jest.fn();
+      globalThis.fetch = fetchSpy;
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/mint transport failure/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mockClient.resolve).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel mint failed',
+        expect.objectContaining({ error: 'mint transport failure' }),
       );
     });
   });

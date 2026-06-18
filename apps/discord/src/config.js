@@ -431,16 +431,17 @@ module.exports = {
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
 
-  // Multi-use qURL access token (`at_...`) the bot resolves to reach the
-  // watermark-detect endpoint over the qURL reverse-tunnel (PR-3, #1101).
-  // connector.js's resolveDetectTarget() calls QurlClient.resolve({
-  // access_token: DETECT_ACCESS_TOKEN }) — which issues an NHP knock for the
-  // bot's current IP — immediately before each /api/detect POST. Secret-
-  // shaped (read verbatim from env like QURL_API_KEY / QURL_WEBHOOK_SECRET);
-  // no default. When unset, /qurl detect surfaces a clear configured-error
-  // (resolveDetectTarget throws) rather than silently failing. SSM-seeded at
-  // detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
-  DETECT_ACCESS_TOKEN: process.env.DETECT_ACCESS_TOKEN,
+  // Slug of the qURL reverse-tunnel resource that fronts the watermark-detect
+  // endpoint (#1101). connector.js's resolveDetectTarget() resolves this slug to
+  // a resource_id (`GET /resources?slug=…`), then self-mints a FRESH ephemeral
+  // qURL on it (`POST /resources/{id}/qurls`) and resolves that — the NHP knock
+  // for the bot's current IP — immediately before each /api/detect POST. No
+  // pre-seeded access token: the bot mints per call with its own QURL_API_KEY.
+  // A plain NON-secret env (e.g. `detect-sandbox` / `detect-prod`), read
+  // verbatim; no default. When unset, /qurl detect surfaces a clear
+  // configured-error (resolveDetectTarget throws) rather than silently failing.
+  // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
+  DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG,
 
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL
