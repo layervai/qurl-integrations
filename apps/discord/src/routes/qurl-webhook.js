@@ -630,7 +630,7 @@ async function getSenderCounterRenderState(sendId) {
     });
   senderCounterRenderStateCache.set(sendId, {
     promise,
-    expiresAt: now + senderCounterRenderStateCacheTtlMs(),
+    expiresAt: now + config.QURL_VIEW_COUNTER_COALESCE_MS,
   });
   return promise;
 }
@@ -921,7 +921,6 @@ function editSenderCounterInBackground({
         patchCachedSenderCounterRenderState(sendId, {
           lastRenderedCount: N,
           lastRenderedAt: Date.now(),
-          viewedCount: Math.max(typeof state.viewedCount === 'number' ? state.viewedCount : 0, N),
         });
       } else {
         senderCounterRenderStateCache.delete(sendId);
