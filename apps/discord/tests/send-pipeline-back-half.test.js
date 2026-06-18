@@ -502,6 +502,31 @@ describe('monitorLinkStatus — shared monotonic floor with the webhook fast-pat
     monitor.stop();
   });
 
+  it('falls back to the local poll count when the persisted floor read fails', async () => {
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      TWO_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+      '1m', 'Sent to 2 users', { components: [] }, 2,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    mockDb.getSendRenderedCount.mockRejectedValueOnce(new Error('DDB floor read failed'));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('👀 1 viewed / 1 pending'),
+    }));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'Monitor floor-read failed; rendering local poll count',
+      { sendId: 'send-1', error: 'DDB floor read failed' },
+    );
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 1);
+    monitor.stop();
+  });
+
   it('COMMIT-AFTER-EDIT: a failed poll render does NOT advance the floor (mirror of the fast-path fence)', async () => {
     // If the poll advanced the floor on a render that DIDN'T land, the
     // fast-path's N<=L skip would strand a count never displayed —

@@ -1510,6 +1510,9 @@ describe('qurl sends', () => {
     for (const attr of ['interaction_token', 'interaction_app_id', 'expected_count', 'confirm_base_msg', 'confirm_expires_at', 'viewed_count']) {
       expect(input.UpdateExpression).toContain(attr);
     }
+    const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
+      .find(([, val]) => val === 3)?.[0];
+    expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
   });
 
   test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
@@ -1530,6 +1533,18 @@ describe('qurl sends', () => {
     expect(input.UpdateExpression).not.toContain('confirm_expires_at');
     expect(input.UpdateExpression).not.toContain('viewed_count');
     expect(Object.values(input.ExpressionAttributeValues)).not.toContain(null);
+    const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
+      .find(([, val]) => val === 5)?.[0];
+    expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
+  });
+
+  test('saveSendConfirmState: token-only partial update has no expected_count monotonic condition', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', { interactionToken: 'tok-refresh' });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('interaction_token');
+    expect(input.UpdateExpression).not.toContain('expected_count');
+    expect(input.ConditionExpression).toBeUndefined();
   });
 
   test('saveSendConfirmState: no recognized field → no write at all (not an empty SET)', async () => {

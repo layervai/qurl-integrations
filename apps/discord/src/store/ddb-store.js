@@ -1913,20 +1913,26 @@ async function saveSendConfirmState(sendId, {
   };
   const sets = [];
   const values = {};
+  let expectedCountPlaceholder = null;
   let i = 0;
   for (const [attr, val] of Object.entries(fields)) {
     if (val === undefined) continue;
     const placeholder = `:v${i++}`;
     sets.push(`${attr} = ${placeholder}`);
     values[placeholder] = val;
+    if (attr === 'expected_count') expectedCountPlaceholder = placeholder;
   }
   if (sets.length === 0) return;
-  await ddb.send(new UpdateCommand({
+  const update = {
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
     UpdateExpression: `SET ${sets.join(', ')}`,
     ExpressionAttributeValues: values,
-  }));
+  };
+  if (expectedCountPlaceholder) {
+    update.ConditionExpression = `attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`;
+  }
+  await ddb.send(new UpdateCommand(update));
 }
 
 // Deduped resource_id list. Currently only used by tests; src/ uses
