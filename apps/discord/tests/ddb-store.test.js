@@ -1261,6 +1261,8 @@ describe('qurl sends', () => {
     });
     // No senderDiscordId arg — PR-B's webhook path has no sender context.
     const state = await store.getSendRenderState('s1');
+    const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(input.ConsistentRead).toBe(true);
     expect(state).toEqual({
       interactionToken: 'tok-abc', interactionAppId: 'app-1',
       expectedCount: 5, lastRenderedCount: 2,

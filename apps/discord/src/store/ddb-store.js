@@ -1679,6 +1679,7 @@ async function getSendRenderState(sendId) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.qurl_send_configs,
     Key: { send_id: sendId },
+    ConsistentRead: true,
   }));
   const row = res.Item;
   if (!row) return null;
