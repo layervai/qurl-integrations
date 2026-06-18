@@ -128,7 +128,7 @@ const flipVerdict = () => flip.flipVerdict(logger);
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockRecordQurlView.mockResolvedValue('recorded');
+  mockRecordQurlView.mockResolvedValue({ result: 'recorded', firstView: true });
   mockFindSendsByQurlId.mockResolvedValue([READY_ROW]);
   mockMarkConsumedDMEdited.mockResolvedValue(true);
   mockClearConsumedDMEdited.mockResolvedValue(undefined);

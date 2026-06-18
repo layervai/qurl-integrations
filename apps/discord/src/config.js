@@ -510,6 +510,17 @@ module.exports = {
   // QURL_DETECT_COOLDOWN_MS explicitly — decoupled so a future send-cadence
   // change can't silently re-tune the oracle. See setDetectCooldown.
   QURL_DETECT_COOLDOWN_MS: detectCooldownMs,
+  // Leading-edge debounce for the sub-second view-counter fast-path
+  // (qurl-webhook.js editSenderCounterInBackground). On a high-fan-out
+  // send (cap QURL_SEND_MAX_RECIPIENTS, default 20000) every recipient's
+  // first view fires a qurl.accessed webhook; un-coalesced, each would
+  // PATCH the sender confirmation, storming Discord's per-message edit
+  // budget (429s). This bounds fast-path edits per send to ~1 per window
+  // per replica; distinct first-view aggregate writes are sharded in
+  // qurl_views so they do not funnel through one send row. Default to the
+  // largest sub-second window (900ms); larger env overrides are rejected
+  // back to that default rather than clamped.
+  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 900, { minPositive: true, max: 900 }),
 
   SHARD_ID,
 
