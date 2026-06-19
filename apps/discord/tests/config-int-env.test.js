@@ -46,6 +46,26 @@ function captureFreshConfig(envOverrides, run) {
   });
 }
 
+describe('config — Discord install state rollout', () => {
+  test('trims DISCORD_INSTALL_STATE_SECRET and parses required-state flag literally', () => {
+    const secret = '2'.repeat(64);
+    captureFreshConfig({
+      DISCORD_INSTALL_STATE_SECRET: `  ${secret}\n`,
+      DISCORD_INSTALL_STATE_REQUIRED: 'true',
+    }, (cfg) => {
+      expect(cfg.DISCORD_INSTALL_STATE_SECRET).toBe(secret);
+      expect(cfg.DISCORD_INSTALL_STATE_SECRET_MIN_CHARS).toBe(64);
+      expect(cfg.DISCORD_INSTALL_STATE_REQUIRED).toBe(true);
+    });
+  });
+
+  test('keeps required-state flag off for typo values', () => {
+    captureFreshConfig({ DISCORD_INSTALL_STATE_REQUIRED: 'TRUE' }, (cfg) => {
+      expect(cfg.DISCORD_INSTALL_STATE_REQUIRED).toBe(false);
+    });
+  });
+});
+
 describe('config.intEnv — strictInteger + minPositive (QURL_BOT_MAX_INFLIGHT_HANDLERS)', () => {
   // QURL_BOT_MAX_INFLIGHT_HANDLERS is the canonical strictInteger +
   // minPositive caller. Trailing-garbage rejection is load-bearing:

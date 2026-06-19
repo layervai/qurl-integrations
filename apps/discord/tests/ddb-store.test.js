@@ -69,8 +69,11 @@ process.env.DDB_TABLE_PREFIX = 'test-prefix-';
 process.env.AWS_REGION = 'us-east-2';
 
 const store = require('../src/store/ddb-store');
+const logger = require('../src/logger');
+const { AUDIT_EVENTS } = require('../src/constants');
 
 beforeEach(() => {
+  jest.clearAllMocks();
   ddbMock.reset();
   // mockReset (not mockClear) so a future test setting a sticky
   // mockImplementation can't leak into the next case — mockClear only
@@ -390,6 +393,29 @@ describe('guild configs', () => {
     // wrapper above.
     expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
     expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
+    expect(input.ReturnValues).toBe('UPDATED_OLD');
+  });
+
+  test('setGuildApiKey: audits when configured_by changes on an existing guild', async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { configured_by: 'old-admin' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'new-admin');
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: 'g-1',
+      old_admin_id: 'old-admin',
+      new_admin_id: 'new-admin',
+    });
+  });
+
+  test('setGuildApiKey: does not audit first setup or same-admin re-key', async () => {
+    ddbMock.on(UpdateCommand)
+      .resolvesOnce({})
+      .resolvesOnce({ Attributes: { guild_id: 'g-1', configured_by: 'admin' } });
+    await store.setGuildApiKey('g-1', 'plain-key', 'admin');
+    await store.setGuildApiKey('g-1', 'plain-key-2', 'admin');
+    expect(logger.audit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED,
+      expect.anything(),
+    );
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {
