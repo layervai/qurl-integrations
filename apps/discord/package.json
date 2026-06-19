@@ -43,10 +43,10 @@
     "supertest": "^7.2.2"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
   },
   "overrides": {
-    "undici": "^6.24.1",
+    "undici": "8.5.0",
     "lodash": "^4.17.21"
   }
 }
