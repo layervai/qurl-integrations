@@ -35,8 +35,8 @@ const (
 
 // DDBStateStore stores short-lived OAuth state in the existing workspace_state
 // table under reserved oauth_state# keys. It does not use the workspace API-key
-// cache/encryptor path: these rows are not workspace credentials, carry a 5m
-// TTL, and are consumed atomically on callback.
+// cache/encryptor path: these rows are not workspace credentials, carry a
+// 1-hour TTL, and are deleted atomically on callback.
 type DDBStateStore struct {
 	Client    auth.DynamoDBClient
 	TableName string
@@ -105,25 +105,55 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 func (s *DDBStateStore) StartState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
 	return s.updateAndReadState(ctx, handle, now, oauthStateAttrStartedAt,
 		"attribute_exists(#pk) AND attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
-		ddbtypes.ReturnValueAllNew, false)
+		ddbtypes.ReturnValueAllNew)
 }
 
-// ConsumeState atomically marks an opaque state consumed and returns the prior
-// payload, including the PKCE verifier needed for Auth0 token exchange.
+// ConsumeState atomically deletes an opaque state and returns the prior payload,
+// including the PKCE verifier needed for Auth0 token exchange.
 func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
-	return s.updateAndReadState(ctx, handle, now, oauthStateAttrConsumedAt,
-		"attribute_exists(#pk) AND attribute_exists(#started_at) AND attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
-		ddbtypes.ReturnValueAllOld, true)
-}
-
-func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, now time.Time, markAttr, condition string, returnValues ddbtypes.ReturnValue, removeVerifier bool) (VerifiedState, error) {
 	if err := s.validate(); err != nil {
 		return VerifiedState{}, err
 	}
 	if handle == "" {
 		return VerifiedState{}, errStateMalformed
 	}
-	updateExpression := "SET #mark = if_not_exists(#mark, :now_iso)"
+	out, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(s.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			workspaceStatePKAttr: &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
+		},
+		ConditionExpression: aws.String(
+			"attribute_exists(#pk) AND attribute_exists(#started_at) AND " +
+				"attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
+		),
+		ExpressionAttributeNames: map[string]string{
+			"#pk":          workspaceStatePKAttr,
+			"#started_at":  oauthStateAttrStartedAt,
+			"#consumed_at": oauthStateAttrConsumedAt,
+			"#expires_at":  oauthStateAttrExpiresAt,
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
+		},
+		ReturnValues: ddbtypes.ReturnValueAllOld,
+	})
+	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			return VerifiedState{}, errStateExpired
+		}
+		return VerifiedState{}, fmt.Errorf("oauth state store delete: %w", err)
+	}
+	return verifiedStateFromDDBItem(out.Attributes)
+}
+
+func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, now time.Time, markAttr, condition string, returnValues ddbtypes.ReturnValue) (VerifiedState, error) {
+	if err := s.validate(); err != nil {
+		return VerifiedState{}, err
+	}
+	if handle == "" {
+		return VerifiedState{}, errStateMalformed
+	}
 	names := map[string]string{
 		"#pk":          workspaceStatePKAttr,
 		"#mark":        markAttr,
@@ -131,16 +161,12 @@ func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, n
 		"#consumed_at": oauthStateAttrConsumedAt,
 		"#expires_at":  oauthStateAttrExpiresAt,
 	}
-	if removeVerifier {
-		updateExpression += " REMOVE #verifier"
-		names["#verifier"] = oauthStateAttrVerifier
-	}
 	out, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			workspaceStatePKAttr: &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
 		},
-		UpdateExpression:         aws.String(updateExpression),
+		UpdateExpression:         aws.String("SET #mark = if_not_exists(#mark, :now_iso)"),
 		ConditionExpression:      aws.String(condition),
 		ExpressionAttributeNames: names,
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{

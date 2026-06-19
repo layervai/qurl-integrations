@@ -127,13 +127,15 @@ var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin m
 // failures so old installs can be pointed at the reinstall path.
 var ErrSlackBotTokenNotConfigured = errors.New("workspace Slack bot token not configured — admin must reinstall the Slack app")
 
-// DynamoDBClient is the slice of *dynamodb.Client the provider actually
-// uses. Exposed as an interface so tests can inject a fake without
-// spinning up localstack.
+// DynamoDBClient is the slice of *dynamodb.Client used by the workspace
+// provider and the OAuth state store that reuses its client/table wiring.
+// Exposed as an interface so tests can inject a fake without spinning up
+// localstack.
 type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 // FieldEncryptor seals/opens an attribute's plaintext using a customer-

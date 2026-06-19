@@ -317,7 +317,7 @@ func TestStartRejectsExpiredState(t *testing.T) {
 	cfg := newStartCfg()
 	old := cfg.Now()
 	state, _ := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, old)
-	cfg.Now = func() time.Time { return old.Add(10 * time.Minute) }
+	cfg.Now = func() time.Time { return old.Add(stateMaxAge + time.Second) }
 	h := Start(cfg)
 	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()

@@ -52,6 +52,7 @@ func (s *memoryStateStore) ConsumeState(_ context.Context, handle string, now ti
 		return VerifiedState{}, errStateExpired
 	}
 	s.consumed[handle] = true
+	delete(s.items, handle)
 	return state.VerifiedState, nil
 }
 
@@ -78,6 +79,21 @@ func TestMintStoredStateProducesOpaqueHandle(t *testing.T) {
 		t.Fatalf("stored payload mismatch: %+v", got)
 	}
 	assertStateHasNonceAndVerifier(t, got.Nonce, got.CodeVerifier)
+}
+
+func TestMintStoredStateExpiresAfterOneHour(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	store := newMemoryStateStore()
+	handle, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "", SetupModeReuse, now)
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	store.mu.Lock()
+	state := store.items[handle]
+	store.mu.Unlock()
+	if got := state.ExpiresAt.Sub(now); got != time.Hour {
+		t.Fatalf("stored state lifetime = %s, want 1h", got)
+	}
 }
 
 func containsForTest(s, substr string) bool {

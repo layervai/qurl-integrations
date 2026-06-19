@@ -221,7 +221,7 @@ func TestVerifyStateRejectsExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintState: %v", err)
 	}
-	if _, err := VerifyState(testSecret, tok, now.Add(10*time.Minute)); !errors.Is(err, errStateExpired) {
+	if _, err := VerifyState(testSecret, tok, now.Add(stateMaxAge+time.Second)); !errors.Is(err, errStateExpired) {
 		t.Fatalf("want errStateExpired, got %v", err)
 	}
 }

@@ -16,6 +16,9 @@ type fakeOAuthStateDDB struct {
 	updateInput  *dynamodb.UpdateItemInput
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
+	deleteInput  *dynamodb.DeleteItemInput
+	deleteOutput *dynamodb.DeleteItemOutput
+	deleteErr    error
 }
 
 func (f *fakeOAuthStateDDB) GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -33,6 +36,14 @@ func (f *fakeOAuthStateDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateIte
 		return f.updateOutput, f.updateErr
 	}
 	return &dynamodb.UpdateItemOutput{Attributes: storedStateDDBItem()}, nil
+}
+
+func (f *fakeOAuthStateDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteInput = in
+	if f.deleteOutput != nil || f.deleteErr != nil {
+		return f.deleteOutput, f.deleteErr
+	}
+	return &dynamodb.DeleteItemOutput{Attributes: storedStateDDBItem()}, nil
 }
 
 func storedStateDDBItem() map[string]ddbtypes.AttributeValue {
@@ -80,6 +91,9 @@ func TestDDBStateStorePutStateWritesOpaqueStateRow(t *testing.T) {
 	if _, ok := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN); !ok {
 		t.Fatalf("ttl attr missing/wrong: %v", ddb.putInput.Item[oauthStateAttrTTL])
 	}
+	if got := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN).Value; got != "1700003600" {
+		t.Fatalf("ttl attr = %q, want one-hour expiry epoch", got)
+	}
 	if got := aws.ToString(ddb.putInput.ConditionExpression); !strings.Contains(got, "attribute_not_exists") {
 		t.Fatalf("PutState must be conditional, got %q", got)
 	}
@@ -95,16 +109,19 @@ func TestDDBStateStoreConsumeStateIsConditionalOneShot(t *testing.T) {
 	if got.TeamID != testStateTeamID || got.Email != testNormalizedSetupEmail || got.Mode != SetupModeRotate {
 		t.Fatalf("verified state mismatch: %+v", got)
 	}
-	cond := aws.ToString(ddb.updateInput.ConditionExpression)
+	if ddb.updateInput != nil {
+		t.Fatalf("ConsumeState must delete, not update: %+v", ddb.updateInput)
+	}
+	if ddb.deleteInput == nil {
+		t.Fatal("expected DeleteItem")
+	}
+	cond := aws.ToString(ddb.deleteInput.ConditionExpression)
 	for _, want := range []string{"attribute_exists(#started_at)", "attribute_not_exists(#consumed_at)", "#expires_at > :now_epoch"} {
 		if !strings.Contains(cond, want) {
 			t.Fatalf("consume condition missing %q in %q", want, cond)
 		}
 	}
-	if expr := aws.ToString(ddb.updateInput.UpdateExpression); !strings.Contains(expr, "REMOVE #verifier") {
-		t.Fatalf("consume update must remove stored verifier, got %q", expr)
-	}
-	if ddb.updateInput.ReturnValues != ddbtypes.ReturnValueAllOld {
-		t.Fatalf("consume ReturnValues = %v, want ALL_OLD", ddb.updateInput.ReturnValues)
+	if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
+		t.Fatalf("consume ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
 	}
 }

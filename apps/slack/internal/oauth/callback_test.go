@@ -855,10 +855,10 @@ func TestCallbackRejectsMissingCookie(t *testing.T) {
 
 func TestCallbackRejectsExpiredState(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
-	// Mint state at T0; verify at T0+10min — past stateMaxAge (5min).
+	// Mint state at T0; verify after stateMaxAge.
 	oldNow := cfg.Now()
 	state, _ := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, oldNow)
-	cfg.Now = func() time.Time { return oldNow.Add(10 * time.Minute) }
+	cfg.Now = func() time.Time { return oldNow.Add(stateMaxAge + time.Second) }
 
 	h := Callback(cfg)
 	rec := httptest.NewRecorder()

@@ -389,7 +389,7 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 			// to bound PII exposure in operator logs.
 			"error_description", truncateForLog(q.Get("error_description"), 128))
 		// Clear the cookie even on the Auth0-error branch so the
-		// stale state can't be replayed within the 5-minute TTL.
+		// stale state can't be replayed within the state TTL.
 		// On the success path, the cookie clears after verify; this
 		// closes the same-browser-replay window on Auth0 reject too.
 		clearStateCookie(w)

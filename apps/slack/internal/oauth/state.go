@@ -39,16 +39,17 @@ import (
 // /qurl setup slash-command handler, which has already verified the
 // Slack signing secret and therefore the caller's workspace identity.
 //
-// Expiry: 5 minutes from mint covers the slash-command-reply → click →
-// Auth0 authenticate → callback round-trip.
+// Expiry: 1 hour from mint matches the qURL Connector bootstrap key lifetime
+// used by /qurl-admin protect-connector, giving admins the same setup window
+// whether they are connecting the workspace account or bootstrapping a sidecar.
 //
 // Replay posture: StateStore-backed states are consumed once on callback. The
-// store writes a `ttl` cleanup hint, but the consume path also checks expiry in
-// the conditional write because table TTL is best-effort and may lag. The
-// double-submit cookie still binds the Auth0 callback to the browser that opened
-// /start.
+// store writes a `ttl` cleanup hint for abandoned states, but successful
+// callbacks delete the row immediately and every read/consume path checks expiry
+// conditionally because table TTL is best-effort and may lag. The double-submit
+// cookie still binds the Auth0 callback to the browser that opened /start.
 const (
-	stateMaxAge          = 5 * time.Minute
+	stateMaxAge          = time.Hour
 	stateLegacyParts     = 5
 	stateEmailParts      = 6
 	stateEmailModeParts  = 7
