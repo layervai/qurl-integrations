@@ -2330,6 +2330,30 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     }));
   });
 
+  it('file send: mint partial metadata reaches the primary failure log without links', async () => {
+    const interaction = makeInteraction();
+    const partialErr = Object.assign(new Error('Connector mint_link failed (502)'), {
+      status: 502,
+      partialLinkCount: 2,
+      partialQurlIds: ['q_partial_one', 'q_partial_two'],
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockRejectedValueOnce(partialErr);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to prepare QURL links',
+      expect.objectContaining({
+        status: 502,
+        partial_link_count: 2,
+        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
+  });
+
   it('file send: quota_exceeded does NOT emit at the primary site either', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
