@@ -73,6 +73,15 @@ describe('verifyMarketingInstallState', () => {
     expect(verifyMarketingInstallState(state, NOW)).toEqual({ ok: false, reason: 'signature' });
   });
 
+  it('rejects uppercase hex signatures as malformed', () => {
+    const signed = sign(basePayload);
+    const dot = signed.lastIndexOf('.');
+    const encoded = signed.slice(0, dot);
+    const sig = signed.slice(dot + 1).toUpperCase();
+    expect(verifyMarketingInstallState(`${encoded}.${sig}`, NOW))
+      .toEqual({ ok: false, reason: 'malformed' });
+  });
+
   it('rejects a payload segment swapped after signing a different encoded body', () => {
     const signed = sign(basePayload);
     const sig = signed.slice(signed.lastIndexOf('.') + 1);

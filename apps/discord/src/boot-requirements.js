@@ -110,7 +110,7 @@ function missingViewUpdatePushKeys(cfg) {
 // itself is not configured yet, that route already fails closed with
 // 503, so defer this verifier-specific check until the callback is live.
 function discordInstallStateConfigProblems(cfg) {
-  if (cfg.isDiscordInstallConfigured === false) return [];
+  if (!cfg.isDiscordInstallConfigured) return [];
   if (!cfg.DISCORD_INSTALL_STATE_REQUIRED) return [];
   if (!cfg.DISCORD_INSTALL_STATE_SECRET) {
     return ['DISCORD_INSTALL_STATE_SECRET is required when DISCORD_INSTALL_STATE_REQUIRED=true'];

@@ -25,7 +25,7 @@ function verifyMarketingInstallState(state, nowSec = Math.floor(Date.now() / 100
   }
   const encoded = state.slice(0, dot);
   const sigHex = state.slice(dot + 1);
-  if (!/^[a-f0-9]{64}$/i.test(sigHex)) {
+  if (!/^[a-f0-9]{64}$/.test(sigHex)) {
     return { ok: false, reason: 'malformed' };
   }
 

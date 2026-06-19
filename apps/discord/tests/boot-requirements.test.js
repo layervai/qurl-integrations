@@ -223,6 +223,7 @@ describe('missingViewUpdatePushKeys', () => {
 describe('discordInstallStateConfigProblems', () => {
   it('returns empty while required-state rollout flag is off', () => {
     expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
       DISCORD_INSTALL_STATE_REQUIRED: false,
       DISCORD_INSTALL_STATE_SECRET: '',
       DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
@@ -240,6 +241,7 @@ describe('discordInstallStateConfigProblems', () => {
 
   it('requires the signing secret after the required-state flag flips', () => {
     expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
       DISCORD_INSTALL_STATE_REQUIRED: true,
       DISCORD_INSTALL_STATE_SECRET: '',
       DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
@@ -250,6 +252,7 @@ describe('discordInstallStateConfigProblems', () => {
 
   it('rejects a too-short signing secret after the required-state flag flips', () => {
     expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
       DISCORD_INSTALL_STATE_REQUIRED: true,
       DISCORD_INSTALL_STATE_SECRET: '2'.repeat(63),
       DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
@@ -260,6 +263,7 @@ describe('discordInstallStateConfigProblems', () => {
 
   it('returns empty when required-state mode has a 32-byte-hex-length secret', () => {
     expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
       DISCORD_INSTALL_STATE_REQUIRED: true,
       DISCORD_INSTALL_STATE_SECRET: '2'.repeat(64),
       DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
