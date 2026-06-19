@@ -2067,9 +2067,11 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
       ':b': configuredBy,
       ':u': now,
     },
-    // Return only old values for touched attrs: keeps the old
-    // configured_by read atomic with the re-key without returning the
-    // entire previous guild_configs row.
+    // Return old values for touched attrs: keeps the old configured_by
+    // read atomic with the re-key without returning the entire previous
+    // guild_configs row. DynamoDB also returns the old encrypted
+    // qurl_api_key because it is touched by this update; leave it
+    // unread so the audit payload never carries key material.
     ReturnValues: 'UPDATED_OLD',
   }));
   const oldConfiguredBy = res.Attributes && res.Attributes.configured_by;

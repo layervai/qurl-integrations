@@ -93,7 +93,7 @@ setup) means required to use that feature.
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
-| `DISCORD_INSTALL_STATE_SECRET` | Discord install state | Shared 64-character hex HMAC secret for signed layerv.ai "Add to Discord" links; the bot and marketing both use the hex string as the raw HMAC key. Set on the bot before marketing flips the link to include `state`. |
+| `DISCORD_INSTALL_STATE_SECRET` | Discord install state | Shared 64-character hex HMAC secret for signed layerv.ai "Add to Discord" links; the bot and marketing both use the hex string as the raw HMAC key, and the state signature segment is lowercase SHA-256 hex. Set on the bot before marketing flips the link to include `state`. |
 | `DISCORD_INSTALL_STATE_REQUIRED` | Discord install state | Set to `true` only after the bot secret is deployed and all layerv.ai install links send signed `state`; then callbacks missing `state` are rejected. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
