@@ -100,6 +100,19 @@ function deriveInstanceIp() {
   return null;
 }
 
+function normalizeBaseUrl(raw) {
+  const value = (raw || 'http://localhost:3000').trim();
+  try {
+    const url = new URL(value);
+    if (!url.username && !url.password && url.pathname === '/' && !url.search && !url.hash) {
+      return `${url.protocol}//${url.host}`;
+    }
+  } catch {
+    // Leave malformed values untouched so boot diagnostics quote what was set.
+  }
+  return value;
+}
+
 // Safe int parser: handles NaN and falsy-zero correctly.
 //
 // Options:
@@ -386,7 +399,7 @@ module.exports = {
 
   // Server
   PORT: intEnv('PORT', 3000),
-  BASE_URL: process.env.BASE_URL || 'http://localhost:3000',
+  BASE_URL: normalizeBaseUrl(process.env.BASE_URL),
 
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute

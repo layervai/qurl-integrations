@@ -160,7 +160,7 @@ describe('baseUrlHttpsProblem', () => {
     };
   }
 
-  it('accepts any https:// BASE_URL (the good prod case)', () => {
+  it('accepts a bare https:// BASE_URL origin (the good prod case)', () => {
     const HTTPS = 'https://bot.example.com';
     expect(baseUrlHttpsProblem(cfg({ BASE_URL: HTTPS }), true)).toBeNull();
     expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: HTTPS }), true)).toBeNull();
@@ -181,6 +181,37 @@ describe('baseUrlHttpsProblem', () => {
     const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://' }), true);
     expect(msg).not.toBeNull();
     expect(msg).toContain('https://');
+  });
+
+  it('rejects qURL OAuth configured + BASE_URL with path/query/fragment/userinfo', () => {
+    for (const bad of [
+      'https://bot.example.com/prefix',
+      'https://bot.example.com?debug=true',
+      'https://bot.example.com#callback',
+      'https://user:pass@bot.example.com',
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).toContain(bad);
+    }
+  });
+
+  it('rejects qURL OAuth configured + local-only BASE_URL host literals', () => {
+    for (const bad of [
+      'https://localhost',
+      'https://bot.localhost',
+      'https://127.0.0.1',
+      'https://10.0.3.4',
+      'https://172.16.0.2',
+      'https://192.168.1.20',
+      'https://[::1]',
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).toContain(bad);
+    }
   });
 
   // The #619 headline regression: a deploy with the qURL OAuth setup flow

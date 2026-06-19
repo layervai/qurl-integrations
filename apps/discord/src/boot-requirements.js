@@ -78,12 +78,13 @@ function missingKekRequiredKeys(env) {
 //
 // The check parses BASE_URL (new URL) rather than prefix-matching: parsing
 // normalizes the case-insensitive scheme (RFC 3986) and rejects a bare
-// "https://" with no host that would still build a broken redirect. It
-// validates scheme + parseability, NOT reachability — an https://localhost
-// (or other private) origin passes here yet still can't serve an external
-// OAuth redirect, but reachability isn't knowable at boot. The localhost
-// default parses as http:// so it's not usable, catching both
-// "unset → localhost" and explicit http://.
+// "https://" with no host that would still build a broken redirect. OAuth
+// needs a public bare origin because the code composes
+// `${BASE_URL}/oauth/qurl/callback`; embedded paths, query strings, userinfo,
+// or obvious local-only IP literals either miss the registered mux route or
+// can't serve the external Auth0 browser redirect. We intentionally do NOT
+// resolve DNS at boot — reachability belongs in deploy smoke tests — but we
+// can reject localhost/loopback/private IP literals cheaply.
 //
 // Intentionally NOT gated on: the per-guild webhook bridge
 // (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
@@ -100,23 +101,58 @@ function missingKekRequiredKeys(env) {
 // "fell back to the localhost default" so an empty SSM param doesn't
 // false-positive. Caller gates on NODE_ENV==='production'; string-or-null
 // mirrors unsupportedRoleShipperCombo et al.
+function isPrivateIPv4Literal(hostname) {
+  const parts = hostname.split('.');
+  if (parts.length !== 4) return false;
+  const octets = parts.map(part => Number(part));
+  if (octets.some((octet, idx) => !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== parts[idx])) {
+    return false;
+  }
+  const [a, b] = octets;
+  return a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168);
+}
+
+function isLocalOnlyHost(hostname) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost'
+    || host.endsWith('.localhost')
+    || host === '::1'
+    || isPrivateIPv4Literal(host);
+}
+
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
-  let usableHttps = false;
+  let parsed = null;
   try {
-    usableHttps = new URL(cfg.BASE_URL).protocol === 'https:';
+    parsed = new URL(cfg.BASE_URL);
   } catch {
     // Malformed BASE_URL (incl. a host-less "https://") is not usable.
   }
-  if (usableHttps) return null;
+  const usesHttps = parsed?.protocol === 'https:';
+  const isBareOrigin = Boolean(
+    parsed
+      && parsed.host
+      && !parsed.username
+      && !parsed.password
+      && (!parsed.pathname || parsed.pathname === '/')
+      && !parsed.search
+      && !parsed.hash
+  );
+  const isPublicOrigin = Boolean(parsed && !isLocalOnlyHost(parsed.hostname));
+  const usableOAuthOrigin = usesHttps && isBareOrigin && isPublicOrigin;
+  if (usableOAuthOrigin) return null;
   if (cfg.isQurlOAuthConfigured) {
     return (
-      'BASE_URL must be a complete https:// URL (scheme + host) in production ' +
+      'BASE_URL must be a public bare https:// origin in production ' +
       '— the qURL guided setup flow builds its OAuth redirect from it, and a ' +
-      `non-https value dead-ends setup at the redirect. Got: ${cfg.BASE_URL}. ` +
+      `non-public or non-origin value dead-ends setup at the redirect. Got: ${cfg.BASE_URL}. ` +
       "Set BASE_URL to the bot's public https:// origin in the deployment template."
     );
   }
-  if (baseUrlExplicitlySet) {
+  if (baseUrlExplicitlySet && !usesHttps) {
     return `BASE_URL must use https:// in production (got ${cfg.BASE_URL})`;
   }
   return null;
