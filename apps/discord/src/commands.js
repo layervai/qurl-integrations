@@ -2127,6 +2127,10 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...(error.partialLinkCount ? {
+        partial_link_count: error.partialLinkCount,
+        partial_qurl_ids: error.partialQurlIds,
+      } : {}),
       sendId,
     });
     clearCooldown(interaction.user.id); // allow retry on failure
@@ -3034,7 +3038,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
-          sendId, error: err.message, apiCode: err.apiCode, status: err.status, isExpired,
+          sendId,
+          error: err.message,
+          apiCode: err.apiCode,
+          status: err.status,
+          ...(err.partialLinkCount ? {
+            partial_link_count: err.partialLinkCount,
+            partial_qurl_ids: err.partialQurlIds,
+          } : {}),
+          isExpired,
         });
         // Always emit — every failure here (CDN re-download, connector
         // re-upload, or mint) is a "couldn't create links" event. A rare,
@@ -3106,7 +3118,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', {
-      sendId, error: error.message, apiCode: error.apiCode, status: error.status,
+      sendId,
+      error: error.message,
+      apiCode: error.apiCode,
+      status: error.status,
+      ...(error.partialLinkCount ? {
+        partial_link_count: error.partialLinkCount,
+        partial_qurl_ids: error.partialQurlIds,
+      } : {}),
     });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted

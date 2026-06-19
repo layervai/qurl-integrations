@@ -463,6 +463,86 @@ describe('Connector client — coverage boost', () => {
         expect(e.apiCode).toBeNull();
       }
     });
+
+    it('surfaces partial mint qurl_ids from non-2xx bodies without logging qurl_link tokens', async () => {
+      const logger = require('../src/logger');
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'render failed after mint',
+          links: [
+            { qurl_id: 'q_partial_one', qurl_link: 'https://qurl.link/#at_secret_one' },
+            { qurl_id: 'q_partial_two', qurl_link: 'https://qurl.link/#at_secret_two' },
+          ],
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 });
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(502);
+        expect(e.partialLinkCount).toBe(2);
+        expect(e.partialQurlIds).toEqual(['q_partial_one', 'q_partial_two']);
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Connector mint_link returned partial links on non-2xx',
+        expect.objectContaining({
+          resource_id: 'res-1',
+          status: 502,
+          bodyLen: expect.any(Number),
+          partial_link_count: 2,
+          partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+        }),
+      );
+      const serializedLogs = JSON.stringify([
+        logger.warn.mock.calls,
+        logger.debug.mock.calls,
+      ]);
+      expect(serializedLogs).not.toContain('at_secret');
+      expect(serializedLogs).not.toContain('qurl.link');
+    });
+
+    it('ignores malformed partial mint links and uses the generic debug path', async () => {
+      const logger = require('../src/logger');
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'render failed before usable qurl ids',
+          links: [
+            {},
+            { qurl_id: '' },
+            'not-an-object',
+          ],
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', { expiresAt: '2026-01-01T00:00:00Z', n: 2 });
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(502);
+        expect(e.partialLinkCount).toBeUndefined();
+        expect(e.partialQurlIds).toBeUndefined();
+      }
+
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        'Connector mint_link returned partial links on non-2xx',
+        expect.anything(),
+      );
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Connector mint_link error',
+        expect.objectContaining({
+          status: 502,
+          bodyLen: expect.any(Number),
+        }),
+      );
+    });
   });
 
   describe('mintLinks — null/missing links guard (line 96)', () => {

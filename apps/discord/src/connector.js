@@ -64,31 +64,71 @@ const QUOTA_EXCEEDED_PATTERNS = [
   /per[\s_-]?resource (token|link|mint) (limit|cap)/i,
 ];
 
-async function throwConnectorError(label, response) {
-  let bodyText = '';
+function parseConnectorBody(bodyText) {
+  let parsed = null;
   let apiCode = null;
   let apiDetail = null;
+  if (!bodyText) return { parsed, apiCode, apiDetail };
+
   try {
-    bodyText = await response.text();
-    if (bodyText) {
-      try {
-        const parsed = JSON.parse(bodyText);
-        // Connector wraps upstream API errors as `{success:false, error:"..."}`.
-        // The wrapped string is what we pattern-match for known codes.
-        const errStr = typeof parsed.error === 'string' ? parsed.error : '';
-        if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
-          apiCode = 'quota_exceeded';
-          apiDetail = errStr;
-        }
-      } catch { /* not JSON, ignore */ }
+    parsed = JSON.parse(bodyText);
+    // Connector wraps upstream API errors as `{success:false, error:"..."}`.
+    // The wrapped string is what we pattern-match for known codes.
+    const errStr = typeof parsed.error === 'string' ? parsed.error : '';
+    if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+      apiCode = 'quota_exceeded';
+      apiDetail = errStr;
     }
-  } catch { /* network read failed, fall through with empty body */ }
-  logger.debug(`${label} error`, { status: response.status, apiCode, bodyLen: bodyText.length });
+  } catch { /* not JSON, ignore */ }
+
+  return { parsed, apiCode, apiDetail };
+}
+
+function mintedLinksWithId(links) {
+  if (!Array.isArray(links)) return [];
+  return links.filter(link => (
+    link
+    && typeof link === 'object'
+    && typeof link.qurl_id === 'string'
+    && link.qurl_id.length > 0
+  ));
+}
+
+function qurlIdsFromLinks(links) {
+  return links.map(link => link.qurl_id);
+}
+
+function throwConnectorErrorFromBody(label, response, {
+  bodyText = '',
+  apiCode = null,
+  apiDetail = null,
+  partialQurlIds = [],
+} = {}) {
+  if (partialQurlIds.length === 0) {
+    logger.debug(`${label} error`, {
+      status: response.status,
+      apiCode,
+      bodyLen: bodyText.length,
+    });
+  }
   const err = new Error(`${label} failed (${response.status})`);
   err.status = response.status;
   err.apiCode = apiCode;
   err.apiDetail = apiDetail;
+  if (partialQurlIds.length > 0) {
+    err.partialLinkCount = partialQurlIds.length;
+    err.partialQurlIds = partialQurlIds;
+  }
   throw err;
+}
+
+async function throwConnectorError(label, response) {
+  let bodyText = '';
+  try {
+    bodyText = await response.text();
+  } catch { /* network read failed, fall through with empty body */ }
+  const { apiCode, apiDetail } = parseConnectorBody(bodyText);
+  throwConnectorErrorFromBody(label, response, { bodyText, apiCode, apiDetail });
 }
 
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.
@@ -396,7 +436,30 @@ async function mintLinks(resourceId, { expiresAt, n, apiKey, selfDestructSeconds
   });
 
   if (!response.ok) {
-    return throwConnectorError('Connector mint_link', response);
+    let bodyText = '';
+    try {
+      bodyText = await response.text();
+    } catch { /* network read failed, fall through with empty body */ }
+    const { parsed, apiCode, apiDetail } = parseConnectorBody(bodyText);
+    const partialQurlIds = qurlIdsFromLinks(mintedLinksWithId(parsed?.links));
+    if (partialQurlIds.length > 0) {
+      // TODO(upstream-contract): Best-effort reconciliation signal; connector
+      // error bodies must only include qurl_ids for links that were actually minted.
+      logger.warn('Connector mint_link returned partial links on non-2xx', {
+        resource_id: resourceId,
+        status: response.status,
+        apiCode,
+        bodyLen: bodyText.length,
+        partial_link_count: partialQurlIds.length,
+        partial_qurl_ids: partialQurlIds,
+      });
+    }
+    return throwConnectorErrorFromBody('Connector mint_link', response, {
+      bodyText,
+      apiCode,
+      apiDetail,
+      partialQurlIds,
+    });
   }
 
   const result = await response.json();
