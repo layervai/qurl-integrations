@@ -38,6 +38,30 @@ const agentProposalPreviewPrefix = "I can set that up, but applying changes from
 // internals never reach the channel.
 const agentErrorReply = "Something went wrong handling that. Please try again, or use a `/qurl` command."
 
+// agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
+// features. Surfaced in every AI-disclosure string below so users always have a
+// route to how their messages are processed. (The page is created by a sibling
+// website PR; the link can ship before that page merges.)
+const agentAIPrivacyURL = "https://layerv.ai/privacy/qurl-slack"
+
+// agentAIDisclosure is the Slack-Marketplace-required AI disclosure for the
+// agent surface: it names the AI provider (Anthropic Claude), warns that AI can
+// be wrong (review before approving), notes the paid-plan requirement for Slack
+// AI apps, and links the privacy notice. Used as the pane's first-run intro and
+// kept as one const so the App Home / pane copy can't drift on the load-bearing
+// points (AI used + can be wrong + privacy link).
+const agentAIDisclosure = "I use AI (Anthropic Claude) to interpret requests and can make mistakes — review any proposed action before approving. AI features require a paid Slack plan. Privacy: " + agentAIPrivacyURL
+
+// agentAIDisclosureShort is the App Home context-block variant of
+// agentAIDisclosure — the same load-bearing points (AI used + can be wrong +
+// privacy link) in the tighter form a context block wants.
+const agentAIDisclosureShort = "🤖 Uses AI (Anthropic Claude) and can make mistakes — review actions before approving. Privacy: " + agentAIPrivacyURL
+
+// agentConfirmAIDisclosure is the small AI-provenance line on the proposed-action
+// confirm card, reminding the approver the proposal came from the AI agent before
+// they approve it.
+const agentConfirmAIDisclosure = "🤖 Proposed by the AI agent — review before approving."
+
 // agentTransientReply is posted when a turn fails for a likely-transient reason —
 // the turn-budget deadline elapsed, or the context was canceled — as opposed to
 // agentErrorReply's generic failure. Slack's agent-design guidance is to separate

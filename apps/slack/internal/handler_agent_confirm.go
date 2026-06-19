@@ -340,10 +340,18 @@ func buildAgentConfirmBlocks(summary, reason, id string) []any {
 	if reason = strings.TrimSpace(reason); reason != "" {
 		blocks = append(blocks, plainTextSectionBlock("Reason: "+reason))
 	}
-	blocks = append(blocks, actionsBlock(
-		primaryButtonElement("Approve", agentConfirmApproveActionID, id),
-		dangerButtonElement("Reject", agentConfirmRejectActionID, id),
-	))
+	// AI-provenance context line: reminds the approver this proposal came from the AI
+	// agent before they act on it. Rendered plain_text (plainTextContextBlock), keeping
+	// the card's "no mrkdwn next to the Approve button" injection-defense invariant that
+	// the summary/reason above also hold — the copy is fixed product text, but staying
+	// plain_text keeps the whole card uniformly non-mrkdwn.
+	blocks = append(blocks,
+		plainTextContextBlock(agentConfirmAIDisclosure),
+		actionsBlock(
+			primaryButtonElement("Approve", agentConfirmApproveActionID, id),
+			dangerButtonElement("Reject", agentConfirmRejectActionID, id),
+		),
+	)
 	return blocks
 }
 

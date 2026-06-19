@@ -79,13 +79,14 @@ func TestBuildAgentConfirmBlocks(t *testing.T) {
 	blocks := buildAgentConfirmBlocks("Revoke $staging.", "incident 412", "abc123")
 	raw, _ := json.Marshal(blocks)
 	s := string(raw)
-	for _, want := range []string{"Revoke $staging.", "Reason: incident 412", agentConfirmApproveActionID, agentConfirmRejectActionID, "abc123"} {
+	for _, want := range []string{"Revoke $staging.", "Reason: incident 412", agentConfirmApproveActionID, agentConfirmRejectActionID, "abc123", agentConfirmAIDisclosure} {
 		if !strings.Contains(s, want) {
 			t.Errorf("confirm blocks missing %q: %s", want, s)
 		}
 	}
 	// The LLM-distilled summary must render as plain_text (no mrkdwn), so an
-	// injected masked link can't surface next to the Approve button.
+	// injected masked link can't surface next to the Approve button. The AI-disclosure
+	// context line is plain_text too, so the whole card stays mrkdwn-free.
 	if strings.Contains(s, "mrkdwn") {
 		t.Errorf("confirm card must not render any mrkdwn (injection surface): %s", s)
 	}
