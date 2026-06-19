@@ -21,6 +21,7 @@ describe('@layervai/qurl export contract', () => {
     });
 
     expect(client).toBeInstanceOf(QURLClient);
+    // Keep in sync with src/qurl.js's SAFE_STATUS0_CODES imports.
     for (const errorCode of [
       ERROR_CODE_NETWORK,
       ERROR_CODE_TIMEOUT,
