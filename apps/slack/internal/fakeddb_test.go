@@ -412,8 +412,12 @@ func (f *fakeDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ 
 	}
 	table[key] = existing
 	out := &dynamodb.UpdateItemOutput{}
-	if in.ReturnValues == ddbtypes.ReturnValueAllNew {
+	switch in.ReturnValues {
+	case ddbtypes.ReturnValueAllNew:
 		out.Attributes = cloneItem(existing)
+	case ddbtypes.ReturnValueUpdatedNew:
+		out.Attributes = cloneUpdatedNewAttributes(existing, aws.ToString(in.UpdateExpression), in.ExpressionAttributeNames)
+	case "", ddbtypes.ReturnValueNone, ddbtypes.ReturnValueAllOld, ddbtypes.ReturnValueUpdatedOld:
 	}
 	return out, nil
 }
@@ -486,6 +490,57 @@ func cloneItem(item map[string]ddbtypes.AttributeValue) map[string]ddbtypes.Attr
 	out := make(map[string]ddbtypes.AttributeValue, len(item))
 	for k, v := range item {
 		out[k] = v
+	}
+	return out
+}
+
+func cloneUpdatedNewAttributes(item map[string]ddbtypes.AttributeValue, expr string, names map[string]string) map[string]ddbtypes.AttributeValue {
+	out := map[string]ddbtypes.AttributeValue{}
+	// The fake returns touched top-level attributes for UPDATED_NEW. That is
+	// enough for current callers, though nested writes return the parent value.
+	for _, attr := range updatedTopLevelAttrs(expr, names) {
+		if v, ok := item[attr]; ok {
+			out[attr] = v
+		}
+	}
+	return out
+}
+
+func updatedTopLevelAttrs(expr string, names map[string]string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(path string) {
+		parts := resolvePath(strings.TrimSuffix(strings.TrimSpace(path), ","), names)
+		if len(parts) == 0 {
+			return
+		}
+		attr := parts[0]
+		if _, ok := seen[attr]; ok {
+			return
+		}
+		seen[attr] = struct{}{}
+		out = append(out, attr)
+	}
+	for _, c := range splitUpdateClauses(expr) {
+		switch c.verb {
+		case "SET":
+			for _, p := range splitTopLevelCommas(c.body) {
+				if eq := strings.Index(p, "="); eq >= 0 {
+					add(p[:eq])
+				}
+			}
+		case "ADD", "DELETE":
+			for _, p := range splitTopLevelCommas(c.body) {
+				fields := strings.Fields(p)
+				if len(fields) > 0 {
+					add(fields[0])
+				}
+			}
+		case "REMOVE":
+			for _, field := range strings.Fields(c.body) {
+				add(field)
+			}
+		}
 	}
 	return out
 }
@@ -613,7 +668,11 @@ func applyAddClause(body string, item, vals map[string]ddbtypes.AttributeValue, 
 	if len(parts) != 2 {
 		return fmt.Errorf("fakeDDB ADD: expected `<attr> :value`, got %q", body)
 	}
-	attr := parts[0]
+	attrParts := resolvePath(parts[0], names)
+	if len(attrParts) != 1 {
+		return fmt.Errorf("fakeDDB ADD: unsupported attr path %q", parts[0])
+	}
+	attr := attrParts[0]
 	v, ok := vals[parts[1]]
 	if !ok {
 		return fmt.Errorf("fakeDDB ADD: unknown value %q", parts[1])
@@ -744,9 +803,116 @@ func splitTopLevelCommas(s string) []string {
 	return out
 }
 
+func splitTopLevelKeyword(s, keyword string) []string {
+	delimiter := " " + keyword + " "
+	depth := 0
+	out := []string{}
+	last := 0
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '(':
+			depth++
+			i++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		default:
+			if depth == 0 && strings.HasPrefix(s[i:], delimiter) {
+				out = append(out, strings.TrimSpace(s[last:i]))
+				i += len(delimiter)
+				last = i
+				continue
+			}
+			i++
+		}
+	}
+	tail := strings.TrimSpace(s[last:])
+	if tail != "" {
+		out = append(out, tail)
+	}
+	return out
+}
+
+func stripOuterParens(s string) string {
+	for {
+		s = strings.TrimSpace(s)
+		if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+			return s
+		}
+		depth := 0
+		enclosesWholeTerm := true
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '(':
+				depth++
+			case ')':
+				if depth > 0 {
+					depth--
+				}
+				if depth == 0 && i != len(s)-1 {
+					enclosesWholeTerm = false
+				}
+			}
+			if !enclosesWholeTerm {
+				break
+			}
+		}
+		if !enclosesWholeTerm || depth != 0 {
+			return s
+		}
+		s = s[1 : len(s)-1]
+	}
+}
+
+func TestFakeDDBEvalConditionParenthesizedTopLevelOR(t *testing.T) {
+	item := map[string]ddbtypes.AttributeValue{
+		"count": &ddbtypes.AttributeValueMemberN{Value: "2"},
+	}
+	vals := map[string]ddbtypes.AttributeValue{
+		":one":     &ddbtypes.AttributeValueMemberN{Value: "1"},
+		":three":   &ddbtypes.AttributeValueMemberN{Value: "3"},
+		":ten":     &ddbtypes.AttributeValueMemberN{Value: "10"},
+		":hundred": &ddbtypes.AttributeValueMemberN{Value: "100"},
+	}
+	names := map[string]string{
+		"#count": "count",
+	}
+
+	for _, tc := range []struct {
+		name string
+		expr string
+		want bool
+	}{
+		{
+			name: "second disjunct true",
+			expr: "(#count = :one) OR (#count < :three)",
+			want: true,
+		},
+		{
+			name: "both disjuncts false",
+			expr: "(#count = :ten) OR (#count > :hundred)",
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := evalCondition(tc.expr, item, true, vals, names)
+			if err != nil {
+				t.Fatalf("evalCondition parenthesized OR: %v", err)
+			}
+			if ok != tc.want {
+				t.Fatalf("evalCondition parenthesized OR = %v, want %v", ok, tc.want)
+			}
+		})
+	}
+}
+
 // evalCondition supports the exact ConditionExpression shapes the
-// production code emits, joined by " AND ". Each subexpression is
-// one of:
+// production code emits: subexpressions joined by top-level " AND " plus the
+// simple top-level " OR " conditions used by optimistic writes. Mixed or nested
+// boolean trees beyond that are intentionally out of scope for this test fake.
+// Each subexpression is one of:
 //
 //	attribute_exists(<attr>)
 //	attribute_not_exists(<attr>)
@@ -756,11 +922,10 @@ func splitTopLevelCommas(s string) []string {
 //	<attr> < :val
 //	<attr> > :val
 //
-// Returns (true, nil) when every subexpression is satisfied. OR is
-// NOT parsed — no production caller emits it post-scope-cut.
+// Returns (true, nil) when every subexpression is satisfied.
 func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
-	parts := strings.Split(expr, " AND ")
+	parts := splitTopLevelKeyword(expr, "AND")
 	for _, p := range parts {
 		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
@@ -774,6 +939,22 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
+	term = strings.TrimSpace(stripOuterParens(term))
+	if term == "" {
+		return false, nil
+	}
+	if parts := splitTopLevelKeyword(term, "OR"); len(parts) > 1 {
+		for _, part := range parts {
+			ok, err := evalConditionTerm(strings.TrimSpace(part), item, present, vals, names)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 	switch {
 	case strings.HasPrefix(term, "attribute_exists("):
 		attr := strings.TrimSuffix(strings.TrimPrefix(term, "attribute_exists("), ")")
@@ -867,7 +1048,7 @@ func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, pre
 		return false, nil
 	}
 	// Binary comparison: `<attr> <op> :val`. The only operators in
-	// production use are `=` and `>`.
+	// production use are `=`, `>`, and `<`.
 	for _, op := range []string{">=", "<=", "<>", "=", ">", "<"} {
 		idx := strings.Index(term, " "+op+" ")
 		if idx < 0 {

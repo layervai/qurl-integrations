@@ -2297,8 +2297,15 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("tail audit write did not start")
 	}
-	if got := len(h.sem); got != 0 {
-		t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", got)
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for len(h.sem) != 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", len(h.sem))
+		case <-ticker.C:
+		}
 	}
 	releaseAudit()
 	h.Wait()

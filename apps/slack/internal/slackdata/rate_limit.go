@@ -62,6 +62,9 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 		return ok, 0, updateErr
 	}
 	storedWindow, hasWindow := readRateLimitWindow(item)
+	if hasWindow && storedWindow > windowUnix {
+		return s.followFutureRateLimitWindowOnce(ctx, counterKey, storedWindow, limit, window, now, item, true)
+	}
 	if hasWindow && storedWindow == windowUnix {
 		return false, retry, nil
 	}
@@ -89,6 +92,23 @@ func (s *Store) CheckRateLimit(ctx context.Context, slackUserID, teamID string) 
 		StatusCode: http.StatusServiceUnavailable,
 		Title:      "CheckRateLimit: concurrent counter update did not settle",
 	}
+}
+
+func (s *Store) followFutureRateLimitWindowOnce(ctx context.Context, counterKey string, storedWindow int64, limit int, window time.Duration, now time.Time, item map[string]ddbtypes.AttributeValue, followNewer bool) (bool, time.Duration, error) {
+	futureRetry := time.Unix(storedWindow, 0).UTC().Add(window).Sub(now)
+	if readNumber(item, attrRateLimitCount) >= int64(limit) {
+		return false, futureRetry, nil
+	}
+	ok, latest, err := s.incrementCurrentRateLimitWindow(ctx, counterKey, storedWindow, limit)
+	if err != nil || ok {
+		return ok, 0, err
+	}
+	if latestWindow, hasLatestWindow := readRateLimitWindow(latest); followNewer && hasLatestWindow && latestWindow > storedWindow {
+		return s.followFutureRateLimitWindowOnce(ctx, counterKey, latestWindow, limit, window, now, latest, false)
+	}
+	// If the row moved back to the local window or otherwise did not settle the
+	// stored future window, deny conservatively; the next call re-reads the row.
+	return false, futureRetry, nil
 }
 
 func (s *Store) rateLimitLimit() int {
