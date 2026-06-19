@@ -1771,6 +1771,11 @@ type workspaceKeyRevoker interface {
 // uninstall to local-only.
 var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 
+// Ensure the production provider keeps satisfying the workspace-row teardown
+// capability so a refactor that drops DeleteWorkspaceState surfaces here rather
+// than silently leaving the encrypted bot token behind on uninstall.
+var _ workspaceStateDeleter = (*auth.DDBProvider)(nil)
+
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
@@ -1819,6 +1824,24 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			return
 		}
 	}
+	// DeleteAPIKey cleared only the qURL key columns. Forget the rest of the
+	// workspace too — the encrypted Slack bot token + data key, the
+	// workspace_mappings row, and every channel_policies row — so `/qurl
+	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
+	// event triggers). Best-effort and idempotent: the primary disconnect already
+	// succeeded, so a sweep failure is logged inside purgeWorkspace and does not
+	// change the success reply. Run it on a tracked async goroutine off h.baseCtx
+	// (NOT this request's ctx, which `defer cancel()`s on return) so the extra
+	// DeleteItem/Query round-trips — which can be several on a workspace used in
+	// many channels — stay off the slash ack's tight sync budget. h.Go is
+	// wg-tracked so a graceful shutdown drains an in-flight purge.
+	purgeTeamID := teamID
+	purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID)
+	h.Go(func() {
+		purgeCtx, purgeCancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
+		defer purgeCancel()
+		h.purgeWorkspace(purgeCtx, purgeLog, purgeTeamID)
+	})
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
 		respondSlack(w, revokedReply)
@@ -2040,6 +2063,13 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
+	case env.Type == "event_callback" && isLifecycleEvent(env.Event.Type):
+		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
+		// because the cascade must run regardless of conversation-mode wiring
+		// (handleAgentEvent returns early when the agent is disabled). It only
+		// schedules the async purge; the 200 below is the ack Slack needs to stop
+		// retrying.
+		h.handleLifecycleEvent(&env)
 	case env.Type == "event_callback":
 		// Conversation mode. handleAgentEvent only schedules async work (or
 		// no-ops when disabled/filtered); we always ack 200 below so Slack

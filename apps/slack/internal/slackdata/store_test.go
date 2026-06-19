@@ -1175,3 +1175,203 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 		}
 	})
 }
+
+// TestDeleteWorkspaceMapping fences the workspace-forget half of the
+// Slack-lifecycle / `/qurl uninstall` cascade: a single unconditional DeleteItem
+// keyed by team_id, idempotent on an absent row, and a 400 on an empty team_id
+// before any DDB call.
+func TestDeleteWorkspaceMapping(t *testing.T) {
+	t.Run("deletes the row by team_id", func(t *testing.T) {
+		var captured *dynamodb.DeleteItemInput
+		store := newStore(&stubDDB{
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				captured = in
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		if err := store.DeleteWorkspaceMapping(context.Background(), "T1"); err != nil {
+			t.Fatalf("DeleteWorkspaceMapping: %v", err)
+		}
+		if captured == nil {
+			t.Fatal("no DeleteItem issued")
+		}
+		if got := aws.ToString(captured.TableName); got != "ws" {
+			t.Errorf("DeleteItem table = %q, want %q", got, "ws")
+		}
+		if v, ok := captured.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "T1" {
+			t.Errorf("DeleteItem key = %v, want slack_team_id=T1", captured.Key)
+		}
+		// Idempotent forget: unconditional delete (no ConditionExpression) so an
+		// absent row is a no-op rather than a ConditionalCheckFailed.
+		if captured.ConditionExpression != nil {
+			t.Errorf("ConditionExpression = %q, want none", aws.ToString(captured.ConditionExpression))
+		}
+	})
+
+	t.Run("absent row is a no-op", func(t *testing.T) {
+		// stubDDB's default DeleteItem returns success with no state — the same
+		// no-op DynamoDB performs for a missing key. A nil error proves the method
+		// does not synthesize a not-found.
+		store := newStore(&stubDDB{})
+		if err := store.DeleteWorkspaceMapping(context.Background(), "T_absent"); err != nil {
+			t.Fatalf("DeleteWorkspaceMapping on absent row: %v, want nil", err)
+		}
+	})
+
+	t.Run("empty team_id rejected before DDB", func(t *testing.T) {
+		called := false
+		store := newStore(&stubDDB{
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				called = true
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		err := store.DeleteWorkspaceMapping(context.Background(), "")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+			t.Fatalf("DeleteWorkspaceMapping(\"\") err = %v, want 400 *Error", err)
+		}
+		if called {
+			t.Error("must reject empty team_id before issuing DeleteItem")
+		}
+	})
+
+	t.Run("transport error maps to 503", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				return nil, errors.New("ddb down")
+			},
+		})
+		err := store.DeleteWorkspaceMapping(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("DeleteWorkspaceMapping transport err = %v, want 503 *Error", err)
+		}
+	})
+}
+
+// TestPurgeTeamChannelPolicies fences the per-channel-policy half of the
+// Slack-lifecycle / `/qurl uninstall` cascade: Query every row for the team
+// (paging the LastEvaluatedKey loop) and DeleteItem each by its (team, channel)
+// key. It must delete EVERY page's rows, address each by the queried SK, tolerate
+// an empty team (nothing to delete), reject an empty team_id, and surface a Query
+// error so the caller can decide to retry.
+func TestPurgeTeamChannelPolicies(t *testing.T) {
+	t.Run("deletes every row across pages", func(t *testing.T) {
+		page := 0
+		var deletedChannels []string
+		store := newStore(&stubDDB{
+			queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				if got := aws.ToString(in.TableName); got != "cp" {
+					t.Errorf("Query table = %q, want %q", got, "cp")
+				}
+				if v, ok := in.ExpressionAttributeValues[":tid"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "T1" {
+					t.Errorf("Query :tid = %v, want T1", in.ExpressionAttributeValues[":tid"])
+				}
+				page++
+				if page == 1 {
+					if in.ExclusiveStartKey != nil {
+						t.Errorf("page 1 ExclusiveStartKey = %v, want nil", in.ExclusiveStartKey)
+					}
+					return &dynamodb.QueryOutput{
+						Items:            []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_p1", []string{"r1"}, nil)},
+						LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackChannelID: stringAttr("C_p1")},
+					}, nil
+				}
+				if len(in.ExclusiveStartKey) == 0 {
+					t.Errorf("page 2 ExclusiveStartKey is empty, want the prior LastEvaluatedKey")
+				}
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_p2", nil, map[string]string{"a": "r2"})},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				if got := aws.ToString(in.TableName); got != "cp" {
+					t.Errorf("DeleteItem table = %q, want %q", got, "cp")
+				}
+				if v, ok := in.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "T1" {
+					t.Errorf("DeleteItem PK = %v, want slack_team_id=T1", in.Key)
+				}
+				if in.ConditionExpression != nil {
+					t.Errorf("DeleteItem ConditionExpression = %q, want none (idempotent)", aws.ToString(in.ConditionExpression))
+				}
+				cid := in.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS).Value
+				deletedChannels = append(deletedChannels, cid)
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err != nil {
+			t.Fatalf("PurgeTeamChannelPolicies: %v", err)
+		}
+		if page != 2 {
+			t.Errorf("query pages = %d, want 2", page)
+		}
+		if want := []string{"C_p1", "C_p2"}; !reflect.DeepEqual(deletedChannels, want) {
+			t.Errorf("deleted channels = %v, want %v", deletedChannels, want)
+		}
+	})
+
+	t.Run("empty team deletes nothing", func(t *testing.T) {
+		deleteCalled := false
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deleteCalled = true
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err != nil {
+			t.Fatalf("PurgeTeamChannelPolicies(empty team): %v", err)
+		}
+		if deleteCalled {
+			t.Error("no rows queried — DeleteItem must not be called")
+		}
+	})
+
+	t.Run("empty team_id rejected before DDB", func(t *testing.T) {
+		queried := false
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				queried = true
+				return &dynamodb.QueryOutput{}, nil
+			},
+		})
+		err := store.PurgeTeamChannelPolicies(context.Background(), "")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+			t.Fatalf("PurgeTeamChannelPolicies(\"\") err = %v, want 400 *Error", err)
+		}
+		if queried {
+			t.Error("must reject empty team_id before issuing Query")
+		}
+	})
+
+	t.Run("query error surfaces", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return nil, errors.New("AccessDenied: not authorized to perform dynamodb:Query")
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err == nil {
+			t.Error("PurgeTeamChannelPolicies: want error when Query fails")
+		}
+	})
+
+	t.Run("delete error surfaces", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C1", []string{"r1"}, nil)},
+				}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				return nil, errors.New("ddb delete down")
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err == nil {
+			t.Error("PurgeTeamChannelPolicies: want error when DeleteItem fails")
+		}
+	})
+}

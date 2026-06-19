@@ -790,3 +790,29 @@ func (s *Store) ListAdmins(ctx context.Context, teamID string) (ownerID string, 
 	sort.Strings(adminIDs)
 	return ownerID, adminIDs, nil
 }
+
+// DeleteWorkspaceMapping removes the entire workspace_mappings row for teamID —
+// owner, admin set, and agent toggle. It is part of the Slack-lifecycle
+// (app_uninstalled / tokens_revoked) and `/qurl uninstall` cascade that forgets a
+// workspace: with the install gone, the ownership/admin anchor has nothing left
+// to gate.
+//
+// Idempotent by design: the DeleteItem carries no ConditionExpression, so an
+// absent row is a DynamoDB no-op (no ConditionalCheckFailed, no error). The
+// purge orchestrator runs every delete best-effort regardless of which rows a
+// given workspace actually has, so a not-found must not surface as an error.
+func (s *Store) DeleteWorkspaceMapping(ctx context.Context, teamID string) error {
+	if teamID == "" {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "DeleteWorkspaceMapping: team_id is required"}
+	}
+	_, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrSlackTeamID: stringAttr(teamID),
+		},
+	})
+	if err != nil {
+		return ddbToError("DeleteWorkspaceMapping", err)
+	}
+	return nil
+}
