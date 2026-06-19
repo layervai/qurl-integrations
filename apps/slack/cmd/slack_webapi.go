@@ -268,6 +268,7 @@ const (
 const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
 const slackConversationsMembersURL = "https://slack.com/api/conversations.members"
 const slackConversationsOpenURL = "https://slack.com/api/conversations.open"
+const slackUsersInfoURL = "https://slack.com/api/users.info"
 
 const (
 	// maxMembershipPages bounds the conversations.members page scan for one membership check.
@@ -292,17 +293,18 @@ const (
 	slackAssistantSetStatusURL           = "https://slack.com/api/assistant.threads.setStatus"
 )
 
-// slackChatPostMessageTimeout bounds every chat.postMessage HTTP request. For a
-// single post this 4s client timeout is the BINDING deadline: the conversation-
-// mode delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
+// slackWebAPITimeout bounds each request made by the shared Slack Web API
+// client (chat.postMessage, users.info, reactions, assistant threads, etc.).
+// For conversation-mode posts this 4s client timeout is the BINDING deadline:
+// the delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
 // OUTER envelope spanning the transcript save plus the post, so the 4s timeout
 // fires first on a stuck request. Unlike views.open there is no short trigger
 // window to race, so 4s leaves comfortable headroom for one round-trip while
-// still freeing the worker well inside its budget. The Grid fallback does NOT add
-// a second round-trip: it retries only on ErrSlackBotTokenNotConfigured, which
-// postBody surfaces solely from the token *lookup* (before any HTTP request is
-// built), so the org-token attempt is the first and only HTTP call.
-const slackChatPostMessageTimeout = 4 * time.Second
+// still freeing the worker well inside its budget. The Grid fallback does NOT
+// add a second round-trip: it retries only on ErrSlackBotTokenNotConfigured,
+// which postBody surfaces solely from the token *lookup* (before any HTTP
+// request is built), so the org-token attempt is the first and only HTTP call.
+const slackWebAPITimeout = 4 * time.Second
 
 // slackWebAPIResponseBodyLimit bounds any Slack web API response the shared poster
 // reads (an echoed chat.postMessage body, a reactions.add confirmation) — all stay
@@ -327,7 +329,7 @@ type slackWebAPIPoster struct {
 
 func newSlackWebAPIPoster(lookup slackBotTokenLookup, userAgent, url, op string, respErr func(int, http.Header, []byte) error, httpClient *http.Client) *slackWebAPIPoster {
 	if httpClient == nil {
-		httpClient = defaultSlackPostMessageClient()
+		httpClient = defaultSlackWebAPIClient()
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
@@ -740,7 +742,7 @@ func newSlackAgentStreamPortWithTokenLookup(lookup slackBotTokenLookup, userAgen
 	if httpClient == nil {
 		// One shared client across start/append×N/stop so a streamed turn's verb sequence
 		// reuses keep-alive connections (parity with the assistant/reactions ports).
-		httpClient = defaultSlackPostMessageClient()
+		httpClient = defaultSlackWebAPIClient()
 	}
 	mk := func(url, op string) *slackWebAPIPoster {
 		return newSlackWebAPIPoster(lookup, userAgent, url, op, func(s int, h http.Header, raw []byte) error {
@@ -831,7 +833,7 @@ func slackResolveChannelNameFromConversationInfo(resolveInfo internal.ResolveCon
 // Enterprise Grid org-token fallback.
 func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsInfoURL string, httpClient *http.Client) internal.ResolveConversationInfoFunc {
 	if httpClient == nil {
-		httpClient = defaultSlackPostMessageClient()
+		httpClient = defaultSlackWebAPIClient()
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
@@ -903,6 +905,123 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 	}
 }
 
+type slackUserInfo struct {
+	ID      string
+	Deleted bool
+	IsBot   bool
+}
+
+var slackUsersInfoBenign = map[string]struct{}{"user_not_found": {}}
+
+func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, userAgent, token, userID string) (slackUserInfo, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"?user="+neturl.QueryEscape(userID), http.NoBody)
+	if err != nil {
+		return slackUserInfo{}, false, fmt.Errorf("users.info request build: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return slackUserInfo{}, false, fmt.Errorf("users.info request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, slackWebAPIResponseBodyLimit+1))
+	if err != nil {
+		return slackUserInfo{}, false, fmt.Errorf("users.info response read: %w", err)
+	}
+	if len(raw) > slackWebAPIResponseBodyLimit {
+		return slackUserInfo{}, false, fmt.Errorf("users.info response exceeded %d bytes", slackWebAPIResponseBodyLimit)
+	}
+	if err := slackWebAPIResponseStatusError("users.info", resp.StatusCode, resp.Header, raw); err != nil {
+		return slackUserInfo{}, false, err
+	}
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		User  struct {
+			ID      string `json:"id"`
+			Deleted bool   `json:"deleted"`
+			IsBot   bool   `json:"is_bot"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
+			return slackUserInfo{}, false, fmt.Errorf("users.info response JSON: %w: %s", err, snippet)
+		}
+		return slackUserInfo{}, false, fmt.Errorf("users.info response JSON: %w", err)
+	}
+	if err := slackWebAPIResponseFieldsError("users.info", slackUsersInfoBenign, resp.Header, out.OK, out.Error); err != nil {
+		return slackUserInfo{}, false, err
+	}
+	if !out.OK {
+		// slackUsersInfoBenign currently only allows user_not_found.
+		return slackUserInfo{}, false, nil
+	}
+	return slackUserInfo{ID: out.User.ID, Deleted: out.User.Deleted, IsBot: out.User.IsBot}, true, nil
+}
+
+// newSlackUserLookupFuncWithTokenLookup builds the [internal.SlackUserLookupFunc]
+// seam over users.info. It returns false (not an error) for Slack's user_not_found
+// and for deleted/bot users; all other Slack/API failures surface as errors so
+// the transfer handler can fail closed without mutating owner_id.
+func newSlackUserLookupFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, usersInfoURL string, httpClient *http.Client) internal.SlackUserLookupFunc {
+	if httpClient == nil {
+		httpClient = defaultSlackWebAPIClient()
+	}
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		userAgent = defaultSlackAPIUserAgent
+	}
+	exists := func(ctx context.Context, ownerID, userID string) (bool, error) {
+		token, err := lookup(ctx, ownerID)
+		if err != nil {
+			return false, fmt.Errorf("users.info token lookup: %w", err)
+		}
+		if token = strings.TrimSpace(token); token == "" {
+			return false, errors.New("users.info token lookup: empty token")
+		}
+		info, found, err := fetchSlackUserInfo(ctx, httpClient, usersInfoURL, userAgent, token, userID)
+		if err != nil {
+			return false, err
+		}
+		ok := found && info.ID == userID && !info.Deleted && !info.IsBot
+		if !ok {
+			logRejectedSlackUserLookup(ownerID, userID, info, found)
+		}
+		return ok, nil
+	}
+	return func(ctx context.Context, teamID, _ string, userID string) (bool, error) {
+		// Ownership transfer needs workspace membership, not just Enterprise
+		// Grid org visibility. users.info has no workspace selector, so do not
+		// retry with the org-level token when the workspace token is missing;
+		// qurl-integrations#877 tracks safe Grid support.
+		return exists(ctx, teamID, userID)
+	}
+}
+
+func logRejectedSlackUserLookup(ownerID, requestedUserID string, info slackUserInfo, found bool) {
+	reason := "user_not_found"
+	switch {
+	case !found:
+		// Keep the default user_not_found reason.
+	case info.ID != requestedUserID:
+		reason = "mismatched_id"
+	case info.Deleted:
+		reason = "deleted"
+	case info.IsBot:
+		reason = "bot"
+	}
+	attrs := []any{
+		"token_owner_id", slackOwnerLogID(ownerID),
+		"target_user_id", slackOwnerLogID(requestedUserID),
+		"reason", reason,
+	}
+	if reason == "mismatched_id" {
+		attrs = append(attrs, "returned_user_id", slackOwnerLogID(info.ID))
+	}
+	slog.Warn("users.info rejected ownership transfer target", attrs...)
+}
+
 // fetchConversationsMembersPage GETs one conversations.members page on token and returns its
 // member ids + the next_cursor (empty when the membership is exhausted). The body is bounded
 // by slackWebAPIResponseBodyLimit; a Slack ok:false surfaces as an error.
@@ -964,7 +1083,7 @@ func fetchConversationsMembersPage(ctx context.Context, httpClient *http.Client,
 // not-confirmed; that's an acceptable degradation for a best-effort access guard.
 func newSlackChannelMembershipFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsMembersURL string, httpClient *http.Client) internal.ChannelMembershipFunc {
 	if httpClient == nil {
-		httpClient = defaultSlackPostMessageClient()
+		httpClient = defaultSlackWebAPIClient()
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
@@ -1024,7 +1143,7 @@ type slackAssistantThreadsPort struct {
 
 func newSlackAssistantThreadsPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, setTitleURL, setSuggestedPromptsURL, setStatusURL string, httpClient *http.Client) internal.AssistantThreadsPort {
 	if httpClient == nil {
-		httpClient = defaultSlackPostMessageClient()
+		httpClient = defaultSlackWebAPIClient()
 	}
 	setTitle := newSlackWebAPIPoster(lookup, userAgent, setTitleURL, "assistant.threads.setTitle",
 		func(s int, h http.Header, raw []byte) error {
@@ -1088,12 +1207,12 @@ type assistantPromptBody struct {
 	Message string `json:"message"`
 }
 
-// defaultSlackPostMessageClient builds the seam's HTTP client. Mirrors
+// defaultSlackWebAPIClient builds the shared Slack Web API HTTP client. Mirrors
 // defaultSlackViewsOpenClient (CheckRedirect → ErrUseLastResponse so a redirect
-// is surfaced as a response, not followed) but with the chat.postMessage timeout.
-func defaultSlackPostMessageClient() *http.Client {
+// is surfaced as a response, not followed) but with the shared Web API timeout.
+func defaultSlackWebAPIClient() *http.Client {
 	return &http.Client{
-		Timeout: slackChatPostMessageTimeout,
+		Timeout: slackWebAPITimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -1109,6 +1228,23 @@ func defaultSlackPostMessageClient() *http.Client {
 // `ok:false:ratelimited` map to the rate-limit sentinel (load-bearing for the
 // chat.postMessage delivery worker — do not "harmonize" the ratelimited branch away).
 func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode int, header http.Header, raw []byte) error {
+	if err := slackWebAPIResponseStatusError(op, statusCode, header, raw); err != nil {
+		return err
+	}
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		if snippet := slackAPIBodySnippet(raw); snippet != "" {
+			return fmt.Errorf("%s response JSON: %w: %s", op, err, snippet)
+		}
+		return fmt.Errorf("%s response JSON: %w", op, err)
+	}
+	return slackWebAPIResponseFieldsError(op, benign, header, out.OK, out.Error)
+}
+
+func slackWebAPIResponseStatusError(op string, statusCode int, header http.Header, raw []byte) error {
 	if statusCode == http.StatusTooManyRequests {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
@@ -1121,21 +1257,14 @@ func slackWebAPIResponseError(op string, benign map[string]struct{}, statusCode 
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return fmt.Errorf("%s: empty response body", op)
 	}
+	return nil
+}
 
-	var out struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		if snippet := slackAPIBodySnippet(raw); snippet != "" {
-			return fmt.Errorf("%s response JSON: %w: %s", op, err, snippet)
-		}
-		return fmt.Errorf("%s response JSON: %w", op, err)
-	}
-	if out.OK {
+func slackWebAPIResponseFieldsError(op string, benign map[string]struct{}, header http.Header, ok bool, slackErr string) error {
+	if ok {
 		return nil
 	}
-	code := slackAPIErrorCode(out.Error)
+	code := slackAPIErrorCode(slackErr)
 	if code == "ratelimited" {
 		return internal.NewSlackRateLimitError(header.Get("Retry-After"))
 	}
@@ -1205,8 +1334,8 @@ type slackReactionPort struct {
 
 func newSlackReactionPortWithTokenLookup(lookup slackBotTokenLookup, userAgent, addURL, removeURL string, httpClient *http.Client) internal.ReactionPort {
 	if httpClient == nil {
-		// Reuse the chat.postMessage transport posture: 4s timeout + redirect-as-response.
-		httpClient = defaultSlackPostMessageClient()
+		// Reuse the shared Web API transport posture: 4s timeout + redirect-as-response.
+		httpClient = defaultSlackWebAPIClient()
 	}
 	add := newSlackWebAPIPoster(lookup, userAgent, addURL, "reactions.add",
 		func(s int, h http.Header, raw []byte) error {
