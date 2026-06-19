@@ -525,6 +525,39 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 }
 
+func TestCallbackConsumesStoredStateOnce(t *testing.T) {
+	cfg, _, store, _ := newCallbackCfg(t)
+	stateStore := newMemoryStateStore()
+	cfg.StateStore = stateStore
+	state, err := MintStoredStateWithEmailMode(context.Background(), stateStore, testTeamID, testUserID, testAdminEmail, SetupModeReuse, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if _, err := stateStore.StartState(context.Background(), state, cfg.Now()); err != nil {
+		t.Fatalf("StartState: %v", err)
+	}
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first callback status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("second callback status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Fatal("first callback should persist workspace key")
+	}
+}
+
 func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: "different@example.com"}

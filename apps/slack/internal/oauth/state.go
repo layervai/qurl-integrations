@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,22 +15,18 @@ import (
 	"time"
 )
 
-// State token format:
+// New setup links use an opaque random state handle stored server-side via
+// StateStore. The handle is the only state value carried in Slack/Auth0 URLs;
+// team/user/email/mode/nonce/PKCE verifier stay in the backend store and the
+// callback consumes the row atomically.
+//
+// Legacy signed state token format, accepted only for short deploy overlap:
 //
 //	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + code_verifier + "|" + hmac_hex )
 //	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + code_verifier + "|" + hmac_hex )
 //	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + mode + "|" + code_verifier + "|" + hmac_hex )
 //
 // where hmac_hex signs every payload field before it.
-//
-// State is integrity-protected, not encrypted: a copied setup link can be
-// base64url-decoded to read the Slack IDs, optional setup email, and PKCE
-// verifier. Do not put long-lived credentials here; the PKCE verifier is a
-// short-lived authorization-request value carried in state to keep this Lambda
-// flow stateless. Because the verifier is in the front-channel state, PKCE here
-// binds the authorization request as defense-in-depth for a confidential client
-// rather than providing standards-style verifier confidentiality against a party
-// that can read the authorize/callback URLs.
 //
 // Pre-PKCE state formats are still parsed for the short deploy overlap, but
 // they do not complete end-to-end: Callback requires a state-bound verifier
@@ -45,18 +42,11 @@ import (
 // Expiry: 5 minutes from mint covers the slash-command-reply → click →
 // Auth0 authenticate → callback round-trip.
 //
-// Replay posture: within the 5-minute TTL the token *can* be replayed —
-// the nonce is random-per-mint but not persisted to a one-shot store.
-// The double-submit cookie blunts the replay surface (a second clicker
-// needs the same browser, and clearStateCookie runs on every reject
-// path plus on successful state-verify), so a leaked URL alone doesn't
-// re-bind in a different browser. A nonce-store-backed one-shot would
-// close the same-browser-twice case completely; the tradeoff is the
-// extra storage dependency on a flow that's per-workspace-install rare.
-// If we ever need it, DDB with a TTL attribute on the nonce keeps the
-// storage cost bounded (~5min retention) and reuses the existing
-// workspace_state plumbing. Acceptable for v1; revisit if install-flow
-// logs show legitimate replay.
+// Replay posture: StateStore-backed states are consumed once on callback. The
+// store writes a `ttl` cleanup hint, but the consume path also checks expiry in
+// the conditional write because table TTL is best-effort and may lag. The
+// double-submit cookie still binds the Auth0 callback to the browser that opened
+// /start.
 const (
 	stateMaxAge          = 5 * time.Minute
 	stateLegacyParts     = 5
@@ -64,6 +54,7 @@ const (
 	stateEmailModeParts  = 7
 	stateNonceLen        = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
 	statePKCEVerifierLen = 32 // 32 bytes base64url-encode to 43 chars, RFC 7636's lower bound.
+	stateHandleLen       = 32 // 256-bit opaque handle; no payload is encoded in the URL.
 	StateMinSecret       = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
 	stateFutureSkew      = 30 * time.Second
 	stateSeparator       = "|"
@@ -145,60 +136,96 @@ func normalizeSetupMode(mode SetupMode) (SetupMode, error) {
 	}
 }
 
+func mintRandomHex(bytesLen int, label string) (string, error) {
+	b := make([]byte, bytesLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("state: read %s: %w", label, err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func mintCodeVerifier() (string, error) {
+	verifierBytes := make([]byte, statePKCEVerifierLen)
+	if _, err := rand.Read(verifierBytes); err != nil {
+		return "", fmt.Errorf("state: read PKCE verifier: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(verifierBytes), nil
+}
+
+func normalizeStateInputs(teamID, userID, email string, mode SetupMode) (normalizedTeamID, normalizedUserID, normalizedEmail string, normalizedMode SetupMode, err error) {
+	normalizedMode, err = normalizeSetupMode(mode)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	if teamID == "" {
+		return "", "", "", "", errStateEmptyTeam
+	}
+	if userID == "" {
+		return "", "", "", "", errStateEmptyUser
+	}
+	// The legacy wire format uses '|' as the separator between payload parts.
+	// Keep rejecting it for stored states too so callers see one stable input
+	// contract regardless of the backing representation.
+	if strings.ContainsRune(teamID, stateSeparatorRune) ||
+		strings.ContainsRune(userID, stateSeparatorRune) ||
+		strings.ContainsRune(email, stateSeparatorRune) {
+		return "", "", "", "", errStateIDHasSeparator
+	}
+	if email != "" {
+		normalized, err := NormalizeEmail(email)
+		if err != nil {
+			return "", "", "", "", err
+		}
+		email = normalized
+	}
+	if normalizedMode != SetupModeReuse && email == "" {
+		return "", "", "", "", errStateBadMode
+	}
+	return teamID, userID, email, normalizedMode, nil
+}
+
+func newVerifiedState(teamID, userID, email string, mode SetupMode) (VerifiedState, error) {
+	teamID, userID, email, normalizedMode, err := normalizeStateInputs(teamID, userID, email, mode)
+	if err != nil {
+		return VerifiedState{}, err
+	}
+	nonce, err := mintRandomHex(stateNonceLen, "nonce")
+	if err != nil {
+		return VerifiedState{}, err
+	}
+	codeVerifier, err := mintCodeVerifier()
+	if err != nil {
+		return VerifiedState{}, err
+	}
+	return VerifiedState{
+		TeamID:       teamID,
+		UserID:       userID,
+		Nonce:        nonce,
+		CodeVerifier: codeVerifier,
+		Email:        email,
+		Mode:         normalizedMode,
+	}, nil
+}
+
 // mintState produces a fresh state token binding (teamID, userID) and,
 // when non-empty, a normalized email address under secret.
 func mintState(secret []byte, teamID, userID, email string, mode SetupMode, now time.Time) (string, error) {
 	if len(secret) < StateMinSecret {
 		return "", errStateShortKey
 	}
-	normalizedMode, err := normalizeSetupMode(mode)
+	verified, err := newVerifiedState(teamID, userID, email, mode)
 	if err != nil {
 		return "", err
 	}
-	if teamID == "" {
-		return "", errStateEmptyTeam
-	}
-	if userID == "" {
-		return "", errStateEmptyUser
-	}
-	// The wire format uses '|' as the separator between payload parts.
-	// Today's Slack team/user IDs are pure [A-Z0-9], but if Slack ever
-	// extends the alphabet a stray '|' would split into more parts than
-	// VerifyState expects and silently mismatch. Reject up front.
-	if strings.ContainsRune(teamID, stateSeparatorRune) ||
-		strings.ContainsRune(userID, stateSeparatorRune) ||
-		strings.ContainsRune(email, stateSeparatorRune) {
-		return "", errStateIDHasSeparator
-	}
-	if email != "" {
-		normalized, err := NormalizeEmail(email)
-		if err != nil {
-			return "", err
-		}
-		email = normalized
-	}
-	nonceBytes := make([]byte, stateNonceLen)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return "", fmt.Errorf("state: read nonce: %w", err)
-	}
-	nonce := hex.EncodeToString(nonceBytes)
-	verifierBytes := make([]byte, statePKCEVerifierLen)
-	if _, err := rand.Read(verifierBytes); err != nil {
-		return "", fmt.Errorf("state: read PKCE verifier: %w", err)
-	}
-	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
 	ts := strconv.FormatInt(now.Unix(), 10)
-	payloadParts := []string{teamID, userID, nonce, ts}
-	if email != "" {
-		payloadParts = append(payloadParts, email)
+	payloadParts := []string{verified.TeamID, verified.UserID, verified.Nonce, ts}
+	if verified.Email != "" {
+		payloadParts = append(payloadParts, verified.Email)
 	}
-	if normalizedMode != SetupModeReuse {
-		if email == "" {
-			return "", errStateBadMode
-		}
-		payloadParts = append(payloadParts, string(normalizedMode))
+	if verified.Mode != SetupModeReuse {
+		payloadParts = append(payloadParts, string(verified.Mode))
 	}
-	payloadParts = append(payloadParts, codeVerifier)
+	payloadParts = append(payloadParts, verified.CodeVerifier)
 	signed := signedPayload(payloadParts...)
 	mac := hmac.New(sha256.New, secret)
 	// hmac.Hash.Write never returns an error (documented in stdlib); the
@@ -210,6 +237,32 @@ func mintState(secret []byte, teamID, userID, email string, mode SetupMode, now 
 	raw = append(raw, stateSeparatorB)
 	raw = append(raw, sig...)
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// MintStoredStateWithEmailMode stores a fresh setup state server-side and
+// returns the opaque handle that should be sent through the front-channel URL.
+func MintStoredStateWithEmailMode(ctx context.Context, store StateStore, teamID, userID, email string, mode SetupMode, now time.Time) (string, error) {
+	if store == nil {
+		return "", errors.New("state: store is nil")
+	}
+	verified, err := newVerifiedState(teamID, userID, email, mode)
+	if err != nil {
+		return "", err
+	}
+	handleBytes := make([]byte, stateHandleLen)
+	if _, err := rand.Read(handleBytes); err != nil {
+		return "", fmt.Errorf("state: read handle: %w", err)
+	}
+	handle := base64.RawURLEncoding.EncodeToString(handleBytes)
+	state := StoredState{
+		VerifiedState: verified,
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(stateMaxAge),
+	}
+	if err := store.PutState(ctx, handle, state); err != nil {
+		return "", err
+	}
+	return handle, nil
 }
 
 // MintState produces a legacy no-email state token binding (teamID, userID)
@@ -243,6 +296,25 @@ type VerifiedState struct {
 	CodeVerifier string
 	Email        string
 	Mode         SetupMode
+}
+
+// StoredState is the backend-only OAuth state payload. It intentionally mirrors
+// VerifiedState plus timestamps so Start can build the Auth0 authorize URL and
+// Callback can consume the same payload without putting sensitive fields in the
+// front-channel URL.
+type StoredState struct {
+	VerifiedState
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
+// StateStore persists OAuth state by opaque handle. StartState may be called
+// more than once before expiry (browser retry); ConsumeState must be atomic and
+// one-shot.
+type StateStore interface {
+	PutState(ctx context.Context, handle string, state StoredState) error
+	StartState(ctx context.Context, handle string, now time.Time) (VerifiedState, error)
+	ConsumeState(ctx context.Context, handle string, now time.Time) (VerifiedState, error)
 }
 
 type parsedStateParts struct {
@@ -362,6 +434,13 @@ func validPKCEVerifier(verifier string) bool {
 func stateEmailNormalized(email string) bool {
 	normalized, err := NormalizeEmail(email)
 	return err == nil && normalized == email
+}
+
+func isStateValidationError(err error) bool {
+	return errors.Is(err, errStateExpired) ||
+		errors.Is(err, errStateBadHMAC) ||
+		errors.Is(err, errStateMalformed) ||
+		errors.Is(err, errStateFuture)
 }
 
 // VerifyState validates and decodes a state token. Returns the recovered

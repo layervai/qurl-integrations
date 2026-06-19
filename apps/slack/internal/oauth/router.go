@@ -91,6 +91,7 @@ func callbackURL(slackBaseURL string) string {
 type SetupConfig struct {
 	StateSecret  []byte
 	SlackBaseURL string
+	StateStore   StateStore
 }
 
 // SetupURL builds the /qurl setup link from the supplied state token.
@@ -262,9 +263,16 @@ type Config struct {
 	APIKeyMintReplayWindowHours int
 
 	// OAuthStateSecret is the HMAC-SHA256 key used to mint and verify
-	// the `state` token threaded through Auth0. Operator-set; the
-	// constructor refuses anything shorter than stateMinSecret.
+	// legacy signed `state` tokens during short deploy overlap. New
+	// setup links use StateStore-backed opaque handles. Operator-set;
+	// the constructor refuses anything shorter than stateMinSecret.
 	OAuthStateSecret []byte
+
+	// StateStore keeps team/user/email/mode/nonce/PKCE verifier out of
+	// front-channel OAuth URLs and consumes callback state atomically.
+	// Nil falls back to legacy signed-state verification for tests and
+	// short deploy overlap only; production buildOAuthConfig wires DDB.
+	StateStore StateStore
 
 	// Provider is the DDB-backed key store. Normal setup reuses a valid
 	// stored key or persists a fresh key with metadata; explicit rotation

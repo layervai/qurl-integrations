@@ -1687,9 +1687,17 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	var state string
+	var err error
+	if h.oauthSetup.StateStore != nil {
+		stateCtx, stateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+		defer stateCancel()
+		state, err = oauth.MintStoredStateWithEmailMode(stateCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	} else {
+		state, err = oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	}
 	if err != nil {
-		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
+		slog.Error("/qurl setup: mint OAuth state failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}

@@ -383,6 +383,7 @@ func run() error {
 		handler.SetOAuthSetup(oauth.SetupConfig{
 			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
+			StateStore:   oauthCfg.StateStore,
 		})
 		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
 		// install, set-alias, admin add/remove/list/revoke). It must be
@@ -989,6 +990,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		SetupBindingReplayWindowHours: setupBindingReplayWindowHours,
 		APIKeyMintReplayWindowHours:   apiKeyMintReplayWindowHours,
 		OAuthStateSecret:              []byte(stateSecret),
+		StateStore:                    oauth.NewDDBStateStore(provider),
 		Provider:                      provider,
 		IDTokenVerifier:               verifier,
 		Minter:                        &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},

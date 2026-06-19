@@ -123,6 +123,49 @@ func TestStartHappyPath(t *testing.T) {
 	}
 }
 
+func TestStartUsesStoredOpaqueState(t *testing.T) {
+	cfg := newStartCfg()
+	store := newMemoryStateStore()
+	cfg.StateStore = store
+	state, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "Admin@Example.COM", SetupModeReuse, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	h := Start(cfg)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	q := u.Query()
+	if q.Get("state") != state {
+		t.Errorf("state: got %q want opaque handle %q", q.Get("state"), state)
+	}
+	verified, err := store.StartState(context.Background(), state, cfg.Now())
+	if err != nil {
+		t.Fatalf("StartState after handler: %v", err)
+	}
+	if q.Get("nonce") != verified.Nonce {
+		t.Errorf("nonce: got %q want stored nonce %q", q.Get("nonce"), verified.Nonce)
+	}
+	if q.Get("code_challenge") != pkceCodeChallenge(verified.CodeVerifier) {
+		t.Errorf("code_challenge: got %q want S256 challenge from stored verifier", q.Get("code_challenge"))
+	}
+	if q.Get("login_hint") != "admin@example.com" {
+		t.Errorf("login_hint: got %q want normalized setup email", q.Get("login_hint"))
+	}
+	if strings.Contains(state, "admin@example.com") || strings.Contains(state, verified.CodeVerifier) {
+		t.Fatalf("front-channel state leaked payload: state=%q verifier=%q", state, verified.CodeVerifier)
+	}
+}
+
 func TestStartEmailSetupUsesLoginHintWithoutForcingConnection(t *testing.T) {
 	cfg := newStartCfg()
 	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "Admin@Example.COM", cfg.Now())

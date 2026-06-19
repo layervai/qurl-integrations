@@ -233,8 +233,9 @@ var errMissingPKCEVerifier = errors.New("auth0 token exchange missing PKCE verif
 // Callback returns the http.HandlerFunc for GET /oauth/qurl/callback.
 //
 // Steps:
-//  1. Validate cookie + query.state via timing-safe compare; verify the
-//     state's HMAC + expiry; recover (teamID, userID).
+//  1. Validate cookie + query.state via timing-safe compare; consume the
+//     backend state row, or verify a legacy signed state during deploy overlap;
+//     recover (teamID, userID).
 //  2. POST to Auth0 /oauth/token with the state-bound PKCE verifier to
 //     exchange code → access_token + id_token.
 //  3. Verify id_token signature + nonce against Auth0 JWKS — extract `sub`
@@ -430,10 +431,18 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		return VerifiedState{}, "", false
 	}
 
-	// HMAC + expiry on the state token itself; the cookie check
-	// above proves "same browser" but not "minted by us".
-	v, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
+	// Backend consume (or legacy HMAC + expiry) on the state token itself; the
+	// cookie check above proves "same browser" but not "minted by us".
+	v, err := consumeCallbackState(r.Context(), cfg, stateParam, now())
 	if err != nil {
+		if !isStateValidationError(err) {
+			slog.Error("oauth/callback state store failed", "error", err)
+			clearStateCookie(w)
+			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "qURL setup is temporarily unavailable",
+				"qURL™ setup could not verify this setup link.",
+				"Return to Slack and run /qurl setup <email> again in a few minutes.")
+			return VerifiedState{}, "", false
+		}
 		slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		clearStateCookie(w)
 		renderOAuthErrorPage(w, http.StatusBadRequest, "Setup link is invalid or expired",
@@ -445,6 +454,23 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	// Cookie has done its job — clear so a refresh can't re-bind.
 	clearStateCookie(w)
 	return v, code, true
+}
+
+//nolint:gocritic // hugeParam: mirrors Callback's package-wide value-pass Config posture.
+func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
+	if cfg.StateStore != nil {
+		verified, err := cfg.StateStore.ConsumeState(ctx, stateParam, now)
+		if err == nil {
+			return verified, nil
+		}
+		if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMalformed) {
+			return VerifiedState{}, err
+		}
+		// Legacy signed states minted before StateStore rollout are not present
+		// in DDB; preserve a short deploy-overlap path. Opaque handles fail the
+		// HMAC verifier below.
+	}
+	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }
 
 // verifyIDTokenClaims extracts email + sub from the id_token. Email
