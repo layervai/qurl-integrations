@@ -188,13 +188,23 @@ describe('baseUrlHttpsProblem', () => {
       'https://bot.example.com/prefix',
       'https://bot.example.com?debug=true',
       'https://bot.example.com#callback',
-      'https://user:pass@bot.example.com',
     ]) {
       const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
       expect(msg).not.toBeNull();
       expect(msg).toContain('public bare https:// origin');
       expect(msg).toContain(bad);
     }
+  });
+
+  it('redacts BASE_URL userinfo from boot errors', () => {
+    const msg = baseUrlHttpsProblem(
+      cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://user:pass@bot.example.com' }),
+      true,
+    );
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('public bare https:// origin');
+    expect(msg).toContain('https://bot.example.com/');
+    expect(msg).not.toContain('user:pass');
   });
 
   it('rejects qURL OAuth configured + local-only BASE_URL host literals', () => {

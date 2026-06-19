@@ -124,6 +124,20 @@ function isLocalOnlyHost(hostname) {
     || isPrivateIPv4Literal(host);
 }
 
+function baseUrlForError(rawBaseUrl) {
+  try {
+    const parsed = new URL(rawBaseUrl);
+    if (parsed.username || parsed.password) {
+      parsed.username = '';
+      parsed.password = '';
+      return parsed.href;
+    }
+  } catch {
+    // Preserve malformed values exactly; they cannot carry parsed userinfo.
+  }
+  return rawBaseUrl;
+}
+
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
   let parsed = null;
   try {
@@ -144,16 +158,17 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
   const isPublicOrigin = Boolean(parsed && !isLocalOnlyHost(parsed.hostname));
   const usableOAuthOrigin = usesHttps && isBareOrigin && isPublicOrigin;
   if (usableOAuthOrigin) return null;
+  const displayBaseUrl = baseUrlForError(cfg.BASE_URL);
   if (cfg.isQurlOAuthConfigured) {
     return (
       'BASE_URL must be a public bare https:// origin in production ' +
       '— the qURL guided setup flow builds its OAuth redirect from it, and a ' +
-      `non-public or non-origin value dead-ends setup at the redirect. Got: ${cfg.BASE_URL}. ` +
+      `non-public or non-origin value dead-ends setup at the redirect. Got: ${displayBaseUrl}. ` +
       "Set BASE_URL to the bot's public https:// origin in the deployment template."
     );
   }
   if (baseUrlExplicitlySet && !usesHttps) {
-    return `BASE_URL must use https:// in production (got ${cfg.BASE_URL})`;
+    return `BASE_URL must use https:// in production (got ${displayBaseUrl})`;
   }
   return null;
 }
