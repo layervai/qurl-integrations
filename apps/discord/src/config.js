@@ -442,16 +442,17 @@ module.exports = {
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
 
-  // Multi-use qURL access token (`at_...`) the bot resolves to reach the
-  // watermark-detect endpoint over the qURL reverse-tunnel (PR-3, #1101).
-  // connector.js's resolveDetectTarget() calls QurlClient.resolve({
-  // access_token: DETECT_ACCESS_TOKEN }) — which issues an NHP knock for the
-  // bot's current IP — immediately before each /api/detect POST. Secret-
-  // shaped (read verbatim from env like QURL_API_KEY / QURL_WEBHOOK_SECRET);
-  // no default. When unset, /qurl detect surfaces a clear configured-error
-  // (resolveDetectTarget throws) rather than silently failing. SSM-seeded at
-  // detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
-  DETECT_ACCESS_TOKEN: process.env.DETECT_ACCESS_TOKEN,
+  // Slug of the qURL reverse-tunnel resource that fronts the watermark-detect
+  // endpoint (#1101). connector.js's resolveDetectTarget() resolves this slug to
+  // a resource_id (`GET /resources?slug=…`), then self-mints a FRESH ephemeral
+  // qURL on it (`POST /resources/{id}/qurls`) and resolves that — the NHP knock
+  // for the bot's current IP — immediately before each /api/detect POST. No
+  // pre-seeded access token: the bot mints per call with its own QURL_API_KEY.
+  // A plain NON-secret env (e.g. `detect-sandbox` / `detect-prod`), read
+  // verbatim; no default. When unset, /qurl detect surfaces a clear
+  // configured-error (resolveDetectTarget throws) rather than silently failing.
+  // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
+  DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG,
 
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL
@@ -520,6 +521,17 @@ module.exports = {
   // QURL_DETECT_COOLDOWN_MS explicitly — decoupled so a future send-cadence
   // change can't silently re-tune the oracle. See setDetectCooldown.
   QURL_DETECT_COOLDOWN_MS: detectCooldownMs,
+  // Leading-edge debounce for the sub-second view-counter fast-path
+  // (qurl-webhook.js editSenderCounterInBackground). On a high-fan-out
+  // send (cap QURL_SEND_MAX_RECIPIENTS, default 20000) every recipient's
+  // first view fires a qurl.accessed webhook; un-coalesced, each would
+  // PATCH the sender confirmation, storming Discord's per-message edit
+  // budget (429s). This bounds fast-path edits per send to ~1 per window
+  // per replica; distinct first-view aggregate writes are sharded in
+  // qurl_views so they do not funnel through one send row. Default to the
+  // largest sub-second window (900ms); larger env overrides are rejected
+  // back to that default rather than clamped.
+  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 900, { minPositive: true, max: 900 }),
 
   SHARD_ID,
 

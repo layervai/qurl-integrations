@@ -16,6 +16,9 @@
  *     those are DDB-side guarantees, not our code.
  */
 
+const fs = require('fs');
+const path = require('path');
+
 jest.mock('../src/config', () => ({
   PENDING_LINK_EXPIRY_MINUTES: 10,
 }));
@@ -1200,6 +1203,458 @@ describe('qurl sends', () => {
     expect(result.attachment_url).toBe('https://cdn.example/attachment');
   });
 
+  test('getSendConfig: SECURITY — strips the SENSITIVE interaction_token from the full-row return', async () => {
+    // PR-B persists the live ~15-min interaction-webhook bearer cred onto
+    // this row. getSendConfig is the full-row getter its (scalar-reading)
+    // callers use, so it must NOT hand the token back — a caller that logs
+    // / audit-ships / error-dumps the config object would otherwise leak
+    // the cred. (The fast-path reads the token via getSendRenderState, the
+    // one return shape that intentionally carries it.)
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        send_id: 's1', sender_discord_id: 'sender',
+        interaction_token: 'tok-LIVE-bearer-cred', interaction_app_id: 'app-1',
+        expires_in: '24h', personal_message: 'hi',
+      },
+    });
+    const result = await store.getSendConfig('s1', 'sender');
+    expect(result).not.toHaveProperty('interaction_token');
+    expect(JSON.stringify(result)).not.toContain('tok-LIVE-bearer-cred');
+    // Non-sensitive config fields the callers DO read survive.
+    expect(result.expires_in).toBe('24h');
+    expect(result.personal_message).toBe('hi');
+  });
+
+  // ── View-counter render state (cross-replica fast-path, PR-B) ──
+
+  test('getSendRenderState: SECURITY - decrypted token has one production caller', () => {
+    const srcRoot = path.join(__dirname, '../src');
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.isFile() && entry.name.endsWith('.js')) {
+          files.push(full);
+        }
+      }
+    };
+    walk(srcRoot);
+
+    const callers = files
+      .map(file => ({
+        rel: path.relative(srcRoot, file).replace(/\\/g, '/'),
+        text: fs.readFileSync(file, 'utf8'),
+      }))
+      .filter(({ rel }) => !['store/ddb-store.js', 'store/contract.js'].includes(rel))
+      .filter(({ text }) => /\bgetSendRenderState\s*\(/.test(text))
+      .map(({ rel }) => rel)
+      .sort();
+
+    expect(callers).toEqual(['routes/qurl-webhook.js']);
+  });
+
+  test('saveSendConfig: does NOT write view-counter render-state (that is saveSendConfirmState only)', async () => {
+    // saveSendConfig runs BEFORE the token/confirmMsg/delivered exist, so
+    // it carries no render-state fields — they are written separately by
+    // saveSendConfirmState after the editReply. Pin that the config Put
+    // never touches the render-state attrs (no second, sensitive-token
+    // write surface to keep in sync).
+    ddbMock.on(PutCommand).resolves({});
+    await store.saveSendConfig({
+      sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
+      connectorResourceId: 'conn', actualUrl: null, expiresIn: '24h',
+      personalMessage: null, locationName: null, attachmentName: null,
+      attachmentContentType: null, attachmentUrl: null,
+    });
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(item).not.toHaveProperty('interaction_token');
+    expect(item).not.toHaveProperty('interaction_app_id');
+    expect(item).not.toHaveProperty('expected_count');
+    expect(item).not.toHaveProperty('confirm_expires_at');
+    expect(item).not.toHaveProperty('last_rendered_count');
+  });
+
+  test('getSendRenderState: maps row fields, derives terminal default, no ownership filter', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        send_id: 's1', sender_discord_id: 'sender',
+        interaction_token: `enc:v1:IV:TAG:${Buffer.from('tok-abc').toString('hex')}`,
+        interaction_app_id: 'app-1',
+        expected_count: 5, last_rendered_count: 2,
+      },
+    });
+    // No senderDiscordId arg — PR-B's webhook path has no sender context.
+    const state = await store.getSendRenderState('s1');
+    const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(input.ConsistentRead).toBe(true);
+    expect(state).toEqual({
+      interactionToken: 'tok-abc', interactionAppId: 'app-1',
+      expectedCount: 5, lastRenderedCount: 2,
+      viewedCount: null,
+      // last_rendered_at absent on the row → 0 (never edited), which the
+      // fast-path treats as "older than any coalesce window".
+      lastRenderedAt: 0,
+      baseMsg: undefined, qurlIds: [], terminal: false,
+    });
+  });
+
+  test('getSendRenderState: maps last_rendered_at (epoch MS) through for the coalesce gate', async () => {
+    const at = 1_700_000_000_000;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', last_rendered_count: 4, last_rendered_at: at, viewed_count: 4 },
+    });
+    const state = await store.getSendRenderState('s1');
+    expect(state.lastRenderedAt).toBe(at);
+    expect(state.viewedCount).toBe(4);
+  });
+
+  test('getSendRenderState: terminal=true when revoked_at OR confirm_terminal set; qurlIds passthrough', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', revoked_at: 'when', confirm_qurl_ids: ['q_a', 'q_b'] },
+    });
+    const viaRevoke = await store.getSendRenderState('s1');
+    expect(viaRevoke.terminal).toBe(true);
+    expect(viaRevoke.qurlIds).toEqual(['q_a', 'q_b']);
+    // defaults when fields absent
+    expect(viaRevoke.expectedCount).toBe(0);
+    expect(viaRevoke.lastRenderedCount).toBe(0);
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({ Item: { send_id: 's2', confirm_terminal: true } });
+    const viaTerminalFlag = await store.getSendRenderState('s2');
+    expect(viaTerminalFlag.terminal).toBe(true);
+    expect(viaTerminalFlag.qurlIds).toEqual([]); // absent → [] not undefined
+  });
+
+  test('getSendRenderState: returns null on missing row / empty sendId', async () => {
+    ddbMock.on(GetCommand).resolves({}); // no Item
+    expect(await store.getSendRenderState('nope')).toBeNull();
+    expect(await store.getSendRenderState('')).toBeNull();
+    expect(await store.getSendRenderState(undefined)).toBeNull();
+  });
+
+  test('getSendRenderState: self-defends past confirm_expires_at — treats a dead token as absent', async () => {
+    // The bot enforces the interaction token's ~15-min lifetime itself
+    // (the table has no DDB TTL yet), so a row whose confirm_expires_at is
+    // in the past returns null → the fast-path skips, the poll backstop
+    // renders. Without this, a stale token would be re-tried until reaped.
+    const pastSeconds = Math.floor(Date.now() / 1000) - 60;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', interaction_token: 'tok-dead', interaction_app_id: 'app-1', confirm_expires_at: pastSeconds },
+    });
+    expect(await store.getSendRenderState('s1')).toBeNull();
+
+    // A future confirm_expires_at still returns the live state.
+    ddbMock.reset();
+    const futureSeconds = Math.floor(Date.now() / 1000) + 600;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', interaction_token: 'tok-live', interaction_app_id: 'app-1', confirm_expires_at: futureSeconds },
+    });
+    expect((await store.getSendRenderState('s1')).interactionToken).toBe('tok-live');
+  });
+
+  test('tryAdvanceRenderedCount: monotonic guard — advances up, rejects equal/lower', async () => {
+    // first advance 0→1 true; re-advance to 1 false; advance 1→2 true;
+    // lower 2→1 false. The store layer is stateless across calls (the
+    // CAS lives in DDB), so we drive the ConditionExpression verdict via
+    // the mock: success resolves, a no-advance CCFEs.
+    const ccfe = new Error('cond');
+    ccfe.name = 'ConditionalCheckFailedException';
+
+    ddbMock.on(UpdateCommand).resolves({});
+    const before = Date.now();
+    expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(true); // 0→1
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // Coalescing: the SAME write stamps last_rendered_at (epoch MS) so the
+    // next webhook's leading-edge debounce sees this confirmed edit.
+    expect(input.UpdateExpression).toMatch(/SET last_rendered_count = :n/);
+    expect(input.UpdateExpression).toMatch(/last_rendered_at = :now/);
+    // The MS clock lives in the SET clause, NOT the condition — only the
+    // count is guarded monotonic.
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
+    );
+    expect(input.ExpressionAttributeValues[':n']).toBe(1);
+    const stamped = input.ExpressionAttributeValues[':now'];
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(false); // re-advance to 1
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).resolves({});
+    expect(await store.tryAdvanceRenderedCount('s1', 2)).toBe(true); // 1→2
+
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    expect(await store.tryAdvanceRenderedCount('s1', 1)).toBe(false); // lower 2→1
+  });
+
+  test('tryAdvanceRenderedCount: non-CCFE errors propagate', async () => {
+    const boom = new Error('throughput');
+    boom.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(UpdateCommand).rejects(boom);
+    await expect(store.tryAdvanceRenderedCount('s1', 1)).rejects.toThrow('throughput');
+  });
+
+  test('incrementSendViewedCount: increments a sharded qurl_views counter row, not the send config hot row', async () => {
+    const before = Math.floor(Date.now() / 1000);
+    ddbMock.on(UpdateCommand).resolves({});
+    await expect(store.incrementSendViewedCount('s1', 'q_a', 1)).resolves.toBeUndefined();
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-qurl-views');
+    expect(input.Key.qurl_id).toBe('__send_view_count__s1#00');
+    expect(input.UpdateExpression).toBe('SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one');
+    expect(input.ExpressionAttributeValues).toEqual(expect.objectContaining({
+      ':sid': 's1',
+      ':one': 1,
+    }));
+    expect(input.ExpressionAttributeValues[':shard']).toBe(0);
+    expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60);
+    expect(input.ReturnValues).toBeUndefined();
+  });
+
+  test('getSendViewedCount: small sends read one strong shard key', async () => {
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#00', viewed_count: 1 }] },
+    });
+    await expect(store.getSendViewedCount('s1', 1)).resolves.toBe(1);
+    const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(request.ConsistentRead).toBe(true);
+    expect(request.Keys).toEqual([{ qurl_id: '__send_view_count__s1#00' }]);
+  });
+
+  test('getSendViewedCount: invalid expectedCount falls back to the one-shard floor', async () => {
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#00', viewed_count: 2 }] },
+    });
+    await expect(store.getSendViewedCount('s1', 0)).resolves.toBe(2);
+    const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(request.Keys).toEqual([{ qurl_id: '__send_view_count__s1#00' }]);
+  });
+
+  test('getSendViewedCount: expanded expectedCount still reads earlier one-shard writes', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.incrementSendViewedCount('s1', 'q_a', 1);
+    const writtenKey = ddbMock.commandCalls(UpdateCommand)[0].args[0].input.Key;
+    expect(writtenKey).toEqual({ qurl_id: '__send_view_count__s1#00' });
+
+    ddbMock.reset();
+    ddbMock.on(BatchGetCommand).resolves({
+      Responses: { 'test-prefix-qurl-views': [{ ...writtenKey, viewed_count: 1 }] },
+    });
+
+    await expect(store.getSendViewedCount('s1', 20000)).resolves.toBe(1);
+    const request = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(request.ConsistentRead).toBe(true);
+    expect(request.Keys).toHaveLength(64);
+    expect(request.Keys).toContainEqual(writtenKey);
+  });
+
+  test('getSendViewedCount: max-fanout sends read 64 strong shard keys and retry unprocessed shards once', async () => {
+    let attempt = 0;
+    ddbMock.on(BatchGetCommand).callsFake((input) => {
+      attempt += 1;
+      if (attempt === 1) {
+        return Promise.resolve({
+          Responses: {
+            'test-prefix-qurl-views': [
+              { qurl_id: '__send_view_count__s1#00', viewed_count: 3 },
+              { qurl_id: '__send_view_count__s1#01', viewed_count: 2 },
+              { qurl_id: '__send_view_count__s1#02', viewed_count: 0 },
+            ],
+          },
+          UnprocessedKeys: { 'test-prefix-qurl-views': { Keys: input.RequestItems['test-prefix-qurl-views'].Keys.slice(63) } },
+        });
+      }
+      return Promise.resolve({
+        Responses: { 'test-prefix-qurl-views': [{ qurl_id: '__send_view_count__s1#63', viewed_count: 4 }] },
+      });
+    });
+    await expect(store.getSendViewedCount('s1', 20000)).resolves.toBe(9);
+    const first = ddbMock.commandCalls(BatchGetCommand)[0].args[0].input;
+    const request = first.RequestItems['test-prefix-qurl-views'];
+    const keys = request.Keys;
+    expect(request.ConsistentRead).toBe(true);
+    expect(keys).toHaveLength(64);
+    expect(keys[0].qurl_id).toBe('__send_view_count__s1#00');
+    expect(keys[63].qurl_id).toBe('__send_view_count__s1#63');
+    expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(2);
+    const retry = ddbMock.commandCalls(BatchGetCommand)[1].args[0].input
+      .RequestItems['test-prefix-qurl-views'];
+    expect(retry.ConsistentRead).toBe(true);
+    expect(retry.Keys).toEqual([{ qurl_id: '__send_view_count__s1#63' }]);
+  });
+
+  test('getSendRenderedCount: strongly reads only the displayed floor', async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { last_rendered_count: 7, interaction_token: 'tok' } });
+    await expect(store.getSendRenderedCount('s1')).resolves.toBe(7);
+    const input = ddbMock.commandCalls(GetCommand)[0].args[0].input;
+    expect(input).toEqual({
+      TableName: 'test-prefix-qurl-send-configs',
+      Key: { send_id: 's1' },
+      ProjectionExpression: 'last_rendered_count',
+      ConsistentRead: true,
+    });
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({});
+    await expect(store.getSendRenderedCount('missing')).resolves.toBe(0);
+    await expect(store.getSendRenderedCount('')).resolves.toBe(0);
+  });
+
+  test('touchRenderedAt: failure-path debounce stamp — SETs last_rendered_at ONLY, no count, no condition', async () => {
+    // Refreshes the coalesce clock on a FAILED edit attempt without
+    // advancing the count (which would strand the stuck-counter guard).
+    const before = Date.now();
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.touchRenderedAt('s1');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // Only last_rendered_at — NOT last_rendered_count.
+    expect(input.UpdateExpression).toBe('SET last_rendered_at = :now');
+    expect(input.UpdateExpression).not.toMatch(/last_rendered_count/);
+    // Unconditional — the whole point is to stamp even though nothing was
+    // displayed, so there's no count guard.
+    expect(input.ConditionExpression).toBeUndefined();
+    const stamped = input.ExpressionAttributeValues[':now'];
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+  });
+
+  test('tryClaimRenderAttempt: conditionally stamps only when the shared attempt clock is stale', async () => {
+    const before = Date.now();
+    ddbMock.on(UpdateCommand).resolves({});
+    await expect(store.tryClaimRenderAttempt('s1', before - 900)).resolves.toBe(true);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.TableName).toBe('test-prefix-qurl-send-configs');
+    expect(input.Key).toEqual({ send_id: 's1' });
+    expect(input.UpdateExpression).toBe('SET last_rendered_at = :now');
+    expect(input.ConditionExpression).toBe(
+      'attribute_not_exists(last_rendered_at) OR last_rendered_at <= :cutoff',
+    );
+    expect(input.ExpressionAttributeValues[':cutoff']).toBe(before - 900);
+    const stamped = input.ExpressionAttributeValues[':now'];
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+
+    const ccfe = new Error('cond');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.reset();
+    ddbMock.on(UpdateCommand).rejects(ccfe);
+    await expect(store.tryClaimRenderAttempt('s1', Date.now())).resolves.toBe(false);
+
+    ddbMock.reset();
+    const boom = new Error('throughput');
+    boom.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(UpdateCommand).rejects(boom);
+    await expect(store.tryClaimRenderAttempt('s1', Date.now())).rejects.toThrow('throughput');
+    await expect(store.tryClaimRenderAttempt('', Date.now())).resolves.toBe(false);
+  });
+
+  test('markConfirmTerminal: idempotent SET confirm_terminal = true, no condition', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.markConfirmTerminal('s1');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toMatch(/SET confirm_terminal = :t/);
+    expect(input.ExpressionAttributeValues[':t']).toBe(true);
+    expect(input.ConditionExpression).toBeUndefined(); // sticky kill-switch, no guard
+  });
+
+  test('saveSendConfirmState: send-time write SETs all present render fields', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', {
+      interactionToken: 'tok-live', interactionAppId: 'app-1',
+      expectedCount: 3, confirmBaseMsg: 'Sent to 3 users', confirmExpiresAt: 1234567890,
+      viewedCount: 0,
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1' });
+    expect(input.UpdateExpression).toMatch(/^SET /);
+    // Every present field lands; the placeholder values carry the data.
+    const vals = Object.values(input.ExpressionAttributeValues);
+    expect(vals).toEqual(expect.arrayContaining([
+      `enc:v1:IV:TAG:${Buffer.from('tok-live').toString('hex')}`,
+      'app-1', 3, 'Sent to 3 users', 1234567890, 0,
+    ]));
+    expect(vals).not.toContain('tok-live');
+    for (const attr of ['interaction_token', 'interaction_app_id', 'expected_count', 'confirm_base_msg', 'confirm_expires_at', 'viewed_count']) {
+      expect(input.UpdateExpression).toContain(attr);
+    }
+    const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
+      .find(([, val]) => val === 3)?.[0];
+    expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
+  });
+
+  test('saveSendConfirmState: partial /qurl-add re-persist updates ONLY the passed keys — NEVER nulls the live token', async () => {
+    // THE regression guard: a fixed five-attr SET would write
+    // interaction_token = null when the add caller omits it, permanently
+    // disarming the fast-path (its absent-guard skips on a null token).
+    // Build-from-present-keys must touch ONLY expected_count + confirm_base_msg.
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', {
+      expectedCount: 5, confirmBaseMsg: 'Sent to 5 users',
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('expected_count');
+    expect(input.UpdateExpression).toContain('confirm_base_msg');
+    // The token / app id / TTL attrs must NOT appear in the SET clause at all.
+    expect(input.UpdateExpression).not.toContain('interaction_token');
+    expect(input.UpdateExpression).not.toContain('interaction_app_id');
+    expect(input.UpdateExpression).not.toContain('confirm_expires_at');
+    expect(input.UpdateExpression).not.toContain('viewed_count');
+    expect(Object.values(input.ExpressionAttributeValues)).not.toContain(null);
+    const expectedCountPlaceholder = Object.entries(input.ExpressionAttributeValues)
+      .find(([, val]) => val === 5)?.[0];
+    expect(input.ConditionExpression).toBe(`attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`);
+  });
+
+  test('saveSendConfirmState: caps oversized inline qurl_id cache to avoid DDB item-size blowup', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', {
+      confirmQurlIds: Array.from({ length: 1001 }, (_, i) => `q_${i}`),
+    });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('confirm_qurl_ids');
+    expect(Object.values(input.ExpressionAttributeValues)).toContainEqual([]);
+  });
+
+  test('saveSendConfirmState: token-only partial update has no expected_count monotonic condition', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', { interactionToken: 'tok-refresh' });
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain('interaction_token');
+    expect(input.UpdateExpression).not.toContain('expected_count');
+    expect(input.ConditionExpression).toBeUndefined();
+  });
+
+  test('saveSendConfirmState: stale lower expected_count condition miss is a quiet no-op', async () => {
+    ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('stale fanout'), {
+      name: 'ConditionalCheckFailedException',
+    }));
+    await expect(store.saveSendConfirmState('s1', {
+      expectedCount: 2,
+      confirmBaseMsg: 'Sent to 2 users',
+    })).resolves.toBe(false);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ConditionExpression).toMatch(/expected_count <= :v/);
+  });
+
+  test('saveSendConfirmState: no recognized field → no write at all (not an empty SET)', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.saveSendConfirmState('s1', {});
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    await store.saveSendConfirmState('s1'); // no fields arg
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
   test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret' },
@@ -1232,6 +1687,26 @@ describe('qurl sends', () => {
       expect(rows).toEqual([]);
     }
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  test('getSendItems: projects qurl_id (load-bearing for the view-counter fast-path N)', async () => {
+    // The webhook fast-path maps a send's recipient rows → qurl_ids via
+    // this fn, then counts DISTINCT viewed ids. If the projection ever
+    // drops qurl_id, the fast-path computes qurlIds=[] → N=0 → it never
+    // edits, and EVERY fast-path unit test (which mocks getSendItems to
+    // already carry qurl_id) stays green. This is the one production
+    // dependency the mocks structurally hide — pin it here.
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        send_id: 's1', sender_discord_id: 'owner',
+        resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+        dm_channel_id: 'c1', dm_message_id: 'm1', dm_status: 'sent',
+      }],
+    });
+    const items = await store.getSendItems('s1', 'owner');
+    expect(items).toEqual([expect.objectContaining({
+      resource_id: 'res-1', recipient_discord_id: 'r1', qurl_id: 'q_aaaaaaaaaa1',
+    })]);
   });
 
   test('findSendsByQurlId: tolerates DDB returning Count>1 (consumer handles defensively)', async () => {
@@ -1369,7 +1844,7 @@ describe('qurl views', () => {
     const result = await store.recordQurlView({
       qurlId: 'q_aaaaaaaaaa1', accessCount: 3, consumed: false, eventId: 'evt-1',
     });
-    expect(result).toBe('recorded');
+    expect(result).toEqual({ result: 'recorded', firstView: true });
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.TableName).toBe('test-prefix-qurl-views');
     expect(input.Key).toEqual({ qurl_id: 'q_aaaaaaaaaa1' });
@@ -1398,6 +1873,25 @@ describe('qurl views', () => {
     const THIRTY_DAYS = 30 * 24 * 60 * 60;
     expect(input.ExpressionAttributeValues[':exp']).toBeGreaterThanOrEqual(before + THIRTY_DAYS);
     expect(input.ExpressionAttributeValues[':exp']).toBeLessThanOrEqual(before + THIRTY_DAYS + 5);
+    expect(input.ReturnValues).toBe('ALL_OLD');
+  });
+
+  test('recordQurlView: reports firstView from ALL_OLD access_count', async () => {
+    const cases = [
+      { response: {}, qurlId: 'q_new', accessCount: 2, eventId: 'evt-new', firstView: true },
+      { response: { Attributes: { access_count: 0 } }, qurlId: 'q_zero', accessCount: 1, eventId: 'evt-zero', firstView: true },
+      { response: { Attributes: { access_count: 1 } }, qurlId: 'q_repeat', accessCount: 2, eventId: 'evt-repeat', firstView: false },
+      { response: { Attributes: { qurl_id: 'q_legacy', last_updated: 'legacy' } }, qurlId: 'q_legacy', accessCount: 1, eventId: 'evt-legacy', firstView: false },
+    ];
+    for (const c of cases) {
+      ddbMock.reset();
+      ddbMock.on(UpdateCommand).resolves(c.response);
+      await expect(store.recordQurlView({
+        qurlId: c.qurlId, accessCount: c.accessCount, consumed: false, eventId: c.eventId,
+      })).resolves.toEqual({ result: 'recorded', firstView: c.firstView });
+    }
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ReturnValues).toBe('ALL_OLD');
   });
 
   test('recordQurlView: ConditionalCheckFailedException → "dedup" (replay path, NOT a failure)', async () => {
@@ -1407,7 +1901,7 @@ describe('qurl views', () => {
     const result = await store.recordQurlView({
       qurlId: 'q_x', accessCount: 1, consumed: false, eventId: 'evt-1',
     });
-    expect(result).toBe('dedup');
+    expect(result).toEqual({ result: 'dedup', firstView: false });
   });
 
   test('recordQurlView: rejects qurlId="" so an empty-id collision attractor never lands in DDB', async () => {
@@ -1416,13 +1910,16 @@ describe('qurl views', () => {
     ).rejects.toThrow(/qurlId is required/);
   });
 
-  test('recordQurlView: rejects negative or non-numeric accessCount', async () => {
+  test('recordQurlView: rejects non-positive or non-numeric accessCount', async () => {
     await expect(
       store.recordQurlView({ qurlId: 'q_x', accessCount: -1, consumed: false, eventId: 'e' }),
-    ).rejects.toThrow(/non-negative/);
+    ).rejects.toThrow(/positive/);
+    await expect(
+      store.recordQurlView({ qurlId: 'q_x', accessCount: 0, consumed: false, eventId: 'e' }),
+    ).rejects.toThrow(/positive/);
     await expect(
       store.recordQurlView({ qurlId: 'q_x', accessCount: 'two', consumed: false, eventId: 'e' }),
-    ).rejects.toThrow(/non-negative/);
+    ).rejects.toThrow(/positive/);
   });
 
   test('recordQurlView: rejects missing eventId (replay protection requires a key)', async () => {

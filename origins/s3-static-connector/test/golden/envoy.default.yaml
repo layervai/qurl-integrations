@@ -1,0 +1,81 @@
+# Envoy SigV4 signing layer — internal to the s3-static-connector image.
+# Bound to loopback only. Receives cache-miss requests from nginx, signs the
+# final hop to private S3 with the workload's AWS credentials (default provider
+# chain: EC2 instance role via IMDSv2, ECS task role, env), and forwards to S3.
+# render.sh appends the TLS transport_socket (envoy.tls.partial) when talking to
+# real S3; the behavior tests render without it and point at a plaintext stub.
+node:
+  id: s3-static-connector
+  cluster: s3-static-connector
+
+static_resources:
+  listeners:
+  - name: origin
+    address:
+      socket_address: { address: "127.0.0.1", port_value: 9090 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: s3_origin
+          codec_type: AUTO
+          route_config:
+            name: s3_routes
+            virtual_hosts:
+            - name: s3
+              domains: ["*"]
+              routes:
+              - match: { prefix: "/" }
+                route:
+                  cluster: s3
+                  timeout: 30s
+          http_filters:
+          - name: envoy.filters.http.aws_request_signing
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.aws_request_signing.v3.AwsRequestSigning
+              service_name: s3
+              region: us-east-1
+              # GET/HEAD carry no body — sign with x-amz-content-sha256:
+              # UNSIGNED-PAYLOAD instead of buffering to hash an empty body.
+              use_unsigned_payload: true
+              # Sign the bucket vhost; nginx already set this Host and the cluster
+              # SNI matches, so signed Host == sent Host == SNI.
+              host_rewrite: "example-bucket.s3.us-east-1.amazonaws.com"
+              # Never sign hop-by-hop / proxy-injected headers — S3 would
+              # recompute a different signature.
+              match_excluded_headers:
+              - prefix: x-forwarded
+              - prefix: x-envoy
+              - exact: x-amzn-trace-id
+              - exact: x-request-id
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+  - name: s3
+    type: LOGICAL_DNS
+    connect_timeout: 5s
+    # Standard AWS commercial S3 egress is the supported path; IPv6-only S3
+    # egress stays out of scope for this image.
+    dns_lookup_family: V4_ONLY
+    load_assignment:
+      cluster_name: s3
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: "example-bucket.s3.us-east-1.amazonaws.com", port_value: 443 }
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: example-bucket.s3.us-east-1.amazonaws.com
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/ssl/certs/ca-certificates.crt
+            match_typed_subject_alt_names:
+            - san_type: DNS
+              matcher:
+                exact: example-bucket.s3.us-east-1.amazonaws.com
