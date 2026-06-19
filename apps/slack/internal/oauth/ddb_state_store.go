@@ -33,22 +33,33 @@ const (
 	oauthStateAttrTTL        = "ttl"
 )
 
+type oauthStateDDBClient interface {
+	auth.DynamoDBClient
+	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
+}
+
 // DDBStateStore stores short-lived OAuth state in the existing workspace_state
 // table under reserved oauth_state# keys. It does not use the workspace API-key
 // cache/encryptor path: these rows are not workspace credentials, carry a
 // 1-hour TTL, and are deleted atomically on callback.
 type DDBStateStore struct {
-	Client    auth.DynamoDBClient
+	Client    oauthStateDDBClient
 	TableName string
 }
 
 // NewDDBStateStore returns a StateStore backed by the same workspace_state table
 // and DynamoDB client as the workspace API-key provider.
 func NewDDBStateStore(provider *auth.DDBProvider) *DDBStateStore {
-	if provider == nil {
+	if provider == nil || provider.Client == nil {
 		return nil
 	}
-	return &DDBStateStore{Client: provider.Client, TableName: provider.TableName}
+	client, ok := provider.Client.(oauthStateDDBClient)
+	if !ok {
+		// Fail closed instead of silently falling back to legacy signed state,
+		// which would put the PKCE verifier back into the front-channel URL.
+		return &DDBStateStore{TableName: provider.TableName}
+	}
+	return &DDBStateStore{Client: client, TableName: provider.TableName}
 }
 
 func oauthStateKey(handle string) string {

@@ -63,9 +63,6 @@ func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemI
 	}
 	return &dynamodb.UpdateItemOutput{}, f.updateErr
 }
-func (f *fakeDDBClient) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	return &dynamodb.DeleteItemOutput{}, nil
-}
 
 // emptyPlaintextEncryptor decrypts any ciphertext to zero bytes. Used
 // to exercise the "decrypted plaintext is empty" guard in APIKey
