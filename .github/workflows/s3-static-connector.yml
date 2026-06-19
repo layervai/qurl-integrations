@@ -140,15 +140,13 @@ jobs:
 
           for arch in amd64 arm64; do
             digest="$(jq -er --arg arch "$arch" '
-              [
-                .manifests[]
+              [.manifests[]
                 | select(.platform.os == "linux" and .platform.architecture == $arch)
-                | .digest
-              ] as $matches
-              | if ($matches | length) == 1 then
-                  $matches[0]
+                | .digest]
+              | if length == 1 then
+                  .[0]
                 else
-                  error("expected exactly one linux/\($arch) manifest, found \($matches | length)")
+                  error("expected exactly one linux/\($arch) manifest, found \(length)")
                 end
             ' /tmp/candidate.json)"
             echo "${arch}_image=${IMAGE_NAME}@${digest}" >> "$GITHUB_OUTPUT"
