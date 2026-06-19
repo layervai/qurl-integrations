@@ -7,11 +7,6 @@ const STATE_KIND = 'discord-install';
 const STATE_MAX_TTL_SECONDS = 10 * 60;
 const STATE_TTL_SKEW_SECONDS = 30;
 
-function b64urlDecode(str) {
-  const padded = str + '='.repeat((4 - (str.length % 4)) % 4);
-  return Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-}
-
 function verifyMarketingInstallState(state, nowSec = Math.floor(Date.now() / 1000)) {
   if (typeof state !== 'string' || !state) {
     return { ok: false, reason: 'missing' };
@@ -44,7 +39,7 @@ function verifyMarketingInstallState(state, nowSec = Math.floor(Date.now() / 100
 
   let payload;
   try {
-    payload = JSON.parse(b64urlDecode(encoded).toString('utf8'));
+    payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
   } catch {
     return { ok: false, reason: 'payload' };
   }

@@ -106,8 +106,11 @@ function missingViewUpdatePushKeys(cfg) {
 // Discord install signed-state rollout. Missing state is accepted until
 // DISCORD_INSTALL_STATE_REQUIRED=true; once the flag flips, the secret
 // becomes a boot-time requirement so a bad deploy does not turn every
-// public "Add to Discord" click into a 400.
+// public "Add to Discord" click into a 400. If the install callback
+// itself is not configured yet, that route already fails closed with
+// 503, so defer this verifier-specific check until the callback is live.
 function discordInstallStateConfigProblems(cfg) {
+  if (cfg.isDiscordInstallConfigured === false) return [];
   if (!cfg.DISCORD_INSTALL_STATE_REQUIRED) return [];
   if (!cfg.DISCORD_INSTALL_STATE_SECRET) {
     return ['DISCORD_INSTALL_STATE_SECRET is required when DISCORD_INSTALL_STATE_REQUIRED=true'];

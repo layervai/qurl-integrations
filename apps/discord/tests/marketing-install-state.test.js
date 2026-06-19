@@ -10,8 +10,7 @@ const {
 const NOW = 2_000_000;
 
 function b64url(payload) {
-  return Buffer.from(JSON.stringify(payload)).toString('base64')
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return Buffer.from(JSON.stringify(payload)).toString('base64url');
 }
 
 function sign(payload, secret = config.DISCORD_INSTALL_STATE_SECRET) {
@@ -72,5 +71,13 @@ describe('verifyMarketingInstallState', () => {
   it('rejects signatures minted by a different secret', () => {
     const state = sign(basePayload, '3'.repeat(64));
     expect(verifyMarketingInstallState(state, NOW)).toEqual({ ok: false, reason: 'signature' });
+  });
+
+  it('rejects a payload segment swapped after signing a different encoded body', () => {
+    const signed = sign(basePayload);
+    const sig = signed.slice(signed.lastIndexOf('.') + 1);
+    const tamperedEncoded = b64url({ ...basePayload, e: NOW + 120 });
+    expect(verifyMarketingInstallState(`${tamperedEncoded}.${sig}`, NOW))
+      .toEqual({ ok: false, reason: 'signature' });
   });
 });

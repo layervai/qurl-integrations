@@ -229,6 +229,15 @@ describe('discordInstallStateConfigProblems', () => {
     })).toEqual([]);
   });
 
+  it('returns empty when required-state mode is set before the Discord install callback is configured', () => {
+    expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: false,
+      DISCORD_INSTALL_STATE_REQUIRED: true,
+      DISCORD_INSTALL_STATE_SECRET: '',
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
+  });
+
   it('requires the signing secret after the required-state flag flips', () => {
     expect(discordInstallStateConfigProblems({
       DISCORD_INSTALL_STATE_REQUIRED: true,
