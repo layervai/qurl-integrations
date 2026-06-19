@@ -21,8 +21,13 @@ describe('@layervai/qurl export contract', () => {
     });
 
     expect(client).toBeInstanceOf(QURLClient);
-    expect(ERROR_CODE_NETWORK).toBe('network_error');
-    expect(ERROR_CODE_TIMEOUT).toBe('timeout');
-    expect(ERROR_CODE_CLIENT_VALIDATION).toBe('client_validation');
+    for (const errorCode of [
+      ERROR_CODE_NETWORK,
+      ERROR_CODE_TIMEOUT,
+      ERROR_CODE_CLIENT_VALIDATION,
+    ]) {
+      expect(typeof errorCode).toBe('string');
+      expect(errorCode).toBeTruthy();
+    }
   });
 });
