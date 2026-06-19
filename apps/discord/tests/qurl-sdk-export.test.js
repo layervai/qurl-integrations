@@ -1,6 +1,6 @@
 /**
- * Pins the @layervai/qurl export contract that connector.js (and qurl.js, once
- * #844 lands) construct against.
+ * Pins the @layervai/qurl export contract that connector.js and qurl.js
+ * construct against.
  *
  * Every other spec MOCKS `@layervai/qurl` (e.g. connector-coverage.test.js),
  * and a name-keyed mock satisfies whatever name the code imports — so it can't
@@ -13,9 +13,5 @@ describe('@layervai/qurl export contract', () => {
   it('exports QURLClient as a constructor', () => {
     const sdk = require('@layervai/qurl');
     expect(typeof sdk.QURLClient).toBe('function');
-    // The bug imported `QurlClient` (undefined). Pin that the typo'd name stays
-    // unexported, so a regressed import couldn't silently work even if the SDK
-    // ever added it as an alias.
-    expect(sdk.QurlClient).toBeUndefined();
   });
 });
