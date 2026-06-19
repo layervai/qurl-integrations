@@ -1,0 +1,4 @@
+# Keep the reusable image context stable: tests and docs are not part of the
+# runtime image.
+test/
+*.md

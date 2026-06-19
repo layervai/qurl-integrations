@@ -13,6 +13,7 @@ on:
     workflows:
       - "slack: Build and Test"
       - "discord: Build and Test"
+      - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
       - "CodeQL"
       - "Secrets Scan"
@@ -77,6 +78,9 @@ jobs:
               ;;
             "discord: Build and Test")
               impact="Discord bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
+              ;;
+            "origins/s3-static-connector: Build and Publish")
+              impact="Reusable S3 static connector image build or publish failed. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
               ;;
             "Shared Tests (All Apps)")
               impact="Shared integration code failed after merge. Treat downstream app deploys from this SHA as suspect until the run is fixed or proven unrelated."

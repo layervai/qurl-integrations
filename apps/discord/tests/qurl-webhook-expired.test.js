@@ -33,7 +33,7 @@ jest.mock('../src/store', () => ({
   clearExpiredDMEdited: (...args) => mockClearExpiredDMEdited(...args),
   isSendRevoked: (...args) => mockIsSendRevoked(...args),
   // qurl.accessed flow stubs (server boot touches healthCheck).
-  recordQurlView: jest.fn(async () => 'recorded'),
+  recordQurlView: jest.fn(async () => ({ result: 'recorded', firstView: true })),
   healthCheck: jest.fn(),
   getStats: jest.fn(() => ({})),
 }));
