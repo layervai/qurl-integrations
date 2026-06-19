@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/hmac"
 	"errors"
 	"fmt"
 	"time"
@@ -148,4 +149,30 @@ func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, e
 		return "", errors.New("sub claim missing or empty")
 	}
 	return sub, nil
+}
+
+// VerifyNonce verifies the id_token nonce claim against the value carried in
+// the signed setup state. A mismatch means the id_token belongs to a different
+// authorization request and the callback must fail closed before binding or
+// minting workspace credentials.
+func (v *JWKSVerifier) VerifyNonce(ctx context.Context, idToken, expectedNonce string) error {
+	if expectedNonce == "" {
+		return errors.New("expected nonce is empty")
+	}
+	tok, err := v.verifiedToken(ctx, idToken)
+	if err != nil {
+		return err
+	}
+	rawNonce, ok := tok.Get("nonce")
+	if !ok {
+		return errors.New("nonce claim missing")
+	}
+	nonce, ok := rawNonce.(string)
+	if !ok {
+		return errors.New("nonce claim is not a string")
+	}
+	if !hmac.Equal([]byte(nonce), []byte(expectedNonce)) {
+		return errors.New("nonce claim mismatch")
+	}
+	return nil
 }

@@ -1,17 +1,19 @@
 package oauth
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 // Start returns the http.HandlerFunc for GET /oauth/qurl/start.
 //
 // Contract:
-//   - Requires `?state=<signed_state>` minted by the /qurl setup
+//   - Requires `?state=<opaque_state>` minted by the /qurl setup
 //     slash-command handler (which is Slack-signature-verified).
-//     Workspace identity comes from the verified HMAC payload — never
+//     Workspace identity comes from the backend state payload — never
 //     from an unsigned query param.
 //   - Sets the state token as the double-submit cookie via setStateCookie.
 //   - 302s to Auth0 /authorize.
@@ -41,8 +43,15 @@ func Start(cfg Config) http.HandlerFunc {
 				"Return to Slack and start setup from /qurl setup <email>.")
 			return
 		}
-		verified, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
+		verified, err := startState(r.Context(), cfg, stateParam, now())
 		if err != nil {
+			if !isStateValidationError(err) {
+				slog.Error("oauth/start state store failed", "error", err)
+				renderOAuthErrorPage(w, http.StatusServiceUnavailable, "qURL setup is temporarily unavailable",
+					"qURL™ setup could not read this setup link.",
+					"Return to Slack and run /qurl setup <email> again in a few minutes.")
+				return
+			}
 			reason := "invalid"
 			switch {
 			case errors.Is(err, errStateExpired):
@@ -71,4 +80,20 @@ func Start(cfg Config) http.HandlerFunc {
 		setStateCookie(w, stateParam)
 		http.Redirect(w, r, authorizeURL(cfg, stateParam, verified), http.StatusFound)
 	}
+}
+
+//nolint:gocritic // hugeParam: mirrors Start/Callback's package-wide value-pass Config posture.
+func startState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
+	if cfg.StateStore != nil {
+		verified, err := cfg.StateStore.StartState(ctx, stateParam, now)
+		if err == nil {
+			return verified, nil
+		}
+		if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMalformed) {
+			return VerifiedState{}, err
+		}
+		// Fall through for legacy signed states minted shortly before the
+		// server-side state rollout. Opaque handles won't verify below.
+	}
+	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }

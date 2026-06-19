@@ -1,0 +1,127 @@
+package oauth
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+)
+
+type fakeOAuthStateDDB struct {
+	putInput     *dynamodb.PutItemInput
+	updateInput  *dynamodb.UpdateItemInput
+	updateOutput *dynamodb.UpdateItemOutput
+	updateErr    error
+	deleteInput  *dynamodb.DeleteItemInput
+	deleteOutput *dynamodb.DeleteItemOutput
+	deleteErr    error
+}
+
+func (f *fakeOAuthStateDDB) GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return &dynamodb.GetItemOutput{}, nil
+}
+
+func (f *fakeOAuthStateDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	f.putInput = in
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+func (f *fakeOAuthStateDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	f.updateInput = in
+	if f.updateOutput != nil || f.updateErr != nil {
+		return f.updateOutput, f.updateErr
+	}
+	return &dynamodb.UpdateItemOutput{Attributes: storedStateDDBItem()}, nil
+}
+
+func (f *fakeOAuthStateDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteInput = in
+	if f.deleteOutput != nil || f.deleteErr != nil {
+		return f.deleteOutput, f.deleteErr
+	}
+	return &dynamodb.DeleteItemOutput{Attributes: storedStateDDBItem()}, nil
+}
+
+func storedStateDDBItem() map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		oauthStateAttrTeamID:   &ddbtypes.AttributeValueMemberS{Value: testStateTeamID},
+		oauthStateAttrUserID:   &ddbtypes.AttributeValueMemberS{Value: testStateUserID},
+		oauthStateAttrNonce:    &ddbtypes.AttributeValueMemberS{Value: strings.Repeat("a", stateNonceLen*2)},
+		oauthStateAttrVerifier: &ddbtypes.AttributeValueMemberS{Value: strings.Repeat("b", 43)},
+		oauthStateAttrEmail:    &ddbtypes.AttributeValueMemberS{Value: testNormalizedSetupEmail},
+		oauthStateAttrMode:     &ddbtypes.AttributeValueMemberS{Value: string(SetupModeRotate)},
+	}
+}
+
+func TestDDBStateStorePutStateWritesOpaqueStateRow(t *testing.T) {
+	ddb := &fakeOAuthStateDDB{}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	now := time.Unix(1700000000, 0).UTC()
+	state := StoredState{
+		VerifiedState: VerifiedState{
+			TeamID:       testStateTeamID,
+			UserID:       testStateUserID,
+			Nonce:        strings.Repeat("a", stateNonceLen*2),
+			CodeVerifier: strings.Repeat("b", 43),
+			Email:        testNormalizedSetupEmail,
+			Mode:         SetupModeRotate,
+		},
+		CreatedAt: now,
+		ExpiresAt: now.Add(stateMaxAge),
+	}
+	if err := store.PutState(context.Background(), "opaque-handle", state); err != nil {
+		t.Fatalf("PutState: %v", err)
+	}
+	if ddb.putInput == nil {
+		t.Fatal("expected PutItem")
+	}
+	if got := aws.ToString(ddb.putInput.TableName); got != "workspace-state" {
+		t.Fatalf("table = %q", got)
+	}
+	if v, ok := ddb.putInput.Item[workspaceStatePKAttr].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != oauthStateKey("opaque-handle") {
+		t.Fatalf("pk = %v", ddb.putInput.Item[workspaceStatePKAttr])
+	}
+	if v, ok := ddb.putInput.Item[oauthStateAttrVerifier].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != state.CodeVerifier {
+		t.Fatalf("code verifier not persisted server-side: %v", ddb.putInput.Item[oauthStateAttrVerifier])
+	}
+	if _, ok := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN); !ok {
+		t.Fatalf("ttl attr missing/wrong: %v", ddb.putInput.Item[oauthStateAttrTTL])
+	}
+	if got := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN).Value; got != "1700003600" {
+		t.Fatalf("ttl attr = %q, want one-hour expiry epoch", got)
+	}
+	if got := aws.ToString(ddb.putInput.ConditionExpression); !strings.Contains(got, "attribute_not_exists") {
+		t.Fatalf("PutState must be conditional, got %q", got)
+	}
+}
+
+func TestDDBStateStoreConsumeStateIsConditionalOneShot(t *testing.T) {
+	ddb := &fakeOAuthStateDDB{}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	got, err := store.ConsumeState(context.Background(), "opaque-handle", time.Unix(1700000030, 0))
+	if err != nil {
+		t.Fatalf("ConsumeState: %v", err)
+	}
+	if got.TeamID != testStateTeamID || got.Email != testNormalizedSetupEmail || got.Mode != SetupModeRotate {
+		t.Fatalf("verified state mismatch: %+v", got)
+	}
+	if ddb.updateInput != nil {
+		t.Fatalf("ConsumeState must delete, not update: %+v", ddb.updateInput)
+	}
+	if ddb.deleteInput == nil {
+		t.Fatal("expected DeleteItem")
+	}
+	cond := aws.ToString(ddb.deleteInput.ConditionExpression)
+	for _, want := range []string{"attribute_exists(#started_at)", "attribute_not_exists(#consumed_at)", "#expires_at > :now_epoch"} {
+		if !strings.Contains(cond, want) {
+			t.Fatalf("consume condition missing %q in %q", want, cond)
+		}
+	}
+	if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
+		t.Fatalf("consume ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
+	}
+}
