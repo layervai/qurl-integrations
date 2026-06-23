@@ -138,7 +138,6 @@ function transactionWriteRetryable(err) {
     'ProvisionedThroughputExceededException',
     'RequestLimitExceeded',
     'ThrottlingException',
-    'TransactionConflictException',
   ]);
   if (retryableNames.has(err.name)) return true;
   if (err.name !== 'TransactionCanceledException' || !Array.isArray(err.CancellationReasons)) {
