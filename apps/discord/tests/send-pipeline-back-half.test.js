@@ -243,6 +243,8 @@ const {
   renderViewCounter,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
+  buildDeliveryEmbed,
+  packBulkDeliveryComponents,
   mintLinksInBatches,
   activeMonitors,
   executeSendPipeline,
@@ -2049,7 +2051,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
 });
 
 describe('handleAddRecipients — file path failure modes', () => {
-  it('refuses when stored attachment_url is missing', async () => {
+  it('refuses when a legacy stored file config is missing attachment_url', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: null, attachment_name: 'x.png', attachment_content_type: 'image/png',
@@ -2277,34 +2279,29 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
     expect(failureCalls).toHaveLength(0);
   });
 
-  it('mixed send: location failure after file success emits kind=location, not file', async () => {
-    // The activeKind fix. The inner file try/catch returns on its OWN failure,
-    // so by the time the outer catch fires the failure was in the LOCATION
-    // branch. `hasFile ? 'file' : 'location'` would mis-label this as 'file'
-    // because hasFile is still truthy for a mixed sendConfig.
+  it('mixed send config is rejected before minting duplicate-key rows', async () => {
+    // Mixed file/location configs cannot be represented in qurl_sends: the
+    // table is keyed by (send_id, recipient_discord_id), so two links for one
+    // recipient would collide. Reject before upload/mint/DB side effects.
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', actual_url: 'https://maps.example.com/x',
       location_name: 'Mixed', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
-    // File branch succeeds...
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/f-1', resource_id: 'res-file-new' }]);
-    // ...location branch fails.
-    mockUploadJsonToConnector.mockRejectedValueOnce(Object.assign(new Error('connector 502'), { status: 502 }));
 
-    await handleAddRecipients(
+    const result = await handleAddRecipients(
       'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
     );
 
-    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
-      send_id: 'send-mixed',
-      kind: 'location', // NOT 'file' — pins the activeKind fix
-      reason: 'upstream_5xx',
-      status_code: 502,
-    }));
+    expect(result.msg).toMatch(/mixed file and location sends are not supported/);
+    expect(result.newRecipients).toEqual([]);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith('qurl_send_create_link_failure', expect.anything());
   });
 });
 
@@ -2775,13 +2772,118 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
     expect(result.delivered).toBe(0);
     // sendDM must NOT have been called — the abort happens before DMs.
     expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
+    expect(logger.info).toHaveBeenCalledWith(
+      'Cleaned up freshly minted Add Recipients qURL resources',
+      expect.objectContaining({
+        sendId: 'send-1',
+        reason: 'guarded_transaction_failed',
+        total: 1,
+      }),
+    );
+  });
+
+  it('reports revoked when recordQURLSendBatch loses the revoked_at condition race', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    const err = new Error('revoked');
+    err.code = 'SEND_CONFIG_REVOKED';
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
+
+    const result = await handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
+    expect(result.delivered).toBe(0);
+    expect(result.newRecipients).toEqual([]);
+    expect(mockDeleteLink).toHaveBeenCalledWith('res-new', 'apikey');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('logs cleanup failures but still reports revoked when the guarded write loses the race', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    const err = new Error('revoked');
+    err.code = 'SEND_CONFIG_REVOKED';
+    mockDb.recordQURLSendBatch.mockRejectedValueOnce(err);
+    mockDeleteLink.mockRejectedValueOnce(new Error('delete failed'));
+
+    const result = await handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
+    expect(result.newRecipients).toEqual([]);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to clean up freshly minted Add Recipients qURL resources',
+      expect.objectContaining({
+        sendId: 'send-1',
+        reason: 'revoked_guard',
+        failed_count: 1,
+        total: 1,
+        failures: [expect.objectContaining({ resourceId: 'res-new', error: 'delete failed' })],
+      }),
+    );
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('refuses oversized guarded batches before DDB and cleans up freshly minted resources', async () => {
+    const users = Array.from({ length: 100 }, (_, i) => ({
+      id: `u${i}`,
+      username: `User ${i}`,
+      bot: false,
+    }));
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-0', fileBuffer: new ArrayBuffer(10) });
+    let reuploadIndex = 1;
+    mockReUploadBuffer.mockImplementation(async () => ({ resource_id: `res-${reuploadIndex++}` }));
+    for (let batch = 0; batch < 10; batch++) {
+      mockMintLinks.mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({
+        qurl_id: `q_${batch}_${i}`,
+        qurl_link: `https://q.test/${batch}/${i}`,
+      })));
+    }
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await handleAddRecipients(
+      'send-1', makeUsersCollection(users), makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Cannot add recipients — too many recipients selected. Try fewer recipients.');
+    expect(result.delivered).toBe(0);
+    expect(result.newRecipients).toEqual([]);
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+    expect(mockDeleteLink).toHaveBeenCalledTimes(10);
+    expect(mockDeleteLink.mock.calls.map(call => call[0]).sort()).toEqual(
+      Array.from({ length: 10 }, (_, i) => `res-${i}`).sort(),
+    );
   });
 });
 
 describe('handleAddRecipients — happy path (location)', () => {
   it('mints, records, DMs, returns delivered count', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      resource_type: 'maps',
+      connector_resource_id: 'res-existing-location',
+      actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower', expires_in: '30m', personal_message: 'check this out',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
@@ -2866,31 +2968,20 @@ describe('handleAddRecipients — happy path (location)', () => {
   // introduces a mutating serialize hook (or a buildDeliveryEmbed
   // change that turns the embed mutation-aware) would break the
   // pattern silently. This test pins the reference-equality contract.
-  it('shares one EmbedBuilder reference across N>1 embeds in the payload', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-file-shared', expires_in: '30m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
-      actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower',
+  it('shares one EmbedBuilder reference across N>1 embeds in the bulk payload primitives', () => {
+    const qurlLinks = ['https://q.test/share-file', 'https://q.test/share-loc'];
+    const embed = buildDeliveryEmbed({
+      senderAlias: 'Sender',
+      guildName: 'Guild',
+      guildIconUrl: null,
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      personalMessage: null,
     });
-    mockDownloadAndUpload.mockResolvedValueOnce({
-      resource_id: 'res-file-shared-new', fileBuffer: Buffer.from('x'),
-    });
-    mockMintLinks
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/share-file', resource_id: 'res-file-shared-new' }])
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/share-loc', resource_id: 'res-loc-shared-new' }]);
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-shared-new' });
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    const payload = {
+      embeds: Array(qurlLinks.length).fill(embed),
+      components: packBulkDeliveryComponents(qurlLinks),
+    };
 
-    await handleAddRecipients(
-      'send-share', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(mockSendDM).toHaveBeenCalledTimes(1);
-    const [, payload] = mockSendDM.mock.calls[0];
-    // file + location → 2 links to the one recipient.
     expect(payload.embeds).toHaveLength(2);
     // The optimization: same EmbedBuilder reference, not two copies.
     expect(payload.embeds[0]).toBe(payload.embeds[1]);
@@ -2903,12 +2994,8 @@ describe('handleAddRecipients — happy path (location)', () => {
     if (typeof payload.embeds[0].toJSON === 'function') {
       expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
     }
-    // Link-ordering contract: the two minted qURLs (file then location,
-    // per the mintLinks mock sequencing above) must map positionally
-    // onto the Step Through buttons in the assembled payload. A future
-    // refactor that shuffles recipientLinks[recipient.id] between
-    // population and the packBulkDeliveryComponents call would
-    // silently mis-route recipients to the wrong qURL otherwise.
+    // Link-ordering contract: the qURLs must map positionally onto the Step
+    // Through buttons in the assembled payload.
     // discord.js mock here is the lightweight chainable variant —
     // setURL.mock.calls captures the URL each button was built with;
     // pull the URL via the first call's first arg.
@@ -2916,8 +3003,8 @@ describe('handleAddRecipients — happy path (location)', () => {
       .flatMap(row => row.components)
       .map(b => b.setURL.mock.calls[0]?.[0])
       .filter(Boolean);
-    // The two step-throughs (file then location) precede the trust
-    // button; the trust button's URL is the hardcoded brand landing.
+    // The two step-throughs precede the trust button; the trust button's
+    // URL is the hardcoded brand landing.
     expect(urls).toEqual([
       'https://q.test/share-file',
       'https://q.test/share-loc',
@@ -2925,10 +3012,10 @@ describe('handleAddRecipients — happy path (location)', () => {
     ]);
   });
 
-  // Locks the single-emission contract: a sendConfig with both file
-  // AND location must NOT fire upload_success twice (would double-count
-  // UploadCount in CloudWatch). The kind field must be 'mixed'.
-  it('emits exactly ONE upload_success with kind=mixed when both file + location prep paths run', async () => {
+  // qurl_sends is keyed by (send_id, recipient_discord_id), so one
+  // recipient cannot receive both file and location rows in one send.
+  // Reject mixed configs before any upload/mint side effects.
+  it('does not emit upload_success for unsupported mixed file + location configs', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-file-orig', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
@@ -2937,24 +3024,19 @@ describe('handleAddRecipients — happy path (location)', () => {
       actual_url: 'https://maps.example.com/x',
       location_name: 'Eiffel Tower',
     });
-    // File path succeeds.
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
-    // mintLinks called twice (once per kind).
-    mockMintLinks
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/file', resource_id: 'res-file-new' }])
-      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/loc', resource_id: 'res-loc-new' }]);
-    // Location path succeeds.
-    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
-    await handleAddRecipients(
+    const result = await handleAddRecipients(
       'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
       makeInteraction(), 'apikey',
     );
 
+    expect(result.msg).toMatch(/mixed file and location sends are not supported/);
     const uploadEvents = logger.audit.mock.calls.filter(c => c[0] === 'upload_success');
-    expect(uploadEvents).toHaveLength(1);
-    expect(uploadEvents[0][1]).toEqual({ send_id: 'send-mixed', kind: 'mixed' });
+    expect(uploadEvents).toHaveLength(0);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
 
   it('reports failed DMs as failed in the return value', async () => {
@@ -3213,6 +3295,7 @@ describe('handleAddRecipients — guild_id threading (#1101)', () => {
     );
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+      { requireSendConfigUnrevoked: true },
     );
   });
 });

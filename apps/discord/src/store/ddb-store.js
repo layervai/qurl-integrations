@@ -61,12 +61,19 @@ const {
   ScanCommand,
   BatchGetCommand,
   BatchWriteCommand,
+  TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
-const { DM_STATUS, AUDIT_EVENTS } = require('../constants');
+const {
+  DM_STATUS,
+  AUDIT_EVENTS,
+  DDB_TRANSACTION_MAX_ACTIONS,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
+} = require('../constants');
 const { isPositiveFinite } = require('../utils/time');
 
 // Badge taxonomy — stable string enum values so callers that
@@ -90,6 +97,60 @@ const BADGE_INFO = {
   [BADGE_TYPES.STREAK_MASTER]: { emoji: '🎯', name: 'Streak Master', description: '3 consecutive months of contributions' },
   [BADGE_TYPES.MULTI_REPO]: { emoji: '🌐', name: 'Multi-Repo', description: 'Contributed to multiple repositories' },
 };
+
+class SendConfigRevokedError extends Error {
+  constructor(sendIds) {
+    const ids = Array.isArray(sendIds) ? sendIds : [sendIds].filter(Boolean);
+    const label = ids.length === 1 ? `send ${ids[0]}` : 'one or more sends';
+    super(`recordQURLSendBatch: ${label} was revoked or no longer matched the sender before recipient rows were saved`);
+    this.name = 'SendConfigRevokedError';
+    this.code = 'SEND_CONFIG_REVOKED';
+    this.sendId = ids.length === 1 ? ids[0] : undefined;
+    this.sendIds = ids;
+  }
+}
+
+function transactionGuardConditionFailed(err, guardCount) {
+  // CancellationReasons are positional. recordQURLSendBatch builds guarded
+  // transactions with all ConditionCheck items first, so only the first
+  // guardCount reasons may represent revoked/deleted/sender-mismatch state.
+  return err?.name === 'TransactionCanceledException'
+    && Array.isArray(err.CancellationReasons)
+    && err.CancellationReasons
+      .slice(0, guardCount)
+      .some(r => r?.Code === 'ConditionalCheckFailed');
+}
+
+function transactionConditionFailedSendIds(err, sendIds) {
+  const failed = err.CancellationReasons
+    .slice(0, sendIds.length)
+    .flatMap((reason, index) => (reason?.Code === 'ConditionalCheckFailed' ? [sendIds[index]] : []));
+  return failed;
+}
+
+function transactionWriteRetryable(err) {
+  if (!err || typeof err !== 'object') return false;
+  // The SDK retries top-level throttling, but transaction cancellations can
+  // surface per-item throughput/conflict reasons as CancellationReasons. Keep
+  // this narrow outer loop so those transaction-specific shapes get backoff
+  // too, with the same ClientRequestToken reused for idempotency.
+  const retryableNames = new Set([
+    'ProvisionedThroughputExceededException',
+    'RequestLimitExceeded',
+    'ThrottlingException',
+    'TransactionConflictException',
+  ]);
+  if (retryableNames.has(err.name)) return true;
+  if (err.name !== 'TransactionCanceledException' || !Array.isArray(err.CancellationReasons)) {
+    return false;
+  }
+  const retryableReasonCodes = new Set([
+    'ProvisionedThroughputExceeded',
+    'ThrottlingError',
+    'TransactionConflict',
+  ]);
+  return err.CancellationReasons.some(r => retryableReasonCodes.has(r?.Code));
+}
 
 // Table name mapping. Map keys (SQL-era snake_case names) match the
 // outputs.tf `table_names` shape in `modules/qurl-bot-ddb/` so
@@ -991,20 +1052,41 @@ async function recordQURLSend({
   }));
 }
 
-async function recordQURLSendBatch(sends) {
+function qurlSendBatchItem(s, createdAt) {
+  // qurl_id is sparsely written so an empty/missing value (e.g.
+  // a future emit path that doesn't surface it) doesn't pollute
+  // the qurl_id-index GSI. See recordQURLSend for the same gate.
+  const Item = {
+    send_id: s.sendId,
+    recipient_discord_id: s.recipientDiscordId,
+    sender_discord_id: s.senderDiscordId,
+    resource_id: s.resourceId,
+    resource_type: s.resourceType,
+    qurl_link: s.qurlLink,
+    expires_in: s.expiresIn,
+    channel_id: s.channelId,
+    target_type: s.targetType,
+    dm_status: 'pending',
+    created_at: createdAt,
+  };
+  if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
+    Item.qurl_id = s.qurlId;
+  }
+  // guild_id: non-key attribute scoping watermark attribution to
+  // the minting guild (#1101). Sparse like qurl_id — a legacy /
+  // non-guild send omits it. No Terraform change needed (schemaless
+  // non-key attr); rides the qurl_id-index GSI for the /qurl detect
+  // read (projection = ALL). See recordQURLSend for the full why.
+  if (typeof s.guildId === 'string' && s.guildId.length > 0) {
+    Item.guild_id = s.guildId;
+  }
+  return Item;
+}
+
+async function recordQURLSendBatch(sends, options = {}) {
   if (!sends || sends.length === 0) return;
-  // DDB BatchWriteItem caps at 25 items per request. A batch can come
-  // back with `UnprocessedItems` populated — DDB returns items that
-  // were throttled, rejected on the 4MB payload limit, or hit a
-  // transient 5xx. The caller MUST retry those with exponential
-  // backoff; silent-drop would leak recipients (the row never lands
-  // in qurl_sends, so `updateSendDMStatus` against the missing
-  // composite key later becomes a no-op and the user sees a missing
-  // delivery). SQLite used `db.transaction` which was atomic; DDB
-  // has no equivalent so the retry loop IS the durability guarantee.
-  const CHUNK = 25;
   const MAX_RETRIES = 5;
-  // Single `now` shared across every chunk + every retry of this
+  // Single `now` shared across every batch chunk / guarded transaction of this
   // batch. INTENTIONAL parity with SQLite's transactional insert —
   // every recipient of one send shares one `created_at`, and
   // downstream queries (getRecentSends groups by send_id and uses
@@ -1014,56 +1096,101 @@ async function recordQURLSendBatch(sends) {
   // values, fragmenting the GSI ordering and making a single send
   // look like several distinct events to consumers.
   const now = nowIso();
-  for (let i = 0; i < sends.length; i += CHUNK) {
-    const slice = sends.slice(i, i + CHUNK);
-    let requestItems = {
-      [TABLES.qurl_sends]: slice.map(s => {
-        // qurl_id is sparsely written so an empty/missing value (e.g.
-        // a future emit path that doesn't surface it) doesn't pollute
-        // the qurl_id-index GSI. See recordQURLSend for the same gate.
-        const Item = {
-          send_id: s.sendId,
-          recipient_discord_id: s.recipientDiscordId,
-          sender_discord_id: s.senderDiscordId,
-          resource_id: s.resourceId,
-          resource_type: s.resourceType,
-          qurl_link: s.qurlLink,
-          expires_in: s.expiresIn,
-          channel_id: s.channelId,
-          target_type: s.targetType,
-          dm_status: 'pending',
-          created_at: now,
-        };
-        if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
-          Item.qurl_id = s.qurlId;
+  const requireSendConfigUnrevoked = options.requireSendConfigUnrevoked === true;
+
+  if (!requireSendConfigUnrevoked) {
+    // Default path for initial sends: keep the cheaper BatchWriteItem flow.
+    // Add Recipients is the only caller with a persisted config row that can
+    // be revoked between read and write, so it opts into the guarded
+    // transaction path below.
+    const CHUNK = 25;
+    for (let i = 0; i < sends.length; i += CHUNK) {
+      const slice = sends.slice(i, i + CHUNK);
+      let requestItems = {
+        [TABLES.qurl_sends]: slice.map(s => ({ PutRequest: { Item: qurlSendBatchItem(s, now) } })),
+      };
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
+        const unprocessed = res.UnprocessedItems || {};
+        const remaining = unprocessed[TABLES.qurl_sends];
+        if (!remaining || remaining.length === 0) break;
+        if (attempt === MAX_RETRIES) {
+          // All attempts exhausted — fail loud rather than silently
+          // dropping recipients. Caller's retry policy (workflow-level)
+          // decides whether to re-invoke the originating send command.
+          throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
         }
-        // guild_id: non-key attribute scoping watermark attribution to
-        // the minting guild (#1101). Sparse like qurl_id — a legacy /
-        // non-guild send omits it. No Terraform change needed (schemaless
-        // non-key attr); rides the qurl_id-index GSI for the /qurl detect
-        // read (projection = ALL). See recordQURLSend for the full why.
-        if (typeof s.guildId === 'string' && s.guildId.length > 0) {
-          Item.guild_id = s.guildId;
-        }
-        return { PutRequest: { Item } };
-      }),
-    };
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
-      const unprocessed = res.UnprocessedItems || {};
-      const remaining = unprocessed[TABLES.qurl_sends];
-      if (!remaining || remaining.length === 0) break;
-      if (attempt === MAX_RETRIES) {
-        // All attempts exhausted — fail loud rather than silently
-        // dropping recipients. Caller's retry policy (workflow-level)
-        // decides whether to re-invoke the originating send command.
-        throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
+        // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.
+        // `.unref()`-equivalent for Promise sleep isn't needed; the
+        // await keeps the event loop moving.
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+        requestItems = unprocessed;
       }
-      // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.
-      // `.unref()`-equivalent for Promise sleep isn't needed; the
-      // await keeps the event loop moving.
-      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
-      requestItems = unprocessed;
+    }
+    return;
+  }
+
+  // Add Recipients uses one TransactWriteItems call so recipient-row Put(s)
+  // are atomically guarded by the send config row's revoked_at state. This
+  // keeps the extra transaction cost scoped to the path that has the post-read
+  // revoke race: if a revoke wins and sets revoked_at before this transaction
+  // commits, none of the newly minted recipient rows land. The Add Recipients
+  // UI caps at Discord's 25-select limit today, so this should stay far below
+  // the 100-action transaction cap. If a future caller exceeds the cap, fail
+  // before any DDB write instead of partially committing earlier chunks.
+  if (!ddbSendConfigGuardFitsTransaction(sends)) {
+    throw new Error(`recordQURLSendBatch: guarded batch exceeds TransactWriteItems action limit (${ddbSendConfigGuardActionCount(sends)} > ${DDB_TRANSACTION_MAX_ACTIONS})`);
+  }
+
+  const senderMap = new Map();
+  for (const send of sends) {
+    const existingSender = senderMap.get(send.sendId);
+    if (existingSender !== undefined && existingSender !== send.senderDiscordId) {
+      throw new Error(`recordQURLSendBatch: conflicting sender_discord_id for send_id ${send.sendId}`);
+    }
+    senderMap.set(send.sendId, send.senderDiscordId);
+  }
+
+  const sendIds = [...senderMap.keys()];
+  // Keep ConditionChecks before Puts. The cancellation-reason parser above
+  // relies on this guard-first order to map ConditionalCheckFailed reasons
+  // back to the send ids that lost the revoke/delete/sender-mismatch race.
+  const TransactItems = [
+    ...sendIds.map(sendId => ({
+      ConditionCheck: {
+        TableName: TABLES.qurl_send_configs,
+        Key: { send_id: sendId },
+        // Missing config rows, revoked rows, and sender mismatches all
+        // fail closed here. Add Recipients already read the config row; if
+        // it disappears before persistence, do not create recipient rows.
+        ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoked_at)',
+        ExpressionAttributeValues: { ':sender': senderMap.get(sendId) },
+      },
+    })),
+    ...sends.map(s => ({
+      Put: {
+        TableName: TABLES.qurl_sends,
+        Item: qurlSendBatchItem(s, now),
+      },
+    })),
+  ];
+  const ClientRequestToken = crypto.randomUUID();
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await ddb.send(new TransactWriteCommand({ TransactItems, ClientRequestToken }));
+      break;
+    } catch (err) {
+      // Fail closed before considering retries: a ConditionCheck failure on
+      // the config guard means revoked/deleted/sender-mismatch state won the
+      // race, even if other transaction items also report transient reasons.
+      if (transactionGuardConditionFailed(err, sendIds.length)) {
+        throw new SendConfigRevokedError(transactionConditionFailedSendIds(err, sendIds));
+      }
+      if (attempt < MAX_RETRIES && transactionWriteRetryable(err)) {
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+        continue;
+      }
+      throw err;
     }
   }
 }
