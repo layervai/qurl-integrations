@@ -2303,6 +2303,30 @@ describe('handleAddRecipients — QURL_SEND_CREATE_LINK_FAILURE emission (#276)'
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
     expect(logger.audit).not.toHaveBeenCalledWith('qurl_send_create_link_failure', expect.anything());
   });
+
+  it('rejects corrupt non-file configs with file payloads before minting', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      resource_type: 'maps',
+      connector_resource_id: 'res-1',
+      actual_url: null,
+      expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png',
+      attachment_content_type: 'image/png',
+    });
+
+    const result = await handleAddRecipients(
+      'send-corrupt', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toMatch(/stored send configuration is unsupported/);
+    expect(result.newRecipients).toEqual([]);
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
 });
 
 // The PRIMARY incident surface: /qurl send itself failing at the upload+mint

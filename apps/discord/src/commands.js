@@ -2902,14 +2902,14 @@ async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, opt
   if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
     // Unreachable by construction for today's Add Recipients flow: oversized
     // batches fail before DDB, and revoked errors only come from a single
-    // transaction. Keep the guard so a future caller cannot bulk-delete
-    // resources after a possibly partial multi-transaction persistence path.
-    logger.error('Refusing bulk cleanup for revoked Add Recipients batch that may span transactions', {
+    // transaction. If a future caller violates that invariant, still revoke
+    // the freshly minted qURLs; rows may point at deleted resources, but no DMs
+    // have been sent and the grants fail closed.
+    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
       sendId,
       send_count: batchSends.length,
       txn_actions: txnActionCount,
     });
-    return;
   }
 
   // Called when no recipient rows landed, or when a terminal guarded
@@ -3025,6 +3025,16 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     logger.warn('addRecipients refused mixed file/location send config', { sendId });
     return {
       msg: 'Cannot add recipients — mixed file and location sends are not supported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (hasFilePayload && sendConfig.resource_type && sendConfig.resource_type !== RESOURCE_TYPES.FILE) {
+    logger.warn('addRecipients refused non-file send config with file payload', {
+      sendId,
+      resource_type: sendConfig.resource_type,
+    });
+    return {
+      msg: 'Cannot add recipients — stored send configuration is unsupported. Create a new send instead.',
       newLinks: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
