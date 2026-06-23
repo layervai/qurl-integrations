@@ -80,6 +80,18 @@ const LIMITS = {
   RELEASE_NOTES_TRUNCATE: 500,
 };
 
+// DynamoDB TransactWriteItems hard action cap. Shared so the Add Recipients
+// revoked-race cleanup and DDB guarded write use identical fit checks.
+const DDB_TRANSACTION_MAX_ACTIONS = 100;
+
+function ddbSendConfigGuardActionCount(sends = []) {
+  return sends.length + new Set(sends.map(s => s.sendId)).size;
+}
+
+function ddbSendConfigGuardFitsTransaction(sends = []) {
+  return ddbSendConfigGuardActionCount(sends) <= DDB_TRANSACTION_MAX_ACTIONS;
+}
+
 // Maximum attachment size the bot will accept. Shared between commands.js
 // (user-facing validation) and connector.js (CDN download + streaming cap).
 // Keep in sync with Discord's own 25MB attachment limit.
@@ -638,6 +650,9 @@ module.exports = {
   ROLE_COLORS,
   TIMEOUTS,
   LIMITS,
+  DDB_TRANSACTION_MAX_ACTIONS,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
   MAX_FILE_SIZE,
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
