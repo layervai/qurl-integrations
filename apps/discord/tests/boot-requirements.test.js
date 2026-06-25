@@ -16,6 +16,7 @@ const {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -141,6 +142,130 @@ describe('missingKekRequiredKeys', () => {
     expect(
       missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: 'k' })
     ).toEqual([]);
+  });
+});
+
+describe('baseUrlHttpsProblem', () => {
+  // Mirrors the shape index.js passes: a parsed config object (BASE_URL is
+  // already defaulted to http://localhost:3000 in config.js when unset),
+  // plus the caller-computed `baseUrlExplicitlySet` boolean. Default cfg is
+  // a plain non-consuming deploy with BASE_URL unset (the localhost
+  // fallback); each test overrides the mode flags / BASE_URL it exercises.
+  const LOCALHOST = 'http://localhost:3000'; // config.js BASE_URL default
+  function cfg(overrides = {}) {
+    return {
+      isQurlOAuthConfigured: false,
+      BASE_URL: LOCALHOST,
+      ...overrides,
+    };
+  }
+
+  it('accepts a bare https:// BASE_URL origin (the good prod case)', () => {
+    const HTTPS = 'https://bot.example.com';
+    expect(baseUrlHttpsProblem(cfg({ BASE_URL: HTTPS }), true)).toBeNull();
+    expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: HTTPS }), true)).toBeNull();
+  });
+
+  it('accepts an uppercase HTTPS:// scheme (URL scheme is case-insensitive)', () => {
+    // The parse-based check normalizes the scheme, so a valid HTTPS:// origin
+    // isn't falsely rejected at boot (the pre-#619 prefix check was case-sensitive).
+    expect(
+      baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'HTTPS://bot.example.com' }), true),
+    ).toBeNull();
+  });
+
+  it('rejects a host-less "https://" BASE_URL (would build a broken redirect)', () => {
+    // new URL('https://') throws — a scheme with no host can't be a usable
+    // redirect base, so a consuming deploy must still fail fast rather than
+    // pass a prefix check.
+    const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://' }), true);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('https://');
+  });
+
+  it('rejects qURL OAuth configured + BASE_URL with path/query/fragment/userinfo', () => {
+    for (const bad of [
+      'https://bot.example.com/prefix',
+      'https://bot.example.com?debug=true',
+      'https://bot.example.com#callback',
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).toContain(bad);
+    }
+  });
+
+  it('redacts BASE_URL userinfo from boot errors', () => {
+    const msg = baseUrlHttpsProblem(
+      cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://user:pass@bot.example.com' }),
+      true,
+    );
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('public bare https:// origin');
+    expect(msg).toContain('https://bot.example.com/');
+    expect(msg).not.toContain('user:pass');
+  });
+
+  it('rejects qURL OAuth configured + local-only BASE_URL host literals', () => {
+    for (const bad of [
+      'https://localhost',
+      'https://bot.localhost',
+      'https://127.0.0.1',
+      'https://10.0.3.4',
+      'https://172.16.0.2',
+      'https://192.168.1.20',
+      'https://[::1]',
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).toContain(bad);
+    }
+  });
+
+  // The #619 headline regression: a deploy with the qURL OAuth setup flow
+  // configured (AUTH0_* set) but BASE_URL left unset silently falls back to
+  // localhost and dead-ends /qurl setup at the OAuth redirect. Boot must
+  // reject — fail-fast at deploy, not at setup time.
+  it('rejects qURL OAuth configured + BASE_URL unset (localhost fallback)', () => {
+    const msg = baseUrlHttpsProblem(
+      cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
+      false, // not explicitly set — fell back to the localhost default
+    );
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/BASE_URL/);
+    expect(msg).toMatch(/https:\/\//);
+    expect(msg).toMatch(/qURL/);
+    // Echoes the offending value so an operator pasting the log line sees it.
+    expect(msg).toContain(LOCALHOST);
+  });
+
+  // The non-consuming false-positive guard: a plain single-guild / multi-
+  // tenant deploy with no OAuth surface ignores BASE_URL, so the localhost
+  // default (unset, not explicitly set) must NOT fail boot.
+  it('does not false-positive a non-consuming deploy with BASE_URL unset', () => {
+    expect(baseUrlHttpsProblem(cfg({ BASE_URL: LOCALHOST }), false)).toBeNull();
+  });
+
+  // ...but a stale explicit http:// value in a non-consuming deploy is still
+  // rejected — the original canary, in case a future code path re-enables use.
+  it('rejects a stale explicit http:// BASE_URL even when no surface consumes it', () => {
+    const msg = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://stale.example.com' }), true);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('http://stale.example.com');
+  });
+
+  // The two non-https rejections carry distinct messages: the consuming-
+  // surface message explains why BASE_URL matters (operator remediation);
+  // the non-consuming path keeps the terse legacy canary message. Pin the
+  // distinction so a refactor can't collapse them and strip the guidance.
+  it('uses the OAuth-aware message for consuming surfaces and the terse canary otherwise', () => {
+    const consuming = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }), false);
+    const canary = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://x.example.com' }), true);
+    expect(consuming).toMatch(/OAuth redirect/);
+    expect(canary).not.toMatch(/OAuth redirect/);
+    expect(canary).toMatch(/BASE_URL must use https:\/\/ in production/);
   });
 });
 
