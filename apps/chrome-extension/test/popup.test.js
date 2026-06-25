@@ -611,6 +611,67 @@ test('formatFileSize uses a GB tier for large files', function () {
   assert.equal(popup.formatFileSize(2 * 1024 * 1024 * 1024), '2.0 GB');
 });
 
+test('buildCopyUrlText copies only accessible https URLs', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    if (String(link).startsWith('https://')) {
+      return String(link);
+    }
+    return null;
+  };
+
+  assert.equal(
+    popup.buildCopyUrlText([
+      { filename: 'report.pdf', link: 'https://files.example.com/a' },
+      { filename: 'bad.txt', link: 'http://files.example.com/b' },
+      { filename: 'notes.txt', link: 'https://files.example.com/c' },
+    ]),
+    'https://files.example.com/a\nhttps://files.example.com/c'
+  );
+});
+
+test('copy button label and success summaries use the Gmail-extension wording', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        copy_btn: 'Copy the qURL link',
+        result_one_success: 'Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.',
+        result_insertion_only_failed: 'Your file was uploaded successfully. Click "Copy the qURL link" to get the accessible URL.',
+      },
+    }
+  );
+
+  assert.equal(popup.getMessage('copy_btn', ''), 'Copy the qURL link');
+  assert.equal(
+    popup.getMessage('result_one_success', ''),
+    'Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.'
+  );
+  assert.equal(
+    popup.getMessage('result_insertion_only_failed', ''),
+    'Your file was uploaded successfully. Click "Copy the qURL link" to get the accessible URL.'
+  );
+});
+
 test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay', function () {
   const popup = loadPopup(
     function () {

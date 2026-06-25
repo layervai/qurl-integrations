@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { webcrypto } = require('node:crypto');
 
 const qurlApi = require('../lib/qurl-api.js');
 
@@ -7,12 +8,26 @@ const originalFetch = global.fetch;
 const originalChrome = global.chrome;
 const originalSetTimeout = global.setTimeout;
 const originalClearTimeout = global.clearTimeout;
+const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+
+function restoreGlobalCrypto() {
+  if (originalCryptoDescriptor) {
+    Object.defineProperty(globalThis, 'crypto', originalCryptoDescriptor);
+    return;
+  }
+  delete globalThis.crypto;
+}
 
 test.beforeEach(function () {
   global.fetch = originalFetch;
   global.chrome = originalChrome;
   global.setTimeout = originalSetTimeout;
   global.clearTimeout = originalClearTimeout;
+  Object.defineProperty(globalThis, 'crypto', {
+    value: webcrypto,
+    configurable: true,
+    writable: true,
+  });
 });
 
 test.afterEach(function () {
@@ -20,6 +35,7 @@ test.afterEach(function () {
   global.chrome = originalChrome;
   global.setTimeout = originalSetTimeout;
   global.clearTimeout = originalClearTimeout;
+  restoreGlobalCrypto();
 });
 
 test('normalizeQurlApiBase strips /api/upload and requires https', function () {

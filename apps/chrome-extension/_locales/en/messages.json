@@ -1,6 +1,6 @@
 {
   "ext_name": {
-    "message": "qURL File Upload",
+    "message": "qURL Agent",
     "description": "Extension name"
   },
   "ext_desc": {
@@ -146,8 +146,8 @@
     "description": "Footer hint shown while the extension is waiting to insert links into Gmail"
   },
   "copy_btn": {
-    "message": "Copy inserted content",
-    "description": "Copy the same formatted content that is inserted into Gmail"
+    "message": "Copy the qURL link",
+    "description": "Copy only the accessible qURL URL"
   },
   "copy_done": {
     "message": "Copied",
@@ -162,12 +162,12 @@
     "description": "Footer hint"
   },
   "result_one_success": {
-    "message": "1 file uploaded successfully",
-    "description": "Success summary for single file"
+    "message": "Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.",
+    "description": "Success message shown when the uploaded link is inserted into Gmail"
   },
   "result_n_success": {
-    "message": "$COUNT$ files uploaded successfully",
-    "description": "Success summary for multiple files",
+    "message": "Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.",
+    "description": "Success message shown when the uploaded links are inserted into Gmail",
     "placeholders": {
       "count": {
         "content": "$1",
@@ -190,8 +190,8 @@
     }
   },
   "result_insertion_only_failed": {
-    "message": "Uploaded successfully, but Gmail draft insertion failed",
-    "description": "Error summary shown when uploads succeed but Gmail insertion fails"
+    "message": "Your file was uploaded successfully. Click \"Copy the qURL link\" to get the accessible URL.",
+    "description": "Message shown when upload succeeds but Gmail insertion fails"
   },
   "permission_missing_error": {
     "message": "Permission to access the configured qURL server is missing. Open settings and save the server URL again.",

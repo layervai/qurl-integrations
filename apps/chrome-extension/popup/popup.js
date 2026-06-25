@@ -395,8 +395,11 @@ copyBtn.addEventListener('click', async () => {
   if (lastSuccessfulResults.length === 0) return;
 
   try {
-    const html = buildCopyHtml(lastSuccessfulResults);
-    const text = buildCopyText(lastSuccessfulResults);
+    const html = buildCopyUrlHtml(lastSuccessfulResults);
+    const text = buildCopyUrlText(lastSuccessfulResults);
+    if (!text) {
+      throw new Error('No accessible qURL link available to copy.');
+    }
     await writeRichClipboard(html, text);
     copyBtn.textContent = getMessage('copy_done', 'Copied');
   } catch (err) {
@@ -405,7 +408,7 @@ copyBtn.addEventListener('click', async () => {
   }
 
   window.setTimeout(function () {
-    copyBtn.textContent = getMessage('copy_btn', 'Copy inserted content');
+    copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
   }, COPY_BUTTON_REVERT_MS);
 });
 
@@ -479,7 +482,7 @@ function showResults(results, errors, insertionError) {
   errorArea.classList.add('hidden');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
-  copyBtn.textContent = getMessage('copy_btn', 'Copy inserted content');
+  copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
 
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
@@ -562,7 +565,7 @@ function clearResults() {
   errorArea.classList.add('hidden');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
-  copyBtn.textContent = getMessage('copy_btn', 'Copy inserted content');
+  copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
 }
 
 function setLoading(loading) {
@@ -737,11 +740,9 @@ function isRetryableRuntimeMessageError(err) {
   return Boolean(err && err.qurlRetryable);
 }
 
-// buildCopyHtml/buildCopyText/normalizeAllowedLink delegate to the single implementation in
-// lib/qurl-compose-format.js (loaded before this script in popup.html). Keeping one copy
-// prevents the security-sensitive https-only URL logic from drifting between two places. The
-// formatter is a hard dependency, so fail loudly if it is missing rather than silently
-// falling back to a second, potentially weaker, implementation.
+// Clipboard URL extraction still delegates the https-only validation to the shared formatter in
+// lib/qurl-compose-format.js. Keep the URL allowlist in one place so Gmail insertion, link
+// rendering, and clipboard copy cannot drift on what constitutes a safe qURL.
 function getComposeFormatter() {
   if (!window.QURLComposeFormatter) {
     throw new Error('QURLComposeFormatter is not loaded — check the script order in popup.html.');
@@ -756,16 +757,35 @@ function formatFileSize(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
-function buildCopyHtml(results) {
-  return getComposeFormatter().buildLinkHtml(results);
-}
-
-function buildCopyText(results) {
-  return getComposeFormatter().buildLinkPlainText(results);
-}
-
 function normalizeAllowedLink(link) {
   return getComposeFormatter().normalizeAllowedLink(link);
+}
+
+function buildCopyUrlText(results) {
+  if (!results || results.length === 0) {
+    return '';
+  }
+
+  return results
+    .map(function (result) {
+      return normalizeAllowedLink(result.link);
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildCopyUrlHtml(results) {
+  const text = buildCopyUrlText(results);
+  if (!text) {
+    return '';
+  }
+
+  return text
+    .split('\n')
+    .map(function (link) {
+      return getComposeFormatter().escapeHtml(link);
+    })
+    .join('<br>');
 }
 
 async function writeRichClipboard(html, text) {
@@ -810,6 +830,8 @@ function copyViaExecCommand(html, text) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     applyLocalizedText,
+    buildCopyUrlHtml,
+    buildCopyUrlText,
     clearSettingsPanelCloseTimer,
     createInsertLinksMessage,
     createRequestId,
