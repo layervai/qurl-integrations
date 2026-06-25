@@ -71,7 +71,7 @@ All of these must pass before merge:
   - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
     `build`, `ci`, `chore`, `revert`
   - Scopes: `slack`, `teams`, `discord`, `cli`, `zapier`,
-    `chrome-extension`, `origins`, `shared`, `ci`
+    `chrome-extension`, `edge-extension`, `origins`, `shared`, `ci`
     (`.github/workflows/pr-title.yml` also accepts repository-maintenance
     scopes `infra` and `deps`, tracked in #463.)
 - **Linting** passes (golangci-lint with 28+ linters — see `.golangci.yml`)
@@ -103,7 +103,7 @@ settings, update this section in the same operational change.
 
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
-`chrome-extension / required`, and `shared / required`. Each workflow's
+`chrome-extension / required`, `edge-extension / required`, and `shared / required`. Each workflow's
 `changes` filter is the source of truth for which paths need validation. When
 that filter matches, the aggregate validates every quality gate listed in its
 workflow `needs:` set. When branch protection requires path-gated app/shared

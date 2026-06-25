@@ -36,6 +36,20 @@
         }
       ]
     },
+    "apps/edge-extension": {
+      "release-type": "node",
+      "component": "edge-extension",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "manifest.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "apps/cli": {
       "release-type": "go",
       "component": "cli",
