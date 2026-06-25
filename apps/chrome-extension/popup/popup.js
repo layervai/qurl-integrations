@@ -490,10 +490,14 @@ function showResults(results, errors, insertionError) {
     copyArea.classList.remove('hidden');
     copyBtn.disabled = false;
     resultArea.classList.remove('hidden');
-    const summaryClass = errors.length === 0 ? 'all-success' : 'partial';
+    const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
     const summaryText = results.length === 1
-      ? getMessage('result_one_success', '1 file uploaded successfully')
-      : getMessage('result_n_success', '$1 files uploaded successfully', [String(results.length)]);
+      ? (insertionError
+        ? getMessage('result_one_success_upload_only', '1 file uploaded successfully')
+        : getMessage('result_one_success', '1 file uploaded successfully'))
+      : (insertionError
+        ? getMessage('result_n_success_upload_only', '$1 files uploaded successfully', [String(results.length)])
+        : getMessage('result_n_success', '$1 files uploaded successfully', [String(results.length)]));
 
     const summary = document.createElement('div');
     summary.className = `result-summary ${summaryClass}`;
@@ -534,7 +538,7 @@ function showResults(results, errors, insertionError) {
     // as its own bullet below. The singular case must not depend on insertionError, or one
     // failed upload alongside an insertion failure renders the ungrammatical "1 files…".
     title.textContent = insertionError && errors.length === 0
-      ? getMessage('result_insertion_only_failed', 'Uploaded successfully, but Gmail draft insertion failed')
+      ? getMessage('result_insertion_only_failed', 'Upload completed successfully. Click "Copy the qURL link" to get the accessible URL.')
       : errors.length === 1
       ? getMessage('result_one_error', '1 file failed to upload')
       : getMessage('result_n_errors', '$1 files failed to upload', [String(errors.length)]);
@@ -783,7 +787,8 @@ function buildCopyUrlHtml(results) {
   return text
     .split('\n')
     .map(function (link) {
-      return getComposeFormatter().escapeHtml(link);
+      const escaped = getComposeFormatter().escapeHtml(link);
+      return `<a href="${escaped}">${escaped}</a>`;
     })
     .join('<br>');
 }
@@ -846,6 +851,7 @@ if (typeof module !== 'undefined' && module.exports) {
     scheduleSettingsPanelClose,
     sendRuntimeMessageWithRetry,
     sendRuntimeMessageWithTimeout,
+    showResults,
     showPermissionConfirmation,
   };
 }

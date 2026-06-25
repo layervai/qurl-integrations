@@ -52,16 +52,23 @@ function createClassList() {
   };
 }
 
-function createElement() {
+function createElement(tagName) {
   const listeners = new Map();
-  return {
+  const element = {
     addEventListener(type, handler) {
       if (!listeners.has(type)) {
         listeners.set(type, []);
       }
       listeners.get(type).push(handler);
     },
-    appendChild() {},
+    append(...nodes) {
+      this.children.push(...nodes);
+    },
+    appendChild(node) {
+      this.children.push(node);
+      return node;
+    },
+    children: [],
     classList: createClassList(),
     click() {},
     closest() {
@@ -87,7 +94,6 @@ function createElement() {
     setAttribute(name, value) {
       this[name] = value;
     },
-    textContent: '',
     async trigger(type, event) {
       const handlers = listeners.get(type) || [];
       for (const handler of handlers) {
@@ -101,6 +107,32 @@ function createElement() {
     },
     value: '',
   };
+  element.tagName = String(tagName || 'div').toUpperCase();
+  let innerHTML = '';
+  let textContent = '';
+  Object.defineProperty(element, 'innerHTML', {
+    get() {
+      return innerHTML;
+    },
+    set(value) {
+      innerHTML = String(value);
+      textContent = '';
+      element.children = [];
+    },
+    configurable: true,
+  });
+  Object.defineProperty(element, 'textContent', {
+    get() {
+      return textContent;
+    },
+    set(value) {
+      textContent = String(value);
+      innerHTML = '';
+      element.children = [];
+    },
+    configurable: true,
+  });
+  return element;
 }
 
 function loadPopup(sendMessageImpl, timerImpl, options) {
@@ -641,7 +673,7 @@ test('buildCopyUrlText copies only accessible https URLs', function () {
   );
 });
 
-test('copy button label and success summaries use the Gmail-extension wording', function () {
+test('buildCopyUrlHtml returns escaped anchor tags joined with breaks', function () {
   const popup = loadPopup(
     function () {
       return Promise.resolve({ success: true });
@@ -654,22 +686,84 @@ test('copy button label and success summaries use the Gmail-extension wording', 
     },
     {
       chromeMessages: {
-        copy_btn: 'Copy the qURL link',
-        result_one_success: 'Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.',
-        result_insertion_only_failed: 'Your file was uploaded successfully. Click "Copy the qURL link" to get the accessible URL.',
+        ext_name: 'Popup',
       },
     }
   );
 
-  assert.equal(popup.getMessage('copy_btn', ''), 'Copy the qURL link');
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
   assert.equal(
-    popup.getMessage('result_one_success', ''),
-    'Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.'
+    popup.buildCopyUrlHtml([
+      { link: 'https://files.example.com/a?x=1&y=<two>' },
+      { link: 'http://files.example.com/b' },
+      { link: 'https://files.example.com/c' },
+    ]),
+    '<a href="https://files.example.com/a?x=1&amp;y=&lt;two&gt;">https://files.example.com/a?x=1&amp;y=&lt;two&gt;</a><br><a href="https://files.example.com/c">https://files.example.com/c</a>'
   );
+});
+
+test('showResults uses insertion-aware success summaries', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        result_n_success: 'Inserted $1 qURL links into the Gmail draft.',
+        result_n_success_upload_only: '$1 files uploaded successfully',
+        result_insertion_only_failed: 'Upload completed successfully. Click "Copy the qURL link" to get the accessible URL.',
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+
+  const successSummary = popup.__testElements.get('resultArea').children[0];
   assert.equal(
-    popup.getMessage('result_insertion_only_failed', ''),
-    'Your file was uploaded successfully. Click "Copy the qURL link" to get the accessible URL.'
+    successSummary.textContent,
+    'Inserted 2 qURL links into the Gmail draft.'
   );
+  assert.equal(successSummary.className, 'result-summary all-success');
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    'Active tab is not Gmail.'
+  );
+
+  const resultArea = popup.__testElements.get('resultArea');
+  const errorArea = popup.__testElements.get('errorArea');
+  const uploadOnlySummary = resultArea.children[0];
+
+  assert.equal(
+    uploadOnlySummary.textContent,
+    '2 files uploaded successfully'
+  );
+  assert.equal(uploadOnlySummary.className, 'result-summary partial');
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Click "Copy the qURL link" to get the accessible URL.');
 });
 
 test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay', function () {
