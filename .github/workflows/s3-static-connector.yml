@@ -131,14 +131,35 @@ jobs:
             type=gha,scope=s3-static-connector-publish
           cache-to: type=gha,mode=max,scope=s3-static-connector-publish
 
-      - name: Runtime behavior contract (candidate linux/amd64)
+      - name: Resolve candidate platform manifests
+        id: candidate_platforms
         env:
           CANDIDATE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.candidate.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect --raw "$CANDIDATE_IMAGE" > /tmp/candidate.json
+
+          for arch in amd64 arm64; do
+            digest="$(jq -er --arg arch "$arch" '
+              [.manifests[]
+                | select(.platform.os == "linux" and .platform.architecture == $arch)
+                | .digest]
+              | if length == 1 then
+                  .[0]
+                else
+                  error("expected exactly one linux/\($arch) manifest, found \(length)")
+                end
+            ' /tmp/candidate.json)"
+            echo "${arch}_image=${IMAGE_NAME}@${digest}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Runtime behavior contract (candidate linux/amd64)
+        env:
+          CANDIDATE_IMAGE: ${{ steps.candidate_platforms.outputs.amd64_image }}
         run: SKIP_BUILD=true PLATFORM=linux/amd64 IMG="$CANDIDATE_IMAGE" bash test/behavior_test.sh
 
       - name: Runtime behavior contract (candidate linux/arm64)
         env:
-          CANDIDATE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.candidate.outputs.digest }}
+          CANDIDATE_IMAGE: ${{ steps.candidate_platforms.outputs.arm64_image }}
         run: SKIP_BUILD=true PLATFORM=linux/arm64 IMG="$CANDIDATE_IMAGE" bash test/behavior_test.sh
 
       - name: Promote tested image tags
