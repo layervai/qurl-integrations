@@ -204,8 +204,12 @@
     }
   },
   "result_insertion_only_failed": {
-    "message": "Upload completed successfully. Click \"Copy the qURL link\" to get the accessible URL.",
+    "message": "Upload completed successfully. Use the copy button below to get the accessible URL.",
     "description": "Message shown when uploads succeed but Gmail insertion fails"
+  },
+  "result_insertion_only_failed_no_copy": {
+    "message": "Upload completed successfully, but no accessible qURL link is available to copy.",
+    "description": "Message shown when uploads succeed, Gmail insertion fails, and no https qURL link is available for manual copy"
   },
   "permission_missing_error": {
     "message": "Permission to access the configured qURL server is missing. Open settings and save the server URL again.",

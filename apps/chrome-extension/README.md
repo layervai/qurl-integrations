@@ -54,8 +54,8 @@ A few things worth knowing:
   instead of failing the whole batch. Your qURL server may set a lower limit,
   in which case a smaller file can still be rejected after upload.
 - **Manual copy fallback.** If the links can't be inserted automatically (for
-  example, no compose window is open), the popup keeps a **Copy inserted
-  content** button so you can paste them into your draft yourself.
+  example, no compose window is open), the popup keeps a **Copy the qURL link**
+  button so you can paste the accessible link into your draft yourself.
 
 ## Pointing at a different qURL server
 

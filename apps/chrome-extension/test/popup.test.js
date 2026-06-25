@@ -720,7 +720,8 @@ test('showResults uses insertion-aware success summaries', function () {
       chromeMessages: {
         result_n_success: 'Inserted $1 qURL links into the Gmail draft.',
         result_n_success_upload_only: '$1 files uploaded successfully',
-        result_insertion_only_failed: 'Upload completed successfully. Click "Copy the qURL link" to get the accessible URL.',
+        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible URL.',
+        result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
       },
     }
   );
@@ -763,7 +764,40 @@ test('showResults uses insertion-aware success summaries', function () {
     '2 files uploaded successfully'
   );
   assert.equal(uploadOnlySummary.className, 'result-summary partial');
-  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Click "Copy the qURL link" to get the accessible URL.');
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible URL.');
+});
+
+test('showResults disables copy when no accessible links are available', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function () {
+    return null;
+  };
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'http://files.example.com/a', expiry: null },
+    ],
+    [],
+    'Active tab is not Gmail.'
+  );
+
+  assert.equal(popup.__testElements.get('copyArea').classList.contains('hidden'), false);
+  assert.equal(popup.__testElements.get('copyBtn').disabled, true);
+  assert.equal(
+    popup.__testElements.get('errorArea').children[0].textContent,
+    'Upload completed successfully, but no accessible qURL link is available to copy.'
+  );
 });
 
 test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay', function () {

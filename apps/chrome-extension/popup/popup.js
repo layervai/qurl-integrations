@@ -483,12 +483,14 @@ function showResults(results, errors, insertionError) {
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
   copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
+  const copyText = buildCopyUrlText(results);
+  const hasCopyableLinks = Boolean(copyText);
 
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
   if (results.length > 0) {
     copyArea.classList.remove('hidden');
-    copyBtn.disabled = false;
+    copyBtn.disabled = !hasCopyableLinks;
     resultArea.classList.remove('hidden');
     const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
     const summaryText = results.length === 1
@@ -538,7 +540,9 @@ function showResults(results, errors, insertionError) {
     // as its own bullet below. The singular case must not depend on insertionError, or one
     // failed upload alongside an insertion failure renders the ungrammatical "1 files…".
     title.textContent = insertionError && errors.length === 0
-      ? getMessage('result_insertion_only_failed', 'Upload completed successfully. Click "Copy the qURL link" to get the accessible URL.')
+      ? (hasCopyableLinks
+        ? getMessage('result_insertion_only_failed', 'Upload completed successfully. Use the copy button below to get the accessible URL.')
+        : getMessage('result_insertion_only_failed_no_copy', 'Upload completed successfully, but no accessible qURL link is available to copy.'))
       : errors.length === 1
       ? getMessage('result_one_error', '1 file failed to upload')
       : getMessage('result_n_errors', '$1 files failed to upload', [String(errors.length)]);
