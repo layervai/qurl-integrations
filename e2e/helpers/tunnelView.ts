@@ -27,7 +27,7 @@
  * (the knock) → `200 r_<id>.qurl.site…/views/<mint-id>` (the tunnel view).
  */
 
-import { chromium, type Browser } from 'playwright';
+import { chromium, errors, type Browser } from 'playwright';
 
 /** Matches the tunnel view URL on ANY environment:
  *   https://r_<id>.qurl.site<.layerv.xyz|.layerv.ai|…>/views/<mint-id>
@@ -73,6 +73,16 @@ export interface ViewViaQurlLinkResult {
   url: string;
 }
 
+export class TunnelViewTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(
+      `viewViaQurlLink: no tunnel-view response (…/views/<id>) within ${timeoutMs}ms — ` +
+        `the knock did not resolve to a served view (link revoked/consumed/expired, or tunnel down).`,
+    );
+    this.name = 'TunnelViewTimeoutError';
+  }
+}
+
 function resolveHeadless(opt?: boolean): boolean {
   if (opt !== undefined) return opt;
   // Local-debug overrides; default headless for CI.
@@ -101,25 +111,28 @@ export async function viewViaQurlLink(
     const page = await (await browser.newContext()).newPage();
 
     // Wait on the tunnel-view RESPONSE, registered BEFORE goto so one that lands
-    // mid-navigation isn't missed. Settle it into an always-resolving promise
-    // (Response | undefined): goto and the waiter share timeoutMs, so if goto
-    // rejects first the bare waiter would reject later with nothing awaiting it —
-    // an unhandled rejection jest can misattribute to a later test. domcontentloaded,
-    // NOT networkidle: the tunnel keepalive means networkidle never fires. The
-    // predicate is URL-only — status is checked after, so a non-200 view throws
-    // "returned N", not "no response".
+    // mid-navigation isn't missed. Keep a catch attached: goto and the waiter
+    // share timeoutMs, so if goto rejects first the bare waiter would reject later
+    // with nothing awaiting it — an unhandled rejection jest can misattribute to a
+    // later test. domcontentloaded, NOT networkidle: the tunnel keepalive means
+    // networkidle never fires. The predicate is URL-only — status is checked after,
+    // so a non-200 view throws "returned N", not "no response".
     const tunnelResponse = page
       .waitForResponse((r) => TUNNEL_VIEW_RE.test(r.url()), { timeout: timeoutMs })
-      .catch(() => undefined);
+      .then((response) => ({ response, error: undefined }))
+      .catch((error: unknown) => ({ response: undefined, error }));
+    // Do not remap navigation timeouts into TunnelViewTimeoutError: a stalled SPA
+    // shell is a different failure than the observed tunnel-view waiter miss.
     await page.goto(qurlLink, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
 
-    const resp = await tunnelResponse;
-    if (!resp) {
-      throw new Error(
-        `viewViaQurlLink: no tunnel-view response (…/views/<id>) within ${timeoutMs}ms — ` +
-          `the knock did not resolve to a served view (link revoked/consumed/expired, or tunnel down).`,
-      );
+    const { response, error: waitError } = await tunnelResponse;
+    if (waitError instanceof errors.TimeoutError) {
+      throw new TunnelViewTimeoutError(timeoutMs);
     }
+    if (waitError) {
+      throw waitError;
+    }
+    const resp = response!;
     if (resp.status() !== 200) {
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }
