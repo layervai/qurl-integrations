@@ -542,7 +542,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -586,7 +586,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody[testKeyAPIKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
+	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
 		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
 	}
 	if _, ok := apiKeyBody["purpose"]; ok {
@@ -693,7 +693,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -1374,7 +1374,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -1421,7 +1421,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
-	if apiKeyBody[testKeyAPIKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
+	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
 		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
@@ -1543,7 +1543,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 					testKeyKeyID:      testTunnelAPIKeyID,
 					testKeyAPIKey:     testTunnelModalKey,
 					testKeyStatus:     client.StatusActive,
-					testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 					testKeyTunnelSlug: testTunnelSlug,
 					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 				})
@@ -1615,7 +1615,7 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 					testKeyKeyID:      testTunnelAPIKeyID,
 					testKeyAPIKey:     testTunnelModalKey,
 					testKeyStatus:     client.StatusActive,
-					testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 					testKeyTunnelSlug: testTunnelSlug,
 					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 				})
@@ -2244,7 +2244,7 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelModalKey,
 			testKeyStatus:     client.StatusActive,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -2906,7 +2906,7 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     "",
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3098,7 +3098,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     "lv_live_bad'quote",
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3138,7 +3138,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3234,7 +3234,7 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3416,7 +3416,7 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3483,7 +3483,7 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3655,7 +3655,7 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3735,7 +3735,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3815,7 +3815,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3889,7 +3889,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      keyID,
 			testKeyAPIKey:     fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3980,7 +3980,7 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -4099,7 +4099,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     "lv_live_retry_bootstrap",
-			testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -4192,7 +4192,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				respondQURLEnvelope(t, w, map[string]any{
 					testKeyKeyID:      testTunnelAPIKeyID,
 					testKeyAPIKey:     testTunnelAPIKey,
-					testKeyAPIKeyType: client.APIKeyTypeTunnelBootstrap,
+					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 					testKeyTunnelSlug: testTunnelSlug,
 					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 				})

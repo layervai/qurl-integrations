@@ -15,7 +15,7 @@ const (
 	testKeyAPIKey      = "api_key"
 	testKeyExpiresAt   = "expires_at"
 	testKeyKeyID       = "key_id"
-	testKeyAPIKeyType  = "key_type"
+	testKeyKeyType     = "key_type"
 	testKeyResourceID  = "resource_id"
 	testKeySlug        = "slug"
 	testKeyStatus      = "status"
