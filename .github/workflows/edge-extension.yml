@@ -1,0 +1,152 @@
+name: "edge-extension: Build and Test"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Node version is read from apps/edge-extension/.nvmrc below so CI and local dev (nvm)
+# stay in lock-step. Avoid adding a NODE_VERSION env var or inline version — it would drift.
+
+jobs:
+  changes:
+    name: edge-extension / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      edge_extension: ${{ steps.filter.outputs.edge_extension }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            edge_extension:
+              # Source of truth for Edge extension-impacting paths on PR and main push events.
+              - 'apps/edge-extension/**'
+              - '.github/workflows/edge-extension.yml'
+
+  build-and-test:
+    name: edge-extension / build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.edge_extension == 'true'
+    defaults:
+      run:
+        working-directory: apps/edge-extension
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: apps/edge-extension/.nvmrc
+          cache: 'npm'
+          cache-dependency-path: apps/edge-extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Syntax check
+        run: |
+          node --check popup/popup.js
+          node --check background.js
+          node --check content/gmail-compose.js
+          node --check lib/qurl-api.js
+          node --check lib/qurl-compose-format.js
+          node --check lib/qurl-config.js
+          node --check lib/qurl-i18n.js
+
+      - name: Run tests
+        run: npm test
+
+      # package:release rebuilds the release/ directory from source (scripts/package-release.js
+      # invokes build-release.js), so it exercises the build too — no separate build step needed.
+      - name: Package release
+        run: npm run package:release
+
+  required:
+    name: edge-extension / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every Edge extension quality gate must be listed here;
+    # edge-extension / required only validates jobs in this needs set.
+    # display_names below is annotation-only.
+    needs: [changes, build-and-test]
+    if: always()
+    steps:
+      - name: Verify Edge extension CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          EDGE_EXTENSION_CHANGED: ${{ needs.changes.outputs.edge_extension }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::edge-extension / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$EDGE_EXTENSION_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No Edge extension-impacting changes detected; Edge extension CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::edge-extension / detect changes emitted unexpected edge_extension output: ${EDGE_EXTENSION_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              build-and-test)
+                echo "edge-extension / build and test"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not an Edge extension quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Edge extension-impacting changes require every quality gate
+              # listed in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"
