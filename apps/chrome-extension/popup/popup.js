@@ -496,10 +496,10 @@ function showResults(results, errors, insertionError) {
     const summaryText = results.length === 1
       ? (insertionError
         ? getMessage('result_one_success_upload_only', '1 file uploaded successfully')
-        : getMessage('result_one_success', '1 file uploaded successfully'))
+        : getMessage('result_one_success', 'Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.'))
       : (insertionError
         ? getMessage('result_n_success_upload_only', '$1 files uploaded successfully', [String(results.length)])
-        : getMessage('result_n_success', '$1 files uploaded successfully', [String(results.length)]));
+        : getMessage('result_n_success', 'Agent detected that you are editing a Gmail draft and automatically inserted $1 qURL links into the email body.', [String(results.length)]));
 
     const summary = document.createElement('div');
     summary.className = `result-summary ${summaryClass}`;
