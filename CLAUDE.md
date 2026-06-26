@@ -16,12 +16,27 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
-- `apps/edge-extension/` — Edge MV3 extension (JavaScript)
+- `apps/edge-extension/` — Edge MV3 extension (JavaScript); see **Chrome↔Edge lockstep** below
 - `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
 - `origins/s3-static-connector/` — reusable private S3 static origin image
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
 - Per-app release tracks via Release Please monorepo mode (`release-please-config.json`)
+
+### Chrome↔Edge lockstep
+
+`apps/edge-extension/` is a platform adaptation of `apps/chrome-extension/`. The two share security-sensitive logic (multipart sanitization, HTTPS-only normalization, permission handling) that **must be kept in sync**. When editing any of the following files in one extension, apply the same change to the counterpart:
+
+| chrome-extension          | edge-extension            | Notes                                  |
+|---------------------------|---------------------------|----------------------------------------|
+| `lib/qurl-api.js`         | `lib/qurl-api.js`         | Upload logic, sanitizers, permissions  |
+| `lib/qurl-compose-format.js` | `lib/qurl-compose-format.js` | Link formatting for Gmail insertion |
+| `content/gmail-compose.js`| `content/gmail-compose.js`| Gmail DOM manipulation                 |
+| `background.js`           | `background.js`           | Service worker message handling        |
+
+Intentional differences (do **not** sync these):
+- `manifest.json` — Edge uses `update_url` pointing to the Edge Add-ons store
+- `_locales/en/messages.json` `ext_name` — "qURL File Upload" vs "qURL File Upload for Edge"
 
 ## Commit format
 

@@ -599,37 +599,13 @@ function _sanitizeFilename(name) {
 }
 
 function createMultipartBoundary() {
-  // Use the browser crypto API when available; the Node test runner falls back to Node's
-  // crypto implementation so the extension code stays browser-safe without a test-only shim.
+  // crypto.getRandomValues is present in every Edge at/after minimum_chrome_version, so there
+  // is no non-crypto fallback to maintain (Node test runs provide it via the global crypto too).
   const bytes = new Uint8Array(16);
-  const randomBytes = getRandomBytes;
-  randomBytes(bytes);
+  globalThis.crypto.getRandomValues(bytes);
   return '----QurlBoundary' + Array.from(bytes, function (byte) {
     return byte.toString(16).padStart(2, '0');
   }).join('');
-}
-
-function getRandomBytes(bytes) {
-  const browserCrypto = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
-  if (browserCrypto && typeof browserCrypto.getRandomValues === 'function') {
-    return browserCrypto.getRandomValues(bytes);
-  }
-
-  if (typeof require === 'function') {
-    try {
-      const nodeCrypto = require('node:crypto');
-      if (nodeCrypto.webcrypto && typeof nodeCrypto.webcrypto.getRandomValues === 'function') {
-        return nodeCrypto.webcrypto.getRandomValues(bytes);
-      }
-      if (typeof nodeCrypto.randomFillSync === 'function') {
-        return nodeCrypto.randomFillSync(bytes);
-      }
-    } catch (_err) {
-      // Ignore and fall through to the error below.
-    }
-  }
-
-  throw new Error('crypto.getRandomValues is not available.');
 }
 
 /**
