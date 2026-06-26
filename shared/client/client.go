@@ -720,11 +720,6 @@ type APIKey struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	// KeyType is the optional constrained key type, such as "tunnel_bootstrap".
 	KeyType string `json:"key_type,omitempty"`
-	// TODO(upstream-contract): remove after qurl-service no longer emits the
-	// pre-GA response field name.
-	//
-	// Deprecated: Read KeyType instead.
-	Purpose string `json:"purpose,omitempty"`
 	// TunnelSlug is the sidecar slug this constrained key is bound to.
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }

@@ -586,7 +586,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
+	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
 		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
 	}
 	if _, ok := apiKeyBody["purpose"]; ok {
