@@ -151,9 +151,9 @@ const ResourceTypeURL = "url"
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
 
-// APIKeyPurposeTunnelBootstrap is the restricted key purpose used by the
+// APIKeyTypeTunnelBootstrap is the restricted key type used by the
 // Docker reverse-tunnel onboarding flow.
-const APIKeyPurposeTunnelBootstrap = "tunnel_bootstrap"
+const APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -699,7 +699,7 @@ type CreateAPIKeyInput struct {
 	Name       string   `json:"name"`
 	Scopes     []string `json:"scopes"`
 	ExpiresIn  string   `json:"expires_in,omitempty"`
-	Purpose    string   `json:"purpose,omitempty"`
+	KeyType    string   `json:"key_type,omitempty"`
 	TunnelSlug string   `json:"tunnel_slug,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
@@ -718,9 +718,8 @@ type APIKey struct {
 	Status    string     `json:"status,omitempty"`
 	CreatedAt time.Time  `json:"created_at,omitzero"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// Purpose is the optional constrained-key purpose, such as
-	// "tunnel_bootstrap".
-	Purpose string `json:"purpose,omitempty"`
+	// KeyType is the optional constrained key type, such as "tunnel_bootstrap".
+	KeyType string `json:"key_type,omitempty"`
 	// TunnelSlug is the sidecar slug this constrained key is bound to.
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }
