@@ -52,16 +52,23 @@ function createClassList() {
   };
 }
 
-function createElement() {
+function createElement(tagName) {
   const listeners = new Map();
-  return {
+  const element = {
     addEventListener(type, handler) {
       if (!listeners.has(type)) {
         listeners.set(type, []);
       }
       listeners.get(type).push(handler);
     },
-    appendChild() {},
+    append(...nodes) {
+      this.children.push(...nodes);
+    },
+    appendChild(node) {
+      this.children.push(node);
+      return node;
+    },
+    children: [],
     classList: createClassList(),
     click() {},
     closest() {
@@ -87,7 +94,6 @@ function createElement() {
     setAttribute(name, value) {
       this[name] = value;
     },
-    textContent: '',
     async trigger(type, event) {
       const handlers = listeners.get(type) || [];
       for (const handler of handlers) {
@@ -101,6 +107,32 @@ function createElement() {
     },
     value: '',
   };
+  element.tagName = String(tagName || 'div').toUpperCase();
+  let innerHTML = '';
+  let textContent = '';
+  Object.defineProperty(element, 'innerHTML', {
+    get() {
+      return innerHTML;
+    },
+    set(value) {
+      innerHTML = String(value);
+      textContent = '';
+      element.children = [];
+    },
+    configurable: true,
+  });
+  Object.defineProperty(element, 'textContent', {
+    get() {
+      return textContent;
+    },
+    set(value) {
+      textContent = String(value);
+      innerHTML = '';
+      element.children = [];
+    },
+    configurable: true,
+  });
+  return element;
 }
 
 function loadPopup(sendMessageImpl, timerImpl, options) {
@@ -609,6 +641,163 @@ test('formatFileSize uses a GB tier for large files', function () {
   );
 
   assert.equal(popup.formatFileSize(2 * 1024 * 1024 * 1024), '2.0 GB');
+});
+
+test('buildCopyUrlText copies only accessible https URLs', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    if (String(link).startsWith('https://')) {
+      return String(link);
+    }
+    return null;
+  };
+
+  assert.equal(
+    popup.buildCopyUrlText([
+      { filename: 'report.pdf', link: 'https://files.example.com/a' },
+      { filename: 'bad.txt', link: 'http://files.example.com/b' },
+      { filename: 'notes.txt', link: 'https://files.example.com/c' },
+    ]),
+    'https://files.example.com/a\nhttps://files.example.com/c'
+  );
+});
+
+test('buildCopyUrlHtml returns escaped anchor tags joined with breaks', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        ext_name: 'Popup',
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  assert.equal(
+    popup.buildCopyUrlHtml([
+      { link: 'https://files.example.com/a?x=1&y=<two>' },
+      { link: 'http://files.example.com/b' },
+      { link: 'https://files.example.com/c' },
+    ]),
+    '<a href="https://files.example.com/a?x=1&amp;y=&lt;two&gt;">https://files.example.com/a?x=1&amp;y=&lt;two&gt;</a><br><a href="https://files.example.com/c">https://files.example.com/c</a>'
+  );
+});
+
+test('showResults uses insertion-aware success summaries', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        result_n_success: 'Inserted $1 qURL links into the Gmail draft.',
+        result_n_success_upload_only: '$1 files uploaded successfully',
+        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible URL.',
+        result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+
+  const successSummary = popup.__testElements.get('resultArea').children[0];
+  assert.equal(
+    successSummary.textContent,
+    'Inserted 2 qURL links into the Gmail draft.'
+  );
+  assert.equal(successSummary.className, 'result-summary all-success');
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    'Active tab is not Gmail.'
+  );
+
+  const resultArea = popup.__testElements.get('resultArea');
+  const errorArea = popup.__testElements.get('errorArea');
+  const uploadOnlySummary = resultArea.children[0];
+
+  assert.equal(
+    uploadOnlySummary.textContent,
+    '2 files uploaded successfully'
+  );
+  assert.equal(uploadOnlySummary.className, 'result-summary partial');
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible URL.');
+});
+
+test('showResults disables copy when no accessible links are available', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function () {
+    return null;
+  };
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'http://files.example.com/a', expiry: null },
+    ],
+    [],
+    'Active tab is not Gmail.'
+  );
+
+  assert.equal(popup.__testElements.get('copyArea').classList.contains('hidden'), false);
+  assert.equal(popup.__testElements.get('copyBtn').disabled, true);
+  assert.equal(
+    popup.__testElements.get('errorArea').children[0].textContent,
+    'Upload completed successfully, but no accessible qURL link is available to copy.'
+  );
 });
 
 test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay', function () {
