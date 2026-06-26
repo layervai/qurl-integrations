@@ -1428,12 +1428,20 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	var gotHeader string
 	var gotBody CreateAPIKeyInput
+	var gotWire map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/api-keys" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		gotHeader = r.Header.Get(HeaderIdempotencyKey)
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&gotWire); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		body, err := json.Marshal(gotWire)
+		if err != nil {
+			t.Fatalf("remarshal body: %v", err)
+		}
+		if err := json.Unmarshal(body, &gotBody); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
@@ -1442,7 +1450,7 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 			"name":        testTunnelSlug + " bootstrap",
 			"scopes":      []string{"qurl:agent", "qurl:write"},
 			"status":      StatusActive,
-			"purpose":     APIKeyPurposeTunnelBootstrap,
+			"key_type":    APIKeyTypeTunnelBootstrap,
 			"tunnel_slug": testTunnelSlug,
 			"expires_at":  "2026-05-28T00:00:00Z",
 		})
@@ -1453,7 +1461,7 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	got, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
 		Name:           testTunnelSlug + " bootstrap",
 		Scopes:         []string{"qurl:agent", "qurl:write"},
-		Purpose:        APIKeyPurposeTunnelBootstrap,
+		KeyType:        APIKeyTypeTunnelBootstrap,
 		TunnelSlug:     testTunnelSlug,
 		ExpiresIn:      "24h",
 		IdempotencyKey: "bootstrap-key-12345678901234567890",
@@ -1464,14 +1472,65 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	if gotHeader != "bootstrap-key-12345678901234567890" {
 		t.Errorf("Idempotency-Key = %q", gotHeader)
 	}
-	if gotBody.Purpose != APIKeyPurposeTunnelBootstrap || gotBody.TunnelSlug != testTunnelSlug {
+	if gotBody.KeyType != APIKeyTypeTunnelBootstrap || gotBody.TunnelSlug != testTunnelSlug {
 		t.Errorf("body = %+v, want tunnel bootstrap fields", gotBody)
 	}
-	if got.APIKey != "lv_live_secret" || got.Purpose != APIKeyPurposeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
+	if _, ok := gotWire["purpose"]; ok {
+		t.Errorf("body contained deprecated purpose field: %+v", gotWire)
+	}
+	if got.APIKey != "lv_live_secret" || got.KeyType != APIKeyTypeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
 		t.Errorf("decoded key = %+v", got)
 	}
 	if got.ExpiresAt == nil {
 		t.Fatal("ExpiresAt should decode")
+	}
+}
+
+func TestCreateAPIKeyMapsLegacyPurposeToKeyType(t *testing.T) {
+	var gotBody CreateAPIKeyInput
+	var gotWire map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotWire); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		body, err := json.Marshal(gotWire)
+		if err != nil {
+			t.Fatalf("remarshal body: %v", err)
+		}
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"key_id":      "key_abc123DEF456",
+			"api_key":     "lv_live_secret",
+			"name":        testTunnelSlug + " bootstrap",
+			"scopes":      []string{"qurl:agent", "qurl:write"},
+			"status":      StatusActive,
+			"key_type":    APIKeyTypeTunnelBootstrap,
+			"tunnel_slug": testTunnelSlug,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
+		Name:       testTunnelSlug + " bootstrap",
+		Scopes:     []string{"qurl:agent", "qurl:write"},
+		Purpose:    APIKeyPurposeTunnelBootstrap,
+		TunnelSlug: testTunnelSlug,
+		ExpiresIn:  "24h",
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if gotBody.KeyType != APIKeyTypeTunnelBootstrap {
+		t.Errorf("KeyType = %q, want %q", gotBody.KeyType, APIKeyTypeTunnelBootstrap)
+	}
+	if gotBody.Purpose != "" {
+		t.Errorf("Purpose = %q, want omitted legacy field", gotBody.Purpose)
+	}
+	if _, ok := gotWire["purpose"]; ok {
+		t.Errorf("body contained deprecated purpose field: %+v", gotWire)
 	}
 }
 

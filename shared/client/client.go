@@ -151,9 +151,15 @@ const ResourceTypeURL = "url"
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
 
-// APIKeyPurposeTunnelBootstrap is the restricted key purpose used by the
+// APIKeyTypeTunnelBootstrap is the restricted key type used by the
 // Docker reverse-tunnel onboarding flow.
-const APIKeyPurposeTunnelBootstrap = "tunnel_bootstrap"
+const APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
+
+// APIKeyPurposeTunnelBootstrap is a compatibility alias for callers that still
+// use the pre-GA field name.
+//
+// Deprecated: Use APIKeyTypeTunnelBootstrap instead.
+const APIKeyPurposeTunnelBootstrap = APIKeyTypeTunnelBootstrap
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -696,11 +702,14 @@ type CreateResourceInput struct {
 
 // CreateAPIKeyInput is the input for `POST /v1/api-keys`.
 type CreateAPIKeyInput struct {
-	Name       string   `json:"name"`
-	Scopes     []string `json:"scopes"`
-	ExpiresIn  string   `json:"expires_in,omitempty"`
-	Purpose    string   `json:"purpose,omitempty"`
-	TunnelSlug string   `json:"tunnel_slug,omitempty"`
+	Name      string   `json:"name"`
+	Scopes    []string `json:"scopes"`
+	ExpiresIn string   `json:"expires_in,omitempty"`
+	KeyType   string   `json:"key_type,omitempty"`
+	// Deprecated: Set KeyType instead. CreateAPIKey maps this to KeyType when
+	// KeyType is empty so older callers emit the current qurl-service wire field.
+	Purpose    string `json:"-"`
+	TunnelSlug string `json:"tunnel_slug,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so retries replay the same plaintext key.
@@ -718,8 +727,10 @@ type APIKey struct {
 	Status    string     `json:"status,omitempty"`
 	CreatedAt time.Time  `json:"created_at,omitzero"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// Purpose is the optional constrained-key purpose, such as
-	// "tunnel_bootstrap".
+	// KeyType is the optional constrained key type, such as "tunnel_bootstrap".
+	KeyType string `json:"key_type,omitempty"`
+	// Deprecated: Read KeyType instead. Purpose is the pre-GA response field
+	// name and remains here only for legacy response decoding.
 	Purpose string `json:"purpose,omitempty"`
 	// TunnelSlug is the sidecar slug this constrained key is bound to.
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
@@ -865,7 +876,11 @@ func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*A
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(input)
+	wireInput := *input
+	if wireInput.KeyType == "" {
+		wireInput.KeyType = wireInput.Purpose
+	}
+	body, err := json.Marshal(&wireInput)
 	if err != nil {
 		return nil, fmt.Errorf("marshal create api key input: %w", err)
 	}
