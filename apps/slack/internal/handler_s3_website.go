@@ -25,7 +25,7 @@ const (
 
 var (
 	s3WebsiteBucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
-	s3WebsiteRegionPattern = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[1-9][0-9]*$`)
+	s3WebsiteRegionPattern = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[1-9]\d*$`)
 	s3WebsitePrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 	s3WebsiteIndexPattern  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
@@ -190,8 +190,8 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 	respondJSON(w, http.StatusOK, map[string]any{})
 }
 
-func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStateValue) (*s3WebsiteInstallArgs, map[string]string) {
-	fieldErrors := map[string]string{}
+func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStateValue) (args *s3WebsiteInstallArgs, fieldErrors map[string]string) {
+	fieldErrors = map[string]string{}
 
 	slug := strings.TrimPrefix(strings.TrimSpace(interactionStateText(values, s3WebsiteInstallBlockSlug, s3WebsiteInstallActionSlug)), "$")
 	if !tunnelSlugPattern.MatchString(slug) {
@@ -253,8 +253,8 @@ func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStat
 	}, nil
 }
 
-func normalizeS3WebsitePrefix(raw string) (string, string) {
-	prefix := strings.Trim(strings.TrimSpace(raw), "/")
+func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {
+	prefix = strings.Trim(strings.TrimSpace(raw), "/")
 	if prefix == "" {
 		return "", ""
 	}
@@ -488,7 +488,7 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	}, nil
 }
 
-func (p preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key *client.APIKey, aliasStatus, displayName string, now time.Time) (string, error) {
+func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key *client.APIKey, aliasStatus, displayName string, now time.Time) (string, error) {
 	if key == nil {
 		return "", errors.New("bootstrap api key is missing")
 	}

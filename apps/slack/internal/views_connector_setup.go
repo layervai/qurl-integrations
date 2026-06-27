@@ -114,6 +114,7 @@ func S3WebsiteInstallModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// S3WebsiteInstallErrorModal renders a replacement modal for S3 website setup failures.
 func S3WebsiteInstallErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
