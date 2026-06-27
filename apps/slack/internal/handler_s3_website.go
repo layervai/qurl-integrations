@@ -19,6 +19,7 @@ import (
 
 const (
 	defaultS3StaticConnectorImage    = "ghcr.io/layervai/qurl-integrations/s3-static-connector:main"
+	defaultS3WebsiteIndexDocument    = "index.html"
 	s3WebsiteOriginPort              = defaultTunnelLocalPort
 	s3WebsiteUnexpectedFailureNotice = "S3 website qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect` again."
 )
@@ -234,9 +235,9 @@ func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStat
 
 	index := strings.TrimSpace(interactionStateText(values, s3WebsiteInstallBlockIndex, s3WebsiteInstallActionIndex))
 	if index == "" {
-		fieldErrors[s3WebsiteInstallBlockIndex] = "Index document is required."
+		index = defaultS3WebsiteIndexDocument
 	} else if len(index) > 128 || !s3WebsiteIndexPattern.MatchString(index) || strings.Contains(index, "/") || index == "." || index == ".." {
-		fieldErrors[s3WebsiteInstallBlockIndex] = "Use a simple file name such as index.html."
+		fieldErrors[s3WebsiteInstallBlockIndex] = "Use a simple file name such as index.html, default.html, or home.html."
 	}
 
 	if len(fieldErrors) > 0 {

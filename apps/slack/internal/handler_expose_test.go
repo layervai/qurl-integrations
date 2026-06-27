@@ -343,7 +343,15 @@ func TestHandleExposeConnectorClick_OpensSetupChooser(t *testing.T) {
 		t.Errorf("callback_id = %v, want %s", modal[blockKitFieldCallbackID], callbackIDConnectorSetup)
 	}
 	viewBody := string(view)
-	for _, want := range []string{"Existing service", "S3 hosted website", connectorSetupActionType} {
+	for _, want := range []string{
+		"Web app or HTTP API",
+		"App, dashboard, admin tool, or API reachable on an HTTP port.",
+		"S3 static website",
+		"Static-site files in an S3 bucket.",
+		"What type of resource are you protecting?",
+		"radio_buttons",
+		connectorSetupActionType,
+	} {
 		if !strings.Contains(viewBody, want) {
 			t.Errorf("connector setup chooser missing %q: %s", want, viewBody)
 		}

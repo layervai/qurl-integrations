@@ -34,7 +34,7 @@ const (
 
 // ConnectorSetupModal is the qURL Connector branch point opened from
 // `/qurl-admin protect` -> "Protect qURL Connector". Existing-service setup
-// routes to the long-standing qURL Connector installer; S3 hosted website setup
+// routes to the long-standing qURL Connector installer; S3 static website setup
 // routes to a separate modal that collects bucket details and renders both the
 // qURL Connector and private S3 origin artifacts.
 func ConnectorSetupModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
@@ -48,6 +48,16 @@ func ConnectorSetupModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
 	if len(privateMeta) > slackPrivateMetadataMaxBytes {
 		return nil, fmt.Errorf("private_metadata exceeds Slack limit: %d bytes", len(privateMeta))
 	}
+	existingServiceOption := optionObjWithDescription(
+		"Web app or HTTP API",
+		connectorSetupExistingService,
+		"App, dashboard, admin tool, or API reachable on an HTTP port.",
+	)
+	s3WebsiteOption := optionObjWithDescription(
+		"S3 static website",
+		connectorSetupS3Website,
+		"Static-site files in an S3 bucket.",
+	)
 	payload := map[string]any{
 		blockKitFieldType:            blockKitTypeModal,
 		blockKitFieldCallbackID:      callbackIDConnectorSetup,
@@ -57,11 +67,11 @@ func ConnectorSetupModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
 		blockKitFieldPrivateMetadata: string(privateMeta),
 		blockKitFieldBlocks: []any{
 			contextBlock("Target channel: " + slackChannelMention(meta.ChannelID)),
-			inputBlock(connectorSetupBlockType, "What are you protecting?", "Choose the closest setup type. The next screen asks only for the details that setup needs.", false,
-				staticSelect(connectorSetupActionType, []map[string]any{
-					optionObj("Existing service", connectorSetupExistingService),
-					optionObj("S3 hosted website", connectorSetupS3Website),
-				}, optionObj("Existing service", connectorSetupExistingService))),
+			inputBlock(connectorSetupBlockType, "What type of resource are you protecting?", "Choose how qURL Connector should reach the origin.", false,
+				radioButtons(connectorSetupActionType, []map[string]any{
+					existingServiceOption,
+					s3WebsiteOption,
+				}, existingServiceOption)),
 		},
 	}
 	return json.Marshal(payload)
@@ -107,8 +117,8 @@ func S3WebsiteInstallModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
 				plainTextInput(s3WebsiteInstallActionRegion, "us-east-1", "")),
 			inputBlock(s3WebsiteInstallBlockPrefix, "S3 prefix", "Optional. Use this when the website files live under a folder such as website.", true,
 				plainTextInput(s3WebsiteInstallActionPrefix, "website", "")),
-			inputBlock(s3WebsiteInstallBlockIndex, "Index document", "Usually index.html.", false,
-				plainTextInput(s3WebsiteInstallActionIndex, "index.html", "index.html")),
+			inputBlock(s3WebsiteInstallBlockIndex, "Directory index file", "Optional. Keep index.html unless your site uses default.html, home.html, or similar.", true,
+				plainTextInput(s3WebsiteInstallActionIndex, defaultS3WebsiteIndexDocument, defaultS3WebsiteIndexDocument)),
 		},
 	}
 	return json.Marshal(payload)

@@ -43,9 +43,9 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 }
 
 // handleExposeConnectorClick opens the qURL Connector setup chooser in response
-// to the "Protect qURL Connector" button. The chooser routes existing-service
-// setup to the long-standing installer and S3 hosted website setup to the
-// S3-specific artifact generator.
+// to the "Protect qURL Connector" button. The chooser routes web-app/API setup
+// to the long-standing installer and S3 static website setup to the S3-specific
+// artifact generator.
 // Mirrors handleListEditClick: ack fast, render+open on the async goroutine
 // within Slack's trigger window, fail open via the interaction's response_url.
 // Not admin-re-gated at open (the picker only renders for admins and the modal

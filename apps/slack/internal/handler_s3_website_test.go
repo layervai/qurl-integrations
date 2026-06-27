@@ -292,6 +292,28 @@ func TestParseS3WebsiteInstallModalArgsValidatesS3Fields(t *testing.T) {
 	}
 }
 
+func TestParseS3WebsiteInstallModalArgsDefaultsDirectoryIndex(t *testing.T) {
+	values := s3WebsiteInstallModalValues(
+		testTunnelSlug,
+		"$team-dash",
+		string(tunnelEnvDocker),
+		testS3WebsiteBucket,
+		testS3WebsiteRegion,
+		testS3WebsitePrefix,
+		"",
+	)
+	args, fieldErrors := parseS3WebsiteInstallModalArgs(values)
+	if len(fieldErrors) > 0 {
+		t.Fatalf("fieldErrors = %+v, want none", fieldErrors)
+	}
+	if args == nil {
+		t.Fatal("args = nil, want parsed args")
+	}
+	if args.IndexDocument != defaultS3WebsiteIndexDocument {
+		t.Fatalf("IndexDocument = %q, want %q", args.IndexDocument, defaultS3WebsiteIndexDocument)
+	}
+}
+
 func connectorSetupViewSubmissionBody(t *testing.T, meta *TunnelInstallModalMetadata, setupType string) string {
 	t.Helper()
 	pm, err := json.Marshal(meta)

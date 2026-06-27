@@ -2182,9 +2182,9 @@ func (h *Handler) adminHelpMessage(command string) string {
 		appendSectionHeader("*Protect resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl-admin protect` — Guided chooser: protect an existing service, S3 hosted website, or existing URL resource (recommended)",
-				"• `/qurl-admin protect-connector` — Guided connector setup for existing services (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup for existing services; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin protect` — Guided chooser: protect a web app, HTTP API, S3 static website, or existing URL resource (recommended)",
+				"• `/qurl-admin protect-connector` — Guided connector setup for web apps and HTTP APIs (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup for web apps and HTTP APIs; creates a bootstrap key and binds `$<id>` in this channel",
 				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
