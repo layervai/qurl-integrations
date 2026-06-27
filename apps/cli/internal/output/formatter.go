@@ -11,7 +11,7 @@ import (
 
 	"github.com/fatih/color"
 
-	"github.com/layervai/qurl-go/qurl"
+	qurlsdk "github.com/layervai/qurl-go/qurl"
 
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -28,7 +28,7 @@ type Formatter interface {
 	FormatCreate(w io.Writer, output *client.CreateOutput) error
 	FormatList(w io.Writer, output *client.ListOutput) error
 	FormatResolve(w io.Writer, output *client.ResolveOutput) error
-	FormatEnter(w io.Writer, handle *qurl.ResourceHandle) error
+	FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error
 	FormatMint(w io.Writer, output *client.MintOutput) error
 	FormatQuota(w io.Writer, output *client.QuotaOutput) error
 }
@@ -154,7 +154,7 @@ func (f TableFormatter) FormatResolve(w io.Writer, output *client.ResolveOutput)
 }
 
 // FormatEnter formats a qv2 portal-entry result as a key-value table.
-func (f TableFormatter) FormatEnter(w io.Writer, handle *qurl.ResourceHandle) error {
+func (f TableFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
 	wr.printf("%s\n\n", f.green.Sprint("Portal entered"))
@@ -238,7 +238,7 @@ func (JSONFormatter) FormatResolve(w io.Writer, output *client.ResolveOutput) er
 }
 
 // FormatEnter formats a qv2 portal-entry result as JSON.
-func (JSONFormatter) FormatEnter(w io.Writer, handle *qurl.ResourceHandle) error {
+func (JSONFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error {
 	return writeJSON(w, handle)
 }
 
