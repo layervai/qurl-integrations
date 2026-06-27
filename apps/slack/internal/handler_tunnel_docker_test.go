@@ -8,11 +8,13 @@ import (
 func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	t.Parallel()
 	got := mustRenderDockerTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvDocker,
-		WebRef:      "web.1_2-3",
+		Slug:            testTunnelSlug,
+		Alias:           testTunnelSlug,
+		LocalPort:       9090,
+		Environment:     tunnelEnvDocker,
+		WebRef:          "web.1_2-3",
+		ResourceID:      testTunnelResourceID,
+		KnockResourceID: testTunnelKnockID,
 	}, testTunnelImageRef)
 
 	for _, want := range []string{
@@ -25,7 +27,10 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"`,
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
+		"resource_id: '" + testTunnelResourceID + "'",
+		"LAYERV_KNOCK_RESOURCE_ID='" + testTunnelKnockID + "'",
 		`--network "container:${WEB_CONTAINER}"`,
+		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		"Re-running this install briefly restarts the qURL Connector container",
 		"restart the qURL Connector after replacing or recreating the web container",
 		testTunnelDockerLine,

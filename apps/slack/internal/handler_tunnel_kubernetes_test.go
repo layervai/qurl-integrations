@@ -15,10 +15,12 @@ import (
 func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
 	t.Parallel()
 	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:            testTunnelSlug,
+		Alias:           testTunnelSlug,
+		LocalPort:       9090,
+		Environment:     tunnelEnvKubernetes,
+		ResourceID:      testTunnelResourceID,
+		KnockResourceID: testTunnelKnockID,
 	}
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 
@@ -101,6 +103,9 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"securityContext:",
 		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
+		"name: LAYERV_KNOCK_RESOURCE_ID",
+		"value: '" + testTunnelKnockID + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
 		"runAsNonRoot: true",
@@ -143,10 +148,12 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		t.Skip("kubectl not on PATH")
 	}
 	got := mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:            testTunnelSlug,
+		Alias:           testTunnelSlug,
+		LocalPort:       9090,
+		Environment:     tunnelEnvKubernetes,
+		ResourceID:      testTunnelResourceID,
+		KnockResourceID: testTunnelKnockID,
 	}, testTunnelImageRef)
 	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
 	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-connector-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
@@ -171,10 +178,12 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
 	dns1123Label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
 	args := &tunnelInstallArgs{
-		Slug:        slug,
-		Alias:       slug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:            slug,
+		Alias:           slug,
+		LocalPort:       9090,
+		Environment:     tunnelEnvKubernetes,
+		ResourceID:      testTunnelResourceID,
+		KnockResourceID: testTunnelKnockID,
 	}
 	names := kubernetesTunnelObjectNames(slug)
 	for label, name := range map[string]string{

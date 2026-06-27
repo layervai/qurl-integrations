@@ -125,11 +125,13 @@ const (
 )
 
 type tunnelInstallArgs struct {
-	Slug        string
-	Alias       string
-	LocalPort   int
-	Environment tunnelInstallEnvironment
-	WebRef      string
+	Slug            string
+	Alias           string
+	LocalPort       int
+	Environment     tunnelInstallEnvironment
+	WebRef          string
+	ResourceID      string
+	KnockResourceID string
 	// WebRefKind is parse-time grammar metadata for cross-field validation.
 	// Renderers intentionally consume only WebRef after validation succeeds.
 	WebRefKind tunnelInstallWebRefKind
@@ -655,6 +657,14 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	if err != nil {
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
+	}
+	if err := args.pinTunnelResource(resource); err != nil {
+		resourceID := ""
+		if resource != nil {
+			resourceID = resource.ResourceID
+		}
+		log.Error("tunnel install: create/find resource returned incomplete tunnel identity", "error", err, "slug", args.Slug, "resource_id", resourceID)
+		return nil, "qURL Connector setup could not resolve the connector resource placement. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
 	// Bind/verify the channel shortcut before minting the bootstrap key so an
@@ -1195,18 +1205,56 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 	}
 }
 
+func (args *tunnelInstallArgs) pinTunnelResource(resource *client.Resource) error {
+	if resource == nil {
+		return errors.New("connector resource is missing")
+	}
+	if strings.TrimSpace(resource.ResourceID) == "" {
+		return errors.New("connector resource is missing resource_id")
+	}
+	if strings.TrimSpace(resource.KnockResourceID) == "" {
+		return errors.New("connector resource is missing knock_resource_id")
+	}
+	args.ResourceID = strings.TrimSpace(resource.ResourceID)
+	args.KnockResourceID = strings.TrimSpace(resource.KnockResourceID)
+	return nil
+}
+
+func (args *tunnelInstallArgs) requirePinnedTunnelResource() error {
+	if args == nil {
+		return errors.New("connector install args are missing")
+	}
+	if strings.TrimSpace(args.ResourceID) == "" {
+		return errors.New("connector resource_id is required")
+	}
+	if strings.TrimSpace(args.KnockResourceID) == "" {
+		return errors.New("connector knock_resource_id is required")
+	}
+	return nil
+}
+
 func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
+	if err := args.requirePinnedTunnelResource(); err != nil {
+		return "", err
+	}
 	quotedSlug, err := yamlSingleQuoted(args.Slug)
 	if err != nil {
 		return "", err
 	}
+	quotedResourceID, err := yamlSingleQuoted(args.ResourceID)
+	if err != nil {
+		return "", err
+	}
 	// The client calls this route token `id`; the Admin API stores and returns
-	// the same verbatim value as the resource slug.
+	// the same verbatim value as the resource slug. resource_id is pinned from
+	// the setup-time find-or-create response so the runtime bootstrap key is
+	// used only for agent bootstrap, not resource discovery.
 	return fmt.Sprintf(`routes:
   - id: %s
     type: http
     local_ip: 127.0.0.1
-    local_port: %d`, quotedSlug, args.LocalPort), nil
+    local_port: %d
+    resource_id: %s`, quotedSlug, args.LocalPort, quotedResourceID), nil
 }
 
 func renderPortablePipefailShell() string {
