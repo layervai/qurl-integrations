@@ -46,8 +46,12 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		submission := payload.asViewSubmission()
 		LogViewSubmission(slog.Default(), &submission)
 		switch payload.View.CallbackID {
+		case callbackIDConnectorSetup:
+			h.handleConnectorSetupSubmission(w, &submission)
 		case callbackIDTunnelInstall:
 			h.handleTunnelInstallSubmission(w, &submission)
+		case callbackIDS3WebsiteInstall:
+			h.handleS3WebsiteInstallSubmission(w, &submission)
 		case callbackIDTunnelEdit:
 			h.handleTunnelEditSubmission(w, &submission)
 		case callbackIDExposeURL:
@@ -632,6 +636,9 @@ func (v interactionStateValue) text() string {
 }
 
 var interactionStateLogAllowlist = map[string]map[string]struct{}{
+	connectorSetupBlockType: {
+		connectorSetupActionType: {},
+	},
 	tunnelInstallBlockSlug: {
 		tunnelInstallActionSlug: {},
 	},
@@ -646,6 +653,18 @@ var interactionStateLogAllowlist = map[string]map[string]struct{}{
 	},
 	tunnelInstallBlockWebRef: {
 		tunnelInstallActionWebRef: {},
+	},
+	s3WebsiteInstallBlockSlug: {
+		s3WebsiteInstallActionSlug: {},
+	},
+	s3WebsiteInstallBlockShortcut: {
+		s3WebsiteInstallActionShortcut: {},
+	},
+	s3WebsiteInstallBlockEnvironment: {
+		s3WebsiteInstallActionEnvironment: {},
+	},
+	s3WebsiteInstallBlockRegion: {
+		s3WebsiteInstallActionRegion: {},
 	},
 }
 
@@ -672,11 +691,19 @@ var viewSubmissionStateLogAllowlist = func() map[string]map[string]struct{} {
 // default in sanitizedViewSubmissionStateValues.
 var viewSubmissionBlockIDs = []string{
 	claimCodeBlockID,
+	connectorSetupBlockType,
 	tunnelInstallBlockSlug,
 	tunnelInstallBlockShortcut,
 	tunnelInstallBlockEnvironment,
 	tunnelInstallBlockLocalPort,
 	tunnelInstallBlockWebRef,
+	s3WebsiteInstallBlockSlug,
+	s3WebsiteInstallBlockShortcut,
+	s3WebsiteInstallBlockEnvironment,
+	s3WebsiteInstallBlockBucket,
+	s3WebsiteInstallBlockRegion,
+	s3WebsiteInstallBlockPrefix,
+	s3WebsiteInstallBlockIndex,
 	tunnelEditBlockDisplayName,
 	tunnelEditBlockAliases,
 	tunnelEditBlockChannels,
