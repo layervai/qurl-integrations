@@ -24,6 +24,7 @@ WEB_CONTAINER=%s
 %s
 
 QURL_CONNECTOR_ID=%s
+LAYERV_KNOCK_RESOURCE_ID=%s
 CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
@@ -53,7 +54,8 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
+  -e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID" \
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), shellSingleQuote(args.KnockResourceID), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
