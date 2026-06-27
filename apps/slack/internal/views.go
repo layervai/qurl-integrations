@@ -120,15 +120,18 @@ var redactedSubmissionBlockIDs = map[string]struct{}{
 	// Edit/expose aliases and names are redacted even when install aliases are
 	// visible diagnostics: edit/expose submissions can carry existing resource
 	// labels, URL targets, or broad free-form edits from an established setup.
-	claimCodeBlockID:           {},
-	tunnelEditBlockDisplayName: {},
-	tunnelEditBlockAliases:     {},
-	tunnelEditBlockChannels:    {},
-	exposeURLBlockResource:     {},
-	exposeURLBlockAlias:        {},
-	exposeURLBlockTarget:       {},
-	feedbackBlockSummary:       {},
-	feedbackBlockDetails:       {},
+	claimCodeBlockID:            {},
+	tunnelEditBlockDisplayName:  {},
+	tunnelEditBlockAliases:      {},
+	tunnelEditBlockChannels:     {},
+	exposeURLBlockResource:      {},
+	exposeURLBlockAlias:         {},
+	exposeURLBlockTarget:        {},
+	s3WebsiteInstallBlockBucket: {},
+	s3WebsiteInstallBlockPrefix: {},
+	s3WebsiteInstallBlockIndex:  {},
+	feedbackBlockSummary:        {},
+	feedbackBlockDetails:        {},
 }
 
 // IsRedactedSubmissionBlock reports whether a submitted Slack view state block

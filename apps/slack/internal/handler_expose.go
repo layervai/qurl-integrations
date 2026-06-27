@@ -42,14 +42,15 @@ func (h *Handler) handleExpose(w http.ResponseWriter, values url.Values) {
 	respondSlackBlocks(w, "What do you want to protect in this channel?", exposeChooserBlocks(channelID))
 }
 
-// handleExposeConnectorClick opens the existing guided connector installer in
-// response to the "Protect qURL Connector" button. It reuses TunnelInstallModal
-// and its existing submission handler wholesale — the button is just a second
-// entry point to the wizard the bare `/qurl-admin protect-connector` opens.
+// handleExposeConnectorClick opens the qURL Connector setup chooser in response
+// to the "Protect qURL Connector" button. The chooser routes existing-service
+// setup to the long-standing installer and S3 hosted website setup to the
+// S3-specific artifact generator.
 // Mirrors handleListEditClick: ack fast, render+open on the async goroutine
 // within Slack's trigger window, fail open via the interaction's response_url.
 // Not admin-re-gated at open (the picker only renders for admins and the modal
-// discloses nothing new); handleTunnelInstallSubmission is the mutation gate.
+// discloses nothing new); the follow-up modal submission handlers are the
+// mutation gates.
 func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *interactionPayload) {
 	log := slog.With(
 		"command", "protect_connector_click",
@@ -76,7 +77,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 	}
 	teamID, enterpriseID, triggerID := payload.Team.ID, payload.Enterprise.ID, payload.TriggerID
 	h.Go(func() {
-		view, err := TunnelInstallModal(&meta)
+		view, err := ConnectorSetupModal(&meta)
 		if err != nil {
 			log.Error("protect connector: modal render failed", "error", err)
 			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
