@@ -85,11 +85,22 @@ func enterPortal(ctx context.Context, link string, issuerKeys, relays []string) 
 }
 
 // staticTrustConfig builds an EnterPortal Config from CLI-supplied issuer keys
-// and relay allowlist entries.
+// (repeatable "<kid>=<base64-DER>") and relay allowlist entries.
 func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
-	derByKID, err := parseIssuerKeys(issuerKeys)
-	if err != nil {
-		return qurl.Config{}, err
+	if len(issuerKeys) == 0 {
+		return qurl.Config{}, errors.New("at least one --issuer-key is required when configuring trust anchors")
+	}
+	derByKID := make(map[string][]byte, len(issuerKeys))
+	for _, raw := range issuerKeys {
+		kid, encoded, ok := strings.Cut(raw, "=")
+		if !ok || kid == "" || encoded == "" {
+			return qurl.Config{}, fmt.Errorf("invalid --issuer-key %q: expected <kid>=<base64-DER>", raw)
+		}
+		der, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return qurl.Config{}, fmt.Errorf("invalid --issuer-key %q: bad base64: %w", kid, err)
+		}
+		derByKID[kid] = der
 	}
 	ts, err := qv2.NewTrustStoreFromDER(derByKID)
 	if err != nil {
@@ -99,25 +110,4 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 		TrustStore:     ts,
 		RelayAllowlist: qv2.NewRelayAllowlist(relays),
 	}, nil
-}
-
-// parseIssuerKeys turns repeatable "<kid>=<base64-DER>" flag values into the
-// kid -> DER map qv2.NewTrustStoreFromDER expects.
-func parseIssuerKeys(issuerKeys []string) (map[string][]byte, error) {
-	if len(issuerKeys) == 0 {
-		return nil, errors.New("at least one --issuer-key is required when configuring trust anchors")
-	}
-	derByKID := make(map[string][]byte, len(issuerKeys))
-	for _, raw := range issuerKeys {
-		kid, encoded, ok := strings.Cut(raw, "=")
-		if !ok || kid == "" || encoded == "" {
-			return nil, fmt.Errorf("invalid --issuer-key %q: expected <kid>=<base64-DER>", raw)
-		}
-		der, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --issuer-key %q: bad base64: %w", kid, err)
-		}
-		derByKID[kid] = der
-	}
-	return derByKID, nil
 }
