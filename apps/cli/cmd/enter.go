@@ -64,7 +64,9 @@ Provide your qURL link as an argument, pipe it in, or run "qurl enter" and paste
   echo '<link>' | qurl enter
   qurl enter
 
-qURL links are short-lived. If a link no longer works, ask whoever shared it for a new one.`,
+qURL links are short-lived. If a link no longer works, ask whoever shared it for a new one.
+
+Because a qURL link is sensitive, prefer piping it in or pasting it at the prompt rather than passing it as an argument (arguments can be saved in your shell history).`,
 		Example: `  qurl enter 'https://qurl.link/#...'
   echo "$LINK" | qurl enter
   qurl enter -o json`,

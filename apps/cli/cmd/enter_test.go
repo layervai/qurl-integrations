@@ -241,6 +241,22 @@ func TestStaticTrustConfig_EmptyRelay(t *testing.T) {
 	}
 }
 
+// TestStaticTrustConfig_DevErrorsExemptFromJargonContract pins that the hidden
+// --issuer-key/--relay developer flags are INTENTIONALLY exempt from the customer
+// jargon contract: their validation errors are raw and precise (they contain dev
+// terms like "issuer-key"/"trust"). The no-jargon guarantee covers only the
+// non-hidden customer surface. Asserting the dev error DOES contain jargon keeps
+// this boundary explicit.
+func TestStaticTrustConfig_DevErrorsExemptFromJargonContract(t *testing.T) {
+	_, err := staticTrustConfig(nil, []string{"relay.example"})
+	if err == nil {
+		t.Fatal("expected an error from the dev-flag path")
+	}
+	if _, found := findForbiddenJargon(err.Error()); !found {
+		t.Fatalf("expected the dev-flag error to contain developer jargon (exempt by design), got: %q", err.Error())
+	}
+}
+
 // TestFriendlyEnterError drives friendlyEnterError directly and asserts, for every
 // branch, BOTH that the customer-facing .Error() text is the right friendly message
 // AND that the original error stays reachable via errors.Is (enterError.Unwrap).
