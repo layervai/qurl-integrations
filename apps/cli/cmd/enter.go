@@ -74,7 +74,7 @@ qURL links are short-lived. If a link no longer works, ask whoever shared it for
 			// resolve): a qURL link carries the per-qURL secret in its fragment, so it must
 			// not be echoed. We also do NOT call validateAccessToken: a qURL link is not an
 			// at_ token.
-			link, err := readToken(cmd, args, "qURL link: ")
+			link, err := readToken(cmd, args, "qURL link (input hidden): ")
 			if err != nil {
 				return err
 			}
