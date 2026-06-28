@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,6 +14,19 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/layervai/qurl-go/qv2"
 )
+
+// runEnterErr executes `qurl enter` with the given args and returns the error.
+// `enter` is a pure client-side command (no qURL API call), so unlike runCmdErr
+// it needs no mock server or --endpoint.
+func runEnterErr(t *testing.T, args ...string) error {
+	t.Helper()
+	cmd := rootCmd("test")
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs(append([]string{"enter"}, args...))
+	return cmd.Execute()
+}
 
 // testIssuerKeyArg generates a fresh P-256 key and returns a "<kid>=<base64-DER>"
 // --issuer-key flag value whose DER parses as a valid trust anchor. The key is
@@ -36,10 +50,7 @@ func testIssuerKeyArg(t *testing.T, kid string) string {
 // with ErrNotConfigured while the qv2 admission path is undeployed. This pins the
 // "wired but not yet live" contract.
 func TestEnterCommand_NoTrustConfig_FailsClosed(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "enter", "https://qurl.link/#qv2.a.b.c")
+	err := runEnterErr(t, "https://qurl.link/#qv2.a.b.c")
 	if err == nil {
 		t.Fatal("expected fail-closed error with no trust config")
 	}
@@ -51,10 +62,7 @@ func TestEnterCommand_NoTrustConfig_FailsClosed(t *testing.T) {
 // TestEnterCommand_InvalidIssuerKey exercises the CLI's --issuer-key parsing: a
 // value missing the "<kid>=<der>" shape is rejected before any qurl-go call.
 func TestEnterCommand_InvalidIssuerKey(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "enter", "https://qurl.link/#qv2.a.b.c",
+	err := runEnterErr(t, "https://qurl.link/#qv2.a.b.c",
 		"--issuer-key", "no-equals-sign", "--relay", "relay.qurl.link")
 	if err == nil {
 		t.Fatal("expected error for malformed --issuer-key")
@@ -66,10 +74,7 @@ func TestEnterCommand_InvalidIssuerKey(t *testing.T) {
 
 // TestEnterCommand_InvalidIssuerKeyBase64 covers a kid with non-base64 key bytes.
 func TestEnterCommand_InvalidIssuerKeyBase64(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "enter", "https://qurl.link/#qv2.a.b.c",
+	err := runEnterErr(t, "https://qurl.link/#qv2.a.b.c",
 		"--issuer-key", "k1=!!!not-base64!!!", "--relay", "relay.qurl.link")
 	if err == nil {
 		t.Fatal("expected error for non-base64 --issuer-key")
@@ -85,10 +90,7 @@ func TestEnterCommand_InvalidIssuerKeyBase64(t *testing.T) {
 // is wired all the way into qurl-go (not short-circuited and not the
 // ErrNotConfigured default path).
 func TestEnterCommand_WithTrustConfig_ReachesVerify(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "enter", "https://qurl.link/#qv2.a.b.c",
+	err := runEnterErr(t, "https://qurl.link/#qv2.a.b.c",
 		"--issuer-key", testIssuerKeyArg(t, "k1"), "--relay", "relay.qurl.link")
 	if err == nil {
 		t.Fatal("expected error parsing/verifying malformed link")
@@ -116,5 +118,32 @@ func TestStaticTrustConfig_IssuerKeyOnly_RelayFailsClosed(t *testing.T) {
 	// Any relay_url must be rejected by the empty allowlist.
 	if err := qv2.ValidateRelayURL("https://relay.qurl.link/", cfg.RelayAllowlist); !errors.Is(err, qv2.ErrRelayURL) {
 		t.Fatalf("expected ErrRelayURL for empty allowlist, got: %v", err)
+	}
+}
+
+// TestStaticTrustConfig_RelayOnly_RequiresIssuerKey: supplying --relay without any
+// --issuer-key is rejected (a relay allowlist with no trust anchors can verify
+// nothing).
+func TestStaticTrustConfig_RelayOnly_RequiresIssuerKey(t *testing.T) {
+	_, err := staticTrustConfig(nil, []string{"relay.qurl.link"})
+	if err == nil {
+		t.Fatal("expected error for relay without issuer key")
+	}
+	if !strings.Contains(err.Error(), "at least one --issuer-key is required") {
+		t.Fatalf("expected issuer-key-required error, got: %v", err)
+	}
+}
+
+// TestStaticTrustConfig_DuplicateKid: two --issuer-key values sharing a kid are
+// rejected rather than silently overwriting one anchor with the other.
+func TestStaticTrustConfig_DuplicateKid(t *testing.T) {
+	k1 := testIssuerKeyArg(t, "k1")
+	k1Again := testIssuerKeyArg(t, "k1") // same kid, different key bytes
+	_, err := staticTrustConfig([]string{k1, k1Again}, []string{"relay.qurl.link"})
+	if err == nil {
+		t.Fatal("expected error for duplicate kid")
+	}
+	if !strings.Contains(err.Error(), "duplicate --issuer-key for kid") {
+		t.Fatalf("expected duplicate-kid error, got: %v", err)
 	}
 }

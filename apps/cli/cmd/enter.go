@@ -47,7 +47,7 @@ configured for the qv2 path, "enter" fails closed (the portal is not configured)
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// readToken handles arg/stdin/interactive. We intentionally do NOT call
 			// validateAccessToken here: a qv2 link is not an at_ token.
-			link, err := readToken(cmd, args)
+			link, err := readToken(cmd, args, "qv2 link: ")
 			if err != nil {
 				return err
 			}
@@ -95,6 +95,9 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 		kid, encoded, ok := strings.Cut(raw, "=")
 		if !ok || kid == "" || encoded == "" {
 			return qurl.Config{}, fmt.Errorf("invalid --issuer-key %q: expected <kid>=<base64-DER>", raw)
+		}
+		if _, dup := derByKID[kid]; dup {
+			return qurl.Config{}, fmt.Errorf("duplicate --issuer-key for kid %q", kid)
 		}
 		der, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
