@@ -207,6 +207,39 @@ func TestStaticTrustConfig_EmptyRelay(t *testing.T) {
 	}
 }
 
+// TestFriendlyEnterError drives friendlyEnterError directly and asserts, for every
+// branch, BOTH that the customer-facing .Error() text is the right friendly message
+// AND that the original error stays reachable via errors.Is (enterError.Unwrap).
+// Previously only the ErrNotConfigured branch was exercised at runtime, so the
+// overloaded and generic mappings were untested.
+func TestFriendlyEnterError(t *testing.T) {
+	// Capture the generic input once: errors.Is matches a plain errors.New by
+	// identity, so the assertion must target the same instance passed in.
+	boom := errors.New("boom")
+
+	cases := []struct {
+		name     string
+		inputErr error
+		wantMsg  string
+	}{
+		{"not configured", qurl.ErrNotConfigured, enterMsgNotConfigured},
+		{"server overloaded", qurl.ErrServerOverloaded, enterMsgOverloaded},
+		{"generic", boom, enterMsgGeneric},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := friendlyEnterError(tc.inputErr)
+			if got.Error() != tc.wantMsg {
+				t.Errorf("friendlyEnterError(%v).Error() = %q, want %q", tc.inputErr, got.Error(), tc.wantMsg)
+			}
+			if !errors.Is(got, tc.inputErr) {
+				t.Errorf("friendlyEnterError(%v): errors.Is should reach the original sentinel via Unwrap", tc.inputErr)
+			}
+		})
+	}
+}
+
 // findEnterCmd locates the `enter` subcommand off the real root command so the
 // test sees the exact help copy and flag wiring (including MarkHidden) a customer
 // would get.
