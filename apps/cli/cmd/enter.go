@@ -110,8 +110,11 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 		return qurl.Config{}, fmt.Errorf("build trust store: %w", err)
 	}
 
-	// Reject empty/whitespace --relay entries explicitly: NewRelayAllowlist would
-	// silently drop them, masking a misconfigured flag.
+	// qv2.NewRelayAllowlist already trims+lowercases each entry and drops empties
+	// (qv2/relay.go), so a padded value like " relay.host " is normalized and still
+	// matches — passing the raw slice here is safe and no CLI-side trimming is needed.
+	// We reject a fully empty/whitespace entry explicitly only to surface a clear CLI
+	// error instead of the allowlist silently dropping it (which would mask a typo'd flag).
 	for _, relay := range relays {
 		if strings.TrimSpace(relay) == "" {
 			return qurl.Config{}, errors.New("invalid --relay: entry must not be empty")
