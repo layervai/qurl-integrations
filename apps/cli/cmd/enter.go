@@ -13,6 +13,41 @@ import (
 	"github.com/layervai/qurl-go/qv2"
 )
 
+// Friendly, jargon-free messages surfaced to customers. These are the ONLY
+// strings the `qurl enter` command may put in front of a user on error. They are
+// defined once here and referenced by both the error mapping and the tests so the
+// two never drift.
+const (
+	enterMsgNotConfigured = "This version of the CLI can't open qURL links yet. Please update to the latest version."
+	enterMsgOverloaded    = "The qURL service is busy right now. Please try again in a moment."
+	enterMsgGeneric       = "Couldn't open this qURL link. It may be invalid or expired — ask whoever shared it for a new one."
+)
+
+// enterError wraps an underlying error with a friendly, customer-facing message.
+// Error() returns only the friendly text (no jargon leaks), while Unwrap() keeps
+// the original error reachable so errors.Is still works against qurl-go sentinels.
+type enterError struct {
+	msg string
+	err error
+}
+
+func (e *enterError) Error() string { return e.msg }
+func (e *enterError) Unwrap() error { return e.err }
+
+// friendlyEnterError maps a qurl-go EnterPortal failure onto a customer-facing
+// message. The raw error text is never surfaced; it is preserved via Unwrap so
+// errors.Is keeps working for callers/tests.
+func friendlyEnterError(err error) error {
+	switch {
+	case errors.Is(err, qurl.ErrNotConfigured):
+		return &enterError{msg: enterMsgNotConfigured, err: err}
+	case errors.Is(err, qurl.ErrServerOverloaded):
+		return &enterError{msg: enterMsgOverloaded, err: err}
+	default:
+		return &enterError{msg: enterMsgGeneric, err: err}
+	}
+}
+
 func enterCmd(opts *globalOpts) *cobra.Command {
 	var (
 		issuerKeys []string
@@ -20,41 +55,31 @@ func enterCmd(opts *globalOpts) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "enter [qv2-link]",
-		Short: "Enter a qURL portal (qv2 link)",
-		Long: `Enter a qURL portal by opening a qv2 link end to end.
+		Use:   "enter [link]",
+		Short: "Enter a qURL link to reach what it points to",
+		Long: `Enter a qURL link to securely reach the resource it points to.
 
-Unlike "resolve" (which exchanges an at_ access token with the qURL API), "enter"
-takes a self-contained qv2 link (#qv2.<claims>.<secret>.<sig>) and drives the full
-client-side flow via qurl-go: verify the issuer signature locally, validate the
-relay, then knock the relay so the target grants network access to your IP.
+Provide your qURL link as an argument, pipe it in, or run "qurl enter" and paste it when prompted:
+  qurl enter '<link>'
+  echo '<link>' | qurl enter
+  qurl enter
 
-The qv2 link can be provided as an argument, via stdin, or interactively:
-  qurl enter '<qv2-link>'           Argument (visible in shell history)
-  echo "$LINK" | qurl enter         Stdin (safer)
-  qurl enter                        Interactive prompt (hidden input)
-
-Trust configuration (required — the path fails closed without it):
-  --issuer-key <kid>=<base64-DER>   Issuer trust anchor (P-256 SPKI DER, std base64). Repeatable.
-  --relay <host[:port]>             Allowed relay origin. Repeatable.
-
-Note: the qv2 admission contract is not yet deployed. Without trust anchors
-configured for the qv2 path, "enter" fails closed (the portal is not configured).`,
-		Example: `  qurl enter '#qv2.<claims>.<secret>.<sig>' --issuer-key k1=<base64-DER> --relay relay.qurl.link
-  echo "$LINK" | qurl enter --issuer-key k1=<base64-DER> --relay relay.qurl.link
+qURL links are short-lived. If a link no longer works, ask whoever shared it for a new one.`,
+		Example: `  qurl enter 'https://qurl.link/#...'
+  echo "$LINK" | qurl enter
   qurl enter -o json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// readToken handles arg/stdin/interactive. We intentionally do NOT call
-			// validateAccessToken here: a qv2 link is not an at_ token.
-			link, err := readToken(cmd, args, "qv2 link: ")
+			// validateAccessToken here: an enter link is not an at_ token.
+			link, err := readToken(cmd, args, "qURL link: ")
 			if err != nil {
 				return err
 			}
 
 			handle, err := enterPortal(cmd.Context(), link, issuerKeys, relays)
 			if err != nil {
-				return fmt.Errorf("enter qURL portal: %w", err)
+				return err
 			}
 
 			return opts.formatter().FormatEnter(cmd.OutOrStdout(), handle)
@@ -63,6 +88,11 @@ configured for the qv2 path, "enter" fails closed (the portal is not configured)
 
 	cmd.Flags().StringArrayVar(&issuerKeys, "issuer-key", nil, "Issuer trust anchor as <kid>=<base64-DER P-256 SPKI> (repeatable)")
 	cmd.Flags().StringArrayVar(&relays, "relay", nil, "Allowed relay origin host[:port] (repeatable)")
+	// These flags are developer/diagnostic plumbing for the not-yet-deployed qv2
+	// admission path. Hide them so they never appear on the customer help surface,
+	// but keep them fully functional for development and tests.
+	_ = cmd.Flags().MarkHidden("issuer-key")
+	_ = cmd.Flags().MarkHidden("relay")
 
 	return cmd
 }
@@ -72,16 +102,28 @@ configured for the qv2 path, "enter" fails closed (the portal is not configured)
 // EnterPortalWith with a static trust config built from those flags; otherwise it
 // falls through to the one-arg EnterPortal, which resolves the process-wide default
 // provider and fails closed (ErrNotConfigured) until the qv2 path is configured.
+//
+// staticTrustConfig errors (developer-only, hidden-flag input validation) are
+// returned raw so dev/diagnostic feedback stays precise; only the qurl-go
+// EnterPortal/EnterPortalWith results are mapped to friendly customer messages.
 func enterPortal(ctx context.Context, link string, issuerKeys, relays []string) (*qurl.ResourceHandle, error) {
 	if len(issuerKeys) == 0 && len(relays) == 0 {
-		return qurl.EnterPortal(ctx, link)
+		handle, err := qurl.EnterPortal(ctx, link)
+		if err != nil {
+			return nil, friendlyEnterError(err)
+		}
+		return handle, nil
 	}
 
 	cfg, err := staticTrustConfig(issuerKeys, relays)
 	if err != nil {
 		return nil, err
 	}
-	return qurl.EnterPortalWith(ctx, link, cfg)
+	handle, err := qurl.EnterPortalWith(ctx, link, cfg)
+	if err != nil {
+		return nil, friendlyEnterError(err)
+	}
+	return handle, nil
 }
 
 // staticTrustConfig builds an EnterPortal Config from CLI-supplied issuer keys
