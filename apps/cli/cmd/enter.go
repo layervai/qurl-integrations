@@ -18,9 +18,9 @@ import (
 // defined once here and referenced by both the error mapping and the tests so the
 // two never drift.
 const (
-	enterMsgNotConfigured = "This version of the CLI can't open qURL links yet. Please update to the latest version."
+	enterMsgNotConfigured = "Opening qURL links from the command line isn't available yet. Please check back soon."
 	enterMsgOverloaded    = "The qURL service is busy right now. Please try again in a moment."
-	enterMsgGeneric       = "Couldn't open this qURL link. It may be invalid or expired — ask whoever shared it for a new one."
+	enterMsgGeneric       = "Couldn't open this qURL link. Please try again — if it keeps failing, ask whoever shared it for a new one."
 )
 
 // enterError wraps an underlying error with a friendly, customer-facing message.
@@ -70,8 +70,10 @@ qURL links are short-lived. If a link no longer works, ask whoever shared it for
   qurl enter -o json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// readToken handles arg/stdin/interactive. We intentionally do NOT call
-			// validateAccessToken here: an enter link is not an at_ token.
+			// readToken handles arg/stdin/interactive. Interactive input is masked (like
+			// resolve): a qURL link carries the per-qURL secret in its fragment, so it must
+			// not be echoed. We also do NOT call validateAccessToken: a qURL link is not an
+			// at_ token.
 			link, err := readToken(cmd, args, "qURL link: ")
 			if err != nil {
 				return err
