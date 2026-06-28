@@ -336,9 +336,10 @@ func TestJSONFormatEnter(t *testing.T) {
 	if parsed.OpenSeconds != 305 {
 		t.Errorf("got OpenSeconds %d, want 305", parsed.OpenSeconds)
 	}
-	// Assert the repo-owned snake_case keys (not the SDK field names).
-	if !strings.Contains(buf.String(), `"target"`) || !strings.Contains(buf.String(), `"open_seconds"`) {
-		t.Errorf("expected repo-owned json keys target/open_seconds:\n%s", buf.String())
+	// Assert the repo-owned snake_case keys (not the SDK field names); target_url
+	// matches resolve's JSON key.
+	if !strings.Contains(buf.String(), `"target_url"`) || !strings.Contains(buf.String(), `"open_seconds"`) {
+		t.Errorf("expected repo-owned json keys target_url/open_seconds:\n%s", buf.String())
 	}
 }
 

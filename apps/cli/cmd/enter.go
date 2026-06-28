@@ -67,11 +67,11 @@ configured for the qv2 path, "enter" fails closed (the portal is not configured)
 	return cmd
 }
 
-// enterPortal drives qurl-go's EnterPortal. When explicit trust anchors are
-// supplied (--issuer-key / --relay) it builds a Static provider Config and calls
-// EnterPortalWith; otherwise it falls through to the one-arg EnterPortal, which
-// resolves the process-wide default provider and fails closed (ErrNotConfigured)
-// until the qv2 path is configured.
+// enterPortal drives qurl-go's EnterPortal. The branch is selected purely on
+// trust-flag presence: when any --issuer-key / --relay flag is set it routes to
+// EnterPortalWith with a static trust config built from those flags; otherwise it
+// falls through to the one-arg EnterPortal, which resolves the process-wide default
+// provider and fails closed (ErrNotConfigured) until the qv2 path is configured.
 func enterPortal(ctx context.Context, link string, issuerKeys, relays []string) (*qurl.ResourceHandle, error) {
 	if len(issuerKeys) == 0 && len(relays) == 0 {
 		return qurl.EnterPortal(ctx, link)
