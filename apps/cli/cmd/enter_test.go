@@ -11,9 +11,44 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+
 	"github.com/layervai/qurl-go/qurl"
 	"github.com/layervai/qurl-go/qv2"
 )
+
+// enterForbiddenWords is the customer-surface jargon contract for `qurl enter`:
+// none of these may appear (case-insensitive) in Short / Long / Example, any
+// NON-hidden flag usage string, or any returned error's user-facing text. The
+// entries are pre-lowercased so substring checks against a lowercased haystack
+// actually match (a verbatim-cased needle like "DER" would never hit a lowercased
+// haystack and silently pass). Shared by the help and error jargon tests.
+var enterForbiddenWords = []string{
+	"qv2",
+	"relay",
+	"resolve",
+	"trust",
+	"issuer",
+	"signature",
+	"admission",
+	"proof-of-possession",
+	"proof of possession",
+	"knock",
+	"fail closed",
+	"fails closed",
+	"errnotconfigured",
+	"at_",
+	"access token",
+	"device key",
+	"spki",
+	"der",
+	"base64",
+	"allowlist",
+	"nhp",
+	"serverid",
+	"cell",
+}
 
 // runEnterErr executes `qurl enter` with the given args and returns the error.
 // `enter` is a pure client-side command (no qURL API call), so unlike runCmdErr
@@ -47,15 +82,27 @@ func testIssuerKeyArg(t *testing.T, kid string) string {
 
 // TestEnterCommand_NoTrustConfig_FailsClosed: with no --issuer-key/--relay the
 // command takes the one-arg EnterPortal default-provider path, which fails closed
-// with ErrNotConfigured while the qv2 admission path is undeployed. This pins the
-// "wired but not yet live" contract.
+// while the underlying admission path is undeployed. This pins the "wired but not
+// yet live" contract — the sentinel is still reachable via Unwrap, but the message
+// surfaced to the customer is the friendly, jargon-free string.
 func TestEnterCommand_NoTrustConfig_FailsClosed(t *testing.T) {
 	err := runEnterErr(t, "https://qurl.link/#qv2.a.b.c")
 	if err == nil {
 		t.Fatal("expected fail-closed error with no trust config")
 	}
+	// The sentinel remains reachable through enterError.Unwrap.
 	if !errors.Is(err, qurl.ErrNotConfigured) {
-		t.Fatalf("expected ErrNotConfigured, got: %v", err)
+		t.Fatalf("expected ErrNotConfigured (via Unwrap), got: %v", err)
+	}
+	// ...but the customer-facing text must be the friendly string, not raw jargon.
+	if err.Error() != enterMsgNotConfigured {
+		t.Fatalf("expected friendly not-configured message, got: %q", err.Error())
+	}
+	lower := strings.ToLower(err.Error())
+	for _, bad := range []string{"errnotconfigured", "trust", "relay"} {
+		if strings.Contains(lower, bad) {
+			t.Fatalf("friendly error leaked jargon %q: %q", bad, err.Error())
+		}
 	}
 }
 
@@ -157,5 +204,76 @@ func TestStaticTrustConfig_EmptyRelay(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid --relay") {
 		t.Fatalf("expected invalid-relay error, got: %v", err)
+	}
+}
+
+// findEnterCmd locates the `enter` subcommand off the real root command so the
+// test sees the exact help copy and flag wiring (including MarkHidden) a customer
+// would get.
+func findEnterCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	root := rootCmd("test")
+	for _, c := range root.Commands() {
+		if c.Name() == "enter" {
+			return c
+		}
+	}
+	t.Fatal("enter subcommand not found on root command")
+	return nil
+}
+
+// TestEnterCommand_NoJargonInHelp asserts the customer-visible help surface
+// (Short, Long, Example, and every NON-hidden flag's usage) contains none of the
+// forbidden jargon words. Hidden flags (--issuer-key/--relay) are excluded, which
+// also proves MarkHidden took effect — if it hadn't, their usage strings carry
+// "trust"/"issuer"/"relay"/"base64"/"DER" and this test would fail.
+func TestEnterCommand_NoJargonInHelp(t *testing.T) {
+	cmd := findEnterCmd(t)
+
+	var parts []string
+	parts = append(parts, cmd.Short, cmd.Long, cmd.Example)
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if f.Hidden {
+			return
+		}
+		parts = append(parts, f.Usage)
+	})
+
+	haystack := strings.ToLower(strings.Join(parts, "\n"))
+	for _, bad := range enterForbiddenWords {
+		if strings.Contains(haystack, bad) {
+			t.Errorf("customer help surface leaked jargon %q\nhelp text:\n%s", bad, haystack)
+		}
+	}
+}
+
+// TestEnterCommand_NoJargonInErrors runs the no-flags (customer) path against a
+// qv2-shaped link and a clearly-malformed input, and asserts each surfaced error
+// is one of the friendly messages and contains none of the forbidden jargon words.
+func TestEnterCommand_NoJargonInErrors(t *testing.T) {
+	friendly := map[string]bool{
+		enterMsgNotConfigured: true,
+		enterMsgOverloaded:    true,
+		enterMsgGeneric:       true,
+	}
+
+	for _, input := range []string{
+		"https://qurl.link/#qv2.a.b.c",
+		"not-a-real-qurl-link",
+	} {
+		err := runEnterErr(t, input)
+		if err == nil {
+			t.Fatalf("expected an error for input %q", input)
+		}
+		msg := err.Error()
+		if !friendly[msg] {
+			t.Errorf("input %q: error %q is not one of the friendly messages", input, msg)
+		}
+		lower := strings.ToLower(msg)
+		for _, bad := range enterForbiddenWords {
+			if strings.Contains(lower, bad) {
+				t.Errorf("input %q: error leaked jargon %q: %q", input, bad, msg)
+			}
+		}
 	}
 }
