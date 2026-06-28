@@ -57,7 +57,9 @@ func isAlnumToken(w string) bool {
 		return false
 	}
 	for _, r := range w {
-		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+		isLower := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if !isLower && !isDigit {
 			return false
 		}
 	}
@@ -350,7 +352,7 @@ func TestFindForbiddenJargon(t *testing.T) {
 		}
 	}
 	// Innocuous copy that merely CONTAINS a short token as a substring must NOT trip.
-	for _, ok := range []string{"please consider this", "an excellent result", "your order was cancelled", "under the hood"} {
+	for _, ok := range []string{"please consider this", "an excellent result", "entrust the folder", "under the hood"} {
 		if w, found := findForbiddenJargon(ok); found {
 			t.Errorf("false positive: %q flagged on %q", w, ok)
 		}
