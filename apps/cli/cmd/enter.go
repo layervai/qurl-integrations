@@ -27,7 +27,7 @@ func enterCmd(opts *globalOpts) *cobra.Command {
 Unlike "resolve" (which exchanges an at_ access token with the qURL API), "enter"
 takes a self-contained qv2 link (#qv2.<claims>.<secret>.<sig>) and drives the full
 client-side flow via qurl-go: verify the issuer signature locally, validate the
-relay, then knock the relay so the target firewall opens for your IP.
+relay, then knock the relay so the target grants network access to your IP.
 
 The qv2 link can be provided as an argument, via stdin, or interactively:
   qurl enter '<qv2-link>'           Argument (visible in shell history)

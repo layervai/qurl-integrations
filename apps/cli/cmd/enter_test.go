@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/layervai/qurl-go/qurl"
+	"github.com/layervai/qurl-go/qv2"
 )
 
 // testIssuerKeyArg generates a fresh P-256 key and returns a "<kid>=<base64-DER>"
@@ -96,5 +97,24 @@ func TestEnterCommand_WithTrustConfig_ReachesVerify(t *testing.T) {
 	// error is a qurl-go parse/verify failure, never ErrNotConfigured.
 	if errors.Is(err, qurl.ErrNotConfigured) {
 		t.Fatalf("trust config was not applied; got ErrNotConfigured: %v", err)
+	}
+}
+
+// TestStaticTrustConfig_IssuerKeyOnly_RelayFailsClosed proves that supplying
+// --issuer-key with no --relay yields an empty relay allowlist that rejects every
+// relay_url at qv2 validation (fail closed), rather than admitting an attacker-
+// chosen relay. We assert on the allowlist directly because a full link's relay
+// gate only runs after signature verification.
+func TestStaticTrustConfig_IssuerKeyOnly_RelayFailsClosed(t *testing.T) {
+	cfg, err := staticTrustConfig([]string{testIssuerKeyArg(t, "k1")}, nil)
+	if err != nil {
+		t.Fatalf("staticTrustConfig: %v", err)
+	}
+	if cfg.RelayAllowlist == nil {
+		t.Fatal("expected a non-nil (empty) relay allowlist")
+	}
+	// Any relay_url must be rejected by the empty allowlist.
+	if err := qv2.ValidateRelayURL("https://relay.qurl.link/", cfg.RelayAllowlist); !errors.Is(err, qv2.ErrRelayURL) {
+		t.Fatalf("expected ErrRelayURL for empty allowlist, got: %v", err)
 	}
 }

@@ -22,6 +22,22 @@ const (
 	FormatJSON  = "json"
 )
 
+// EnterOutput is the repo-owned JSON shape for `qurl enter`. It projects the
+// qurl-go ResourceHandle into a stable, explicitly-tagged contract this repo
+// controls, so an SDK type change cannot silently alter `enter -o json` output.
+type EnterOutput struct {
+	Target      string `json:"target"`
+	OpenSeconds uint32 `json:"open_seconds,omitempty"`
+}
+
+// enterOutputFrom projects a qurl-go ResourceHandle into the repo-owned shape.
+func enterOutputFrom(handle *qurlsdk.ResourceHandle) EnterOutput {
+	return EnterOutput{
+		Target:      handle.RedirectURL,
+		OpenSeconds: handle.OpenSeconds,
+	}
+}
+
 // Formatter is the interface for output formatters.
 type Formatter interface {
 	FormatQURL(w io.Writer, qurl *client.QURL) error
@@ -237,9 +253,10 @@ func (JSONFormatter) FormatResolve(w io.Writer, output *client.ResolveOutput) er
 	return writeJSON(w, output)
 }
 
-// FormatEnter formats a qv2 portal-entry result as JSON.
+// FormatEnter formats a qv2 portal-entry result as JSON using the repo-owned
+// EnterOutput shape rather than the raw SDK type.
 func (JSONFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error {
-	return writeJSON(w, handle)
+	return writeJSON(w, enterOutputFrom(handle))
 }
 
 // FormatMint formats a mint response as JSON.
