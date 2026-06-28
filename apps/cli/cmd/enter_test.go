@@ -147,3 +147,15 @@ func TestStaticTrustConfig_DuplicateKid(t *testing.T) {
 		t.Fatalf("expected duplicate-kid error, got: %v", err)
 	}
 }
+
+// TestStaticTrustConfig_EmptyRelay: an empty/whitespace --relay entry is rejected
+// with a clear error rather than being silently dropped by the allowlist builder.
+func TestStaticTrustConfig_EmptyRelay(t *testing.T) {
+	_, err := staticTrustConfig([]string{testIssuerKeyArg(t, "k1")}, []string{"   "})
+	if err == nil {
+		t.Fatal("expected error for empty --relay entry")
+	}
+	if !strings.Contains(err.Error(), "invalid --relay") {
+		t.Fatalf("expected invalid-relay error, got: %v", err)
+	}
+}
