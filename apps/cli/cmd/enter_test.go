@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -48,6 +49,37 @@ var enterForbiddenWords = []string{
 	"nhp",
 	"serverid",
 	"cell",
+}
+
+// isAlnumToken reports whether w is only [a-z0-9] (already-lowercased entries).
+func isAlnumToken(w string) bool {
+	if w == "" {
+		return false
+	}
+	for _, r := range w {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// findForbiddenJargon returns the first enterForbiddenWords entry present in s.
+// Alphanumeric tokens (der, cell, qv2, ...) are matched on word boundaries so
+// innocuous copy like "consider"/"excellent" can't trip them; tokens containing
+// non-word chars (at_, "access token", "proof-of-possession") match as substrings.
+func findForbiddenJargon(s string) (string, bool) {
+	lower := strings.ToLower(s)
+	for _, w := range enterForbiddenWords {
+		if isAlnumToken(w) {
+			if regexp.MustCompile(`\b` + w + `\b`).MatchString(lower) {
+				return w, true
+			}
+		} else if strings.Contains(lower, w) {
+			return w, true
+		}
+	}
+	return "", false
 }
 
 // runEnterErr executes `qurl enter` with the given args and returns the error.
@@ -272,11 +304,9 @@ func TestEnterCommand_NoJargonInHelp(t *testing.T) {
 		parts = append(parts, f.Usage)
 	})
 
-	haystack := strings.ToLower(strings.Join(parts, "\n"))
-	for _, bad := range enterForbiddenWords {
-		if strings.Contains(haystack, bad) {
-			t.Errorf("customer help surface leaked jargon %q\nhelp text:\n%s", bad, haystack)
-		}
+	haystack := strings.Join(parts, "\n")
+	if bad, found := findForbiddenJargon(haystack); found {
+		t.Errorf("customer help surface leaked jargon %q\nhelp text:\n%s", bad, strings.ToLower(haystack))
 	}
 }
 
@@ -302,11 +332,27 @@ func TestEnterCommand_NoJargonInErrors(t *testing.T) {
 		if !friendly[msg] {
 			t.Errorf("input %q: error %q is not one of the friendly messages", input, msg)
 		}
-		lower := strings.ToLower(msg)
-		for _, bad := range enterForbiddenWords {
-			if strings.Contains(lower, bad) {
-				t.Errorf("input %q: error leaked jargon %q: %q", input, bad, msg)
-			}
+		if bad, found := findForbiddenJargon(msg); found {
+			t.Errorf("input %q: error leaked jargon %q: %q", input, bad, msg)
+		}
+	}
+}
+
+// TestFindForbiddenJargon pins findForbiddenJargon both ways: real jargon is still
+// caught (so the help/error guards aren't vacuous), while innocuous copy that only
+// CONTAINS a short forbidden token as a substring ("consider", "excellent") does
+// not false-positive and break the build for the wrong reason.
+func TestFindForbiddenJargon(t *testing.T) {
+	// Real jargon must be caught (non-vacuity).
+	for _, bad := range []string{"this uses a relay", "verify the issuer signature", "a qv2 link", "base64-DER blob"} {
+		if _, found := findForbiddenJargon(bad); !found {
+			t.Errorf("expected jargon detected in %q", bad)
+		}
+	}
+	// Innocuous copy that merely CONTAINS a short token as a substring must NOT trip.
+	for _, ok := range []string{"please consider this", "an excellent result", "your order was cancelled", "under the hood"} {
+		if w, found := findForbiddenJargon(ok); found {
+			t.Errorf("false positive: %q flagged on %q", w, ok)
 		}
 	}
 }
