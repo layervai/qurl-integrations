@@ -30,7 +30,8 @@ const (
 // output, and open_seconds carries omitempty because the SDK reports 0 as "not
 // provided".
 type EnterOutput struct {
-	Target      string `json:"target_url"`
+	Target string `json:"target_url"`
+	// TODO(upstream-contract): open_seconds==0 mirrors qurl-go ResourceHandle's "0 == not provided" godoc; if the SDK ever uses 0 for a genuinely closed/expired window, revisit this omitempty and FormatEnter's >0 guard.
 	OpenSeconds uint32 `json:"open_seconds,omitempty"`
 }
 
@@ -179,6 +180,7 @@ func (f TableFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle)
 	wr := &errWriter{w: tw}
 	wr.printf("%s\n\n", f.green.Sprint("Portal entered"))
 	wr.printf("%s\t%s\n", f.bold.Sprint("Target:"), handle.RedirectURL)
+	// TODO(upstream-contract): see EnterOutput — 0 means "not provided" per qurl-go, not a 0-second grant.
 	if handle.OpenSeconds > 0 {
 		wr.printf("%s\t%ds\n", f.bold.Sprint("Access:"), handle.OpenSeconds)
 	}
