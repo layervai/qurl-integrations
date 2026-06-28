@@ -30,7 +30,7 @@ The access token can be provided as an argument, via stdin, or interactively:
   qurl resolve -o json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			token, err := readToken(cmd, args)
+			token, err := readToken(cmd, args, "Access token: ")
 			if err != nil {
 				return err
 			}
@@ -56,8 +56,9 @@ The access token can be provided as an argument, via stdin, or interactively:
 	}
 }
 
-// readToken reads the access token from args, stdin, or interactive prompt.
-func readToken(cmd *cobra.Command, args []string) (string, error) {
+// readToken reads a secret value from args, stdin, or an interactive prompt. The
+// prompt string labels the hidden interactive input (e.g. "Access token: ").
+func readToken(cmd *cobra.Command, args []string, prompt string) (string, error) {
 	// From argument
 	if len(args) > 0 {
 		return args[0], nil
@@ -77,7 +78,7 @@ func readToken(cmd *cobra.Command, args []string) (string, error) {
 	}
 
 	// Interactive prompt with hidden input
-	if _, err := fmt.Fprint(cmd.ErrOrStderr(), "Access token: "); err != nil {
+	if _, err := fmt.Fprint(cmd.ErrOrStderr(), prompt); err != nil {
 		return "", err
 	}
 	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
