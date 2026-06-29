@@ -68,7 +68,11 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <body>
 <div class="card">
 <h1><span class="ok">&#10003;</span> qURL Slack app installed</h1>
-<p>Guided qURL Connector setup is enabled for this workspace. Return to Slack and run <code>/qurl-admin protect-connector</code>.</p>
+<p>Next steps in Slack:</p>
+<ol>
+<li>Run <code>/qurl setup &lt;email&gt;</code> to connect this workspace to your qURL account.</li>
+<li>Run <code>/qurl-admin protect-connector</code> to set up your first connector.</li>
+</ol>
 <p>Install target: <code>{{.InstallTarget}}</code></p>
 </div>
 </body>

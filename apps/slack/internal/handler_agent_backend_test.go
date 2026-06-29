@@ -17,6 +17,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -427,6 +428,30 @@ func TestAgentBackend_NilStoreIsGraceful(t *testing.T) {
 		out, err := fn()
 		if err != nil || out != agentBackendUnconfigured {
 			t.Fatalf("nil store should be graceful, got %q err=%v", out, err)
+		}
+	}
+}
+
+func TestAgentBackend_UnboundWorkspaceNudgesToSetup(t *testing.T) {
+	// When the workspace isn't connected to qURL, a tool that needs the client must
+	// return the actionable "/qurl setup <email>" nudge as content (so the model
+	// relays it) rather than a generic model-safe error — matching the slash path.
+	b, _ := newBackendUnderTest(t, false)
+	b.authClient = func(context.Context, string) (*client.Client, error) {
+		return nil, auth.ErrWorkspaceNotConfigured
+	}
+	for name, fn := range map[string]func() (string, error){
+		// ListResources needs the client only when the channel has an allowed set, so
+		// resolve a token (its slug branch always reaches the client) and read quota.
+		"ResolveToken": func() (string, error) { return b.ResolveToken(context.Background(), backendTC(), "staging") },
+		"Quota":        func() (string, error) { return b.Quota(context.Background(), backendTC()) },
+	} {
+		out, err := fn()
+		if err != nil {
+			t.Fatalf("%s: unbound workspace must not error, got %v", name, err)
+		}
+		if out != workspaceNotSetupMessage {
+			t.Fatalf("%s: want the setup nudge, got %q", name, out)
 		}
 	}
 }

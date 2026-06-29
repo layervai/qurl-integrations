@@ -60,11 +60,14 @@ func blocksContain(t *testing.T, blocks []any, want string) bool {
 
 func TestBuildAgentHomeView_EmptyState(t *testing.T) {
 	blocks := buildAgentHomeView(nil)
-	if len(blocks) != 4 { // header + intro + divider + empty-state
-		t.Fatalf("empty view should have 4 blocks, got %d", len(blocks))
+	if len(blocks) != 5 { // header + intro + AI-disclosure + divider + empty-state
+		t.Fatalf("empty view should have 5 blocks, got %d", len(blocks))
 	}
 	if !blocksContain(t, blocks, agentHomeEmpty) {
 		t.Fatal("empty view must carry the empty-state copy")
+	}
+	if !blocksContain(t, blocks, agentAIDisclosureShort) {
+		t.Fatal("Home view must carry the AI disclosure")
 	}
 }
 
@@ -75,8 +78,8 @@ func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 		{Actor: "U1", Action: string(agent.ActionGet), Target: "staging", Channel: "C1", UnixSec: 1_700_000_000},
 	}
 	blocks := buildAgentHomeView(entries)
-	if len(blocks) != 6 { // 3 chrome + 3 entries
-		t.Fatalf("expected 6 blocks, got %d", len(blocks))
+	if len(blocks) != 7 { // 4 chrome (header + intro + AI-disclosure + divider) + 3 entries
+		t.Fatalf("expected 7 blocks, got %d", len(blocks))
 	}
 	// Neutral action label (not a success claim) + target.
 	if !blocksContain(t, blocks, "Revoke") || !blocksContain(t, blocks, "billing") {
