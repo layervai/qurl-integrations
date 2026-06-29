@@ -42,7 +42,7 @@ func newFakeProvider() *auth.DDBProvider {
 
 const (
 	validStateSecret          = "0123456789abcdef0123456789abcdef" // 32 bytes; matches minStateSecretBytes.
-	defaultSlackBotScopesCSV  = "commands,chat:write,im:write"
+	defaultSlackBotScopesCSV  = "commands,chat:write,im:write,users:read"
 	testConnectorImageRepo    = "ghcr.io/layervai/qurl-connector"
 	testConnectorVersionImage = testConnectorImageRepo + ":v1.2.3"
 	testConnectorLatestImage  = testConnectorImageRepo + ":latest"
