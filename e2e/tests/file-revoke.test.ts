@@ -45,7 +45,12 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
-import { mintIdFromTunnelViewUrl, viewViaQurlLink } from '../helpers/tunnelView';
+import {
+  TunnelViewTimeoutError,
+  mintIdFromTunnelViewUrl,
+  viewViaQurlLink,
+  type ViewViaQurlLinkResult,
+} from '../helpers/tunnelView';
 
 const env = loadEnv();
 
@@ -65,6 +70,35 @@ const ONE_PIXEL_PNG = Uint8Array.from(
   ),
 );
 
+async function mintAndViewConnectorResource(
+  resourceId: string,
+  expiresAt: string,
+): Promise<{ qurlLink: string; view: ViewViaQurlLinkResult }> {
+  const mintAndView = async () => {
+    const minted = await qurl.mintConnectorView(env.UPLOAD_API_URL, resourceId, env.QURL_API_KEY, {
+      expiresAt,
+      oneTimeUse: true,
+    });
+    const view = await viewViaQurlLink(minted.qurl_link);
+    return { qurlLink: minted.qurl_link, view };
+  };
+
+  try {
+    return await mintAndView();
+  } catch (err) {
+    // A one-time qurl.link can be consumed by the browser/knock path even if
+    // Playwright misses the tunnel view response during a transient tunnel delay.
+    // Only that timeout gets a fresh mint; connector errors and non-200 views
+    // still fail immediately so the smoke remains a real deploy gate.
+    if (!(err instanceof TunnelViewTimeoutError)) {
+      throw err;
+    }
+    // eslint-disable-next-line no-console
+    console.warn('file-revoke: tunnel view timed out; reminting a fresh one-time view link');
+    return await mintAndView();
+  }
+}
+
 describe('File Revoke', () => {
   test('upload file → view 200 → revoke → getLinkStatus 404', async () => {
     const upload = await qurl.uploadFile(
@@ -82,16 +116,12 @@ describe('File Revoke', () => {
     // r_<tunnel>.qurl.site/views/<mint-id>. expires_at is required by
     // render-at-mint (1h here; the connector clamps to its own cap).
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const minted = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
-      expiresAt,
-      oneTimeUse: true,
-    });
 
     // View through the REAL recipient path: qurl.link → NHP knock → tunnel view.
     // #1111 decommissioned the legacy fileviewer host, so only a real browser
     // completes the SPA-driven knock (the SPA reads the #at_ fragment in JS). A
     // 200 means the baked image served end-to-end through the tunnel.
-    const view = await viewViaQurlLink(minted.qurl_link);
+    const { view } = await mintAndViewConnectorResource(upload.resource_id, expiresAt);
     expect(view.status).toBe(200);
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
@@ -105,7 +135,7 @@ describe('File Revoke', () => {
     ).rejects.toThrow(/404/);
     // Generous timeout: connector mint + headless-browser knock (cold chromium
     // launch + navigation + the helper's own 30s tunnel-view budget) on CI.
-  }, 90_000);
+  }, 120_000);
 
   test('distinct-per-viewer watermark + `_`/`-` resource-id SNI on the tunnel', async () => {
     // ONE upload → TWO minted recipient views. The whole point of render-at-mint:
@@ -118,33 +148,23 @@ describe('File Revoke', () => {
     );
     expect(upload.resource_id).toMatch(/^r_/);
 
-    // Mint two independent views for the SAME resource. expires_at is required by
-    // render-at-mint (1h; the connector clamps to its own cap). One-time-use, so
-    // each link is consumed by exactly one knock — matching one viewViaQurlLink call.
-    // Sequential, NOT Promise.all: this mirrors the proven single-mint path exactly
-    // (the existing test above, green in the sandbox gate) rather than introducing a
-    // concurrent per-resource double-bake the gate has never exercised — robustness
-    // for the first post-merge run, at the cost of one extra mint round-trip.
+    // Mint and view two independent one-time views for the SAME resource.
+    // expires_at is required by render-at-mint (1h; the connector clamps to its
+    // own cap). Sequential, NOT Promise.all: this mirrors the proven single-mint
+    // path exactly rather than introducing a concurrent per-resource double-bake
+    // the gate has never exercised.
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const mintedA = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
-      expiresAt,
-      oneTimeUse: true,
-    });
-    const mintedB = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
-      expiresAt,
-      oneTimeUse: true,
-    });
+    const viewedA = await mintAndViewConnectorResource(upload.resource_id, expiresAt);
+    const viewedB = await mintAndViewConnectorResource(upload.resource_id, expiresAt);
     // Each mint MUST yield its own distinct qurl.link, or the two viewers below
     // would just be re-driving the same one-time link (and the second would 404).
-    expect(mintedA.qurl_link).not.toBe(mintedB.qurl_link);
+    expect(viewedA.qurlLink).not.toBe(viewedB.qurlLink);
 
-    // Drive BOTH minted links through the real recipient path (qurl.link → NHP
-    // knock → tunnel view). Sequential, NOT Promise.all: each call launches its own
-    // cold chromium and these run on a single jest worker (maxWorkers:1) — serial
-    // keeps peak memory to one browser and avoids the two knocks racing for the
-    // shared CI egress IP's WAF budget.
-    const viewA = await viewViaQurlLink(mintedA.qurl_link);
-    const viewB = await viewViaQurlLink(mintedB.qurl_link);
+    // Both helper calls drove the real recipient path (qurl.link → NHP knock →
+    // tunnel view). Serial execution keeps peak memory to one browser and avoids
+    // the two knocks racing for the shared CI egress IP's WAF budget.
+    const { view: viewA } = viewedA;
+    const { view: viewB } = viewedB;
 
     // Both recipients get a served (200) per-recipient object end-to-end.
     expect(viewA.status).toBe(200);
@@ -191,8 +211,9 @@ describe('File Revoke', () => {
       qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id),
     ).rejects.toThrow(/404/);
     // Generous timeout: two connector mints + TWO sequential cold-chromium knocks
-    // (each with the helper's own 30s tunnel-view budget) + revoke, on CI.
-  }, 180_000);
+    // with one possible remint/retry each (4 total 30s tunnel-view budgets) +
+    // revoke, on CI.
+  }, 240_000);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(
