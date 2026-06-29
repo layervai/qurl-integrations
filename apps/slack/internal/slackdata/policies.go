@@ -482,6 +482,78 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 	return channels, nil
 }
 
+// PurgeTeamChannelPolicies deletes EVERY channel_policies row for teamID — all
+// alias_bindings and allowed_resource_ids across every channel the bot was used
+// in. It is part of the Slack-lifecycle (app_uninstalled / tokens_revoked) and
+// `/qurl uninstall` cascade that forgets a workspace once the Slack install is
+// gone and there is nothing left for those per-channel grants to authorize.
+//
+// Two phases against the partition key (slack_team_id):
+//
+//   - Query pages over the team's rows (LastEvaluatedKey loop, same shape as
+//     [Store.ChannelsForResource]), projecting only the SK so a wide row doesn't
+//     drag every attribute over the wire — the DeleteItem only needs the key.
+//   - Each row is removed with an unconditional DeleteItem keyed by its
+//     (slack_team_id, slack_channel_id). Unconditional ⇒ idempotent: a row that a
+//     concurrent unset-alias already cleared makes its delete a DynamoDB no-op.
+//
+// Best-effort by construction: it deletes the rows it observed during the
+// Query pass. A row created after the Query completes is not seen — acceptable
+// here because once the Slack app is uninstalled the bot can no longer be invoked
+// to create new policy rows, so the set is effectively frozen before the purge
+// runs. Sequential DeleteItem (not BatchWriteItem) keeps the [DynamoDBClient]
+// surface unchanged; per-team channel-policy rows are bounded by the channels a
+// workspace used the bot in, so the round-trips stay modest.
+func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
+	if teamID == "" {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
+	}
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.ChannelPoliciesName),
+			KeyConditionExpression: aws.String(attrSlackTeamID + " = :tid"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":tid": stringAttr(teamID),
+			},
+			// Only the SK is needed to issue the per-row DeleteItem; the rest of
+			// each row is irrelevant to a full delete. Mirrors the projected reads
+			// elsewhere on this table.
+			ProjectionExpression: aws.String("#cid"),
+			ExpressionAttributeNames: map[string]string{
+				"#cid": attrSlackChannelID,
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return ddbToError("PurgeTeamChannelPolicies", err)
+		}
+		for _, item := range out.Items {
+			channelID := readString(item, attrSlackChannelID)
+			if channelID == "" {
+				// A row without a readable SK can't be addressed for delete; skip
+				// it rather than emit a malformed key (it would 400). This should
+				// not happen for a well-formed table.
+				continue
+			}
+			if _, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+				TableName: aws.String(s.ChannelPoliciesName),
+				Key: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID:    stringAttr(teamID),
+					attrSlackChannelID: stringAttr(channelID),
+				},
+			}); err != nil {
+				return ddbToError("PurgeTeamChannelPolicies", err)
+			}
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	return nil
+}
+
 // allowedResourceIDsFromItem returns the set of resource IDs a channel_policies
 // item makes available: the union of its `allowed_resource_ids` SS and its
 // `alias_bindings` map values (empty IDs dropped). This is the single

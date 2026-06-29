@@ -134,6 +134,11 @@ type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	// DeleteItem backs [DDBProvider.DeleteWorkspaceState] — the Slack-lifecycle
+	// (app_uninstalled / tokens_revoked) and `/qurl uninstall` cascade that
+	// removes the ENTIRE workspace_state row, bot token and all. The
+	// per-column [DDBProvider.DeleteAPIKey] path uses UpdateItem REMOVE instead.
+	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 // FieldEncryptor seals/opens an attribute's plaintext using a customer-
@@ -1087,6 +1092,43 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: UpdateItem: %w", err)
 	}
 	p.invalidateAPIKeyCache(workspaceID, now.Add(apiKeyCacheTTL))
+	return nil
+}
+
+// DeleteWorkspaceState removes the ENTIRE workspace_state row for workspaceID —
+// the encrypted Slack bot token and its data key, the encrypted qURL API key and
+// its data key, and all install/setup metadata. It is the storage half of the
+// Slack-lifecycle cascade (app_uninstalled / tokens_revoked) and of `/qurl
+// uninstall`'s full forget: once Slack uninstalls the app the bot token is dead
+// and the workspace has consented to removal, so nothing in the row should
+// survive. Contrast with [DDBProvider.DeleteAPIKey], which clears only the qURL
+// columns and deliberately preserves the Slack install metadata for a key
+// rotation/reconnect.
+//
+// Idempotent: an unconditional DeleteItem on an absent key is a DynamoDB no-op
+// (no ConditionalCheckFailed, no error), so calling this for a workspace that was
+// never configured, or twice for the same workspace, simply returns nil. The
+// API-key plaintext cache is invalidated with a strong-read marker for one TTL so
+// a same-process eventually-consistent read can't re-cache a key from a row this
+// call just deleted — the same posture DeleteAPIKey takes.
+//
+// Like DeleteAPIKey this touches only local credential state; upstream qURL key
+// revocation is the caller's concern (the lifecycle/uninstall orchestrator
+// best-efforts it before this write), keeping the auth package free of the
+// qurl-service client dependency.
+func (p *DDBProvider) DeleteWorkspaceState(ctx context.Context, workspaceID string) error {
+	if workspaceID == "" {
+		return errors.New("DDBProvider.DeleteWorkspaceState: workspaceID is empty")
+	}
+	if _, err := p.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	}); err != nil {
+		return fmt.Errorf("DDBProvider.DeleteWorkspaceState: DeleteItem: %w", err)
+	}
+	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
 	return nil
 }
 
