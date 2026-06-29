@@ -42,6 +42,7 @@ const (
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
+	envAuth0ExpectedAudience      = "AUTH0_EXPECTED_AUDIENCE"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -863,6 +864,26 @@ func missingOAuthEnvVars(vals map[string]string) []string {
 // degraded silently into a fail-fast startup error.
 var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than required minimum")
 
+// validateAuth0AudienceMatchesExpected fails fast when infra provides the
+// Auth0 API identifier expected for this qURL endpoint and AUTH0_AUDIENCE
+// drifts from it. The endpoint->audience mapping intentionally lives in
+// deployment config so sandbox/internal domains are not mirrored in public
+// source. AUTH0_AUDIENCE is compared exactly because Auth0 API identifiers
+// are exact-match strings; only the infra-provided expected value is trimmed
+// before comparison. The caller rejects surrounding whitespace in audience
+// before calling this helper because that raw value is sent to Auth0. Leaving
+// the expected value unset disables only this drift check, preserving
+// local/self-hosted deployments that own their own audience contract.
+func validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience string) error {
+	expectedAudience = strings.TrimSpace(expectedAudience)
+	if expectedAudience == "" || audience == expectedAudience {
+		return nil
+	}
+	return fmt.Errorf(
+		"AUTH0_AUDIENCE %q does not exactly match %s %q for QURL_ENDPOINT %q",
+		audience, envAuth0ExpectedAudience, expectedAudience, qurlEndpoint)
+}
+
 // buildOAuthConfig assembles the oauth.Config from env. Returns
 // (cfg, false, nil) when any required env var is missing — the caller
 // logs and skips route registration so a sandbox boot with no Auth0
@@ -902,6 +923,9 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
+	// TODO(upstream-contract): private infra owns the QURL_ENDPOINT ->
+	// Auth0 audience mapping and sets this env var for managed deployments.
+	expectedAudience := os.Getenv(envAuth0ExpectedAudience)
 	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
 	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
@@ -923,6 +947,12 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if len(missing) > 0 {
 		slog.Warn("OAuth routes NOT registered — required env vars unset", "missing", missing)
 		return oauth.Config{}, false, nil
+	}
+	if strings.TrimSpace(audience) != audience {
+		return oauth.Config{}, false, fmt.Errorf("AUTH0_AUDIENCE must not contain surrounding whitespace (got %q)", audience)
+	}
+	if err := validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience); err != nil {
+		return oauth.Config{}, false, err
 	}
 	// SLACK_BASE_URL must be HTTPS: the state cookie is Secure, and a
 	// browser silently drops Set-Cookie: Secure on an http:// response,
