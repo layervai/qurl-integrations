@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +207,7 @@ func (f *fakeMinter) APIKeyRevoked(ctx context.Context, _, _ string) (bool, erro
 type fakeIDTokenVerifier struct {
 	email  string
 	sub    string
+	nonce  string
 	err    error
 	subErr error
 }
@@ -219,6 +221,16 @@ func (f *fakeIDTokenVerifier) VerifySub(_ context.Context, _ string) (string, er
 		return "", f.subErr
 	}
 	return f.sub, nil
+}
+
+func (f *fakeIDTokenVerifier) VerifyNonce(_ context.Context, _, nonce string) error {
+	if nonce == "" {
+		return errors.New("missing nonce")
+	}
+	if f.nonce != "" && f.nonce != nonce {
+		return errors.New("nonce mismatch")
+	}
+	return nil
 }
 
 // fakeSlackClient captures PostDirectMessage calls.
@@ -276,6 +288,10 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 		_ = r.ParseForm()
 		if r.Form.Get("grant_type") != "authorization_code" {
 			http.Error(w, "wrong grant", http.StatusBadRequest)
+			return
+		}
+		if r.Form.Get("code_verifier") == "" {
+			http.Error(w, "missing code_verifier", http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -509,6 +525,39 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 }
 
+func TestCallbackConsumesStoredStateOnce(t *testing.T) {
+	cfg, _, store, _ := newCallbackCfg(t)
+	stateStore := newMemoryStateStore()
+	cfg.StateStore = stateStore
+	state, err := MintStoredStateWithEmailMode(context.Background(), stateStore, testTeamID, testUserID, testAdminEmail, SetupModeReuse, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if _, err := stateStore.StartState(context.Background(), state, cfg.Now()); err != nil {
+		t.Fatalf("StartState: %v", err)
+	}
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first callback status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("second callback status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs == nil {
+		t.Fatal("first callback should persist workspace key")
+	}
+}
+
 func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: "different@example.com"}
@@ -530,6 +579,30 @@ func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	defer minter.mintMu.Unlock()
 	if minter.mintCalls != 0 {
 		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on email mismatch", minter.mintCalls)
+	}
+}
+
+func TestCallbackRejectsIDTokenNonceMismatch(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, nonce: "different-nonce"}
+	state := mintTestStateWithEmail(t, &cfg, testAdminEmail)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Authorization couldn't be verified")
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Error("SetAPIKeyWithMetadata must not run when id_token nonce does not match state")
+	}
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Errorf("MintWorkspaceAPIKey calls: got %d want 0 on nonce mismatch", minter.mintCalls)
 	}
 }
 
@@ -782,10 +855,10 @@ func TestCallbackRejectsMissingCookie(t *testing.T) {
 
 func TestCallbackRejectsExpiredState(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
-	// Mint state at T0; verify at T0+10min — past stateMaxAge (5min).
+	// Mint state at T0; verify after stateMaxAge.
 	oldNow := cfg.Now()
 	state, _ := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, oldNow)
-	cfg.Now = func() time.Time { return oldNow.Add(10 * time.Minute) }
+	cfg.Now = func() time.Time { return oldNow.Add(stateMaxAge + time.Second) }
 
 	h := Callback(cfg)
 	rec := httptest.NewRecorder()
@@ -794,6 +867,25 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
 	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
+}
+
+func TestCallbackRejectsLegacyStateWithoutPKCEVerifierAsOutOfDate(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	now := cfg.Now()
+	state := mintLegacyStateForTest(t,
+		cfg.OAuthStateSecret,
+		testTeamID,
+		testUserID,
+		"legacy-nonce",
+		strconv.FormatInt(now.Unix(), 10))
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "Setup link is out of date")
 }
 
 // TestCallbackMintFailureDoesNotRevoke locks the contract: when the
@@ -1086,6 +1178,23 @@ func TestCallbackAuth0TokenFailure(t *testing.T) {
 		t.Errorf("got %d want 502 (auth0 5xx surfaces as 502)", rec.Code)
 	}
 	assertOAuthErrorPage(t, rec, "Couldn't connect qURL")
+}
+
+func TestExchangeAuth0CodeRejectsMissingPKCEVerifier(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	var hits int
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		hits++
+		return nil, errors.New("unexpected request")
+	})}
+
+	_, _, err := exchangeAuth0Code(context.Background(), httpClient, cfg, "abc", "")
+	if err == nil {
+		t.Fatal("exchangeAuth0Code missing verifier: got nil error, want failure")
+	}
+	if hits != 0 {
+		t.Fatalf("token endpoint hits: got %d want 0 when code_verifier is missing", hits)
+	}
 }
 
 // TestExchangeAuth0CodeAcceptsExactCapBody locks the off-by-one fix on

@@ -1,0 +1,229 @@
+package oauth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+)
+
+const (
+	workspaceStatePKAttr = "team_id"
+
+	oauthStateKeyPrefix      = "oauth_state#"
+	oauthStateAttrItemType   = "item_type"
+	oauthStateItemType       = "oauth_state"
+	oauthStateAttrTeamID     = "oauth_team_id"
+	oauthStateAttrUserID     = "oauth_user_id"
+	oauthStateAttrNonce      = "oauth_nonce"
+	oauthStateAttrVerifier   = "oauth_code_verifier"
+	oauthStateAttrEmail      = "oauth_email"
+	oauthStateAttrMode       = "oauth_mode"
+	oauthStateAttrCreatedAt  = "oauth_created_at"
+	oauthStateAttrExpiresAt  = "oauth_expires_at"
+	oauthStateAttrStartedAt  = "oauth_started_at"
+	oauthStateAttrConsumedAt = "oauth_consumed_at"
+	oauthStateAttrTTL        = "ttl"
+)
+
+type oauthStateDDBClient interface {
+	auth.DynamoDBClient
+	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
+}
+
+// DDBStateStore stores short-lived OAuth state in the existing workspace_state
+// table under reserved oauth_state# keys. It does not use the workspace API-key
+// cache/encryptor path: these rows are not workspace credentials, carry a
+// 1-hour TTL, and are deleted atomically on callback.
+type DDBStateStore struct {
+	Client    oauthStateDDBClient
+	TableName string
+}
+
+// NewDDBStateStore returns a StateStore backed by the same workspace_state table
+// and DynamoDB client as the workspace API-key provider.
+func NewDDBStateStore(provider *auth.DDBProvider) *DDBStateStore {
+	if provider == nil || provider.Client == nil {
+		return nil
+	}
+	client, ok := provider.Client.(oauthStateDDBClient)
+	if !ok {
+		// Fail closed instead of silently falling back to legacy signed state,
+		// which would put the PKCE verifier back into the front-channel URL.
+		return &DDBStateStore{TableName: provider.TableName}
+	}
+	return &DDBStateStore{Client: client, TableName: provider.TableName}
+}
+
+func oauthStateKey(handle string) string {
+	return oauthStateKeyPrefix + handle
+}
+
+func (s *DDBStateStore) validate() error {
+	if s == nil || s.Client == nil || s.TableName == "" {
+		return errors.New("oauth state store is not configured")
+	}
+	return nil
+}
+
+// PutState stores a fresh opaque OAuth state row. The row is conditional so an
+// impossible random-handle collision fails closed instead of overwriting.
+func (s *DDBStateStore) PutState(ctx context.Context, handle string, state StoredState) error { //nolint:gocritic // StateStore value signature keeps callers immutable and simple.
+	if err := s.validate(); err != nil {
+		return err
+	}
+	if handle == "" {
+		return errStateMalformed
+	}
+	if state.TeamID == "" || state.UserID == "" || state.Nonce == "" || state.CodeVerifier == "" || state.ExpiresAt.IsZero() {
+		return errStateMalformed
+	}
+	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(s.TableName),
+		Item: map[string]ddbtypes.AttributeValue{
+			workspaceStatePKAttr:    &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
+			oauthStateAttrItemType:  &ddbtypes.AttributeValueMemberS{Value: oauthStateItemType},
+			oauthStateAttrTeamID:    &ddbtypes.AttributeValueMemberS{Value: state.TeamID},
+			oauthStateAttrUserID:    &ddbtypes.AttributeValueMemberS{Value: state.UserID},
+			oauthStateAttrNonce:     &ddbtypes.AttributeValueMemberS{Value: state.Nonce},
+			oauthStateAttrVerifier:  &ddbtypes.AttributeValueMemberS{Value: state.CodeVerifier},
+			oauthStateAttrEmail:     &ddbtypes.AttributeValueMemberS{Value: state.Email},
+			oauthStateAttrMode:      &ddbtypes.AttributeValueMemberS{Value: string(state.Mode)},
+			oauthStateAttrCreatedAt: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.CreatedAt.Unix(), 10)},
+			oauthStateAttrExpiresAt: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
+			oauthStateAttrTTL:       &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
+		},
+		ConditionExpression: aws.String("attribute_not_exists(#pk)"),
+		ExpressionAttributeNames: map[string]string{
+			"#pk": workspaceStatePKAttr,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("oauth state store PutState: %w", err)
+	}
+	return nil
+}
+
+// StartState marks an opaque state as started and returns the backend payload
+// needed to build the Auth0 authorization URL.
+func (s *DDBStateStore) StartState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
+	return s.updateAndReadState(ctx, handle, now, oauthStateAttrStartedAt,
+		"attribute_exists(#pk) AND attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
+		ddbtypes.ReturnValueAllNew)
+}
+
+// ConsumeState atomically deletes an opaque state and returns the prior payload,
+// including the PKCE verifier needed for Auth0 token exchange.
+func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
+	if err := s.validate(); err != nil {
+		return VerifiedState{}, err
+	}
+	if handle == "" {
+		return VerifiedState{}, errStateMalformed
+	}
+	out, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: aws.String(s.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			workspaceStatePKAttr: &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
+		},
+		ConditionExpression: aws.String(
+			"attribute_exists(#pk) AND attribute_exists(#started_at) AND " +
+				"attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
+		),
+		ExpressionAttributeNames: map[string]string{
+			"#pk":          workspaceStatePKAttr,
+			"#started_at":  oauthStateAttrStartedAt,
+			"#consumed_at": oauthStateAttrConsumedAt,
+			"#expires_at":  oauthStateAttrExpiresAt,
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
+		},
+		ReturnValues: ddbtypes.ReturnValueAllOld,
+	})
+	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			return VerifiedState{}, errStateExpired
+		}
+		return VerifiedState{}, fmt.Errorf("oauth state store delete: %w", err)
+	}
+	return verifiedStateFromDDBItem(out.Attributes)
+}
+
+func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, now time.Time, markAttr, condition string, returnValues ddbtypes.ReturnValue) (VerifiedState, error) {
+	if err := s.validate(); err != nil {
+		return VerifiedState{}, err
+	}
+	if handle == "" {
+		return VerifiedState{}, errStateMalformed
+	}
+	names := map[string]string{
+		"#pk":          workspaceStatePKAttr,
+		"#mark":        markAttr,
+		"#started_at":  oauthStateAttrStartedAt,
+		"#consumed_at": oauthStateAttrConsumedAt,
+		"#expires_at":  oauthStateAttrExpiresAt,
+	}
+	out, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			workspaceStatePKAttr: &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
+		},
+		UpdateExpression:         aws.String("SET #mark = if_not_exists(#mark, :now_iso)"),
+		ConditionExpression:      aws.String(condition),
+		ExpressionAttributeNames: names,
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":now_iso":   &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
+		},
+		ReturnValues: returnValues,
+	})
+	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			return VerifiedState{}, errStateExpired
+		}
+		return VerifiedState{}, fmt.Errorf("oauth state store update: %w", err)
+	}
+	return verifiedStateFromDDBItem(out.Attributes)
+}
+
+func verifiedStateFromDDBItem(item map[string]ddbtypes.AttributeValue) (VerifiedState, error) {
+	if item == nil {
+		return VerifiedState{}, errStateMalformed
+	}
+	mode, err := normalizeSetupMode(SetupMode(readDDBString(item, oauthStateAttrMode)))
+	if err != nil {
+		return VerifiedState{}, errStateMalformed
+	}
+	v := VerifiedState{
+		TeamID:       readDDBString(item, oauthStateAttrTeamID),
+		UserID:       readDDBString(item, oauthStateAttrUserID),
+		Nonce:        readDDBString(item, oauthStateAttrNonce),
+		CodeVerifier: readDDBString(item, oauthStateAttrVerifier),
+		Email:        readDDBString(item, oauthStateAttrEmail),
+		Mode:         mode,
+	}
+	if v.TeamID == "" || v.UserID == "" || v.Nonce == "" || !validPKCEVerifier(v.CodeVerifier) {
+		return VerifiedState{}, errStateMalformed
+	}
+	if v.Email != "" && !stateEmailNormalized(v.Email) {
+		return VerifiedState{}, errStateMalformed
+	}
+	return v, nil
+}
+
+func readDDBString(item map[string]ddbtypes.AttributeValue, key string) string {
+	if v, ok := item[key].(*ddbtypes.AttributeValueMemberS); ok {
+		return v.Value
+	}
+	return ""
+}
