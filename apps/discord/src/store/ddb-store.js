@@ -2058,7 +2058,7 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
   // row, including resetting configured_at. Mirror createLink's
   // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
   // so first-write sets it and re-keys leave it alone.
-  await ddb.send(new UpdateCommand({
+  const res = await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
     Key: { guild_id: guildId },
     UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
@@ -2067,7 +2067,21 @@ async function setGuildApiKey(guildId, apiKey, configuredBy) {
       ':b': configuredBy,
       ':u': now,
     },
+    // Return old values for touched attrs: keeps the old configured_by
+    // read atomic with the re-key without returning the entire previous
+    // guild_configs row. DynamoDB also returns the old encrypted
+    // qurl_api_key because it is touched by this update; leave it
+    // unread so the audit payload never carries key material.
+    ReturnValues: 'UPDATED_OLD',
   }));
+  const oldConfiguredBy = res.Attributes && res.Attributes.configured_by;
+  if (oldConfiguredBy && oldConfiguredBy !== configuredBy) {
+    logger.audit(AUDIT_EVENTS.QURL_SETUP_ADMIN_CHANGED, {
+      guild_id: guildId,
+      old_admin_id: oldConfiguredBy,
+      new_admin_id: configuredBy,
+    });
+  }
 }
 
 // Raw delete. No qurl-service subscription teardown. Today there is
