@@ -1297,10 +1297,9 @@ func readPinnedImageConfig(envName, image, floatingHint string) (string, error) 
 			msg += "; " + floatingHint
 		}
 		return "", fmt.Errorf("%s: %s", envName, msg)
-	default:
-		// Future connectorimage.PinStatus values must fail closed.
-		return "", fmt.Errorf("%s could not validate image pinning", envName)
 	}
+	// Future connectorimage.PinStatus values must fail closed.
+	return "", fmt.Errorf("%s could not validate image pinning", envName)
 }
 
 // readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;

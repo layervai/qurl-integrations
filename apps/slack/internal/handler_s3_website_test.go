@@ -126,6 +126,71 @@ func TestConnectorSetupSubmissionRejectsExpiredChooser(t *testing.T) {
 	}
 }
 
+func TestConnectorSetupSubmissionRejectsUnknownSetupType(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+	}
+	body := connectorSetupViewSubmissionBody(t, &meta, "unsupported")
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Choose one of the listed qURL Connector setup types") {
+		t.Fatalf("modal response = %s, want setup-type validation error", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), callbackIDS3WebsiteInstall) || strings.Contains(w.Body.String(), callbackIDTunnelInstall) {
+		t.Fatalf("modal response opened install form despite unknown setup type: %s", w.Body.String())
+	}
+}
+
+func TestConnectorSetupSubmissionRejectsChooserIdentityMismatch(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+	}
+	pm, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal private_metadata: %v", err)
+	}
+	body := viewSubmissionBody(t, "V_test_connector_setup", callbackIDConnectorSetup, string(pm), testAdminTeamID, "U_other",
+		map[string]map[string]interactionStateValue{
+			connectorSetupBlockType: {
+				connectorSetupActionType: {SelectedOption: &interactionSelectedOption{Value: connectorSetupS3Website}},
+			},
+		})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Could not verify this modal") {
+		t.Fatalf("modal response = %s, want identity mismatch rejection", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), callbackIDS3WebsiteInstall) || strings.Contains(w.Body.String(), callbackIDTunnelInstall) {
+		t.Fatalf("modal response opened install form despite identity mismatch: %s", w.Body.String())
+	}
+}
+
 func TestPrepareS3WebsiteInstallMessageRejectsFloatingOriginImage(t *testing.T) {
 	h := NewHandler(Config{
 		TunnelImage:   testTunnelImageRef,
