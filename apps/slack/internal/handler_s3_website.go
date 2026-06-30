@@ -238,7 +238,7 @@ func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStat
 	index := strings.TrimSpace(interactionStateText(values, s3WebsiteInstallBlockIndex, s3WebsiteInstallActionIndex))
 	if index == "" {
 		index = defaultS3WebsiteIndexDocument
-	} else if len(index) > 128 || !s3WebsiteIndexPattern.MatchString(index) || strings.Contains(index, "/") || index == "." || index == ".." {
+	} else if len(index) > 128 || !s3WebsiteIndexPattern.MatchString(index) || index == "." || index == ".." {
 		fieldErrors[s3WebsiteInstallBlockIndex] = "Use a simple file name such as index.html, default.html, or home.html."
 	}
 
@@ -910,6 +910,15 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 containers:
   - name: s3-static-origin
     image: %s
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
     env:
       - name: S3_BUCKET
         value: %s

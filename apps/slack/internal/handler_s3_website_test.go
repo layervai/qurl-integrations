@@ -552,10 +552,11 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	var podSpec struct {
 		SecurityContext map[string]any `yaml:"securityContext"`
 		Containers      []struct {
-			Name         string              `yaml:"name"`
-			Image        string              `yaml:"image"`
-			Env          []ecsEnvironmentVar `yaml:"env"`
-			VolumeMounts []struct {
+			Name            string              `yaml:"name"`
+			Image           string              `yaml:"image"`
+			SecurityContext map[string]any      `yaml:"securityContext"`
+			Env             []ecsEnvironmentVar `yaml:"env"`
+			VolumeMounts    []struct {
 				Name      string `yaml:"name"`
 				MountPath string `yaml:"mountPath"`
 				ReadOnly  bool   `yaml:"readOnly"`
@@ -573,6 +574,9 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	if origin.Name != testS3OriginContainer || origin.Image != defaultS3StaticConnectorImage {
 		t.Fatalf("origin pod container = %+v", origin)
 	}
+	if origin.SecurityContext["runAsNonRoot"] != true || origin.SecurityContext["allowPrivilegeEscalation"] != false {
+		t.Fatalf("origin securityContext = %+v, want non-root/no-privilege-escalation", origin.SecurityContext)
+	}
 	originEnv := ecsEnvMap(origin.Env)
 	for name, want := range map[string]string{
 		testS3EnvBucket:         testS3WebsiteBucket,
@@ -588,6 +592,9 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	connectorEnv := ecsEnvMap(connector.Env)
 	if connector.Name != ecsConnectorContainerName || connector.Image != testTunnelImageRef {
 		t.Fatalf("connector pod container = %+v", connector)
+	}
+	if connector.SecurityContext["runAsNonRoot"] != true || connector.SecurityContext["allowPrivilegeEscalation"] != false {
+		t.Fatalf("connector securityContext = %+v, want non-root/no-privilege-escalation", connector.SecurityContext)
 	}
 	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
