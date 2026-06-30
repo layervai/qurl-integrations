@@ -371,6 +371,12 @@ type Config struct {
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
 
+	// S3OriginImage is the private S3 website origin image shown by the
+	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's
+	// digest-pinned default; production can set QURL_S3_ORIGIN_IMAGE to a
+	// tested digest when rotating the origin independently from the Slack app.
+	S3OriginImage string
+
 	// PostFeedback delivers a `/qurl feedback` submission to the internal
 	// feedback Slack channel. Nil disables `/qurl feedback`: the command
 	// replies that feedback isn't enabled and userHelpMessage omits the line.

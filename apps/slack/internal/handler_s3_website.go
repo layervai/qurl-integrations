@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector:main"
+	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:d51131d192f297e0edaf1ae0f07694c8700f412235a3538be82c091ad4432916"
 	defaultS3WebsiteIndexDocument = "index.html"
 	// origins/s3-static-connector listens on 127.0.0.1:8080 by default.
 	s3WebsiteOriginPort              = defaultTunnelLocalPort
@@ -262,7 +262,8 @@ func isS3WebsiteCommercialRegion(region string) bool {
 	}
 	// Mirror origins/s3-static-connector/render.sh's unsupported partition
 	// prefixes. The Slack-side regex is otherwise a stricter preflight gate for
-	// real AWS region suffixes, so rejected modal values fail before key mint.
+	// real AWS region suffixes, so rejected modal values fail before key mint;
+	// the four-segment us-* partitions are already rejected before this loop.
 	for _, unsupportedPrefix := range []string{"cn-", "us-gov-", "us-iso-", "us-isob-"} {
 		if strings.HasPrefix(region, unsupportedPrefix) {
 			return false
@@ -478,9 +479,15 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	if err := ValidateTunnelImageRef(connectorImage); err != nil {
 		return preparedS3WebsiteInstallMessage{}, fmt.Errorf("qURL Connector image reference: %w", err)
 	}
-	originImage := defaultS3StaticConnectorImage
+	originImage := strings.TrimSpace(h.cfg.S3OriginImage)
+	if originImage == "" {
+		originImage = defaultS3StaticConnectorImage
+	}
 	if err := ValidateTunnelImageRef(originImage); err != nil {
 		return preparedS3WebsiteInstallMessage{}, fmt.Errorf("S3 origin image reference: %w", err)
+	}
+	if h.cfg.S3OriginImage != "" && !strings.Contains(originImage, "@sha256:") {
+		return preparedS3WebsiteInstallMessage{}, errors.New("S3 origin image reference must be digest-pinned")
 	}
 	environmentLabel, err := args.Environment.label()
 	if err != nil {
@@ -494,7 +501,7 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	if imageNote != "" {
 		imageNote += "\n"
 	}
-	imageNote += "For production S3 websites, pin the S3 origin image to a tested digest after it soaks in your target environment."
+	imageNote += "S3 origin image is digest-pinned by default; set `QURL_S3_ORIGIN_IMAGE` to a tested digest when rotating it."
 	return preparedS3WebsiteInstallMessage{
 		connectorImage:   connectorImage,
 		originImage:      originImage,
@@ -636,7 +643,7 @@ docker run -d \
 		return "", err
 	}
 	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the bootstrap key so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate the S3 origin container, recreate the qURL Connector container too because it shares the origin container's network namespace.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate the S3 origin container, recreate the qURL Connector container too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running; if the connector exhausted retries before the origin namespace existed, rerun this block to recreate both containers.", nil
 }
 
 func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {

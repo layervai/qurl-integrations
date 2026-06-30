@@ -26,6 +26,7 @@ const (
 	testS3EnvPrefix          = "S3_PREFIX"
 	testS3EnvIndex           = "INDEX_DOCUMENT"
 	testS3EnvCacheConnector  = "CACHE_CONNECTOR_ID"
+	testS3OriginImageRef     = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 )
 
 func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T) {
@@ -91,6 +92,19 @@ func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T)
 	}
 }
 
+func TestPrepareS3WebsiteInstallMessageRejectsFloatingOriginImage(t *testing.T) {
+	h := NewHandler(Config{
+		TunnelImage:   testTunnelImageRef,
+		S3OriginImage: "ghcr.io/layervai/qurl-integrations/s3-static-connector:main",
+	})
+
+	_, err := h.prepareS3WebsiteInstallMessage(testS3WebsiteArgs(tunnelEnvDocker))
+
+	if err == nil || !strings.Contains(err.Error(), "S3 origin image reference must be digest-pinned") {
+		t.Fatalf("prepareS3WebsiteInstallMessage() err = %v, want digest-pin rejection", err)
+	}
+}
+
 func TestS3WebsiteInstallModalSubmissionLetsBootstrapBindResource(t *testing.T) {
 	now := fixedNow
 	ts := newAdminTestServers(t)
@@ -129,6 +143,7 @@ func TestS3WebsiteInstallModalSubmissionLetsBootstrapBindResource(t *testing.T) 
 	h := newAdminTestHandler(t, ts)
 	freezeTunnelBootstrapNow(t, h, now)
 	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.S3OriginImage = testS3OriginImageRef
 	dmPosts := captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	inv := newAdminSlashInvoker(t, h)
@@ -180,7 +195,7 @@ func TestS3WebsiteInstallModalSubmissionLetsBootstrapBindResource(t *testing.T) 
 		"qURL alias `$team-dash` is ready in this channel.",
 		"first agent bootstrap response seeds the qURL resource identity",
 		"qURL Connector image: `" + testTunnelImageRef + "`",
-		"S3 origin image: `" + defaultS3StaticConnectorImage + "`",
+		"S3 origin image: `" + testS3OriginImageRef + "`",
 		"S3_BUCKET='" + testS3WebsiteBucket + "'",
 		"AWS_REGION='" + testS3WebsiteRegion + "'",
 		"S3_PREFIX='" + testS3WebsitePrefix + "'",
