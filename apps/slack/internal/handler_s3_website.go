@@ -20,7 +20,8 @@ import (
 const (
 	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:d51131d192f297e0edaf1ae0f07694c8700f412235a3538be82c091ad4432916"
 	defaultS3WebsiteIndexDocument = "index.html"
-	// origins/s3-static-connector listens on 127.0.0.1:8080 by default.
+	// TODO(upstream-contract): keep in lockstep with
+	// origins/s3-static-connector's default LISTEN_ADDR=127.0.0.1:8080.
 	s3WebsiteOriginPort              = defaultTunnelLocalPort
 	s3WebsiteUnexpectedFailureNotice = "S3 website qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect` again."
 	s3WebsiteECSLogGroup             = "/ecs/qurl-s3-website"
@@ -84,8 +85,9 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
-	// This chooser only opens the setup-specific modal; the mutating install
-	// submissions enforce TTL from this freshly rendered modal.
+	// The chooser itself is non-mutating, so it re-stamps the TTL clock instead
+	// of enforcing the old chooser age; the setup-specific install submissions
+	// enforce admin + TTL before creating resources or keys.
 	meta.CreatedAtUnix = h.now().Unix()
 
 	var (
@@ -486,6 +488,8 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	if err := ValidateTunnelImageRef(originImage); err != nil {
 		return preparedS3WebsiteInstallMessage{}, fmt.Errorf("S3 origin image reference: %w", err)
 	}
+	// readS3OriginImageConfig enforces this at startup; keep the render-time
+	// check as defense-in-depth for tests and any future direct Handler wiring.
 	if h.cfg.S3OriginImage != "" && !strings.Contains(originImage, "@sha256:") {
 		return preparedS3WebsiteInstallMessage{}, errors.New("S3 origin image reference must be digest-pinned")
 	}
@@ -746,7 +750,7 @@ docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), re
 		return "", err
 	}
 	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the bootstrap key so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate or rename the S3 origin service, recreate the qURL Connector service too because it shares the origin service network namespace.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate or rename the S3 origin service, recreate the qURL Connector service too because it shares the origin service network namespace. After a Docker daemon restart, verify both services are running; if the connector exhausted retries before the origin namespace existed, rerun this block to recreate both services.", nil
 }
 
 func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -777,7 +781,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"1. Store the bootstrap key from the separate DM in AWS Secrets Manager. This install-instructions message intentionally does not contain the key.\n\n" +
 		"2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n" +
 		configBlock + "\n\n" +
-		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager, and replace `<region>` in the awslogs options:\n\n" +
+		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager:\n\n" +
 		containerBlock + "\n\n" +
 		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
 }
@@ -799,7 +803,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				LogDriver: ecsLogDriverAWSLogs,
 				Options: map[string]string{
 					ecsLogGroupOption:        s3WebsiteECSLogGroup,
-					ecsLogRegionOption:       ecsLogRegionPlaceholder,
+					ecsLogRegionOption:       args.Region,
 					ecsLogStreamPrefixOption: "origin",
 				},
 			},
@@ -822,7 +826,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				LogDriver: ecsLogDriverAWSLogs,
 				Options: map[string]string{
 					ecsLogGroupOption:        s3WebsiteECSLogGroup,
-					ecsLogRegionOption:       ecsLogRegionPlaceholder,
+					ecsLogRegionOption:       args.Region,
 					ecsLogStreamPrefixOption: ecsLogStreamPrefixQURL,
 				},
 			},

@@ -487,6 +487,9 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if got := connector.Environment[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector QURL_CONNECTOR_ID = %q, want %q", got, testTunnelSlug)
 	}
+	if !strings.Contains(got, "After a Docker daemon restart, verify both services are running") {
+		t.Fatalf("Compose instructions missing daemon-restart recovery note:\n%s", got)
+	}
 	assertNoPinnedS3Identity(t, got)
 }
 
@@ -518,12 +521,18 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 			t.Fatalf("origin env %s = %q, want %q", name, got, want)
 		}
 	}
+	if got := origin.LogConfiguration.Options[ecsLogRegionOption]; got != testS3WebsiteRegion {
+		t.Fatalf("origin awslogs-region = %q, want modal region %q", got, testS3WebsiteRegion)
+	}
 	connectorEnv := ecsEnvMap(connector.Environment)
 	if connector.Name != ecsConnectorContainerName || connector.Image != testTunnelImageRef {
 		t.Fatalf("connector container = %+v", connector)
 	}
 	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
+	}
+	if got := connector.LogConfiguration.Options[ecsLogRegionOption]; got != testS3WebsiteRegion {
+		t.Fatalf("connector awslogs-region = %q, want modal region %q", got, testS3WebsiteRegion)
 	}
 	if _, ok := connectorEnv[testForbiddenKnockResourceEnv]; ok {
 		t.Fatalf("connector env should not include %s: %+v", testForbiddenKnockResourceEnv, connectorEnv)
