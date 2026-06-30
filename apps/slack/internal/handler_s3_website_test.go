@@ -664,6 +664,32 @@ func TestParseS3WebsiteInstallModalArgsDefaultsDirectoryIndex(t *testing.T) {
 	}
 }
 
+func TestParseS3WebsiteInstallModalArgsRejectsDotOnlyIndex(t *testing.T) {
+	t.Parallel()
+
+	for _, index := range []string{".", "..", "..."} {
+		t.Run(index, func(t *testing.T) {
+			t.Parallel()
+			values := s3WebsiteInstallModalValues(
+				testTunnelSlug,
+				"$team-dash",
+				string(tunnelEnvDocker),
+				testS3WebsiteBucket,
+				testS3WebsiteRegion,
+				testS3WebsitePrefix,
+				index,
+			)
+			args, fieldErrors := parseS3WebsiteInstallModalArgs(values)
+			if args != nil {
+				t.Fatalf("args = %+v, want nil", args)
+			}
+			if _, ok := fieldErrors[s3WebsiteInstallBlockIndex]; !ok {
+				t.Fatalf("fieldErrors missing index for %q: %+v", index, fieldErrors)
+			}
+		})
+	}
+}
+
 func TestParseS3WebsiteInstallModalArgsRejectsUnsupportedPartitions(t *testing.T) {
 	for _, region := range []string{"cn-north-1", "us-gov-west-1", "us-iso-east-1", "us-isob-east-1"} {
 		t.Run(region, func(t *testing.T) {

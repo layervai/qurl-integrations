@@ -250,7 +250,7 @@ func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStat
 	index := strings.TrimSpace(interactionStateText(values, s3WebsiteInstallBlockIndex, s3WebsiteInstallActionIndex))
 	if index == "" {
 		index = defaultS3WebsiteIndexDocument
-	} else if len(index) > 128 || !s3WebsiteIndexPattern.MatchString(index) || index == "." || index == ".." {
+	} else if len(index) > 128 || !s3WebsiteIndexPattern.MatchString(index) || strings.Trim(index, ".") == "" {
 		fieldErrors[s3WebsiteInstallBlockIndex] = "Use a simple file name such as index.html, default.html, or home.html."
 	}
 
@@ -799,6 +799,8 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
+	// The S3 origin is the protected workload, so both containers are essential:
+	// losing either one should fail/restart the ECS task.
 	containers := []ecsContainerDefinition{
 		{
 			Name:      "s3-static-origin",
