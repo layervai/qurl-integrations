@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	defaultS3StaticConnectorImage    = "ghcr.io/layervai/qurl-integrations/s3-static-connector:main"
-	defaultS3WebsiteIndexDocument    = "index.html"
+	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector:main"
+	defaultS3WebsiteIndexDocument = "index.html"
+	// origins/s3-static-connector listens on 127.0.0.1:8080 by default.
 	s3WebsiteOriginPort              = defaultTunnelLocalPort
 	s3WebsiteUnexpectedFailureNotice = "S3 website qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect` again."
 	s3WebsiteECSLogGroup             = "/ecs/qurl-s3-website"
@@ -223,7 +224,7 @@ func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStat
 	}
 
 	region := strings.ToLower(strings.TrimSpace(interactionStateText(values, s3WebsiteInstallBlockRegion, s3WebsiteInstallActionRegion)))
-	if !s3WebsiteRegionPattern.MatchString(region) || strings.Contains(region, "-gov-") {
+	if !isS3WebsiteCommercialRegion(region) {
 		fieldErrors[s3WebsiteInstallBlockRegion] = "Use a standard AWS commercial region such as us-east-1."
 	}
 
@@ -251,6 +252,20 @@ func parseS3WebsiteInstallModalArgs(values map[string]map[string]interactionStat
 		Prefix:        prefix,
 		IndexDocument: index,
 	}, nil
+}
+
+func isS3WebsiteCommercialRegion(region string) bool {
+	if !s3WebsiteRegionPattern.MatchString(region) {
+		return false
+	}
+	// Keep this in sync with origins/s3-static-connector/render.sh, which
+	// only renders standard aws.amazon.com commercial S3 endpoint hosts.
+	for _, unsupportedPrefix := range []string{"cn-", "us-gov-", "us-iso-", "us-isob-"} {
+		if strings.HasPrefix(region, unsupportedPrefix) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {
@@ -618,7 +633,7 @@ docker run -d \
 		return "", err
 	}
 	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the bootstrap key so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate the S3 origin container, recreate the qURL Connector container too because it shares the origin container's network namespace.", nil
 }
 
 func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -718,7 +733,7 @@ docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), re
 		return "", err
 	}
 	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the bootstrap key so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate or rename the S3 origin service, recreate the qURL Connector service too because it shares the origin service network namespace.", nil
 }
 
 func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {

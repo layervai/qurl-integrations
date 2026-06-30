@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -18,6 +20,12 @@ const (
 	testS3WebsiteIndex       = "index.html"
 	testS3WebsiteRegion      = "us-east-1"
 	testS3WebsiteDisplayName = "Stats S3 website"
+	testS3OriginContainer    = "s3-static-origin"
+	testS3EnvBucket          = "S3_BUCKET"
+	testS3EnvRegion          = "AWS_REGION"
+	testS3EnvPrefix          = "S3_PREFIX"
+	testS3EnvIndex           = "INDEX_DOCUMENT"
+	testS3EnvCacheConnector  = "CACHE_CONNECTOR_ID"
 )
 
 func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T) {
@@ -251,7 +259,7 @@ func TestS3WebsiteInstallRejectsMissingResourceIDBeforeMintingBootstrapKey(t *te
 	if len(*dmPosts) != 0 {
 		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
 	}
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "resource_id") {
+	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, fAttrResourceID) {
 		t.Fatalf("async reply = %q, want missing resource_id error before key mint", async)
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, "team-dash"); err != nil || found {
@@ -307,6 +315,218 @@ func TestParseS3WebsiteInstallModalArgsDefaultsDirectoryIndex(t *testing.T) {
 	}
 }
 
+func TestParseS3WebsiteInstallModalArgsRejectsUnsupportedPartitions(t *testing.T) {
+	for _, region := range []string{"cn-north-1", "us-gov-west-1", "us-iso-east-1", "us-isob-east-1"} {
+		t.Run(region, func(t *testing.T) {
+			values := s3WebsiteInstallModalValues(
+				testTunnelSlug,
+				"$team-dash",
+				string(tunnelEnvDocker),
+				testS3WebsiteBucket,
+				region,
+				testS3WebsitePrefix,
+				testS3WebsiteIndex,
+			)
+			args, fieldErrors := parseS3WebsiteInstallModalArgs(values)
+			if args != nil {
+				t.Fatalf("args = %+v, want nil", args)
+			}
+			if _, ok := fieldErrors[s3WebsiteInstallBlockRegion]; !ok {
+				t.Fatalf("fieldErrors missing region for %s: %+v", region, fieldErrors)
+			}
+		})
+	}
+}
+
+func TestRenderS3WebsiteConnectorConfigYAMLDoesNotPinResourceIdentity(t *testing.T) {
+	configYAML, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvDocker))
+	if err != nil {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
+	}
+	for _, want := range []string{
+		"routes:",
+		"id: '" + testTunnelSlug + "'",
+		"type: http",
+		"local_ip: 127.0.0.1",
+		"local_port: 8080",
+	} {
+		if !strings.Contains(configYAML, want) {
+			t.Fatalf("config missing %q:\n%s", want, configYAML)
+		}
+	}
+	for _, forbidden := range []string{fAttrResourceID, testKeyKnockResourceID, testForbiddenKnockResourceEnv} {
+		if strings.Contains(configYAML, forbidden) {
+			t.Fatalf("config leaked %q:\n%s", forbidden, configYAML)
+		}
+	}
+}
+
+func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testing.T) {
+	got, err := renderDockerComposeS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvCompose), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerComposeS3WebsiteInstructions: %v", err)
+	}
+	body := extractS3TestBlock(t, got, "cat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\n", "\nQURL_COMPOSE_YAML_EOF")
+
+	var parsed struct {
+		Services map[string]struct {
+			Image       string            `yaml:"image"`
+			Environment map[string]string `yaml:"environment"`
+			NetworkMode string            `yaml:"network_mode"`
+			Volumes     []string          `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("Compose fragment did not parse: %v\n%s", err, body)
+	}
+	origin := parsed.Services["qurl-s3-origin-"+testTunnelSlug]
+	if origin.Image != defaultS3StaticConnectorImage {
+		t.Fatalf("origin image = %q, want %q", origin.Image, defaultS3StaticConnectorImage)
+	}
+	for name, want := range map[string]string{
+		testS3EnvBucket:         testS3WebsiteBucket,
+		testS3EnvRegion:         testS3WebsiteRegion,
+		testS3EnvPrefix:         testS3WebsitePrefix,
+		testS3EnvIndex:          testS3WebsiteIndex,
+		testS3EnvCacheConnector: testTunnelSlug,
+	} {
+		if got := origin.Environment[name]; got != want {
+			t.Fatalf("origin env %s = %q, want %q", name, got, want)
+		}
+	}
+	connector := parsed.Services["qurl-connector-"+testTunnelSlug]
+	if connector.Image != testTunnelImageRef {
+		t.Fatalf("connector image = %q, want %q", connector.Image, testTunnelImageRef)
+	}
+	if connector.NetworkMode != "service:qurl-s3-origin-"+testTunnelSlug {
+		t.Fatalf("connector network_mode = %q, want origin service network", connector.NetworkMode)
+	}
+	if got := connector.Environment[ecsConnectorIDEnv]; got != testTunnelSlug {
+		t.Fatalf("connector QURL_CONNECTOR_ID = %q, want %q", got, testTunnelSlug)
+	}
+	assertNoPinnedS3Identity(t, got)
+}
+
+func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
+	containerJSON, err := renderS3WebsiteECSContainerJSON(testS3WebsiteArgs(tunnelEnvECSFargate), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderS3WebsiteECSContainerJSON: %v", err)
+	}
+	var containers []ecsContainerDefinition
+	if err := json.Unmarshal([]byte(containerJSON), &containers); err != nil {
+		t.Fatalf("ECS container JSON did not parse: %v\n%s", err, containerJSON)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("containers = %+v, want origin + qurl connector", containers)
+	}
+	origin, connector := containers[0], containers[1]
+	if origin.Name != testS3OriginContainer || origin.Image != defaultS3StaticConnectorImage {
+		t.Fatalf("origin container = %+v", origin)
+	}
+	originEnv := ecsEnvMap(origin.Environment)
+	for name, want := range map[string]string{
+		testS3EnvBucket:         testS3WebsiteBucket,
+		testS3EnvRegion:         testS3WebsiteRegion,
+		testS3EnvPrefix:         testS3WebsitePrefix,
+		testS3EnvIndex:          testS3WebsiteIndex,
+		testS3EnvCacheConnector: testTunnelSlug,
+	} {
+		if got := originEnv[name]; got != want {
+			t.Fatalf("origin env %s = %q, want %q", name, got, want)
+		}
+	}
+	connectorEnv := ecsEnvMap(connector.Environment)
+	if connector.Name != ecsConnectorContainerName || connector.Image != testTunnelImageRef {
+		t.Fatalf("connector container = %+v", connector)
+	}
+	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
+		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
+	}
+	if _, ok := connectorEnv[testForbiddenKnockResourceEnv]; ok {
+		t.Fatalf("connector env should not include %s: %+v", testForbiddenKnockResourceEnv, connectorEnv)
+	}
+	assertNoPinnedS3Identity(t, containerJSON)
+}
+
+func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testing.T) {
+	got, err := renderKubernetesS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvKubernetes), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderKubernetesS3WebsiteInstructions: %v", err)
+	}
+	objects := extractS3TestBlock(t, got, "kubectl apply -f - <<'QURL_K8S_YAML_EOF'\n", "\nQURL_K8S_YAML_EOF")
+	docs := strings.Split(objects, "\n---\n")
+	if len(docs) != 2 {
+		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + PVC:\n%s", len(docs), objects)
+	}
+	var configMap struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal([]byte(docs[0]), &configMap); err != nil {
+		t.Fatalf("ConfigMap YAML did not parse: %v\n%s", err, docs[0])
+	}
+	configYAML, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvKubernetes))
+	if err != nil {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
+	}
+	if gotConfig := configMap.Data["qurl-proxy.yaml"]; gotConfig != configYAML {
+		t.Fatalf("ConfigMap qurl-proxy.yaml = %q, want %q", gotConfig, configYAML)
+	}
+	var pvc map[string]any
+	if err := yaml.Unmarshal([]byte(docs[1]), &pvc); err != nil {
+		t.Fatalf("PVC YAML did not parse: %v\n%s", err, docs[1])
+	}
+
+	patchStart := strings.Index(got, "Pod spec additions:")
+	if patchStart < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec section:\n%s", got)
+	}
+	patch := extractS3TestBlock(t, got[patchStart:], "```\n", "\n```")
+	var podSpec struct {
+		SecurityContext map[string]any `yaml:"securityContext"`
+		Containers      []struct {
+			Name         string              `yaml:"name"`
+			Image        string              `yaml:"image"`
+			Env          []ecsEnvironmentVar `yaml:"env"`
+			VolumeMounts []struct {
+				Name      string `yaml:"name"`
+				MountPath string `yaml:"mountPath"`
+				ReadOnly  bool   `yaml:"readOnly"`
+			} `yaml:"volumeMounts"`
+		} `yaml:"containers"`
+		Volumes []map[string]any `yaml:"volumes"`
+	}
+	if err := yaml.Unmarshal([]byte(patch), &podSpec); err != nil {
+		t.Fatalf("Pod spec fragment YAML did not parse: %v\n%s", err, patch)
+	}
+	if podSpec.SecurityContext["fsGroup"] == nil || len(podSpec.Containers) != 2 || len(podSpec.Volumes) != 3 {
+		t.Fatalf("pod spec = %+v, want fsGroup, two containers, and three volumes", podSpec)
+	}
+	origin, connector := podSpec.Containers[0], podSpec.Containers[1]
+	if origin.Name != testS3OriginContainer || origin.Image != defaultS3StaticConnectorImage {
+		t.Fatalf("origin pod container = %+v", origin)
+	}
+	originEnv := ecsEnvMap(origin.Env)
+	for name, want := range map[string]string{
+		testS3EnvBucket:         testS3WebsiteBucket,
+		testS3EnvRegion:         testS3WebsiteRegion,
+		testS3EnvPrefix:         testS3WebsitePrefix,
+		testS3EnvIndex:          testS3WebsiteIndex,
+		testS3EnvCacheConnector: testTunnelSlug,
+	} {
+		if got := originEnv[name]; got != want {
+			t.Fatalf("origin env %s = %q, want %q", name, got, want)
+		}
+	}
+	connectorEnv := ecsEnvMap(connector.Env)
+	if connector.Name != ecsConnectorContainerName || connector.Image != testTunnelImageRef {
+		t.Fatalf("connector pod container = %+v", connector)
+	}
+	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
+		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
+	}
+	assertNoPinnedS3Identity(t, got)
+}
+
 func connectorSetupViewSubmissionBody(t *testing.T, meta *TunnelInstallModalMetadata, setupType string) string {
 	t.Helper()
 	pm, err := json.Marshal(meta)
@@ -359,4 +579,54 @@ func s3WebsiteInstallModalValues(slug, shortcut, env, bucket, region, prefix, in
 func asString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func testS3WebsiteArgs(env tunnelInstallEnvironment) *s3WebsiteInstallArgs {
+	return &s3WebsiteInstallArgs{
+		Slug:          testTunnelSlug,
+		Alias:         "team-dash",
+		Environment:   env,
+		Bucket:        testS3WebsiteBucket,
+		Region:        testS3WebsiteRegion,
+		Prefix:        testS3WebsitePrefix,
+		IndexDocument: testS3WebsiteIndex,
+	}
+}
+
+func extractS3TestBlock(t *testing.T, got, start, end string) string {
+	t.Helper()
+	bodyStart := strings.Index(got, start)
+	if bodyStart < 0 {
+		t.Fatalf("missing block start %q:\n%s", start, got)
+	}
+	bodyStart += len(start)
+	bodyEnd := strings.Index(got[bodyStart:], end)
+	if bodyEnd < 0 {
+		t.Fatalf("missing block end %q:\n%s", end, got)
+	}
+	return got[bodyStart : bodyStart+bodyEnd]
+}
+
+func ecsEnvMap(vars []ecsEnvironmentVar) map[string]string {
+	env := map[string]string{}
+	for _, item := range vars {
+		env[item.Name] = item.Value
+	}
+	return env
+}
+
+func assertNoPinnedS3Identity(t *testing.T, got string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		fAttrResourceID,
+		testKeyKnockResourceID,
+		testForbiddenKnockResourceEnv,
+		testForbiddenSlackShellFence,
+		testForbiddenSlackYAMLFence,
+		testTunnelModalKey,
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("S3 website instructions leaked %q:\n%s", forbidden, got)
+		}
+	}
 }
