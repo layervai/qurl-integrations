@@ -270,11 +270,10 @@ func isS3WebsiteCommercialRegion(region string) bool {
 	if !s3WebsiteRegionPattern.MatchString(region) {
 		return false
 	}
-	// Mirror origins/s3-static-connector/render.sh's unsupported partition
-	// prefixes. The Slack-side regex is otherwise a stricter preflight gate for
-	// real AWS region suffixes, so rejected modal values fail before key mint;
-	// the four-segment us-* partitions are already rejected before this loop.
-	for _, unsupportedPrefix := range []string{"cn-", "us-gov-", "us-iso-", "us-isob-"} {
+	// Mirror origins/s3-static-connector/render.sh's unsupported commercial
+	// partition check. The Slack-side regex already rejects four-segment
+	// us-gov/us-iso/us-isob values before this point.
+	for _, unsupportedPrefix := range []string{"cn-"} {
 		if strings.HasPrefix(region, unsupportedPrefix) {
 			return false
 		}
@@ -348,7 +347,13 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 		log.Error("S3 website install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_dm_delivery_failed")
 		panicCleanup = nil
-		_ = h.postResponse(log, req.responseURL, "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted. Re-run `/qurl-admin protect` after DM delivery is available.")
+		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
+		if errors.Is(err, ErrSlackMissingScope) {
+			message += " " + h.tunnelBootstrapDMSlackAppInstallMessage()
+		} else {
+			message += " Re-run `/qurl-admin protect` after DM delivery is available."
+		}
+		_ = h.postResponse(log, req.responseURL, message)
 		return
 	}
 
@@ -655,7 +660,7 @@ docker run -d \
 		return "", err
 	}
 	intro := "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the bootstrap key so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate the S3 origin container, recreate the qURL Connector container too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running; if the connector exhausted retries before the origin namespace existed, rerun this block to recreate both containers.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "` and `docker logs -f qurl-s3-origin-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart the qURL Connector container too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running; if the connector exhausted retries before the origin namespace existed, rerun this block to recreate both containers.", nil
 }
 
 func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -703,7 +708,9 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 	}
 	// The Compose heredoc is intentionally unquoted so the target host expands
 	// ${AGENT_STATE_DIR}, ${SECRET_DIR}, and ${QURL_CONNECTOR_ID}. Interpolated
-	// S3 fields reach this template only after strict modal validation.
+	// S3 fields reach this template only after strict modal validation, and
+	// image refs remain safe only while ValidateTunnelImageRef excludes shell
+	// metacharacters such as $, backticks, backslashes, and whitespace.
 	compose := fmt.Sprintf(`set -eu
 %s
 
@@ -758,7 +765,7 @@ docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), re
 		return "", err
 	}
 	intro := "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the bootstrap key so the secret does not land in shell history."
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate or rename the S3 origin service, recreate the qURL Connector service too because it shares the origin service network namespace. After a Docker daemon restart, verify both services are running; if the connector exhausted retries before the origin namespace existed, rerun this block to recreate both services.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f qurl-s3-website-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file. If you recreate, rename, or Docker auto-restarts the S3 origin service after a crash, recreate or restart the qURL Connector service too because it shares the origin service network namespace. After a Docker daemon restart, verify both services are running; if the connector exhausted retries before the origin namespace existed, rerun this block to recreate both services.", nil
 }
 
 func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {

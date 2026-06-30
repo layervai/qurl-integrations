@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,11 @@ const (
 	testS3EnvIndex           = "INDEX_DOCUMENT"
 	testS3EnvCacheConnector  = "CACHE_CONNECTOR_ID"
 	testS3OriginImageRef     = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	testSlackAppInstallHint  = "latest qURL Slack app install"
+	testSlackAppInstallLink  = "<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>"
+	testProtectConnectorCmd  = "/qurl-admin protect-connector"
+	testInstallBlockLead     = "Run this whole block"
+	testDockerRunDetached    = "docker run -d"
 )
 
 func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T) {
@@ -246,6 +252,87 @@ func TestS3WebsiteInstallModalSubmissionLetsBootstrapBindResource(t *testing.T) 
 	}
 	if !found || gotRID != testTunnelResourceID {
 		t.Fatalf("alias lookup = (%q, %v), want (%s, true)", gotRID, found, testTunnelResourceID)
+	}
+}
+
+func TestS3WebsiteInstallDMFailureMissingScopeIncludesInstallHint(t *testing.T) {
+	now := fixedNow
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:      testTunnelAPIKeyID,
+			testKeyAPIKey:     testTunnelModalKey,
+			testKeyStatus:     client.StatusActive,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+			testKeyTunnelSlug: testTunnelSlug,
+			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	freezeTunnelBootstrapNow(t, h, now)
+	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
+	h.cfg.TunnelImage = testTunnelImageRef
+	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
+	}
+	h.SetAliasStore(h.cfg.AdminStore)
+	inv := newAdminSlashInvoker(t, h)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   inv.responseU.URL,
+		CreatedAtUnix: now.Unix(),
+	}
+	body := s3WebsiteInstallViewSubmissionBody(t, &meta, s3WebsiteInstallModalValues(
+		testTunnelSlug,
+		"$team-dash",
+		string(tunnelEnvDocker),
+		testS3WebsiteBucket,
+		testS3WebsiteRegion,
+		testS3WebsitePrefix,
+		testS3WebsiteIndex,
+	))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	failure := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
+	if revokeHits != 1 {
+		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+	for _, want := range []string{
+		"temporary key was revoked",
+		testSlackAppInstallHint,
+		testSlackAppInstallLink,
+		testProtectConnectorCmd,
+	} {
+		if !strings.Contains(failure, want) {
+			t.Fatalf("failure notice = %s, missing %q", failure, want)
+		}
+	}
+	for _, forbidden := range []string{testTunnelModalKey, testInstallBlockLead, testDockerRunDetached} {
+		if strings.Contains(failure, forbidden) {
+			t.Fatalf("missing-scope notice leaked install secret/details %q: %s", forbidden, failure)
+		}
 	}
 }
 
@@ -472,6 +559,22 @@ func TestRenderS3WebsiteConnectorConfigYAMLDoesNotPinResourceIdentity(t *testing
 	}
 }
 
+func TestRenderDockerS3WebsiteInstructionsMentionsOriginAutoRestart(t *testing.T) {
+	got, err := renderDockerS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvDocker), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
+	}
+	for _, want := range []string{
+		"Docker auto-restarts it after a crash",
+		"recreate or restart the qURL Connector container",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Docker instructions missing %q:\n%s", want, got)
+		}
+	}
+	assertNoPinnedS3Identity(t, got)
+}
+
 func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testing.T) {
 	got, err := renderDockerComposeS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvCompose), testTunnelImageRef, defaultS3StaticConnectorImage)
 	if err != nil {
@@ -517,6 +620,9 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	}
 	if !strings.Contains(got, "After a Docker daemon restart, verify both services are running") {
 		t.Fatalf("Compose instructions missing daemon-restart recovery note:\n%s", got)
+	}
+	if !strings.Contains(got, "Docker auto-restarts the S3 origin service after a crash") {
+		t.Fatalf("Compose instructions missing origin auto-restart recovery note:\n%s", got)
 	}
 	assertNoPinnedS3Identity(t, got)
 }
