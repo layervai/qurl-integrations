@@ -275,12 +275,7 @@ func isS3WebsiteCommercialRegion(region string) bool {
 	// Mirror origins/s3-static-connector/render.sh's unsupported commercial
 	// partition check. The Slack-side regex already rejects four-segment
 	// us-gov/us-iso/us-isob values before this point.
-	for _, unsupportedPrefix := range []string{"cn-"} {
-		if strings.HasPrefix(region, unsupportedPrefix) {
-			return false
-		}
-	}
-	return true
+	return !strings.HasPrefix(region, "cn-")
 }
 
 func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {

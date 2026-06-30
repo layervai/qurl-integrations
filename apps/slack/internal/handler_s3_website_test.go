@@ -491,6 +491,157 @@ func TestParseS3WebsiteInstallModalArgsValidatesS3Fields(t *testing.T) {
 	}
 }
 
+func TestParseS3WebsiteInstallModalArgsRejectsComposeShellMetacharacters(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		blockID  string
+		actionID string
+		value    string
+	}{
+		{
+			name:     "slug dollar",
+			blockID:  s3WebsiteInstallBlockSlug,
+			actionID: s3WebsiteInstallActionSlug,
+			value:    "stats$site",
+		},
+		{
+			name:     "slug backtick",
+			blockID:  s3WebsiteInstallBlockSlug,
+			actionID: s3WebsiteInstallActionSlug,
+			value:    "stats`site",
+		},
+		{
+			name:     "slug backslash",
+			blockID:  s3WebsiteInstallBlockSlug,
+			actionID: s3WebsiteInstallActionSlug,
+			value:    `stats\site`,
+		},
+		{
+			name:     "slug whitespace",
+			blockID:  s3WebsiteInstallBlockSlug,
+			actionID: s3WebsiteInstallActionSlug,
+			value:    "stats site",
+		},
+		{
+			name:     "bucket dollar",
+			blockID:  s3WebsiteInstallBlockBucket,
+			actionID: s3WebsiteInstallActionBucket,
+			value:    "stats$site",
+		},
+		{
+			name:     "bucket backtick",
+			blockID:  s3WebsiteInstallBlockBucket,
+			actionID: s3WebsiteInstallActionBucket,
+			value:    "stats`site",
+		},
+		{
+			name:     "bucket backslash",
+			blockID:  s3WebsiteInstallBlockBucket,
+			actionID: s3WebsiteInstallActionBucket,
+			value:    `stats\site`,
+		},
+		{
+			name:     "bucket whitespace",
+			blockID:  s3WebsiteInstallBlockBucket,
+			actionID: s3WebsiteInstallActionBucket,
+			value:    "stats site",
+		},
+		{
+			name:     "region dollar",
+			blockID:  s3WebsiteInstallBlockRegion,
+			actionID: s3WebsiteInstallActionRegion,
+			value:    "us$east-1",
+		},
+		{
+			name:     "region backtick",
+			blockID:  s3WebsiteInstallBlockRegion,
+			actionID: s3WebsiteInstallActionRegion,
+			value:    "us`east-1",
+		},
+		{
+			name:     "region backslash",
+			blockID:  s3WebsiteInstallBlockRegion,
+			actionID: s3WebsiteInstallActionRegion,
+			value:    `us\east-1`,
+		},
+		{
+			name:     "region whitespace",
+			blockID:  s3WebsiteInstallBlockRegion,
+			actionID: s3WebsiteInstallActionRegion,
+			value:    "us east-1",
+		},
+		{
+			name:     "prefix dollar",
+			blockID:  s3WebsiteInstallBlockPrefix,
+			actionID: s3WebsiteInstallActionPrefix,
+			value:    "website$prod",
+		},
+		{
+			name:     "prefix backtick",
+			blockID:  s3WebsiteInstallBlockPrefix,
+			actionID: s3WebsiteInstallActionPrefix,
+			value:    "website`prod",
+		},
+		{
+			name:     "prefix backslash",
+			blockID:  s3WebsiteInstallBlockPrefix,
+			actionID: s3WebsiteInstallActionPrefix,
+			value:    `website\prod`,
+		},
+		{
+			name:     "prefix whitespace",
+			blockID:  s3WebsiteInstallBlockPrefix,
+			actionID: s3WebsiteInstallActionPrefix,
+			value:    "website prod",
+		},
+		{
+			name:     "index dollar",
+			blockID:  s3WebsiteInstallBlockIndex,
+			actionID: s3WebsiteInstallActionIndex,
+			value:    "index$.html",
+		},
+		{
+			name: "baseline valid",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values := s3WebsiteInstallModalValues(
+				testTunnelSlug,
+				"$team-dash",
+				string(tunnelEnvDocker),
+				testS3WebsiteBucket,
+				testS3WebsiteRegion,
+				testS3WebsitePrefix,
+				testS3WebsiteIndex,
+			)
+			if tc.blockID != "" {
+				state := values[tc.blockID][tc.actionID]
+				state.Value = tc.value
+				values[tc.blockID][tc.actionID] = state
+			}
+			args, fieldErrors := parseS3WebsiteInstallModalArgs(values)
+			if tc.blockID == "" {
+				if len(fieldErrors) > 0 {
+					t.Fatalf("fieldErrors = %+v, want none", fieldErrors)
+				}
+				if args == nil {
+					t.Fatal("args = nil, want parsed args")
+				}
+				return
+			}
+			if args != nil {
+				t.Fatalf("args = %+v, want nil", args)
+			}
+			if _, ok := fieldErrors[tc.blockID]; !ok {
+				t.Fatalf("fieldErrors missing %s: %+v", tc.blockID, fieldErrors)
+			}
+		})
+	}
+}
+
 func TestParseS3WebsiteInstallModalArgsDefaultsDirectoryIndex(t *testing.T) {
 	values := s3WebsiteInstallModalValues(
 		testTunnelSlug,
