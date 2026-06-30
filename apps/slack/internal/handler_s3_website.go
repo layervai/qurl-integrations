@@ -998,6 +998,7 @@ volumes:
   - name: qurl-bootstrap
     secret:
       secretName: %s
+      # fsGroup 65532 grants group-read access to the nonroot sidecars.
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
