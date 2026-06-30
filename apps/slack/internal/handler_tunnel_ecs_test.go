@@ -45,7 +45,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", testForbiddenKnockResourceEnv} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -78,5 +78,12 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 	if container.Secrets[0].ValueFrom != "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_"+testTunnelSlug {
 		t.Fatalf("ECS secret ValueFrom = %q, want unmistakable replacement placeholder", container.Secrets[0].ValueFrom)
+	}
+	env := map[string]string{}
+	for _, e := range container.Environment {
+		env[e.Name] = e.Value
+	}
+	if _, ok := env[testForbiddenKnockResourceEnv]; ok {
+		t.Fatalf("ECS environment should not include %s: %+v", testForbiddenKnockResourceEnv, env)
 	}
 }

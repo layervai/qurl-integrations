@@ -60,12 +60,14 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"up -d qurl-connector\n",
 		"logs -f qurl-connector`;",
 		"Verify with `docker compose -f \"$APP_COMPOSE_FILE\"",
+		testTunnelResourceID,
+		testForbiddenKnockResourceEnv,
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -94,7 +96,8 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 	}
 	var parsed struct {
 		Services map[string]struct {
-			Image string `yaml:"image"`
+			Image       string            `yaml:"image"`
+			Environment map[string]string `yaml:"environment"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal([]byte(got[bodyStart:bodyStart+bodyEnd]), &parsed); err != nil {
@@ -103,6 +106,9 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 	service := parsed.Services["qurl-connector-"+testTunnelSlug]
 	if service.Image != testTunnelImageRef {
 		t.Fatalf("Compose service image = %q, want %q", service.Image, testTunnelImageRef)
+	}
+	if _, ok := service.Environment[testForbiddenKnockResourceEnv]; ok {
+		t.Fatalf("Compose service should not include %s: %+v", testForbiddenKnockResourceEnv, service.Environment)
 	}
 }
 
@@ -131,5 +137,8 @@ func TestRenderDockerComposeTunnelInstructionsPinsValidatedExpansionInputs(t *te
 		if !strings.Contains(got, want) {
 			t.Fatalf("Docker Compose instructions missing validated-expansion guard %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, testForbiddenKnockResourceEnv) {
+		t.Fatalf("Docker Compose instructions leaked placement env:\n%s", got)
 	}
 }

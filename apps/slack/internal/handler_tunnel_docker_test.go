@@ -40,7 +40,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	if strings.Contains(got, "Replace `YOUR_WEB_CONTAINER_NAME`") {
 		t.Fatalf("Docker instructions still included placeholder warning:\n%s", got)
 	}
-	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv} {
+	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv, testTunnelResourceID, testForbiddenKnockResourceEnv} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker instructions leaked %q:\n%s", forbidden, got)
 		}

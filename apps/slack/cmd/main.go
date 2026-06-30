@@ -39,6 +39,7 @@ const (
 	listenAddr                    = ":8080"
 	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
+	envQURLS3OriginImage          = "QURL_S3_ORIGIN_IMAGE"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
@@ -52,6 +53,7 @@ const (
 	connectorImageErrMalformedRef    = "invalid image reference; use lowercase image:tag or lowercase image@sha256:<64 lowercase hex>"
 	connectorImageErrAmbiguousRef    = "ambiguous slashless registry ref; include a repository path such as gcr.io/<org>/<image>:v1"
 	connectorImageErrMalformedDigest = "invalid digest ref; use image@sha256:<64 lowercase hex> with a full image name, not bare sha256:<digest>"
+	s3OriginImageErrDigestRequired   = "must be digest-pinned as image@sha256:<64 lowercase hex>"
 
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
@@ -174,6 +176,10 @@ func run() error {
 	// Validate the customer-rendered connector image before infra clients so
 	// manifest mistakes fail with the image-specific startup error.
 	tunnelImage, err := readTunnelImageConfig()
+	if err != nil {
+		return err
+	}
+	s3OriginImage, err := readS3OriginImageConfig()
 	if err != nil {
 		return err
 	}
@@ -317,6 +323,7 @@ func run() error {
 		AdminStore:                     adminStore,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		S3OriginImage:                  s3OriginImage,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -1222,42 +1229,7 @@ func readTunnelImageConfig() (string, error) {
 		// dev/sandbox env cannot break a correctly pinned production image.
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
-		switch connectorimage.ClassifyPin(image) {
-		case connectorimage.Accepted:
-			return image, nil
-		case connectorimage.LatestDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrLatestDigest,
-			)
-		case connectorimage.UppercaseDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrDigestLowercase,
-			)
-		case connectorimage.MalformedReference:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrMalformedRef,
-			)
-		case connectorimage.AmbiguousReference:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrAmbiguousRef,
-			)
-		case connectorimage.MalformedDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrMalformedDigest,
-			)
-		case connectorimage.Floating:
-			return "", fmt.Errorf(
-				"%s: %s; %s",
-				envQURLConnectorImage, connectorImageErrFloating, connectorImageFallbackHint,
-			)
-		}
-		// Future connectorimage.PinStatus values must fail closed.
-		return "", fmt.Errorf("%s could not validate image pinning", envQURLConnectorImage)
+		return readPinnedImageConfig(envQURLConnectorImage, image, connectorImageFallbackHint)
 	}
 
 	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))
@@ -1270,6 +1242,64 @@ func readTunnelImageConfig() (string, error) {
 	default:
 		return "", fmt.Errorf("%s=%q is unsupported; set %s only for dev/sandbox, or set %s to a specific non-latest tag or digest", envQURLConnectorImageFallback, rawFallback, connectorImageFallbackOptIn, envQURLConnectorImage)
 	}
+}
+
+func readS3OriginImageConfig() (string, error) {
+	image := strings.TrimSpace(os.Getenv(envQURLS3OriginImage))
+	if err := internal.ValidateTunnelImageRef(image); err != nil {
+		return "", fmt.Errorf("%s: %w", envQURLS3OriginImage, err)
+	}
+	if image == "" {
+		return "", nil
+	}
+	pinned, err := readPinnedImageConfig(envQURLS3OriginImage, image, "")
+	if err != nil {
+		return "", err
+	}
+	if !strings.Contains(pinned, "@sha256:") {
+		return "", fmt.Errorf("%s: %s", envQURLS3OriginImage, s3OriginImageErrDigestRequired)
+	}
+	return pinned, nil
+}
+
+func readPinnedImageConfig(envName, image, floatingHint string) (string, error) {
+	switch connectorimage.ClassifyPin(image) {
+	case connectorimage.Accepted:
+		return image, nil
+	case connectorimage.LatestDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrLatestDigest,
+		)
+	case connectorimage.UppercaseDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrDigestLowercase,
+		)
+	case connectorimage.MalformedReference:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrMalformedRef,
+		)
+	case connectorimage.AmbiguousReference:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrAmbiguousRef,
+		)
+	case connectorimage.MalformedDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrMalformedDigest,
+		)
+	case connectorimage.Floating:
+		msg := connectorImageErrFloating
+		if floatingHint != "" {
+			msg += "; " + floatingHint
+		}
+		return "", fmt.Errorf("%s: %s", envName, msg)
+	}
+	// Future connectorimage.PinStatus values must fail closed.
+	return "", fmt.Errorf("%s could not validate image pinning", envName)
 }
 
 // readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;

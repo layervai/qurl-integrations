@@ -124,6 +124,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"runAsUser: 0",
 		"defaultMode: 0400",
 		"defaultMode: 0444",
+		testTunnelResourceID,
+		testForbiddenKnockResourceEnv,
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
