@@ -802,9 +802,9 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"1. Store the bootstrap key from the separate DM in AWS Secrets Manager. This install-instructions message intentionally does not contain the key.\n\n" +
 		"2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n" +
 		configBlock + "\n\n" +
-		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager:\n\n" +
+		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager and replace `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Create the CloudWatch Logs group `/ecs/qurl-s3-website` if it does not already exist.\n" +
+		"4. Create the CloudWatch Logs group `/ecs/qurl-s3-website` in the ECS task region if it does not already exist.\n" +
 		"5. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
 }
 
@@ -827,7 +827,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				LogDriver: ecsLogDriverAWSLogs,
 				Options: map[string]string{
 					ecsLogGroupOption:        s3WebsiteECSLogGroup,
-					ecsLogRegionOption:       args.Region,
+					ecsLogRegionOption:       ecsLogRegionPlaceholder,
 					ecsLogStreamPrefixOption: "origin",
 				},
 			},
@@ -850,7 +850,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				LogDriver: ecsLogDriverAWSLogs,
 				Options: map[string]string{
 					ecsLogGroupOption:        s3WebsiteECSLogGroup,
-					ecsLogRegionOption:       args.Region,
+					ecsLogRegionOption:       ecsLogRegionPlaceholder,
 					ecsLogStreamPrefixOption: ecsLogStreamPrefixQURL,
 				},
 			},

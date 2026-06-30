@@ -877,7 +877,10 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if !strings.Contains(instructions, "Do not share qurl-agent-state across concurrently running sidecars") {
 		t.Fatalf("ECS instructions missing qurl-agent-state sharing warning:\n%s", instructions)
 	}
-	if !strings.Contains(instructions, "Create the CloudWatch Logs group `/ecs/qurl-s3-website`") {
+	if !strings.Contains(instructions, "replace `"+ecsLogRegionPlaceholder+"` with the ECS task region") {
+		t.Fatalf("ECS instructions missing awslogs task-region placeholder guidance:\n%s", instructions)
+	}
+	if !strings.Contains(instructions, "Create the CloudWatch Logs group `/ecs/qurl-s3-website` in the ECS task region") {
 		t.Fatalf("ECS instructions missing CloudWatch log group setup note:\n%s", instructions)
 	}
 
@@ -909,8 +912,8 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 		}
 		assertNoShellMetacharacter(t, "ECS origin env "+name, originEnv[name])
 	}
-	if got := origin.LogConfiguration.Options[ecsLogRegionOption]; got != testS3WebsiteRegion {
-		t.Fatalf("origin awslogs-region = %q, want modal region %q", got, testS3WebsiteRegion)
+	if got := origin.LogConfiguration.Options[ecsLogRegionOption]; got != ecsLogRegionPlaceholder {
+		t.Fatalf("origin awslogs-region = %q, want task-region placeholder", got)
 	}
 	connectorEnv := ecsEnvMap(connector.Environment)
 	if connector.Name != ecsConnectorContainerName || connector.Image != testTunnelImageRef {
@@ -919,8 +922,8 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
 	}
-	if got := connector.LogConfiguration.Options[ecsLogRegionOption]; got != testS3WebsiteRegion {
-		t.Fatalf("connector awslogs-region = %q, want modal region %q", got, testS3WebsiteRegion)
+	if got := connector.LogConfiguration.Options[ecsLogRegionOption]; got != ecsLogRegionPlaceholder {
+		t.Fatalf("connector awslogs-region = %q, want task-region placeholder", got)
 	}
 	if _, ok := connectorEnv[testForbiddenKnockResourceEnv]; ok {
 		t.Fatalf("connector env should not include %s: %+v", testForbiddenKnockResourceEnv, connectorEnv)
