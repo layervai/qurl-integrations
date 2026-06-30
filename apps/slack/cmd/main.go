@@ -53,6 +53,7 @@ const (
 	connectorImageErrMalformedRef    = "invalid image reference; use lowercase image:tag or lowercase image@sha256:<64 lowercase hex>"
 	connectorImageErrAmbiguousRef    = "ambiguous slashless registry ref; include a repository path such as gcr.io/<org>/<image>:v1"
 	connectorImageErrMalformedDigest = "invalid digest ref; use image@sha256:<64 lowercase hex> with a full image name, not bare sha256:<digest>"
+	s3OriginImageErrDigestRequired   = "must be digest-pinned as image@sha256:<64 lowercase hex>"
 
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
@@ -1228,7 +1229,7 @@ func readTunnelImageConfig() (string, error) {
 		// dev/sandbox env cannot break a correctly pinned production image.
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
-		return readPinnedImageConfig(envQURLConnectorImage, image)
+		return readPinnedImageConfig(envQURLConnectorImage, image, connectorImageFallbackHint)
 	}
 
 	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))
@@ -1251,17 +1252,17 @@ func readS3OriginImageConfig() (string, error) {
 	if image == "" {
 		return "", nil
 	}
-	pinned, err := readPinnedImageConfig(envQURLS3OriginImage, image)
+	pinned, err := readPinnedImageConfig(envQURLS3OriginImage, image, "")
 	if err != nil {
 		return "", err
 	}
 	if !strings.Contains(pinned, "@sha256:") {
-		return "", fmt.Errorf("%s: %s", envQURLS3OriginImage, connectorImageErrFloating)
+		return "", fmt.Errorf("%s: %s", envQURLS3OriginImage, s3OriginImageErrDigestRequired)
 	}
 	return pinned, nil
 }
 
-func readPinnedImageConfig(envName, image string) (string, error) {
+func readPinnedImageConfig(envName, image, floatingHint string) (string, error) {
 	switch connectorimage.ClassifyPin(image) {
 	case connectorimage.Accepted:
 		return image, nil
@@ -1292,8 +1293,8 @@ func readPinnedImageConfig(envName, image string) (string, error) {
 		)
 	case connectorimage.Floating:
 		msg := connectorImageErrFloating
-		if envName == envQURLConnectorImage {
-			msg += "; " + connectorImageFallbackHint
+		if floatingHint != "" {
+			msg += "; " + floatingHint
 		}
 		return "", fmt.Errorf("%s: %s", envName, msg)
 	default:

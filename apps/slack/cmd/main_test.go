@@ -312,8 +312,13 @@ func TestReadS3OriginImageConfig(t *testing.T) {
 		},
 		{
 			name:        "floating override rejected",
-			image:       testConnectorImageRepo + ":main",
+			image:       testConnectorImageRepo,
 			wantErrText: connectorImageErrFloating,
+		},
+		{
+			name:        "tagged override requires digest",
+			image:       testConnectorImageRepo + ":main",
+			wantErrText: s3OriginImageErrDigestRequired,
 		},
 	}
 	for _, tc := range cases {
