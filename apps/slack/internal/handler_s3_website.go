@@ -29,6 +29,11 @@ const (
 	s3WebsiteECSLogGroup             = "/ecs/qurl-s3-website"
 )
 
+// TODO(upstream-contract): the generated Docker, Compose, and Kubernetes
+// artifacts assume qurl-connector and origins/s3-static-connector both run as
+// distroless nonroot UID/GID 65532. Keep host ownership, fsGroup, runAsUser,
+// runAsGroup, and Secret defaultMode in lockstep with those image users.
+
 var (
 	// Intentionally lighter than the full AWS bucket-name rule set: Slack
 	// rejects dotted/shell-unsafe values early, and AWS remains the final
@@ -103,7 +108,8 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 	}
 	// The chooser itself is non-mutating. Once freshness is verified, re-stamp
 	// the setup-specific install modal so admins still get a full bounded window
-	// to fill out the selected connector form.
+	// to fill out the selected connector form. This intentionally gives the
+	// chooser and install form one TTL window each.
 	meta.CreatedAtUnix = h.now().Unix()
 
 	var (
@@ -804,7 +810,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		configBlock + "\n\n" +
 		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager and replace `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Create the CloudWatch Logs group `/ecs/qurl-s3-website` in the ECS task region if it does not already exist.\n" +
+		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
 		"5. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
 }
 
