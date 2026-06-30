@@ -166,6 +166,9 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 		responseURL:  meta.ResponseURL,
 		args:         args,
 	}
+	// S3 website setup is reachable only from the human admin chooser today, so
+	// there is no agent-origin audit row to attach. If an agent-origin entry point
+	// is added, mirror handleTunnelInstallSubmission's audit wiring before minting.
 
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
@@ -373,8 +376,12 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 		log.Error("S3 website install: Slack follow-up delivery failed after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_response_url_delivery_failed")
 		panicCleanup = nil
-		_ = h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The S3 website qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect` again.")
-		_ = h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the S3 website qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect` again.")
+		if err := h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The S3 website qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect` again."); err != nil {
+			log.Error("S3 website install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "s3_website_bootstrap_discard_dm_delivery_failed")
+		}
+		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the S3 website qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect` again.") {
+			log.Error("S3 website install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "s3_website_bootstrap_discard_notice_delivery_failed")
+		}
 	default:
 		log.Error("S3 website install: unknown Slack follow-up delivery state after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_unknown_response_url_delivery_state")
