@@ -41,7 +41,15 @@ type ecsLogConfiguration struct {
 
 const (
 	ecsFargateChecklistText         = "ECS/Fargate task-definition checklist"
-	ecsFargateRegionPlaceholderNote = "Also replace the `<region>` placeholder in the `awslogs-region` field below."
+	ecsConnectorContainerName       = "qurl-connector"
+	ecsConnectorIDEnv               = "QURL_CONNECTOR_ID"
+	ecsLogDriverAWSLogs             = "awslogs"
+	ecsLogGroupOption               = "awslogs-group"
+	ecsLogRegionOption              = "awslogs-region"
+	ecsLogRegionPlaceholder         = "<region>"
+	ecsFargateRegionPlaceholderNote = "Also replace the `" + ecsLogRegionPlaceholder + "` placeholder in the `awslogs-region` field below."
+	ecsLogStreamPrefixOption        = "awslogs-stream-prefix"
+	ecsLogStreamPrefixQURL          = "qurl"
 )
 
 func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (string, error) {
@@ -49,7 +57,7 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 	if err != nil {
 		return "", err
 	}
-	secretName := "qurl-connector-" + args.Slug
+	secretName := ecsConnectorContainerName + "-" + args.Slug
 	configYAML, err := renderTunnelConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -80,12 +88,11 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
 	container := ecsContainerDefinition{
-		Name:      "qurl-connector",
+		Name:      ecsConnectorContainerName,
 		Image:     image,
 		Essential: false,
 		Environment: []ecsEnvironmentVar{
-			{Name: "QURL_CONNECTOR_ID", Value: args.Slug},
-			{Name: "LAYERV_KNOCK_RESOURCE_ID", Value: args.KnockResourceID},
+			{Name: ecsConnectorIDEnv, Value: args.Slug},
 		},
 		// TODO(qurl-connector-ecs-secret-file): prefer QURL_API_KEY_FILE once the
 		// ECS/Fargate guide uses a file-mounted secret runtime instead of native
@@ -98,11 +105,11 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 			{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
 		},
 		LogConfiguration: ecsLogConfiguration{
-			LogDriver: "awslogs",
+			LogDriver: ecsLogDriverAWSLogs,
 			Options: map[string]string{
-				"awslogs-group":         "/ecs/qurl-connector",
-				"awslogs-region":        "<region>",
-				"awslogs-stream-prefix": "qurl",
+				ecsLogGroupOption:        "/ecs/qurl-connector",
+				ecsLogRegionOption:       ecsLogRegionPlaceholder,
+				ecsLogStreamPrefixOption: ecsLogStreamPrefixQURL,
 			},
 		},
 	}

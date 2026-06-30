@@ -13,13 +13,11 @@ import (
 )
 
 const (
-	testS3WebsiteBucket        = "stats-site-bucket"
-	testS3WebsitePrefix        = "website"
-	testS3WebsiteIndex         = "index.html"
-	testS3WebsiteRegion        = "us-east-1"
-	testS3WebsiteKnockResource = "qurl-connector-server"
-	testKeyKnockResourceID     = "knock_resource_id"
-	testS3WebsiteDisplayName   = "Stats S3 website"
+	testS3WebsiteBucket      = "stats-site-bucket"
+	testS3WebsitePrefix      = "website"
+	testS3WebsiteIndex       = "index.html"
+	testS3WebsiteRegion      = "us-east-1"
+	testS3WebsiteDisplayName = "Stats S3 website"
 )
 
 func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T) {
@@ -85,7 +83,7 @@ func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T)
 	}
 }
 
-func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
+func TestS3WebsiteInstallModalSubmissionLetsBootstrapBindResource(t *testing.T) {
 	now := fixedNow
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -98,12 +96,11 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 			t.Fatalf("decode resource body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:      testTunnelResourceID,
-			testKeyKnockResourceID: testS3WebsiteKnockResource,
-			testKeyType:            client.ResourceTypeTunnel,
-			testKeySlug:            testTunnelSlug,
-			testKeyStatus:          client.StatusActive,
-			testKeyDescription:     testS3WebsiteDisplayName,
+			testKeyResourceID:  testTunnelResourceID,
+			testKeyType:        client.ResourceTypeTunnel,
+			testKeySlug:        testTunnelSlug,
+			testKeyStatus:      client.StatusActive,
+			testKeyDescription: testS3WebsiteDisplayName,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -173,16 +170,13 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 		"S3 website qURL Connector `" + testTunnelSlug + "`",
 		testS3WebsiteDisplayName,
 		"qURL alias `$team-dash` is ready in this channel.",
-		"generated qURL Connector config already includes the qURL resource details",
+		"first agent bootstrap response seeds the qURL resource identity",
 		"qURL Connector image: `" + testTunnelImageRef + "`",
 		"S3 origin image: `" + defaultS3StaticConnectorImage + "`",
 		"S3_BUCKET='" + testS3WebsiteBucket + "'",
 		"AWS_REGION='" + testS3WebsiteRegion + "'",
 		"S3_PREFIX='" + testS3WebsitePrefix + "'",
 		"INDEX_DOCUMENT='" + testS3WebsiteIndex + "'",
-		"LAYERV_KNOCK_RESOURCE_ID='" + testS3WebsiteKnockResource + "'",
-		"resource_id: '" + testTunnelResourceID + "'",
-		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		`--network "container:${ORIGIN_CONTAINER}"`,
 		"/qurl get $team-dash",
 	} {
@@ -190,7 +184,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testTunnelModalKey, testForbiddenSlackShellFence, testForbiddenSlackYAMLFence, "find_or_create", "YOUR_WEB_CONTAINER_NAME", "tunnel"} {
+	for _, forbidden := range []string{testTunnelModalKey, testForbiddenSlackShellFence, testForbiddenSlackYAMLFence, "find_or_create", "YOUR_WEB_CONTAINER_NAME", testTunnelResourceID, testForbiddenKnockResourceEnv, testKeyResourceID, testKeyKnockResourceID} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -204,7 +198,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 	}
 }
 
-func TestS3WebsiteInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *testing.T) {
+func TestS3WebsiteInstallRejectsMissingResourceIDBeforeMintingBootstrapKey(t *testing.T) {
 	now := fixedNow
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
@@ -212,10 +206,9 @@ func TestS3WebsiteInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *t
 	var apiKeyHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyType:   client.ResourceTypeTunnel,
+			testKeySlug:   testTunnelSlug,
+			testKeyStatus: client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -258,8 +251,8 @@ func TestS3WebsiteInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *t
 	if len(*dmPosts) != 0 {
 		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
 	}
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "knock_resource_id") {
-		t.Fatalf("async reply = %q, want incomplete identity error before key mint", async)
+	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "resource_id") {
+		t.Fatalf("async reply = %q, want missing resource_id error before key mint", async)
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, "team-dash"); err != nil || found {
 		t.Fatalf("alias lookup found=%v err=%v, want no alias bound before complete identity", found, err)

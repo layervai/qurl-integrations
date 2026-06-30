@@ -9,12 +9,10 @@ import (
 func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	t.Parallel()
 	got := mustRenderECSFargateTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:            testTunnelSlug,
-		Alias:           testTunnelSlug,
-		LocalPort:       9090,
-		Environment:     tunnelEnvECSFargate,
-		ResourceID:      testTunnelResourceID,
-		KnockResourceID: testTunnelKnockID,
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvECSFargate,
 	}, testTunnelImageRef)
 
 	for _, want := range []string{
@@ -36,11 +34,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point",
 		"mounted into the task as the `qurl-config` volume",
 		testTunnelLocalPort9090Line,
-		"resource_id: '" + testTunnelResourceID + "'",
 		`"name": "QURL_CONNECTOR_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
-		`"name": "LAYERV_KNOCK_RESOURCE_ID"`,
-		`"value": "` + testTunnelKnockID + `"`,
 		testTunnelECSAPIKeyNameLine,
 		`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
 		`"sourceVolume": "qurl-agent-state"`,
@@ -50,7 +45,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", testForbiddenKnockResourceEnv} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -63,12 +58,10 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 
 	containerJSON, err := renderECSSidecarContainerJSON(&tunnelInstallArgs{
-		Slug:            testTunnelSlug,
-		Alias:           testTunnelSlug,
-		LocalPort:       9090,
-		Environment:     tunnelEnvECSFargate,
-		ResourceID:      testTunnelResourceID,
-		KnockResourceID: testTunnelKnockID,
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   9090,
+		Environment: tunnelEnvECSFargate,
 	}, testTunnelImageRef)
 	if err != nil {
 		t.Fatalf("renderECSSidecarContainerJSON: %v", err)
@@ -90,7 +83,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	for _, e := range container.Environment {
 		env[e.Name] = e.Value
 	}
-	if env["LAYERV_KNOCK_RESOURCE_ID"] != testTunnelKnockID {
-		t.Fatalf("ECS environment LAYERV_KNOCK_RESOURCE_ID = %q, want %q", env["LAYERV_KNOCK_RESOURCE_ID"], testTunnelKnockID)
+	if _, ok := env[testForbiddenKnockResourceEnv]; ok {
+		t.Fatalf("ECS environment should not include %s: %+v", testForbiddenKnockResourceEnv, env)
 	}
 }

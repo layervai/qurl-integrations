@@ -22,6 +22,7 @@ const (
 	defaultS3WebsiteIndexDocument    = "index.html"
 	s3WebsiteOriginPort              = defaultTunnelLocalPort
 	s3WebsiteUnexpectedFailureNotice = "S3 website qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect` again."
+	s3WebsiteECSLogGroup             = "/ecs/qurl-s3-website"
 )
 
 var (
@@ -32,15 +33,13 @@ var (
 )
 
 type s3WebsiteInstallArgs struct {
-	Slug            string
-	Alias           string
-	Environment     tunnelInstallEnvironment
-	Bucket          string
-	Region          string
-	Prefix          string
-	IndexDocument   string
-	ResourceID      string
-	KnockResourceID string
+	Slug          string
+	Alias         string
+	Environment   tunnelInstallEnvironment
+	Bucket        string
+	Region        string
+	Prefix        string
+	IndexDocument string
 }
 
 type s3WebsiteInstallRequest struct {
@@ -384,12 +383,10 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		log.Error("S3 website install: create/find resource failed", "error", err, "slug", args.Slug)
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
-	if resource.ResourceID == "" || resource.KnockResourceID == "" {
-		log.Error("S3 website install: qURL API response missing pinned connector identity", "slug", args.Slug, "resource_id_present", resource.ResourceID != "", "knock_resource_id_present", resource.KnockResourceID != "")
-		return nil, "qURL Connector setup could not receive the resource details needed for a one-time bootstrap key. No bootstrap key was minted. Please retry after the qURL API returns resource_id and knock_resource_id for connector resources.", errors.New("qURL Connector resource identity incomplete")
+	if resource.ResourceID == "" {
+		log.Error("S3 website install: qURL API response missing resource identity", "slug", args.Slug)
+		return nil, "qURL Connector setup could not receive the resource needed for the Slack shortcut. No bootstrap key was minted. Please retry after the qURL API returns resource_id for connector resources.", errors.New("qURL Connector resource identity incomplete")
 	}
-	args.ResourceID = resource.ResourceID
-	args.KnockResourceID = resource.KnockResourceID
 
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resource.ResourceID)
 	if err != nil {
@@ -508,7 +505,7 @@ func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key
 	b.WriteString(aliasStatus)
 	b.WriteString("\n\nInstall instructions are below. The temporary bootstrap key ")
 	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
-	b.WriteString(" and was sent separately by DM. The generated qURL Connector config already includes the qURL resource details, so the bootstrap key is only for agent bootstrap and first start.")
+	b.WriteString(" and was sent separately by DM. The first agent bootstrap response seeds the qURL resource identity, so the key is only for agent bootstrap and first start.")
 	b.WriteString("\n\n")
 	b.WriteString("qURL Connector image: `")
 	b.WriteString(p.connectorImage)
@@ -551,16 +548,11 @@ func renderS3WebsiteConnectorConfigYAML(args *s3WebsiteInstallArgs) (string, err
 	if err != nil {
 		return "", err
 	}
-	quotedResourceID, err := yamlSingleQuoted(args.ResourceID)
-	if err != nil {
-		return "", err
-	}
 	return fmt.Sprintf(`routes:
   - id: %s
     type: http
     local_ip: 127.0.0.1
-    local_port: %d
-    resource_id: %s`, quotedSlug, s3WebsiteOriginPort, quotedResourceID), nil
+    local_port: %d`, quotedSlug, s3WebsiteOriginPort), nil
 }
 
 func renderDockerS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -574,7 +566,6 @@ func renderDockerS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImag
 %s
 
 QURL_CONNECTOR_ID=%s
-LAYERV_KNOCK_RESOURCE_ID=%s
 S3_BUCKET=%s
 AWS_REGION=%s
 S3_PREFIX=%s
@@ -620,8 +611,7 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  -e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID" \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.KnockResourceID), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(connectorImage))
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(connectorImage))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
@@ -645,10 +635,6 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 		return "", err
 	}
 	quotedSlug, err := yamlSingleQuoted(args.Slug)
-	if err != nil {
-		return "", err
-	}
-	quotedKnock, err := yamlSingleQuoted(args.KnockResourceID)
 	if err != nil {
 		return "", err
 	}
@@ -723,10 +709,9 @@ services:
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
       QURL_CONNECTOR_ID: %s
-      LAYERV_KNOCK_RESOURCE_ID: %s
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, originServiceName, quotedOriginService, quotedSlug, quotedKnock)
+docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, originServiceName, quotedOriginService, quotedSlug)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
@@ -753,7 +738,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 	if err != nil {
 		return "", err
 	}
-	secretName := "qurl-connector-" + args.Slug
+	secretName := ecsConnectorContainerName + "-" + args.Slug
 	intro := strings.Join([]string{
 		"Use this as an ECS/Fargate task-definition checklist.",
 		"Create the AWS Secrets Manager secret as `" + secretName + "` using the temporary bootstrap key delivered separately by DM.",
@@ -783,21 +768,20 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				{Name: "CACHE_CONNECTOR_ID", Value: args.Slug},
 			},
 			LogConfiguration: ecsLogConfiguration{
-				LogDriver: "awslogs",
+				LogDriver: ecsLogDriverAWSLogs,
 				Options: map[string]string{
-					"awslogs-group":         "/ecs/qurl-s3-website",
-					"awslogs-region":        "<region>",
-					"awslogs-stream-prefix": "origin",
+					ecsLogGroupOption:        s3WebsiteECSLogGroup,
+					ecsLogRegionOption:       ecsLogRegionPlaceholder,
+					ecsLogStreamPrefixOption: "origin",
 				},
 			},
 		},
 		{
-			Name:      "qurl-connector",
+			Name:      ecsConnectorContainerName,
 			Image:     connectorImage,
 			Essential: true,
 			Environment: []ecsEnvironmentVar{
-				{Name: "QURL_CONNECTOR_ID", Value: args.Slug},
-				{Name: "LAYERV_KNOCK_RESOURCE_ID", Value: args.KnockResourceID},
+				{Name: ecsConnectorIDEnv, Value: args.Slug},
 			},
 			Secrets: []ecsSecret{
 				{Name: tunnelEnvAPIKey, ValueFrom: "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug},
@@ -807,11 +791,11 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 				{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
 			},
 			LogConfiguration: ecsLogConfiguration{
-				LogDriver: "awslogs",
+				LogDriver: ecsLogDriverAWSLogs,
 				Options: map[string]string{
-					"awslogs-group":         "/ecs/qurl-s3-website",
-					"awslogs-region":        "<region>",
-					"awslogs-stream-prefix": "qurl",
+					ecsLogGroupOption:        s3WebsiteECSLogGroup,
+					ecsLogRegionOption:       ecsLogRegionPlaceholder,
+					ecsLogStreamPrefixOption: ecsLogStreamPrefixQURL,
 				},
 			},
 		},
@@ -849,10 +833,6 @@ func renderKubernetesS3WebsiteInstructions(args *s3WebsiteInstallArgs, connector
 		return "", err
 	}
 	quotedSlug, err := yamlSingleQuoted(args.Slug)
-	if err != nil {
-		return "", err
-	}
-	quotedKnock, err := yamlSingleQuoted(args.KnockResourceID)
 	if err != nil {
 		return "", err
 	}
@@ -936,8 +916,6 @@ containers:
         value: /run/secrets/qurl-connector/api_key
       - name: QURL_CONNECTOR_ID
         value: %s
-      - name: LAYERV_KNOCK_RESOURCE_ID
-        value: %s
     volumeMounts:
       - name: qurl-agent-state
         mountPath: /var/lib/layerv/agent
@@ -958,7 +936,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorImage, quotedSlug, quotedKnock, quotedAgentPVC, quotedSecret, quotedConfigMap)
+      name: %s`, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorImage, quotedSlug, quotedAgentPVC, quotedSecret, quotedConfigMap)
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {

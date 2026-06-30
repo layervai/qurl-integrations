@@ -28,12 +28,10 @@ func renderInstallForEnv(t *testing.T, env tunnelInstallEnvironment) string {
 	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
 	freezeTunnelBootstrapNow(t, h, now)
 	msg, err := h.renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:            testTunnelSlug,
-		Alias:           testTunnelSlug,
-		LocalPort:       defaultTunnelLocalPort,
-		Environment:     env,
-		ResourceID:      testTunnelResourceID,
-		KnockResourceID: testTunnelKnockID,
+		Slug:        testTunnelSlug,
+		Alias:       testTunnelSlug,
+		LocalPort:   defaultTunnelLocalPort,
+		Environment: env,
 	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage(%v): %v", env, err)
