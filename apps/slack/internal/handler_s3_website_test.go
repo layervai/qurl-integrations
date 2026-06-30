@@ -877,6 +877,9 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if !strings.Contains(instructions, "Do not share qurl-agent-state across concurrently running sidecars") {
 		t.Fatalf("ECS instructions missing qurl-agent-state sharing warning:\n%s", instructions)
 	}
+	if !strings.Contains(instructions, "Create the CloudWatch Logs group `/ecs/qurl-s3-website`") {
+		t.Fatalf("ECS instructions missing CloudWatch log group setup note:\n%s", instructions)
+	}
 
 	containerJSON, err := renderS3WebsiteECSContainerJSON(testS3WebsiteArgs(tunnelEnvECSFargate), testTunnelImageRef, defaultS3StaticConnectorImage)
 	if err != nil {

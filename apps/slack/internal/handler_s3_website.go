@@ -804,7 +804,8 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		configBlock + "\n\n" +
 		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
+		"4. Create the CloudWatch Logs group `/ecs/qurl-s3-website` if it does not already exist.\n" +
+		"5. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
