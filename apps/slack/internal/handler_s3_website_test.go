@@ -92,6 +92,34 @@ func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T)
 	}
 }
 
+func TestConnectorSetupSubmissionRejectsExpiredChooser(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Add(-tunnelInstallModalTTL - time.Second).Unix(),
+	}
+	body := connectorSetupViewSubmissionBody(t, &meta, connectorSetupS3Website)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "modal expired") {
+		t.Fatalf("modal response = %s, want stale chooser rejection", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), callbackIDS3WebsiteInstall) || strings.Contains(w.Body.String(), callbackIDTunnelInstall) {
+		t.Fatalf("modal response opened install form despite expired chooser: %s", w.Body.String())
+	}
+}
+
 func TestPrepareS3WebsiteInstallMessageRejectsFloatingOriginImage(t *testing.T) {
 	h := NewHandler(Config{
 		TunnelImage:   testTunnelImageRef,

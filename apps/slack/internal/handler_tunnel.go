@@ -656,6 +656,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
+	if resource.ResourceID == "" {
+		log.Error("tunnel install: qURL API response missing resource identity", "slug", args.Slug)
+		return nil, "qURL Connector setup could not receive the resource needed for the Slack shortcut. No bootstrap key was minted. Please retry after the qURL API returns resource_id for connector resources.", errors.New("qURL Connector resource identity incomplete")
+	}
 
 	// Bind/verify the channel shortcut before minting the bootstrap key so an
 	// alias conflict fails without creating a secret. After the resource exists,

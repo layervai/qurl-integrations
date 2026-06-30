@@ -18,6 +18,8 @@ import (
 )
 
 const (
+	// TODO(upstream-contract): keep this digest in lockstep with the
+	// origins/s3-static-connector image promoted for Slack S3 website installs.
 	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:d51131d192f297e0edaf1ae0f07694c8700f412235a3538be82c091ad4432916"
 	defaultS3WebsiteIndexDocument = "index.html"
 	// TODO(upstream-contract): keep in lockstep with
@@ -85,9 +87,15 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
-	// The chooser itself is non-mutating, so it re-stamps the TTL clock instead
-	// of enforcing the old chooser age; the setup-specific install submissions
-	// enforce admin + TTL before creating resources or keys.
+	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
+	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
+		slog.Warn("connector setup modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
+		respondTunnelInstallModalError(w, "This modal expired. Run /qurl-admin protect and choose qURL Connector again.")
+		return
+	}
+	// The chooser itself is non-mutating. Once freshness is verified, re-stamp
+	// the setup-specific install modal so admins still get a full bounded window
+	// to fill out the selected connector form.
 	meta.CreatedAtUnix = h.now().Unix()
 
 	var (
