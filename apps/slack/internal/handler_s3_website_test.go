@@ -904,6 +904,7 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 		if got := originEnv[name]; got != want {
 			t.Fatalf("origin env %s = %q, want %q", name, got, want)
 		}
+		assertNoShellMetacharacter(t, "ECS origin env "+name, originEnv[name])
 	}
 	if got := origin.LogConfiguration.Options[ecsLogRegionOption]; got != testS3WebsiteRegion {
 		t.Fatalf("origin awslogs-region = %q, want modal region %q", got, testS3WebsiteRegion)
@@ -996,6 +997,7 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 		if got := originEnv[name]; got != want {
 			t.Fatalf("origin env %s = %q, want %q", name, got, want)
 		}
+		assertNoShellMetacharacter(t, "Kubernetes origin env "+name, originEnv[name])
 	}
 	connectorEnv := ecsEnvMap(connector.Env)
 	if connector.Name != ecsConnectorContainerName || connector.Image != testTunnelImageRef {
@@ -1111,5 +1113,12 @@ func assertNoPinnedS3Identity(t *testing.T, got string) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("S3 website instructions leaked %q:\n%s", forbidden, got)
 		}
+	}
+}
+
+func assertNoShellMetacharacter(t *testing.T, name, value string) {
+	t.Helper()
+	if strings.ContainsAny(value, "$`") {
+		t.Fatalf("%s contains shell metacharacter: %q", name, value)
 	}
 }
