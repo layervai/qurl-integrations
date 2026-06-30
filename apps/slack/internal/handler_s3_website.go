@@ -84,6 +84,8 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
+	// This chooser only opens the setup-specific modal; the mutating install
+	// submissions enforce TTL from this freshly rendered modal.
 	meta.CreatedAtUnix = h.now().Unix()
 
 	var (
@@ -258,8 +260,9 @@ func isS3WebsiteCommercialRegion(region string) bool {
 	if !s3WebsiteRegionPattern.MatchString(region) {
 		return false
 	}
-	// Keep this in sync with origins/s3-static-connector/render.sh, which
-	// only renders standard aws.amazon.com commercial S3 endpoint hosts.
+	// Mirror origins/s3-static-connector/render.sh's unsupported partition
+	// prefixes. The Slack-side regex is otherwise a stricter preflight gate for
+	// real AWS region suffixes, so rejected modal values fail before key mint.
 	for _, unsupportedPrefix := range []string{"cn-", "us-gov-", "us-iso-", "us-isob-"} {
 		if strings.HasPrefix(region, unsupportedPrefix) {
 			return false
@@ -679,6 +682,9 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 	if err != nil {
 		return "", err
 	}
+	// The Compose heredoc is intentionally unquoted so the target host expands
+	// ${AGENT_STATE_DIR}, ${SECRET_DIR}, and ${QURL_CONNECTOR_ID}. Interpolated
+	// S3 fields reach this template only after strict modal validation.
 	compose := fmt.Sprintf(`set -eu
 %s
 

@@ -267,6 +267,74 @@ func TestS3WebsiteInstallRejectsMissingResourceIDBeforeMintingBootstrapKey(t *te
 	}
 }
 
+func TestS3WebsiteInstallModalRejectsExpiredModal(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        testAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Add(-tunnelInstallModalTTL - time.Second).Unix(),
+	}
+	body := s3WebsiteInstallViewSubmissionBody(t, &meta, s3WebsiteInstallModalValues(
+		testTunnelSlug,
+		"$team-dash",
+		string(tunnelEnvDocker),
+		testS3WebsiteBucket,
+		testS3WebsiteRegion,
+		testS3WebsitePrefix,
+		testS3WebsiteIndex,
+	))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "This modal expired") {
+		t.Fatalf("modal response = %s, want expiry rejection", w.Body.String())
+	}
+}
+
+func TestS3WebsiteInstallModalRejectsNonAdmin(t *testing.T) {
+	const nonAdminUserID = "UMEMBER01"
+
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	meta := TunnelInstallModalMetadata{
+		TeamID:        testAdminTeamID,
+		ChannelID:     testTunnelChannelID,
+		UserID:        nonAdminUserID,
+		ResponseURL:   testSlackResponseURL,
+		CreatedAtUnix: fixedNow.Unix(),
+	}
+	body := s3WebsiteInstallViewSubmissionBody(t, &meta, s3WebsiteInstallModalValues(
+		testTunnelSlug,
+		"$team-dash",
+		string(tunnelEnvDocker),
+		testS3WebsiteBucket,
+		testS3WebsiteRegion,
+		testS3WebsitePrefix,
+		testS3WebsiteIndex,
+	))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "admin-only") {
+		t.Fatalf("modal response = %s, want admin-only rejection", w.Body.String())
+	}
+}
+
 func TestParseS3WebsiteInstallModalArgsValidatesS3Fields(t *testing.T) {
 	values := s3WebsiteInstallModalValues(
 		testTunnelSlug,
