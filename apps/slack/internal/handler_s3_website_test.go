@@ -805,6 +805,14 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 }
 
 func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
+	instructions, err := renderECSS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvECSFargate), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderECSS3WebsiteInstructions: %v", err)
+	}
+	if !strings.Contains(instructions, "Do not share qurl-agent-state across concurrently running sidecars") {
+		t.Fatalf("ECS instructions missing qurl-agent-state sharing warning:\n%s", instructions)
+	}
+
 	containerJSON, err := renderS3WebsiteECSContainerJSON(testS3WebsiteArgs(tunnelEnvECSFargate), testTunnelImageRef, defaultS3StaticConnectorImage)
 	if err != nil {
 		t.Fatalf("renderS3WebsiteECSContainerJSON: %v", err)

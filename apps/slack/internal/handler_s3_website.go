@@ -30,7 +30,13 @@ const (
 )
 
 var (
+	// Intentionally lighter than the full AWS bucket-name rule set: Slack
+	// rejects dotted/shell-unsafe values early, and AWS remains the final
+	// arbiter for reserved prefixes/suffixes and IP-address-shaped names.
 	s3WebsiteBucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+	// Pattern-based instead of an allowlist so new commercial regions work
+	// without redeploying the Slack app; unsupported partitions are excluded
+	// below and AWS reports nonexistent commercial regions at deploy time.
 	s3WebsiteRegionPattern = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[1-9]\d*$`)
 	s3WebsitePrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 	s3WebsiteIndexPattern  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -529,6 +535,9 @@ func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key
 	if key == nil {
 		return "", errors.New("bootstrap api key is missing")
 	}
+	// Defense-in-depth parity with the tunnel installer: S3 instructions do not
+	// render the key, but this still catches malformed API-key shapes before any
+	// post-mint delivery work continues.
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		return "", err
 	}
@@ -795,7 +804,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		configBlock + "\n\n" +
 		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
+		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
