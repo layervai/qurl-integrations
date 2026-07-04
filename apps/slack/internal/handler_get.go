@@ -372,8 +372,10 @@ const enterPortalButtonLabel = "Enter Portal"
 // surface.
 func renderGetSuccess(link string) (fallbackText string, blocks []any) {
 	button := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
+	// sectionBlock renders mrkdwn (bold + :emoji:); the text is a static template
+	// with no user/LLM input, so the mrkdwn carries no injection surface.
 	blocks = []any{
-		mrkdwnSectionBlock(":link: *qURL ready* — one-time use · link expires in " + resourceLinkExpiryHuman),
+		sectionBlock(":link: *qURL ready* — one-time use · link expires in " + resourceLinkExpiryHuman),
 		actionsBlock(button),
 	}
 	return enterPortalFallbackText(link), blocks

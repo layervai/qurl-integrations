@@ -798,20 +798,6 @@ func plainTextSectionBlock(text string) map[string]any {
 	}
 }
 
-// mrkdwnSectionBlock returns a `section` block whose text is an mrkdwn object, so
-// Slack renders `*bold*` and `:emoji:`. Unlike [plainTextSectionBlock] this does
-// NOT neutralize `<…>` mention/link syntax, so callers MUST pass a STATIC template
-// (or independently-escaped text) — never raw user/LLM input.
-func mrkdwnSectionBlock(text string) map[string]any {
-	return map[string]any{
-		"type": "section",
-		"text": map[string]any{
-			"type": "mrkdwn",
-			"text": text,
-		},
-	}
-}
-
 // Feedback modal block/action IDs and input bounds. The bounds are enforced
 // client-side via the inputs' max_length AND re-checked in
 // parseFeedbackModalArgs so a crafted submission cannot exceed them.
