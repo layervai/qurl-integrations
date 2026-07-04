@@ -366,12 +366,12 @@ const enterPortalButtonLabel = "Enter Portal"
 // the plain-text fallback. The link rides in the button's `url` rather than as
 // raw prose, so it's one tap and Slack never link-unfurls it (an unfurl fetch
 // could brush a one-time link). The fallback KEEPS the raw URL so a non-block
-// client still has something actionable. expiryHuman is the human admit window
-// (resourceLinkExpiryHuman). Both strings here are static templates — no user
-// or LLM input — so the mrkdwn headline carries no injection surface.
+// client still has something actionable. The one-time-use / admit-window suffix
+// reads the resourceLinkExpiryHuman const directly. Both strings here are static
+// templates — no user or LLM input — so the mrkdwn headline carries no injection
+// surface.
 func renderGetSuccess(link string) (fallbackText string, blocks []any) {
-	button := urlButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
-	button["style"] = blockKitStylePrimary
+	button := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
 	blocks = []any{
 		mrkdwnSectionBlock(":link: *qURL ready* — one-time use · link expires in " + resourceLinkExpiryHuman),
 		actionsBlock(button),

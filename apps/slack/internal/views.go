@@ -614,6 +614,15 @@ func urlButtonElement(buttonText, actionID, url string) map[string]any {
 	}
 }
 
+// primaryURLButtonElement is a [urlButtonElement] rendered with Slack's `primary`
+// (filled) style — the URL-button analog of [primaryButtonElement], used for the
+// headline "Enter Portal" link on a minted qURL.
+func primaryURLButtonElement(buttonText, actionID, url string) map[string]any {
+	b := urlButtonElement(buttonText, actionID, url)
+	b["style"] = blockKitStylePrimary
+	return b
+}
+
 // primaryButtonElement is a [buttonElement] rendered with Slack's `primary`
 // (filled) style — used for the headline "Create qURL" action so it reads
 // above the secondary Edit button on admin `/qurl list` rows.
