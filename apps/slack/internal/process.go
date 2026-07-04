@@ -241,9 +241,16 @@ func responseURLTextBody(text string) ([]byte, error) {
 // the "never unfurled" invariant uniform across surfaces (this is the highest-traffic
 // get path) rather than resting on assumed behavior. The suppression is repo-wide —
 // it applies to EVERY caller (get, /qurl list, revoke, tunnel install) — which is
-// harmless: their fallbacks are status/confirm prose that only surfaces when blocks
-// can't render, and none want unfurl. mrkdwn is left at Slack's default so those
-// prose fallbacks keep their formatting.
+// harmless: none of their fallbacks want unfurl.
+//
+// mrkdwn is left at Slack's default (true), unlike the chat.post* block seams
+// (Mrkdwn:false) — deliberately. Those seams set it to neutralize a prompt-injected
+// LLM confirm-card summary in their fallback; postResponseBlocks has no LLM input.
+// Both its fallback shapes are safe (and want) mrkdwn: revoke/list/tunnel pass mrkdwn
+// prose (revoke even uses escaped backtick code, which mrkdwn:false would render
+// literally), and the `/qurl get` fallback carries a STATIC one-time URL — mrkdwn:true
+// merely linkifies it, which is what a "usable link for non-block clients" fallback
+// wants and is safe (static, so no injection; unfurl is already off above).
 func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
 	body, err := json.Marshal(map[string]any{
 		respFieldResponseType: respTypeEphemeral,

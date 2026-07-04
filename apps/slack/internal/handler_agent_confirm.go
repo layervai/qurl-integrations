@@ -997,10 +997,16 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		//
 		// INVARIANT: cmd carries no dm flag (flags only ever holds "reason" above), so
 		// getWork takes the in-channel render branch and res.blocks is ALWAYS non-nil
-		// here — deliverConfirmPrivate posts the Enter Portal button. If a future change
-		// set dm:true on this path, res.blocks would be nil and the "Sent to your DM."
-		// status string would be delivered as the private payload while the card reported
-		// the link delivered; keep this path dm-less to preserve that coupling.
+		// here — deliverConfirmPrivate posts the Enter Portal button. The guard below
+		// ENFORCES it rather than only documenting it: if a future change set dm:true on
+		// this path, res.blocks would be nil and the "Sent to your DM." status string
+		// would otherwise be delivered as the private payload while the card reported the
+		// link delivered. Fail loud (neutral failure card + generic private detail)
+		// instead of silently mis-delivering a credential.
+		if res.blocks == nil {
+			log.Error("agent get: getWork returned no blocks on the confirm path — dm-less invariant broken", "token", pa.Token)
+			return newAttributedPrivateActionResult(false, agentConfirmGetFailedReply, ":warning: "+commonGetMintFailedMessage, "Access link could not be generated.")
+		}
 		return newAttributedPrivateActionResultBlocks(true, agentConfirmGetDeliveredReply, res.text, res.blocks, "Access link was sent privately to the approver.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
