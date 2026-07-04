@@ -201,9 +201,11 @@ var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not ye
 //     all channel-scoped), then mint. POSTs the result to response_url.
 //
 // Optional flags:
-//   - `dm:true` → final message via PostDM to the user's DM instead
-//     of channel ephemeral. Falls back to ephemeral with a friendly
-//     "DM not configured" warning when PostDM is nil.
+//   - `dm:true` → the minted link is delivered via PostDMBlocks to the
+//     user's DM (an Enter Portal button) instead of the channel ephemeral.
+//     Refused up front (getWork) with a "DM delivery is not configured —
+//     re-run without dm:true" warning when PostDMBlocks is nil, rather than
+//     falling back in-channel against the user's privacy intent.
 //   - `reason:"…"` → forwarded as [client.CreateInput.Reason] so it
 //     lands in the audit row.
 func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
@@ -397,15 +399,23 @@ func enterPortalFallbackText(link string) string {
 	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
 }
 
-// isHTTPSURL reports whether s parses as an absolute https URL WITH a host. A
-// minted qurl_link is always an absolute https qurl.link URL, so this both matches
-// the server contract (https-only, mirroring the resourceExposeSchemeHTTPS checks in
-// handler_expose.go / handler_agent_confirm.go) AND is a valid Slack Block Kit button
-// `url`; a value failing it is a server contract surprise (see the getWork guard),
-// not ordinary input. Uses url.Parse rather than a scheme prefix so a scheme-only
-// ("https://") or otherwise malformed value — which Slack would also reject — is
-// caught here.
+// slackButtonURLMaxLen is Slack's hard cap on a Block Kit button `url`; a longer
+// value bounces the whole message, so it must fail the guard below like any other
+// url Slack would reject.
+const slackButtonURLMaxLen = 3000
+
+// isHTTPSURL reports whether s is an absolute https URL WITH a host and within
+// Slack's button-url length cap. A minted qurl_link is always a short absolute
+// https qurl.link URL, so this both matches the server contract (https-only,
+// mirroring the resourceExposeSchemeHTTPS checks in handler_expose.go /
+// handler_agent_confirm.go) AND is a valid Slack Block Kit button `url`; a value
+// failing it is a server contract surprise (see the getWork guard), not ordinary
+// input. Uses url.Parse rather than a scheme prefix so a scheme-only ("https://")
+// or otherwise malformed value — which Slack would also reject — is caught here.
 func isHTTPSURL(s string) bool {
+	if len(s) > slackButtonURLMaxLen {
+		return false
+	}
 	u, err := url.Parse(s)
 	if err != nil {
 		return false

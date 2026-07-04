@@ -1091,9 +1091,11 @@ func TestIsHTTPSURL(t *testing.T) {
 		{"qurl.link/abc", false},
 		{"https://", false},        // scheme-only, no host — Slack would reject the button
 		{"//qurl.link/abc", false}, // scheme-relative, no scheme
+		// A valid https URL past Slack's 3000-char button-url cap still bounces the block post.
+		{"https://qurl.link/" + strings.Repeat("a", slackButtonURLMaxLen), false},
 	} {
 		if got := isHTTPSURL(c.in); got != c.want {
-			t.Errorf("isHTTPSURL(%q) = %v, want %v", c.in, got, c.want)
+			t.Errorf("isHTTPSURL(%.60q) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }

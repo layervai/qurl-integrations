@@ -2082,7 +2082,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 
 // userHelpMessage renders the `/qurl help` text — the user-facing verbs
 // only. Verbs that depend on optional Config wiring are omitted when that
-// wiring is nil — a workspace without PostDM won't see the dm:true
+// wiring is nil — a workspace without PostDMBlocks won't see the dm:true
 // variant. The verbs still dispatch if a user types them directly; the
 // omission is just so help text doesn't advertise a path that will reply
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
@@ -2128,7 +2128,10 @@ func (h *Handler) userHelpMessage(command string) string {
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
-		if h.cfg.PostDM != nil {
+		// Gate on PostDMBlocks (the seam deliverGetDM uses to deliver the Enter Portal
+		// button), matching getWork's dm:true refusal — so help never advertises dm:true
+		// when its only reply would be ":warning: DM delivery is not configured".
+		if h.cfg.PostDMBlocks != nil {
 			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
