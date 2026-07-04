@@ -1053,6 +1053,27 @@ func TestHandleGet_MalformedLinkRejected(t *testing.T) {
 	}
 }
 
+// TestHandleGet_SlashRendersEnterPortalButton fences the PRIMARY /qurl get surface:
+// the channel ephemeral must carry the Enter Portal URL button (blocks), not merely
+// a plain-text link — so a regression in finishGet back to a text-only post is caught
+// on the most common path (the DM and agent-confirm paths assert the button separately).
+func TestHandleGet_SlashRendersEnterPortalButton(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/slash-btn", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdmin("get $prod-db", testAdminTeamID, testAdminUserID)
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	blocks := parseSlackBlocks(t, body)
+	if gotURL, _ := enterPortalButton(t, blocks)["url"].(string); gotURL != "https://qurl.link/slash-btn" {
+		t.Fatalf("Enter Portal button url = %q, want the minted link on the slash surface", gotURL)
+	}
+}
+
 // TestIsWebURL fences the button-url scheme guard: http(s) URLs pass; empty,
 // scheme-less, or non-web values fail (so they're caught before a doomed block post).
 func TestIsWebURL(t *testing.T) {
@@ -1067,6 +1088,8 @@ func TestIsWebURL(t *testing.T) {
 		{"not-a-url", false},
 		{"ftp://qurl.link/abc", false},
 		{"qurl.link/abc", false},
+		{"https://", false},        // scheme-only, no host — Slack would reject the button
+		{"//qurl.link/abc", false}, // scheme-relative, no scheme
 	} {
 		if got := isWebURL(c.in); got != c.want {
 			t.Errorf("isWebURL(%q) = %v, want %v", c.in, got, c.want)

@@ -361,21 +361,26 @@ const enterPortalActionID = "qurl_enter_portal"
 // "entering the portal".
 const enterPortalButtonLabel = "Enter Portal"
 
+// oneTimeUseNotice is the shared "one-time use · link expires in X" phrase used in
+// BOTH the Enter Portal headline and the plain-text fallback, so the wording (and
+// the admit-window value) can't drift between the two renderings.
+func oneTimeUseNotice() string {
+	return "one-time use · link expires in " + resourceLinkExpiryHuman
+}
+
 // renderGetSuccess builds the two renderings of a minted one-time link: the
 // Block Kit blocks (headline section + primary "Enter Portal" URL button) and
 // the plain-text fallback. The link rides in the button's `url` rather than as
 // raw prose, so it's one tap and Slack never link-unfurls it (an unfurl fetch
 // could brush a one-time link). The fallback KEEPS the raw URL so a non-block
-// client still has something actionable. The one-time-use / admit-window suffix
-// reads the resourceLinkExpiryHuman const directly. Both strings here are static
-// templates — no user or LLM input — so the mrkdwn headline carries no injection
-// surface.
+// client still has something actionable. Both strings here are static templates —
+// no user or LLM input — so the mrkdwn headline carries no injection surface.
 func renderGetSuccess(link string) (fallbackText string, blocks []any) {
 	button := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
 	// sectionBlock renders mrkdwn (bold + :emoji:); the text is a static template
 	// with no user/LLM input, so the mrkdwn carries no injection surface.
 	blocks = []any{
-		sectionBlock(":link: *qURL ready* — one-time use · link expires in " + resourceLinkExpiryHuman),
+		sectionBlock(":link: *qURL ready* — " + oneTimeUseNotice()),
 		actionsBlock(button),
 	}
 	return enterPortalFallbackText(link), blocks
@@ -388,15 +393,21 @@ func renderGetSuccess(link string) (fallbackText string, blocks []any) {
 // one-time URL still transits the notification channel — same exposure as the
 // pre-button prose message, and out of scope for the button's in-body privacy win.
 func enterPortalFallbackText(link string) string {
-	return ":link: qURL ready: " + link + " (one-time use · link expires in " + resourceLinkExpiryHuman + ")"
+	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
 }
 
-// isWebURL reports whether s is a non-empty http(s) URL — the minimum a Slack
-// Block Kit button `url` must be for Slack to accept the message. qURL mints
-// return absolute https qurl.link URLs, so a value failing this is a server
-// contract surprise (see the getWork guard), not ordinary input.
+// isWebURL reports whether s parses as an absolute http(s) URL WITH a host — the
+// minimum a Slack Block Kit button `url` needs for Slack to accept the message.
+// qURL mints return absolute https qurl.link URLs, so a value failing this is a
+// server contract surprise (see the getWork guard), not ordinary input. Uses
+// url.Parse rather than a scheme prefix so a scheme-only ("https://") or otherwise
+// malformed value — which Slack would also reject — is caught here.
 func isWebURL(s string) bool {
-	return strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == resourceExposeSchemeHTTPS || u.Scheme == resourceExposeSchemeHTTP) && u.Host != ""
 }
 
 // getWork runs the inner resolve→rate-limit→mint pipeline for the token form
