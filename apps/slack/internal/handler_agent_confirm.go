@@ -838,6 +838,12 @@ func (h *Handler) getDeliverySurfaceUnsupported(ctx context.Context, log *slog.L
 // (or any text-only payload) has blocks nil and posts as plain text through the
 // original text seam. Split per-surface so each leg stays within the complexity
 // budget.
+//
+// A block payload commits to its Block Kit seam: if that seam is nil or errors,
+// this reports false (the terminal card downgrades to "could not be delivered")
+// rather than falling back to the text seam. Deliberate — production always wires
+// both seams, and a silent block→text fallback would change how the credential is
+// rendered without the operator knowing.
 func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, text string, blocks []any) bool {
 	if isDirectMessageChannel(payload.Channel.ID) {
 		return h.deliverConfirmDM(ctx, log, payload, pa.ThreadTS, text, blocks)
@@ -987,9 +993,14 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// Success: the one-time link is a credential — deliver it PRIVATELY, in the SAME
 		// conversation and thread the user approved in (see deliverConfirmPrivate), and
 		// keep the public card neutral. The asker-only gate (processAgentConfirm) ensures
-		// the clicker IS the asker, so the private delivery reaches the right person. The
-		// agent path never sets dm:true, so res carries the Enter Portal blocks (with
-		// res.text as the fallback); deliverConfirmPrivate posts them as a URL button.
+		// the clicker IS the asker, so the private delivery reaches the right person.
+		//
+		// INVARIANT: cmd carries no dm flag (flags only ever holds "reason" above), so
+		// getWork takes the in-channel render branch and res.blocks is ALWAYS non-nil
+		// here — deliverConfirmPrivate posts the Enter Portal button. If a future change
+		// set dm:true on this path, res.blocks would be nil and the "Sent to your DM."
+		// status string would be delivered as the private payload while the card reported
+		// the link delivered; keep this path dm-less to preserve that coupling.
 		return newAttributedPrivateActionResultBlocks(true, agentConfirmGetDeliveredReply, res.text, res.blocks, "Access link was sent privately to the approver.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)

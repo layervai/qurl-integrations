@@ -234,6 +234,13 @@ func responseURLTextBody(text string) ([]byte, error) {
 // blocks message's `text` as the accessibility/notification fallback, so
 // it MUST still carry the full listing. Same SSRF-fenced delivery,
 // single-attempt-with-logging posture as [Handler.postResponse].
+//
+// Unlike the chat.postMessage block seam this does NOT set mrkdwn:false or
+// unfurl_links:false. A response_url message is not link-unfurled, and its
+// fallback text only surfaces when blocks can't render, so for the `/qurl get`
+// link render (fallback carries a static one-time URL) the fallback's mrkdwn
+// treatment is immaterial — the URL lives in the Enter Portal button, not the
+// displayed text.
 func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
 	body, err := json.Marshal(map[string]any{
 		respFieldResponseType: respTypeEphemeral,

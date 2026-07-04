@@ -432,7 +432,11 @@ func TestHandleBlockActions_UnknownActionIgnored(t *testing.T) {
 // mint is never reached.
 //
 // Reads the breadcrumb off the process-global slog default, so it swaps the
-// default to a buffer and restores it. Race-safe: the no-op path is synchronous
+// default to a buffer and restores it in cleanup. Safe from cross-test
+// interference: the test is non-parallel (newAdminTestHandler calls t.Setenv,
+// which makes a later t.Parallel panic), so Go runs it in the sequential phase
+// where no other test executes concurrently — the swap window can't overlap a
+// parallel test reading the default. Race-safe too: the no-op path is synchronous
 // (spawns no worker), so the buffer is only ever touched on this goroutine.
 func TestHandleBlockActions_EnterPortalNoOp(t *testing.T) {
 	var logBuf bytes.Buffer

@@ -412,11 +412,13 @@ func TestSlackPostMessageFuncDefaultsUserAgent(t *testing.T) {
 func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	t.Parallel()
 	var gotBody struct {
-		Channel  string           `json:"channel"`
-		ThreadTS string           `json:"thread_ts"`
-		Text     string           `json:"text"`
-		Blocks   []map[string]any `json:"blocks"`
-		Mrkdwn   *bool            `json:"mrkdwn"` // pointer: assert it was explicitly sent, not merely absent
+		Channel     string           `json:"channel"`
+		ThreadTS    string           `json:"thread_ts"`
+		Text        string           `json:"text"`
+		Blocks      []map[string]any `json:"blocks"`
+		Mrkdwn      *bool            `json:"mrkdwn"`       // pointer: assert it was explicitly sent, not merely absent
+		UnfurlLinks *bool            `json:"unfurl_links"` // pointer: assert explicit suppression, not merely absent
+		UnfurlMedia *bool            `json:"unfurl_media"`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -444,6 +446,15 @@ func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	// Defense-in-depth: mrkdwn must be explicitly false so the fallback renders literally.
 	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
 		t.Fatalf("mrkdwn = %v, want explicit false (literal fallback)", gotBody.Mrkdwn)
+	}
+	// Defense-in-depth: unfurl_links/unfurl_media must be explicitly false so a raw
+	// one-time URL in the fallback (the PostDMBlocks Enter Portal path) can't be
+	// brushed by a background unfurl fetch.
+	if gotBody.UnfurlLinks == nil || *gotBody.UnfurlLinks {
+		t.Fatalf("unfurl_links = %v, want explicit false", gotBody.UnfurlLinks)
+	}
+	if gotBody.UnfurlMedia == nil || *gotBody.UnfurlMedia {
+		t.Fatalf("unfurl_media = %v, want explicit false", gotBody.UnfurlMedia)
 	}
 }
 

@@ -532,6 +532,9 @@ func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, 
 			Text     string `json:"text"`
 			Blocks   []any  `json:"blocks"`
 			Mrkdwn   bool   `json:"mrkdwn"`
+			// No unfurl_links/unfurl_media here (unlike the chat.postMessage block seam):
+			// Slack does not unfurl ephemeral messages, so the raw one-time URL riding in
+			// the fallback text can't be brushed by an unfurl fetch on this surface.
 		}{Channel: channelID, User: userID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false})
 		if err != nil {
 			return fmt.Errorf("chat.postEphemeral request marshal: %w", err)
@@ -732,7 +735,15 @@ func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, us
 			// link) in the notification / non-block-client preview, regardless of whether
 			// the caller also escaped it. The card itself renders the summary as plain_text.
 			Mrkdwn bool `json:"mrkdwn"`
-		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false})
+			// unfurl_links/unfurl_media:false: chat.postMessage is the one unfurl-capable
+			// seam here, and a block-message fallback can carry a raw URL (the Enter Portal
+			// one-time link on the PostDMBlocks path). Suppress explicitly so a background
+			// unfurl fetch can't brush a one-time link — making the "never unfurled"
+			// invariant airtight rather than relying on Slack not unfurling the fallback
+			// when blocks are present. Harmless for the confirm card (no links to unfurl).
+			UnfurlLinks bool `json:"unfurl_links"`
+			UnfurlMedia bool `json:"unfurl_media"`
+		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false, UnfurlLinks: false, UnfurlMedia: false})
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}
