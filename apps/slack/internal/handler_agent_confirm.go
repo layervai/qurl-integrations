@@ -848,55 +848,50 @@ func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, p
 	return h.deliverConfirmEphemeral(ctx, log, payload, pa.ThreadTS, text, blocks)
 }
 
-// deliverConfirmDM posts the private payload into a 1:1 DM conversation: the Enter
-// Portal blocks via PostMessageBlocks when present, else the text via PostMessage.
-func (h *Handler) deliverConfirmDM(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
-	if blocks != nil {
-		if h.cfg.PostMessageBlocks == nil {
-			log.Warn("agent confirm: PostMessageBlocks seam is nil — cannot deliver the get link in a DM")
-			return false
-		}
-		if err := h.cfg.PostMessageBlocks(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, threadTS, blocks, text); err != nil {
-			log.Warn("agent confirm: in-DM get delivery failed", "error", err)
-			return false
-		}
-		return true
-	}
-	if h.cfg.PostMessage == nil {
-		log.Warn("agent confirm: PostMessage seam is nil — cannot deliver the get result in a DM")
+// deliverConfirmSeam runs one private-delivery seam and reports success: it logs
+// and returns false when the seam is unwired (wired == false) or the post errors —
+// so the caller can downgrade the terminal card — and true on a delivered post.
+// seam labels the seam in logs (its name already implies the surface + block/text
+// leg, e.g. PostMessageBlocks = a DM link, PostEphemeral = a channel text detail).
+func deliverConfirmSeam(log *slog.Logger, seam string, wired bool, post func() error) bool {
+	if !wired {
+		log.Warn("agent confirm: private get delivery seam is nil", "seam", seam)
 		return false
 	}
-	if err := h.cfg.PostMessage(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, threadTS, text); err != nil {
-		log.Warn("agent confirm: in-DM get delivery failed", "error", err)
+	if err := post(); err != nil {
+		log.Warn("agent confirm: private get delivery failed", "seam", seam, "error", err)
 		return false
 	}
 	return true
+}
+
+// deliverConfirmDM posts the private payload into a 1:1 DM conversation: the Enter
+// Portal blocks via PostMessageBlocks when present, else the text via PostMessage.
+func (h *Handler) deliverConfirmDM(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
+	team, ent, channel := payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID
+	if blocks != nil {
+		return deliverConfirmSeam(log, "PostMessageBlocks", h.cfg.PostMessageBlocks != nil, func() error {
+			return h.cfg.PostMessageBlocks(ctx, team, ent, channel, threadTS, blocks, text)
+		})
+	}
+	return deliverConfirmSeam(log, "PostMessage", h.cfg.PostMessage != nil, func() error {
+		return h.cfg.PostMessage(ctx, team, ent, channel, threadTS, text)
+	})
 }
 
 // deliverConfirmEphemeral posts the private payload as a standalone in-channel
 // ephemeral: the Enter Portal blocks via PostEphemeralBlocks when present, else
 // the text via PostEphemeral.
 func (h *Handler) deliverConfirmEphemeral(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
+	team, ent, channel, user := payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, payload.User.ID
 	if blocks != nil {
-		if h.cfg.PostEphemeralBlocks == nil {
-			log.Warn("agent confirm: PostEphemeralBlocks seam is nil — cannot deliver the get link in a channel")
-			return false
-		}
-		if err := h.cfg.PostEphemeralBlocks(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, threadTS, payload.User.ID, blocks, text); err != nil {
-			log.Warn("agent confirm: channel ephemeral get delivery failed", "error", err)
-			return false
-		}
-		return true
+		return deliverConfirmSeam(log, "PostEphemeralBlocks", h.cfg.PostEphemeralBlocks != nil, func() error {
+			return h.cfg.PostEphemeralBlocks(ctx, team, ent, channel, threadTS, user, blocks, text)
+		})
 	}
-	if h.cfg.PostEphemeral == nil {
-		log.Warn("agent confirm: PostEphemeral seam is nil — cannot deliver the get result in a channel")
-		return false
-	}
-	if err := h.cfg.PostEphemeral(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, threadTS, payload.User.ID, text); err != nil {
-		log.Warn("agent confirm: channel ephemeral get delivery failed", "error", err)
-		return false
-	}
-	return true
+	return deliverConfirmSeam(log, "PostEphemeral", h.cfg.PostEphemeral != nil, func() error {
+		return h.cfg.PostEphemeral(ctx, team, ent, channel, threadTS, user, text)
+	})
 }
 
 // finalizeConfirmedAction executes a claimed action, delivers any sensitive get output
