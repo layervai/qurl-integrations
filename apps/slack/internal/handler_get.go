@@ -392,6 +392,7 @@ func renderGetSuccess(link string) (fallbackText string, blocks []any) {
 // Slack also uses this text as the push/desktop notification preview, so the raw
 // one-time URL still transits the notification channel — same exposure as the
 // pre-button prose message, and out of scope for the button's in-body privacy win.
+// A link-less fallback for notification-capable clients is tracked in #922.
 func enterPortalFallbackText(link string) string {
 	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
 }

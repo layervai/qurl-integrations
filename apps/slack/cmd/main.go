@@ -1523,10 +1523,14 @@ func logConfirmModeState(s agentSurfaceState, readOnlyLive bool) {
 	case readOnlyLive && s.confirmFlag && s.blocksWired:
 		slog.Warn("conversation mode CONFIRM (mutation execution) is LIVE: an admin Approving a card EXECUTES the change. Confirm the hard pre-enablement gates (get-link authorization; R2 public-card replace_original; C1 connector key-privacy; C2 connector trigger-window) AND the DPA/data-handling review have cleared before relying on this.")
 		// A confirmed get success delivers the minted link via the Block Kit DM/ephemeral
-		// seams with NO text fallback (deliverConfirmPrivate), and PostEphemeralBlocks is
-		// not part of the agentEnabled gate — so an unwired seam fails every agent get
-		// AFTER the mint is burned. Surface it at boot rather than as a silent per-request
-		// post-mint failure in production.
+		// seams with NO text fallback (deliverConfirmPrivate), so an unwired seam fails
+		// every agent get AFTER the mint is burned. WARN, not gate: unlike
+		// PostMessageBlocks (which renders the confirm CARD for EVERY action, so its
+		// absence correctly forces confirm DARK), these two are needed only for GET
+		// DELIVERY — folding them into the agentConfirmEnabled gate would also disable
+		// revoke/alias/protect confirms that don't touch them. So the targeted choice is
+		// to keep confirm live and surface the get-delivery risk loudly at boot, rather
+		// than as a silent per-request post-mint failure in production.
 		if !s.dmBlocksWired || !s.ephemeralBlocksWired {
 			slog.Warn("CONFIRM is LIVE but a get-delivery Block Kit seam is unwired; agent get approvals will FAIL after minting (no text fallback). Wire PostDMBlocks (1:1 DM gets) and PostEphemeralBlocks (channel gets).",
 				"dm_blocks_wired", s.dmBlocksWired, "ephemeral_blocks_wired", s.ephemeralBlocksWired)
