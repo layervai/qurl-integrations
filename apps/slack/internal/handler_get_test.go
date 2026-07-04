@@ -1030,6 +1030,50 @@ func TestRenderGetSuccess(t *testing.T) {
 	}
 }
 
+// TestHandleGet_MalformedLinkRejected fences the URL-button contract: a mint that
+// returns a non-empty but non-http(s) qurl_link (a server contract surprise) is
+// rejected with the generic retry copy — NOT rendered into an Enter Portal button,
+// which Slack would reject outright, bouncing the whole message after the mint is
+// already burned. Same defensive disposition as an empty qurl_link.
+func TestHandleGet_MalformedLinkRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "not-a-url", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, commonGetMintFailedMessage) {
+		t.Errorf("async reply = %q, want the generic mint-failed message for a malformed link", async)
+	}
+	if strings.Contains(async, "not-a-url") {
+		t.Errorf("async reply leaked the malformed link: %q", async)
+	}
+}
+
+// TestIsWebURL fences the button-url scheme guard: http(s) URLs pass; empty,
+// scheme-less, or non-web values fail (so they're caught before a doomed block post).
+func TestIsWebURL(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"https://qurl.link/abc", true},
+		{"http://qurl.link/abc", true},
+		{"", false},
+		{"not-a-url", false},
+		{"ftp://qurl.link/abc", false},
+		{"qurl.link/abc", false},
+	} {
+		if got := isWebURL(c.in); got != c.want {
+			t.Errorf("isWebURL(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 // TestHandleGet_DMRidesOneTimeSuffix fences that the
 // "(one-time use · link expires in 1 minute)" suffix rides into the DM
 // payload (not the channel reply) on dm:true. That suffix is the

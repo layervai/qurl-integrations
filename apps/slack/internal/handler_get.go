@@ -383,9 +383,20 @@ func renderGetSuccess(link string) (fallbackText string, blocks []any) {
 
 // enterPortalFallbackText is the notification / non-block-client fallback for a
 // minted link. It mirrors the pre-button prose (raw URL included) so a client
-// that can't render the Enter Portal button still receives a usable link.
+// that can't render the Enter Portal button still receives a usable link. NOTE:
+// Slack also uses this text as the push/desktop notification preview, so the raw
+// one-time URL still transits the notification channel — same exposure as the
+// pre-button prose message, and out of scope for the button's in-body privacy win.
 func enterPortalFallbackText(link string) string {
 	return ":link: qURL ready: " + link + " (one-time use · link expires in " + resourceLinkExpiryHuman + ")"
+}
+
+// isWebURL reports whether s is a non-empty http(s) URL — the minimum a Slack
+// Block Kit button `url` must be for Slack to accept the message. qURL mints
+// return absolute https qurl.link URLs, so a value failing this is a server
+// contract surprise (see the getWork guard), not ordinary input.
+func isWebURL(s string) bool {
+	return strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")
 }
 
 // getWork runs the inner resolve→rate-limit→mint pipeline for the token form
@@ -471,10 +482,15 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	if err != nil {
 		return getResult{}, mapMintError(log, err)
 	}
-	// Defensive: a 200 with an empty qurl_link is a server contract
-	// surprise — log loud and surface the generic retry message.
-	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "resource_id", input.ResourceID)
+	// Defensive: an empty OR non-http(s) qurl_link is a server contract surprise.
+	// The Enter Portal render puts the link in a Block Kit button `url`, and Slack
+	// rejects the WHOLE message if that url isn't a valid http(s) URL — so a
+	// malformed link would bounce the block post and fail delivery after the mint
+	// is already burned. Reject it here with the generic retry message + a loud log
+	// (same disposition as empty), rather than ship a doomed block message. Not a
+	// text fallback: a non-URL link is broken, not a rendering-mode choice.
+	if !isWebURL(out.QURLLink) {
+		log.Error("get: mint returned empty or non-http(s) qurl_link — server contract surprise", "resource_id", input.ResourceID, "has_link", out.QURLLink != "")
 		return getResult{}, &userError{msg: commonGetMintFailedMessage}
 	}
 

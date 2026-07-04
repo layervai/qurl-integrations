@@ -230,6 +230,10 @@ func run() error {
 	// Block Kit DM + ephemeral seams: deliver a minted `/qurl get` (dm:true) or
 	// agent-confirm link as an "Enter Portal" URL button rather than a raw
 	// hyperlink. Same token lookup + Grid fallback as their text siblings above.
+	// REQUIRED, not optional: a get success commits to its block seam (no text-seam
+	// fallback — see deliverConfirmPrivate), so leaving PostDMBlocks/PostEphemeralBlocks
+	// unwired while agent-confirm is enabled would fail every DM/channel get AFTER the
+	// mint is burned. Keep both wired whenever the confirm flow is on.
 	postDMBlocks := newSlackPostDMBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
 	postEphemeralBlocks := newSlackPostEphemeralBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
