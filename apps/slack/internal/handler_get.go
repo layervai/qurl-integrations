@@ -397,18 +397,20 @@ func enterPortalFallbackText(link string) string {
 	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
 }
 
-// isWebURL reports whether s parses as an absolute http(s) URL WITH a host — the
-// minimum a Slack Block Kit button `url` needs for Slack to accept the message.
-// qURL mints return absolute https qurl.link URLs, so a value failing this is a
-// server contract surprise (see the getWork guard), not ordinary input. Uses
-// url.Parse rather than a scheme prefix so a scheme-only ("https://") or otherwise
-// malformed value — which Slack would also reject — is caught here.
-func isWebURL(s string) bool {
+// isHTTPSURL reports whether s parses as an absolute https URL WITH a host. A
+// minted qurl_link is always an absolute https qurl.link URL, so this both matches
+// the server contract (https-only, mirroring the resourceExposeSchemeHTTPS checks in
+// handler_expose.go / handler_agent_confirm.go) AND is a valid Slack Block Kit button
+// `url`; a value failing it is a server contract surprise (see the getWork guard),
+// not ordinary input. Uses url.Parse rather than a scheme prefix so a scheme-only
+// ("https://") or otherwise malformed value — which Slack would also reject — is
+// caught here.
+func isHTTPSURL(s string) bool {
 	u, err := url.Parse(s)
 	if err != nil {
 		return false
 	}
-	return (u.Scheme == resourceExposeSchemeHTTPS || u.Scheme == resourceExposeSchemeHTTP) && u.Host != ""
+	return u.Scheme == resourceExposeSchemeHTTPS && u.Host != ""
 }
 
 // getWork runs the inner resolve→rate-limit→mint pipeline for the token form
@@ -494,15 +496,15 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	if err != nil {
 		return getResult{}, mapMintError(log, err)
 	}
-	// Defensive: an empty OR non-http(s) qurl_link is a server contract surprise.
-	// The Enter Portal render puts the link in a Block Kit button `url`, and Slack
-	// rejects the WHOLE message if that url isn't a valid http(s) URL — so a
-	// malformed link would bounce the block post and fail delivery after the mint
-	// is already burned. Reject it here with the generic retry message + a loud log
-	// (same disposition as empty), rather than ship a doomed block message. Not a
-	// text fallback: a non-URL link is broken, not a rendering-mode choice.
-	if !isWebURL(out.QURLLink) {
-		log.Error("get: mint returned empty or non-http(s) qurl_link — server contract surprise", "resource_id", input.ResourceID, "has_link", out.QURLLink != "")
+	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
+	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a
+	// Block Kit button `url`, and Slack rejects the WHOLE message if that url is
+	// malformed — so a bad link would bounce the block post and fail delivery after the
+	// mint is already burned. Reject it here with the generic retry message + a loud log
+	// (same disposition as empty), rather than ship a doomed block message. Not a text
+	// fallback: a non-URL link is broken, not a rendering-mode choice.
+	if !isHTTPSURL(out.QURLLink) {
+		log.Error("get: mint returned empty or non-https qurl_link — server contract surprise", "resource_id", input.ResourceID, "has_link", out.QURLLink != "")
 		return getResult{}, &userError{msg: commonGetMintFailedMessage}
 	}
 

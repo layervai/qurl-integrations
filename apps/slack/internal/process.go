@@ -235,17 +235,20 @@ func responseURLTextBody(text string) ([]byte, error) {
 // it MUST still carry the full listing. Same SSRF-fenced delivery,
 // single-attempt-with-logging posture as [Handler.postResponse].
 //
-// Unlike the chat.postMessage block seam this does NOT set mrkdwn:false or
-// unfurl_links:false. A response_url message is not link-unfurled, and its
-// fallback text only surfaces when blocks can't render, so for the `/qurl get`
-// link render (fallback carries a static one-time URL) the fallback's mrkdwn
-// treatment is immaterial — the URL lives in the Enter Portal button, not the
-// displayed text.
+// It sets unfurl_links/unfurl_media:false for parity with the chat.postMessage
+// block seams: a response_url message is not link-unfurled by Slack today, but the
+// `/qurl get` fallback carries a static one-time URL, so suppressing explicitly keeps
+// the "never unfurled" invariant uniform across surfaces (this is the highest-traffic
+// get path) rather than resting on assumed behavior. mrkdwn is left at Slack's default:
+// the fallback only surfaces when blocks can't render, and this seam's other callers
+// (list/revoke/tunnel) intentionally use mrkdwn in their prose fallbacks.
 func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
 	body, err := json.Marshal(map[string]any{
 		respFieldResponseType: respTypeEphemeral,
 		respFieldText:         fallbackText,
 		blockKitFieldBlocks:   blocks,
+		"unfurl_links":        false,
+		"unfurl_media":        false,
 	})
 	if err != nil {
 		log.Error("marshal response_url blocks payload failed", "error", err)

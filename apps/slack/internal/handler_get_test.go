@@ -1074,16 +1074,17 @@ func TestHandleGet_SlashRendersEnterPortalButton(t *testing.T) {
 	}
 }
 
-// TestIsWebURL fences the button-url scheme guard: http(s) URLs pass; empty,
-// scheme-less, or non-web values fail (so they're caught before a doomed block post).
-func TestIsWebURL(t *testing.T) {
+// TestIsHTTPSURL fences the button-url guard: absolute https URLs with a host pass;
+// http (looser than the mint contract), empty, scheme-less, scheme-only, or non-web
+// values fail (so they're caught before a doomed block post).
+func TestIsHTTPSURL(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		in   string
 		want bool
 	}{
 		{"https://qurl.link/abc", true},
-		{"http://qurl.link/abc", true},
+		{"http://qurl.link/abc", false}, // http is looser than the https-only mint contract
 		{"", false},
 		{"not-a-url", false},
 		{"ftp://qurl.link/abc", false},
@@ -1091,8 +1092,8 @@ func TestIsWebURL(t *testing.T) {
 		{"https://", false},        // scheme-only, no host — Slack would reject the button
 		{"//qurl.link/abc", false}, // scheme-relative, no scheme
 	} {
-		if got := isWebURL(c.in); got != c.want {
-			t.Errorf("isWebURL(%q) = %v, want %v", c.in, got, c.want)
+		if got := isHTTPSURL(c.in); got != c.want {
+			t.Errorf("isHTTPSURL(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }
