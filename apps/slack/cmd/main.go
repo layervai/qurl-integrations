@@ -227,6 +227,11 @@ func run() error {
 	// renders like the streaming pane while still carrying a fallback.
 	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
+	// Block Kit DM + ephemeral seams: deliver a minted `/qurl get` (dm:true) or
+	// agent-confirm link as an "Enter Portal" URL button rather than a raw
+	// hyperlink. Same token lookup + Grid fallback as their text siblings above.
+	postDMBlocks := newSlackPostDMBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
+	postEphemeralBlocks := newSlackPostEphemeralBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
 	// wired (same token lookup as the post seams); inert until the agent surface is live
 	// and needs the reactions:write scope in the Slack manifest to actually land.
@@ -336,6 +341,8 @@ func run() error {
 		PostMarkdownMessage:         postMarkdownMessage,
 		AgentDisabled:               agentDisabled,
 		PostMessageBlocks:           postMessageBlocks,
+		PostDMBlocks:                postDMBlocks,
+		PostEphemeralBlocks:         postEphemeralBlocks,
 		AgentConfirmEnabled:         agentConfirmEnabled,
 		AgentChannelFollowups:       agentChannelFollowups,
 		AgentSurfaceExclusiveAcks:   agentSurfaceExclusiveAcks,

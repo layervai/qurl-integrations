@@ -194,7 +194,8 @@ func TestRecordAgentAudit_PersistsForApprover(t *testing.T) {
 	var payload interactionPayload
 	payload.Team.ID, payload.Channel.ID, payload.User.ID = "T1", "C1", "Uadmin"
 	pa := &pendingAction{Action: agent.ActionRevoke, Token: "metrics", Reason: "cleanup"}
-	h.recordAgentAudit(context.Background(), slog.Default(), &payload, pa, newAttributedActionResult(true, "Revoked `$metrics`.", "Resource and all of its qURLs were revoked."))
+	res := newAttributedActionResult(true, "Revoked `$metrics`.", "Resource and all of its qURLs were revoked.")
+	h.recordAgentAudit(context.Background(), slog.Default(), &payload, pa, &res)
 
 	got, err := store.ListAuditEntries(context.Background(), "T1", "Uadmin", 10)
 	if err != nil {
@@ -217,5 +218,6 @@ func TestRecordAgentAudit_NilStoreSafe(t *testing.T) {
 	var payload interactionPayload
 	payload.Team.ID, payload.User.ID = "T1", "U1"
 	// Must not panic with a nil store.
-	h.recordAgentAudit(context.Background(), slog.Default(), &payload, &pendingAction{Action: agent.ActionGet, Token: "x"}, newAttributedActionResult(true, "ok", "Access link was sent privately to the approver."))
+	res := newAttributedActionResult(true, "ok", "Access link was sent privately to the approver.")
+	h.recordAgentAudit(context.Background(), slog.Default(), &payload, &pendingAction{Action: agent.ActionGet, Token: "x"}, &res)
 }

@@ -430,6 +430,20 @@ type Config struct {
 	// (see agentConfirmEnabled); production wires it in cmd/main.go.
 	PostMessageBlocks PostMessageBlocksFunc
 
+	// PostDMBlocks posts a Block Kit direct message (conversations.open then a
+	// chat.postMessage with blocks) — the DM analog of PostMessageBlocks. It
+	// delivers the `/qurl get dm:true` minted link as an "Enter Portal" URL button
+	// instead of a raw hyperlink. Nil makes getWork refuse `dm:true` (the privacy
+	// contract can't be met without it); production wires it in cmd/main.go.
+	PostDMBlocks PostDMBlocksFunc
+
+	// PostEphemeralBlocks posts a Block Kit chat.postEphemeral (visible only to
+	// userID) — the Block Kit analog of PostEphemeral. The confirm flow delivers a
+	// get's minted link this way in a channel/private channel as an "Enter Portal"
+	// URL button. Nil → the channel get delivery reports failure and the card
+	// downgrades; it is NOT part of the agentEnabled gate.
+	PostEphemeralBlocks PostEphemeralBlocksFunc
+
 	// AgentConfirmEnabled gates the propose→confirm→execute flow on top of the
 	// read-only conversation surface. While false (the default), a proposed
 	// mutation is surfaced as today's text preview and nothing executes; while
@@ -565,6 +579,22 @@ type PostEphemeralFunc func(ctx context.Context, teamID, enterpriseID, channelID
 // confirm flow passes escapeMrkdwnText output); the production impl should also
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
+
+// PostDMBlocksFunc posts a Block Kit direct message to slackUserID (conversations.open
+// then a chat.postMessage with blocks) on the per-workspace bot token — the DM analog
+// of PostMessageBlocksFunc, used to deliver a `/qurl get dm:true` link as an Enter
+// Portal URL button. fallbackText is the notification/non-block fallback (it carries
+// the raw URL so a non-block client isn't dead-ended). enterpriseID is passed for
+// Enterprise Grid token resolution, matching PostDMFunc.
+type PostDMBlocksFunc func(ctx context.Context, teamID, enterpriseID, slackUserID string, blocks []any, fallbackText string) error
+
+// PostEphemeralBlocksFunc posts a Block Kit chat.postEphemeral (visible only to userID)
+// on the per-workspace bot token — the Block Kit analog of PostEphemeralFunc. threadTS
+// threads it into the card's conversation. Like PostEphemeralFunc it's a standalone
+// message a same-response_url card-replace can't clobber, and it returns an error on a
+// non-ok response so the caller can downgrade the card. fallbackText is the
+// notification/non-block fallback.
+type PostEphemeralBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID string, blocks []any, fallbackText string) error
 
 // AppHomePublishFunc publishes a user's App Home tab via views.publish on the
 // per-workspace bot token (enterpriseID for Grid token resolution). blocks is the

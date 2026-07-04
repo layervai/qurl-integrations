@@ -192,7 +192,7 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
-	text, err := h.getWork(ctx, log, &getWorkArgs{
+	res, err := h.getWork(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -200,7 +200,7 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		userID:       userID,
 		triggerID:    triggerID,
 	})
-	h.finishGet(log, responseURL, text, err)
+	h.finishGet(log, responseURL, res, err)
 }
 
 // findActionByID returns the first action in a block_actions payload whose

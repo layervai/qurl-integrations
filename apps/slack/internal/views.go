@@ -597,6 +597,23 @@ func buttonElement(buttonText, actionID, value string) map[string]any {
 	}
 }
 
+// urlButtonElement returns a `button` block element whose `url` opens directly
+// in the user's browser on click — Slack's native link-button behavior — rather
+// than round-tripping a block_action to the app like [buttonElement]. An
+// action_id still rides along so the click is routable and shows up in
+// [blockActionIDs] logging; there is no `value` because a link button carries no
+// server-side payload. NOTE: Slack still delivers a block_actions interaction
+// when a url button is clicked, so the action_id MUST be a benign no-op in
+// handleBlockActions (the unrecognized-action `200 OK` path handles this).
+func urlButtonElement(buttonText, actionID, url string) map[string]any {
+	return map[string]any{
+		"type":                "button",
+		"text":                plainTextObj(buttonText),
+		blockKitFieldActionID: actionID,
+		"url":                 url,
+	}
+}
+
 // primaryButtonElement is a [buttonElement] rendered with Slack's `primary`
 // (filled) style — used for the headline "Create qURL" action so it reads
 // above the secondary Edit button on admin `/qurl list` rows.
@@ -769,6 +786,20 @@ func plainTextSectionBlock(text string) map[string]any {
 	return map[string]any{
 		"type": "section",
 		"text": plainTextObj(text),
+	}
+}
+
+// mrkdwnSectionBlock returns a `section` block whose text is an mrkdwn object, so
+// Slack renders `*bold*` and `:emoji:`. Unlike [plainTextSectionBlock] this does
+// NOT neutralize `<…>` mention/link syntax, so callers MUST pass a STATIC template
+// (or independently-escaped text) — never raw user/LLM input.
+func mrkdwnSectionBlock(text string) map[string]any {
+	return map[string]any{
+		"type": "section",
+		"text": map[string]any{
+			"type": "mrkdwn",
+			"text": text,
+		},
 	}
 }
 
