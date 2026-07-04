@@ -228,12 +228,13 @@ func run() error {
 	postMarkdownMessage := newSlackPostMarkdownMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	postMessageBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	// Block Kit DM + ephemeral seams: deliver a minted `/qurl get` (dm:true) or
-	// agent-confirm link as an "Enter Portal" URL button rather than a raw
+	// agent-confirm channel link as an "Enter Portal" URL button rather than a raw
 	// hyperlink. Same token lookup + Grid fallback as their text siblings above.
-	// REQUIRED, not optional: a get success commits to its block seam (no text-seam
-	// fallback — see deliverConfirmPrivate), so leaving PostDMBlocks/PostEphemeralBlocks
-	// unwired while agent-confirm is enabled would fail every DM/channel get AFTER the
-	// mint is burned. Keep both wired whenever the confirm flow is on.
+	// PostEphemeralBlocks is effectively REQUIRED when agent-confirm is on: a confirmed
+	// channel get commits to it with no text fallback (deliverConfirmEphemeral), so an
+	// unwired seam fails channel get approvals AFTER the mint is burned — logConfirmModeState
+	// warns loudly at boot. PostDMBlocks is only for `/qurl get dm:true`, which is refused
+	// pre-mint when it's nil (getWork), so that path degrades gracefully.
 	postDMBlocks := newSlackPostDMBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
 	postEphemeralBlocks := newSlackPostEphemeralBlocksFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostEphemeralURL, nil)
 	// reactions.add/remove seam for the agent's best-effort "working on it" ack. Always
@@ -300,7 +301,6 @@ func run() error {
 		storeWired:            agentStore != nil,
 		postWired:             postMessage != nil,
 		blocksWired:           postMessageBlocks != nil,
-		dmBlocksWired:         postDMBlocks != nil,
 		ephemeralBlocksWired:  postEphemeralBlocks != nil,
 		assistantThreadsWired: agentAssistantThreads != nil,
 		confirmFlag:           agentConfirmEnabled,
@@ -1457,8 +1457,7 @@ type agentSurfaceState struct {
 	storeWired            bool
 	postWired             bool
 	blocksWired           bool
-	dmBlocksWired         bool // PostDMBlocks — 1:1 DM get-link delivery
-	ephemeralBlocksWired  bool // PostEphemeralBlocks — channel get-link delivery
+	ephemeralBlocksWired  bool // PostEphemeralBlocks — confirm-flow channel get-link delivery
 	assistantThreadsWired bool
 	confirmFlag           bool // QURL_AGENT_CONFIRM_ENABLED
 	exclusiveAcksFlag     bool // QURL_AGENT_SURFACE_EXCLUSIVE_ACKS
@@ -1522,18 +1521,20 @@ func logConfirmModeState(s agentSurfaceState, readOnlyLive bool) {
 	switch {
 	case readOnlyLive && s.confirmFlag && s.blocksWired:
 		slog.Warn("conversation mode CONFIRM (mutation execution) is LIVE: an admin Approving a card EXECUTES the change. Confirm the hard pre-enablement gates (get-link authorization; R2 public-card replace_original; C1 connector key-privacy; C2 connector trigger-window) AND the DPA/data-handling review have cleared before relying on this.")
-		// A confirmed get success delivers the minted link via the Block Kit DM/ephemeral
-		// seams with NO text fallback (deliverConfirmPrivate), so an unwired seam fails
-		// every agent get AFTER the mint is burned. WARN, not gate: unlike
-		// PostMessageBlocks (which renders the confirm CARD for EVERY action, so its
-		// absence correctly forces confirm DARK), these two are needed only for GET
-		// DELIVERY — folding them into the agentConfirmEnabled gate would also disable
-		// revoke/alias/protect confirms that don't touch them. So the targeted choice is
-		// to keep confirm live and surface the get-delivery risk loudly at boot, rather
-		// than as a silent per-request post-mint failure in production.
-		if !s.dmBlocksWired || !s.ephemeralBlocksWired {
-			slog.Warn("CONFIRM is LIVE but a get-delivery Block Kit seam is unwired; agent get approvals will FAIL after minting (no text fallback). Wire PostDMBlocks (1:1 DM gets) and PostEphemeralBlocks (channel gets).",
-				"dm_blocks_wired", s.dmBlocksWired, "ephemeral_blocks_wired", s.ephemeralBlocksWired)
+		// A confirmed CHANNEL get delivers the minted link via PostEphemeralBlocks with
+		// NO text fallback (deliverConfirmEphemeral), so if it's unwired every channel
+		// get approval fails AFTER the mint is burned. (The confirm DM leg rides on
+		// PostMessageBlocks — already required by the gate above — and PostDMBlocks is a
+		// separate `/qurl get dm:true` concern, refused pre-mint, so neither belongs
+		// here.) WARN, not gate: unlike PostMessageBlocks (which renders the confirm CARD
+		// for EVERY action, so its absence correctly forces confirm DARK), PostEphemeralBlocks
+		// is needed only for GET delivery — folding it into the agentConfirmEnabled gate
+		// would also disable revoke/alias/protect confirms that don't touch it. So the
+		// targeted choice is to keep confirm live and surface the risk loudly at boot,
+		// rather than as a silent per-request post-mint failure in production.
+		if !s.ephemeralBlocksWired {
+			slog.Warn("CONFIRM is LIVE but PostEphemeralBlocks is unwired; agent channel get approvals will FAIL after minting (no text fallback). Wire PostEphemeralBlocks.",
+				"ephemeral_blocks_wired", s.ephemeralBlocksWired)
 		}
 	case !s.killed && s.confirmFlag:
 		// When killed, the kill-switch line above is the accurate cause; a confirm-DARK
