@@ -495,6 +495,115 @@ func TestSlackPostMessageBlocksFuncSurfacesSlackError(t *testing.T) {
 	}
 }
 
+// Shared literals for the Block Kit seam tests, kept as consts so goconst's
+// repeated-string counter stays quiet once the new seam tests reuse them.
+const (
+	pathConversationsOpen = "/conversations.open"
+	pathChatPostMessage   = "/chat.postMessage"
+	blockTypeSection      = "section"
+)
+
+// TestSlackPostDMBlocksFuncOpensIMThenPostsBlocks pins the DM Block Kit seam's
+// two-hop: conversations.open → extract the opened channel id → post the blocks
+// via the shared chat.postMessage block poster (so the `dm:true` Enter Portal
+// button lands in the user's DM). Also confirms the shared poster's
+// defense-in-depth (mrkdwn:false, unfurl_links:false) carries through this path.
+func TestSlackPostDMBlocksFuncOpensIMThenPostsBlocks(t *testing.T) {
+	t.Parallel()
+	var openBody struct {
+		Users string `json:"users"`
+	}
+	var postBody struct {
+		Channel     string           `json:"channel"`
+		ThreadTS    string           `json:"thread_ts"`
+		Text        string           `json:"text"`
+		Blocks      []map[string]any `json:"blocks"`
+		Mrkdwn      *bool            `json:"mrkdwn"`
+		UnfurlLinks *bool            `json:"unfurl_links"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pathConversationsOpen:
+			if err := json.NewDecoder(r.Body).Decode(&openBody); err != nil {
+				t.Fatalf("decode open body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"channel":{"id":"D_dm"}}`))
+		case pathChatPostMessage:
+			if err := json.NewDecoder(r.Body).Decode(&postBody); err != nil {
+				t.Fatalf("decode post body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostDMBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL+pathConversationsOpen, srv.URL+pathChatPostMessage, nil)
+	blocks := []any{map[string]any{"type": blockTypeSection, "text": map[string]any{"type": "mrkdwn", "text": "portal"}}}
+	if err := post(context.Background(), testSlackTeamID, "E_org", "U_dm", blocks, "dm blocks fallback"); err != nil {
+		t.Fatalf("PostDMBlocks: %v", err)
+	}
+	// conversations.open targets the user; the post goes to the opened DM channel.
+	if openBody.Users != "U_dm" {
+		t.Fatalf("open body = %+v, want the Slack user", openBody)
+	}
+	if postBody.Channel != "D_dm" || postBody.Text != "dm blocks fallback" {
+		t.Fatalf("post body channel/text = %+v, want opened DM channel + fallback", postBody)
+	}
+	if len(postBody.Blocks) != 1 || postBody.Blocks[0]["type"] != blockTypeSection {
+		t.Fatalf("blocks = %+v, want one section block", postBody.Blocks)
+	}
+	// Inherited from the shared chat.postMessage block seam: the one-time URL in the
+	// fallback can't render as markup or be unfurled.
+	if postBody.Mrkdwn == nil || *postBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false", postBody.Mrkdwn)
+	}
+	if postBody.UnfurlLinks == nil || *postBody.UnfurlLinks {
+		t.Fatalf("unfurl_links = %v, want explicit false", postBody.UnfurlLinks)
+	}
+}
+
+// TestSlackPostEphemeralBlocksFuncPostsBlocksAndFallback pins the channel Block
+// Kit ephemeral seam's body shape: channel/user/thread routing plus the blocks +
+// fallback text with mrkdwn explicitly false.
+func TestSlackPostEphemeralBlocksFuncPostsBlocksAndFallback(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Channel  string           `json:"channel"`
+		User     string           `json:"user"`
+		ThreadTS string           `json:"thread_ts"`
+		Text     string           `json:"text"`
+		Blocks   []map[string]any `json:"blocks"`
+		Mrkdwn   *bool            `json:"mrkdwn"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	post := newSlackPostEphemeralBlocksFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, nil)
+	blocks := []any{map[string]any{"type": blockTypeSection, "text": map[string]any{"type": "mrkdwn", "text": "portal"}}}
+	if err := post(context.Background(), testSlackTeamID, "E1", mdTestChannel, "1700.0005", "U_eph", blocks, "eph blocks fallback"); err != nil {
+		t.Fatalf("PostEphemeralBlocks: %v", err)
+	}
+	if gotBody.Channel != mdTestChannel || gotBody.User != "U_eph" || gotBody.ThreadTS != "1700.0005" {
+		t.Fatalf("body channel/user/thread = %+v", gotBody)
+	}
+	if gotBody.Text != "eph blocks fallback" {
+		t.Fatalf("fallback text = %q, want the fallback", gotBody.Text)
+	}
+	if len(gotBody.Blocks) != 1 || gotBody.Blocks[0]["type"] != blockTypeSection {
+		t.Fatalf("blocks = %+v, want one section block", gotBody.Blocks)
+	}
+	if gotBody.Mrkdwn == nil || *gotBody.Mrkdwn {
+		t.Fatalf("mrkdwn = %v, want explicit false (literal fallback)", gotBody.Mrkdwn)
+	}
+}
+
 // mdTestChannel is the channel id the markdown builder tests post to. A
 // shared const keeps the literal out of goconst's repeated-string count.
 const mdTestChannel = "C_chan"
