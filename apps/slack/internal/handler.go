@@ -2347,6 +2347,11 @@ const (
 	// respActionUpdate is the response_action value that swaps the current
 	// modal for a replacement view (the modal error responders use it).
 	respActionUpdate = "update"
+	// respFieldUnfurlLinks / respFieldUnfurlMedia disable link/media unfurling on a
+	// response_url block payload (postResponseBlocks) — kept as consts to match the
+	// other response-payload keys rather than bare literals.
+	respFieldUnfurlLinks = "unfurl_links"
+	respFieldUnfurlMedia = "unfurl_media"
 )
 
 func respondSlack(w http.ResponseWriter, text string) {

@@ -239,16 +239,18 @@ func responseURLTextBody(text string) ([]byte, error) {
 // block seams: a response_url message is not link-unfurled by Slack today, but the
 // `/qurl get` fallback carries a static one-time URL, so suppressing explicitly keeps
 // the "never unfurled" invariant uniform across surfaces (this is the highest-traffic
-// get path) rather than resting on assumed behavior. mrkdwn is left at Slack's default:
-// the fallback only surfaces when blocks can't render, and this seam's other callers
-// (list/revoke/tunnel) intentionally use mrkdwn in their prose fallbacks.
+// get path) rather than resting on assumed behavior. The suppression is repo-wide —
+// it applies to EVERY caller (get, /qurl list, revoke, tunnel install) — which is
+// harmless: their fallbacks are status/confirm prose that only surfaces when blocks
+// can't render, and none want unfurl. mrkdwn is left at Slack's default so those
+// prose fallbacks keep their formatting.
 func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
 	body, err := json.Marshal(map[string]any{
 		respFieldResponseType: respTypeEphemeral,
 		respFieldText:         fallbackText,
 		blockKitFieldBlocks:   blocks,
-		"unfurl_links":        false,
-		"unfurl_media":        false,
+		respFieldUnfurlLinks:  false,
+		respFieldUnfurlMedia:  false,
 	})
 	if err != nil {
 		log.Error("marshal response_url blocks payload failed", "error", err)
