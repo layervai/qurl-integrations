@@ -51,6 +51,31 @@ func writeCreateFixture(t *testing.T, w http.ResponseWriter, link, resourceID st
 	}
 }
 
+// enterPortalButton digs the Enter Portal URL button out of a renderGetSuccess
+// block slice (the actions block's first element), so tests can assert the minted
+// link rides in the button (not just the notification fallback). Fails the test if
+// the shape isn't the expected section + actions(button) render.
+func enterPortalButton(t *testing.T, blocks []any) map[string]any {
+	t.Helper()
+	for _, b := range blocks {
+		block, ok := b.(map[string]any)
+		if !ok || block["type"] != "actions" {
+			continue
+		}
+		elements, ok := block["elements"].([]any)
+		if !ok || len(elements) == 0 {
+			t.Fatalf("actions block missing elements: %+v", block)
+		}
+		button, ok := elements[0].(map[string]any)
+		if !ok {
+			t.Fatalf("actions element is not a button map: %+v", elements[0])
+		}
+		return button
+	}
+	t.Fatalf("no actions block found in %+v", blocks)
+	return nil
+}
+
 // writeAPIError writes an RFC-7807-shaped error envelope at the
 // given status code.
 func writeAPIError(t *testing.T, w http.ResponseWriter, status int, code, title string) {
@@ -825,8 +850,8 @@ func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 		userID:    "U1",
 	}
 	reply, err := h.getWork(context.Background(), slogTestLogger(t), &args)
-	if reply != "" {
-		t.Errorf("reply = %q, want empty on the refuse-to-mint path", reply)
+	if reply.text != "" || reply.blocks != nil {
+		t.Errorf("reply = %+v, want empty getResult on the refuse-to-mint path", reply)
 	}
 	var ue *userError
 	if !errors.As(err, &ue) {
@@ -837,13 +862,14 @@ func TestGetWork_EmptyAliasRefusesToMint(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMVariantRefusedWhenPostDMNil fences the privacy-
+// TestHandleGet_DMVariantRefusedWhenPostDMBlocksNil fences the privacy-
 // preserving refusal: dm:true asks for the link in a DM (so it does
-// NOT leak into channel history). When PostDM is not wired we
-// refuse the mint with a user-facing "DM is not configured" copy —
-// silently posting the link in-channel would violate the user's
+// NOT leak into channel history). When PostDMBlocks — the Block Kit DM
+// seam deliverGetDM uses to deliver the Enter Portal button — is not
+// wired we refuse the mint with a user-facing "DM is not configured"
+// copy; silently posting the link in-channel would violate the user's
 // explicit intent. The mint is NOT burned (no POST /v1/qurls).
-func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
+func TestHandleGet_DMVariantRefusedWhenPostDMBlocksNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var mintCalls atomic.Int32
@@ -852,7 +878,7 @@ func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 		writeCreateFixture(t, w, "https://qurl.link/should-not-be-minted", testResourceIDFix)
 	})
 	h := newAdminTestHandler(t, ts)
-	// PostDM is nil by default.
+	// PostDMBlocks is nil by default.
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
@@ -867,10 +893,11 @@ func TestHandleGet_DMVariantRefusedWhenPostDMNil(t *testing.T) {
 	}
 }
 
-// TestHandleGet_DMVariantPostDMSuccess fences the dm:true happy path:
-// the link goes to PostDM, and the channel ephemeral confirms with
-// the :incoming_envelope: copy. No link in the channel surface.
-func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
+// TestHandleGet_DMVariantPostDMBlocksSuccess fences the dm:true happy path:
+// the link goes to PostDMBlocks (the Enter Portal button, with the link in the
+// fallback), and the channel ephemeral confirms with the :incoming_envelope:
+// copy. No link in the channel surface.
+func TestHandleGet_DMVariantPostDMBlocksSuccess(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
@@ -879,20 +906,26 @@ func TestHandleGet_DMVariantPostDMSuccess(t *testing.T) {
 
 	var dmCalls atomic.Int32
 	var dmText string
+	var dmBlocks []any
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, blocks []any, fallbackText string) error {
 		dmCalls.Add(1)
-		dmText = text
+		dmText = fallbackText
+		dmBlocks = blocks
 		return nil
 	}
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db dm:true", testAdminTeamID, testAdminUserID)
 	if dmCalls.Load() != 1 {
-		t.Errorf("PostDM calls = %d, want 1", dmCalls.Load())
+		t.Errorf("PostDMBlocks calls = %d, want 1", dmCalls.Load())
 	}
 	if !strings.Contains(dmText, "https://qurl.link/dm-secret") {
-		t.Errorf("DM text missing link: %q", dmText)
+		t.Errorf("DM fallback text missing link: %q", dmText)
+	}
+	// The link rides in the Enter Portal button's url, not just the fallback.
+	if url, _ := enterPortalButton(t, dmBlocks)["url"].(string); url != "https://qurl.link/dm-secret" {
+		t.Errorf("Enter Portal button url = %q, want the minted link", url)
 	}
 	if !strings.Contains(async, ":incoming_envelope:") {
 		t.Errorf("async reply missing DM-sent confirmation: %q", async)
@@ -911,7 +944,7 @@ func TestHandleGet_DMVariantMissingScopeMentionsSlackReinstall(t *testing.T) {
 
 	h := newAdminTestHandler(t, ts)
 	h.SetSlackInstallURL("https://slack-bot.example/oauth/slack/install")
-	h.cfg.PostDM = func(context.Context, string, string, string, string) error {
+	h.cfg.PostDMBlocks = func(context.Context, string, string, string, []any, string) error {
 		return fmt.Errorf("chat.postMessage: %w", ErrSlackMissingScope)
 	}
 	inv := newAdminSlashInvoker(t, h)
@@ -945,6 +978,128 @@ func TestResourceLinkExpiryConstsInSync(t *testing.T) {
 	}
 }
 
+// TestRenderGetSuccess locks the Enter Portal render: the minted link rides in a
+// primary URL button (labeled from the SDK-consistent enterPortalButtonLabel, with
+// the no-op enterPortalActionID), the headline section OMITS the raw URL, and the
+// plain-text fallback still carries the link + one-time-use suffix so a non-block
+// client isn't dead-ended.
+func TestRenderGetSuccess(t *testing.T) {
+	t.Parallel()
+	const link = "https://qurl.link/enter-me"
+	fallback, blocks := renderGetSuccess(link)
+
+	if !strings.Contains(fallback, link) {
+		t.Errorf("fallback missing link: %q", fallback)
+	}
+	if !strings.HasSuffix(fallback, "(one-time use · link expires in "+resourceLinkExpiryHuman+")") {
+		t.Errorf("fallback missing one-time-use/expiry suffix: %q", fallback)
+	}
+
+	// The headline section must NOT leak the raw URL — that's the whole point: it
+	// lives in the button now.
+	section, ok := blocks[0].(map[string]any)
+	if !ok || section["type"] != "section" {
+		t.Fatalf("blocks[0] is not a section: %+v", blocks[0])
+	}
+	textObj, ok := section["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("section text is not a text object: %+v", section["text"])
+	}
+	if sectionText, _ := textObj["text"].(string); strings.Contains(sectionText, link) {
+		t.Errorf("headline section leaked the raw URL: %q", sectionText)
+	}
+
+	// The button carries the link, the SDK-consistent label, the no-op action_id,
+	// and the primary style.
+	button := enterPortalButton(t, blocks)
+	if button["url"] != link {
+		t.Errorf("button url = %v, want %q", button["url"], link)
+	}
+	if button["action_id"] != enterPortalActionID {
+		t.Errorf("button action_id = %v, want %q", button["action_id"], enterPortalActionID)
+	}
+	if button["style"] != blockKitStylePrimary {
+		t.Errorf("button style = %v, want %q", button["style"], blockKitStylePrimary)
+	}
+	buttonText, ok := button["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("button text is not a text object: %+v", button["text"])
+	}
+	if label, _ := buttonText["text"].(string); label != enterPortalButtonLabel {
+		t.Errorf("button label = %q, want %q", label, enterPortalButtonLabel)
+	}
+}
+
+// TestHandleGet_MalformedLinkRejected fences the URL-button contract: a mint that
+// returns a non-empty but non-http(s) qurl_link (a server contract surprise) is
+// rejected with the generic retry copy — NOT rendered into an Enter Portal button,
+// which Slack would reject outright, bouncing the whole message after the mint is
+// already burned. Same defensive disposition as an empty qurl_link.
+func TestHandleGet_MalformedLinkRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "not-a-url", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+	if !strings.Contains(async, commonGetMintFailedMessage) {
+		t.Errorf("async reply = %q, want the generic mint-failed message for a malformed link", async)
+	}
+	if strings.Contains(async, "not-a-url") {
+		t.Errorf("async reply leaked the malformed link: %q", async)
+	}
+}
+
+// TestHandleGet_SlashRendersEnterPortalButton fences the PRIMARY /qurl get surface:
+// the channel ephemeral must carry the Enter Portal URL button (blocks), not merely
+// a plain-text link — so a regression in finishGet back to a text-only post is caught
+// on the most common path (the DM and agent-confirm paths assert the button separately).
+func TestHandleGet_SlashRendersEnterPortalButton(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/slash-btn", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdmin("get $prod-db", testAdminTeamID, testAdminUserID)
+	body := inv.captured.waitForBody(t, 2*time.Second)
+	blocks := parseSlackBlocks(t, body)
+	if gotURL, _ := enterPortalButton(t, blocks)["url"].(string); gotURL != "https://qurl.link/slash-btn" {
+		t.Fatalf("Enter Portal button url = %q, want the minted link on the slash surface", gotURL)
+	}
+}
+
+// TestIsHTTPSURL fences the button-url guard: absolute https URLs with a host pass;
+// http (looser than the mint contract), empty, scheme-less, scheme-only, or non-web
+// values fail (so they're caught before a doomed block post).
+func TestIsHTTPSURL(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"https://qurl.link/abc", true},
+		{"http://qurl.link/abc", false}, // http is looser than the https-only mint contract
+		{"", false},
+		{"not-a-url", false},
+		{"ftp://qurl.link/abc", false},
+		{"qurl.link/abc", false},
+		{"https://", false},        // scheme-only, no host — Slack would reject the button
+		{"//qurl.link/abc", false}, // scheme-relative, no scheme
+		// A valid https URL past Slack's 3000-char button-url cap still bounces the block post.
+		{"https://qurl.link/" + strings.Repeat("a", slackButtonURLMaxLen), false},
+	} {
+		if got := isHTTPSURL(c.in); got != c.want {
+			t.Errorf("isHTTPSURL(%.60q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 // TestHandleGet_DMRidesOneTimeSuffix fences that the
 // "(one-time use · link expires in 1 minute)" suffix rides into the DM
 // payload (not the channel reply) on dm:true. That suffix is the
@@ -960,8 +1115,8 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 	var dmText string
 	h := newAdminTestHandler(t, ts)
-	h.cfg.PostDM = func(_ context.Context, _, _, _, text string) error {
-		dmText = text
+	h.cfg.PostDMBlocks = func(_ context.Context, _, _, _ string, _ []any, fallbackText string) error {
+		dmText = fallbackText
 		return nil
 	}
 	inv := newAdminSlashInvoker(t, h)
