@@ -107,7 +107,7 @@ func (r *report) settle(ctx context.Context, store purger, logger *slog.Logger) 
 		}
 		return nil
 	}
-	return r.applyPurge(ctx, store, logger)
+	return r.applyPurge(ctx, store, logger, targets)
 }
 
 // applyPurge clears every confirmed orphan via slackdata.Store.PurgeResourceFromChannel —
@@ -115,8 +115,7 @@ func (r *report) settle(ctx context.Context, store purger, logger *slog.Logger) 
 // behaviorally identical to the live #654 path. Each purge is an auditable log
 // record; a failure is counted (ALERTABLE) and logged but does not abort the
 // sweep, since the purge is idempotent and a re-run retries cleanly.
-func (r *report) applyPurge(ctx context.Context, store purger, logger *slog.Logger) error {
-	targets := r.purgeTargets()
+func (r *report) applyPurge(ctx context.Context, store purger, logger *slog.Logger, targets []purgeTarget) error {
 	for _, t := range targets {
 		unbound, err := store.PurgeResourceFromChannel(ctx, t.teamID, t.channelID, t.resourceID)
 		if err != nil {
