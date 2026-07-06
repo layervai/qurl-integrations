@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // recordingStateDeleter is a recordingAuthProvider that also satisfies
@@ -352,6 +353,42 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 		}
 		if len(entries) != 0 {
 			t.Fatalf("GetChannelPolicy(%q) after uninstall = %v, want empty", ch, entries)
+		}
+	}
+}
+
+func TestSlashCommandUninstallPurgesWorkspaceWhenAPIKeyAlreadyCleared(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+	provider.deleteErr = auth.ErrWorkspaceNotConfigured
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
+		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+	h.Wait()
+	if provider.deleteStateCalls != 1 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (already-cleared uninstall must still forget bot state)", provider.deleteStateCalls)
+	}
+	if provider.deleteStateWorkspaceID != testAdminTeamID {
+		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
+	}
+
+	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	var ae *slackdata.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+		t.Fatalf("ListAdmins after already-cleared uninstall: err = %v, want 404 *Error", err)
+	}
+	for _, ch := range []string{"C_one", "C_two"} {
+		entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, ch)
+		if err != nil {
+			t.Fatalf("GetChannelPolicy(%q) after already-cleared uninstall: %v", ch, err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("GetChannelPolicy(%q) after already-cleared uninstall = %v, want empty", ch, entries)
 		}
 	}
 }

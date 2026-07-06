@@ -1776,6 +1776,29 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
 	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
 
+	// DeleteAPIKey clears only the qURL key columns. Whenever the command reaches
+	// a terminal local-disconnect result (success, or already-no-qURL-key), forget
+	// the rest of the workspace too — the encrypted Slack bot token + data key,
+	// the workspace_mappings row, and every channel_policies row — so `/qurl
+	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
+	// event triggers). Best-effort and idempotent: the primary disconnect path has
+	// already reached a terminal reply, so a sweep failure is logged inside
+	// purgeWorkspace and does not change the Slack response. Run it on a tracked
+	// async goroutine off h.baseCtx (NOT this request's ctx, which `defer
+	// cancel()`s on return) so the extra DeleteItem/Query round-trips — which can
+	// be several on a workspace used in many channels — stay off the slash ack's
+	// tight sync budget. h.Go is wg-tracked so a graceful shutdown drains an
+	// in-flight purge.
+	schedulePurge := func(reason string) {
+		purgeTeamID := teamID
+		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason)
+		h.Go(func() {
+			purgeCtx, purgeCancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
+			defer purgeCancel()
+			h.purgeWorkspaceWithRetry(purgeCtx, purgeLog, purgeTeamID)
+		})
+	}
+
 	// revoked reports whether the upstream key was revoked; a non-nil error means
 	// the key may still be live, so abort before local removal to preserve the
 	// stored key_id for a retry rather than orphaning it.
@@ -1796,9 +1819,11 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 				// / partial row), but this call did revoke the upstream key — report
 				// success, not the contradictory "isn't currently connected".
 				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
+				schedulePurge("qurl_key_already_cleared_after_revoke")
 				respondSlack(w, revokedReply)
 				return
 			}
+			schedulePurge("qurl_key_not_configured")
 			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
 			return
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
@@ -1810,24 +1835,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			return
 		}
 	}
-	// DeleteAPIKey cleared only the qURL key columns. Forget the rest of the
-	// workspace too — the encrypted Slack bot token + data key, the
-	// workspace_mappings row, and every channel_policies row — so `/qurl
-	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
-	// event triggers). Best-effort and idempotent: the primary disconnect already
-	// succeeded, so a sweep failure is logged inside purgeWorkspace and does not
-	// change the success reply. Run it on a tracked async goroutine off h.baseCtx
-	// (NOT this request's ctx, which `defer cancel()`s on return) so the extra
-	// DeleteItem/Query round-trips — which can be several on a workspace used in
-	// many channels — stay off the slash ack's tight sync budget. h.Go is
-	// wg-tracked so a graceful shutdown drains an in-flight purge.
-	purgeTeamID := teamID
-	purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID)
-	h.Go(func() {
-		purgeCtx, purgeCancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
-		defer purgeCancel()
-		h.purgeWorkspaceWithRetry(purgeCtx, purgeLog, purgeTeamID)
-	})
+	schedulePurge("delete_api_key_succeeded")
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
 		respondSlack(w, revokedReply)
