@@ -161,6 +161,15 @@ func (p fakeProvider) APIKey(_ context.Context, teamID string) (string, error) {
 	return "", auth.ErrWorkspaceNotConfigured
 }
 
+// SupportsDeleteAPIKey / DeleteAPIKey satisfy the auth.Provider interface.
+// statecrawl is read-only w.r.t. the workspace_state table (it only reads keys
+// to drive liveness), so the fake reports delete unsupported and never mutates
+// — matching the interface contract that DeleteAPIKey is a no-op when
+// SupportsDeleteAPIKey is false.
+func (p fakeProvider) SupportsDeleteAPIKey() bool { return false }
+
+func (p fakeProvider) DeleteAPIKey(_ context.Context, _ string) error { return nil }
+
 // qurlResource is a resource entry in the GET /v1/resources test envelope.
 func qurlResource(id, typ, slug, status string) map[string]any {
 	r := map[string]any{"resource_id": id, "type": typ, "status": status}
