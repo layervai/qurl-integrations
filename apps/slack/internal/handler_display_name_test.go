@@ -568,8 +568,8 @@ func TestUnsetDisplayName_ResolvesByChannelAlias(t *testing.T) {
 // TestSetDisplayName_ChannelAliasToURLResourceRejected guards the type fence on
 // the alias path: a channel alias can point at a URL resource, but Display Names
 // apply only to connectors. The alias resolves, the recovered resource is
-// type=url, and the verb refuses with an unset-alias hint rather than PATCHing a
-// URL resource's description.
+// type=url, and the verb refuses with connector-only copy rather than PATCHing a
+// URL resource's description or nudging the admin to clear a valid URL alias.
 func TestSetDisplayName_ChannelAliasToURLResourceRejected(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 	const urlResourceID = "r_url_resource"
@@ -587,8 +587,11 @@ func TestSetDisplayName_ChannelAliasToURLResourceRejected(t *testing.T) {
 	_, _, async := newAdminSlashInvokerOnChannel(t, h, testAliasChannelID).
 		invokeAdminAsync("set-display-name "+testDisplayNameAlias+" "+testDisplayNameNewName, testAliasTeamID, "U_alias_admin")
 
-	if !strings.Contains(async, "no longer points at an active qURL Connector") || !strings.Contains(async, "unset-alias") {
-		t.Errorf("async reply = %q, want the alias-not-a-connector hint", async)
+	if !strings.Contains(async, "Display Names apply only to qURL Connectors") {
+		t.Errorf("async reply = %q, want the connector-only hint", async)
+	}
+	if strings.Contains(async, "unset-alias") || strings.Contains(async, "no longer points at an active") {
+		t.Errorf("async reply = %q, must not recommend clearing a valid URL-resource alias", async)
 	}
 	if capPatch.calls.Load() != 0 {
 		t.Errorf("PATCH fired against a non-connector resource (calls = %d)", capPatch.calls.Load())
