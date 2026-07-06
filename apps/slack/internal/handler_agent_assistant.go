@@ -117,8 +117,9 @@ func (h *Handler) persistAssistantContext(ctx context.Context, log *slog.Logger,
 // caller, so this only does the UX. A nil AssistantThreads seam (pre-enablement, or
 // unwired in a test) skips the title/prompts; the intro post is independently guarded on
 // its own PostMessage seam. The calls are independent best-effort: a failure is logged
-// and the others still run; prompts go first so they land even if ctx expires before the
-// title call — the higher-value affordance.
+// and the others still run. The disclosure is attempted first because it is the
+// compliance-critical first-touch notice; prompts/title follow when AssistantThreads is
+// available.
 func (h *Handler) setAssistantFirstRun(ctx context.Context, log *slog.Logger, teamID, enterpriseID string, at *assistantThread) {
 	h.postAssistantDisclosure(ctx, log, teamID, enterpriseID, at)
 	port := h.cfg.AssistantThreads

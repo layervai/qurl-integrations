@@ -40,9 +40,8 @@ const agentErrorReply = "Something went wrong handling that. Please try again, o
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
-// route to how their messages are processed. (The page is created by a sibling
-// website PR; the link can ship before that page merges.)
-const agentAIPrivacyURL = "https://layerv.ai/privacy/qurl-slack"
+// route to how their messages are processed.
+const agentAIPrivacyURL = "https://layerv.ai/privacy/"
 
 // agentAIDisclosure is the Slack-Marketplace-required AI disclosure for the
 // agent surface: it names the AI provider (Anthropic Claude), warns that AI can
