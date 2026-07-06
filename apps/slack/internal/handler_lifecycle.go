@@ -183,10 +183,16 @@ type workspaceStateDeleter interface {
 // sent, and `/qurl uninstall` reports success off its own primary DeleteAPIKey
 // result, not this sweep.
 //
-// Upstream qURL key revocation is NOT done here — it is the caller's concern (the
-// `/qurl uninstall` path best-efforts it before calling this; the lifecycle path
-// has no live credential to revoke with). This keeps purgeWorkspace a pure local
-// storage sweep.
+// Upstream qURL key revocation is NOT done here — it is the caller's concern.
+// The `/qurl uninstall` path best-efforts it before calling this. The lifecycle
+// path currently prioritizes local data deletion because owner-authorized
+// upstream revocation from Slack app-console uninstall is not available yet.
+// TODO(#806): once owner-auth revocation exists, revoke-before-purge for
+// lifecycle events too so app-console uninstalls do not leave a live upstream
+// qURL key that is no longer locally referenceable.
+//
+// Keeping purgeWorkspace a pure local storage sweep keeps the auth package free
+// of the qurl-service client dependency.
 func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string) error {
 	if workspaceID == "" {
 		log.Warn("purgeWorkspace called with empty workspace id — skipping")
