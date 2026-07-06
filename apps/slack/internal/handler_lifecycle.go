@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -28,6 +29,14 @@ const (
 // worker slot indefinitely. The purge runs off h.baseCtx (NOT the request ctx),
 // because the 200 OK is returned to Slack before the purge starts.
 const lifecyclePurgeTimeout = 20 * time.Second
+
+// lifecyclePurgeRetryAttempts gives an ack-first purge a bounded transient-DDB
+// recovery path after Slack has already received 200 OK and will not redeliver
+// the event. The retry loop still lives inside lifecyclePurgeTimeout.
+const (
+	lifecyclePurgeRetryAttempts  = 3
+	lifecyclePurgeRetryBaseDelay = 500 * time.Millisecond
+)
 
 // isLifecycleEvent reports whether an inner event is an install-teardown signal
 // that should trigger a full workspace purge.
@@ -98,7 +107,7 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		ctx, cancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
 		defer cancel()
 		for _, workspaceID := range workspaceIDs {
-			h.purgeWorkspace(ctx, log.With("workspace_id", workspaceID), workspaceID)
+			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID)
 		}
 	})
 }
@@ -131,21 +140,24 @@ type workspaceStateDeleter interface {
 // Best-effort by design: it ATTEMPTS all three deletes regardless of whether any
 // one fails, so a transient error on one table never strands the others. Each
 // delete is independently idempotent (an absent row is a no-op), so a partial
-// prior purge — or a re-delivered Slack event — converges cleanly on a retry.
+// prior purge converges cleanly when a later retry or fresh teardown signal runs.
 // Failures are logged (workspace id only; the deletes carry no token material, so
-// nothing secret is logged) and otherwise swallowed: a lifecycle ack has already
-// been sent, and `/qurl uninstall` reports success off its own primary
-// DeleteAPIKey result, not this sweep.
+// nothing secret is logged) and returned as a joined error so async callers can
+// retry or emit a final manual-cleanup signal. A lifecycle ack has already been
+// sent, and `/qurl uninstall` reports success off its own primary DeleteAPIKey
+// result, not this sweep.
 //
 // Upstream qURL key revocation is NOT done here — it is the caller's concern (the
 // `/qurl uninstall` path best-efforts it before calling this; the lifecycle path
 // has no live credential to revoke with). This keeps purgeWorkspace a pure local
 // storage sweep.
-func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string) {
+func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string) error {
 	if workspaceID == "" {
 		log.Warn("purgeWorkspace called with empty workspace id — skipping")
-		return
+		return nil
 	}
+
+	var errs []error
 
 	// workspace_state — the encrypted bot token lives here, so this is the
 	// load-bearing delete for the Marketplace "uninstall forgets the token"
@@ -154,6 +166,7 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 	if deleter, ok := h.cfg.AuthProvider.(workspaceStateDeleter); ok {
 		if err := deleter.DeleteWorkspaceState(ctx, workspaceID); err != nil {
 			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
+			errs = append(errs, err)
 		} else {
 			log.Info("purgeWorkspace: deleted workspace_state row")
 		}
@@ -165,16 +178,58 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 	// unwired (sandbox / no-DDB) there's nothing to purge there.
 	if h.cfg.AdminStore == nil {
 		log.Debug("purgeWorkspace: AdminStore unwired — skipping mappings/policies purge")
-		return
+		return errors.Join(errs...)
 	}
 	if err := h.cfg.AdminStore.DeleteWorkspaceMapping(ctx, workspaceID); err != nil {
 		log.Error("purgeWorkspace: failed to delete workspace_mappings row", "error", err)
+		errs = append(errs, err)
 	} else {
 		log.Info("purgeWorkspace: deleted workspace_mappings row")
 	}
 	if err := h.cfg.AdminStore.PurgeTeamChannelPolicies(ctx, workspaceID); err != nil {
 		log.Error("purgeWorkspace: failed to purge channel_policies rows", "error", err)
+		errs = append(errs, err)
 	} else {
 		log.Info("purgeWorkspace: purged channel_policies rows")
+	}
+	return errors.Join(errs...)
+}
+
+func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) {
+	for attempt := 1; attempt <= lifecyclePurgeRetryAttempts; attempt++ {
+		attemptLog := log.With("attempt", attempt, "max_attempts", lifecyclePurgeRetryAttempts)
+		err := h.purgeWorkspace(ctx, attemptLog, workspaceID)
+		if err == nil {
+			return
+		}
+		if attempt == lifecyclePurgeRetryAttempts {
+			log.Error("purgeWorkspace: exhausted retries; manual cleanup may be required",
+				"attempts", attempt,
+				"cleanup_action_required", true,
+				"error", err,
+			)
+			return
+		}
+
+		delay := time.Duration(attempt) * lifecyclePurgeRetryBaseDelay
+		log.Warn("purgeWorkspace: retrying failed purge",
+			"attempt", attempt,
+			"next_attempt", attempt+1,
+			"retry_delay", delay.String(),
+			"error", err,
+		)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			log.Error("purgeWorkspace: retry canceled before next attempt", "error", ctx.Err())
+			return
+		case <-timer.C:
+		}
 	}
 }

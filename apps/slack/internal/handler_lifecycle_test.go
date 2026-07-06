@@ -254,10 +254,11 @@ func TestHandleLifecycleEvent_AckEvenWhenPurgeFails(t *testing.T) {
 	}
 	h.Wait()
 
-	// All three deletes were still attempted (best-effort): the state delete ran
-	// (and errored), so the call count proves the attempt.
-	if provider.deleteStateCalls != 1 {
-		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (attempted despite error)", provider.deleteStateCalls)
+	// The async purge retries boundedly after failures; each attempt still reaches
+	// the state delete, proving the ack-first path has a transient-failure retry
+	// story without changing Slack's 200 response.
+	if provider.deleteStateCalls != lifecyclePurgeRetryAttempts {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want %d retry attempts", provider.deleteStateCalls, lifecyclePurgeRetryAttempts)
 	}
 }
 

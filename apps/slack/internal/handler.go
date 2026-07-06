@@ -1826,7 +1826,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	h.Go(func() {
 		purgeCtx, purgeCancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
 		defer purgeCancel()
-		h.purgeWorkspace(purgeCtx, purgeLog, purgeTeamID)
+		h.purgeWorkspaceWithRetry(purgeCtx, purgeLog, purgeTeamID)
 	})
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
