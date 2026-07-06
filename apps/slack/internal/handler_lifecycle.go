@@ -54,24 +54,58 @@ func isLifecycleEvent(event *slackInnerEvent) bool {
 	}
 }
 
-// lifecycleWorkspaceIDs resolves every workspace identity a lifecycle event may
-// refer to, matching the per-workspace DDB partition key: team_id for a normal
-// install, and enterprise_id for an org-level Grid install. Slack Grid lifecycle
-// payloads can carry both IDs, while the stored bot token may live under the
-// enterprise key, so callers purge each unique candidate idempotently.
+// lifecycleWorkspaceIDs resolves the DDB partition key(s) a lifecycle event
+// should purge: team_id for a workspace install, enterprise_id for an org-level
+// Grid install. Slack's Events API authorization metadata disambiguates those
+// cases when both outer IDs are present. Older/partial payloads without
+// authorizations fall back to both unique outer IDs so legacy Grid uninstall
+// events do not strand an enterprise-keyed install.
 func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	var ids []string
 	seen := map[string]struct{}{}
-	for _, raw := range []string{env.TeamID, env.EnterpriseID} {
+	add := func(raw string) {
 		id := strings.TrimSpace(raw)
 		if id == "" {
-			continue
+			return
 		}
 		if _, ok := seen[id]; ok {
-			continue
+			return
 		}
 		seen[id] = struct{}{}
 		ids = append(ids, id)
+	}
+
+	if len(env.Authorizations) == 0 {
+		add(env.TeamID)
+		add(env.EnterpriseID)
+		return ids
+	}
+
+	enterpriseInstall := false
+	for _, auth := range env.Authorizations {
+		if auth.IsEnterpriseInstall {
+			enterpriseInstall = true
+			break
+		}
+	}
+	if enterpriseInstall {
+		for _, auth := range env.Authorizations {
+			if auth.IsEnterpriseInstall {
+				add(auth.EnterpriseID)
+			}
+		}
+		if len(ids) == 0 {
+			add(env.EnterpriseID)
+		}
+		return ids
+	}
+
+	add(env.TeamID)
+	for _, auth := range env.Authorizations {
+		add(auth.TeamID)
+	}
+	if len(ids) == 0 {
+		add(env.EnterpriseID)
 	}
 	return ids
 }

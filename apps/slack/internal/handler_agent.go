@@ -91,13 +91,20 @@ const agentThinkingStatus = "is thinking…"
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
 type slackEventEnvelope struct {
-	Type         string          `json:"type"`
-	Challenge    string          `json:"challenge"`
-	TeamID       string          `json:"team_id"`
-	EnterpriseID string          `json:"enterprise_id"`
-	APIAppID     string          `json:"api_app_id"`
-	EventID      string          `json:"event_id"`
-	Event        slackInnerEvent `json:"event"`
+	Type           string                    `json:"type"`
+	Challenge      string                    `json:"challenge"`
+	TeamID         string                    `json:"team_id"`
+	EnterpriseID   string                    `json:"enterprise_id"`
+	APIAppID       string                    `json:"api_app_id"`
+	EventID        string                    `json:"event_id"`
+	Authorizations []slackEventAuthorization `json:"authorizations,omitempty"`
+	Event          slackInnerEvent           `json:"event"`
+}
+
+type slackEventAuthorization struct {
+	EnterpriseID        string `json:"enterprise_id,omitempty"`
+	TeamID              string `json:"team_id,omitempty"`
+	IsEnterpriseInstall bool   `json:"is_enterprise_install,omitempty"`
 }
 
 // slackInnerEvent is the inner `event` object for app_mention / message events,
