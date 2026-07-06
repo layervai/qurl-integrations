@@ -18,14 +18,16 @@ import (
 // those tests asserting the "provider can't delete a row" skip path.
 type recordingStateDeleter struct {
 	recordingAuthProvider
-	deleteStateCalls       int
-	deleteStateWorkspaceID string
-	deleteStateErr         error
+	deleteStateCalls        int
+	deleteStateWorkspaceID  string
+	deleteStateWorkspaceIDs []string
+	deleteStateErr          error
 }
 
 func (p *recordingStateDeleter) DeleteWorkspaceState(_ context.Context, workspaceID string) error {
 	p.deleteStateCalls++
 	p.deleteStateWorkspaceID = workspaceID
+	p.deleteStateWorkspaceIDs = append(p.deleteStateWorkspaceIDs, workspaceID)
 	return p.deleteStateErr
 }
 
@@ -38,6 +40,10 @@ func appUninstalledBody(teamID string) string {
 
 func appUninstalledEnterpriseBody(enterpriseID string) string {
 	return `{"type":"event_callback","enterprise_id":"` + enterpriseID + `","api_app_id":"A1","event_id":"EvEnterpriseUninstall","event":{"type":"app_uninstalled"}}`
+}
+
+func appUninstalledGridBody(teamID, enterpriseID string) string {
+	return `{"type":"event_callback","team_id":"` + teamID + `","enterprise_id":"` + enterpriseID + `","api_app_id":"A1","event_id":"EvGridUninstall","event":{"type":"app_uninstalled"}}`
 }
 
 func tokensRevokedBody(teamID string) string {
@@ -149,6 +155,38 @@ func TestHandleLifecycleEvent_EnterpriseFallbackPurgesWorkspace(t *testing.T) {
 	}
 }
 
+func TestHandleLifecycleEvent_EnterpriseGridBothIDsPurgesBothKeys(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandlerForWorkspace(t, testEnterpriseID)
+
+	w := httptest.NewRecorder()
+	body := appUninstalledGridBody(testAdminTeamID, testEnterpriseID)
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+	h.Wait()
+
+	wantIDs := testAdminTeamID + "," + testEnterpriseID
+	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
+		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
+	}
+
+	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID)
+	var ae *slackdata.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+		t.Fatalf("ListAdmins after Grid purge: err = %v, want 404 *Error", err)
+	}
+	for _, ch := range []string{"C_one", "C_two"} {
+		entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testEnterpriseID, ch)
+		if err != nil {
+			t.Fatalf("GetChannelPolicy(%q) after Grid purge: %v", ch, err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("GetChannelPolicy(%q) after Grid purge = %v, want empty", ch, entries)
+		}
+	}
+}
+
 func TestHandleLifecycleEvent_TokensRevokedPurgesWorkspace(t *testing.T) {
 	h, provider, _ := newLifecycleTestHandler(t)
 
@@ -256,7 +294,7 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
 	}
 
-	// mappings + policies gone after the synchronous purge.
+	// mappings + policies gone after the async purge.
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	var ae *slackdata.Error
 	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {

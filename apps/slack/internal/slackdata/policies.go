@@ -503,8 +503,11 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 // the joined delete errors at the end. A row created after the Query completes
 // is not seen — acceptable here because once the Slack app is uninstalled the
 // bot can no longer be invoked to create new policy rows, so the set is
-// effectively frozen before the purge runs. Sequential DeleteItem (not
-// BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
+// effectively frozen before the purge runs. A missed channel_policies row has no
+// TTL and can persist unless a later uninstall/revoke delivery triggers another
+// purge, so lifecycle callers should treat returned errors as meaningful cleanup
+// signals even though the Slack ack has already been sent. Sequential DeleteItem
+// (not BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
 // channel-policy rows are bounded by the channels a workspace used the bot in,
 // so the round-trips stay modest.
 func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {

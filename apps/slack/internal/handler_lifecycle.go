@@ -45,15 +45,26 @@ func isLifecycleEvent(event *slackInnerEvent) bool {
 	}
 }
 
-// lifecycleWorkspaceID resolves the workspace identity a lifecycle event refers
-// to, matching the per-workspace DDB partition key (Slack team_id, or
-// enterprise_id for an org-level install). Returns "" when neither is present so
-// the caller can skip the purge rather than issue a delete against an empty key.
-func lifecycleWorkspaceID(env *slackEventEnvelope) string {
-	if id := strings.TrimSpace(env.TeamID); id != "" {
-		return id
+// lifecycleWorkspaceIDs resolves every workspace identity a lifecycle event may
+// refer to, matching the per-workspace DDB partition key: team_id for a normal
+// install, and enterprise_id for an org-level Grid install. Slack Grid lifecycle
+// payloads can carry both IDs, while the stored bot token may live under the
+// enterprise key, so callers purge each unique candidate idempotently.
+func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
+	var ids []string
+	seen := map[string]struct{}{}
+	for _, raw := range []string{env.TeamID, env.EnterpriseID} {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
-	return strings.TrimSpace(env.EnterpriseID)
+	return ids
 }
 
 // handleLifecycleEvent runs the Slack app-uninstall / token-revoke cascade. It is
@@ -64,10 +75,10 @@ func lifecycleWorkspaceID(env *slackEventEnvelope) string {
 // asynchronously so a slow DDB sweep can't delay (or fail) the 200 that stops
 // Slack from retrying the delivery forever.
 //
-// A purge with no resolvable workspace id is dropped with a log line: there is no
-// row to delete and issuing a delete against an empty key would only 400.
+// A purge with no resolvable workspace id is dropped with a log line: there are
+// no rows to delete and issuing a delete against an empty key would only 400.
 func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
-	workspaceID := lifecycleWorkspaceID(env)
+	workspaceIDs := lifecycleWorkspaceIDs(env)
 	log := slog.With(
 		"surface", "lifecycle",
 		"event_type", env.Event.Type,
@@ -75,18 +86,20 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		"enterprise_id", env.EnterpriseID,
 		"event_id", env.EventID,
 	)
-	if workspaceID == "" {
+	if len(workspaceIDs) == 0 {
 		log.Warn("lifecycle event with no team_id/enterprise_id — nothing to purge")
 		return
 	}
-	log.Info("lifecycle event received — purging workspace data")
+	log.Info("lifecycle event received — purging workspace data", "workspace_ids", workspaceIDs)
 	// Off the request goroutine: handleEvent has already written 200, and the
 	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go is
 	// wg-tracked so a graceful shutdown drains an in-flight purge.
 	h.Go(func() {
 		ctx, cancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
 		defer cancel()
-		h.purgeWorkspace(ctx, log, workspaceID)
+		for _, workspaceID := range workspaceIDs {
+			h.purgeWorkspace(ctx, log.With("workspace_id", workspaceID), workspaceID)
+		}
 	})
 }
 
