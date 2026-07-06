@@ -1255,7 +1255,8 @@ func TestDeleteWorkspaceMapping(t *testing.T) {
 // (paging the LastEvaluatedKey loop) and DeleteItem each by its (team, channel)
 // key. It must delete EVERY page's rows, address each by the queried SK, tolerate
 // an empty team (nothing to delete), reject an empty team_id, and surface a Query
-// error so the caller can decide to retry.
+// error so the caller can decide to retry. A per-row DeleteItem failure should
+// not stop deletion of the remaining observed rows.
 func TestPurgeTeamChannelPolicies(t *testing.T) {
 	t.Run("deletes every row across pages", func(t *testing.T) {
 		page := 0
@@ -1372,6 +1373,45 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 		})
 		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err == nil {
 			t.Error("PurgeTeamChannelPolicies: want error when DeleteItem fails")
+		}
+	})
+
+	t.Run("delete error does not stop remaining rows", func(t *testing.T) {
+		var deletedChannels []string
+		store := newStore(&stubDDB{
+			queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				if len(in.ExclusiveStartKey) == 0 {
+					return &dynamodb.QueryOutput{
+						Items: []map[string]ddbtypes.AttributeValue{
+							channelPolicyRow("C_fail", []string{"r1"}, nil),
+							channelPolicyRow("C_ok1", []string{"r2"}, nil),
+						},
+						LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackChannelID: stringAttr("C_ok1")},
+					}, nil
+				}
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_ok2", nil, map[string]string{"a": "r3"})},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				cid := in.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS).Value
+				deletedChannels = append(deletedChannels, cid)
+				if cid == "C_fail" {
+					return nil, errors.New("ddb delete down")
+				}
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		err := store.PurgeTeamChannelPolicies(context.Background(), "T1")
+		if err == nil {
+			t.Fatal("PurgeTeamChannelPolicies: want joined delete error")
+		}
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("PurgeTeamChannelPolicies err = %v, want joined 503 *Error", err)
+		}
+		if want := []string{"C_fail", "C_ok1", "C_ok2"}; !reflect.DeepEqual(deletedChannels, want) {
+			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
 }

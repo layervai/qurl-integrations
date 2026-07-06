@@ -8,19 +8,14 @@ import (
 )
 
 // Slack Events API lifecycle event types. Both arrive as an `event_callback`
-// envelope whose inner `event.type` is one of these; both mean "this workspace's
-// bot install is gone (or its token has been revoked)", so both drive the same
-// full workspace purge.
+// envelope whose inner `event.type` is one of these.
 //
 //   - app_uninstalled: the workspace removed the app. The bot token is dead.
-//   - tokens_revoked: one or more of the app's tokens were revoked. When the BOT
-//     token is among them the app can no longer act for the workspace, which is
-//     operationally identical to an uninstall. Slack does not reliably split a
-//     bot-token revoke from a lone user-token revoke in this payload, and the bot
-//     holds no per-user tokens (its only install token is the workspace bot
-//     token — see shared/auth.SlackBotTokenInstall), so any tokens_revoked for
-//     this app means the credential it depends on is being torn down. Treat it as
-//     an uninstall and purge; re-install re-seeds the row from scratch.
+//   - tokens_revoked: one or more of the app's tokens were revoked. Purge only
+//     when Slack lists a bot token; a lone user-token revoke must not forget a
+//     still-installed workspace. Today the app stores only the workspace bot
+//     token (see shared/auth.SlackBotTokenInstall), but this explicit guard keeps
+//     future user-token scopes from widening the teardown path by accident.
 const (
 	slackEventTypeAppUninstalled = "app_uninstalled"
 	slackEventTypeTokensRevoked  = "tokens_revoked"
@@ -34,12 +29,17 @@ const (
 // because the 200 OK is returned to Slack before the purge starts.
 const lifecyclePurgeTimeout = 20 * time.Second
 
-// isLifecycleEvent reports whether an inner event type is one of the
-// install-teardown signals that should trigger a full workspace purge.
-func isLifecycleEvent(innerType string) bool {
-	switch innerType {
-	case slackEventTypeAppUninstalled, slackEventTypeTokensRevoked:
+// isLifecycleEvent reports whether an inner event is an install-teardown signal
+// that should trigger a full workspace purge.
+func isLifecycleEvent(event *slackInnerEvent) bool {
+	if event == nil {
+		return false
+	}
+	switch event.Type {
+	case slackEventTypeAppUninstalled:
 		return true
+	case slackEventTypeTokensRevoked:
+		return event.Tokens != nil && len(event.Tokens.Bot) > 0
 	default:
 		return false
 	}

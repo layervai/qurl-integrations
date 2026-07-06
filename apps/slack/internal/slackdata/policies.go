@@ -2,6 +2,7 @@ package slackdata
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -497,18 +498,21 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 //     (slack_team_id, slack_channel_id). Unconditional ⇒ idempotent: a row that a
 //     concurrent unset-alias already cleared makes its delete a DynamoDB no-op.
 //
-// Best-effort by construction: it deletes the rows it observed during the
-// Query pass. A row created after the Query completes is not seen — acceptable
-// here because once the Slack app is uninstalled the bot can no longer be invoked
-// to create new policy rows, so the set is effectively frozen before the purge
-// runs. Sequential DeleteItem (not BatchWriteItem) keeps the [DynamoDBClient]
-// surface unchanged; per-team channel-policy rows are bounded by the channels a
-// workspace used the bot in, so the round-trips stay modest.
+// Best-effort by construction: it attempts to delete every row it observes
+// during the Query pass, even after an individual DeleteItem fails, then returns
+// the joined delete errors at the end. A row created after the Query completes
+// is not seen — acceptable here because once the Slack app is uninstalled the
+// bot can no longer be invoked to create new policy rows, so the set is
+// effectively frozen before the purge runs. Sequential DeleteItem (not
+// BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
+// channel-policy rows are bounded by the channels a workspace used the bot in,
+// so the round-trips stay modest.
 func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
 	}
 	var startKey map[string]ddbtypes.AttributeValue
+	var deleteErrs []error
 	for {
 		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
 			TableName:              aws.String(s.ChannelPoliciesName),
@@ -526,7 +530,7 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 			ExclusiveStartKey: startKey,
 		})
 		if err != nil {
-			return ddbToError("PurgeTeamChannelPolicies", err)
+			return errors.Join(append(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))...)
 		}
 		for _, item := range out.Items {
 			channelID := readString(item, attrSlackChannelID)
@@ -543,7 +547,7 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 					attrSlackChannelID: stringAttr(channelID),
 				},
 			}); err != nil {
-				return ddbToError("PurgeTeamChannelPolicies", err)
+				deleteErrs = append(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
 			}
 		}
 		if len(out.LastEvaluatedKey) == 0 {
@@ -551,7 +555,7 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 		}
 		startKey = out.LastEvaluatedKey
 	}
-	return nil
+	return errors.Join(deleteErrs...)
 }
 
 // allowedResourceIDsFromItem returns the set of resource IDs a channel_policies

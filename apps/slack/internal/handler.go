@@ -2049,7 +2049,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
-	case env.Type == "event_callback" && isLifecycleEvent(env.Event.Type):
+	case env.Type == "event_callback" && isLifecycleEvent(&env.Event):
 		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
 		// because the cascade must run regardless of conversation-mode wiring
 		// (handleAgentEvent returns early when the agent is disabled). It only

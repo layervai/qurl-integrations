@@ -31,7 +31,7 @@ func (p *recordingStateDeleter) DeleteWorkspaceState(_ context.Context, workspac
 
 // appUninstalledBody is a signature-valid Events API app_uninstalled envelope for
 // the given team. tokens_revoked carries an inner tokens object; app_uninstalled
-// carries just the inner type, which is all the lifecycle router reads.
+// carries just the inner type.
 func appUninstalledBody(teamID string) string {
 	return `{"type":"event_callback","team_id":"` + teamID + `","api_app_id":"A1","event_id":"EvUninstall","event":{"type":"app_uninstalled"}}`
 }
@@ -39,6 +39,11 @@ func appUninstalledBody(teamID string) string {
 func tokensRevokedBody(teamID string) string {
 	return `{"type":"event_callback","team_id":"` + teamID + `","api_app_id":"A1","event_id":"EvRevoke",` +
 		`"event":{"type":"tokens_revoked","tokens":{"bot":["B123"]}}}`
+}
+
+func userTokensRevokedBody(teamID string) string {
+	return `{"type":"event_callback","team_id":"` + teamID + `","api_app_id":"A1","event_id":"EvUserRevoke",` +
+		`"event":{"type":"tokens_revoked","tokens":{"oauth":["U123"]}}}`
 }
 
 // newLifecycleTestHandler wires an admin handler (real *slackdata.Store over
@@ -111,9 +116,25 @@ func TestHandleLifecycleEvent_TokensRevokedPurgesWorkspace(t *testing.T) {
 	}
 	h.Wait()
 
-	// tokens_revoked is treated as an uninstall — the full purge runs.
+	// A bot-token revoke is treated as an uninstall — the full purge runs.
 	if provider.deleteStateCalls != 1 {
-		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (tokens_revoked must purge)", provider.deleteStateCalls)
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (bot tokens_revoked must purge)", provider.deleteStateCalls)
+	}
+}
+
+func TestHandleLifecycleEvent_UserTokensRevokedDoesNotPurgeWorkspace(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+
+	w := httptest.NewRecorder()
+	body := userTokensRevokedBody(testAdminTeamID)
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+	h.Wait()
+
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 for oauth-only tokens_revoked", provider.deleteStateCalls)
 	}
 }
 

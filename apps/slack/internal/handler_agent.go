@@ -120,7 +120,13 @@ type slackInnerEvent struct {
 	Tab string `json:"tab,omitempty"`
 	// AssistantThread is set on the container events (assistant_thread_started and
 	// assistant_thread_context_changed), which carry a nested object, not the flat fields.
-	AssistantThread *assistantThread `json:"assistant_thread,omitempty"`
+	AssistantThread *assistantThread    `json:"assistant_thread,omitempty"`
+	Tokens          *slackRevokedTokens `json:"tokens,omitempty"`
+}
+
+type slackRevokedTokens struct {
+	Bot   []string `json:"bot,omitempty"`
+	OAuth []string `json:"oauth,omitempty"`
 }
 
 // assistantThread is the assistant_thread object on a container event: the assistant DM
