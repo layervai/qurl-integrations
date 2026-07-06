@@ -36,6 +36,10 @@ func appUninstalledBody(teamID string) string {
 	return `{"type":"event_callback","team_id":"` + teamID + `","api_app_id":"A1","event_id":"EvUninstall","event":{"type":"app_uninstalled"}}`
 }
 
+func appUninstalledEnterpriseBody(enterpriseID string) string {
+	return `{"type":"event_callback","enterprise_id":"` + enterpriseID + `","api_app_id":"A1","event_id":"EvEnterpriseUninstall","event":{"type":"app_uninstalled"}}`
+}
+
 func tokensRevokedBody(teamID string) string {
 	return `{"type":"event_callback","team_id":"` + teamID + `","api_app_id":"A1","event_id":"EvRevoke",` +
 		`"event":{"type":"tokens_revoked","tokens":{"bot":["B123"]}}}`
@@ -53,10 +57,15 @@ func userTokensRevokedBody(teamID string) string {
 // store-read assertions).
 func newLifecycleTestHandler(t *testing.T) (*Handler, *recordingStateDeleter, *adminTestServers) {
 	t.Helper()
+	return newLifecycleTestHandlerForWorkspace(t, testAdminTeamID)
+}
+
+func newLifecycleTestHandlerForWorkspace(t *testing.T, workspaceID string) (*Handler, *recordingStateDeleter, *adminTestServers) {
+	t.Helper()
 	ts := newAdminTestServers(t)
-	ts.seedAdmin(t) // workspace_mappings row for testAdminTeamID
-	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_one", map[string]string{"grafana": "r_aaa"})
-	ts.seedPolicySet(t, testAdminTeamID, "C_two", "", []string{"r_bbb"})
+	ts.seedWorkspace(t, workspaceID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+	ts.seedPolicyAliasBindings(t, workspaceID, "C_one", map[string]string{"grafana": "r_aaa"})
+	ts.seedPolicySet(t, workspaceID, "C_two", "", []string{"r_bbb"})
 	provider := &recordingStateDeleter{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}}
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AuthProvider = provider
@@ -105,6 +114,41 @@ func TestHandleLifecycleEvent_AppUninstalledPurgesWorkspace(t *testing.T) {
 	}
 }
 
+func TestHandleLifecycleEvent_EnterpriseFallbackPurgesWorkspace(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandlerForWorkspace(t, testEnterpriseID)
+	_ = ts
+
+	w := httptest.NewRecorder()
+	body := appUninstalledEnterpriseBody(testEnterpriseID)
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+	h.Wait()
+
+	if provider.deleteStateCalls != 1 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 1", provider.deleteStateCalls)
+	}
+	if provider.deleteStateWorkspaceID != testEnterpriseID {
+		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testEnterpriseID)
+	}
+
+	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID)
+	var ae *slackdata.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+		t.Fatalf("ListAdmins after enterprise purge: err = %v, want 404 *Error", err)
+	}
+	for _, ch := range []string{"C_one", "C_two"} {
+		entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testEnterpriseID, ch)
+		if err != nil {
+			t.Fatalf("GetChannelPolicy(%q) after enterprise purge: %v", ch, err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("GetChannelPolicy(%q) after enterprise purge = %v, want empty", ch, entries)
+		}
+	}
+}
+
 func TestHandleLifecycleEvent_TokensRevokedPurgesWorkspace(t *testing.T) {
 	h, provider, _ := newLifecycleTestHandler(t)
 
@@ -135,6 +179,22 @@ func TestHandleLifecycleEvent_UserTokensRevokedDoesNotPurgeWorkspace(t *testing.
 
 	if provider.deleteStateCalls != 0 {
 		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 for oauth-only tokens_revoked", provider.deleteStateCalls)
+	}
+}
+
+func TestHandleLifecycleEvent_NoWorkspaceIDDoesNotPurge(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+
+	w := httptest.NewRecorder()
+	body := `{"type":"event_callback","api_app_id":"A1","event_id":"EvNoWorkspace","event":{"type":"app_uninstalled"}}`
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+	h.Wait()
+
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 without team_id/enterprise_id", provider.deleteStateCalls)
 	}
 }
 

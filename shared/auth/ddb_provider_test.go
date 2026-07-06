@@ -145,6 +145,14 @@ func cachedAPIKeyResult(apiKey string) ttlcache.Result[cachedAPIKey] {
 	}
 }
 
+func ddbItemForTestAPIKey(apiKey string) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+		attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+		attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+	}
+}
+
 func TestDDBProviderAPIKey(t *testing.T) {
 	t.Run("happy path", func(t *testing.T) {
 		ddb := &fakeDDBClient{
@@ -2190,6 +2198,8 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 }
 
 func TestDDBProviderDeleteWorkspaceState(t *testing.T) {
+	itemForKey := ddbItemForTestAPIKey
+
 	t.Run("deletes the whole row by team_id", func(t *testing.T) {
 		ddb := &fakeDDBClient{}
 		p := &DDBProvider{
@@ -2230,6 +2240,44 @@ func TestDDBProviderDeleteWorkspaceState(t *testing.T) {
 		}
 		if ddb.deleteCalls != 1 {
 			t.Fatalf("DeleteItem calls = %d, want 1", ddb.deleteCalls)
+		}
+	})
+
+	t.Run("evicts stale cached API key", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		if err := p.DeleteWorkspaceState(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteWorkspaceState: %v", err)
+		}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemConsistentRead(in) {
+				return &dynamodb.GetItemOutput{Item: nil}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
+
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after workspace delete, got %v", err)
+		}
+		if len(ddb.getInputs) != 2 || !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatalf("post-delete refill should use a strongly consistent read, inputs=%v", ddb.getInputs)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1; stale post-delete row must not be decrypted", encryptor.openCalls)
 		}
 	})
 
