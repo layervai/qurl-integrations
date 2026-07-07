@@ -1285,7 +1285,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			var logs bytes.Buffer
 			log := slog.New(slog.NewJSONHandler(&logs, nil))
 
-			_ = mapMintError(log, tc.apiErr)
+			gotErr := mapMintError(log, tc.apiErr)
 
 			var audit map[string]any
 			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
@@ -1326,6 +1326,15 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 				}
 			} else if audit != nil {
 				t.Fatalf("unexpected dependency auth audit: %#v; logs=%s", audit, logs.String())
+			}
+			if isExpectedGetMintForbiddenCode(tc.apiErr.Code) {
+				if strings.Contains(logs.String(), `"level":"ERROR"`) {
+					t.Fatalf("expected quota-class 403 must not log at ERROR: %s", logs.String())
+				}
+				var ue *userError
+				if !errors.As(gotErr, &ue) || !strings.Contains(ue.msg, "Cannot create another qURL right now") {
+					t.Fatalf("expected quota-class 403 msg = %#v (%T), want limit copy", gotErr, gotErr)
+				}
 			}
 		})
 	}

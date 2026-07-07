@@ -19,6 +19,21 @@ const (
 	DependencyQURLService = "qurl_service"
 )
 
+// DependencyAuthFailureAttrs returns the fixed per-event field set for
+// dependency auth failures. Route is a caller-owned origin label for humans,
+// not a closed enum; CloudWatch metric filters should key on event, agent, and
+// dependency instead.
+func DependencyAuthFailureAttrs(route, method, path string, status int, code, requestID string) []slog.Attr {
+	return []slog.Attr{
+		slog.String("route", route),
+		slog.String("method", method),
+		slog.String("path", path),
+		slog.Int("status", status),
+		slog.String("code", code),
+		slog.String("request_id", requestID),
+	}
+}
+
 // LogDependencyAuthFailure emits Slack's CloudWatch-filtered audit shape:
 // {"audit":{"event":"dependency_auth_failure","agent":"slack",...}}.
 func LogDependencyAuthFailure(log *slog.Logger, attrs ...slog.Attr) {
@@ -34,6 +49,6 @@ func LogDependencyAuthFailure(log *slog.Logger, attrs ...slog.Attr) {
 	)
 	auditAttrs = append(auditAttrs, attrs...)
 
-	log.LogAttrs(context.Background(), slog.LevelInfo, "dependency auth failure",
+	log.LogAttrs(context.Background(), slog.LevelWarn, "dependency auth failure",
 		slog.Attr{Key: "audit", Value: slog.GroupValue(auditAttrs...)})
 }

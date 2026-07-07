@@ -20,6 +20,14 @@ import (
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to create qURL. Please try again."
 
+func getMintLimitMessage(apiErr *client.APIError) string {
+	requestID := ""
+	if apiErr != nil {
+		requestID = apiErr.RequestID
+	}
+	return appendSlackReference("Cannot create another qURL right now", requestID) + ". Try again later or ask your Slack admin."
+}
+
 // getUsageMessage is the arg hint shown when `/qurl get` is invoked
 // with no token. Bare `get` parses to [ErrEmptyResource]; the
 // defensive empty-Alias guard below reuses the same copy so the user
@@ -814,9 +822,11 @@ func mapMintError(log *slog.Logger, err error) error {
 			if apiErr.Code == "tunnel_disabled" {
 				return &userError{msg: tunnelDisabledMessage}
 			}
-			if !isExpectedGetMintForbiddenCode(apiErr.Code) {
-				logGetDependencyAuthFailure(log, apiErr)
+			if isExpectedGetMintForbiddenCode(apiErr.Code) {
+				log.Info("get: mint rejected with expected quota-class 403", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
+				return &userError{msg: getMintLimitMessage(apiErr)}
 			}
+			logGetDependencyAuthFailure(log, apiErr)
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
@@ -844,7 +854,7 @@ func mapMintError(log *slog.Logger, err error) error {
 			// permanent-class — log loud so the operator sees the
 			// contract surprise, surface the generic message so the
 			// user isn't told to retry forever.
-			if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+			if apiErr.StatusCode == http.StatusUnauthorized {
 				logGetDependencyAuthFailure(log, apiErr)
 			}
 			log.Error("get: mint rejected with unmapped status", withRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)...)
@@ -872,14 +882,14 @@ func logGetDependencyAuthFailure(log *slog.Logger, apiErr *client.APIError) {
 	}
 	// Emit-once invariant: the shared client retries only 429/5xx, not
 	// auth-class 401/403, so this emits once per failed mint request.
-	slackaudit.LogDependencyAuthFailure(log,
-		slog.String("route", "/qurl get"),
-		slog.String("method", http.MethodPost),
-		slog.String("path", "/v1/resources/:id/qurls"),
-		slog.Int("status", apiErr.StatusCode),
-		slog.String("code", apiErr.Code),
-		slog.String("request_id", apiErr.RequestID),
-	)
+	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
+		"/qurl get",
+		http.MethodPost,
+		"/v1/resources/:id/qurls",
+		apiErr.StatusCode,
+		apiErr.Code,
+		apiErr.RequestID,
+	)...)
 }
 
 // humanizeRetry formats a retry-after duration for surfacing to the

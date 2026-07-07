@@ -112,6 +112,22 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 	}
 
 	logs.Reset()
+	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
+		Method:     http.MethodDelete,
+		Path:       "/v1/api-keys/:id",
+		StatusCode: http.StatusForbidden,
+	}, "oauth_callback_orphan_revoke")
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal empty request-id audit log: %v\n%s", err, logs.String())
+	}
+	if record.Audit["request_id"] != "" {
+		t.Fatalf("audit[request_id] = %#v, want empty string; audit=%#v", record.Audit["request_id"], record.Audit)
+	}
+	if record.Audit["code"] != "" {
+		t.Fatalf("audit[code] = %#v, want empty string; audit=%#v", record.Audit["code"], record.Audit)
+	}
+
+	logs.Reset()
 	logOAuthDependencyAuthFailure(log, errors.New("ordinary failure"), "oauth_callback_mint")
 	if logs.Len() != 0 {
 		t.Fatalf("generic errors must not emit dependency auth audit: %s", logs.String())

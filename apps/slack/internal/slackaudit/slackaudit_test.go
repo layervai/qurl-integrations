@@ -22,10 +22,14 @@ func TestLogDependencyAuthFailureShape(t *testing.T) {
 	)
 
 	var got struct {
+		Level string         `json:"level"`
 		Audit map[string]any `json:"audit"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal audit log: %v\n%s", err, buf.String())
+	}
+	if got.Level != "WARN" {
+		t.Fatalf("level = %q, want WARN; log=%s", got.Level, buf.String())
 	}
 
 	for k, want := range map[string]any{
