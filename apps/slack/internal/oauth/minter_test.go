@@ -751,6 +751,24 @@ func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterMintWorkspaceQuotaExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"quota_exceeded","title":"Quota Exceeded","detail":"quota exceeded"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if !errors.Is(err, ErrAPIKeyLimitReached) {
+		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("quota_exceeded must not be classified as dependency auth failure: %+v", authErr)
+	}
+}
+
 func TestHTTPAPIKeyMinterMintWorkspaceAlreadyBound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
@@ -774,6 +792,11 @@ func TestHTTPAPIKeyMinterMintWorkspaceEnvelopeCodesRequireExpectedStatus(t *test
 		{
 			name:        "api key limit on unexpected status",
 			code:        errCodeAPIKeyLimit,
+			mustNotWrap: ErrAPIKeyLimitReached,
+		},
+		{
+			name:        "quota exceeded on unexpected status",
+			code:        errCodeQuotaExceeded,
 			mustNotWrap: ErrAPIKeyLimitReached,
 		},
 		{
@@ -846,6 +869,25 @@ func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
 	}
 	if authErr.Method != http.MethodPost || authErr.Path != testAPIKeysPath || authErr.StatusCode != http.StatusUnauthorized || authErr.Code != testInvalidToken || authErr.RequestID != "req_replace" {
 		t.Fatalf("auth error = %+v, want POST /v1/api-keys 401 invalid_token req_replace", authErr)
+	}
+}
+
+func TestHTTPAPIKeyMinterReplacementMintQuotaExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"quota_exceeded","title":"Quota Exceeded","detail":"quota exceeded"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "access-token", testTeamID, "k_old")
+	if !errors.Is(err, ErrAPIKeyLimitReached) {
+		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("quota_exceeded replacement mint must not be classified as dependency auth failure: %+v", authErr)
 	}
 }
 
@@ -930,7 +972,9 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 
 func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden"},"meta":{"request_id":"req_revoke"}}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -943,6 +987,12 @@ func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
 	}
 	if authErr.Method != http.MethodDelete || authErr.Path != "/v1/api-keys/:id" || authErr.StatusCode != http.StatusForbidden {
 		t.Fatalf("auth error = %+v, want DELETE /v1/api-keys/:id 403", authErr)
+	}
+	if authErr.Code != "insufficient_scope" {
+		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
+	}
+	if authErr.RequestID != "req_revoke" {
+		t.Fatalf("auth error request id = %q, want req_revoke", authErr.RequestID)
 	}
 }
 

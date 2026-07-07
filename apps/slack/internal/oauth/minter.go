@@ -42,6 +42,9 @@ const (
 	// scope gate AND this quota check surface as HTTP 403, so the status
 	// code alone can't disambiguate — the body `code` is the only signal.
 	errCodeAPIKeyLimit = "api_key_limit"
+	// errCodeQuotaExceeded is a quota-class qurl-service refusal. It is not an
+	// auth dependency failure, even when qurl-service returns HTTP 403.
+	errCodeQuotaExceeded = "quota_exceeded"
 	// errCodeAlreadyExists must pair with HTTP 409. It means qurl-service has
 	// already bound the workspace identity and the Slack app should show the
 	// administrator recovery path instead of minting a second legacy key.
@@ -59,11 +62,11 @@ const (
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 )
 
-// ErrAPIKeyLimitReached is returned when qurl-service refuses provisioning
-// because the account holds the maximum number of API keys for its plan. The
-// OAuth callback maps this to an actionable "revoke a key" page rather than
-// the generic "try again" message — retrying never clears a quota, so the old
-// advice was actively misleading.
+// ErrAPIKeyLimitReached is returned when qurl-service refuses key provisioning
+// because the account hit an API-key or quota-class cap. The OAuth callback
+// maps this to an actionable "revoke a key" page rather than the generic "try
+// again" message — retrying never clears a quota, so the old advice was
+// actively misleading.
 var ErrAPIKeyLimitReached = errors.New("qurl-service API key limit reached")
 
 // ErrExternalIdentityAlreadyBound is returned when qurl-service reports that
@@ -303,7 +306,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 			// Idempotency-Key and preserve mint-fresh retry behavior.
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), "")
 		}
-		if code == errCodeAPIKeyLimit && resp.StatusCode == http.StatusForbidden {
+		if isExpectedAPIKeyQuotaCode(code) && resp.StatusCode == http.StatusForbidden {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
 		if code == errCodeAlreadyExists && resp.StatusCode == http.StatusConflict {
@@ -404,7 +407,7 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		// Preserve the legacy endpoint's historical code-only limit
 		// classification; the binding endpoint uses stricter status+code
 		// pairing because its error contract is new and controlled.
-		if apiKeyLimitError(rb) {
+		if apiKeyQuotaError(rb) {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
 		fields := errorEnvelopeFields(rb)
@@ -453,11 +456,19 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer drainAndCloseResponse(resp)
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+	if len(rb) > minterBodyLimit {
+		return fmt.Errorf("qurl-service DELETE /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w (status %d)", ErrAPIKeyNotFound, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
-		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, "", ""); authErr != nil {
+		fields := errorEnvelopeFields(rb)
+		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
 			return authErr
 		}
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
@@ -625,16 +636,25 @@ func shouldFallbackToLegacyMint(status int, errorCode string) bool {
 	return errorCode == errCodeBindingsDisabled
 }
 
-// apiKeyLimitError reports whether body is a qurl-service error envelope
-// carrying the api-key-limit code. The envelope shape is
+// apiKeyQuotaError reports whether body is a qurl-service error envelope
+// carrying an expected API-key quota-class code. The envelope shape is
 // {"error":{"code":"...", ...}} — qurl-service's own nested form, NOT RFC
 // 7807 problem+json (where code/title/detail are top-level, not nested under
 // "error"), so the match is driven by the parsed JSON shape, not the
 // response Content-Type. A body that doesn't parse to that shape (e.g. a
 // bare {"error":"forbidden"} string, or non-JSON) returns false so the
 // caller falls back to the generic status-code error.
-func apiKeyLimitError(body []byte) bool {
-	return errorEnvelopeCode(body) == errCodeAPIKeyLimit
+func apiKeyQuotaError(body []byte) bool {
+	return isExpectedAPIKeyQuotaCode(errorEnvelopeCode(body))
+}
+
+func isExpectedAPIKeyQuotaCode(code string) bool {
+	switch code {
+	case errCodeAPIKeyLimit, errCodeQuotaExceeded:
+		return true
+	default:
+		return false
+	}
 }
 
 type errorEnvelopeFieldsResult struct {

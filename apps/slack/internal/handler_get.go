@@ -882,8 +882,10 @@ func logGetDependencyAuthFailure(log *slog.Logger, apiErr *client.APIError) {
 	}
 	// Emit-once invariant: the shared client retries only 429/5xx, not
 	// auth-class 401/403, so this emits once per failed mint request.
+	// Keep this stable WARN audit separate from the human ERROR log the caller
+	// emits with contract-surprise detail; CloudWatch filters should key here.
 	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
-		"/qurl get",
+		"qurl_get",
 		http.MethodPost,
 		"/v1/resources/:id/qurls",
 		apiErr.StatusCode,

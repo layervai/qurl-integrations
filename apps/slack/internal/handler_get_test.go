@@ -1311,7 +1311,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 					"event":          "dependency_auth_failure",
 					"agent":          "slack",
 					"dependency":     "qurl_service",
-					"route":          "/qurl get",
+					"route":          "qurl_get",
 					"method":         http.MethodPost,
 					"path":           "/v1/resources/:id/qurls",
 					"code":           tc.apiErr.Code,

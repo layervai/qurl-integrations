@@ -13,7 +13,7 @@ func TestLogDependencyAuthFailureShape(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
 
 	LogDependencyAuthFailure(log,
-		slog.String("route", "/qurl get"),
+		slog.String("route", "qurl_get"),
 		slog.String("method", http.MethodPost),
 		slog.String("path", "/v1/resources/:id/qurls"),
 		slog.Int("status", http.StatusUnauthorized),
@@ -36,7 +36,7 @@ func TestLogDependencyAuthFailureShape(t *testing.T) {
 		"event":      DependencyAuthFailure,
 		"agent":      AgentSlack,
 		"dependency": DependencyQURLService,
-		"route":      "/qurl get",
+		"route":      "qurl_get",
 		"method":     http.MethodPost,
 		"path":       "/v1/resources/:id/qurls",
 		"code":       "invalid_token",

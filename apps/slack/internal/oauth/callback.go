@@ -1035,6 +1035,8 @@ func logOAuthDependencyAuthFailure(log *slog.Logger, err error, route string) {
 	if !errors.As(err, &authErr) {
 		return
 	}
+	// Keep this stable WARN audit separate from the human ERROR/WARN log the
+	// caller emits with operator detail; CloudWatch filters should key here.
 	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
 		route,
 		authErr.Method,
