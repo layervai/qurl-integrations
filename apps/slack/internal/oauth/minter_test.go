@@ -721,6 +721,13 @@ func TestHTTPAPIKeyMinterMintWorkspaceNon2xx(t *testing.T) {
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected status code in error, got %q", err.Error())
 	}
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("403 mint error should be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodPost || authErr.Path != "/v1/external-identity-bindings" || authErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("auth error = %+v, want POST /v1/external-identity-bindings 403", authErr)
+	}
 }
 
 func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
@@ -737,6 +744,10 @@ func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected wrapped status code in error, got %q", err.Error())
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("api_key_limit must not be classified as dependency auth failure: %+v", authErr)
 	}
 }
 
@@ -805,6 +816,33 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	}
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected generic status error, got %q", err)
+	}
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("non-limit 403 must be classified as dependency auth failure, got %T %[1]v", err)
+	}
+	if authErr.Code != "insufficient_scope" {
+		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
+	}
+}
+
+func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_token","title":"Unauthorized"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "tok", testTeamID, "k_old")
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("replacement mint 401 should be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodPost || authErr.Path != "/v1/api-keys" || authErr.StatusCode != http.StatusUnauthorized || authErr.Code != "invalid_token" {
+		t.Fatalf("auth error = %+v, want POST /v1/api-keys 401 invalid_token", authErr)
 	}
 }
 
@@ -884,6 +922,24 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err == nil {
 		t.Fatal("expected error on 5xx")
+	}
+}
+
+func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("revoke 403 should be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodDelete || authErr.Path != "/v1/api-keys/:id" || authErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("auth error = %+v, want DELETE /v1/api-keys/:id 403", authErr)
 	}
 }
 

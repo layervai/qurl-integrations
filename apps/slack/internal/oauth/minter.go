@@ -103,6 +103,32 @@ type HTTPAPIKeyMinter struct {
 	defaultOnce   sync.Once
 }
 
+// DependencyAuthFailureError marks an unexpected qurl-service auth-class
+// rejection so callers can emit the structured CloudWatch audit event without
+// parsing human error strings.
+type DependencyAuthFailureError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Code       string
+}
+
+func (e *DependencyAuthFailureError) Error() string {
+	return fmt.Sprintf("qurl-service %s %s returned %d", e.Method, e.Path, e.StatusCode)
+}
+
+func dependencyAuthFailureError(method, path string, status int, code string) error {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return nil
+	}
+	return &DependencyAuthFailureError{
+		Method:     method,
+		Path:       path,
+		StatusCode: status,
+		Code:       code,
+	}
+}
+
 type mintRequest struct {
 	Name   string   `json:"name"`
 	Scopes []string `json:"scopes"`
@@ -280,6 +306,9 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if code == errCodeAlreadyExists && resp.StatusCode == http.StatusConflict {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
 		}
+		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/external-identity-bindings", resp.StatusCode, code); authErr != nil {
+			return WorkspaceAPIKeyMint{}, authErr
+		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
 	}
 	// Success bodies never participate in fallback; reject oversized responses
@@ -375,6 +404,9 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		if apiKeyLimitError(rb) {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
+		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/api-keys", resp.StatusCode, errorEnvelopeCode(rb)); authErr != nil {
+			return WorkspaceAPIKeyMint{}, authErr
+		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
 	}
 	var mr mintResponse
@@ -421,6 +453,9 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("%w (status %d)", ErrAPIKeyNotFound, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
+		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, ""); authErr != nil {
+			return authErr
+		}
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
 	}
 	return nil

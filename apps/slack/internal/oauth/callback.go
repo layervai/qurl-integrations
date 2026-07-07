@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -879,6 +880,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_mint")
 		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
 		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
@@ -967,6 +969,7 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, teamID, oldKeyID)
 	if err != nil {
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_replacement_mint")
 		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
 		slog.Error("oauth/callback qurl-service replacement provision failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", err,
@@ -1021,9 +1024,24 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_orphan_revoke")
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)
 	}
+}
+
+func logOAuthDependencyAuthFailure(log *slog.Logger, err error, route string) {
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	slackaudit.LogDependencyAuthFailure(log,
+		slog.String("route", route),
+		slog.String("method", authErr.Method),
+		slog.String("path", authErr.Path),
+		slog.Int("status", authErr.StatusCode),
+		slog.String("code", authErr.Code),
+	)
 }
 
 func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {

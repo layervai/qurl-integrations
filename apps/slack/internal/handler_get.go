@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -813,6 +814,7 @@ func mapMintError(log *slog.Logger, err error) error {
 			if apiErr.Code == "tunnel_disabled" {
 				return &userError{msg: tunnelDisabledMessage}
 			}
+			logGetDependencyAuthFailure(log, apiErr)
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
@@ -840,6 +842,9 @@ func mapMintError(log *slog.Logger, err error) error {
 			// permanent-class — log loud so the operator sees the
 			// contract surprise, surface the generic message so the
 			// user isn't told to retry forever.
+			if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+				logGetDependencyAuthFailure(log, apiErr)
+			}
 			log.Error("get: mint rejected with unmapped status", withRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		}
@@ -848,6 +853,20 @@ func mapMintError(log *slog.Logger, err error) error {
 	// disposition as 5xx above.
 	log.Warn("get: mint failed", "error", err)
 	return &userError{msg: serviceUnreachableMessage}
+}
+
+func logGetDependencyAuthFailure(log *slog.Logger, apiErr *client.APIError) {
+	if apiErr == nil {
+		return
+	}
+	slackaudit.LogDependencyAuthFailure(log,
+		slog.String("route", "/qurl get"),
+		slog.String("method", http.MethodPost),
+		slog.String("path", "/v1/resources/:id/qurls"),
+		slog.Int("status", apiErr.StatusCode),
+		slog.String("code", apiErr.Code),
+		slog.String("request_id", apiErr.RequestID),
+	)
 }
 
 // humanizeRetry formats a retry-after duration for surfacing to the

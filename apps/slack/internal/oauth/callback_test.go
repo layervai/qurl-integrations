@@ -73,6 +73,47 @@ func (b *lockedLogBuffer) String() string {
 	return b.buf.String()
 }
 
+func TestLogOAuthDependencyAuthFailure(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       "/v1/external-identity-bindings",
+		StatusCode: http.StatusUnauthorized,
+		Code:       "invalid_token",
+	}, "oauth_callback_mint")
+
+	var record struct {
+		Audit map[string]any `json:"audit"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal audit log: %v\n%s", err, logs.String())
+	}
+	for k, want := range map[string]any{
+		"event":      "dependency_auth_failure",
+		"agent":      "slack",
+		"dependency": "qurl_service",
+		"route":      "oauth_callback_mint",
+		"method":     http.MethodPost,
+		"path":       "/v1/external-identity-bindings",
+		"code":       "invalid_token",
+	} {
+		if record.Audit[k] != want {
+			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, record.Audit[k], want, record.Audit)
+		}
+	}
+	if record.Audit["status"] != float64(http.StatusUnauthorized) {
+		t.Fatalf("audit[status] = %#v, want %d; audit=%#v", record.Audit["status"], http.StatusUnauthorized, record.Audit)
+	}
+
+	logs.Reset()
+	logOAuthDependencyAuthFailure(log, errors.New("ordinary failure"), "oauth_callback_mint")
+	if logs.Len() != 0 {
+		t.Fatalf("generic errors must not emit dependency auth audit: %s", logs.String())
+	}
+}
+
 // fakeWorkspaceStore captures SetAPIKeyWithMetadata calls.
 type fakeWorkspaceStore struct {
 	mu              sync.Mutex
