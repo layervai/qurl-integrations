@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	testBindingPath            = "/v1/external-identity-bindings"
-	testAPIKeysPath            = "/v1/api-keys"
+	testBindingPath            = externalBindingPath
+	testAPIKeysPath            = apiKeysPath
 	bindingUnavailableRetrySec = "60"
 )
 
@@ -24,6 +24,22 @@ const (
 func mintWorkspaceOnlyErr(m *HTTPAPIKeyMinter) error {
 	_, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	return err
+}
+
+func TestDependencyAuthFailureErrorIncludesWireFields(t *testing.T) {
+	err := (&DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testAPIKeysPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_auth",
+	}).Error()
+
+	for _, want := range []string{http.MethodPost, testAPIKeysPath, "403", testInsufficientScope, "req_auth"} {
+		if !strings.Contains(err, want) {
+			t.Fatalf("error string %q missing %q", err, want)
+		}
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

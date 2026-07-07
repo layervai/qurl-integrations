@@ -33,7 +33,7 @@ const (
 	testAuditFieldCode    = "code"
 	testInvalidToken      = "invalid_token"
 	testInsufficientScope = "insufficient_scope"
-	testRevokeKeyPath     = "/v1/api-keys/:id"
+	testRevokeKeyPath     = apiKeyPath
 )
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
