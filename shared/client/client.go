@@ -45,6 +45,11 @@ const (
 //     dodge encoding ambiguity in the upstream key hash.
 const HeaderIdempotencyKey = "Idempotency-Key"
 
+// CreateForResourcePathLabel is the canonical redacted qURL-service path label
+// for resource-scoped qURL creation. Keep audit/log code on this constant so it
+// cannot drift from Client.Create's ResourceID route label.
+const CreateForResourcePathLabel = "/v1/resources/:id/qurls"
+
 // MaxIdempotencyKeyLength is the byte cap mirrored from qurl-service's
 // idempotency-store schema (see `idempotency_dynamodb.go`). Since the
 // validator rejects ≥0x80, accepted keys are pure ASCII — bytes equal
@@ -403,7 +408,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		// if not in its schema; harmless either way and matches the
 		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
-		logLabel = "POST /v1/resources/:id/qurls"
+		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
 			Label:           input.Label,
 			ExpiresIn:       input.ExpiresIn,

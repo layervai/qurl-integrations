@@ -1,17 +1,20 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -1224,6 +1227,117 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	}
 	if got, _ := parsed["reason"].(string); got != "incident #123" {
 		t.Errorf("reason = %v, want %q", parsed["reason"], "incident #123")
+	}
+}
+
+func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		apiErr    *client.APIError
+		wantAudit bool
+	}{
+		{
+			name: "401 emits audit",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusUnauthorized,
+				Code:       "invalid_token",
+				RequestID:  "req_get401",
+			},
+			wantAudit: true,
+		},
+		{
+			name: "unexpected 403 emits audit",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       "insufficient_scope",
+				RequestID:  "req_get403",
+			},
+			wantAudit: true,
+		},
+		{
+			name: "expected tunnel_disabled 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       "tunnel_disabled",
+				RequestID:  "req_tunnel_disabled",
+			},
+			wantAudit: false,
+		},
+		{
+			name: "expected api_key_limit 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       slackoauth.ErrorCodeAPIKeyLimit,
+				RequestID:  "req_api_key_limit",
+			},
+			wantAudit: false,
+		},
+		{
+			name: "expected quota_exceeded 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       slackoauth.ErrorCodeQuotaExceeded,
+				RequestID:  "req_quota_exceeded",
+			},
+			wantAudit: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+			gotErr := mapMintError(log, tc.apiErr)
+
+			var audit map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				if line == "" {
+					continue
+				}
+				var record struct {
+					Audit map[string]any `json:"audit"`
+				}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatalf("unmarshal log line %q: %v", line, err)
+				}
+				if record.Audit != nil {
+					audit = record.Audit
+					break
+				}
+			}
+			if tc.wantAudit {
+				if audit == nil {
+					t.Fatalf("missing dependency auth audit; logs=%s", logs.String())
+				}
+				for k, want := range map[string]any{
+					"event":          "dependency_auth_failure",
+					"agent":          "slack",
+					"dependency":     "qurl_service",
+					"route":          "qurl_get",
+					"method":         http.MethodPost,
+					"path":           client.CreateForResourcePathLabel,
+					"code":           tc.apiErr.Code,
+					testKeyRequestID: tc.apiErr.RequestID,
+				} {
+					if audit[k] != want {
+						t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+					}
+				}
+				if audit["status"] != float64(tc.apiErr.StatusCode) {
+					t.Fatalf("audit[status] = %#v, want %d; audit=%#v", audit["status"], tc.apiErr.StatusCode, audit)
+				}
+			} else if audit != nil {
+				t.Fatalf("unexpected dependency auth audit: %#v; logs=%s", audit, logs.String())
+			}
+			if isExpectedGetMintForbiddenCode(tc.apiErr.Code) {
+				if strings.Contains(logs.String(), `"level":"ERROR"`) {
+					t.Fatalf("expected quota-class 403 must not log at ERROR: %s", logs.String())
+				}
+				var ue *userError
+				if !errors.As(gotErr, &ue) || !strings.Contains(ue.msg, "Cannot create another qURL right now") {
+					t.Fatalf("expected quota-class 403 msg = %#v (%T), want limit copy", gotErr, gotErr)
+				}
+			}
+		})
 	}
 }
 
