@@ -888,7 +888,7 @@ func logGetDependencyAuthFailure(log *slog.Logger, apiErr *client.APIError) {
 	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
 		"qurl_get",
 		http.MethodPost,
-		"/v1/resources/:id/qurls",
+		client.CreateForResourcePathLabel,
 		apiErr.StatusCode,
 		apiErr.Code,
 		apiErr.RequestID,

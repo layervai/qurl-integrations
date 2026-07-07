@@ -739,8 +739,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	err := mintWorkspaceOnlyErr(m)
-	if !errors.Is(err, ErrAPIKeyLimitReached) {
-		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	if !errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("expected ErrAPIKeyProvisioningQuotaReached, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected wrapped status code in error, got %q", err.Error())
@@ -760,8 +760,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceQuotaExceeded(t *testing.T) {
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	err := mintWorkspaceOnlyErr(m)
-	if !errors.Is(err, ErrAPIKeyLimitReached) {
-		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	if !errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("expected ErrAPIKeyProvisioningQuotaReached, got %v", err)
 	}
 	var authErr *DependencyAuthFailureError
 	if errors.As(err, &authErr) {
@@ -792,12 +792,12 @@ func TestHTTPAPIKeyMinterMintWorkspaceEnvelopeCodesRequireExpectedStatus(t *test
 		{
 			name:        "api key limit on unexpected status",
 			code:        ErrorCodeAPIKeyLimit,
-			mustNotWrap: ErrAPIKeyLimitReached,
+			mustNotWrap: ErrAPIKeyProvisioningQuotaReached,
 		},
 		{
 			name:        "quota exceeded on unexpected status",
 			code:        ErrorCodeQuotaExceeded,
-			mustNotWrap: ErrAPIKeyLimitReached,
+			mustNotWrap: ErrAPIKeyProvisioningQuotaReached,
 		},
 		{
 			name:        "already exists on unexpected status",
@@ -834,8 +834,8 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	err := mintWorkspaceOnlyErr(m)
-	if errors.Is(err, ErrAPIKeyLimitReached) {
-		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyLimitReached, got %v", err)
+	if errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyProvisioningQuotaReached, got %v", err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected generic status error, got %q", err)
@@ -905,8 +905,8 @@ func TestHTTPAPIKeyMinterReplacementMintQuotaExceeded(t *testing.T) {
 
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "access-token", testTeamID, "k_old")
-	if !errors.Is(err, ErrAPIKeyLimitReached) {
-		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	if !errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("expected ErrAPIKeyProvisioningQuotaReached, got %v", err)
 	}
 	var authErr *DependencyAuthFailureError
 	if errors.As(err, &authErr) {
@@ -1003,6 +1003,31 @@ func TestHTTPAPIKeyMinterRevokeSuccessIgnoresBody(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err != nil {
 		t.Fatalf("successful revoke body must be ignored, got %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterRevokeOversizedAuthFailureTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, strings.Repeat("x", minterBodyLimit+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("oversized revoke 403 should still be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodDelete || authErr.Path != testRevokeKeyPath || authErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("auth error = %+v, want DELETE /v1/api-keys/:id 403", authErr)
+	}
+	if authErr.Code != "" || authErr.RequestID != "" {
+		t.Fatalf("oversized body should not populate parsed fields, got code=%q request_id=%q", authErr.Code, authErr.RequestID)
+	}
+	if !strings.Contains(err.Error(), "response exceeded") {
+		t.Fatalf("error should preserve oversized-body detail, got %v", err)
 	}
 }
 

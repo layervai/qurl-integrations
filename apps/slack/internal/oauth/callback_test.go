@@ -1004,7 +1004,7 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 // clears a quota). No key is minted, so nothing is persisted.
 func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	minter.mintErr = ErrAPIKeyLimitReached
+	minter.mintErr = ErrAPIKeyProvisioningQuotaReached
 	state := mintTestState(t, &cfg)
 
 	h := Callback(cfg)
@@ -2222,7 +2222,7 @@ func TestCallbackExplicitRotationReplacementMintLimitRendersGuidance(t *testing.
 	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
-	minter.replacementMintErr = ErrAPIKeyLimitReached
+	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
 
 	h := Callback(cfg)

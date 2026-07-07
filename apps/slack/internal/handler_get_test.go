@@ -1314,7 +1314,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 					"dependency":     "qurl_service",
 					"route":          "qurl_get",
 					"method":         http.MethodPost,
-					"path":           "/v1/resources/:id/qurls",
+					"path":           client.CreateForResourcePathLabel,
 					"code":           tc.apiErr.Code,
 					testKeyRequestID: tc.apiErr.RequestID,
 				} {

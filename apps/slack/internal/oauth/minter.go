@@ -63,12 +63,17 @@ const (
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 )
 
-// ErrAPIKeyLimitReached is returned when qurl-service refuses key provisioning
-// because the account hit an API-key or quota-class cap. The OAuth callback
-// maps this to an actionable "revoke a key" page rather than the generic "try
-// again" message — retrying never clears a quota, so the old advice was
-// actively misleading.
-var ErrAPIKeyLimitReached = errors.New("qurl-service API key limit reached")
+// ErrAPIKeyProvisioningQuotaReached is returned when qurl-service refuses key
+// provisioning because the account hit an API-key or quota-class cap. The OAuth
+// callback maps this to an actionable "revoke a key" page rather than the
+// generic "try again" message — retrying never clears a quota, so the old
+// advice was actively misleading.
+var ErrAPIKeyProvisioningQuotaReached = errors.New("qurl-service API key provisioning quota reached")
+
+// ErrAPIKeyLimitReached is the pre-quota-class name kept for compatibility.
+//
+// Deprecated: use ErrAPIKeyProvisioningQuotaReached.
+var ErrAPIKeyLimitReached = ErrAPIKeyProvisioningQuotaReached
 
 // ErrExternalIdentityAlreadyBound is returned when qurl-service reports that
 // the Slack workspace already has an external identity binding, but the bot
@@ -136,6 +141,14 @@ func dependencyAuthFailureError(method, path string, status int, code, requestID
 		Code:       code,
 		RequestID:  requestID,
 	}
+}
+
+func responseExceededError(method, path string, status int, label string, limit int) error {
+	msg := fmt.Sprintf("%s response exceeded %d bytes", label, limit)
+	if authErr := dependencyAuthFailureError(method, path, status, "", ""); authErr != nil {
+		return fmt.Errorf("%w: %s", authErr, msg)
+	}
+	return errors.New(msg)
 }
 
 type mintRequest struct {
@@ -301,7 +314,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if bodyOversized {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+			return WorkspaceAPIKeyMint{}, responseExceededError(http.MethodPost, "/v1/external-identity-bindings", resp.StatusCode, "qurl-service /v1/external-identity-bindings", minterBodyLimit)
 		}
 		fields := errorEnvelopeFields(rb)
 		code := fields.Code
@@ -311,7 +324,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), "")
 		}
 		if isExpectedAPIKeyQuotaCode(code) && resp.StatusCode == http.StatusForbidden {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyProvisioningQuotaReached, resp.StatusCode)
 		}
 		if code == errCodeAlreadyExists && resp.StatusCode == http.StatusConflict {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
@@ -324,7 +337,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	// Success bodies never participate in fallback; reject oversized responses
 	// before parsing the api_key payload.
 	if bodyOversized {
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+		return WorkspaceAPIKeyMint{}, responseExceededError(http.MethodPost, "/v1/external-identity-bindings", resp.StatusCode, "qurl-service /v1/external-identity-bindings", minterBodyLimit)
 	}
 	return bindingMintFromResponse(rb)
 }
@@ -405,14 +418,14 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
 	if len(rb) > minterBodyLimit {
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+		return WorkspaceAPIKeyMint{}, responseExceededError(http.MethodPost, "/v1/api-keys", resp.StatusCode, "qurl-service /v1/api-keys", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		// Preserve the legacy endpoint's historical code-only limit
 		// classification; the binding endpoint uses stricter status+code
 		// pairing because its error contract is new and controlled.
 		if apiKeyQuotaError(rb) {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyProvisioningQuotaReached, resp.StatusCode)
 		}
 		fields := errorEnvelopeFields(rb)
 		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/api-keys", resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
@@ -469,7 +482,7 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 			return fmt.Errorf("read body: %w", err)
 		}
 		if len(rb) > minterBodyLimit {
-			return fmt.Errorf("qurl-service DELETE /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+			return responseExceededError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, "qurl-service DELETE /v1/api-keys", minterBodyLimit)
 		}
 		fields := errorEnvelopeFields(rb)
 		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {

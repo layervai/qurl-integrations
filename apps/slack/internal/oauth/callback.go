@@ -881,7 +881,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
 		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_mint")
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
 		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Error("oauth/callback qurl-service provision failed",
@@ -970,7 +970,7 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, teamID, oldKeyID)
 	if err != nil {
 		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_replacement_mint")
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
 		slog.Error("oauth/callback qurl-service replacement provision failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", err,
 			"team_id", teamID,
