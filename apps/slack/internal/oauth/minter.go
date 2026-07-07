@@ -111,13 +111,14 @@ type DependencyAuthFailureError struct {
 	Path       string
 	StatusCode int
 	Code       string
+	RequestID  string
 }
 
 func (e *DependencyAuthFailureError) Error() string {
 	return fmt.Sprintf("qurl-service %s %s returned %d", e.Method, e.Path, e.StatusCode)
 }
 
-func dependencyAuthFailureError(method, path string, status int, code string) error {
+func dependencyAuthFailureError(method, path string, status int, code, requestID string) error {
 	if status != http.StatusUnauthorized && status != http.StatusForbidden {
 		return nil
 	}
@@ -126,6 +127,7 @@ func dependencyAuthFailureError(method, path string, status int, code string) er
 		Path:       path,
 		StatusCode: status,
 		Code:       code,
+		RequestID:  requestID,
 	}
 }
 
@@ -294,7 +296,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if bodyOversized {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
 		}
-		code := errorEnvelopeCode(rb)
+		fields := errorEnvelopeFields(rb)
+		code := fields.Code
 		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
 			// Legacy fallback keys are revoked on local persist failure, so omit
 			// Idempotency-Key and preserve mint-fresh retry behavior.
@@ -306,7 +309,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if code == errCodeAlreadyExists && resp.StatusCode == http.StatusConflict {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
 		}
-		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/external-identity-bindings", resp.StatusCode, code); authErr != nil {
+		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/external-identity-bindings", resp.StatusCode, code, fields.RequestID); authErr != nil {
 			return WorkspaceAPIKeyMint{}, authErr
 		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
@@ -404,7 +407,8 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		if apiKeyLimitError(rb) {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
 		}
-		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/api-keys", resp.StatusCode, errorEnvelopeCode(rb)); authErr != nil {
+		fields := errorEnvelopeFields(rb)
+		if authErr := dependencyAuthFailureError(http.MethodPost, "/v1/api-keys", resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
 			return WorkspaceAPIKeyMint{}, authErr
 		}
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
@@ -453,7 +457,7 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("%w (status %d)", ErrAPIKeyNotFound, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
-		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, ""); authErr != nil {
+		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, "", ""); authErr != nil {
 			return authErr
 		}
 		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
@@ -633,25 +637,40 @@ func apiKeyLimitError(body []byte) bool {
 	return errorEnvelopeCode(body) == errCodeAPIKeyLimit
 }
 
+type errorEnvelopeFieldsResult struct {
+	Code      string
+	RequestID string
+}
+
 // errorEnvelopeCode returns qurl-service's nested error.code when present.
 // It returns structuredErrorEnvelopeCode for qURL-like shapes that must fail
 // closed (JSON strings and code-less error objects), and "" for generic
 // route-missing bodies that may use the rollout fallback.
 func errorEnvelopeCode(body []byte) string {
+	return errorEnvelopeFields(body).Code
+}
+
+// errorEnvelopeFields returns the nested qurl-service error code plus the
+// request_id correlation handle when the response body carries one.
+func errorEnvelopeFields(body []byte) errorEnvelopeFieldsResult {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return ""
+		return errorEnvelopeFieldsResult{}
 	}
 	var message string
 	if err := json.Unmarshal(trimmed, &message); err == nil {
-		return structuredErrorEnvelopeCode
+		return errorEnvelopeFieldsResult{Code: structuredErrorEnvelopeCode}
 	}
 	var env struct {
 		Error json.RawMessage `json:"error"`
+		Meta  struct {
+			RequestID string `json:"request_id"`
+		} `json:"meta"`
 	}
 	if err := json.Unmarshal(trimmed, &env); err == nil {
+		out := errorEnvelopeFieldsResult{RequestID: env.Meta.RequestID}
 		if len(env.Error) == 0 {
-			return ""
+			return out
 		}
 		var problem struct {
 			Code string `json:"code"`
@@ -659,15 +678,17 @@ func errorEnvelopeCode(body []byte) string {
 		if err := json.Unmarshal(env.Error, &problem); err != nil {
 			// Treat {"error":"..."} as a generic, non-qURL-envelope 404 so
 			// the rollout bridge still covers old route-missing JSON bodies.
-			return ""
+			return out
 		}
 		if problem.Code != "" {
-			return problem.Code
+			out.Code = problem.Code
+			return out
 		}
 		if bytes.HasPrefix(bytes.TrimSpace(env.Error), []byte("{")) {
-			return structuredErrorEnvelopeCode
+			out.Code = structuredErrorEnvelopeCode
+			return out
 		}
-		return ""
+		return out
 	}
-	return ""
+	return errorEnvelopeFieldsResult{}
 }

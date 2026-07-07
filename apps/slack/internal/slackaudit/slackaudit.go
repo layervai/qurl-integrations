@@ -1,3 +1,5 @@
+// Package slackaudit emits machine-filterable audit records for Slack runtime
+// dependencies.
 package slackaudit
 
 import (
@@ -11,11 +13,13 @@ const (
 	// class status.
 	DependencyAuthFailure = "dependency_auth_failure"
 
-	AgentSlack            = "slack"
+	// AgentSlack is the audit.agent value for Slack-originated dependency events.
+	AgentSlack = "slack"
+	// DependencyQURLService is the audit.dependency value for qurl-service calls.
 	DependencyQURLService = "qurl_service"
 )
 
-// LogDependencyAuthFailure emits the same top-level audit shape Discord uses:
+// LogDependencyAuthFailure emits Slack's CloudWatch-filtered audit shape:
 // {"audit":{"event":"dependency_auth_failure","agent":"slack",...}}.
 func LogDependencyAuthFailure(log *slog.Logger, attrs ...slog.Attr) {
 	if log == nil {

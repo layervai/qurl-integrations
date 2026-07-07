@@ -1035,13 +1035,17 @@ func logOAuthDependencyAuthFailure(log *slog.Logger, err error, route string) {
 	if !errors.As(err, &authErr) {
 		return
 	}
-	slackaudit.LogDependencyAuthFailure(log,
+	attrs := []slog.Attr{
 		slog.String("route", route),
 		slog.String("method", authErr.Method),
 		slog.String("path", authErr.Path),
 		slog.Int("status", authErr.StatusCode),
 		slog.String("code", authErr.Code),
-	)
+	}
+	if authErr.RequestID != "" {
+		attrs = append(attrs, slog.String("request_id", authErr.RequestID))
+	}
+	slackaudit.LogDependencyAuthFailure(log, attrs...)
 }
 
 func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {

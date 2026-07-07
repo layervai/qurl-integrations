@@ -814,7 +814,9 @@ func mapMintError(log *slog.Logger, err error) error {
 			if apiErr.Code == "tunnel_disabled" {
 				return &userError{msg: tunnelDisabledMessage}
 			}
-			logGetDependencyAuthFailure(log, apiErr)
+			if !isExpectedGetMintForbiddenCode(apiErr.Code) {
+				logGetDependencyAuthFailure(log, apiErr)
+			}
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
@@ -855,10 +857,21 @@ func mapMintError(log *slog.Logger, err error) error {
 	return &userError{msg: serviceUnreachableMessage}
 }
 
+func isExpectedGetMintForbiddenCode(code string) bool {
+	switch code {
+	case "api_key_limit", "quota_exceeded":
+		return true
+	default:
+		return false
+	}
+}
+
 func logGetDependencyAuthFailure(log *slog.Logger, apiErr *client.APIError) {
 	if apiErr == nil {
 		return
 	}
+	// Emit-once invariant: the shared client retries only 429/5xx, not
+	// auth-class 401/403, so this emits once per failed mint request.
 	slackaudit.LogDependencyAuthFailure(log,
 		slog.String("route", "/qurl get"),
 		slog.String("method", http.MethodPost),

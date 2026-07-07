@@ -725,7 +725,7 @@ func TestHTTPAPIKeyMinterMintWorkspaceNon2xx(t *testing.T) {
 	if !errors.As(err, &authErr) {
 		t.Fatalf("403 mint error should be typed as DependencyAuthFailureError, got %T %[1]v", err)
 	}
-	if authErr.Method != http.MethodPost || authErr.Path != "/v1/external-identity-bindings" || authErr.StatusCode != http.StatusForbidden {
+	if authErr.Method != http.MethodPost || authErr.Path != testBindingPath || authErr.StatusCode != http.StatusForbidden {
 		t.Fatalf("auth error = %+v, want POST /v1/external-identity-bindings 403", authErr)
 	}
 }
@@ -806,7 +806,7 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden","detail":"token missing qurl:write"}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden","detail":"token missing qurl:write"},"meta":{"request_id":"req_scope"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
@@ -824,13 +824,16 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	if authErr.Code != "insufficient_scope" {
 		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
 	}
+	if authErr.RequestID != "req_scope" {
+		t.Fatalf("auth error request id = %q, want req_scope", authErr.RequestID)
+	}
 }
 
 func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(w, `{"error":{"code":"invalid_token","title":"Unauthorized"}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+testInvalidToken+`","title":"Unauthorized"},"meta":{"request_id":"req_replace"}}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -841,8 +844,8 @@ func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
 	if !errors.As(err, &authErr) {
 		t.Fatalf("replacement mint 401 should be typed as DependencyAuthFailureError, got %T %[1]v", err)
 	}
-	if authErr.Method != http.MethodPost || authErr.Path != "/v1/api-keys" || authErr.StatusCode != http.StatusUnauthorized || authErr.Code != "invalid_token" {
-		t.Fatalf("auth error = %+v, want POST /v1/api-keys 401 invalid_token", authErr)
+	if authErr.Method != http.MethodPost || authErr.Path != testAPIKeysPath || authErr.StatusCode != http.StatusUnauthorized || authErr.Code != testInvalidToken || authErr.RequestID != "req_replace" {
+		t.Fatalf("auth error = %+v, want POST /v1/api-keys 401 invalid_token req_replace", authErr)
 	}
 }
 

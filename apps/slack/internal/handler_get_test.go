@@ -1262,6 +1262,24 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			},
 			wantAudit: false,
 		},
+		{
+			name: "expected api_key_limit 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       "api_key_limit",
+				RequestID:  "req_api_key_limit",
+			},
+			wantAudit: false,
+		},
+		{
+			name: "expected quota_exceeded 403 stays quiet",
+			apiErr: &client.APIError{
+				StatusCode: http.StatusForbidden,
+				Code:       "quota_exceeded",
+				RequestID:  "req_quota_exceeded",
+			},
+			wantAudit: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
@@ -1290,14 +1308,14 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 					t.Fatalf("missing dependency auth audit; logs=%s", logs.String())
 				}
 				for k, want := range map[string]any{
-					"event":      "dependency_auth_failure",
-					"agent":      "slack",
-					"dependency": "qurl_service",
-					"route":      "/qurl get",
-					"method":     http.MethodPost,
-					"path":       "/v1/resources/:id/qurls",
-					"code":       tc.apiErr.Code,
-					"request_id": tc.apiErr.RequestID,
+					"event":          "dependency_auth_failure",
+					"agent":          "slack",
+					"dependency":     "qurl_service",
+					"route":          "/qurl get",
+					"method":         http.MethodPost,
+					"path":           "/v1/resources/:id/qurls",
+					"code":           tc.apiErr.Code,
+					testKeyRequestID: tc.apiErr.RequestID,
 				} {
 					if audit[k] != want {
 						t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)

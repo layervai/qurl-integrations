@@ -29,6 +29,8 @@ const (
 	testOldAPIKey     = "lv_live_oldkey1234"
 	testOldKeyID      = "k_old"
 	testAdminEmail    = "admin@example.com"
+	testAuditAgent    = "slack"
+	testInvalidToken  = "invalid_token"
 )
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
@@ -79,9 +81,10 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 
 	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
 		Method:     http.MethodPost,
-		Path:       "/v1/external-identity-bindings",
+		Path:       testBindingPath,
 		StatusCode: http.StatusUnauthorized,
-		Code:       "invalid_token",
+		Code:       testInvalidToken,
+		RequestID:  "req_oauth401",
 	}, "oauth_callback_mint")
 
 	var record struct {
@@ -92,12 +95,13 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 	}
 	for k, want := range map[string]any{
 		"event":      "dependency_auth_failure",
-		"agent":      "slack",
+		"agent":      testAuditAgent,
 		"dependency": "qurl_service",
 		"route":      "oauth_callback_mint",
 		"method":     http.MethodPost,
-		"path":       "/v1/external-identity-bindings",
-		"code":       "invalid_token",
+		"path":       testBindingPath,
+		"code":       testInvalidToken,
+		"request_id": "req_oauth401",
 	} {
 		if record.Audit[k] != want {
 			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, record.Audit[k], want, record.Audit)
