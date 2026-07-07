@@ -791,12 +791,12 @@ func TestHTTPAPIKeyMinterMintWorkspaceEnvelopeCodesRequireExpectedStatus(t *test
 	}{
 		{
 			name:        "api key limit on unexpected status",
-			code:        errCodeAPIKeyLimit,
+			code:        ErrorCodeAPIKeyLimit,
 			mustNotWrap: ErrAPIKeyLimitReached,
 		},
 		{
 			name:        "quota exceeded on unexpected status",
-			code:        errCodeQuotaExceeded,
+			code:        ErrorCodeQuotaExceeded,
 			mustNotWrap: ErrAPIKeyLimitReached,
 		},
 		{
@@ -829,7 +829,7 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden","detail":"token missing qurl:write"},"meta":{"request_id":"req_scope"}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+testInsufficientScope+`","title":"Forbidden","detail":"token missing qurl:write"},"meta":{"request_id":"req_scope"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
@@ -844,11 +844,34 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	if !errors.As(err, &authErr) {
 		t.Fatalf("non-limit 403 must be classified as dependency auth failure, got %T %[1]v", err)
 	}
-	if authErr.Code != "insufficient_scope" {
+	if authErr.Code != testInsufficientScope {
 		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
 	}
 	if authErr.RequestID != "req_scope" {
 		t.Fatalf("auth error request id = %q, want req_scope", authErr.RequestID)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceStructuredEnvelopeAuditCodeEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"title":"Forbidden","detail":"missing qurl:write"},"meta":{"request_id":"req_structured"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("structured 403 must be classified as dependency auth failure, got %T %[1]v", err)
+	}
+	if authErr.Code != "" {
+		t.Fatalf("auth error code = %q, want empty string for internal structured-envelope sentinel", authErr.Code)
+	}
+	if authErr.RequestID != "req_structured" {
+		t.Fatalf("auth error request id = %q, want req_structured", authErr.RequestID)
 	}
 }
 
@@ -970,11 +993,24 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIKeyMinterRevokeSuccessIgnoresBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, strings.Repeat("x", minterBodyLimit+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err != nil {
+		t.Fatalf("successful revoke body must be ignored, got %v", err)
+	}
+}
+
 func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden"},"meta":{"request_id":"req_revoke"}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+testInsufficientScope+`","title":"Forbidden"},"meta":{"request_id":"req_revoke"}}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -985,10 +1021,10 @@ func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
 	if !errors.As(err, &authErr) {
 		t.Fatalf("revoke 403 should be typed as DependencyAuthFailureError, got %T %[1]v", err)
 	}
-	if authErr.Method != http.MethodDelete || authErr.Path != "/v1/api-keys/:id" || authErr.StatusCode != http.StatusForbidden {
+	if authErr.Method != http.MethodDelete || authErr.Path != testRevokeKeyPath || authErr.StatusCode != http.StatusForbidden {
 		t.Fatalf("auth error = %+v, want DELETE /v1/api-keys/:id 403", authErr)
 	}
-	if authErr.Code != "insufficient_scope" {
+	if authErr.Code != testInsufficientScope {
 		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
 	}
 	if authErr.RequestID != "req_revoke" {

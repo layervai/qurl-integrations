@@ -35,16 +35,17 @@ const (
 	// owner-scoped key-status lookup.
 	apiKeyRevokedMaxPages = 10
 
-	// errCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
+	// ErrorCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
 	// when key provisioning is refused because the owner is already at
 	// their plan's API-key cap (free tier = 3). Mirrors qurl-service's
 	// validation.ErrorCodeAPIKeyLimit. Both that endpoint's qurl:write
 	// scope gate AND this quota check surface as HTTP 403, so the status
 	// code alone can't disambiguate — the body `code` is the only signal.
-	errCodeAPIKeyLimit = "api_key_limit"
-	// errCodeQuotaExceeded is a quota-class qurl-service refusal. It is not an
-	// auth dependency failure, even when qurl-service returns HTTP 403.
-	errCodeQuotaExceeded = "quota_exceeded"
+	ErrorCodeAPIKeyLimit = "api_key_limit"
+	// ErrorCodeQuotaExceeded is a quota-class qurl-service refusal. It is not
+	// an auth dependency failure, even when qurl-service returns HTTP 403.
+	ErrorCodeQuotaExceeded = "quota_exceeded"
+
 	// errCodeAlreadyExists must pair with HTTP 409. It means qurl-service has
 	// already bound the workspace identity and the Slack app should show the
 	// administrator recovery path instead of minting a second legacy key.
@@ -124,6 +125,9 @@ func (e *DependencyAuthFailureError) Error() string {
 func dependencyAuthFailureError(method, path string, status int, code, requestID string) error {
 	if status != http.StatusUnauthorized && status != http.StatusForbidden {
 		return nil
+	}
+	if code == structuredErrorEnvelopeCode {
+		code = ""
 	}
 	return &DependencyAuthFailureError{
 		Method:     method,
@@ -456,17 +460,17 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer drainAndCloseResponse(resp)
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
-	if err != nil {
-		return fmt.Errorf("read body: %w", err)
-	}
-	if len(rb) > minterBodyLimit {
-		return fmt.Errorf("qurl-service DELETE /v1/api-keys response exceeded %d bytes", minterBodyLimit)
-	}
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%w (status %d)", ErrAPIKeyNotFound, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
+		rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
+		if err != nil {
+			return fmt.Errorf("read body: %w", err)
+		}
+		if len(rb) > minterBodyLimit {
+			return fmt.Errorf("qurl-service DELETE /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+		}
 		fields := errorEnvelopeFields(rb)
 		if authErr := dependencyAuthFailureError(http.MethodDelete, "/v1/api-keys/:id", resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
 			return authErr
@@ -650,7 +654,7 @@ func apiKeyQuotaError(body []byte) bool {
 
 func isExpectedAPIKeyQuotaCode(code string) bool {
 	switch code {
-	case errCodeAPIKeyLimit, errCodeQuotaExceeded:
+	case ErrorCodeAPIKeyLimit, ErrorCodeQuotaExceeded:
 		return true
 	default:
 		return false

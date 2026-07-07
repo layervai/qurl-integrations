@@ -20,17 +20,20 @@ import (
 )
 
 const (
-	testTeamID        = "T123ABCDEF"
-	testUserID        = "U_ADMIN1"
-	testAuth0ClientID = "client-id"
-	testKeyID         = "k_1"
-	testKeyPrefix     = "lv_live_abcd"
-	testAPIKey        = "lv_live_abcd1234"
-	testOldAPIKey     = "lv_live_oldkey1234"
-	testOldKeyID      = "k_old"
-	testAdminEmail    = "admin@example.com"
-	testAuditAgent    = "slack"
-	testInvalidToken  = "invalid_token"
+	testTeamID            = "T123ABCDEF"
+	testUserID            = "U_ADMIN1"
+	testAuth0ClientID     = "client-id"
+	testKeyID             = "k_1"
+	testKeyPrefix         = "lv_live_abcd"
+	testAPIKey            = "lv_live_abcd1234"
+	testOldAPIKey         = "lv_live_oldkey1234"
+	testOldKeyID          = "k_old"
+	testAdminEmail        = "admin@example.com"
+	testAuditAgent        = "slack"
+	testAuditFieldCode    = "code"
+	testInvalidToken      = "invalid_token"
+	testInsufficientScope = "insufficient_scope"
+	testRevokeKeyPath     = "/v1/api-keys/:id"
 )
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
@@ -94,14 +97,14 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 		t.Fatalf("unmarshal audit log: %v\n%s", err, logs.String())
 	}
 	for k, want := range map[string]any{
-		"event":      "dependency_auth_failure",
-		"agent":      testAuditAgent,
-		"dependency": "qurl_service",
-		"route":      "oauth_callback_mint",
-		"method":     http.MethodPost,
-		"path":       testBindingPath,
-		"code":       testInvalidToken,
-		"request_id": "req_oauth401",
+		"event":            "dependency_auth_failure",
+		"agent":            testAuditAgent,
+		"dependency":       "qurl_service",
+		"route":            "oauth_callback_mint",
+		"method":           http.MethodPost,
+		"path":             testBindingPath,
+		testAuditFieldCode: testInvalidToken,
+		"request_id":       "req_oauth401",
 	} {
 		if record.Audit[k] != want {
 			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, record.Audit[k], want, record.Audit)
@@ -114,7 +117,7 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 	logs.Reset()
 	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
 		Method:     http.MethodDelete,
-		Path:       "/v1/api-keys/:id",
+		Path:       testRevokeKeyPath,
 		StatusCode: http.StatusForbidden,
 	}, "oauth_callback_orphan_revoke")
 	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
@@ -123,8 +126,8 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 	if record.Audit["request_id"] != "" {
 		t.Fatalf("audit[request_id] = %#v, want empty string; audit=%#v", record.Audit["request_id"], record.Audit)
 	}
-	if record.Audit["code"] != "" {
-		t.Fatalf("audit[code] = %#v, want empty string; audit=%#v", record.Audit["code"], record.Audit)
+	if record.Audit[testAuditFieldCode] != "" {
+		t.Fatalf("audit[code] = %#v, want empty string; audit=%#v", record.Audit[testAuditFieldCode], record.Audit)
 	}
 
 	logs.Reset()
@@ -132,6 +135,104 @@ func TestLogOAuthDependencyAuthFailure(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatalf("generic errors must not emit dependency auth audit: %s", logs.String())
 	}
+}
+
+func requireAuditRoute(t *testing.T, records []map[string]any, route string) map[string]any {
+	t.Helper()
+	for _, rec := range records {
+		audit, ok := rec["audit"].(map[string]any)
+		if ok && audit["route"] == route {
+			return audit
+		}
+	}
+	t.Fatalf("missing audit route %q in records: %#v", route, records)
+	return nil
+}
+
+func assertDependencyAuthFailureAudit(t *testing.T, audit map[string]any, route, method, path string, status int, code, requestID string) {
+	t.Helper()
+	for k, want := range map[string]any{
+		"event":            "dependency_auth_failure",
+		"agent":            testAuditAgent,
+		"dependency":       "qurl_service",
+		"route":            route,
+		"method":           method,
+		"path":             path,
+		testAuditFieldCode: code,
+		"request_id":       requestID,
+	} {
+		if audit[k] != want {
+			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+		}
+	}
+	if audit["status"] != float64(status) {
+		t.Fatalf("audit[status] = %#v, want %d; audit=%#v", audit["status"], status, audit)
+	}
+}
+
+func TestMintAndPersistDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	cfg := Config{Minter: &fakeMinter{mintErr: &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testBindingPath,
+		StatusCode: http.StatusUnauthorized,
+		Code:       testInvalidToken,
+		RequestID:  "req_mint",
+	}}}
+
+	rec := httptest.NewRecorder()
+	_, ok := mintAndPersist(rec, cfg, "access-token", testTeamID, testUserID, testAdminSub)
+
+	if ok {
+		t.Fatal("mintAndPersist must fail when qurl-service returns a dependency auth failure")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_mint"),
+		"oauth_callback_mint", http.MethodPost, testBindingPath, http.StatusUnauthorized, testInvalidToken, "req_mint")
+}
+
+func TestMintReplacementAndPersistDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	cfg := Config{Minter: &fakeMinter{replacementMintErr: &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testAPIKeysPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_replacement_mint",
+	}}}
+
+	rec := httptest.NewRecorder()
+	_, ok := mintReplacementAndPersist(rec, cfg, "access-token", testTeamID, testOldKeyID, testUserID, testAdminSub)
+
+	if ok {
+		t.Fatal("mintReplacementAndPersist must fail when qurl-service returns a dependency auth failure")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_replacement_mint"),
+		"oauth_callback_replacement_mint", http.MethodPost, testAPIKeysPath, http.StatusForbidden, testInsufficientScope, "req_replacement_mint")
+}
+
+func TestRevokeOrphanKeyAsyncDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	minter := &fakeMinter{revokeErr: &DependencyAuthFailureError{
+		Method:     http.MethodDelete,
+		Path:       testRevokeKeyPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_orphan_revoke",
+	}}
+
+	revokeOrphanKeyAsync(minter, "access-token", testOldKeyID, testTeamID)
+
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_orphan_revoke"),
+		"oauth_callback_orphan_revoke", http.MethodDelete, testRevokeKeyPath, http.StatusForbidden, testInsufficientScope, "req_orphan_revoke")
 }
 
 // fakeWorkspaceStore captures SetAPIKeyWithMetadata calls.

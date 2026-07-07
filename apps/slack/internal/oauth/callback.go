@@ -1024,6 +1024,9 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		// Count orphan-revoke auth failures in the dependency alarm: even
+		// though cleanup is background work, 401/403 means Slack cannot revoke
+		// qurl-service keys and may leave usable orphan credentials behind.
 		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_orphan_revoke")
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -869,7 +870,7 @@ func mapMintError(log *slog.Logger, err error) error {
 
 func isExpectedGetMintForbiddenCode(code string) bool {
 	switch code {
-	case "api_key_limit", "quota_exceeded":
+	case slackoauth.ErrorCodeAPIKeyLimit, slackoauth.ErrorCodeQuotaExceeded:
 		return true
 	default:
 		return false

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -1266,7 +1267,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			name: "expected api_key_limit 403 stays quiet",
 			apiErr: &client.APIError{
 				StatusCode: http.StatusForbidden,
-				Code:       "api_key_limit",
+				Code:       slackoauth.ErrorCodeAPIKeyLimit,
 				RequestID:  "req_api_key_limit",
 			},
 			wantAudit: false,
@@ -1275,7 +1276,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			name: "expected quota_exceeded 403 stays quiet",
 			apiErr: &client.APIError{
 				StatusCode: http.StatusForbidden,
-				Code:       "quota_exceeded",
+				Code:       slackoauth.ErrorCodeQuotaExceeded,
 				RequestID:  "req_quota_exceeded",
 			},
 			wantAudit: false,
