@@ -508,8 +508,8 @@ func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
 		t.Fatalf("uninstall reply missing revocation caveat: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
-		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
 		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
@@ -534,8 +534,8 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
-		t.Fatalf("not-connected reply missing local Slack app data teardown: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("not-connected reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
 		t.Fatalf("not-connected reply missing Slack reconnect impact: %q", resp[respFieldText])
@@ -564,8 +564,8 @@ func TestSlashCommandUninstallReportsNotConnectedWhenKeyAlreadyGone(t *testing.T
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
-		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 }
 

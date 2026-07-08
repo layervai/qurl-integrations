@@ -637,8 +637,8 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
 		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
-		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
 		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
@@ -734,8 +734,8 @@ func TestSlashCommandUninstallPurgesWorkspaceWhenAPIKeyAlreadyCleared(t *testing
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
-		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
 		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
