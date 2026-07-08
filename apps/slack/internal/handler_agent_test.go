@@ -298,8 +298,9 @@ func (panicAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, 
 	panic("boom in the model call")
 }
 
-// memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem +
-// conditional PutItem (attribute_not_exists / version match).
+// memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem,
+// conditional PutItem (attribute_not_exists / version match), Query, UpdateItem,
+// and unconditional DeleteItem for purge tests.
 type memAgentDDB struct {
 	mu        sync.Mutex
 	items     map[string]map[string]ddbtypes.AttributeValue
@@ -430,7 +431,10 @@ func memNumberValue(av ddbtypes.AttributeValue) int64 {
 	return v
 }
 
-func (f *memAgentDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+func (f *memAgentDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.items, memKey(in.Key))
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 

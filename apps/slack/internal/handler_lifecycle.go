@@ -172,8 +172,11 @@ type workspaceStateDeleter interface {
 //   - workspace_mappings (AdminStore): owner + admin set + agent toggle.
 //   - channel_policies (AdminStore): every channel's alias_bindings and
 //     allowed_resource_ids for this team.
+//   - qurl_agent_state (AgentStore): conversation transcripts, dedupe markers,
+//     pending actions, pane context, rate counters, and recent action audit rows
+//     under this workspace/enterprise partition.
 //
-// Best-effort by design: it ATTEMPTS all three deletes regardless of whether any
+// Best-effort by design: it ATTEMPTS every delete regardless of whether any
 // one fails, so a transient error on one table never strands the others. Each
 // delete is independently idempotent (an absent row is a no-op), so a partial
 // prior purge converges cleanly when a later retry or fresh teardown signal runs.
@@ -214,6 +217,21 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 		}
 	} else {
 		log.Debug("purgeWorkspace: auth provider does not support workspace_state delete — skipping")
+	}
+
+	// qurl_agent_state is optional because conversation mode can be dark or
+	// partially configured. When wired, purge the partition explicitly rather than
+	// waiting for DynamoDB TTL so Marketplace app deletion forgets user-authored
+	// agent data on the same teardown path as the durable workspace tables.
+	if h.cfg.AgentStore != nil {
+		if err := h.cfg.AgentStore.PurgeWorkspaceAgentState(ctx, workspaceID); err != nil {
+			log.Error("purgeWorkspace: failed to purge qurl_agent_state rows", "error", err)
+			errs = append(errs, err)
+		} else {
+			log.Info("purgeWorkspace: purged qurl_agent_state rows")
+		}
+	} else {
+		log.Debug("purgeWorkspace: AgentStore unwired — skipping qurl_agent_state purge")
 	}
 
 	// workspace_mappings + channel_policies live behind AdminStore. When it's

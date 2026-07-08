@@ -84,7 +84,44 @@ func newLifecycleTestHandlerForWorkspace(t *testing.T, workspaceID string) (*Han
 	provider := &recordingStateDeleter{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}}
 	h := newAdminTestHandler(t, ts)
 	h.cfg.AuthProvider = provider
+	h.cfg.AgentStore = &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	seedLifecycleAgentState(t, h.cfg.AgentStore, workspaceID)
 	return h, provider, ts
+}
+
+func seedLifecycleAgentState(t *testing.T, store *slackdata.AgentStore, partition string) {
+	t.Helper()
+	if err := store.SaveConversation(context.Background(), partition, "C_agent:1", []byte(`[{"role":"user","content":"hi"}]`), 0); err != nil {
+		t.Fatalf("seed agent conversation: %v", err)
+	}
+	if err := store.PutPendingAction(context.Background(), partition, "pending_agent", []byte(`{"action":"get"}`)); err != nil {
+		t.Fatalf("seed agent pending action: %v", err)
+	}
+}
+
+func assertLifecycleAgentStatePurged(t *testing.T, store *slackdata.AgentStore, partition string) {
+	t.Helper()
+	blob, _, err := store.LoadConversation(context.Background(), partition, "C_agent:1")
+	if err != nil {
+		t.Fatalf("LoadConversation after purge: %v", err)
+	}
+	if blob != nil {
+		t.Fatalf("LoadConversation after purge = %q, want nil", blob)
+	}
+	if payload, found, err := store.LoadPendingAction(context.Background(), partition, "pending_agent"); err != nil || found || payload != nil {
+		t.Fatalf("LoadPendingAction after purge: payload=%q found=%v err=%v, want absent", payload, found, err)
+	}
+}
+
+func assertLifecycleAgentStatePresent(t *testing.T, store *slackdata.AgentStore, partition string) {
+	t.Helper()
+	blob, _, err := store.LoadConversation(context.Background(), partition, "C_agent:1")
+	if err != nil {
+		t.Fatalf("LoadConversation after other-partition purge: %v", err)
+	}
+	if blob == nil {
+		t.Fatalf("agent conversation for partition %q was unexpectedly purged", partition)
+	}
 }
 
 func TestHandleLifecycleEvent_AppUninstalledPurgesWorkspace(t *testing.T) {
@@ -109,6 +146,7 @@ func TestHandleLifecycleEvent_AppUninstalledPurgesWorkspace(t *testing.T) {
 	if provider.deleteStateWorkspaceID != testAdminTeamID {
 		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
 	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 
 	// workspace_mappings row gone: ListAdmins now 404s.
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
@@ -147,6 +185,7 @@ func TestHandleLifecycleEvent_EnterpriseFallbackPurgesWorkspace(t *testing.T) {
 	if provider.deleteStateWorkspaceID != testEnterpriseID {
 		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testEnterpriseID)
 	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testEnterpriseID)
 
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID)
 	var ae *slackdata.Error
@@ -179,6 +218,7 @@ func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseKey(t *tes
 	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
 		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
 	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testEnterpriseID)
 
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID)
 	var ae *slackdata.Error
@@ -199,6 +239,7 @@ func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseKey(t *tes
 func TestHandleLifecycleEvent_EnterpriseGridTeamInstallPurgesTeamKeyOnly(t *testing.T) {
 	h, provider, ts := newLifecycleTestHandler(t)
 	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+	seedLifecycleAgentState(t, h.cfg.AgentStore, testEnterpriseID)
 
 	w := httptest.NewRecorder()
 	body := appUninstalledGridTeamBody(testAdminTeamID, testEnterpriseID)
@@ -212,6 +253,8 @@ func TestHandleLifecycleEvent_EnterpriseGridTeamInstallPurgesTeamKeyOnly(t *test
 	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
 		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
 	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
+	assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testEnterpriseID)
 
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	var ae *slackdata.Error
@@ -333,6 +376,7 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 	if provider.deleteStateWorkspaceID != testAdminTeamID {
 		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
 	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 	// Success copy stays accurate (recordingAuthProvider's DeleteAPIKey returns
 	// nil, and the upstream revoke degrades to local-only, so this is the
 	// local-only disconnect reply).
@@ -376,6 +420,7 @@ func TestSlashCommandUninstallPurgesWorkspaceWhenAPIKeyAlreadyCleared(t *testing
 	if provider.deleteStateWorkspaceID != testAdminTeamID {
 		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
 	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	var ae *slackdata.Error

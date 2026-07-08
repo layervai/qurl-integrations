@@ -3,6 +3,7 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sort"
 	"strings"
 	"testing"
@@ -14,16 +15,19 @@ import (
 )
 
 // agentFakeDDB is a focused in-memory DynamoDBClient for AgentStore tests. It
-// models only what AgentStore uses: GetItem and conditional PutItem with the
+// models the shapes AgentStore uses: point GetItem, conditional PutItem with the
 // `attribute_not_exists(pk)` and `attribute_not_exists(pk) OR conv_version = :ev`
-// shapes. Keyed by pk|sk.
+// conditions, partition Query, and unconditional DeleteItem. Keyed by pk|sk.
 type agentFakeDDB struct {
-	items     map[string]map[string]ddbtypes.AttributeValue
-	putErr    error
-	getErr    error
-	queryErr  error
-	putCalls  int
-	lastPutAt map[string]string // sk -> ttl value, for assertions
+	items         map[string]map[string]ddbtypes.AttributeValue
+	putErr        error
+	getErr        error
+	queryErr      error
+	deleteErr     error
+	queryPageSize int
+	putCalls      int
+	deleteCalls   int
+	lastPutAt     map[string]string // sk -> ttl value, for assertions
 }
 
 func newAgentFakeDDB() *agentFakeDDB {
@@ -94,13 +98,20 @@ func (f *agentFakeDDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ..
 	return nil, errors.New("not implemented")
 }
 
-func (f *agentFakeDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	return nil, errors.New("not implemented")
+func (f *agentFakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteCalls++
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	delete(f.items, keyOf(in.Key))
+	return &dynamodb.DeleteItemOutput{}, nil
 }
 
-// Query models the one shape ListAuditEntries emits: pk equality + begins_with(sk),
-// with ScanIndexForward + Limit applied. It reads the :pk / :prefix expression values
-// directly rather than parsing the KeyConditionExpression text.
+// Query models the two AgentStore shapes that tests need: ListAuditEntries emits
+// pk equality + begins_with(sk) with ScanIndexForward + Limit, while
+// PurgeWorkspaceAgentState emits pk equality only and pages over the whole
+// partition. It reads the expression values directly rather than parsing the
+// KeyConditionExpression text.
 func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	if f.queryErr != nil {
 		return nil, f.queryErr
@@ -130,6 +141,30 @@ func (f *agentFakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...fu
 	})
 	if in.Limit != nil && int(*in.Limit) < len(matched) {
 		matched = matched[:*in.Limit]
+	}
+	if f.queryPageSize > 0 && f.queryPageSize < len(matched) {
+		start := 0
+		if len(in.ExclusiveStartKey) != 0 {
+			startKey := keyOf(in.ExclusiveStartKey)
+			for i, item := range matched {
+				if keyOf(item) == startKey {
+					start = i + 1
+					break
+				}
+			}
+		}
+		end := start + f.queryPageSize
+		if end > len(matched) {
+			end = len(matched)
+		}
+		out := &dynamodb.QueryOutput{Items: matched[start:end]}
+		if end < len(matched) {
+			out.LastEvaluatedKey = map[string]ddbtypes.AttributeValue{
+				attrAgentPK: matched[end-1][attrAgentPK],
+				attrAgentSK: matched[end-1][attrAgentSK],
+			}
+		}
+		return out, nil
 	}
 	return &dynamodb.QueryOutput{Items: matched}, nil
 }
@@ -432,4 +467,97 @@ func TestPendingAction_Validation(t *testing.T) {
 	if _, err := s.ClaimPendingAction(ctx, "", "id"); err == nil {
 		t.Error("ClaimPendingAction: expected validation error for empty partition")
 	}
+}
+
+func TestPurgeWorkspaceAgentState(t *testing.T) {
+	fake := newAgentFakeDDB()
+	fake.queryPageSize = 2
+	s := newTestAgentStore(fake)
+	ctx := context.Background()
+
+	if err := s.SaveConversation(ctx, "T1", "C1:1", []byte(`[{"role":"user"}]`), 0); err != nil {
+		t.Fatalf("SaveConversation: %v", err)
+	}
+	if _, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil {
+		t.Fatalf("MarkEventSeen: %v", err)
+	}
+	if err := s.PutThreadContext(ctx, "T1", "D1:1", "C1"); err != nil {
+		t.Fatalf("PutThreadContext: %v", err)
+	}
+	if err := s.PutPendingAction(ctx, "T1", "pending1", []byte(`{"action":"get"}`)); err != nil {
+		t.Fatalf("PutPendingAction: %v", err)
+	}
+	if _, err := s.ClaimPendingAction(ctx, "T1", "pending1"); err != nil {
+		t.Fatalf("ClaimPendingAction: %v", err)
+	}
+	if err := s.PutAuditEntry(ctx, "T1", &AuditEntry{Actor: "U1", Action: "get", Target: "r_1"}); err != nil {
+		t.Fatalf("PutAuditEntry: %v", err)
+	}
+	fake.items["T1|"+rateSKPrefix+"team#1700000000"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:   stringAttr("T1"),
+		attrAgentSK:   stringAttr(rateSKPrefix + "team#1700000000"),
+		attrTurnCount: numberAttr(1),
+		attrAgentTTL:  numberAttr(1700003600),
+	}
+	if err := s.SaveConversation(ctx, "T2", "C2:1", []byte(`[{"role":"user"}]`), 0); err != nil {
+		t.Fatalf("SaveConversation T2: %v", err)
+	}
+
+	if err := s.PurgeWorkspaceAgentState(ctx, "T1"); err != nil {
+		t.Fatalf("PurgeWorkspaceAgentState: %v", err)
+	}
+	if fake.deleteCalls != 7 {
+		t.Fatalf("DeleteItem calls = %d, want 7", fake.deleteCalls)
+	}
+	for key := range fake.items {
+		if strings.HasPrefix(key, "T1|") {
+			t.Fatalf("T1 agent-state row survived purge: %s", key)
+		}
+	}
+	if _, ok := fake.items["T2|"+convSKPrefix+"C2:1"]; !ok {
+		t.Fatal("purge removed another workspace's agent-state row")
+	}
+
+	if err := s.PurgeWorkspaceAgentState(ctx, "T1"); err != nil {
+		t.Fatalf("second purge should be idempotent: %v", err)
+	}
+}
+
+func TestPurgeWorkspaceAgentState_ValidationAndErrors(t *testing.T) {
+	t.Run("empty partition", func(t *testing.T) {
+		s := newTestAgentStore(newAgentFakeDDB())
+		err := s.PurgeWorkspaceAgentState(context.Background(), "")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+			t.Fatalf("err = %v, want 400 *Error", err)
+		}
+	})
+
+	t.Run("query error", func(t *testing.T) {
+		fake := newAgentFakeDDB()
+		fake.queryErr = errors.New("ddb query down")
+		s := newTestAgentStore(fake)
+		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("err = %v, want 503 *Error", err)
+		}
+	})
+
+	t.Run("delete error", func(t *testing.T) {
+		fake := newAgentFakeDDB()
+		s := newTestAgentStore(fake)
+		if err := s.SaveConversation(context.Background(), "T1", "C1:1", []byte("x"), 0); err != nil {
+			t.Fatalf("SaveConversation: %v", err)
+		}
+		fake.deleteErr = errors.New("ddb delete down")
+		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("err = %v, want 503 *Error", err)
+		}
+		if _, ok := fake.items["T1|"+convSKPrefix+"C1:1"]; !ok {
+			t.Fatal("delete-error path should not remove the row in the fake")
+		}
+	})
 }
