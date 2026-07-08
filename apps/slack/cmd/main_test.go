@@ -156,20 +156,25 @@ func TestValidateSlackBotToken(t *testing.T) {
 
 func TestReadSlackBotTokenRotationEnabled(t *testing.T) {
 	cases := []struct {
-		name string
-		raw  string
-		want bool
+		name    string
+		raw     string
+		want    bool
+		wantErr bool
 	}{
 		{name: "unset", want: false},
 		{name: "true", raw: "true", want: true},
 		{name: "false", raw: "false", want: false},
-		{name: "malformed fails rotation-safe", raw: "definitely", want: true},
+		{name: "malformed fails startup", raw: "definitely", wantErr: true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(envSlackBotTokenRotation, tc.raw)
-			if got := readSlackBotTokenRotationEnabled(); got != tc.want {
+			got, err := readSlackBotTokenRotationEnabled()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("readSlackBotTokenRotationEnabled() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
 				t.Fatalf("readSlackBotTokenRotationEnabled() = %v, want %v", got, tc.want)
 			}
 		})

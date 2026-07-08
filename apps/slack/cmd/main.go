@@ -275,7 +275,10 @@ func run() error {
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
 	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
-	slackBotTokenRotationEnabled := readSlackBotTokenRotationEnabled()
+	slackBotTokenRotationEnabled, err := readSlackBotTokenRotationEnabled()
+	if err != nil {
+		return err
+	}
 	slog.Info("Slack bot-token revoke handling configured",
 		"slack_bot_token_rotation_enabled", slackBotTokenRotationEnabled,
 		"tokens_revoked_bot_token_triggers_workspace_purge", !slackBotTokenRotationEnabled,
@@ -1421,11 +1424,19 @@ func readSlackRateLimitEnabled() bool {
 
 // readSlackBotTokenRotationEnabled reads QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED.
 // Absent → false, preserving today's Marketplace cleanup behavior where a bot
-// tokens_revoked callback means local teardown. If an operator explicitly sets
-// the flag but misspells the boolean, fail toward true so a rotation rollout
-// typo cannot turn routine Slack bot-token rotation into a destructive purge.
-func readSlackBotTokenRotationEnabled() bool {
-	return readBoolEnvFailSafe(envSlackBotTokenRotation, false, true)
+// tokens_revoked callback means local teardown. A set-but-unparseable value
+// fails startup: silently choosing either pole could suppress a Marketplace
+// cleanup signal or make a routine Slack token rotation destructive.
+func readSlackBotTokenRotationEnabled() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(envSlackBotTokenRotation))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", envSlackBotTokenRotation, err)
+	}
+	return v, nil
 }
 
 // Conservative per-hour turn caps applied when the operator doesn't set the env, so
