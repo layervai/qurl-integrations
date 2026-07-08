@@ -61,10 +61,10 @@ func isLifecycleEvent(event *slackInnerEvent) bool {
 // should purge: team_id for a workspace install, enterprise_id for an org-level
 // Grid install. Slack's Events API authorization metadata disambiguates those
 // cases when both outer IDs are present. Older/partial payloads without
-// authorizations fall back to both unique outer IDs so legacy Grid uninstall
-// events do not strand an enterprise-keyed install. That fallback can over-purge
-// if distinct team-level and org-level installs coexist, but modern Events API
-// payloads include authorizations and take the scoped branch above.
+// authorizations use team_id when present because Slack documents team_id as the
+// workspace identifier for token-revocation callbacks; enterprise_id is only a
+// fallback when team_id is absent, avoiding over-forgetting a distinct org-level
+// install.
 func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	var ids []string
 	seen := map[string]struct{}{}
@@ -82,7 +82,9 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 
 	if len(env.Authorizations) == 0 {
 		add(env.TeamID)
-		add(env.EnterpriseID)
+		if len(ids) == 0 {
+			add(env.EnterpriseID)
+		}
 		return ids
 	}
 

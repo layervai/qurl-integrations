@@ -266,12 +266,31 @@ func TestHandleLifecycleEvent_EnterpriseGridTeamInstallPurgesTeamKeyOnly(t *test
 	}
 }
 
-func TestLifecycleWorkspaceIDs_LegacyGridPayloadUsesBothOuterIDs(t *testing.T) {
+func TestLifecycleWorkspaceIDs_NoAuthorizationPayloadUsesTeamBeforeEnterprise(t *testing.T) {
 	env := &slackEventEnvelope{TeamID: " " + testAdminTeamID + " ", EnterpriseID: testEnterpriseID}
 
-	wantIDs := testAdminTeamID + "," + testEnterpriseID
+	wantIDs := testAdminTeamID
 	if got := strings.Join(lifecycleWorkspaceIDs(env), ","); got != wantIDs {
 		t.Fatalf("lifecycleWorkspaceIDs = %q, want %q", got, wantIDs)
+	}
+
+	enterpriseOnly := &slackEventEnvelope{EnterpriseID: testEnterpriseID}
+	if got := strings.Join(lifecycleWorkspaceIDs(enterpriseOnly), ","); got != testEnterpriseID {
+		t.Fatalf("lifecycleWorkspaceIDs(enterprise-only) = %q, want %q", got, testEnterpriseID)
+	}
+}
+
+func TestLifecycleWorkspaceIDs_PartialEnterpriseAuthorizationFallsBackToEnvelope(t *testing.T) {
+	env := &slackEventEnvelope{
+		TeamID:       testAdminTeamID,
+		EnterpriseID: testEnterpriseID,
+		Authorizations: []slackEventAuthorization{{
+			IsEnterpriseInstall: true,
+		}},
+	}
+
+	if got := strings.Join(lifecycleWorkspaceIDs(env), ","); got != testEnterpriseID {
+		t.Fatalf("lifecycleWorkspaceIDs(partial enterprise auth) = %q, want %q", got, testEnterpriseID)
 	}
 }
 
