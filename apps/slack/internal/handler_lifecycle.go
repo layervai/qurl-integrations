@@ -63,10 +63,13 @@ func isLifecycleEvent(event *slackInnerEvent, botTokenRotationEnabled bool) bool
 // should purge: team_id for a workspace install, enterprise_id for an org-level
 // Grid install. Slack's Events API authorization metadata disambiguates those
 // cases when both outer IDs are present. Older/partial payloads without
-// authorizations use team_id when present because Slack documents team_id as the
-// workspace identifier for token-revocation callbacks; enterprise_id is only a
-// fallback when team_id is absent, avoiding over-forgetting a distinct org-level
-// install.
+// authorizations cannot safely prove org-install vs workspace-install when both
+// IDs are present, so they use team_id when present because Slack documents
+// team_id as the workspace identifier for token-revocation callbacks;
+// enterprise_id is only a fallback when team_id is absent. That prefers avoiding
+// an ambiguous workspace callback deleting a distinct org install; documented
+// app_uninstalled payloads carry authorization metadata for the org-install
+// teardown path.
 func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	var ids []string
 	seen := map[string]struct{}{}
@@ -142,7 +145,11 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		log.Warn("lifecycle event with no team_id/enterprise_id — nothing to purge")
 		return
 	}
-	log.Info("lifecycle event received — purging workspace data", "workspace_ids", workspaceIDs)
+	log.Info("lifecycle event received — purging workspace data",
+		"workspace_ids", workspaceIDs,
+		"upstream_qurl_key_revoke_deferred", true,
+		"follow_up_issue", "layervai/qurl-integrations#926",
+	)
 	// Off the request goroutine: handleEvent has already written 200, and the
 	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go is
 	// wg-tracked so a graceful shutdown drains an in-flight purge.
