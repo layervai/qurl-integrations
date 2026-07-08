@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -18,6 +20,14 @@ import (
 // don't have a more specific message for. Lifted to a constant
 // because three different mapMintError branches need it.
 const commonGetMintFailedMessage = "Failed to create qURL. Please try again."
+
+func getMintLimitMessage(apiErr *client.APIError) string {
+	requestID := ""
+	if apiErr != nil {
+		requestID = apiErr.RequestID
+	}
+	return appendSlackReference("Cannot create another qURL right now", requestID) + ". Try again later or ask your Slack admin."
+}
 
 // getUsageMessage is the arg hint shown when `/qurl get` is invoked
 // with no token. Bare `get` parses to [ErrEmptyResource]; the
@@ -201,9 +211,11 @@ var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not ye
 //     all channel-scoped), then mint. POSTs the result to response_url.
 //
 // Optional flags:
-//   - `dm:true` → final message via PostDM to the user's DM instead
-//     of channel ephemeral. Falls back to ephemeral with a friendly
-//     "DM not configured" warning when PostDM is nil.
+//   - `dm:true` → the minted link is delivered via PostDMBlocks to the
+//     user's DM (an Enter Portal button) instead of the channel ephemeral.
+//     Refused up front (getWork) with a "DM delivery is not configured —
+//     re-run without dm:true" warning when PostDMBlocks is nil, rather than
+//     falling back in-channel against the user's privacy intent.
 //   - `reason:"…"` → forwarded as [client.CreateInput.Reason] so it
 //     lands in the audit row.
 func (h *Handler) handleGet(w http.ResponseWriter, values url.Values) {
@@ -272,7 +284,7 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		return
 	}
 
-	text, err := h.getWork(ctx, log, &getWorkArgs{
+	res, err := h.getWork(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -280,22 +292,30 @@ func (h *Handler) processGet(ctx context.Context, log *slog.Logger, values url.V
 		userID:       userID,
 		triggerID:    triggerID,
 	})
-	h.finishGet(log, responseURL, text, err)
+	h.finishGet(log, responseURL, res, err)
 }
 
 // finishGet posts a [Handler.getWork] outcome to response_url as an
-// ephemeral: the rendered link on success, or the [*userError] message
-// (prefixed with `:warning:`) on failure. A non-userError leak is a
+// ephemeral: the Enter Portal link render on success, or the [*userError]
+// message (prefixed with `:warning:`) on failure. A non-userError leak is a
 // programmer mistake — log it loud and surface the generic catch-all so
 // internals never reach Slack. Shared by the `/qurl get` slash path
 // ([Handler.processGet]) and the `/qurl list` "Create qURL" button
 // ([Handler.processButtonGet]) so both render identical replies.
-func (h *Handler) finishGet(log *slog.Logger, responseURL, text string, err error) {
+func (h *Handler) finishGet(log *slog.Logger, responseURL string, res getResult, err error) {
 	if err != nil {
 		_ = h.postResponse(log, responseURL, mapCoreError(log, err, commonGetMintFailedMessage))
 		return
 	}
-	_ = h.postResponse(log, responseURL, text)
+	// A minted link carries blocks (the Enter Portal button); post them with the
+	// text as the notification / non-block-client fallback. The dm:true path
+	// returns a blocks-less confirmation ("Sent to your DM."), which posts as
+	// plain text.
+	if res.blocks != nil {
+		_ = h.postResponseBlocks(log, responseURL, res.text, res.blocks)
+		return
+	}
+	_ = h.postResponse(log, responseURL, res.text)
 }
 
 // mapCoreError renders a delivery-agnostic mutation core's error as a Slack-safe
@@ -322,20 +342,113 @@ type getWorkArgs struct {
 	triggerID    string
 }
 
+// getResult is a [Handler.getWork] success outcome. Every delivery surface
+// (channel ephemeral, DM, agent-confirm private) renders the minted link the
+// same way: an "Enter Portal" URL button (blocks) with text as the
+// notification / non-block-client fallback.
+//
+//   - text: ALWAYS set. For a minted link it is the fallback that accompanies
+//     blocks (and still carries the raw URL so a client that can't render
+//     blocks isn't dead-ended). For the `dm:true` variant it is instead the
+//     standalone ":incoming_envelope: Sent to your DM." confirmation, delivered
+//     as plain text with blocks nil (the link itself already went to the DM).
+//   - blocks: non-nil ONLY when this result IS the link render. A caller posts
+//     blocks when present and falls back to a plain-text post of `text`
+//     otherwise, so error/confirmation strings stay text-only.
+type getResult struct {
+	text   string
+	blocks []any
+}
+
+// enterPortalActionID is the action_id on the "Enter Portal" URL button carrying
+// a minted qURL. The button's `url` opens the portal directly in the browser;
+// Slack still POSTs a block_actions interaction on click, which handleBlockActions
+// no-op-acks via its unrecognized-action `200 OK` path — we never round-trip to
+// re-mint on it.
+const enterPortalActionID = "qurl_enter_portal"
+
+// enterPortalButtonLabel is the link button's label. Kept consistent with the
+// qURL Go SDK (qurl-go's EnterPortal / EnterPortalWith) and the `qurl enter` CLI
+// (whose success copy is "Portal entered"): reaching a qURL's target is
+// "entering the portal".
+const enterPortalButtonLabel = "Enter Portal"
+
+// oneTimeUseNotice is the shared "one-time use · link expires in X" phrase used in
+// BOTH the Enter Portal headline and the plain-text fallback, so the wording (and
+// the admit-window value) can't drift between the two renderings.
+func oneTimeUseNotice() string {
+	return "one-time use · link expires in " + resourceLinkExpiryHuman
+}
+
+// renderGetSuccess builds the two renderings of a minted one-time link: the
+// Block Kit blocks (headline section + primary "Enter Portal" URL button) and
+// the plain-text fallback. The link rides in the button's `url` rather than as
+// raw prose, so it's one tap and Slack never link-unfurls it (an unfurl fetch
+// could brush a one-time link). The fallback KEEPS the raw URL so a non-block
+// client still has something actionable. Both strings here are static templates —
+// no user or LLM input — so the mrkdwn headline carries no injection surface.
+func renderGetSuccess(link string) (fallbackText string, blocks []any) {
+	button := primaryURLButtonElement(enterPortalButtonLabel, enterPortalActionID, link)
+	// sectionBlock renders mrkdwn (bold + :emoji:); the text is a static template
+	// with no user/LLM input, so the mrkdwn carries no injection surface.
+	blocks = []any{
+		sectionBlock(":link: *qURL ready* — " + oneTimeUseNotice()),
+		actionsBlock(button),
+	}
+	return enterPortalFallbackText(link), blocks
+}
+
+// enterPortalFallbackText is the notification / non-block-client fallback for a
+// minted link. It mirrors the pre-button prose (raw URL included) so a client
+// that can't render the Enter Portal button still receives a usable link. NOTE:
+// Slack also uses this text as the push/desktop notification preview, so the raw
+// one-time URL still transits the notification channel — same exposure as the
+// pre-button prose message, and out of scope for the button's in-body privacy win.
+// A link-less fallback for notification-capable clients is tracked in #922.
+func enterPortalFallbackText(link string) string {
+	return ":link: qURL ready: " + link + " (" + oneTimeUseNotice() + ")"
+}
+
+// slackButtonURLMaxLen is Slack's hard cap on a Block Kit button `url`; a longer
+// value bounces the whole message, so it must fail the guard below like any other
+// url Slack would reject.
+const slackButtonURLMaxLen = 3000
+
+// isHTTPSURL reports whether s is an absolute https URL WITH a host and within
+// Slack's button-url length cap. A minted qurl_link is always a short absolute
+// https qurl.link URL, so this both matches the server contract (https-only,
+// mirroring the resourceExposeSchemeHTTPS checks in handler_expose.go /
+// handler_agent_confirm.go) AND is a valid Slack Block Kit button `url`; a value
+// failing it is a server contract surprise (see the getWork guard), not ordinary
+// input. Uses url.Parse rather than a scheme prefix so a scheme-only ("https://")
+// or otherwise malformed value — which Slack would also reject — is caught here.
+func isHTTPSURL(s string) bool {
+	if len(s) > slackButtonURLMaxLen {
+		return false
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == resourceExposeSchemeHTTPS && u.Host != ""
+}
+
 // getWork runs the inner resolve→rate-limit→mint pipeline for the token form
 // (`/qurl get $id` or `/qurl get $alias`). Raw URLs and `$r_<id>` resource IDs
-// are rejected at parse time. Returns the rendered reply text (without leading
-// `:warning:`) on success, or a [*userError] whose msg routes to the user.
-func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkArgs) (string, error) {
+// are rejected at parse time. Returns a [getResult] (the Enter Portal link
+// render, or the `dm:true` "Sent to your DM." confirmation) on success, or a
+// [*userError] whose msg routes to the user.
+func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkArgs) (getResult, error) {
 	alias := args.cmd.Alias
 
-	// Refuse `dm:true` early when PostDM is not wired — the user's
+	// Refuse `dm:true` early when PostDMBlocks is not wired — the user's
 	// intent is "do not leak the link in channel history", and a
 	// silent channel-fallback violates that intent. Fail-fast here
 	// avoids burning a mint quota on a request that can't be
-	// delivered the way the user asked.
-	if args.cmd.DM() && h.cfg.PostDM == nil {
-		return "", &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
+	// delivered the way the user asked. (deliverGetDM delivers the Enter
+	// Portal render via PostDMBlocks, so that is the seam to guard on.)
+	if args.cmd.DM() && h.cfg.PostDMBlocks == nil {
+		return getResult{}, &userError{msg: "DM delivery is not configured for this workspace. Re-run the command without `dm:true` to receive the link in-channel."}
 	}
 
 	if alias == "" {
@@ -347,14 +460,14 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		// commonGetMintFailedMessage) so a real occurrence correlates to
 		// the log.Error below instead of looping on "please try again".
 		log.Error("get: empty alias token reached getWork — refusing to mint", "raw", args.cmd.Raw)
-		return "", &userError{msg: unexpectedGetShapeMessage}
+		return getResult{}, &userError{msg: unexpectedGetShapeMessage}
 	}
 
 	// AdminStore is required both for token resolution (the channel-alias lookup
 	// in resolveTokenForGet) and for the rate-limit gate further down.
 	if h.cfg.AdminStore == nil {
 		log.Warn("get: AdminStore is nil; token-form lookup unavailable", "team_id", args.teamID)
-		return "", errAdminStoreNotConfigured
+		return getResult{}, errAdminStoreNotConfigured
 	}
 
 	boundResourceID, err := h.resolveTokenForGet(ctx, log, args.teamID, args.channelID, args.userID, alias)
@@ -362,7 +475,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		// Resolution failures (typoed / unknown / not-channel-authorized aliases)
 		// return BEFORE the rate-limit gate below, so a fat-fingered
 		// `/qurl get $typo` never burns the user's quota.
-		return "", err
+		return getResult{}, err
 	}
 
 	// Rate-limit AFTER a successful resolution: only a request that resolved to a
@@ -376,11 +489,11 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
-		return "", &userError{msg: rateLimitErrorMessage(err)}
+		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
 		log.Info("get: rate-limit denied mint", "team_id", args.teamID, "user_id", args.userID, "retry_after_ms", retry.Milliseconds())
-		return "", &userError{msg: rateLimitMessage(retry, "")}
+		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
 	input := client.CreateInput{
@@ -399,30 +512,38 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	c, err := h.authenticatedClient(ctx, args.teamID)
 	if err != nil {
 		log.Error("get: API key lookup failed", "error", err)
-		return "", &userError{msg: authErrorMessage(err)}
+		return getResult{}, &userError{msg: authErrorMessage(err)}
 	}
 
 	out, err := c.Create(ctx, input)
 	if err != nil {
-		return "", mapMintError(log, err)
+		return getResult{}, mapMintError(log, err)
 	}
-	// Defensive: a 200 with an empty qurl_link is a server contract
-	// surprise — log loud and surface the generic retry message.
-	if out.QURLLink == "" {
-		log.Error("get: mint returned empty qurl_link — server contract surprise", "resource_id", input.ResourceID)
-		return "", &userError{msg: commonGetMintFailedMessage}
+	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
+	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a
+	// Block Kit button `url`, and Slack rejects the WHOLE message if that url is
+	// malformed — so a bad link would bounce the block post and fail delivery after the
+	// mint is already burned. Reject it here with the generic retry message + a loud log
+	// (same disposition as empty), rather than ship a doomed block message. Not a text
+	// fallback: a non-URL link is broken, not a rendering-mode choice.
+	if !isHTTPSURL(out.QURLLink) {
+		log.Error("get: mint returned empty or non-https qurl_link — server contract surprise", "resource_id", input.ResourceID, "has_link", out.QURLLink != "")
+		return getResult{}, &userError{msg: commonGetMintFailedMessage}
 	}
 
-	// Unconditional suffix — every `/qurl get` link is one-time use (see
-	// OneTimeUse above) AND only admits a session within resourceLinkExpiry of
-	// minting. That admit window is tight, so surface it at the point of
-	// sharing: a recipient who clicks after it lapses gets a dead link, and
-	// the suffix tells them why.
-	message := ":link: *qURL ready:* " + out.QURLLink + " (one-time use · link expires in " + resourceLinkExpiryHuman + ")"
+	// Render the minted link as an "Enter Portal" URL button (blocks) plus a
+	// plain-text fallback. The one-time-use / admit-window suffix rides in the
+	// headline: that window is tight, so a recipient who taps after it lapses
+	// gets a dead portal, and the copy tells them why.
+	fallbackText, blocks := renderGetSuccess(out.QURLLink)
 	if args.cmd.DM() {
-		return h.deliverGetDM(ctx, log, args.teamID, args.enterpriseID, args.userID, message), nil
+		// deliverGetDM posts the Enter Portal blocks to the user's DM and returns
+		// the plain-text ":incoming_envelope: Sent to your DM." status. The link
+		// render already went to the DM, so this result carries no blocks — the
+		// status confirmation is delivered as plain text in-channel.
+		return getResult{text: h.deliverGetDM(ctx, log, args.teamID, args.enterpriseID, args.userID, fallbackText, blocks)}, nil
 	}
-	return message, nil
+	return getResult{text: fallbackText, blocks: blocks}, nil
 }
 
 // resolveTokenForGet resolves a `$<token>` (channel alias, tunnel slug, or URL
@@ -668,18 +789,18 @@ func (h *Handler) allowedResourceIDsForGet(ctx context.Context, log *slog.Logger
 	return allowed, nil
 }
 
-// deliverGetDM handles the `dm:true` variant. The link goes to the
-// user's DM via PostDM; the response_url ephemeral confirms (without
-// leaking the link in channel history).
+// deliverGetDM handles the `dm:true` variant. The Enter Portal render (blocks,
+// with fallbackText as the notification/non-block fallback) goes to the user's
+// DM via PostDMBlocks; the response_url ephemeral confirms (without leaking the
+// link in channel history).
 //
-// PostDM-nil is rejected earlier in getWork — the dm:true contract
-// is privacy ("do not leak the link in channel history") and a
-// silent channel-fallback violates that. If PostDM is wired but the
-// call itself fails, we surface the failure without re-posting the
-// link (the user can retry without dm:true if they want it
-// in-channel).
-func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, teamID, enterpriseID, userID, message string) string {
-	if err := h.cfg.PostDM(ctx, teamID, enterpriseID, userID, message); err != nil {
+// PostDMBlocks-nil is rejected earlier in getWork — the dm:true contract is
+// privacy ("do not leak the link in channel history") and a silent
+// channel-fallback violates that. If PostDMBlocks is wired but the call itself
+// fails, we surface the failure without re-posting the link (the user can retry
+// without dm:true if they want it in-channel).
+func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, teamID, enterpriseID, userID, fallbackText string, blocks []any) string {
+	if err := h.cfg.PostDMBlocks(ctx, teamID, enterpriseID, userID, blocks, fallbackText); err != nil {
 		log.Warn("get: DM post failed", "error", err)
 		if errors.Is(err, ErrSlackMissingScope) {
 			return ":warning: Could not DM you the link. " + h.latestSlackAppInstallMessage("Private qURL DM delivery", "re-run the command")
@@ -705,6 +826,11 @@ func mapMintError(log *slog.Logger, err error) error {
 			if apiErr.Code == "tunnel_disabled" {
 				return &userError{msg: tunnelDisabledMessage}
 			}
+			if isExpectedGetMintForbiddenCode(apiErr.Code) {
+				log.Info("get: mint rejected with expected quota-class 403", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
+				return &userError{msg: getMintLimitMessage(apiErr)}
+			}
+			logGetDependencyAuthFailure(log, apiErr)
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
 			// `tunnel_disabled` doesn't get silently masked.
@@ -732,6 +858,9 @@ func mapMintError(log *slog.Logger, err error) error {
 			// permanent-class — log loud so the operator sees the
 			// contract surprise, surface the generic message so the
 			// user isn't told to retry forever.
+			if apiErr.StatusCode == http.StatusUnauthorized {
+				logGetDependencyAuthFailure(log, apiErr)
+			}
 			log.Error("get: mint rejected with unmapped status", withRequestIDAttr(apiErr.RequestID, "status", apiErr.StatusCode, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		}
@@ -740,6 +869,33 @@ func mapMintError(log *slog.Logger, err error) error {
 	// disposition as 5xx above.
 	log.Warn("get: mint failed", "error", err)
 	return &userError{msg: serviceUnreachableMessage}
+}
+
+func isExpectedGetMintForbiddenCode(code string) bool {
+	switch code {
+	case slackoauth.ErrorCodeAPIKeyLimit, slackoauth.ErrorCodeQuotaExceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+func logGetDependencyAuthFailure(log *slog.Logger, apiErr *client.APIError) {
+	if apiErr == nil {
+		return
+	}
+	// Emit-once invariant: the shared client retries only 429/5xx, not
+	// auth-class 401/403, so this emits once per failed mint request.
+	// Keep this stable WARN audit separate from the human ERROR log the caller
+	// emits with contract-surprise detail; CloudWatch filters should key here.
+	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
+		"qurl_get",
+		http.MethodPost,
+		client.CreateForResourcePathLabel,
+		apiErr.StatusCode,
+		apiErr.Code,
+		apiErr.RequestID,
+	)...)
 }
 
 // humanizeRetry formats a retry-after duration for surfacing to the
