@@ -16,7 +16,9 @@ import (
 //     when Slack lists a bot token; a lone user-token revoke must not forget a
 //     still-installed workspace. Today the app stores only the workspace bot
 //     token (see shared/auth.SlackBotTokenInstall), but this explicit guard keeps
-//     future user-token scopes from widening the teardown path by accident.
+//     future user-token scopes from widening the teardown path by accident. If
+//     Slack bot-token rotation is enabled later, revisit this path before
+//     treating rotated bot tokens as teardown signals.
 const (
 	slackEventTypeAppUninstalled = "app_uninstalled"
 	slackEventTypeTokensRevoked  = "tokens_revoked"
@@ -141,7 +143,11 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go is
 	// wg-tracked so a graceful shutdown drains an in-flight purge.
 	h.Go(func() {
-		ctx, cancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
+		baseCtx := h.baseCtx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
 		defer cancel()
 		for _, workspaceID := range workspaceIDs {
 			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID)
@@ -191,7 +197,7 @@ type workspaceStateDeleter interface {
 // The `/qurl uninstall` path best-efforts it before calling this. The lifecycle
 // path currently prioritizes local data deletion because owner-authorized
 // upstream revocation from Slack app-console uninstall is not available yet.
-// TODO(#806): once owner-auth revocation exists, revoke-before-purge for
+// TODO(#926): once owner-auth revocation exists, revoke-before-purge for
 // lifecycle events too so app-console uninstalls do not leave a live upstream
 // qURL key that is no longer locally referenceable.
 //
@@ -264,6 +270,8 @@ func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger,
 			return
 		}
 		if attempt == lifecyclePurgeRetryAttempts {
+			// Keep cleanup_action_required stable: qurl-integrations-infra#1284
+			// tracks the CloudWatch alarm that should page on this field.
 			log.Error("purgeWorkspace: exhausted retries; manual cleanup may be required",
 				"attempts", attempt,
 				"cleanup_action_required", true,
