@@ -478,6 +478,67 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 	}
 }
 
+func TestSlashCommandUninstallGridOrgInstallPurgesTeamAndEnterpriseKeys(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandler(t)
+	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+	seedLifecycleAgentState(t, h.cfg.AgentStore, testEnterpriseID)
+
+	inv := newAdminSlashInvoker(t, h)
+	inv.enterpriseID = testEnterpriseID
+	inv.isEnterpriseInstall = slackFormBoolTrue
+	status, reply := inv.invokeAdmin(uninstallVerb, testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("uninstall status = %d, want 200; reply=%q", status, reply)
+	}
+
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	if provider.deleteWorkspaceID != testAdminTeamID {
+		t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
+	}
+	h.Wait()
+
+	wantIDs := testAdminTeamID + "," + testEnterpriseID
+	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
+		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
+	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testEnterpriseID)
+	for _, workspaceID := range []string{testAdminTeamID, testEnterpriseID} {
+		_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), workspaceID)
+		var ae *slackdata.Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+			t.Fatalf("ListAdmins(%q) after Grid org uninstall: err = %v, want 404 *Error", workspaceID, err)
+		}
+	}
+}
+
+func TestSlashCommandUninstallGridWorkspaceInstallKeepsEnterpriseKey(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandler(t)
+	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+	seedLifecycleAgentState(t, h.cfg.AgentStore, testEnterpriseID)
+
+	inv := newAdminSlashInvoker(t, h)
+	inv.enterpriseID = testEnterpriseID
+	inv.isEnterpriseInstall = "false"
+	status, reply := inv.invokeAdmin(uninstallVerb, testAdminTeamID, testAdminUserID)
+	if status != http.StatusOK {
+		t.Fatalf("uninstall status = %d, want 200; reply=%q", status, reply)
+	}
+	h.Wait()
+
+	wantIDs := testAdminTeamID
+	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
+		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
+	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
+	assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testEnterpriseID)
+	if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID); err != nil {
+		t.Fatalf("ListAdmins for enterprise key after workspace-level uninstall: %v", err)
+	}
+}
+
 func TestSlashCommandUninstallPurgesWorkspaceWhenAPIKeyAlreadyCleared(t *testing.T) {
 	h, provider, _ := newLifecycleTestHandler(t)
 	provider.deleteErr = auth.ErrWorkspaceNotConfigured

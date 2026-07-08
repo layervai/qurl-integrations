@@ -141,8 +141,9 @@ type adminSlashInvoker struct {
 	responseU *httptest.Server
 	// channelID overrides the slash-command channel_id form field
 	// for the next invocation. Empty falls back to "C_test".
-	channelID    string
-	enterpriseID string
+	channelID           string
+	enterpriseID        string
+	isEnterpriseInstall string
 }
 
 // newAdminSlashInvoker spins up a response_url-capturing httptest
@@ -215,6 +216,9 @@ func (a *adminSlashInvoker) invokeAdmin(text, teamID, userID string) (status int
 	}
 	if a.enterpriseID != "" {
 		body.Set(fieldEnterpriseID, a.enterpriseID)
+	}
+	if a.isEnterpriseInstall != "" {
+		body.Set(fieldIsEnterpriseInstall, a.isEnterpriseInstall)
 	}
 	encoded := body.Encode()
 	w := httptest.NewRecorder()

@@ -1753,7 +1753,29 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
-	h.deleteWorkspaceAPIKey(w, teamID, userID)
+	h.deleteWorkspaceAPIKey(w, teamID, userID, slashUninstallPurgeWorkspaceIDs(values, teamID))
+}
+
+func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
+	var ids []string
+	seen := map[string]struct{}{}
+	add := func(raw string) {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	add(teamID)
+	if strings.EqualFold(strings.TrimSpace(values.Get(fieldIsEnterpriseInstall)), slackFormBoolTrue) {
+		add(values.Get(fieldEnterpriseID))
+	}
+	return ids
 }
 
 // requireUninstallAvailableAndAuthorized is the single precondition path for
@@ -1812,7 +1834,7 @@ var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 // than silently leaving the encrypted bot token behind on uninstall.
 var _ workspaceStateDeleter = (*auth.DDBProvider)(nil)
 
-func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
+func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
 	// ack window. The revoke is best-effort within this ctx — the qURL client may
@@ -1831,7 +1853,10 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// the rest of the workspace too — the encrypted Slack bot token + data key,
 	// the workspace_mappings row, and every channel_policies row — so `/qurl
 	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
-	// event triggers). Best-effort and idempotent: the primary disconnect path has
+	// event triggers). Enterprise Grid org installs can have local rows keyed by
+	// both team_id and enterprise_id, so the slash payload resolves the full set
+	// of local partitions to sweep while the primary qURL-key delete remains
+	// team-scoped. Best-effort and idempotent: the primary disconnect path has
 	// already reached a terminal reply, so a sweep failure is logged inside
 	// purgeWorkspace and does not change the Slack response. Run it on a tracked
 	// async goroutine off h.baseCtx (NOT this request's ctx, which `defer
@@ -1840,16 +1865,18 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// tight sync budget. h.Go is wg-tracked so a graceful shutdown drains an
 	// in-flight purge.
 	schedulePurge := func(reason string) {
-		purgeTeamID := teamID
-		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason)
+		ids := append([]string(nil), purgeWorkspaceIDs...)
+		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids)
 		h.Go(func() {
 			baseCtx := h.baseCtx
 			if baseCtx == nil {
 				baseCtx = context.Background()
 			}
-			purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-			defer purgeCancel()
-			h.purgeWorkspaceWithRetry(purgeCtx, purgeLog, purgeTeamID)
+			for _, workspaceID := range ids {
+				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
+				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID)
+				purgeCancel()
+			}
 		})
 	}
 
