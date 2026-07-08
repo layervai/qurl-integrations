@@ -158,11 +158,13 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		"follow_up_issue", "layervai/qurl-integrations#926",
 	)
 	// Off the request goroutine: handleEvent has already written 200, and the
-	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go is
-	// wg-tracked so a graceful shutdown drains an in-flight purge. It deliberately
-	// bypasses the general async semaphore: lifecycle events are rare, and dropping
-	// a teardown because the slash/agent pool is full would lose the signal after
-	// Slack has already received 200.
+	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go waits
+	// for the purge goroutine to unwind during shutdown, but h.baseCtx cancellation
+	// can still abort the sweep before it completes; #927 tracks durable recovery
+	// for that ack-after-loss window. This deliberately bypasses the general async
+	// semaphore: lifecycle events are rare, and dropping a teardown because the
+	// slash/agent pool is full would lose the signal after Slack has already
+	// received 200.
 	h.Go(func() {
 		baseCtx := h.baseCtx
 		if baseCtx == nil {

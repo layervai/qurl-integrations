@@ -1862,8 +1862,9 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// async goroutine off h.baseCtx (NOT this request's ctx, which `defer
 	// cancel()`s on return) so the extra DeleteItem/Query round-trips — which can
 	// be several on a workspace used in many channels — stay off the slash ack's
-	// tight sync budget. h.Go is wg-tracked so a graceful shutdown drains an
-	// in-flight purge.
+	// tight sync budget. h.Go is wg-tracked so shutdown waits for the purge
+	// goroutine to unwind; because the purge context derives from h.baseCtx,
+	// shutdown cancellation may abort the best-effort sweep before it completes.
 	schedulePurge := func(reason string) {
 		ids := append([]string(nil), purgeWorkspaceIDs...)
 		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids)
@@ -2141,7 +2142,8 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == slackEnvelopeTypeEventCallback && h.cfg.SlackBotTokenRotationEnabled && isBotTokensRevokedEvent(&env.Event):
 		// In token-rotation deployments this callback can mean "Slack rotated the
 		// bot token" rather than "workspace uninstalled the app". Ack it, but do
-		// not wipe a still-installed workspace.
+		// not wipe a still-installed workspace. This branch is log-only:
+		// isLifecycleEvent(..., true) already suppresses tokens_revoked teardown.
 		slog.Info("tokens_revoked bot-token event ignored because Slack bot-token rotation is enabled", "team_id", env.TeamID, "enterprise_id", env.EnterpriseID, "event_id", env.EventID)
 	case env.Type == slackEnvelopeTypeEventCallback && isLifecycleEvent(&env.Event, h.cfg.SlackBotTokenRotationEnabled):
 		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
