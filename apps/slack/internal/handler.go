@@ -1837,7 +1837,11 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		purgeTeamID := teamID
 		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason)
 		h.Go(func() {
-			purgeCtx, purgeCancel := context.WithTimeout(h.baseCtx, lifecyclePurgeTimeout)
+			baseCtx := h.baseCtx
+			if baseCtx == nil {
+				baseCtx = context.Background()
+			}
+			purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
 			defer purgeCancel()
 			h.purgeWorkspaceWithRetry(purgeCtx, purgeLog, purgeTeamID)
 		})

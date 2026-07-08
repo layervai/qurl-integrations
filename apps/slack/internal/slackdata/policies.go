@@ -541,9 +541,13 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 		for _, item := range out.Items {
 			channelID := readString(item, attrSlackChannelID)
 			if channelID == "" {
-				// A row without a readable SK can't be addressed for delete; skip
-				// it rather than emit a malformed key (it would 400). This should
-				// not happen for a well-formed table.
+				// A row without a readable SK can't be addressed for delete; record
+				// cleanup residue rather than emit a malformed key (it would 400).
+				// This should not happen for a well-formed table.
+				deleteErrs = append(deleteErrs, &Error{
+					StatusCode: http.StatusInternalServerError,
+					Title:      "PurgeTeamChannelPolicies: queried row missing slack_channel_id",
+				})
 				continue
 			}
 			if _, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{

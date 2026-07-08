@@ -511,6 +511,10 @@ func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition str
 		for _, item := range out.Items {
 			sk := readString(item, attrAgentSK)
 			if sk == "" {
+				deleteErrs = append(deleteErrs, &Error{
+					StatusCode: http.StatusInternalServerError,
+					Title:      "PurgeWorkspaceAgentState: queried row missing sk",
+				})
 				continue
 			}
 			if _, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{

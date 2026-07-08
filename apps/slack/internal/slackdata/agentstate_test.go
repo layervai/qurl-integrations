@@ -560,4 +560,21 @@ func TestPurgeWorkspaceAgentState_ValidationAndErrors(t *testing.T) {
 			t.Fatal("delete-error path should not remove the row in the fake")
 		}
 	})
+
+	t.Run("malformed row surfaces cleanup error", func(t *testing.T) {
+		fake := newAgentFakeDDB()
+		fake.items["T1|"] = map[string]ddbtypes.AttributeValue{
+			attrAgentPK: stringAttr("T1"),
+			attrAgentSK: stringAttr(""),
+		}
+		s := newTestAgentStore(fake)
+		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("err = %v, want 500 *Error", err)
+		}
+		if fake.deleteCalls != 0 {
+			t.Fatalf("DeleteItem calls = %d, want 0 for malformed key", fake.deleteCalls)
+		}
+	})
 }

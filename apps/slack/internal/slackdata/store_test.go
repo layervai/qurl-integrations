@@ -1376,6 +1376,31 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed row surfaces cleanup error", func(t *testing.T) {
+		deleteCalled := false
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{{
+						attrSlackTeamID: stringAttr("T1"),
+					}},
+				}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deleteCalled = true
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		err := store.PurgeTeamChannelPolicies(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("PurgeTeamChannelPolicies malformed row err = %v, want 500 *Error", err)
+		}
+		if deleteCalled {
+			t.Fatal("malformed row must not issue a DeleteItem with an incomplete key")
+		}
+	})
+
 	t.Run("delete error does not stop remaining rows", func(t *testing.T) {
 		var deletedChannels []string
 		store := newStore(&stubDDB{
