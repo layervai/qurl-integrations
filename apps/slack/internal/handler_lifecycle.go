@@ -25,6 +25,7 @@ const (
 	slackEnvelopeTypeEventCallback = "event_callback"
 	slackEventTypeAppUninstalled   = "app_uninstalled"
 	slackEventTypeTokensRevoked    = "tokens_revoked"
+	lifecycleEventTypeUnknown      = "unknown"
 )
 
 // lifecyclePurgeTimeout bounds each asynchronous workspace-id purge kicked off
@@ -181,6 +182,15 @@ func firstResolvedID(ids []string) string {
 	return ids[0]
 }
 
+func lifecycleEventTypeForLog(eventType string) string {
+	switch eventType {
+	case slackEventTypeAppUninstalled, slackEventTypeTokensRevoked:
+		return eventType
+	default:
+		return lifecycleEventTypeUnknown
+	}
+}
+
 // lifecycleWorkspaceIDs resolves the DDB partition key(s) that receive the full
 // workspace cascade. Slack's Events API authorization metadata disambiguates
 // Enterprise Grid org installs from workspace installs: org installs fully purge
@@ -210,18 +220,18 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 	agentStateOnlyIDs := partitionResolution.lifecycleAgentStateOnly
 	log := slog.With(
 		"surface", "lifecycle",
-		"event_type", env.Event.Type,
-		"team_id", env.TeamID,
-		"enterprise_id", env.EnterpriseID,
-		"event_id", env.EventID,
+		"event_type", lifecycleEventTypeForLog(env.Event.Type),
+		"has_team_id", env.TeamID != "",
+		"has_enterprise_id", env.EnterpriseID != "",
+		"has_event_id", env.EventID != "",
 	)
 	if len(workspaceIDs) == 0 && len(agentStateOnlyIDs) == 0 {
 		log.Warn("lifecycle event with no team_id/enterprise_id — nothing to purge")
 		return
 	}
 	log.Info("lifecycle event received — purging workspace data",
-		"workspace_ids", workspaceIDs,
-		"agent_state_only_workspace_ids", agentStateOnlyIDs,
+		"workspace_id_count", len(workspaceIDs),
+		"agent_state_only_workspace_id_count", len(agentStateOnlyIDs),
 		"upstream_qurl_key_revoke_deferred", true,
 		"follow_up_issue", "layervai/qurl-integrations#926",
 	)
@@ -380,9 +390,9 @@ func logWorkspaceStateDeleted(log *slog.Logger, identity auth.DeletedWorkspaceSt
 	attrs := []any{}
 	if identity.QURLAPIKeyID != "" {
 		attrs = append(attrs,
-			"deleted_workspace_qurl_key_id", identity.QURLAPIKeyID,
-			"deleted_workspace_qurl_account_id", identity.QURLAccountID,
-			"upstream_qurl_key_identity_captured", true,
+			"deleted_workspace_qurl_key_id_present", true,
+			"deleted_workspace_qurl_account_id_present", identity.QURLAccountID != "",
+			"upstream_qurl_key_identity_seen", true,
 			"upstream_qurl_key_follow_up_issue", "layervai/qurl-integrations#926",
 		)
 	}

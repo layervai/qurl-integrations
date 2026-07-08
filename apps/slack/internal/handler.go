@@ -2137,7 +2137,11 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 		// bot token" rather than "workspace uninstalled the app". Ack it, but do
 		// not wipe a still-installed workspace. This branch is log-only:
 		// isLifecycleEvent(..., true) already suppresses tokens_revoked teardown.
-		slog.Info("tokens_revoked bot-token event ignored because Slack bot-token rotation is enabled", "team_id", env.TeamID, "enterprise_id", env.EnterpriseID, "event_id", env.EventID)
+		slog.Info("tokens_revoked bot-token event ignored because Slack bot-token rotation is enabled",
+			"has_team_id", env.TeamID != "",
+			"has_enterprise_id", env.EnterpriseID != "",
+			"has_event_id", env.EventID != "",
+		)
 	case env.Type == slackEnvelopeTypeEventCallback && isLifecycleEvent(&env.Event, h.cfg.SlackBotTokenRotationEnabled):
 		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
 		// because the cascade must run regardless of conversation-mode wiring
