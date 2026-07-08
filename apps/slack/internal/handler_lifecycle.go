@@ -76,7 +76,10 @@ func isBotTokensRevokedEvent(event *slackInnerEvent) bool {
 // enterprise_id is only a fallback when team_id is absent. That prefers avoiding
 // an ambiguous workspace callback deleting a distinct org install; documented
 // app_uninstalled payloads carry authorization metadata for the org-install
-// teardown path.
+// teardown path. Org-install callbacks intentionally do not enumerate team-keyed
+// workspace rows; workspace-level Grid installs rely on their own team_id
+// lifecycle callbacks. #929 tracks empirical Slack fan-out verification before
+// the paired manifest rollout relies on that contract.
 func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	var ids []string
 	seen := map[string]struct{}{}
