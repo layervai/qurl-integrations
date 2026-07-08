@@ -37,7 +37,10 @@ const lifecyclePurgeTimeout = 20 * time.Second
 // lifecyclePurgeRetryAttempts gives an ack-first purge a bounded transient-DDB
 // recovery path after Slack has already received 200 OK and will not redeliver
 // the event. Each workspace id's retry loop still lives inside
-// lifecyclePurgeTimeout.
+// lifecyclePurgeTimeout. A retry restarts purgeWorkspace from its first query;
+// deletes are idempotent, so partial progress persists, but very large
+// partitions that cannot drain inside this fixed budget need the batched drain
+// optimization tracked in #928.
 const (
 	lifecyclePurgeRetryAttempts  = 3
 	lifecyclePurgeRetryBaseDelay = 500 * time.Millisecond
