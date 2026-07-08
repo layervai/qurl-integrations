@@ -1562,7 +1562,11 @@ describe('handleAddRecipients', () => {
     });
 
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res', fileBuffer: new ArrayBuffer(4) });
-    mockMintLinks.mockRejectedValue(new Error('Connector down'));
+    const partialErr = new Error('Connector mint_link failed (502)');
+    partialErr.status = 502;
+    partialErr.partialLinkCount = 2;
+    partialErr.partialQurlIds = ['q_partial_one', 'q_partial_two'];
+    mockMintLinks.mockRejectedValue(partialErr);
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
@@ -1570,6 +1574,19 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-fail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toMatch(/Failed to prepare links/);
+
+    const logger = require('../src/logger');
+    expect(logger.error).toHaveBeenCalledWith(
+      'addRecipients file re-upload failed',
+      expect.objectContaining({
+        sendId: 'send-fail',
+        status: 502,
+        partial_link_count: 2,
+        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {

@@ -18,6 +18,8 @@ apps/                Per-integration apps (independent release tracks)
   cli/               CLI — create & manage qURLs from the terminal (Go)
   teams/             Microsoft Teams (planned)
   zapier/            Zapier integration (planned)
+origins/             Reusable origin images for qURL Connector-protected resources
+  s3-static-connector/  Private S3 static site origin behind qURL Connector
 shared/              Shared Go libraries used by the Go apps
   client/            qURL API client
   auth/              API key helpers

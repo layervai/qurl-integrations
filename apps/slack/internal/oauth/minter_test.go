@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	testBindingPath            = "/v1/external-identity-bindings"
-	testAPIKeysPath            = "/v1/api-keys"
+	testBindingPath            = externalBindingPath
+	testAPIKeysPath            = apiKeysPath
 	bindingUnavailableRetrySec = "60"
 )
 
@@ -24,6 +24,22 @@ const (
 func mintWorkspaceOnlyErr(m *HTTPAPIKeyMinter) error {
 	_, err := m.MintWorkspaceAPIKey(context.Background(), "tok", testTeamID)
 	return err
+}
+
+func TestDependencyAuthFailureErrorIncludesWireFields(t *testing.T) {
+	err := (&DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testAPIKeysPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_auth",
+	}).Error()
+
+	for _, want := range []string{http.MethodPost, testAPIKeysPath, "403", testInsufficientScope, "req_auth"} {
+		if !strings.Contains(err, want) {
+			t.Fatalf("error string %q missing %q", err, want)
+		}
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -721,6 +737,13 @@ func TestHTTPAPIKeyMinterMintWorkspaceNon2xx(t *testing.T) {
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected status code in error, got %q", err.Error())
 	}
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("403 mint error should be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodPost || authErr.Path != testBindingPath || authErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("auth error = %+v, want POST /v1/external-identity-bindings 403", authErr)
+	}
 }
 
 func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
@@ -732,11 +755,33 @@ func TestHTTPAPIKeyMinterMintWorkspaceAPIKeyLimit(t *testing.T) {
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	err := mintWorkspaceOnlyErr(m)
-	if !errors.Is(err, ErrAPIKeyLimitReached) {
-		t.Fatalf("expected ErrAPIKeyLimitReached, got %v", err)
+	if !errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("expected ErrAPIKeyProvisioningQuotaReached, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected wrapped status code in error, got %q", err.Error())
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("api_key_limit must not be classified as dependency auth failure: %+v", authErr)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceQuotaExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"quota_exceeded","title":"Quota Exceeded","detail":"quota exceeded"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if !errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("expected ErrAPIKeyProvisioningQuotaReached, got %v", err)
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("quota_exceeded must not be classified as dependency auth failure: %+v", authErr)
 	}
 }
 
@@ -762,8 +807,13 @@ func TestHTTPAPIKeyMinterMintWorkspaceEnvelopeCodesRequireExpectedStatus(t *test
 	}{
 		{
 			name:        "api key limit on unexpected status",
-			code:        errCodeAPIKeyLimit,
-			mustNotWrap: ErrAPIKeyLimitReached,
+			code:        ErrorCodeAPIKeyLimit,
+			mustNotWrap: ErrAPIKeyProvisioningQuotaReached,
+		},
+		{
+			name:        "quota exceeded on unexpected status",
+			code:        ErrorCodeQuotaExceeded,
+			mustNotWrap: ErrAPIKeyProvisioningQuotaReached,
 		},
 		{
 			name:        "already exists on unexpected status",
@@ -795,16 +845,88 @@ func TestHTTPAPIKeyMinterMintWorkspaceForbiddenEnvelopeStaysGeneric(t *testing.T
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_scope","title":"Forbidden","detail":"token missing qurl:write"}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+testInsufficientScope+`","title":"Forbidden","detail":"token missing qurl:write"},"meta":{"request_id":"req_scope"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	err := mintWorkspaceOnlyErr(m)
-	if errors.Is(err, ErrAPIKeyLimitReached) {
-		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyLimitReached, got %v", err)
+	if errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("non-limit envelope code must NOT map to ErrAPIKeyProvisioningQuotaReached, got %v", err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected generic status error, got %q", err)
+	}
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("non-limit 403 must be classified as dependency auth failure, got %T %[1]v", err)
+	}
+	if authErr.Code != testInsufficientScope {
+		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
+	}
+	if authErr.RequestID != "req_scope" {
+		t.Fatalf("auth error request id = %q, want req_scope", authErr.RequestID)
+	}
+}
+
+func TestHTTPAPIKeyMinterMintWorkspaceStructuredEnvelopeAuditCodeEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"title":"Forbidden","detail":"missing qurl:write"},"meta":{"request_id":"req_structured"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("structured 403 must be classified as dependency auth failure, got %T %[1]v", err)
+	}
+	if authErr.Code != "" {
+		t.Fatalf("auth error code = %q, want empty string for internal structured-envelope sentinel", authErr.Code)
+	}
+	if authErr.RequestID != "req_structured" {
+		t.Fatalf("auth error request id = %q, want req_structured", authErr.RequestID)
+	}
+}
+
+func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+testInvalidToken+`","title":"Unauthorized"},"meta":{"request_id":"req_replace"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "tok", testTeamID, "k_old")
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("replacement mint 401 should be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodPost || authErr.Path != testAPIKeysPath || authErr.StatusCode != http.StatusUnauthorized || authErr.Code != testInvalidToken || authErr.RequestID != "req_replace" {
+		t.Fatalf("auth error = %+v, want POST /v1/api-keys 401 invalid_token req_replace", authErr)
+	}
+}
+
+func TestHTTPAPIKeyMinterReplacementMintQuotaExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"quota_exceeded","title":"Quota Exceeded","detail":"quota exceeded"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "access-token", testTeamID, "k_old")
+	if !errors.Is(err, ErrAPIKeyProvisioningQuotaReached) {
+		t.Fatalf("expected ErrAPIKeyProvisioningQuotaReached, got %v", err)
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("quota_exceeded replacement mint must not be classified as dependency auth failure: %+v", authErr)
 	}
 }
 
@@ -884,6 +1006,70 @@ func TestHTTPAPIKeyMinterRevokeNon2xx(t *testing.T) {
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err == nil {
 		t.Fatal("expected error on 5xx")
+	}
+}
+
+func TestHTTPAPIKeyMinterRevokeSuccessIgnoresBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, strings.Repeat("x", minterBodyLimit+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if err := m.RevokeAPIKey(context.Background(), "tok", "k_1"); err != nil {
+		t.Fatalf("successful revoke body must be ignored, got %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterRevokeOversizedAuthFailureTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, strings.Repeat("x", minterBodyLimit+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("oversized revoke 403 should still be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodDelete || authErr.Path != testRevokeKeyPath || authErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("auth error = %+v, want DELETE /v1/api-keys/:id 403", authErr)
+	}
+	if authErr.Code != "" || authErr.RequestID != "" {
+		t.Fatalf("oversized body should not populate parsed fields, got code=%q request_id=%q", authErr.Code, authErr.RequestID)
+	}
+	if !strings.Contains(err.Error(), "response exceeded") {
+		t.Fatalf("error should preserve oversized-body detail, got %v", err)
+	}
+}
+
+func TestHTTPAPIKeyMinterRevokeAuthFailureTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"`+testInsufficientScope+`","title":"Forbidden"},"meta":{"request_id":"req_revoke"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := m.RevokeAPIKey(context.Background(), "tok", "k_1")
+
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("revoke 403 should be typed as DependencyAuthFailureError, got %T %[1]v", err)
+	}
+	if authErr.Method != http.MethodDelete || authErr.Path != testRevokeKeyPath || authErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("auth error = %+v, want DELETE /v1/api-keys/:id 403", authErr)
+	}
+	if authErr.Code != testInsufficientScope {
+		t.Fatalf("auth error code = %q, want insufficient_scope", authErr.Code)
+	}
+	if authErr.RequestID != "req_revoke" {
+		t.Fatalf("auth error request id = %q, want req_revoke", authErr.RequestID)
 	}
 }
 

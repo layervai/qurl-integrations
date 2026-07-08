@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -879,7 +880,8 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_mint")
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
 		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Error("oauth/callback qurl-service provision failed",
@@ -967,7 +969,8 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, teamID, oldKeyID)
 	if err != nil {
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_replacement_mint")
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
 		slog.Error("oauth/callback qurl-service replacement provision failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", err,
 			"team_id", teamID,
@@ -1021,9 +1024,30 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		// Count orphan-revoke auth failures in the dependency alarm: even
+		// though cleanup is background work, 401/403 means Slack cannot revoke
+		// qurl-service keys and may leave usable orphan credentials behind.
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_orphan_revoke")
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)
 	}
+}
+
+func logOAuthDependencyAuthFailure(log *slog.Logger, err error, route string) {
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	// Keep this stable WARN audit separate from the human ERROR/WARN log the
+	// caller emits with operator detail; CloudWatch filters should key here.
+	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
+		route,
+		authErr.Method,
+		authErr.Path,
+		authErr.StatusCode,
+		authErr.Code,
+		authErr.RequestID,
+	)...)
 }
 
 func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
