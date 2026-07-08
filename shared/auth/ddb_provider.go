@@ -127,6 +127,16 @@ var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin m
 // failures so old installs can be pointed at the reinstall path.
 var ErrSlackBotTokenNotConfigured = errors.New("workspace Slack bot token not configured — admin must reinstall the Slack app")
 
+// DeletedWorkspaceStateIdentity carries non-secret qURL key provenance returned
+// from a whole-row workspace_state delete. It lets Slack lifecycle cleanup log
+// the upstream key identity before the local row disappears, so operator/manual
+// revoke follow-up remains possible even though the encrypted key material is
+// removed immediately for Marketplace retention.
+type DeletedWorkspaceStateIdentity struct {
+	QURLAPIKeyID  string
+	QURLAccountID string
+}
+
 // DynamoDBClient is the slice of *dynamodb.Client the provider actually
 // uses. Exposed as an interface so tests can inject a fake without
 // spinning up localstack.
@@ -1117,19 +1127,48 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 // best-efforts it before this write), keeping the auth package free of the
 // qurl-service client dependency.
 func (p *DDBProvider) DeleteWorkspaceState(ctx context.Context, workspaceID string) error {
+	_, err := p.deleteWorkspaceState(ctx, workspaceID, false)
+	return err
+}
+
+// DeleteWorkspaceStateWithIdentity removes the entire workspace_state row and
+// returns non-secret qURL key provenance from the deleted item when it existed.
+// It uses DynamoDB ReturnValues=ALL_OLD so identity capture and local deletion
+// are one operation: no pre-read can race with a concurrent update, and no
+// transient identity-read failure can block the Marketplace-required local purge.
+func (p *DDBProvider) DeleteWorkspaceStateWithIdentity(ctx context.Context, workspaceID string) (DeletedWorkspaceStateIdentity, error) {
+	return p.deleteWorkspaceState(ctx, workspaceID, true)
+}
+
+func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID string, captureIdentity bool) (DeletedWorkspaceStateIdentity, error) {
 	if workspaceID == "" {
-		return errors.New("DDBProvider.DeleteWorkspaceState: workspaceID is empty")
+		return DeletedWorkspaceStateIdentity{}, errors.New("DDBProvider.DeleteWorkspaceState: workspaceID is empty")
 	}
-	if _, err := p.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+	input := &dynamodb.DeleteItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
-	}); err != nil {
-		return fmt.Errorf("DDBProvider.DeleteWorkspaceState: DeleteItem: %w", err)
+	}
+	if captureIdentity {
+		input.ReturnValues = ddbtypes.ReturnValueAllOld
+	}
+	out, err := p.Client.DeleteItem(ctx, input)
+	if err != nil {
+		return DeletedWorkspaceStateIdentity{}, fmt.Errorf("DDBProvider.DeleteWorkspaceState: DeleteItem: %w", err)
 	}
 	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
-	return nil
+	if !captureIdentity || out == nil {
+		return DeletedWorkspaceStateIdentity{}, nil
+	}
+	return deletedWorkspaceStateIdentityFromItem(out.Attributes), nil
+}
+
+func deletedWorkspaceStateIdentityFromItem(item map[string]ddbtypes.AttributeValue) DeletedWorkspaceStateIdentity {
+	return DeletedWorkspaceStateIdentity{
+		QURLAPIKeyID:  stringAttribute(item[attrQURLAPIKeyID]),
+		QURLAccountID: stringAttribute(item[attrQURLAccountID]),
+	}
 }
 
 // --- KMSEncryptor ----------------------------------------------------------

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // Slack Events API lifecycle event types. Both arrive as an `event_callback`
@@ -262,6 +264,15 @@ type workspaceStateDeleter interface {
 	DeleteWorkspaceState(ctx context.Context, workspaceID string) error
 }
 
+// workspaceStateIdentityDeleter is the production auth-provider extension that
+// atomically returns the old qURL key identity while deleting workspace_state.
+// Lifecycle cannot revoke upstream yet (#926), but logging this non-secret
+// identity before the local row disappears keeps operator/manual revocation
+// actionable without delaying Marketplace-required local data removal.
+type workspaceStateIdentityDeleter interface {
+	DeleteWorkspaceStateWithIdentity(ctx context.Context, workspaceID string) (auth.DeletedWorkspaceStateIdentity, error)
+}
+
 // purgeWorkspace forgets every trace of a Slack workspace's bot data across the
 // per-workspace DynamoDB tables. It is the storage cascade behind both a Slack
 // lifecycle teardown (app_uninstalled / tokens_revoked) and the `/qurl uninstall`
@@ -309,14 +320,23 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 	// load-bearing delete for the Marketplace "uninstall forgets the token"
 	// requirement. Skip silently when the provider can't delete a row (sandbox /
 	// EnvProvider); there's no per-workspace state to remove in that mode.
-	if deleter, ok := h.cfg.AuthProvider.(workspaceStateDeleter); ok {
+	switch deleter := h.cfg.AuthProvider.(type) {
+	case workspaceStateIdentityDeleter:
+		identity, err := deleter.DeleteWorkspaceStateWithIdentity(ctx, workspaceID)
+		if err != nil {
+			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
+			errs = append(errs, err)
+		} else {
+			logWorkspaceStateDeleted(log, identity)
+		}
+	case workspaceStateDeleter:
 		if err := deleter.DeleteWorkspaceState(ctx, workspaceID); err != nil {
 			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
 			errs = append(errs, err)
 		} else {
-			log.Info("purgeWorkspace: deleted workspace_state row")
+			logWorkspaceStateDeleted(log, auth.DeletedWorkspaceStateIdentity{})
 		}
-	} else {
+	default:
 		log.Debug("purgeWorkspace: auth provider does not support workspace_state delete — skipping")
 	}
 
@@ -354,6 +374,19 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 		log.Info("purgeWorkspace: purged channel_policies rows")
 	}
 	return errors.Join(errs...)
+}
+
+func logWorkspaceStateDeleted(log *slog.Logger, identity auth.DeletedWorkspaceStateIdentity) {
+	attrs := []any{}
+	if identity.QURLAPIKeyID != "" {
+		attrs = append(attrs,
+			"deleted_workspace_qurl_key_id", identity.QURLAPIKeyID,
+			"deleted_workspace_qurl_account_id", identity.QURLAccountID,
+			"upstream_qurl_key_identity_captured", true,
+			"upstream_qurl_key_follow_up_issue", "layervai/qurl-integrations#926",
+		)
+	}
+	log.Info("purgeWorkspace: deleted workspace_state row", attrs...)
 }
 
 func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) {

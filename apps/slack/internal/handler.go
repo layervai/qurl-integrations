@@ -1821,6 +1821,10 @@ var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 // than silently leaving the encrypted bot token behind on uninstall.
 var _ workspaceStateDeleter = (*auth.DDBProvider)(nil)
 
+// Ensure production lifecycle purge keeps returning the deleted row's qURL key
+// identity for the deferred upstream-revoke follow-up (#926).
+var _ workspaceStateIdentityDeleter = (*auth.DDBProvider)(nil)
+
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s

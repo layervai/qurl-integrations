@@ -40,6 +40,7 @@ type fakeDDBClient struct {
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
 	deleteInput  *dynamodb.DeleteItemInput
+	deleteOutput *dynamodb.DeleteItemOutput
 	deleteCalls  int
 	deleteErr    error
 }
@@ -69,6 +70,9 @@ func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemI
 func (f *fakeDDBClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
 	f.deleteCalls++
 	f.deleteInput = in
+	if f.deleteOutput != nil {
+		return f.deleteOutput, f.deleteErr
+	}
 	return &dynamodb.DeleteItemOutput{}, f.deleteErr
 }
 
@@ -2240,6 +2244,42 @@ func TestDDBProviderDeleteWorkspaceState(t *testing.T) {
 		}
 		if ddb.deleteCalls != 1 {
 			t.Fatalf("DeleteItem calls = %d, want 1", ddb.deleteCalls)
+		}
+	})
+
+	t.Run("delete with identity returns old key provenance", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			deleteOutput: &dynamodb.DeleteItemOutput{Attributes: map[string]ddbtypes.AttributeValue{
+				attrQURLAPIKeyID: &ddbtypes.AttributeValueMemberS{Value: " " + testKeyID + " "},
+				attrQURLAccountID: &ddbtypes.AttributeValueMemberS{
+					Value: " " + testQURLAccount + " ",
+				},
+			}},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateWithIdentity(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("DeleteWorkspaceStateWithIdentity: %v", err)
+		}
+		if identity.QURLAPIKeyID != testKeyID || identity.QURLAccountID != testQURLAccount {
+			t.Fatalf("identity = %+v, want key/account %q/%q", identity, testKeyID, testQURLAccount)
+		}
+		if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
+			t.Fatalf("ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
+		}
+	})
+
+	t.Run("delete with identity is empty on absent row", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateWithIdentity(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("DeleteWorkspaceStateWithIdentity absent row: %v", err)
+		}
+		if identity != (DeletedWorkspaceStateIdentity{}) {
+			t.Fatalf("identity = %+v, want empty", identity)
 		}
 	})
 
