@@ -203,7 +203,7 @@ func TestHandleLifecycleEvent_EnterpriseFallbackPurgesWorkspace(t *testing.T) {
 	}
 }
 
-func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseAndTeamKeys(t *testing.T) {
+func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseAndTeamAgentState(t *testing.T) {
 	h, provider, ts := newLifecycleTestHandlerForWorkspace(t, testEnterpriseID)
 	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
 	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_team", map[string]string{"grafana": "r_team"})
@@ -217,19 +217,20 @@ func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseAndTeamKey
 	}
 	h.Wait()
 
-	wantIDs := testEnterpriseID + "," + testAdminTeamID
+	wantIDs := testEnterpriseID
 	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
 		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testEnterpriseID)
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 
-	for _, workspaceID := range []string{testEnterpriseID, testAdminTeamID} {
-		_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), workspaceID)
-		var ae *slackdata.Error
-		if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
-			t.Fatalf("ListAdmins(%q) after Grid purge: err = %v, want 404 *Error", workspaceID, err)
-		}
+	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID)
+	var ae *slackdata.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+		t.Fatalf("ListAdmins(%q) after Grid purge: err = %v, want 404 *Error", testEnterpriseID, err)
+	}
+	if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID); err != nil {
+		t.Fatalf("ListAdmins(%q) after agent-state-only team sweep: %v", testAdminTeamID, err)
 	}
 	for _, ch := range []string{"C_one", "C_two"} {
 		entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testEnterpriseID, ch)
@@ -242,10 +243,10 @@ func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseAndTeamKey
 	}
 	teamEntries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, "C_team")
 	if err != nil {
-		t.Fatalf("GetChannelPolicy(team) after Grid purge: %v", err)
+		t.Fatalf("GetChannelPolicy(team) after agent-state-only team sweep: %v", err)
 	}
-	if len(teamEntries) != 0 {
-		t.Fatalf("GetChannelPolicy(team) after Grid purge = %v, want empty", teamEntries)
+	if len(teamEntries) == 0 {
+		t.Fatalf("GetChannelPolicy(team) after agent-state-only team sweep = empty, want preserved mixed-install policy")
 	}
 }
 
@@ -339,9 +340,12 @@ func TestLifecycleWorkspaceIDs_PartialEnterpriseAuthorizationFallsBackToEnvelope
 		}},
 	}
 
-	wantIDs := testEnterpriseID + "," + testAdminTeamID
-	if got := strings.Join(lifecycleWorkspaceIDs(env), ","); got != wantIDs {
-		t.Fatalf("lifecycleWorkspaceIDs(partial enterprise auth) = %q, want %q", got, wantIDs)
+	resolution := resolveSlackEventPartitions(env)
+	if got := strings.Join(resolution.lifecyclePurge, ","); got != testEnterpriseID {
+		t.Fatalf("lifecycle purge ids(partial enterprise auth) = %q, want %q", got, testEnterpriseID)
+	}
+	if got := strings.Join(resolution.lifecycleAgentStateOnly, ","); got != testAdminTeamID {
+		t.Fatalf("lifecycle agent-state-only ids(partial enterprise auth) = %q, want %q", got, testAdminTeamID)
 	}
 }
 

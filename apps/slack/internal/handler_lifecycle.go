@@ -81,11 +81,11 @@ func (s *orderedIDSet) add(raw string) {
 	if id == "" {
 		return
 	}
-	if _, ok := s.seen[id]; ok {
-		return
-	}
 	if s.seen == nil {
 		s.seen = map[string]struct{}{}
+	}
+	if _, ok := s.seen[id]; ok {
+		return
 	}
 	s.seen[id] = struct{}{}
 	s.ids = append(s.ids, id)
@@ -96,15 +96,18 @@ func (s *orderedIDSet) empty() bool {
 }
 
 type slackEventPartitionResolution struct {
-	agentWrite     string
-	lifecyclePurge []string
+	agentWrite              string
+	lifecyclePurge          []string
+	lifecycleAgentStateOnly []string
 }
 
 // resolveSlackEventPartitions keeps the agent write key and lifecycle purge keys
 // in one place. Org-level Grid installs write conversation/dedupe rows under the
 // enterprise id, but several agent-state item types are always team-keyed
-// (pending actions, audit, pane context, rate counters), so an org lifecycle
-// callback that includes team ids must purge those partitions too.
+// (pending actions, audit, pane context, rate counters). For org lifecycle
+// callbacks, the full cascade stays on the enterprise partition while delivered
+// team ids get an agent-state-only sweep so a mixed workspace-level install's
+// bot token, mapping, and policies are not over-deleted.
 func resolveSlackEventPartitions(env *slackEventEnvelope) slackEventPartitionResolution {
 	if env == nil {
 		return slackEventPartitionResolution{}
@@ -140,11 +143,23 @@ func resolveSlackEventPartitions(env *slackEventEnvelope) slackEventPartitionRes
 			agentWrite = firstResolvedID(teamIDs.ids)
 		}
 		purge.add(agentWrite)
-		purge.add(env.TeamID)
-		for _, teamID := range teamIDs.ids {
-			purge.add(teamID)
+		var agentStateOnly orderedIDSet
+		addAgentStateOnly := func(raw string) {
+			id := strings.TrimSpace(raw)
+			if id == "" || id == agentWrite {
+				return
+			}
+			agentStateOnly.add(id)
 		}
-		return slackEventPartitionResolution{agentWrite: agentWrite, lifecyclePurge: purge.ids}
+		addAgentStateOnly(env.TeamID)
+		for _, teamID := range teamIDs.ids {
+			addAgentStateOnly(teamID)
+		}
+		return slackEventPartitionResolution{
+			agentWrite:              agentWrite,
+			lifecyclePurge:          purge.ids,
+			lifecycleAgentStateOnly: agentStateOnly.ids,
+		}
 	}
 
 	purge.add(env.TeamID)
@@ -164,16 +179,15 @@ func firstResolvedID(ids []string) string {
 	return ids[0]
 }
 
-// lifecycleWorkspaceIDs resolves the DDB partition key(s) a lifecycle event
-// should purge. Slack's Events API authorization metadata disambiguates
-// Enterprise Grid org installs from workspace installs. Org installs purge the
-// enterprise partition plus any team partitions Slack includes, because
-// qurl_agent_state has both enterprise-keyed conversation/dedupe rows and
-// team-keyed pending/audit/context/rate rows. Older/partial payloads without
-// authorizations cannot safely prove org-install vs workspace-install when both
-// IDs are present, so they use team_id when present because Slack documents
-// team_id as the workspace identifier for token-revocation callbacks;
-// enterprise_id is only a fallback when team_id is absent.
+// lifecycleWorkspaceIDs resolves the DDB partition key(s) that receive the full
+// workspace cascade. Slack's Events API authorization metadata disambiguates
+// Enterprise Grid org installs from workspace installs: org installs fully purge
+// the enterprise partition, while any delivered team ids are handled by an
+// agent-state-only sweep. Older/partial payloads without authorizations cannot
+// safely prove org-install vs workspace-install when both IDs are present, so
+// they use team_id when present because Slack documents team_id as the workspace
+// identifier for token-revocation callbacks; enterprise_id is only a fallback
+// when team_id is absent.
 func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	return resolveSlackEventPartitions(env).lifecyclePurge
 }
@@ -189,7 +203,9 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 // A purge with no resolvable workspace id is dropped with a log line: there are
 // no rows to delete and issuing a delete against an empty key would only 400.
 func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
-	workspaceIDs := lifecycleWorkspaceIDs(env)
+	partitionResolution := resolveSlackEventPartitions(env)
+	workspaceIDs := partitionResolution.lifecyclePurge
+	agentStateOnlyIDs := partitionResolution.lifecycleAgentStateOnly
 	log := slog.With(
 		"surface", "lifecycle",
 		"event_type", env.Event.Type,
@@ -197,12 +213,13 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		"enterprise_id", env.EnterpriseID,
 		"event_id", env.EventID,
 	)
-	if len(workspaceIDs) == 0 {
+	if len(workspaceIDs) == 0 && len(agentStateOnlyIDs) == 0 {
 		log.Warn("lifecycle event with no team_id/enterprise_id — nothing to purge")
 		return
 	}
 	log.Info("lifecycle event received — purging workspace data",
 		"workspace_ids", workspaceIDs,
+		"agent_state_only_workspace_ids", agentStateOnlyIDs,
 		"upstream_qurl_key_revoke_deferred", true,
 		"follow_up_issue", "layervai/qurl-integrations#926",
 	)
@@ -222,6 +239,11 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		for _, workspaceID := range workspaceIDs {
 			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
 			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID)
+			cancel()
+		}
+		for _, workspaceID := range agentStateOnlyIDs {
+			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
+			h.purgeAgentStateWithRetry(ctx, log.With("workspace_id", workspaceID, "agent_state_only", true), workspaceID)
 			cancel()
 		}
 	})
@@ -335,16 +357,45 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 }
 
 func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) {
+	retryLifecyclePurge(ctx, log, "purgeWorkspace", func(attemptLog *slog.Logger) error {
+		return h.purgeWorkspace(ctx, attemptLog, workspaceID)
+	})
+}
+
+func (h *Handler) purgeAgentStateWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) {
+	retryLifecyclePurge(ctx, log, "purgeAgentState", func(attemptLog *slog.Logger) error {
+		return h.purgeAgentStatePartition(ctx, attemptLog, workspaceID)
+	})
+}
+
+func (h *Handler) purgeAgentStatePartition(ctx context.Context, log *slog.Logger, workspaceID string) error {
+	if workspaceID == "" {
+		log.Warn("purgeAgentState called with empty workspace id — skipping")
+		return nil
+	}
+	if h.cfg.AgentStore == nil {
+		log.Debug("purgeAgentState: AgentStore unwired — skipping qurl_agent_state purge")
+		return nil
+	}
+	if err := h.cfg.AgentStore.PurgeWorkspaceAgentState(ctx, workspaceID); err != nil {
+		log.Error("purgeAgentState: failed to purge qurl_agent_state rows", "error", err)
+		return err
+	}
+	log.Info("purgeAgentState: purged qurl_agent_state rows")
+	return nil
+}
+
+func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge func(*slog.Logger) error) {
 	for attempt := 1; attempt <= lifecyclePurgeRetryAttempts; attempt++ {
 		attemptLog := log.With("attempt", attempt, "max_attempts", lifecyclePurgeRetryAttempts)
-		err := h.purgeWorkspace(ctx, attemptLog, workspaceID)
+		err := purge(attemptLog)
 		if err == nil {
 			return
 		}
 		if attempt == lifecyclePurgeRetryAttempts {
 			// Keep cleanup_action_required stable: qurl-integrations-infra#1284
 			// tracks the CloudWatch alarm that should page on this field.
-			log.Error("purgeWorkspace: exhausted retries; manual cleanup may be required",
+			log.Error(op+": exhausted retries; manual cleanup may be required",
 				"attempts", attempt,
 				"cleanup_action_required", true,
 				"error", err,
@@ -353,7 +404,7 @@ func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger,
 		}
 
 		delay := time.Duration(attempt) * lifecyclePurgeRetryBaseDelay
-		log.Warn("purgeWorkspace: retrying failed purge",
+		log.Warn(op+": retrying failed purge",
 			"attempt", attempt,
 			"next_attempt", attempt+1,
 			"retry_delay", delay.String(),
@@ -368,7 +419,7 @@ func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger,
 				default:
 				}
 			}
-			log.Error("purgeWorkspace: retry canceled before next attempt", "error", ctx.Err())
+			log.Error(op+": retry canceled before next attempt", "error", ctx.Err())
 			return
 		case <-timer.C:
 		}
