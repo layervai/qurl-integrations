@@ -331,6 +331,24 @@ func TestLifecycleWorkspaceIDs_NoAuthorizationPayloadUsesTeamBeforeEnterprise(t 
 	}
 }
 
+func TestLifecycleWorkspaceIDs_MalformedAuthorizationDoesNotWidenToEnterprisePurge(t *testing.T) {
+	env := &slackEventEnvelope{
+		TeamID:       testAdminTeamID,
+		EnterpriseID: testEnterpriseID,
+		Authorizations: []slackEventAuthorization{{
+			EnterpriseID: testEnterpriseID,
+		}},
+	}
+
+	resolution := resolveSlackEventPartitions(env)
+	if got := strings.Join(resolution.lifecyclePurge, ","); got != testAdminTeamID {
+		t.Fatalf("lifecycle purge ids(malformed auth) = %q, want %q", got, testAdminTeamID)
+	}
+	if got := strings.Join(resolution.lifecycleAgentStateOnly, ","); got != "" {
+		t.Fatalf("lifecycle agent-state-only ids(malformed auth) = %q, want none", got)
+	}
+}
+
 func TestLifecycleWorkspaceIDs_PartialEnterpriseAuthorizationFallsBackToEnvelope(t *testing.T) {
 	env := &slackEventEnvelope{
 		TeamID:       testAdminTeamID,
