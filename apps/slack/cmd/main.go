@@ -276,6 +276,10 @@ func run() error {
 	agentChannelFollowups := readAgentChannelFollowups()
 	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
 	slackBotTokenRotationEnabled := readSlackBotTokenRotationEnabled()
+	slog.Info("Slack bot-token revoke handling configured",
+		"slack_bot_token_rotation_enabled", slackBotTokenRotationEnabled,
+		"tokens_revoked_bot_token_triggers_workspace_purge", !slackBotTokenRotationEnabled,
+	)
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
