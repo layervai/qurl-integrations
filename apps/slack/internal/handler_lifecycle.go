@@ -53,10 +53,14 @@ func isLifecycleEvent(event *slackInnerEvent, botTokenRotationEnabled bool) bool
 	case slackEventTypeAppUninstalled:
 		return true
 	case slackEventTypeTokensRevoked:
-		return !botTokenRotationEnabled && event.Tokens != nil && len(event.Tokens.Bot) > 0
+		return !botTokenRotationEnabled && isBotTokensRevokedEvent(event)
 	default:
 		return false
 	}
+}
+
+func isBotTokensRevokedEvent(event *slackInnerEvent) bool {
+	return event != nil && event.Type == slackEventTypeTokensRevoked && event.Tokens != nil && len(event.Tokens.Bot) > 0
 }
 
 // lifecycleWorkspaceIDs resolves the DDB partition key(s) a lifecycle event
@@ -152,7 +156,10 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 	)
 	// Off the request goroutine: handleEvent has already written 200, and the
 	// purge's DeleteItem/Query calls must not block (or fail) that ack. h.Go is
-	// wg-tracked so a graceful shutdown drains an in-flight purge.
+	// wg-tracked so a graceful shutdown drains an in-flight purge. It deliberately
+	// bypasses the general async semaphore: lifecycle events are rare, and dropping
+	// a teardown because the slash/agent pool is full would lose the signal after
+	// Slack has already received 200.
 	h.Go(func() {
 		baseCtx := h.baseCtx
 		if baseCtx == nil {

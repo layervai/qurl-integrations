@@ -2111,7 +2111,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
-	case env.Type == slackEnvelopeTypeEventCallback && env.Event.Type == slackEventTypeTokensRevoked && h.cfg.SlackBotTokenRotationEnabled && env.Event.Tokens != nil && len(env.Event.Tokens.Bot) > 0:
+	case env.Type == slackEnvelopeTypeEventCallback && h.cfg.SlackBotTokenRotationEnabled && isBotTokensRevokedEvent(&env.Event):
 		// In token-rotation deployments this callback can mean "Slack rotated the
 		// bot token" rather than "workspace uninstalled the app". Ack it, but do
 		// not wipe a still-installed workspace.

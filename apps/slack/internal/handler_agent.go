@@ -701,10 +701,17 @@ func stripBotMention(text string) string {
 // TTL rather than explicit lifecycle purge.
 func agentEventPartition(env *slackEventEnvelope) string {
 	if len(env.Authorizations) > 0 {
+		enterpriseInstall := false
 		for _, authz := range env.Authorizations {
-			if authz.IsEnterpriseInstall && authz.EnterpriseID != "" {
-				return authz.EnterpriseID
+			if authz.IsEnterpriseInstall {
+				enterpriseInstall = true
+				if authz.EnterpriseID != "" {
+					return authz.EnterpriseID
+				}
 			}
+		}
+		if enterpriseInstall && env.EnterpriseID != "" {
+			return env.EnterpriseID
 		}
 		if env.TeamID != "" {
 			return env.TeamID
