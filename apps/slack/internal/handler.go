@@ -1830,10 +1830,12 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
+	const localSlackDataClearedReply = "Local Slack app data for this workspace has also been cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`."
+
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
 	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
 	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
-	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
+	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\n" + localSlackDataClearedReply
 
 	// DeleteAPIKey clears only the qURL key columns. Whenever the command reaches
 	// a terminal local-disconnect result (success, or already-no-qURL-key), forget
@@ -1893,7 +1895,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 				return
 			}
 			schedulePurge("qurl_key_not_configured")
-			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
+			respondSlack(w, "qURL isn't currently connected to this workspace.\n\n"+localSlackDataClearedReply+"\n\nContact your qURL operator if the owner is unavailable.")
 			return
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
 			respondUninstallUnsupported(w)
@@ -1910,7 +1912,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		respondSlack(w, revokedReply)
 		return
 	}
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\n"+localSlackDataClearedReply+"\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.")
 }
 
 // revokeWorkspaceUpstreamKey best-effort revokes the workspace's upstream qURL

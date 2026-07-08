@@ -508,8 +508,11 @@ func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
 		t.Fatalf("uninstall reply missing revocation caveat: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
-		t.Fatalf("uninstall reply missing reconnect ownership hint: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
+		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 }
 
@@ -531,8 +534,11 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
-		t.Fatalf("not-connected reply missing owner reconnect guidance: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
+		t.Fatalf("not-connected reply missing local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("not-connected reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "operator") {
 		t.Fatalf("not-connected reply missing operator recovery guidance: %q", resp[respFieldText])
@@ -557,6 +563,9 @@ func TestSlashCommandUninstallReportsNotConnectedWhenKeyAlreadyGone(t *testing.T
 	}
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
+		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
 	}
 }
 

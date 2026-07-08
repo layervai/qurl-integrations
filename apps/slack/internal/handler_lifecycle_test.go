@@ -474,6 +474,12 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
 		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
 	}
+	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
+		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
+	}
 
 	// mappings + policies gone after the async purge.
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
@@ -564,6 +570,12 @@ func TestSlashCommandUninstallPurgesWorkspaceWhenAPIKeyAlreadyCleared(t *testing
 	}
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Local Slack app data") {
+		t.Fatalf("uninstall reply missing local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 	h.Wait()
 	if provider.deleteStateCalls != 1 {
