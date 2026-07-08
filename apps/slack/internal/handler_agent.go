@@ -692,9 +692,30 @@ func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
 }
 
-// agentEventPartition is the conversation-state partition key: the Enterprise
-// Grid org id when present (stable across the org's workspaces), else the team.
+// agentEventPartition is the conversation-state partition key. Authorization
+// metadata disambiguates Enterprise Grid: org-level installs use enterprise_id,
+// workspace-level installs use team_id so their agent state is purged by the
+// same team-keyed lifecycle teardown as the durable workspace tables. Legacy
+// payloads without authorizations keep the old enterprise-id preference.
 func agentEventPartition(env *slackEventEnvelope) string {
+	if len(env.Authorizations) > 0 {
+		for _, authz := range env.Authorizations {
+			if authz.IsEnterpriseInstall && authz.EnterpriseID != "" {
+				return authz.EnterpriseID
+			}
+		}
+		if env.TeamID != "" {
+			return env.TeamID
+		}
+		for _, authz := range env.Authorizations {
+			if authz.TeamID != "" {
+				return authz.TeamID
+			}
+		}
+		if env.EnterpriseID != "" {
+			return env.EnterpriseID
+		}
+	}
 	if env.EnterpriseID != "" {
 		return env.EnterpriseID
 	}

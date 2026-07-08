@@ -192,9 +192,34 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 }
 
 func TestAgentEventKeys(t *testing.T) {
-	grid := &slackEventEnvelope{TeamID: "T1", EnterpriseID: "E9", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
-	if agentEventPartition(grid) != "E9" {
-		t.Errorf("grid partition should be enterprise id")
+	gridTeam := &slackEventEnvelope{
+		TeamID:       "T1",
+		EnterpriseID: "E9",
+		Authorizations: []slackEventAuthorization{{
+			EnterpriseID:        "E9",
+			TeamID:              "T1",
+			IsEnterpriseInstall: false,
+		}},
+		Event: slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}
+	if agentEventPartition(gridTeam) != "T1" {
+		t.Errorf("grid workspace install partition should be team id")
+	}
+	gridOrg := &slackEventEnvelope{
+		TeamID:       "T1",
+		EnterpriseID: "E9",
+		Authorizations: []slackEventAuthorization{{
+			EnterpriseID:        "E9",
+			IsEnterpriseInstall: true,
+		}},
+		Event: slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}
+	if agentEventPartition(gridOrg) != "E9" {
+		t.Errorf("grid org install partition should be enterprise id")
+	}
+	legacyGrid := &slackEventEnvelope{TeamID: "T1", EnterpriseID: "E9", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
+	if agentEventPartition(legacyGrid) != "E9" {
+		t.Errorf("legacy grid payload should keep enterprise-id fallback")
 	}
 	noGrid := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
 	if agentEventPartition(noGrid) != "T1" {
