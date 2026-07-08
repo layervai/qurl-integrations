@@ -353,6 +353,12 @@ type Config struct {
 	// operator-only reinstall prompt.
 	SlackInstallURL string
 
+	// SlackBotTokenRotationEnabled means Slack may send tokens_revoked for a
+	// routine bot-token rotation while the workspace remains installed. When true,
+	// tokens_revoked is acknowledged but never treated as an uninstall teardown;
+	// app_uninstalled remains the destructive lifecycle signal.
+	SlackBotTokenRotationEnabled bool
+
 	// PostDM posts a direct message via chat.postMessage on the
 	// per-workspace bot token, with the same Enterprise Grid fallback as
 	// OpenView/PostMessage. `/qurl get dm:true` and qURL Connector
@@ -2105,14 +2111,19 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
-	case env.Type == "event_callback" && isLifecycleEvent(&env.Event):
+	case env.Type == slackEnvelopeTypeEventCallback && env.Event.Type == slackEventTypeTokensRevoked && h.cfg.SlackBotTokenRotationEnabled && env.Event.Tokens != nil && len(env.Event.Tokens.Bot) > 0:
+		// In token-rotation deployments this callback can mean "Slack rotated the
+		// bot token" rather than "workspace uninstalled the app". Ack it, but do
+		// not wipe a still-installed workspace.
+		slog.Info("tokens_revoked bot-token event ignored because Slack bot-token rotation is enabled", "team_id", env.TeamID, "enterprise_id", env.EnterpriseID, "event_id", env.EventID)
+	case env.Type == slackEnvelopeTypeEventCallback && isLifecycleEvent(&env.Event, h.cfg.SlackBotTokenRotationEnabled):
 		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
 		// because the cascade must run regardless of conversation-mode wiring
 		// (handleAgentEvent returns early when the agent is disabled). It only
 		// schedules the async purge; the 200 below is the ack Slack needs to stop
 		// retrying.
 		h.handleLifecycleEvent(&env)
-	case env.Type == "event_callback":
+	case env.Type == slackEnvelopeTypeEventCallback:
 		// Conversation mode. handleAgentEvent only schedules async work (or
 		// no-ops when disabled/filtered); we always ack 200 below so Slack
 		// never retries a delivery we accepted.

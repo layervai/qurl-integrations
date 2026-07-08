@@ -266,6 +266,43 @@ func TestHandleLifecycleEvent_EnterpriseGridTeamInstallPurgesTeamKeyOnly(t *test
 	}
 }
 
+func TestHandleLifecycleEvent_MultipleWorkspaceIDsPurgeEachID(t *testing.T) {
+	const secondTeamID = "T_second"
+
+	h, provider, ts := newLifecycleTestHandler(t)
+	ts.seedWorkspace(t, secondTeamID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+	ts.seedPolicyAliasBindings(t, secondTeamID, "C_three", map[string]string{"jenkins": "r_ccc"})
+	seedLifecycleAgentState(t, h.cfg.AgentStore, secondTeamID)
+
+	h.handleLifecycleEvent(&slackEventEnvelope{
+		Type:         slackEnvelopeTypeEventCallback,
+		TeamID:       testAdminTeamID,
+		EnterpriseID: testEnterpriseID,
+		Authorizations: []slackEventAuthorization{
+			{TeamID: testAdminTeamID, EnterpriseID: testEnterpriseID},
+			{TeamID: secondTeamID, EnterpriseID: testEnterpriseID},
+		},
+		EventID: "EvMultiWorkspace",
+		Event:   slackInnerEvent{Type: slackEventTypeAppUninstalled},
+	})
+	h.Wait()
+
+	wantIDs := testAdminTeamID + "," + secondTeamID
+	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
+		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
+	}
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, secondTeamID)
+
+	for _, workspaceID := range []string{testAdminTeamID, secondTeamID} {
+		_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), workspaceID)
+		var ae *slackdata.Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+			t.Fatalf("ListAdmins(%q) after multi-id purge: err = %v, want 404 *Error", workspaceID, err)
+		}
+	}
+}
+
 func TestLifecycleWorkspaceIDs_NoAuthorizationPayloadUsesTeamBeforeEnterprise(t *testing.T) {
 	env := &slackEventEnvelope{TeamID: " " + testAdminTeamID + " ", EnterpriseID: testEnterpriseID}
 
@@ -308,6 +345,27 @@ func TestHandleLifecycleEvent_TokensRevokedPurgesWorkspace(t *testing.T) {
 	// A bot-token revoke is treated as an uninstall — the full purge runs.
 	if provider.deleteStateCalls != 1 {
 		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (bot tokens_revoked must purge)", provider.deleteStateCalls)
+	}
+}
+
+func TestHandleLifecycleEvent_BotTokensRevokedWithRotationEnabledDoesNotPurgeWorkspace(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+	h.cfg.SlackBotTokenRotationEnabled = true
+
+	w := httptest.NewRecorder()
+	body := tokensRevokedBody(testAdminTeamID)
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+	h.Wait()
+
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 when bot-token rotation is enabled", provider.deleteStateCalls)
+	}
+	assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testAdminTeamID)
+	if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID); err != nil {
+		t.Fatalf("ListAdmins after rotation tokens_revoked: %v", err)
 	}
 }
 

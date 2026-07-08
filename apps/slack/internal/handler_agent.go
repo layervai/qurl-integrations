@@ -696,7 +696,9 @@ func stripBotMention(text string) string {
 // metadata disambiguates Enterprise Grid: org-level installs use enterprise_id,
 // workspace-level installs use team_id so their agent state is purged by the
 // same team-keyed lifecycle teardown as the durable workspace tables. Legacy
-// payloads without authorizations keep the old enterprise-id preference.
+// payloads without authorizations keep the old enterprise-id preference; any
+// Grid workspace rows written on that narrow path rely on the short agent-state
+// TTL rather than explicit lifecycle purge.
 func agentEventPartition(env *slackEventEnvelope) string {
 	if len(env.Authorizations) > 0 {
 		for _, authz := range env.Authorizations {

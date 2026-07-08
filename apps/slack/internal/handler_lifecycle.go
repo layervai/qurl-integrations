@@ -20,22 +20,24 @@ import (
 //     Slack bot-token rotation is enabled later, revisit this path before
 //     treating rotated bot tokens as teardown signals.
 const (
-	slackEventTypeAppUninstalled = "app_uninstalled"
-	slackEventTypeTokensRevoked  = "tokens_revoked"
+	slackEnvelopeTypeEventCallback = "event_callback"
+	slackEventTypeAppUninstalled   = "app_uninstalled"
+	slackEventTypeTokensRevoked    = "tokens_revoked"
 )
 
-// lifecyclePurgeTimeout bounds the asynchronous workspace purge kicked off by a
-// lifecycle event. It is generous relative to the few DeleteItem/Query calls a
-// purge makes (workspace_state row + agent_state partition + workspace_mappings
-// row + the team's channel_policies rows) but still bounded so a DDB brownout
-// can't pin an async worker slot indefinitely. The purge runs off h.baseCtx (NOT
-// the request ctx), because the 200 OK is returned to Slack before the purge
-// starts.
+// lifecyclePurgeTimeout bounds each asynchronous workspace-id purge kicked off
+// by a lifecycle event. It is generous relative to the few DeleteItem/Query
+// calls a purge makes (workspace_state row + agent_state partition +
+// workspace_mappings row + the team's channel_policies rows) but still bounded
+// so a DDB brownout can't pin an async worker slot indefinitely. The purge runs
+// off h.baseCtx (NOT the request ctx), because the 200 OK is returned to Slack
+// before the purge starts.
 const lifecyclePurgeTimeout = 20 * time.Second
 
 // lifecyclePurgeRetryAttempts gives an ack-first purge a bounded transient-DDB
 // recovery path after Slack has already received 200 OK and will not redeliver
-// the event. The retry loop still lives inside lifecyclePurgeTimeout.
+// the event. Each workspace id's retry loop still lives inside
+// lifecyclePurgeTimeout.
 const (
 	lifecyclePurgeRetryAttempts  = 3
 	lifecyclePurgeRetryBaseDelay = 500 * time.Millisecond
@@ -43,7 +45,7 @@ const (
 
 // isLifecycleEvent reports whether an inner event is an install-teardown signal
 // that should trigger a full workspace purge.
-func isLifecycleEvent(event *slackInnerEvent) bool {
+func isLifecycleEvent(event *slackInnerEvent, botTokenRotationEnabled bool) bool {
 	if event == nil {
 		return false
 	}
@@ -51,7 +53,7 @@ func isLifecycleEvent(event *slackInnerEvent) bool {
 	case slackEventTypeAppUninstalled:
 		return true
 	case slackEventTypeTokensRevoked:
-		return event.Tokens != nil && len(event.Tokens.Bot) > 0
+		return !botTokenRotationEnabled && event.Tokens != nil && len(event.Tokens.Bot) > 0
 	default:
 		return false
 	}
@@ -149,10 +151,10 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		if baseCtx == nil {
 			baseCtx = context.Background()
 		}
-		ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-		defer cancel()
 		for _, workspaceID := range workspaceIDs {
+			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
 			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID)
+			cancel()
 		}
 	})
 }
