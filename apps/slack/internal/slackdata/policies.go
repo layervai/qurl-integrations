@@ -533,10 +533,7 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 			ExclusiveStartKey: startKey,
 		})
 		if err != nil {
-			joinedErrs := make([]error, 0, len(deleteErrs)+1)
-			joinedErrs = append(joinedErrs, deleteErrs...)
-			joinedErrs = append(joinedErrs, ddbToError("PurgeTeamChannelPolicies", err))
-			return errors.Join(joinedErrs...)
+			return joinSweepErrors(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
 		}
 		for _, item := range out.Items {
 			channelID := readString(item, attrSlackChannelID)

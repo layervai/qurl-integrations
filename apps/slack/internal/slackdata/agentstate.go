@@ -503,10 +503,7 @@ func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition str
 			ExclusiveStartKey:    startKey,
 		})
 		if err != nil {
-			joinedErrs := make([]error, 0, len(deleteErrs)+1)
-			joinedErrs = append(joinedErrs, deleteErrs...)
-			joinedErrs = append(joinedErrs, ddbToError("PurgeWorkspaceAgentState", err))
-			return errors.Join(joinedErrs...)
+			return joinSweepErrors(deleteErrs, ddbToError("PurgeWorkspaceAgentState", err))
 		}
 		for _, item := range out.Items {
 			sk := readString(item, attrAgentSK)

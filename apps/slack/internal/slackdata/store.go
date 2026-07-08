@@ -308,6 +308,17 @@ func ddbToError(op string, err error) error {
 	}
 }
 
+// joinSweepErrors preserves every failure from a paged purge: the per-row
+// DeleteItem errors already observed plus the terminal Query error that stopped
+// pagination. The lifecycle retry path needs the full residue set for both
+// channel_policies and qurl_agent_state purges.
+func joinSweepErrors(deleteErrs []error, queryErr error) error {
+	all := make([]error, 0, len(deleteErrs)+1)
+	all = append(all, deleteErrs...)
+	all = append(all, queryErr)
+	return errors.Join(all...)
+}
+
 // stringAttr is a small helper for string DDB AttributeValues. Empty
 // strings are NOT permitted in DDB (would 400 ValidationException);
 // callers MUST guard upstream.

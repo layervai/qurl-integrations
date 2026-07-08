@@ -66,6 +66,35 @@ func isBotTokensRevokedEvent(event *slackInnerEvent) bool {
 	return event != nil && event.Type == slackEventTypeTokensRevoked && event.Tokens != nil && len(event.Tokens.Bot) > 0
 }
 
+// orderedIDSet accumulates non-empty, whitespace-trimmed workspace ids in
+// insertion order while skipping duplicates. The lifecycle and slash-uninstall
+// resolvers both add candidates incrementally with fallbacks between adds, so a
+// tiny accumulator keeps those call sites explicit without duplicating the
+// trim/dedupe closure.
+type orderedIDSet struct {
+	seen map[string]struct{}
+	ids  []string
+}
+
+func (s *orderedIDSet) add(raw string) {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		return
+	}
+	if _, ok := s.seen[id]; ok {
+		return
+	}
+	if s.seen == nil {
+		s.seen = map[string]struct{}{}
+	}
+	s.seen[id] = struct{}{}
+	s.ids = append(s.ids, id)
+}
+
+func (s *orderedIDSet) empty() bool {
+	return len(s.ids) == 0
+}
+
 // lifecycleWorkspaceIDs resolves the DDB partition key(s) a lifecycle event
 // should purge: team_id for a workspace install, enterprise_id for an org-level
 // Grid install. Slack's Events API authorization metadata disambiguates those
@@ -81,26 +110,14 @@ func isBotTokensRevokedEvent(event *slackInnerEvent) bool {
 // lifecycle callbacks. #929 tracks empirical Slack fan-out verification before
 // the paired manifest rollout relies on that contract.
 func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
-	var ids []string
-	seen := map[string]struct{}{}
-	add := func(raw string) {
-		id := strings.TrimSpace(raw)
-		if id == "" {
-			return
-		}
-		if _, ok := seen[id]; ok {
-			return
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-	}
+	var set orderedIDSet
 
 	if len(env.Authorizations) == 0 {
-		add(env.TeamID)
-		if len(ids) == 0 {
-			add(env.EnterpriseID)
+		set.add(env.TeamID)
+		if set.empty() {
+			set.add(env.EnterpriseID)
 		}
-		return ids
+		return set.ids
 	}
 
 	enterpriseInstall := false
@@ -113,23 +130,23 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	if enterpriseInstall {
 		for _, authz := range env.Authorizations {
 			if authz.IsEnterpriseInstall {
-				add(authz.EnterpriseID)
+				set.add(authz.EnterpriseID)
 			}
 		}
-		if len(ids) == 0 {
-			add(env.EnterpriseID)
+		if set.empty() {
+			set.add(env.EnterpriseID)
 		}
-		return ids
+		return set.ids
 	}
 
-	add(env.TeamID)
+	set.add(env.TeamID)
 	for _, authz := range env.Authorizations {
-		add(authz.TeamID)
+		set.add(authz.TeamID)
 	}
-	if len(ids) == 0 {
-		add(env.EnterpriseID)
+	if set.empty() {
+		set.add(env.EnterpriseID)
 	}
-	return ids
+	return set.ids
 }
 
 // handleLifecycleEvent runs the Slack app-uninstall / token-revoke cascade. It is

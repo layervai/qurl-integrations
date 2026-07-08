@@ -1757,25 +1757,12 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 }
 
 func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
-	var ids []string
-	seen := map[string]struct{}{}
-	add := func(raw string) {
-		id := strings.TrimSpace(raw)
-		if id == "" {
-			return
-		}
-		if _, ok := seen[id]; ok {
-			return
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-	}
-
-	add(teamID)
+	var set orderedIDSet
+	set.add(teamID)
 	if strings.EqualFold(strings.TrimSpace(values.Get(fieldIsEnterpriseInstall)), slackFormBoolTrue) {
-		add(values.Get(fieldEnterpriseID))
+		set.add(values.Get(fieldEnterpriseID))
 	}
-	return ids
+	return set.ids
 }
 
 // requireUninstallAvailableAndAuthorized is the single precondition path for
