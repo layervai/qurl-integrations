@@ -695,10 +695,10 @@ func stripBotMention(text string) string {
 // agentEventPartition is the conversation-state partition key. Authorization
 // metadata disambiguates Enterprise Grid: org-level installs use enterprise_id,
 // workspace-level installs use team_id so their agent state is purged by the
-// same team-keyed lifecycle teardown as the durable workspace tables. Legacy
-// payloads without authorizations keep the old enterprise-id preference; any
-// Grid workspace rows written on that narrow path rely on the short agent-state
-// TTL rather than explicit lifecycle purge.
+// same team-keyed lifecycle teardown as the durable workspace tables. Payloads
+// without authorizations use the same team-first fallback as lifecycleWorkspaceIDs
+// so future writes stay aligned with explicit purge; older enterprise-keyed rows
+// from before that alignment rely on the short agent-state TTL.
 func agentEventPartition(env *slackEventEnvelope) string {
 	if len(env.Authorizations) > 0 {
 		enterpriseInstall := false
@@ -725,10 +725,10 @@ func agentEventPartition(env *slackEventEnvelope) string {
 			return env.EnterpriseID
 		}
 	}
-	if env.EnterpriseID != "" {
-		return env.EnterpriseID
+	if env.TeamID != "" {
+		return env.TeamID
 	}
-	return env.TeamID
+	return env.EnterpriseID
 }
 
 // agentEventRootTS is the thread root a turn belongs to: the parent thread_ts

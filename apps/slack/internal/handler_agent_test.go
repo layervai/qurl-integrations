@@ -229,8 +229,8 @@ func TestAgentEventKeys(t *testing.T) {
 		t.Errorf("partial grid org install partition should fall back to envelope enterprise id")
 	}
 	legacyGrid := &slackEventEnvelope{TeamID: "T1", EnterpriseID: "E9", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
-	if agentEventPartition(legacyGrid) != "E9" {
-		t.Errorf("legacy grid payload should keep enterprise-id fallback")
+	if agentEventPartition(legacyGrid) != "T1" {
+		t.Errorf("legacy grid payload should use team-id fallback to match lifecycle purge")
 	}
 	noGrid := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
 	if agentEventPartition(noGrid) != "T1" {
