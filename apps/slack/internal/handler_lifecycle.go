@@ -204,6 +204,10 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	return resolveSlackEventPartitions(env).lifecyclePurge
 }
 
+// lifecyclePurgeCutoff chooses the oldest trustworthy teardown timestamp for
+// guarded deletes. Slack event_time is second-granularity, so writes in the same
+// wall-clock second can be retained; that favors not clobbering a fast reinstall
+// over making teardown exhaustive to the sub-second.
 func lifecyclePurgeCutoff(env *slackEventEnvelope, observedAt time.Time) time.Time {
 	observedAt = observedAt.UTC()
 	if env == nil || env.EventTime <= 0 {

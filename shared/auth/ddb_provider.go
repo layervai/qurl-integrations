@@ -1196,6 +1196,9 @@ func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID stri
 	if err != nil {
 		var ccfe *ddbtypes.ConditionalCheckFailedException
 		if !cutoff.IsZero() && errors.As(err, &ccfe) {
+			// The row was retained because it is newer than the teardown signal,
+			// but any cached qURL key may still be from before that reinstall.
+			// Evict and force strong reads briefly so callers refill from DDB.
 			p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
 			return DeletedWorkspaceStateIdentity{}, ErrWorkspaceStateUpdatedAfterCutoff
 		}

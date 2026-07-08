@@ -478,9 +478,13 @@ func (s *AgentStore) ClaimPendingAction(ctx context.Context, partition, id strin
 //
 // The table is keyed by (pk, sk), so the purge queries one partition and deletes
 // each observed sort key. Deletes are unconditional and therefore idempotent; an
-// already-removed row is a no-op. The method attempts every delete in a page even
-// after an individual DeleteItem error, then returns the joined errors so the
-// lifecycle retry path can retry any residue.
+// already-removed row is a no-op. Unlike the durable workspace_state /
+// workspace_mappings / channel_policies rows, this ephemeral TTL-backed state is
+// intentionally not reinstall-cutoff guarded, so delayed teardown can remove
+// fresh agent conversation or pane context but cannot remove credentials or
+// policy. The method attempts every delete in a page even after an individual
+// DeleteItem error, then returns the joined errors so the lifecycle retry path
+// can retry any residue.
 func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition string) error {
 	if partition == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeWorkspaceAgentState: partition is required"}
