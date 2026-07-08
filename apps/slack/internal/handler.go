@@ -1825,6 +1825,10 @@ var _ workspaceStateDeleter = (*auth.DDBProvider)(nil)
 // identity for the deferred upstream-revoke follow-up (#926).
 var _ workspaceStateIdentityDeleter = (*auth.DDBProvider)(nil)
 
+// Ensure production lifecycle purge uses the reinstall-race guard when deleting
+// workspace_state rows.
+var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
+
 func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
@@ -1860,7 +1864,8 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// shutdown cancellation may abort the best-effort sweep before it completes.
 	schedulePurge := func(reason string) {
 		ids := append([]string(nil), purgeWorkspaceIDs...)
-		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids)
+		purgeCutoff := h.now()
+		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids, "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
 		h.Go(func() {
 			baseCtx := h.baseCtx
 			if baseCtx == nil {
@@ -1868,7 +1873,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			}
 			for _, workspaceID := range ids {
 				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID)
+				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff)
 				purgeCancel()
 			}
 		})

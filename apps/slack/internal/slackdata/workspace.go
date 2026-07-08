@@ -23,6 +23,7 @@ const (
 	attrAdminSlackUserIDs = "admin_slack_user_ids"
 	attrCreatedAt         = "created_at"
 	attrUpdatedAt         = "updated_at"
+	attrUpdatedAtNano     = "updated_at_unix_nano"
 	// attrSeedAdminSlackUser records who originally claimed the
 	// workspace (the user who ran /qurl setup — BindWorkspace seeds
 	// this from the OAuth callback's verified.UserID). Write-only
@@ -224,17 +225,19 @@ func (s *Store) SetAgentEnabled(ctx context.Context, teamID string, enabled bool
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SetAgentEnabled: team_id is required"}
 	}
-	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression:    aws.String("SET " + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow),
+		UpdateExpression:    aws.String("SET " + attrAgentEnabled + " = :v, " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String("attribute_exists(" + attrSlackTeamID + ")"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":v":    boolAttr(enabled),
-			exprNow: stringAttr(nowISO),
+			":v":        boolAttr(enabled),
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err == nil {
@@ -323,7 +326,6 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// instant rather than two sub-microsecond-apart readings of
 	// time.Now.
 	now := s.nowOrDefault().UTC()
-	nowISO := now.Format(time.RFC3339)
 	created := m.CreatedAt
 	if created.IsZero() {
 		created = now
@@ -343,7 +345,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	// the write-once forensic record of who originally claimed the workspace.
 	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           aws.String(s.WorkspaceMappingsName),
-		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, nowISO),
+		Item:                workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, now),
 		ConditionExpression: aws.String("attribute_not_exists(slack_team_id)"),
 	})
 	if err == nil {
@@ -465,7 +467,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 // differ only in their ConditionExpression, so the item shape lives in
 // one place. See BindWorkspace for why owner_id and
 // seed_admin_slack_user_id are kept as distinct attributes.
-func workspaceMappingItem(teamID, ownerID, seedAdmin string, created time.Time, nowISO string) map[string]ddbtypes.AttributeValue {
+func workspaceMappingItem(teamID, ownerID, seedAdmin string, created, now time.Time) map[string]ddbtypes.AttributeValue {
 	return map[string]ddbtypes.AttributeValue{
 		attrSlackTeamID:        stringAttr(teamID),
 		attrOwnerID:            stringAttr(ownerID),
@@ -473,8 +475,9 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created time.Time, 
 		attrAdminSlackUserIDs: &ddbtypes.AttributeValueMemberSS{
 			Value: []string{seedAdmin},
 		},
-		attrCreatedAt: stringAttr(created.Format(time.RFC3339)),
-		attrUpdatedAt: stringAttr(nowISO),
+		attrCreatedAt:     stringAttr(created.Format(time.RFC3339)),
+		attrUpdatedAt:     stringAttr(now.UTC().Format(time.RFC3339)),
+		attrUpdatedAtNano: unixNanoAttr(now),
 	}
 }
 
@@ -491,12 +494,11 @@ func workspaceMappingItem(teamID, ownerID, seedAdmin string, created time.Time, 
 // non-owner rebind gets.
 func (s *Store) reclaimLegacyWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin, legacyOwner, existingCreatedAt string) error {
 	now := s.nowOrDefault().UTC()
-	nowISO := now.Format(time.RFC3339)
 	created := m.CreatedAt
 	if created.IsZero() {
 		created = now
 	}
-	item := workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, nowISO)
+	item := workspaceMappingItem(m.TeamID, m.OwnerID, seedAdmin, created, now)
 	// Preserve the orphaned row's original created_at verbatim when the
 	// disambiguation read found one — it's the durable "this predates
 	// #510" signal, and keeping the raw string avoids a parse/format
@@ -551,13 +553,14 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 			Title:      "AddAdmin: team_id and target_user_id are required",
 		}
 	}
-	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression: aws.String("ADD admin_slack_user_ids :uids SET updated_at = :now"),
+		UpdateExpression: aws.String("SET updated_at = :now, updated_at_unix_nano = :now_nano ADD admin_slack_user_ids :uids"),
 		// Two clauses combined: refuse on a missing row (handler maps
 		// to "workspace_not_bound") AND on an already-member user
 		// (handler maps to "admin_already_exists"). DDB doesn't let
@@ -565,9 +568,10 @@ func (s *Store) AddAdmin(ctx context.Context, teamID, targetUserID string) error
 		// the post-CCFE GetItem below makes the call.
 		ConditionExpression: aws.String("attribute_exists(slack_team_id) AND NOT contains(admin_slack_user_ids, :uid)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":uids": &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
-			":uid":  stringAttr(targetUserID),
-			exprNow: stringAttr(nowISO),
+			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":      stringAttr(targetUserID),
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err == nil {
@@ -719,13 +723,14 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 			Title:      "RemoveAdmin: cannot remove the workspace owner",
 		}
 	}
-	nowISO := s.nowOrDefault().UTC().Format(time.RFC3339)
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-		UpdateExpression: aws.String("DELETE admin_slack_user_ids :uids SET updated_at = :now"),
+		UpdateExpression: aws.String("SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE admin_slack_user_ids :uids"),
 		// `contains(...)` guarantees the user is in the set at
 		// mutation time — a CCFE here is the "nothing to remove"
 		// case (either the row vanished mid-flight, or the user
@@ -733,9 +738,10 @@ func (s *Store) RemoveAdmin(ctx context.Context, teamID, targetUserID string) er
 		// a row delete-race in the same code path.
 		ConditionExpression: aws.String("contains(admin_slack_user_ids, :uid) AND attribute_exists(slack_team_id)"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":uids": &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
-			":uid":  stringAttr(targetUserID),
-			exprNow: stringAttr(nowISO),
+			":uids":     &ddbtypes.AttributeValueMemberSS{Value: []string{targetUserID}},
+			":uid":      stringAttr(targetUserID),
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err == nil {
@@ -802,16 +808,42 @@ func (s *Store) ListAdmins(ctx context.Context, teamID string) (ownerID string, 
 // purge orchestrator runs every delete best-effort regardless of which rows a
 // given workspace actually has, so a not-found must not surface as an error.
 func (s *Store) DeleteWorkspaceMapping(ctx context.Context, teamID string) error {
+	return s.deleteWorkspaceMapping(ctx, teamID, time.Time{})
+}
+
+// DeleteWorkspaceMappingBefore removes the workspace_mappings row only when it
+// has not been updated since cutoff. It protects fast uninstall/reinstall/setup
+// flows from a delayed async lifecycle purge deleting a freshly rebound
+// ownership/admin row.
+func (s *Store) DeleteWorkspaceMappingBefore(ctx context.Context, teamID string, cutoff time.Time) error {
+	return s.deleteWorkspaceMapping(ctx, teamID, cutoff)
+}
+
+func (s *Store) deleteWorkspaceMapping(ctx context.Context, teamID string, cutoff time.Time) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "DeleteWorkspaceMapping: team_id is required"}
 	}
-	_, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+	input := &dynamodb.DeleteItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(teamID),
 		},
-	})
+	}
+	if !cutoff.IsZero() {
+		input.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+		input.ExpressionAttributeNames = map[string]string{
+			"#updated_at_nano": attrUpdatedAtNano,
+		}
+		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
+			":purge_cutoff_nano": unixNanoAttr(cutoff),
+		}
+	}
+	_, err := s.Client.DeleteItem(ctx, input)
 	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if !cutoff.IsZero() && errors.As(err, &ccfe) {
+			return nil
+		}
 		return ddbToError("DeleteWorkspaceMapping", err)
 	}
 	return nil

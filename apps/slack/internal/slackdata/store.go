@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -401,3 +402,9 @@ func readTime(item map[string]ddbtypes.AttributeValue, key string) time.Time {
 // expires_at > :now read across multiple UpdateExpression callers.
 // Lifted to a constant to satisfy goconst.
 const exprNow = ":now"
+
+const exprNowNano = ":now_nano"
+
+func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
+}

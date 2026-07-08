@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -253,27 +254,7 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 // "available in a channel" iff its id is in that union regardless of which
 // surface carries it.
 func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, resourceID string) error {
-	if teamID == "" || channelID == "" || resourceID == "" {
-		return &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "ExposeResourceToChannel: team_id, channel_id, and resource_id are required",
-		}
-	}
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-		UpdateExpression: aws.String("ADD " + attrAllowedResourceIDs + " :rids"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-		},
-	})
-	if err != nil {
-		return ddbToError("ExposeResourceToChannel", err)
-	}
-	return nil
+	return s.updateChannelResourceSet(ctx, "ExposeResourceToChannel", "ADD", teamID, channelID, resourceID)
 }
 
 // RevokeResourceFromChannel removes resourceID from the (teamID, channelID)
@@ -289,25 +270,33 @@ func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, 
 // revoking such a channel means unbinding its aliases too (the Edit modal's
 // aliases field, or `/qurl-admin unset-alias`).
 func (s *Store) RevokeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) error {
+	return s.updateChannelResourceSet(ctx, "RevokeResourceFromChannel", "DELETE", teamID, channelID, resourceID)
+}
+
+func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateVerb, teamID, channelID, resourceID string) error {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return &Error{
 			StatusCode: http.StatusBadRequest,
-			Title:      "RevokeResourceFromChannel: team_id, channel_id, and resource_id are required",
+			Title:      operation + ": team_id, channel_id, and resource_id are required",
 		}
 	}
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-		UpdateExpression: aws.String("DELETE " + attrAllowedResourceIDs + " :rids"),
+		UpdateExpression: aws.String("SET " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " " + updateVerb + " " + attrAllowedResourceIDs + " :rids"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			":rids":     &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err != nil {
-		return ddbToError("RevokeResourceFromChannel", err)
+		return ddbToError(operation, err)
 	}
 	return nil
 }
@@ -390,10 +379,15 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// alias_bindings key that pointed at it. The DELETE uses the literal attribute
 	// name (matching RevokeResourceFromChannel); only the user-controlled alias
 	// keys are name-aliased.
-	expr := "DELETE " + attrAllowedResourceIDs + " :rid"
-	var names map[string]string
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
+	expr := "SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano
+	names := map[string]string{
+		"#updated_at":      attrUpdatedAt,
+		"#updated_at_nano": attrUpdatedAtNano,
+	}
 	if len(aliasKeys) > 0 {
-		names = map[string]string{exprAliasBindings: attrAliasBindings}
+		names[exprAliasBindings] = attrAliasBindings
 		removes := make([]string, len(aliasKeys))
 		for i, alias := range aliasKeys {
 			nameRef := fmt.Sprintf("#a%d", i)
@@ -402,6 +396,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		}
 		expr += " REMOVE " + strings.Join(removes, ", ")
 	}
+	expr += " DELETE " + attrAllowedResourceIDs + " :rid"
 
 	in := &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
@@ -411,11 +406,11 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		},
 		UpdateExpression: aws.String(expr),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rid": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			":rid":      &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
-	}
-	if names != nil {
-		in.ExpressionAttributeNames = names
+		ExpressionAttributeNames: names,
 	}
 	if _, err := s.Client.UpdateItem(ctx, in); err != nil {
 		return nil, ddbToError("PurgeResourceFromChannel", err)
@@ -511,6 +506,18 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 // channel-policy rows are bounded by the channels a workspace used the bot in,
 // so the round-trips stay modest.
 func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
+	return s.purgeTeamChannelPolicies(ctx, teamID, time.Time{})
+}
+
+// PurgeTeamChannelPoliciesBefore deletes channel_policies rows for teamID only
+// when they have not been updated since cutoff. Rows created or changed by a
+// fast reinstall/setup after the teardown signal are retained rather than being
+// clobbered by a delayed async purge.
+func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID string, cutoff time.Time) error {
+	return s.purgeTeamChannelPolicies(ctx, teamID, cutoff)
+}
+
+func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cutoff time.Time) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
 	}
@@ -547,13 +554,27 @@ func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) err
 				})
 				continue
 			}
-			if _, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			deleteInput := &dynamodb.DeleteItemInput{
 				TableName: aws.String(s.ChannelPoliciesName),
 				Key: map[string]ddbtypes.AttributeValue{
 					attrSlackTeamID:    stringAttr(teamID),
 					attrSlackChannelID: stringAttr(channelID),
 				},
-			}); err != nil {
+			}
+			if !cutoff.IsZero() {
+				deleteInput.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+				deleteInput.ExpressionAttributeNames = map[string]string{
+					"#updated_at_nano": attrUpdatedAtNano,
+				}
+				deleteInput.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
+					":purge_cutoff_nano": unixNanoAttr(cutoff),
+				}
+			}
+			if _, err := s.Client.DeleteItem(ctx, deleteInput); err != nil {
+				var ccfe *ddbtypes.ConditionalCheckFailedException
+				if !cutoff.IsZero() && errors.As(err, &ccfe) {
+					continue
+				}
 				deleteErrs = append(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
 			}
 		}

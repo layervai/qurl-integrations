@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -22,6 +24,8 @@ type recordingStateDeleter struct {
 	deleteStateCalls        int
 	deleteStateWorkspaceID  string
 	deleteStateWorkspaceIDs []string
+	deleteStateCutoff       time.Time
+	deleteStateCutoffs      []time.Time
 	deleteStateErr          error
 }
 
@@ -30,6 +34,18 @@ func (p *recordingStateDeleter) DeleteWorkspaceState(_ context.Context, workspac
 	p.deleteStateWorkspaceID = workspaceID
 	p.deleteStateWorkspaceIDs = append(p.deleteStateWorkspaceIDs, workspaceID)
 	return p.deleteStateErr
+}
+
+func (p *recordingStateDeleter) DeleteWorkspaceStateBeforeWithIdentity(_ context.Context, workspaceID string, cutoff time.Time) (auth.DeletedWorkspaceStateIdentity, error) {
+	p.deleteStateCalls++
+	p.deleteStateWorkspaceID = workspaceID
+	p.deleteStateWorkspaceIDs = append(p.deleteStateWorkspaceIDs, workspaceID)
+	p.deleteStateCutoff = cutoff
+	p.deleteStateCutoffs = append(p.deleteStateCutoffs, cutoff)
+	if p.deleteStateErr != nil {
+		return auth.DeletedWorkspaceStateIdentity{}, p.deleteStateErr
+	}
+	return auth.DeletedWorkspaceStateIdentity{Deleted: true}, nil
 }
 
 // appUninstalledBody is a signature-valid Events API app_uninstalled envelope for
@@ -346,6 +362,95 @@ func TestLifecycleWorkspaceIDs_MalformedAuthorizationDoesNotWidenToEnterprisePur
 	}
 	if got := strings.Join(resolution.lifecycleAgentStateOnly, ","); got != "" {
 		t.Fatalf("lifecycle agent-state-only ids(malformed auth) = %q, want none", got)
+	}
+}
+
+func TestLifecyclePurgeCutoffUsesOlderSlackEventTime(t *testing.T) {
+	observedAt := time.Date(2026, 7, 8, 12, 30, 45, 999, time.UTC)
+	eventAt := time.Date(2026, 7, 8, 12, 29, 0, 0, time.UTC)
+
+	got := lifecyclePurgeCutoff(&slackEventEnvelope{EventTime: eventAt.Unix()}, observedAt)
+	if !got.Equal(eventAt) {
+		t.Fatalf("cutoff = %s, want event time %s", got, eventAt)
+	}
+
+	got = lifecyclePurgeCutoff(&slackEventEnvelope{EventTime: observedAt.Add(time.Minute).Unix()}, observedAt)
+	if !got.Equal(observedAt) {
+		t.Fatalf("future event cutoff = %s, want observed time %s", got, observedAt)
+	}
+}
+
+func TestHandleLifecycleEvent_PassesEventCutoffToWorkspacePurge(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+	observedAt := time.Date(2026, 7, 8, 12, 30, 45, 999, time.UTC)
+	eventAt := time.Date(2026, 7, 8, 12, 29, 0, 0, time.UTC)
+	h.now = func() time.Time { return observedAt }
+
+	h.handleLifecycleEvent(&slackEventEnvelope{
+		Type:      slackEnvelopeTypeEventCallback,
+		TeamID:    testAdminTeamID,
+		EventID:   "EvCutoff",
+		EventTime: eventAt.Unix(),
+		Event:     slackInnerEvent{Type: slackEventTypeAppUninstalled},
+	})
+	h.Wait()
+
+	if provider.deleteStateCalls != 1 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 1", provider.deleteStateCalls)
+	}
+	if !provider.deleteStateCutoff.Equal(eventAt) {
+		t.Fatalf("delete cutoff = %s, want %s", provider.deleteStateCutoff, eventAt)
+	}
+}
+
+func TestHandleLifecycleEvent_RetainsRowsUpdatedAfterEventCutoff(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	provider := &recordingStateDeleter{recordingAuthProvider: recordingAuthProvider{apiKey: "test-key"}}
+	h.cfg.AuthProvider = provider
+	h.cfg.AgentStore = &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+
+	eventAt := time.Date(2026, 7, 8, 12, 30, 45, 0, time.UTC)
+	freshAt := eventAt.Add(100 * time.Millisecond)
+	observedAt := eventAt.Add(500 * time.Millisecond)
+	h.now = func() time.Time { return observedAt }
+	h.cfg.AdminStore.Now = func() time.Time { return freshAt }
+
+	if err := h.cfg.AdminStore.BindWorkspace(context.Background(), &slackdata.WorkspaceMapping{
+		TeamID:  testAdminTeamID,
+		OwnerID: testAdminOwnerID,
+	}, testAdminUserID); err != nil {
+		t.Fatalf("BindWorkspace fresh row: %v", err)
+	}
+	if err := h.cfg.AdminStore.ExposeResourceToChannel(context.Background(), testAdminTeamID, "C_fresh", "r_fresh"); err != nil {
+		t.Fatalf("ExposeResourceToChannel fresh row: %v", err)
+	}
+
+	h.handleLifecycleEvent(&slackEventEnvelope{
+		Type:      slackEnvelopeTypeEventCallback,
+		TeamID:    testAdminTeamID,
+		EventID:   "EvDelayedUninstall",
+		EventTime: eventAt.Unix(),
+		Event:     slackInnerEvent{Type: slackEventTypeAppUninstalled},
+	})
+	h.Wait()
+
+	if provider.deleteStateCalls != 1 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 1", provider.deleteStateCalls)
+	}
+	_, admins, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after delayed purge = %v, want retained fresh mapping", err)
+	}
+	if !slices.Contains(admins, testAdminUserID) {
+		t.Fatalf("admins after delayed purge = %v, want %q retained", admins, testAdminUserID)
+	}
+	allowed, err := h.cfg.AdminStore.AllowedResourceIDsForChannel(context.Background(), testAdminTeamID, "C_fresh")
+	if err != nil {
+		t.Fatalf("AllowedResourceIDsForChannel after delayed purge: %v", err)
+	}
+	if _, ok := allowed["r_fresh"]; !ok {
+		t.Fatalf("fresh policy after delayed purge = %v, want r_fresh retained", allowed)
 	}
 }
 

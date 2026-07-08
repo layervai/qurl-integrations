@@ -432,6 +432,18 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	if err != nil {
 		return nil, err
 	}
+	if cond := aws.ToString(in.ConditionExpression); cond != "" {
+		item, present := table[key]
+		ok, err := evalCondition(cond, item, present, in.ExpressionAttributeValues, in.ExpressionAttributeNames)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &ddbtypes.ConditionalCheckFailedException{
+				Message: aws.String("ConditionalCheckFailedException"),
+			}
+		}
+	}
 	delete(table, key)
 	return &dynamodb.DeleteItemOutput{}, nil
 }
@@ -745,7 +757,7 @@ func splitTopLevelCommas(s string) []string {
 }
 
 // evalCondition supports the exact ConditionExpression shapes the
-// production code emits, joined by " AND ". Each subexpression is
+// production code emits, joined by " AND " or " OR ". Each subexpression is
 // one of:
 //
 //	attribute_exists(<attr>)
@@ -762,7 +774,7 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 	expr = strings.TrimSpace(expr)
 	parts := strings.Split(expr, " AND ")
 	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		ok, err := evalConditionAnyTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
 			return false, err
 		}
@@ -771,6 +783,20 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 		}
 	}
 	return true, nil
+}
+
+func evalConditionAnyTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
+	parts := strings.Split(term, " OR ")
+	for _, p := range parts {
+		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {

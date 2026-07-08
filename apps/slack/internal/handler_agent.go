@@ -97,6 +97,7 @@ type slackEventEnvelope struct {
 	EnterpriseID   string                    `json:"enterprise_id"`
 	APIAppID       string                    `json:"api_app_id"`
 	EventID        string                    `json:"event_id"`
+	EventTime      int64                     `json:"event_time,omitempty"`
 	Authorizations []slackEventAuthorization `json:"authorizations,omitempty"`
 	Event          slackInnerEvent           `json:"event"`
 }

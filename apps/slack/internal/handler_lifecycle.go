@@ -204,6 +204,18 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	return resolveSlackEventPartitions(env).lifecyclePurge
 }
 
+func lifecyclePurgeCutoff(env *slackEventEnvelope, observedAt time.Time) time.Time {
+	observedAt = observedAt.UTC()
+	if env == nil || env.EventTime <= 0 {
+		return observedAt
+	}
+	eventAt := time.Unix(env.EventTime, 0).UTC()
+	if eventAt.Before(observedAt) {
+		return eventAt
+	}
+	return observedAt
+}
+
 // handleLifecycleEvent runs the Slack app-uninstall / token-revoke cascade. It is
 // reached from handleEvent for an event_callback whose inner type is an install
 // teardown, AFTER the Slack signature has been verified and AFTER handleEvent has
@@ -215,6 +227,7 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 // A purge with no resolvable workspace id is dropped with a log line: there are
 // no rows to delete and issuing a delete against an empty key would only 400.
 func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
+	purgeCutoff := lifecyclePurgeCutoff(env, h.now())
 	partitionResolution := resolveSlackEventPartitions(env)
 	workspaceIDs := partitionResolution.lifecyclePurge
 	agentStateOnlyIDs := partitionResolution.lifecycleAgentStateOnly
@@ -232,6 +245,7 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 	log.Info("lifecycle event received — purging workspace data",
 		"workspace_id_count", len(workspaceIDs),
 		"agent_state_only_workspace_id_count", len(agentStateOnlyIDs),
+		"purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339),
 		"upstream_qurl_key_revoke_deferred", true,
 		"follow_up_issue", "layervai/qurl-integrations#926",
 	)
@@ -250,7 +264,7 @@ func (h *Handler) handleLifecycleEvent(env *slackEventEnvelope) {
 		}
 		for _, workspaceID := range workspaceIDs {
 			ctx, cancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID)
+			h.purgeWorkspaceWithRetry(ctx, log.With("workspace_id", workspaceID), workspaceID, purgeCutoff)
 			cancel()
 		}
 		for _, workspaceID := range agentStateOnlyIDs {
@@ -281,6 +295,10 @@ type workspaceStateDeleter interface {
 // actionable without delaying Marketplace-required local data removal.
 type workspaceStateIdentityDeleter interface {
 	DeleteWorkspaceStateWithIdentity(ctx context.Context, workspaceID string) (auth.DeletedWorkspaceStateIdentity, error)
+}
+
+type workspaceStateBeforeIdentityDeleter interface {
+	DeleteWorkspaceStateBeforeWithIdentity(ctx context.Context, workspaceID string, cutoff time.Time) (auth.DeletedWorkspaceStateIdentity, error)
 }
 
 // purgeWorkspace forgets every trace of a Slack workspace's bot data across the
@@ -318,7 +336,7 @@ type workspaceStateIdentityDeleter interface {
 //
 // Keeping purgeWorkspace a pure local storage sweep keeps the auth package free
 // of the qurl-service client dependency.
-func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string) error {
+func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time) error {
 	if workspaceID == "" {
 		log.Warn("purgeWorkspace called with empty workspace id — skipping")
 		return nil
@@ -331,6 +349,17 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 	// requirement. Skip silently when the provider can't delete a row (sandbox /
 	// EnvProvider); there's no per-workspace state to remove in that mode.
 	switch deleter := h.cfg.AuthProvider.(type) {
+	case workspaceStateBeforeIdentityDeleter:
+		identity, err := deleter.DeleteWorkspaceStateBeforeWithIdentity(ctx, workspaceID, cutoff)
+		switch {
+		case err == nil:
+			logWorkspaceStateDeleted(log, identity)
+		case errors.Is(err, auth.ErrWorkspaceStateUpdatedAfterCutoff):
+			log.Info("purgeWorkspace: retained workspace_state row updated after purge cutoff")
+		default:
+			log.Error("purgeWorkspace: failed to delete workspace_state row", "error", err)
+			errs = append(errs, err)
+		}
 	case workspaceStateIdentityDeleter:
 		identity, err := deleter.DeleteWorkspaceStateWithIdentity(ctx, workspaceID)
 		if err != nil {
@@ -371,22 +400,26 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 		log.Debug("purgeWorkspace: AdminStore unwired — skipping mappings/policies purge")
 		return errors.Join(errs...)
 	}
-	if err := h.cfg.AdminStore.DeleteWorkspaceMapping(ctx, workspaceID); err != nil {
+	if err := h.cfg.AdminStore.DeleteWorkspaceMappingBefore(ctx, workspaceID, cutoff); err != nil {
 		log.Error("purgeWorkspace: failed to delete workspace_mappings row", "error", err)
 		errs = append(errs, err)
 	} else {
-		log.Info("purgeWorkspace: deleted workspace_mappings row")
+		log.Info("purgeWorkspace: purged or retained workspace_mappings row")
 	}
-	if err := h.cfg.AdminStore.PurgeTeamChannelPolicies(ctx, workspaceID); err != nil {
+	if err := h.cfg.AdminStore.PurgeTeamChannelPoliciesBefore(ctx, workspaceID, cutoff); err != nil {
 		log.Error("purgeWorkspace: failed to purge channel_policies rows", "error", err)
 		errs = append(errs, err)
 	} else {
-		log.Info("purgeWorkspace: purged channel_policies rows")
+		log.Info("purgeWorkspace: purged or retained channel_policies rows")
 	}
 	return errors.Join(errs...)
 }
 
 func logWorkspaceStateDeleted(log *slog.Logger, identity auth.DeletedWorkspaceStateIdentity) {
+	if !identity.Deleted {
+		log.Info("purgeWorkspace: workspace_state row absent or retained")
+		return
+	}
 	attrs := []any{}
 	if identity.QURLAPIKeyID != "" {
 		attrs = append(attrs,
@@ -399,9 +432,9 @@ func logWorkspaceStateDeleted(log *slog.Logger, identity auth.DeletedWorkspaceSt
 	log.Info("purgeWorkspace: deleted workspace_state row", attrs...)
 }
 
-func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string) {
+func (h *Handler) purgeWorkspaceWithRetry(ctx context.Context, log *slog.Logger, workspaceID string, cutoff time.Time) {
 	retryLifecyclePurge(ctx, log, "purgeWorkspace", func(attemptLog *slog.Logger) error {
-		return h.purgeWorkspace(ctx, attemptLog, workspaceID)
+		return h.purgeWorkspace(ctx, attemptLog, workspaceID, cutoff)
 	})
 }
 

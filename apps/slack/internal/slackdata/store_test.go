@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -797,10 +798,16 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("UpdateItem calls = %d, want 2", len(calls))
 	}
-	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty" {
+	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("seed UpdateExpression = %q", got)
 	}
-	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid" {
+	if now, ok := calls[0].ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf("seed :now = %#v, want timestamp", calls[0].ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := calls[0].ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf("seed :now_nano = %#v, want unix nanos", calls[0].ExpressionAttributeValues[":now_nano"])
+	}
+	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("write UpdateExpression = %q", got)
 	}
 	if got := aws.ToString(calls[1].ConditionExpression); got != "attribute_not_exists(#ab.#a)" {
@@ -812,6 +819,12 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 	rid, ok := calls[1].ExpressionAttributeValues[":rid"].(*ddbtypes.AttributeValueMemberS)
 	if !ok || rid.Value != "r_prod_dash01" {
 		t.Errorf(":rid = %#v, want r_prod_dash01", calls[1].ExpressionAttributeValues[":rid"])
+	}
+	if now, ok := calls[1].ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf(":now = %#v, want timestamp", calls[1].ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := calls[1].ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf(":now_nano = %#v, want unix nanos", calls[1].ExpressionAttributeValues[":now_nano"])
 	}
 }
 
@@ -886,14 +899,20 @@ func TestExposeResourceToChannel_AddsToAllowedSet(t *testing.T) {
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "ADD allowed_resource_ids :rids" {
-		t.Errorf("UpdateExpression = %q, want ADD allowed_resource_ids :rids", exp)
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids" {
+		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids", exp)
 	}
 	if tbl := aws.ToString(got.TableName); tbl != "cp" {
 		t.Errorf("TableName = %q, want cp", tbl)
 	}
 	if rids, ok := got.ExpressionAttributeValues[":rids"].(*ddbtypes.AttributeValueMemberSS); !ok || len(rids.Value) != 1 || rids.Value[0] != "r_target01" {
 		t.Errorf(":rids = %#v, want SS[r_target01]", got.ExpressionAttributeValues[":rids"])
+	}
+	if now, ok := got.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf(":now = %#v, want timestamp", got.ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := got.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf(":now_nano = %#v, want unix nanos", got.ExpressionAttributeValues[":now_nano"])
 	}
 	if k, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); k == nil || k.Value != "T1" {
 		t.Errorf("Key team = %#v, want T1", got.Key[attrSlackTeamID])
@@ -920,8 +939,14 @@ func TestRevokeResourceFromChannel_DeletesFromAllowedSet(t *testing.T) {
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "DELETE allowed_resource_ids :rids" {
-		t.Errorf("UpdateExpression = %q, want DELETE allowed_resource_ids :rids", exp)
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids" {
+		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids", exp)
+	}
+	if now, ok := got.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf(":now = %#v, want timestamp", got.ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := got.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf(":now_nano = %#v, want unix nanos", got.ExpressionAttributeValues[":now_nano"])
 	}
 	if rids, ok := got.ExpressionAttributeValues[":rids"].(*ddbtypes.AttributeValueMemberSS); !ok || len(rids.Value) != 1 || rids.Value[0] != "r_target01" {
 		t.Errorf(":rids = %#v, want SS[r_target01]", got.ExpressionAttributeValues[":rids"])
@@ -1085,6 +1110,15 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			t.Fatal("no UpdateItem issued")
 		}
 		expr := aws.ToString(captured.UpdateExpression)
+		if !strings.Contains(expr, "SET #updated_at = :now") {
+			t.Errorf("UpdateExpression missing updated_at SET: %q", expr)
+		}
+		if !strings.Contains(expr, "#updated_at_nano = :now_nano") {
+			t.Errorf("UpdateExpression missing updated_at_unix_nano SET: %q", expr)
+		}
+		if removeAt, deleteAt := strings.Index(expr, " REMOVE "), strings.Index(expr, " DELETE "); removeAt == -1 || deleteAt == -1 || removeAt > deleteAt {
+			t.Errorf("UpdateExpression clause order = %q, want REMOVE before DELETE", expr)
+		}
 		if !strings.Contains(expr, "DELETE "+attrAllowedResourceIDs+" :rid") {
 			t.Errorf("UpdateExpression missing SS DELETE of the revoked id: %q", expr)
 		}
@@ -1095,11 +1129,17 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 		if !ok || !reflect.DeepEqual(ss.Value, []string{deadID}) {
 			t.Errorf(":rid = %#v, want string-set [%q]", captured.ExpressionAttributeValues[":rid"], deadID)
 		}
-		// Every name ref other than the alias_bindings attr resolves to an alias
-		// key slated for REMOVE — it must be the STALE alias, never the survivor.
+		if now, ok := captured.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+			t.Errorf(":now = %#v, want timestamp", captured.ExpressionAttributeValues[":now"])
+		}
+		if nowNano, ok := captured.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+			t.Errorf(":now_nano = %#v, want unix nanos", captured.ExpressionAttributeValues[":now_nano"])
+		}
+		// Every name ref other than metadata resolves to an alias key slated for
+		// REMOVE — it must be the STALE alias, never the survivor.
 		var removed []string
 		for ref, name := range captured.ExpressionAttributeNames {
-			if ref == exprAliasBindings {
+			if ref == exprAliasBindings || name == attrUpdatedAt || name == attrUpdatedAtNano {
 				continue
 			}
 			removed = append(removed, name)
@@ -1136,10 +1176,13 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			t.Fatal("no UpdateItem issued (the SS member must still be cleared)")
 		}
 		if expr := aws.ToString(captured.UpdateExpression); strings.Contains(expr, "REMOVE") {
-			t.Errorf("UpdateExpression should be DELETE-only, got %q", expr)
+			t.Errorf("UpdateExpression should not remove aliases, got %q", expr)
 		}
-		if len(captured.ExpressionAttributeNames) != 0 {
-			t.Errorf("DELETE-only update should carry no name refs, got %v", captured.ExpressionAttributeNames)
+		if captured.ExpressionAttributeNames["#updated_at"] != attrUpdatedAt {
+			t.Errorf("ExpressionAttributeNames = %v, want updated_at name ref", captured.ExpressionAttributeNames)
+		}
+		if captured.ExpressionAttributeNames["#updated_at_nano"] != attrUpdatedAtNano {
+			t.Errorf("ExpressionAttributeNames = %v, want updated_at_unix_nano name ref", captured.ExpressionAttributeNames)
 		}
 	})
 
@@ -1246,6 +1289,40 @@ func TestDeleteWorkspaceMapping(t *testing.T) {
 		var ae *Error
 		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
 			t.Fatalf("DeleteWorkspaceMapping transport err = %v, want 503 *Error", err)
+		}
+	})
+
+	t.Run("guarded delete uses updated_at cutoff", func(t *testing.T) {
+		var captured *dynamodb.DeleteItemInput
+		store := newStore(&stubDDB{
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				captured = in
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		cutoff := time.Date(2026, 7, 8, 12, 30, 45, 999, time.UTC)
+		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", cutoff); err != nil {
+			t.Fatalf("DeleteWorkspaceMappingBefore: %v", err)
+		}
+		if got := aws.ToString(captured.ConditionExpression); got != "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano" {
+			t.Fatalf("ConditionExpression = %q", got)
+		}
+		if got := captured.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
+			t.Fatalf("#updated_at_nano = %q, want %q", got, attrUpdatedAtNano)
+		}
+		if got := captured.ExpressionAttributeValues[":purge_cutoff_nano"].(*ddbtypes.AttributeValueMemberN).Value; got != strconv.FormatInt(cutoff.UTC().UnixNano(), 10) {
+			t.Fatalf(":purge_cutoff_nano = %q", got)
+		}
+	})
+
+	t.Run("guarded delete treats newer row as retained", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				return nil, &ddbtypes.ConditionalCheckFailedException{}
+			},
+		})
+		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("DeleteWorkspaceMappingBefore newer row err = %v, want nil", err)
 		}
 	})
 }
@@ -1398,6 +1475,30 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 		}
 		if deleteCalled {
 			t.Fatal("malformed row must not issue a DeleteItem with an incomplete key")
+		}
+	})
+
+	t.Run("guarded delete skips rows updated after cutoff", func(t *testing.T) {
+		var deleteCalls int
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_new", []string{"r1"}, nil)},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deleteCalls++
+				if got := aws.ToString(in.ConditionExpression); got != "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano" {
+					t.Fatalf("ConditionExpression = %q", got)
+				}
+				return nil, &ddbtypes.ConditionalCheckFailedException{}
+			},
+		})
+		if err := store.PurgeTeamChannelPoliciesBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("PurgeTeamChannelPoliciesBefore newer row err = %v, want nil", err)
+		}
+		if deleteCalls != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", deleteCalls)
 		}
 	})
 

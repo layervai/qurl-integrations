@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2030,6 +2031,9 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "slack_bot_installed_at = if_not_exists(slack_bot_installed_at, :now)") {
 		t.Errorf("UpdateExpression should preserve original Slack installed_at, got %q", got)
 	}
+	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "updated_at = :now") {
+		t.Errorf("UpdateExpression should bump row updated_at, got %q", got)
+	}
 }
 
 func TestDDBProviderSetSlackBotTokenRemovesEmptyOptionalMetadata(t *testing.T) {
@@ -2090,7 +2094,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
 			t.Errorf("delete key wrong: %v", ddb.updateInput.Key)
 		}
-		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"; got != want {
+		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now, #updated_at_nano = :now_nano REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"; got != want {
 			t.Errorf("UpdateExpression = %q, want %q", got, want)
 		}
 		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)"; got != want {
@@ -2098,6 +2102,9 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		}
 		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "2026-06-13T12:34:56Z" {
 			t.Errorf("ExpressionAttributeValues[:now] = %v, want timestamp", ddb.updateInput.ExpressionAttributeValues[":now"])
+		}
+		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || v.Value != strconv.FormatInt(time.Date(2026, 6, 13, 12, 34, 56, 0, time.UTC).UnixNano(), 10) {
+			t.Errorf("ExpressionAttributeValues[:now_nano] = %v, want unix nanos", ddb.updateInput.ExpressionAttributeValues[":now_nano"])
 		}
 		wantNames := map[string]string{
 			"#qurl_api_key":        attrQURLAPIKey,
@@ -2108,6 +2115,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 			"#configured_by":       attrConfiguredBy,
 			"#configured_at":       attrConfiguredAt,
 			"#updated_at":          attrUpdatedAt,
+			"#updated_at_nano":     attrUpdatedAtNano,
 		}
 		for name, want := range wantNames {
 			if got := ddb.updateInput.ExpressionAttributeNames[name]; got != want {
@@ -2139,6 +2147,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 					delete(row, attrName)
 				}
 				row[attrUpdatedAt] = in.ExpressionAttributeValues[":now"]
+				row[attrUpdatedAtNano] = in.ExpressionAttributeValues[":now_nano"]
 				return &dynamodb.UpdateItemOutput{}, nil
 			},
 		}
@@ -2265,8 +2274,51 @@ func TestDDBProviderDeleteWorkspaceState(t *testing.T) {
 		if identity.QURLAPIKeyID != testKeyID || identity.QURLAccountID != testQURLAccount {
 			t.Fatalf("identity = %+v, want key/account %q/%q", identity, testKeyID, testQURLAccount)
 		}
+		if !identity.Deleted {
+			t.Fatalf("identity.Deleted = false, want true")
+		}
 		if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
 			t.Fatalf("ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
+		}
+	})
+
+	t.Run("guarded delete uses updated_at cutoff and returns identity", func(t *testing.T) {
+		cutoff := time.Date(2026, 7, 8, 12, 30, 45, 987, time.UTC)
+		ddb := &fakeDDBClient{
+			deleteOutput: &dynamodb.DeleteItemOutput{Attributes: map[string]ddbtypes.AttributeValue{
+				attrQURLAPIKeyID: &ddbtypes.AttributeValueMemberS{Value: testKeyID},
+			}},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateBeforeWithIdentity(context.Background(), testTeamID, cutoff)
+		if err != nil {
+			t.Fatalf("DeleteWorkspaceStateBeforeWithIdentity: %v", err)
+		}
+		if !identity.Deleted || identity.QURLAPIKeyID != testKeyID {
+			t.Fatalf("identity = %+v, want deleted key %q", identity, testKeyID)
+		}
+		if got := aws.ToString(ddb.deleteInput.ConditionExpression); got != "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano" {
+			t.Fatalf("ConditionExpression = %q", got)
+		}
+		if got := ddb.deleteInput.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
+			t.Fatalf("#updated_at_nano = %q, want %q", got, attrUpdatedAtNano)
+		}
+		if got := ddb.deleteInput.ExpressionAttributeValues[":purge_cutoff_nano"].(*ddbtypes.AttributeValueMemberN).Value; got != strconv.FormatInt(cutoff.UTC().UnixNano(), 10) {
+			t.Fatalf(":purge_cutoff_nano = %q", got)
+		}
+	})
+
+	t.Run("guarded delete keeps newer row as no-op sentinel", func(t *testing.T) {
+		ddb := &fakeDDBClient{deleteErr: &ddbtypes.ConditionalCheckFailedException{}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateBeforeWithIdentity(context.Background(), testTeamID, time.Now())
+		if !errors.Is(err, ErrWorkspaceStateUpdatedAfterCutoff) {
+			t.Fatalf("err = %v, want ErrWorkspaceStateUpdatedAfterCutoff", err)
+		}
+		if identity != (DeletedWorkspaceStateIdentity{}) {
+			t.Fatalf("identity = %+v, want empty", identity)
 		}
 	})
 

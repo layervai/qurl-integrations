@@ -37,6 +37,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,7 @@ const (
 	attrConfiguredBy  = "configured_by"
 	attrConfiguredAt  = "configured_at"
 	attrUpdatedAt     = "updated_at"
+	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"
 	attrSlackBotTokenDK     = "slack_bot_token_dk"
@@ -127,12 +129,19 @@ var ErrWorkspaceNotConfigured = errors.New("workspace not configured — admin m
 // failures so old installs can be pointed at the reinstall path.
 var ErrSlackBotTokenNotConfigured = errors.New("workspace Slack bot token not configured — admin must reinstall the Slack app")
 
+// ErrWorkspaceStateUpdatedAfterCutoff means a guarded whole-row delete refused
+// to remove workspace_state because the row has been updated since the teardown
+// signal was observed. The Slack lifecycle purge treats this as a successful
+// no-op so a delayed uninstall cleanup cannot clobber a fresh reinstall/setup.
+var ErrWorkspaceStateUpdatedAfterCutoff = errors.New("workspace_state updated after purge cutoff")
+
 // DeletedWorkspaceStateIdentity carries non-secret qURL key provenance returned
 // from a whole-row workspace_state delete. It lets Slack lifecycle cleanup log
 // the upstream key identity before the local row disappears, so operator/manual
 // revoke follow-up remains possible even though the encrypted key material is
 // removed immediately for Marketplace retention.
 type DeletedWorkspaceStateIdentity struct {
+	Deleted       bool
 	QURLAPIKeyID  string
 	QURLAccountID string
 }
@@ -259,6 +268,10 @@ func (p *DDBProvider) nowOrDefault() time.Time {
 		return p.Now()
 	}
 	return time.Now()
+}
+
+func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
 }
 
 func (p *DDBProvider) apiKeyCache() *ttlcache.Cache[cachedAPIKey] {
@@ -884,6 +897,7 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		attrQURLAPIKeyPrefix + " = :key_prefix",
 		attrConfiguredBy + " = :by",
 		attrUpdatedAt + " = :now",
+		attrUpdatedAtNano + " = :now_nano",
 		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", :now)",
 	}
 	values := map[string]ddbtypes.AttributeValue{
@@ -893,6 +907,7 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		":key_prefix": &ddbtypes.AttributeValueMemberS{Value: keyPrefix},
 		":by":         &ddbtypes.AttributeValueMemberS{Value: configuredBy},
 		":now":        &ddbtypes.AttributeValueMemberS{Value: nowString},
+		":now_nano":   unixNanoAttr(now),
 	}
 	// Only write qurl_account_id when we have a verified qURL account. An empty
 	// value (sandbox / no-verifier path) is omitted so it never erases the
@@ -952,18 +967,22 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	if err != nil {
 		return fmt.Errorf("DDBProvider.SetSlackBotToken: encrypt: %w", err)
 	}
-	now := p.nowOrDefault().UTC().Format(time.RFC3339)
+	now := p.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 
 	setParts := []string{
 		attrSlackBotToken + " = :token",
 		attrSlackBotTokenDK + " = :dk",
+		attrUpdatedAt + " = :now",
+		attrUpdatedAtNano + " = :now_nano",
 		attrSlackBotUpdatedAt + " = :now",
 		attrSlackBotInstalledAt + " = if_not_exists(" + attrSlackBotInstalledAt + ", :now)",
 	}
 	values := map[string]ddbtypes.AttributeValue{
-		":token": &ddbtypes.AttributeValueMemberB{Value: ct},
-		":dk":    &ddbtypes.AttributeValueMemberB{Value: wrapped},
-		":now":   &ddbtypes.AttributeValueMemberS{Value: now},
+		":token":    &ddbtypes.AttributeValueMemberB{Value: ct},
+		":dk":       &ddbtypes.AttributeValueMemberB{Value: wrapped},
+		":now":      &ddbtypes.AttributeValueMemberS{Value: nowISO},
+		":now_nano": unixNanoAttr(now),
 	}
 	var removeParts []string
 	setStringAttr := func(attr, token, value string) {
@@ -1075,7 +1094,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		// ConditionExpression: it is only ever written alongside the key, so a row
 		// can't exist with only that attribute, and REMOVE of an absent attribute
 		// is a no-op. (TestDDBProviderDeleteAPIKey pins both expressions.)
-		UpdateExpression: aws.String("SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
+		UpdateExpression: aws.String("SET #updated_at = :now, #updated_at_nano = :now_nano REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
 		ConditionExpression: aws.String(
 			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
 		),
@@ -1088,9 +1107,11 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 			"#configured_by":       attrConfiguredBy,
 			"#configured_at":       attrConfiguredAt,
 			"#updated_at":          attrUpdatedAt,
+			"#updated_at_nano":     attrUpdatedAtNano,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":now": &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			":now":      &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			":now_nano": unixNanoAttr(now),
 		},
 	})
 	if err != nil {
@@ -1127,7 +1148,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 // best-efforts it before this write), keeping the auth package free of the
 // qurl-service client dependency.
 func (p *DDBProvider) DeleteWorkspaceState(ctx context.Context, workspaceID string) error {
-	_, err := p.deleteWorkspaceState(ctx, workspaceID, false)
+	_, err := p.deleteWorkspaceState(ctx, workspaceID, false, time.Time{})
 	return err
 }
 
@@ -1137,10 +1158,19 @@ func (p *DDBProvider) DeleteWorkspaceState(ctx context.Context, workspaceID stri
 // are one operation: no pre-read can race with a concurrent update, and no
 // transient identity-read failure can block the Marketplace-required local purge.
 func (p *DDBProvider) DeleteWorkspaceStateWithIdentity(ctx context.Context, workspaceID string) (DeletedWorkspaceStateIdentity, error) {
-	return p.deleteWorkspaceState(ctx, workspaceID, true)
+	return p.deleteWorkspaceState(ctx, workspaceID, true, time.Time{})
 }
 
-func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID string, captureIdentity bool) (DeletedWorkspaceStateIdentity, error) {
+// DeleteWorkspaceStateBeforeWithIdentity removes workspace_state only when the
+// row has not been updated since cutoff. It protects fast uninstall/reinstall
+// flows from a delayed async lifecycle purge: a reinstall or qURL setup writes
+// updated_at, causing this guarded delete to no-op instead of deleting fresh
+// credential material.
+func (p *DDBProvider) DeleteWorkspaceStateBeforeWithIdentity(ctx context.Context, workspaceID string, cutoff time.Time) (DeletedWorkspaceStateIdentity, error) {
+	return p.deleteWorkspaceState(ctx, workspaceID, true, cutoff)
+}
+
+func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID string, captureIdentity bool, cutoff time.Time) (DeletedWorkspaceStateIdentity, error) {
 	if workspaceID == "" {
 		return DeletedWorkspaceStateIdentity{}, errors.New("DDBProvider.DeleteWorkspaceState: workspaceID is empty")
 	}
@@ -1153,8 +1183,22 @@ func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID stri
 	if captureIdentity {
 		input.ReturnValues = ddbtypes.ReturnValueAllOld
 	}
+	if !cutoff.IsZero() {
+		input.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+		input.ExpressionAttributeNames = map[string]string{
+			"#updated_at_nano": attrUpdatedAtNano,
+		}
+		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
+			":purge_cutoff_nano": unixNanoAttr(cutoff),
+		}
+	}
 	out, err := p.Client.DeleteItem(ctx, input)
 	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if !cutoff.IsZero() && errors.As(err, &ccfe) {
+			p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
+			return DeletedWorkspaceStateIdentity{}, ErrWorkspaceStateUpdatedAfterCutoff
+		}
 		return DeletedWorkspaceStateIdentity{}, fmt.Errorf("DDBProvider.DeleteWorkspaceState: DeleteItem: %w", err)
 	}
 	p.invalidateAPIKeyCache(workspaceID, p.nowOrDefault().Add(apiKeyCacheTTL))
@@ -1165,7 +1209,11 @@ func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID stri
 }
 
 func deletedWorkspaceStateIdentityFromItem(item map[string]ddbtypes.AttributeValue) DeletedWorkspaceStateIdentity {
+	if len(item) == 0 {
+		return DeletedWorkspaceStateIdentity{}
+	}
 	return DeletedWorkspaceStateIdentity{
+		Deleted:       true,
 		QURLAPIKeyID:  stringAttribute(item[attrQURLAPIKeyID]),
 		QURLAccountID: stringAttribute(item[attrQURLAccountID]),
 	}
