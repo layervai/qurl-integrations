@@ -692,46 +692,14 @@ func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
 }
 
-// agentEventPartition is the conversation-state partition key. Authorization
-// metadata disambiguates Enterprise Grid: org-level installs use enterprise_id,
-// workspace-level installs use team_id so their agent state is purged by the
-// same team-keyed lifecycle teardown as the durable workspace tables. Org-level
-// Grid teardown purges only the enterprise partition; workspace-level Grid rows
-// rely on Slack's team_id lifecycle callbacks for the workspace that uninstalled
-// the app. Payloads without authorizations use the same team-first fallback as
-// lifecycleWorkspaceIDs so future writes stay aligned with explicit purge; older
-// enterprise-keyed rows from before that alignment rely on the short agent-state
-// TTL.
+// agentEventPartition is the conversation/dedupe partition key. It deliberately
+// uses the same resolver as lifecycleWorkspaceIDs: org-level installs write those
+// rows under enterprise_id, workspace-level installs write under team_id, and the
+// lifecycle purge also sweeps any team-keyed agent-state partitions Slack
+// includes on org callbacks for pending actions, audit, pane context, and rate
+// counters.
 func agentEventPartition(env *slackEventEnvelope) string {
-	if len(env.Authorizations) > 0 {
-		enterpriseInstall := false
-		for _, authz := range env.Authorizations {
-			if authz.IsEnterpriseInstall {
-				enterpriseInstall = true
-				if authz.EnterpriseID != "" {
-					return authz.EnterpriseID
-				}
-			}
-		}
-		if enterpriseInstall && env.EnterpriseID != "" {
-			return env.EnterpriseID
-		}
-		if env.TeamID != "" {
-			return env.TeamID
-		}
-		for _, authz := range env.Authorizations {
-			if authz.TeamID != "" {
-				return authz.TeamID
-			}
-		}
-		if env.EnterpriseID != "" {
-			return env.EnterpriseID
-		}
-	}
-	if env.TeamID != "" {
-		return env.TeamID
-	}
-	return env.EnterpriseID
+	return resolveSlackEventPartitions(env).agentWrite
 }
 
 // agentEventRootTS is the thread root a turn belongs to: the parent thread_ts

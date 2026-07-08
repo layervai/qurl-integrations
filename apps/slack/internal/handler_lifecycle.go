@@ -95,58 +95,87 @@ func (s *orderedIDSet) empty() bool {
 	return len(s.ids) == 0
 }
 
-// lifecycleWorkspaceIDs resolves the DDB partition key(s) a lifecycle event
-// should purge: team_id for a workspace install, enterprise_id for an org-level
-// Grid install. Slack's Events API authorization metadata disambiguates those
-// cases when both outer IDs are present. Older/partial payloads without
-// authorizations cannot safely prove org-install vs workspace-install when both
-// IDs are present, so they use team_id when present because Slack documents
-// team_id as the workspace identifier for token-revocation callbacks;
-// enterprise_id is only a fallback when team_id is absent. That prefers avoiding
-// an ambiguous workspace callback deleting a distinct org install; documented
-// app_uninstalled payloads carry authorization metadata for the org-install
-// teardown path. Org-install callbacks intentionally do not enumerate team-keyed
-// workspace rows; workspace-level Grid installs rely on their own team_id
-// lifecycle callbacks. #929 tracks empirical Slack fan-out verification before
-// the paired manifest rollout relies on that contract.
-func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
-	var set orderedIDSet
+type slackEventPartitionResolution struct {
+	agentWrite     string
+	lifecyclePurge []string
+}
 
+// resolveSlackEventPartitions keeps the agent write key and lifecycle purge keys
+// in one place. Org-level Grid installs write conversation/dedupe rows under the
+// enterprise id, but several agent-state item types are always team-keyed
+// (pending actions, audit, pane context, rate counters), so an org lifecycle
+// callback that includes team ids must purge those partitions too.
+func resolveSlackEventPartitions(env *slackEventEnvelope) slackEventPartitionResolution {
+	if env == nil {
+		return slackEventPartitionResolution{}
+	}
+	var purge orderedIDSet
 	if len(env.Authorizations) == 0 {
-		set.add(env.TeamID)
-		if set.empty() {
-			set.add(env.EnterpriseID)
+		purge.add(env.TeamID)
+		if purge.empty() {
+			purge.add(env.EnterpriseID)
 		}
-		return set.ids
+		return slackEventPartitionResolution{agentWrite: firstResolvedID(purge.ids), lifecyclePurge: purge.ids}
 	}
 
 	enterpriseInstall := false
+	var enterpriseIDs orderedIDSet
+	var teamIDs orderedIDSet
 	for _, authz := range env.Authorizations {
 		if authz.IsEnterpriseInstall {
 			enterpriseInstall = true
-			break
+			enterpriseIDs.add(authz.EnterpriseID)
+			teamIDs.add(authz.TeamID)
 		}
 	}
 	if enterpriseInstall {
-		for _, authz := range env.Authorizations {
-			if authz.IsEnterpriseInstall {
-				set.add(authz.EnterpriseID)
-			}
+		agentWrite := firstResolvedID(enterpriseIDs.ids)
+		if agentWrite == "" {
+			agentWrite = strings.TrimSpace(env.EnterpriseID)
 		}
-		if set.empty() {
-			set.add(env.EnterpriseID)
+		if agentWrite == "" {
+			agentWrite = strings.TrimSpace(env.TeamID)
 		}
-		return set.ids
+		if agentWrite == "" {
+			agentWrite = firstResolvedID(teamIDs.ids)
+		}
+		purge.add(agentWrite)
+		purge.add(env.TeamID)
+		for _, teamID := range teamIDs.ids {
+			purge.add(teamID)
+		}
+		return slackEventPartitionResolution{agentWrite: agentWrite, lifecyclePurge: purge.ids}
 	}
 
-	set.add(env.TeamID)
+	purge.add(env.TeamID)
 	for _, authz := range env.Authorizations {
-		set.add(authz.TeamID)
+		purge.add(authz.TeamID)
 	}
-	if set.empty() {
-		set.add(env.EnterpriseID)
+	if purge.empty() {
+		purge.add(env.EnterpriseID)
 	}
-	return set.ids
+	return slackEventPartitionResolution{agentWrite: firstResolvedID(purge.ids), lifecyclePurge: purge.ids}
+}
+
+func firstResolvedID(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// lifecycleWorkspaceIDs resolves the DDB partition key(s) a lifecycle event
+// should purge. Slack's Events API authorization metadata disambiguates
+// Enterprise Grid org installs from workspace installs. Org installs purge the
+// enterprise partition plus any team partitions Slack includes, because
+// qurl_agent_state has both enterprise-keyed conversation/dedupe rows and
+// team-keyed pending/audit/context/rate rows. Older/partial payloads without
+// authorizations cannot safely prove org-install vs workspace-install when both
+// IDs are present, so they use team_id when present because Slack documents
+// team_id as the workspace identifier for token-revocation callbacks;
+// enterprise_id is only a fallback when team_id is absent.
+func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
+	return resolveSlackEventPartitions(env).lifecyclePurge
 }
 
 // handleLifecycleEvent runs the Slack app-uninstall / token-revoke cascade. It is

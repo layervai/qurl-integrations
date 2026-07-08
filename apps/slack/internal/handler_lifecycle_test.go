@@ -203,8 +203,11 @@ func TestHandleLifecycleEvent_EnterpriseFallbackPurgesWorkspace(t *testing.T) {
 	}
 }
 
-func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseKey(t *testing.T) {
-	h, provider, _ := newLifecycleTestHandlerForWorkspace(t, testEnterpriseID)
+func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseAndTeamKeys(t *testing.T) {
+	h, provider, ts := newLifecycleTestHandlerForWorkspace(t, testEnterpriseID)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+	ts.seedPolicyAliasBindings(t, testAdminTeamID, "C_team", map[string]string{"grafana": "r_team"})
+	seedLifecycleAgentState(t, h.cfg.AgentStore, testAdminTeamID)
 
 	w := httptest.NewRecorder()
 	body := appUninstalledGridBody(testAdminTeamID, testEnterpriseID)
@@ -214,16 +217,19 @@ func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseKey(t *tes
 	}
 	h.Wait()
 
-	wantIDs := testEnterpriseID
+	wantIDs := testEnterpriseID + "," + testAdminTeamID
 	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
 		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testEnterpriseID)
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 
-	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testEnterpriseID)
-	var ae *slackdata.Error
-	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
-		t.Fatalf("ListAdmins after Grid purge: err = %v, want 404 *Error", err)
+	for _, workspaceID := range []string{testEnterpriseID, testAdminTeamID} {
+		_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), workspaceID)
+		var ae *slackdata.Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+			t.Fatalf("ListAdmins(%q) after Grid purge: err = %v, want 404 *Error", workspaceID, err)
+		}
 	}
 	for _, ch := range []string{"C_one", "C_two"} {
 		entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testEnterpriseID, ch)
@@ -233,6 +239,13 @@ func TestHandleLifecycleEvent_EnterpriseGridOrgInstallPurgesEnterpriseKey(t *tes
 		if len(entries) != 0 {
 			t.Fatalf("GetChannelPolicy(%q) after Grid purge = %v, want empty", ch, entries)
 		}
+	}
+	teamEntries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, "C_team")
+	if err != nil {
+		t.Fatalf("GetChannelPolicy(team) after Grid purge: %v", err)
+	}
+	if len(teamEntries) != 0 {
+		t.Fatalf("GetChannelPolicy(team) after Grid purge = %v, want empty", teamEntries)
 	}
 }
 
@@ -326,8 +339,9 @@ func TestLifecycleWorkspaceIDs_PartialEnterpriseAuthorizationFallsBackToEnvelope
 		}},
 	}
 
-	if got := strings.Join(lifecycleWorkspaceIDs(env), ","); got != testEnterpriseID {
-		t.Fatalf("lifecycleWorkspaceIDs(partial enterprise auth) = %q, want %q", got, testEnterpriseID)
+	wantIDs := testEnterpriseID + "," + testAdminTeamID
+	if got := strings.Join(lifecycleWorkspaceIDs(env), ","); got != wantIDs {
+		t.Fatalf("lifecycleWorkspaceIDs(partial enterprise auth) = %q, want %q", got, wantIDs)
 	}
 }
 
