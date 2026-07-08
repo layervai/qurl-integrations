@@ -17,6 +17,7 @@ jest.mock('../src/config', () => ({
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
+  QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: [],
@@ -600,10 +601,13 @@ describe('qURL client', () => {
     });
 
     it('throws on API error', async () => {
+      // SDK-parseable error double: it reads `.json()` (RFC-7807 envelope) and
+      // `.headers.get()`, unlike the pre-SDK client's `.text()`-only shape.
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
         status: 500,
-        text: async () => 'Internal Server Error',
+        headers: { get: () => null },
+        json: async () => ({ error: { status: 500, code: 'server_error', title: 'HTTP 500', detail: 'boom' } }),
       });
 
       await expect(qurl.createOneTimeLink('https://example.com', '1h', 'label'))
@@ -631,11 +635,12 @@ describe('qURL client', () => {
         status: 204,
       });
 
-      await qurl.deleteLink('resource-42');
+      // delete() requires a qurl-service resource ID (r_ prefix).
+      await qurl.deleteLink('r_resource42abc');
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe('https://api.test.local/v1/qurls/resource-42');
+      expect(url).toBe('https://api.test.local/v1/qurls/r_resource42abc');
       expect(opts.method).toBe('DELETE');
     });
 
@@ -643,10 +648,11 @@ describe('qURL client', () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,
         status: 404,
-        text: async () => 'Not Found',
+        headers: { get: () => null },
+        json: async () => ({ error: { status: 404, code: 'not_found', title: 'HTTP 404', detail: 'qURL not found' } }),
       });
 
-      await expect(qurl.deleteLink('bad-id')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
+      await expect(qurl.deleteLink('r_badid1234567')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
     });
   });
 });
@@ -985,6 +991,7 @@ describe('handleAddRecipients', () => {
       CONNECTOR_URL: 'https://connector.test.local',
       GOOGLE_MAPS_API_KEY: 'test-google-key',
       QURL_SEND_COOLDOWN_MS: 30000,
+      QURL_DETECT_COOLDOWN_MS: 30000,
       QURL_SEND_MAX_RECIPIENTS: 50,
       PENDING_LINK_EXPIRY_MINUTES: 30,
       ADMIN_USER_IDS: [],
@@ -1555,7 +1562,11 @@ describe('handleAddRecipients', () => {
     });
 
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res', fileBuffer: new ArrayBuffer(4) });
-    mockMintLinks.mockRejectedValue(new Error('Connector down'));
+    const partialErr = new Error('Connector mint_link failed (502)');
+    partialErr.status = 502;
+    partialErr.partialLinkCount = 2;
+    partialErr.partialQurlIds = ['q_partial_one', 'q_partial_two'];
+    mockMintLinks.mockRejectedValue(partialErr);
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
@@ -1563,6 +1574,19 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-fail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toMatch(/Failed to prepare links/);
+
+    const logger = require('../src/logger');
+    expect(logger.error).toHaveBeenCalledWith(
+      'addRecipients file re-upload failed',
+      expect.objectContaining({
+        sendId: 'send-fail',
+        status: 502,
+        partial_link_count: 2,
+        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
   });
 
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {

@@ -41,6 +41,18 @@ import { chromium, type Browser } from 'playwright';
  * response. */
 const TUNNEL_VIEW_RE = /\.qurl\.site[^/]*\/views\//;
 
+/** Pulls the `<mint-id>` (the per-recipient `views/<mint-id>` object key) out of a
+ * resolved tunnel-view URL. The mint-id is hex(16 random bytes) = 32 lowercase hex
+ * (connector `internal/handler/mintid.go`), DISTINCT per mint by construction — so
+ * two views minted for the SAME upload resolve to DIFFERENT `views/<mint-id>`
+ * objects, which IS the per-recipient-distinct-watermark guarantee (#1027: "distinct
+ * watermarks (different `views/` objects)"). Returns undefined if the URL has no
+ * `/views/<seg>` segment. Anchored on `/views/` and stops at the next `/` or `?` so
+ * a trailing query/path can't bleed into the captured id. */
+export function mintIdFromTunnelViewUrl(url: string): string | undefined {
+  return /\/views\/([^/?#]+)/.exec(url)?.[1];
+}
+
 export interface ViewViaQurlLinkOptions {
   /** Browser launch headless? Defaults to true; set `PLAYWRIGHT_HEADED=1`
    *  (or `HEADLESS=0`) in the env to watch it run locally for debugging. */
@@ -53,6 +65,12 @@ export interface ViewViaQurlLinkOptions {
 export interface ViewViaQurlLinkResult {
   /** HTTP status of the tunnel-view response (200 means the view served). */
   status: number;
+  /** The resolved tunnel-view URL the knock landed on
+   *  (`https://r_<id>.qurl.site…/views/<mint-id>`). Lets a caller assert on the
+   *  per-recipient `views/<mint-id>` object key (distinct-per-viewer, #1027) and on
+   *  the `r_<id>` host label (DNS + wildcard-cert-via-SNI resolving an `_`-bearing
+   *  label, end-to-end). Use `mintIdFromTunnelViewUrl` to extract the mint-id. */
+  url: string;
 }
 
 function resolveHeadless(opt?: boolean): boolean {
@@ -64,7 +82,9 @@ function resolveHeadless(opt?: boolean): boolean {
 /**
  * Open a minted `qurl_link` in a headless browser, let the SPA drive the NHP
  * knock, and resolve when the reverse-tunnel view response (`…/views/<id>`)
- * arrives — returning its HTTP status (200 = the view served).
+ * arrives — returning its HTTP status (200 = the view served) and the resolved
+ * tunnel-view URL (`r_<id>.qurl.site…/views/<mint-id>`) for per-recipient/SNI
+ * assertions.
  *
  * THROWS if no `…/views/<id>` response arrives within `timeoutMs` — the negative
  * signal a caller relies on (a revoked/consumed/expired link, or a tunnel that's
@@ -103,7 +123,7 @@ export async function viewViaQurlLink(
     if (resp.status() !== 200) {
       throw new Error(`viewViaQurlLink: tunnel-view returned ${resp.status()} (expected 200).`);
     }
-    return { status: resp.status() };
+    return { status: resp.status(), url: resp.url() };
   } finally {
     // Always tear the browser down — a leaked chromium would hang jest's worker exit.
     await browser?.close();

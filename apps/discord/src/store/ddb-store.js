@@ -16,10 +16,11 @@
 // allow data-plane verbs on the specific table ARNs + GSI ARNs —
 // scoping happens infra-side, not here.
 //
-// App-layer encryption: the three sensitive fields
+// App-layer encryption: sensitive fields
 // (`guild_configs.qurl_api_key`, `orphaned_oauth_tokens.access_token`,
-// `qurl_send_configs.attachment_url`) are envelope-encrypted via
-// `utils/crypto.encrypt`. Ciphertext is stored as a regular `S` string.
+// `qurl_send_configs.attachment_url`, `qurl_send_configs.interaction_token`)
+// are envelope-encrypted via `utils/crypto.encrypt`. Ciphertext is stored
+// as a regular `S` string.
 // DDB server-side encryption (AWS-managed aws/dynamodb CMK,
 // configured at the table level) is defense-in-
 // depth — the primary encryption is the app-layer envelope.
@@ -950,7 +951,7 @@ async function getWeeklyDigestData() {
 
 async function recordQURLSend({
   sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType,
-  qurlLink, qurlId, expiresIn, channelId, targetType,
+  qurlLink, qurlId, expiresIn, channelId, targetType, guildId,
 }) {
   // qurl_id is the GSI hash key on qurl_id-index, used by the
   // qurl.expired webhook handler to locate the recipient row for DM
@@ -973,6 +974,16 @@ async function recordQURLSend({
   };
   if (typeof qurlId === 'string' && qurlId.length > 0) {
     Item.qurl_id = qurlId;
+  }
+  // guild_id is a NON-KEY, non-indexed attribute — DynamoDB is schemaless
+  // for non-key attrs, so the qurl-bot-ddb table needs no Terraform change
+  // to carry it. It scopes watermark attribution to the minting guild
+  // (#1101); the /qurl detect read filters sends on it (a write-time
+  // invariant + a defense-in-depth filter at read time). Sparse like
+  // qurl_id: a legacy/non-guild send omits it rather than writing an empty
+  // string. It rides the `qurl_id-index` GSI for free (projection = ALL).
+  if (typeof guildId === 'string' && guildId.length > 0) {
+    Item.guild_id = guildId;
   }
   await ddb.send(new PutCommand({
     TableName: TABLES.qurl_sends,
@@ -1026,6 +1037,14 @@ async function recordQURLSendBatch(sends) {
         if (typeof s.qurlId === 'string' && s.qurlId.length > 0) {
           Item.qurl_id = s.qurlId;
         }
+        // guild_id: non-key attribute scoping watermark attribution to
+        // the minting guild (#1101). Sparse like qurl_id — a legacy /
+        // non-guild send omits it. No Terraform change needed (schemaless
+        // non-key attr); rides the qurl_id-index GSI for the /qurl detect
+        // read (projection = ALL). See recordQURLSend for the full why.
+        if (typeof s.guildId === 'string' && s.guildId.length > 0) {
+          Item.guild_id = s.guildId;
+        }
         return { PutRequest: { Item } };
       }),
     };
@@ -1074,16 +1093,22 @@ const QURL_VIEW_TTL_SECONDS = 30 * 24 * 60 * 60;
 // self-destruct semantics ("once consumed, always consumed"). If
 // qurl-service ever needs to un-consume a row, that's a separate
 // API contract change.
-async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
+//
+// accessCount must be >=1. The webhook route rejects zero before calling
+// this shared store method; keep the store gate too so a future direct
+// caller cannot persist a row that the view counter would treat as unseen.
+async function recordQurlView({
+  qurlId, accessCount, consumed, eventId,
+}) {
   if (!qurlId) throw new Error('recordQurlView: qurlId is required');
-  if (typeof accessCount !== 'number' || accessCount < 0) {
-    throw new Error(`recordQurlView: accessCount must be a non-negative number (got ${accessCount})`);
+  if (typeof accessCount !== 'number' || accessCount <= 0) {
+    throw new Error(`recordQurlView: accessCount must be a positive number (got ${accessCount})`);
   }
   if (!eventId) throw new Error('recordQurlView: eventId is required for replay protection');
   const nowMs = Date.now();
   const consumedBool = Boolean(consumed);
   try {
-    await ddb.send(new UpdateCommand({
+    const res = await ddb.send(new UpdateCommand({
       TableName: TABLES.qurl_views,
       Key: { qurl_id: qurlId },
       // `consumed` is a DDB reserved keyword — must be aliased via
@@ -1106,20 +1131,31 @@ async function recordQurlView({ qurlId, accessCount, consumed, eventId }) {
         ':false': false,
         ':true': true,
       },
+      ReturnValues: 'ALL_OLD',
     }));
-    return 'recorded';
+    const old = res?.Attributes;
+    return {
+      result: 'recorded',
+      firstView: !old || old.access_count === 0,
+    };
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException') {
       // Replay (same event_id) OR out-of-order (lower-or-equal count
       // with no consumed flip). Row already reflects a >= state.
-      return 'dedup';
+      return { result: 'dedup', firstView: false };
     }
     throw err;
   }
 }
 
 // Returns a Map<qurl_id, {accessCount, consumed}>. BatchGet caps at 100
-// keys per request; today max recipients is 50 so chunking is defensive.
+// keys per request, so this chunks at 100. That chunking is LOAD-BEARING,
+// not defensive: max recipients is QURL_SEND_MAX_RECIPIENTS (default
+// 20000), so a full send is up to ⌈N/100⌉ = 200 sequential BatchGets.
+// The sender-counter fast-path now renders from fanout-scaled sharded
+// counters in this same table, so this BatchGet-all path is not on the
+// normal sub-second render path. It remains the monitor poll reader and a
+// legacy fallback for live rows created before the aggregate existed.
 async function getQurlViews(qurlIds) {
   if (!Array.isArray(qurlIds) || qurlIds.length === 0) return new Map();
   // Drop empties defensively — an empty qurl_id is a collision attractor.
@@ -1187,6 +1223,14 @@ async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messag
 // hot path. The `> 1` ambiguous-recipient skip in the handler
 // already catches the duplicate case at length=2.
 //
+// #1101 detect note: /qurl detect applies a same-guild filter to these
+// rows, and Limit:2 is safe for it ONLY because a qurl_id belongs to a
+// single guild (one mint → one recipient → one guild), so every row a
+// qurl_id can return is same-guild and the cap can't truncate away the
+// caller's row. If that invariant were ever relaxed (a qurl_id legitimately
+// spanning guilds with >2 total rows), Limit:2 could drop the caller's
+// same-guild row and yield a false "no match" — revisit the cap then.
+//
 // Returns the rows (full attributes — GSI projection is ALL so
 // dm_channel_id / dm_message_id / expired_edited_at are present).
 async function findSendsByQurlId(qurlId) {
@@ -1244,6 +1288,59 @@ async function clearExpiredDMEdited(sendId, recipientDiscordId) {
     TableName: TABLES.qurl_sends,
     Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
     UpdateExpression: 'REMOVE expired_edited_at',
+  }));
+}
+
+// Idempotency marker for the qurl.accessed consumed-flip DM-edit path.
+// Separate attribute from expired_edited_at by design: the two flips can
+// both legitimately reach the same row (a one-time qURL is consumed,
+// THEN its 30m TTL elapses and qurl-service still emits qurl.expired —
+// see the EventQurlExpired contract, "fires regardless of prior state").
+// Distinct markers let each path short-circuit its own redelivery
+// without one suppressing the other, and let the expired handler detect
+// "consumed already flipped the DM" via a cheap read of this attribute
+// off the row it already fetched (findSendsByQurlId projects ALL).
+//
+// Same conditional-UpdateItem-on-attribute_not_exists shape as
+// markExpiredDMEdited: first call wins, repeats throw
+// ConditionalCheckFailedException which the caller reads as
+// "already flipped, skip the DM PATCH". Returns true on first-flip,
+// false if already-flipped.
+async function markConsumedDMEdited(sendId, recipientDiscordId) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_sends,
+      Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+      UpdateExpression: 'SET consumed_edited_at = :t',
+      ConditionExpression: 'attribute_not_exists(consumed_edited_at)',
+      ExpressionAttributeValues: { ':t': nowIso() },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+// Rollback of the consumed-flip marker — counterpart to
+// clearExpiredDMEdited. Only called when editDM reported a TRANSIENT
+// failure on the consumed-flip path: rolling the marker back lets a
+// REDELIVERED qurl.accessed (or, failing that, the eventual
+// qurl.expired backstop — which skips when consumed_edited_at is set)
+// re-attempt the flip. On a PERMANENT failure (recipient blocked the
+// bot / deleted the DM) the marker MUST stay so a redelivery
+// short-circuits.
+//
+// Best-effort, same contract as clearExpiredDMEdited: a throw here isn't
+// a control-flow signal — it means the marker stays, the redelivery (or
+// expired backstop) sees it and skips, and the missed flip falls back to
+// the qurl.expired edit only if THAT path's marker is also clear. We
+// surface the throw so the caller can log it.
+async function clearConsumedDMEdited(sendId, recipientDiscordId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_sends,
+    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+    UpdateExpression: 'REMOVE consumed_edited_at',
   }));
 }
 
@@ -1503,6 +1600,11 @@ async function saveSendConfig({
       attachment_content_type: attachmentContentType ?? null,
       attachment_url: encryptedUrl,
       self_destruct_seconds: selfDestructSeconds ?? null,
+      // The view-counter render state (interaction_token, expected_count,
+      // confirm_base_msg, confirm_expires_at, confirm_qurl_ids) is written
+      // SEPARATELY by saveSendConfirmState AFTER the initial editReply —
+      // saveSendConfig runs earlier (before the token / confirmMsg /
+      // delivered exist), so it deliberately carries none of those fields.
       created_at: nowIso(),
     },
   }));
@@ -1516,9 +1618,375 @@ async function getSendConfig(sendId, senderDiscordId) {
   const row = res.Item;
   if (!row) return row;
   if (row.sender_discord_id !== senderDiscordId) return undefined; // ownership check
-  return row.attachment_url
-    ? { ...row, attachment_url: decrypt(row.attachment_url) }
-    : row;
+  // SECURITY: never hand the SENSITIVE interaction_token back in the
+  // full-row return. PR-B persists that live ~15-min bearer cred onto
+  // THIS row, but getSendConfig's callers (handleAddRecipients, the
+  // status card) only read scalar config fields — they never need the
+  // token, and returning it risks a caller logging/audit-shipping/error-
+  // dumping the whole config object and leaking the cred. The fast-path
+  // reads the token via getSendRenderState (which is the ONLY return
+  // shape that intentionally carries it, and its sole caller logs only
+  // scalars). Strip it here so the full-row getter is token-free.
+  // Same destructure-and-omit idiom as getGuildConfig's qurl_api_key strip
+  // (the `_drop` throwaway matches that precedent + the `_`-prefix
+  // no-unused-vars convention).
+  const { interaction_token: _drop, ...safe } = row;
+  return safe.attachment_url
+    ? { ...safe, attachment_url: decrypt(safe.attachment_url) }
+    : safe;
+}
+
+// View-counter render state for the cross-replica fast-path (PR-B).
+// Returns ONLY the fields the off-monitor renderer needs to rebuild +
+// edit the sender's confirmation — NOT the full row — so the SENSITIVE
+// interaction_token never leaks into a logged/returned shape by accident
+// (the token is read directly by PR-B's editReply call, not surfaced
+// here). Keyed by send_id alone: unlike getSendConfig there is NO
+// sender_discord_id ownership filter, because PR-B's webhook path has no
+// Discord sender context — the send_id (an unguessable UUID minted
+// server-side) is the only key it carries. Returns null when no row
+// exists (legacy send predating render-state persistence, or a
+// saveSendConfig that failed — both leave the fast-path inert and the
+// in-memory monitor as the sole renderer).
+//
+// `viewedCount` is the legacy single-row aggregate retained only as a
+// rollout floor for rows created before the sharded counter path below.
+// The new path seeds it at send time but never increments it. New
+// fast-path renders sum qurl_views counter shards instead of BatchGetting
+// every qurl_id or hot-writing qurl_send_configs. The `lastRenderedCount`
+// field remains the commit-after-edit floor: the sharded total can run
+// ahead when a view records but the Discord edit is coalesced or fails.
+//
+// `terminal` is derived (not stored as one flag): the display is dead
+// once the sender revoked (revoked_at) OR a window-close/expired path
+// set confirm_terminal — either way a late fast-path edit must NOT
+// resurrect a live-looking counter. `qurlIds` is an optional inline cache
+// of minted qurl_ids for small sends; large sends deliberately store []
+// so the row stays well below DDB's item limit and the rare fallback reads
+// recipient rows via getSendItems instead.
+//
+// EXPIRY SELF-DEFENSE: the qurl_send_configs table has no DDB TTL on
+// confirm_expires_at yet (that needs a qurl-bot-ddb terraform change —
+// see saveSendConfirmState). So the bot enforces the token's lifetime
+// itself: once `now > confirm_expires_at` we treat the render state as
+// absent (return null), so the fast-path stops trusting an
+// interaction_token past its ~15-min Discord TTL regardless of whether
+// the row has been physically reaped. This decouples the feature from
+// the cross-repo TTL change — at worst a dead token lingers at rest, but
+// the bot never reads it.
+async function getSendRenderState(sendId) {
+  if (typeof sendId !== 'string' || sendId.length === 0) return null;
+  const res = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ConsistentRead: true,
+  }));
+  const row = res.Item;
+  if (!row) return null;
+  // Past the confirm window the interaction token is dead (Discord
+  // rejects it); treat the whole render state as absent so the fast-path
+  // skips and the poll backstop is the sole renderer.
+  if (typeof row.confirm_expires_at === 'number' && Math.floor(Date.now() / 1000) > row.confirm_expires_at) {
+    return null;
+  }
+  return {
+    // SENSITIVE: a live Discord bearer cred (~15 min). NEVER log this
+    // value — callers use it only as the editReply credential.
+    interactionToken: row.interaction_token ? decrypt(row.interaction_token) : null,
+    interactionAppId: row.interaction_app_id ?? null,
+    expectedCount: row.expected_count ?? 0,
+    viewedCount: typeof row.viewed_count === 'number' ? row.viewed_count : null,
+    lastRenderedCount: row.last_rendered_count ?? 0,
+    // Epoch MS of the last confirmed fast-path edit (0 if never). The
+    // webhook fast-path leading-edge-debounces on this: skip the edit
+    // when Date.now() - lastRenderedAt < QURL_VIEW_COUNTER_COALESCE_MS.
+    // MS (not the seconds confirm_expires_at uses) because the cooldown
+    // is sub-second — seconds granularity would be too coarse to bound a
+    // sub-second burst. Written alongside last_rendered_count in the
+    // SAME conditional UpdateItem (commit-after-edit), so it only
+    // advances when an edit actually landed.
+    lastRenderedAt: row.last_rendered_at ?? 0,
+    baseMsg: row.confirm_base_msg ?? undefined,
+    qurlIds: Array.isArray(row.confirm_qurl_ids) ? row.confirm_qurl_ids : [],
+    terminal: Boolean(row.revoked_at) || row.confirm_terminal === true,
+  };
+}
+
+const SEND_VIEW_COUNTER_MAX_SHARDS = 64;
+// Roughly half DynamoDB's ~1k WCU/s single-partition ceiling, leaving
+// burst headroom before the next power-of-two shard step kicks in.
+const SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD = 500;
+const SEND_VIEW_COUNTER_PREFIX = '__send_view_count__';
+// Keep the optional inline qurl_id cache comfortably below DynamoDB's
+// 400KB item limit. Larger sends fall back to getSendItems when the
+// sharded aggregate is unavailable; normal renders use the aggregate.
+const SEND_CONFIRM_QURL_IDS_INLINE_LIMIT = 1000;
+
+function normalizeConfirmQurlIdsForInlineCache(qurlIds) {
+  if (qurlIds === undefined) return undefined;
+  if (!Array.isArray(qurlIds)) return [];
+  const ids = qurlIds.filter(id => typeof id === 'string' && id.length > 0);
+  return ids.length <= SEND_CONFIRM_QURL_IDS_INLINE_LIMIT ? ids : [];
+}
+
+function sendViewedCountShardCount(expectedCount) {
+  // Invalid/legacy expected_count falls back to the one-shard floor. The
+  // persisted value should be positive and only grow; choosing the floor keeps
+  // later repaired reads a superset of earlier writes.
+  // A view racing a /qurl add re-persist can briefly read the old shard count;
+  // that can undercount newer wider-shard writes until the next strong render
+  // state read or poll backstop, but the monotonic floor prevents regression.
+  const count = Number.isSafeInteger(expectedCount) && expectedCount > 0
+    ? expectedCount
+    : 1;
+  const needed = Math.ceil(count / SEND_VIEW_COUNTER_TARGET_WRITES_PER_SHARD);
+  let shards = 1;
+  while (shards < needed && shards < SEND_VIEW_COUNTER_MAX_SHARDS) shards *= 2;
+  return shards;
+}
+
+function sendViewedCountShard(qurlId, shardCount) {
+  return crypto.createHash('sha256').update(String(qurlId)).digest()[0] % shardCount;
+}
+
+function sendViewedCountKey(sendId, shard) {
+  return `${SEND_VIEW_COUNTER_PREFIX}${sendId}#${String(shard).padStart(2, '0')}`;
+}
+
+function sendViewedCountKeys(sendId, shardCount) {
+  return Array.from({ length: shardCount }, (_, shard) => ({
+    qurl_id: sendViewedCountKey(sendId, shard),
+  }));
+}
+
+// First-view aggregate for the sender counter. This deliberately lives in
+// qurl_views as synthetic counter rows per send, not on the single
+// qurl_send_configs row. Small sends use one shard; high-fanout sends
+// scale up to 64 shards so a 20k-recipient burst spreads writes instead
+// of funnelling every first view through one hot item. /qurl add only
+// grows expected_count, so later renders that read more shards still
+// include earlier counts written to the lower shard range.
+async function incrementSendViewedCount(sendId, qurlId, expectedCount) {
+  if (!sendId) throw new Error('incrementSendViewedCount: sendId is required');
+  if (!qurlId) throw new Error('incrementSendViewedCount: qurlId is required');
+  const shardCount = sendViewedCountShardCount(expectedCount);
+  const shard = sendViewedCountShard(qurlId, shardCount);
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_views,
+    Key: { qurl_id: sendViewedCountKey(sendId, shard) },
+    UpdateExpression: 'SET send_id = :sid, counter_shard = :shard, expires_at = :exp ADD viewed_count :one',
+    ExpressionAttributeValues: {
+      ':sid': sendId,
+      ':shard': shard,
+      ':exp': Math.floor(Date.now() / 1000) + QURL_VIEW_TTL_SECONDS,
+      ':one': 1,
+    },
+  }));
+}
+
+async function getSendViewedCount(sendId, expectedCount) {
+  if (!sendId) return 0;
+  const keys = sendViewedCountKeys(sendId, sendViewedCountShardCount(expectedCount));
+  const res = await ddb.send(new BatchGetCommand({
+    RequestItems: { [TABLES.qurl_views]: { Keys: keys, ConsistentRead: true } },
+  }));
+  let total = 0;
+  const collect = (batch) => {
+    for (const item of (batch.Responses && batch.Responses[TABLES.qurl_views]) || []) {
+      if (typeof item.viewed_count === 'number' && item.viewed_count > 0) {
+        total += item.viewed_count;
+      }
+    }
+  };
+  collect(res);
+  const unprocessed = res.UnprocessedKeys && res.UnprocessedKeys[TABLES.qurl_views];
+  if (unprocessed && unprocessed.Keys && unprocessed.Keys.length > 0) {
+    // Single retry by design: if sustained DDB throttling still leaves a
+    // partial sum, the next non-coalesced render and the poll backstop
+    // re-read from source-of-truth qurl_views rows and correct the count.
+    collect(await ddb.send(new BatchGetCommand({
+      RequestItems: { [TABLES.qurl_views]: { ...unprocessed, ConsistentRead: true } },
+    })));
+  }
+  return total;
+}
+
+// Strong, token-free read of the displayed counter floor. The poll renderer
+// uses this to avoid rendering below a fast-path edit that already advanced
+// last_rendered_count on another replica.
+async function getSendRenderedCount(sendId) {
+  if (!sendId) return 0;
+  const res = await ddb.send(new GetCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    ProjectionExpression: 'last_rendered_count',
+    ConsistentRead: true,
+  }));
+  const n = res.Item?.last_rendered_count;
+  return typeof n === 'number' && n > 0 ? n : 0;
+}
+
+// Monotonic AFTER-edit commit for the view counter (PR-B calls this
+// ONLY after a Discord edit confirmed the new count is displayed).
+// Conditional UpdateItem: SET last_rendered_count = :n guarded by
+// "never set yet OR strictly less than :n", so two replicas racing to
+// advance the same send can't move the displayed count backwards —
+// whichever confirms the higher count wins, the loser CCFEs. Returns
+// true when this call advanced the count, false on
+// ConditionalCheckFailedException (a concurrent/stale advance — the
+// caller treats it as "someone already showed an equal-or-higher count,
+// nothing to do"). Same CCFE-as-control-flow shape as
+// markExpiredDMEdited / flipRevokedAt.
+//
+// COALESCING: last_rendered_at (epoch MS) is stamped in the SAME
+// successful conditional write as last_rendered_count. If another replica
+// already committed an equal-or-higher count, the whole write CCFEs and
+// that winning replica's timestamp is the debounce clock. The FAILURE path
+// stamps the clock alone via touchRenderedAt (below), so retry storms still
+// coalesce without claiming a count was displayed.
+async function tryAdvanceRenderedCount(sendId, n) {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET last_rendered_count = :n, last_rendered_at = :now',
+      ConditionExpression: 'attribute_not_exists(last_rendered_count) OR last_rendered_count < :n',
+      ExpressionAttributeValues: { ':n': n, ':now': Date.now() },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+// FAILURE-PATH debounce stamp: refresh the coalesce clock WITHOUT touching
+// the count, called when an edit ATTEMPT completed but did NOT confirm
+// (fast-path r.ok === false). Unconditional SET — no count guard, because
+// the whole point is to arm the cooldown even though nothing was
+// displayed. Keeps a high-fan-out burst from re-attempting one PATCH per
+// view during a transient Discord edit outage; the count floor is left
+// untouched so the poll backstop still self-heals the display. Best-
+// effort: the fast-path swallows a throw (the poll covers the miss).
+async function touchRenderedAt(sendId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    UpdateExpression: 'SET last_rendered_at = :now',
+    ExpressionAttributeValues: { ':now': Date.now() },
+  }));
+}
+
+// Distributed leading-edge debounce claim. Unlike tryAdvanceRenderedCount,
+// this does NOT claim the count moved; it only stamps the shared edit-attempt
+// clock when the previous attempt is outside the coalesce window. That turns
+// a cross-replica burst into one Discord PATCH per send/window instead of one
+// per replica/window, while preserving the commit-after-edit count invariant.
+async function tryClaimRenderAttempt(sendId, staleBeforeMs) {
+  if (!sendId) return false;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET last_rendered_at = :now',
+      ConditionExpression: 'attribute_not_exists(last_rendered_at) OR last_rendered_at <= :cutoff',
+      ExpressionAttributeValues: { ':now': Date.now(), ':cutoff': staleBeforeMs },
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+// Sticky fast-path kill-switch. Revoke/window-close use it for frozen
+// displays; mid-life /qurl add degrade uses it for an alive-but-bare poll
+// display. New code that needs display liveness must add its own signal,
+// not infer it from confirm_terminal. Follow-up #875 renames this to the
+// mechanism it actually gates: confirm_fast_path_off.
+async function markConfirmTerminal(sendId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    UpdateExpression: 'SET confirm_terminal = :t',
+    ExpressionAttributeValues: { ':t': true },
+  }));
+}
+
+// Persists the cross-replica fast-path's render state onto the
+// qurl_send_configs row AFTER the initial confirmation editReply has
+// landed (the send-pipeline calls saveSendConfig EARLIER, before
+// confirmMsg / delivered / the interaction token exist, so this is a
+// SEPARATE write rather than more optional args on saveSendConfig).
+//
+// PARTIAL UPDATE BY DESIGN — the SET clause is built from ONLY the keys
+// the caller actually passed (anything `=== undefined` is skipped). Two
+// callers with different field sets share this fn safely:
+//   - send-time wires the full set (interactionToken, interactionAppId,
+//     expectedCount, confirmBaseMsg, confirmExpiresAt, confirmQurlIds) to
+//     arm the fast-path; and
+//   - /qurl add re-persists ONLY expectedCount + confirmBaseMsg +
+//     confirmQurlIds to track the new totals + newly-minted links.
+// A fixed five-attribute SET would let the add caller's omitted
+// interactionToken land as null and PERMANENTLY disarm the fast-path
+// (its absent-guard skips on a null token). Building the clause from the
+// present keys is what keeps the add re-persist from clobbering the live
+// token. No-op (no write) when no recognized field is present.
+// confirmQurlIds is only an inline fallback cache; cap it before write so
+// max-fanout sends cannot push qurl_send_configs near DDB's item limit.
+//
+// SECURITY: interactionToken is a live Discord interaction-webhook bearer
+// cred (~15 min, TTL'd via confirm_expires_at). NEVER log it — this fn
+// writes it but never logs, and the field name is the only thing that
+// ever appears in a log.
+async function saveSendConfirmState(sendId, {
+  interactionToken, interactionAppId, expectedCount, confirmBaseMsg, confirmExpiresAt, confirmQurlIds, viewedCount,
+} = {}) {
+  // Map of attribute → provided value, keeping only the keys the caller
+  // actually passed so an omitted field is left untouched (never nulled).
+  const fields = {
+    interaction_token: interactionToken === undefined ? undefined : encrypt(interactionToken),
+    interaction_app_id: interactionAppId,
+    expected_count: expectedCount,
+    confirm_base_msg: confirmBaseMsg,
+    confirm_expires_at: confirmExpiresAt,
+    confirm_qurl_ids: normalizeConfirmQurlIdsForInlineCache(confirmQurlIds),
+    viewed_count: viewedCount,
+  };
+  const sets = [];
+  const values = {};
+  let expectedCountPlaceholder = null;
+  let i = 0;
+  for (const [attr, val] of Object.entries(fields)) {
+    if (val === undefined) continue;
+    const placeholder = `:v${i++}`;
+    sets.push(`${attr} = ${placeholder}`);
+    values[placeholder] = val;
+    if (attr === 'expected_count') expectedCountPlaceholder = placeholder;
+  }
+  if (sets.length === 0) return;
+  const update = {
+    TableName: TABLES.qurl_send_configs,
+    Key: { send_id: sendId },
+    UpdateExpression: `SET ${sets.join(', ')}`,
+    ExpressionAttributeValues: values,
+  };
+  if (expectedCountPlaceholder) {
+    // Fail closed on stale lower totals. The only production add path
+    // serializes growth; if a future/stale caller tries to lower the
+    // fanout, keep the matching baseMsg/qurlIds from landing too so the
+    // render state stays internally consistent.
+    update.ConditionExpression = `attribute_not_exists(expected_count) OR expected_count <= ${expectedCountPlaceholder}`;
+  }
+  try {
+    await ddb.send(new UpdateCommand(update));
+    return true;
+  } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException' && expectedCountPlaceholder) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 // Deduped resource_id list. Currently only used by tests; src/ uses
@@ -1553,6 +2021,12 @@ async function getSendItems(sendId, senderDiscordId) {
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,
+    // qurl_id is the sparse GSI hash key (recordQURLSendBatch writes it
+    // only when the mint surfaced one). Projected here so the webhook
+    // fast-path can map a send's recipient rows → its tracked qurl_ids
+    // and count DISTINCT viewed links. Legacy / non-guild sends omit it
+    // (undefined); the fast-path filters falsy before the views BatchGet.
+    qurl_id: item.qurl_id,
     // dm_channel_id / dm_message_id are written by markSendDMDelivered
     // after a successful sendDM; legacy rows predating that wire-up
     // have them unset, in which case the revoke path skips the DM
@@ -1996,6 +2470,11 @@ module.exports = {
   getRecentSends, markSendRevoked, isSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   findSendsByQurlId, markExpiredDMEdited, clearExpiredDMEdited,
+  markConsumedDMEdited, clearConsumedDMEdited,
+  // View-counter render state (cross-replica fast-path, PR-B)
+  saveSendConfirmState,
+  getSendRenderState, incrementSendViewedCount, getSendViewedCount,
+  getSendRenderedCount, tryAdvanceRenderedCount, touchRenderedAt, tryClaimRenderAttempt, markConfirmTerminal,
   // QURL views (webhook-fed)
   recordQurlView, getQurlViews,
   // Guild configs

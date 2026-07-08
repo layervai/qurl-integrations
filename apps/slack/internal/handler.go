@@ -108,6 +108,20 @@ func authErrorMessage(err error) string {
 	return authFailureMessage
 }
 
+// rateLimitErrorMessage maps the rate-limit gate's defensive storage errors to
+// user-facing copy. Most failures are DDB/service-health failures, but the
+// workspace-not-bound branch can happen if an admin unbinds the workspace
+// between the caller's auth lookup and the limiter's own existence read.
+func rateLimitErrorMessage(err error) string {
+	var storeErr *slackdata.Error
+	if errors.As(err, &storeErr) &&
+		storeErr.StatusCode == http.StatusNotFound &&
+		storeErr.Code == slackdata.ErrCodeWorkspaceNotBound {
+		return workspaceUnboundReply
+	}
+	return serviceUnreachableMessage
+}
+
 // ackWorkingOnIt is the user-visible ephemeral text returned synchronously
 // while async work runs. The hourglass keeps the user oriented that a
 // follow-up via response_url is on its way.
@@ -416,6 +430,20 @@ type Config struct {
 	// (see agentConfirmEnabled); production wires it in cmd/main.go.
 	PostMessageBlocks PostMessageBlocksFunc
 
+	// PostDMBlocks posts a Block Kit direct message (conversations.open then a
+	// chat.postMessage with blocks) — the DM analog of PostMessageBlocks. It
+	// delivers the `/qurl get dm:true` minted link as an "Enter Portal" URL button
+	// instead of a raw hyperlink. Nil makes getWork refuse `dm:true` (the privacy
+	// contract can't be met without it); production wires it in cmd/main.go.
+	PostDMBlocks PostDMBlocksFunc
+
+	// PostEphemeralBlocks posts a Block Kit chat.postEphemeral (visible only to
+	// userID) — the Block Kit analog of PostEphemeral. The confirm flow delivers a
+	// get's minted link this way in a channel/private channel as an "Enter Portal"
+	// URL button. Nil → the channel get delivery reports failure and the card
+	// downgrades; it is NOT part of the agentEnabled gate.
+	PostEphemeralBlocks PostEphemeralBlocksFunc
+
 	// AgentConfirmEnabled gates the propose→confirm→execute flow on top of the
 	// read-only conversation surface. While false (the default), a proposed
 	// mutation is surfaced as today's text preview and nothing executes; while
@@ -551,6 +579,22 @@ type PostEphemeralFunc func(ctx context.Context, teamID, enterpriseID, channelID
 // confirm flow passes escapeMrkdwnText output); the production impl should also
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
+
+// PostDMBlocksFunc posts a Block Kit direct message to slackUserID (conversations.open
+// then a chat.postMessage with blocks) on the per-workspace bot token — the DM analog
+// of PostMessageBlocksFunc, used to deliver a `/qurl get dm:true` link as an Enter
+// Portal URL button. fallbackText is the notification/non-block fallback (it carries
+// the raw URL so a non-block client isn't dead-ended). enterpriseID is passed for
+// Enterprise Grid token resolution, matching PostDMFunc.
+type PostDMBlocksFunc func(ctx context.Context, teamID, enterpriseID, slackUserID string, blocks []any, fallbackText string) error
+
+// PostEphemeralBlocksFunc posts a Block Kit chat.postEphemeral (visible only to userID)
+// on the per-workspace bot token — the Block Kit analog of PostEphemeralFunc. threadTS
+// threads it into the card's conversation. Like PostEphemeralFunc it's a standalone
+// message a same-response_url card-replace can't clobber, and it returns an error on a
+// non-ok response so the caller can downgrade the card. fallbackText is the
+// notification/non-block fallback.
+type PostEphemeralBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID string, blocks []any, fallbackText string) error
 
 // AppHomePublishFunc publishes a user's App Home tab via views.publish on the
 // per-workspace bot token (enterpriseID for Grid token resolution). blocks is the
@@ -1548,14 +1592,14 @@ func setupModeFlag(mode oauth.SetupMode) string {
 }
 
 // setupModeAction is the user-facing verb for an explicit setup mode, for copy.
-//
-//nolint:exhaustive // default maps SetupModeReuse and the empty mode to the plain "setup" verb.
 func setupModeAction(mode oauth.SetupMode) string {
 	switch mode {
 	case oauth.SetupModeRotate:
 		return "key rotation"
 	case oauth.SetupModeRepoint:
 		return "key repoint"
+	case oauth.SetupModeReuse:
+		return "setup"
 	default:
 		return "setup"
 	}
@@ -2076,7 +2120,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 
 // userHelpMessage renders the `/qurl help` text — the user-facing verbs
 // only. Verbs that depend on optional Config wiring are omitted when that
-// wiring is nil — a workspace without PostDM won't see the dm:true
+// wiring is nil — a workspace without PostDMBlocks won't see the dm:true
 // variant. The verbs still dispatch if a user types them directly; the
 // omission is just so help text doesn't advertise a path that will reply
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
@@ -2122,7 +2166,10 @@ func (h *Handler) userHelpMessage(command string) string {
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
-		if h.cfg.PostDM != nil {
+		// Gate on PostDMBlocks (the seam deliverGetDM uses to deliver the Enter Portal
+		// button), matching getWork's dm:true refusal — so help never advertises dm:true
+		// when its only reply would be ":warning: DM delivery is not configured".
+		if h.cfg.PostDMBlocks != nil {
 			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
@@ -2338,6 +2385,11 @@ const (
 	// respActionUpdate is the response_action value that swaps the current
 	// modal for a replacement view (the modal error responders use it).
 	respActionUpdate = "update"
+	// respFieldUnfurlLinks / respFieldUnfurlMedia disable link/media unfurling on a
+	// response_url block payload (postResponseBlocks) — kept as consts to match the
+	// other response-payload keys rather than bare literals.
+	respFieldUnfurlLinks = "unfurl_links"
+	respFieldUnfurlMedia = "unfurl_media"
 )
 
 func respondSlack(w http.ResponseWriter, text string) {

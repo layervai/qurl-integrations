@@ -24,10 +24,11 @@ function makeStore() {
     async recordQurlView({ qurlId, accessCount, consumed, eventId }) {
       const existing = rows.get(qurlId);
       if (!existing || (existing.lastEventId !== eventId && existing.accessCount < accessCount)) {
+        const firstView = !existing || !(existing.accessCount > 0);
         rows.set(qurlId, { accessCount, consumed, lastEventId: eventId });
-        return 'recorded';
+        return { result: 'recorded', firstView };
       }
-      return 'dedup';
+      return { result: 'dedup', firstView: false };
     },
     async getQurlViews(qurlIds) {
       const out = new Map();
@@ -37,6 +38,8 @@ function makeStore() {
       }
       return out;
     },
+    getSendRenderedCount: jest.fn(async () => 0),
+    findSendsByQurlId: jest.fn(async () => []),
     healthCheck: jest.fn(),
     getStats: jest.fn(() => ({})),
   };

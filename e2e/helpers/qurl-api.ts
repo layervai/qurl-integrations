@@ -83,6 +83,60 @@ export async function uploadFile(
   throw new Error(`uploadFile: still rate-limited after ${maxAttempts} attempts`);
 }
 
+/** Mint a render-at-mint per-recipient VIEW link for an already-uploaded
+ * resource, via the connector's `POST /api/mint_link/:resource_id`.
+ *
+ * This is the recipient path the fileviewer tunnel actually serves: in
+ * render-at-mint mode the connector bakes a per-recipient `views/<mint-id>`
+ * object against the fileviewer tunnel and returns a one-time `qurl.link` whose
+ * NHP knock resolves to `r_<tunnel>.qurl.site/views/<mint-id>` (200). The
+ * `qurl_link` returned by `/upload` is a DIFFERENT thing — the connector's
+ * "never-shared per-upload qURL" (handler.go: it targets `/resources/<md5>`, so
+ * its knock 404s) — so a tunnel view test MUST mint here, not reuse the upload
+ * link. Distinct from `mintLink` below: that hits the qurl-service mint API
+ * (`MINT_API_URL`); this hits the CONNECTOR (`uploadUrl` = the `/api` base).
+ *
+ * `expiresAt` is REQUIRED by render-at-mint (RFC3339; the connector clamps to
+ * its max-expiry cap rather than rejecting an over-cap value).
+ *
+ * Sends `n: 1` (mint exactly one link → read `links[0]`). The POST goes through
+ * `fetchWithTransientRetry`, which is safe here despite being non-idempotent:
+ * per the mint handler a 503 comes ONLY from the pre-bake "render-at-mint not
+ * ready" guard (so a retry can't double-bake a `views/<mint-id>` object),
+ * post-bake failures surface as 502 (which the helper does NOT retry for a
+ * POST), and a rate-limited mint is HTTP 429 (which it backs off on) — so,
+ * unlike `uploadFile`, no separate 200+`error` rate-limit loop is needed.
+ *
+ * `oneTimeUse` defaults true — single-view, matching `viewViaQurlLink`'s one
+ * knock+navigation per call. */
+export async function mintConnectorView(
+  uploadUrl: string,
+  resourceId: string,
+  apiKey: string,
+  opts: { expiresAt: string; oneTimeUse?: boolean },
+): Promise<{ qurl_link: string }> {
+  const res = await fetchWithTransientRetry(`${uploadUrl}/mint_link/${encodeURIComponent(resourceId)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ n: 1, expires_at: opts.expiresAt, one_time_use: opts.oneTimeUse ?? true }),
+  });
+  if (!res.ok) throw new Error(`mint_link failed: ${res.status} ${await res.text()}`);
+  const data = (await res.json()) as {
+    error?: string;
+    links?: Array<{ qurl_id: string; qurl_link: string; expires_at: string }>;
+  };
+  // Gate on the link itself, not a `success` flag: a non-200 already threw above
+  // (`!res.ok`), and a 200 always carries `links[]`, so a present `qurl_link` is
+  // the authoritative signal (mirrors uploadFile keying on `resource_id`).
+  const link = data.links?.[0];
+  if (!link?.qurl_link) {
+    throw new Error(`mint_link returned no link: ${JSON.stringify(data)}`);
+  }
+  // Return only the field this helper guarantees (and the caller uses); the
+  // response also carries qurl_id/expires_at, but only qurl_link is guard-checked.
+  return { qurl_link: link.qurl_link };
+}
+
 /** Mint a one-time qURL link for a resource */
 export async function mintLink(
   mintUrl: string,

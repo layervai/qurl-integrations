@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	qurlsdk "github.com/layervai/qurl-go/qurl"
+
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -270,5 +272,90 @@ func TestJSONFormatResolve(t *testing.T) {
 	}
 	if parsed.TargetURL != "https://api.example.com/data" {
 		t.Errorf("got TargetURL %q", parsed.TargetURL)
+	}
+}
+
+func TestTableFormatEnter(t *testing.T) {
+	handle := &qurlsdk.ResourceHandle{
+		RedirectURL: "https://r_abc123test.qurl.site",
+		OpenSeconds: 305,
+	}
+
+	var buf bytes.Buffer
+	if err := NewTableFormatter().FormatEnter(&buf, handle); err != nil {
+		t.Fatalf("FormatEnter: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"https://r_abc123test.qurl.site", "305", "entered"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTableFormatEnter_ZeroOpenSecondsOmitted(t *testing.T) {
+	handle := &qurlsdk.ResourceHandle{
+		RedirectURL: "https://r_abc123test.qurl.site",
+		OpenSeconds: 0,
+	}
+
+	var buf bytes.Buffer
+	if err := NewTableFormatter().FormatEnter(&buf, handle); err != nil {
+		t.Fatalf("FormatEnter: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "https://r_abc123test.qurl.site") {
+		t.Errorf("output missing target:\n%s", out)
+	}
+	// The "Access:" row must be omitted when OpenSeconds is zero.
+	if strings.Contains(out, "Access:") {
+		t.Errorf("expected no Access row for zero OpenSeconds:\n%s", out)
+	}
+}
+
+func TestJSONFormatEnter(t *testing.T) {
+	handle := &qurlsdk.ResourceHandle{
+		RedirectURL: "https://r_abc123test.qurl.site",
+		OpenSeconds: 305,
+	}
+
+	var buf bytes.Buffer
+	if err := (JSONFormatter{}).FormatEnter(&buf, handle); err != nil {
+		t.Fatalf("FormatEnter: %v", err)
+	}
+
+	var parsed EnterOutput
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed.Target != "https://r_abc123test.qurl.site" {
+		t.Errorf("got Target %q", parsed.Target)
+	}
+	if parsed.OpenSeconds != 305 {
+		t.Errorf("got OpenSeconds %d, want 305", parsed.OpenSeconds)
+	}
+	// Assert the repo-owned snake_case keys (not the SDK field names); target_url
+	// matches resolve's JSON key.
+	if !strings.Contains(buf.String(), `"target_url"`) || !strings.Contains(buf.String(), `"open_seconds"`) {
+		t.Errorf("expected repo-owned json keys target_url/open_seconds:\n%s", buf.String())
+	}
+}
+
+func TestJSONFormatEnter_ZeroOpenSecondsOmitted(t *testing.T) {
+	handle := &qurlsdk.ResourceHandle{
+		RedirectURL: "https://r_abc123test.qurl.site",
+		OpenSeconds: 0,
+	}
+
+	var buf bytes.Buffer
+	if err := (JSONFormatter{}).FormatEnter(&buf, handle); err != nil {
+		t.Fatalf("FormatEnter: %v", err)
+	}
+
+	// open_seconds carries omitempty, so a zero value must not appear.
+	if strings.Contains(buf.String(), "open_seconds") {
+		t.Errorf("expected open_seconds omitted for zero value:\n%s", buf.String())
 	}
 }

@@ -54,8 +54,24 @@ const request = require('supertest');
 const { app } = require('../src/server');
 const db = require('../src/store');
 const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
+const {
+  QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_PKCE_COOKIE,
+} = require('../src/utils/oauth-cookies');
+const { pkceChallengeForVerifier } = require('../src/utils/oauth-pkce');
+const { cookieValue } = require('./helpers/cookies');
 
 const originalFetch = globalThis.fetch;
+
+function extractStyleNonce(res) {
+  const csp = res.headers['content-security-policy'];
+  expect(csp).toBeDefined();
+  expect(csp).not.toContain('unsafe-inline');
+
+  const nonceMatch = csp.match(/style-src 'nonce-([A-Za-z0-9_-]+)'/);
+  expect(nonceMatch).not.toBeNull();
+  return nonceMatch[1];
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -84,6 +100,26 @@ describe('Discord install callback', () => {
       const res = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Missing authorization code');
+    });
+
+    it('uses one CSP nonce in the HTTP header and style tag', async () => {
+      const res = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
+      expect(res.status).toBe(400);
+
+      const nonce = extractStyleNonce(res);
+      // 16 random bytes encoded as unpadded base64url.
+      expect(nonce).toHaveLength(22);
+
+      expect(res.text).toContain(`<style nonce="${nonce}">`);
+      expect(res.text).not.toContain('Content-Security-Policy');
+      expect(res.text).not.toContain('unsafe-inline');
+    });
+
+    it('generates a fresh CSP nonce for each response', async () => {
+      const first = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
+      const second = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
+
+      expect(extractStyleNonce(first)).not.toBe(extractStyleNonce(second));
     });
 
     it('400s on missing guild_id (admin abandoned mid-install)', async () => {
@@ -161,6 +197,12 @@ describe('Discord install callback', () => {
       expect(verified.payload.guildId).toBe('guild-1');
       expect(verified.payload.discordUserId).toBe('987654321098765432');
 
+      const codeVerifier = cookieValue(res.headers['set-cookie'], QURL_OAUTH_PKCE_COOKIE);
+      expect(codeVerifier).not.toBeNull();
+      expect(loc.searchParams.get('code_challenge_method')).toBe('S256');
+      expect(loc.searchParams.get('code_challenge')).toBe(pkceChallengeForVerifier(codeVerifier));
+      expect(loc.searchParams.get('code_challenge')).not.toBe(codeVerifier);
+
       // Cookie binding — Stage-2 chain must set the same `qurl_setup_session`
       // cookie that /oauth/qurl/start sets — Stage-2 sets it at the
       // discord-install handler so the chained /oauth/qurl/callback
@@ -170,7 +212,8 @@ describe('Discord install callback', () => {
       const setCookie = res.headers['set-cookie'];
       expect(setCookie).toBeDefined();
       const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie;
-      expect(cookieHeader).toMatch(/qurl_setup_session=/);
+      expect(cookieHeader).toMatch(new RegExp(`${QURL_OAUTH_SESSION_COOKIE}=`));
+      expect(cookieHeader).toMatch(new RegExp(`${QURL_OAUTH_PKCE_COOKIE}=`));
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
       expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
@@ -241,12 +284,13 @@ describe('Discord install callback', () => {
       const setCookie = Array.isArray(stage2.headers['set-cookie'])
         ? stage2.headers['set-cookie'].join('\n')
         : stage2.headers['set-cookie'] || '';
-      const cookieMatch = setCookie.match(/qurl_setup_session=([^;]+)/);
-      expect(cookieMatch).not.toBeNull();
-      const cookieValue = cookieMatch[1];
+      const sessionCookieValue = cookieValue(setCookie, QURL_OAUTH_SESSION_COOKIE);
+      const pkceCookieValue = cookieValue(setCookie, QURL_OAUTH_PKCE_COOKIE);
+      expect(sessionCookieValue).not.toBeNull();
+      expect(pkceCookieValue).not.toBeNull();
       const stateFromRedirect = new URL(stage2.headers.location).searchParams.get('state');
       // The cookie value IS the state token (double-submit pattern).
-      expect(decodeURIComponent(cookieValue)).toBe(stateFromRedirect);
+      expect(sessionCookieValue).toBe(stateFromRedirect);
 
       // Replay the cookie on /oauth/qurl/callback — the browser would
       // do this because Path=/oauth/qurl matches the request path.
@@ -263,8 +307,11 @@ describe('Discord install callback', () => {
         });
       const stage1Callback = await request(app)
         .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(stateFromRedirect)}`)
-        .set('Cookie', `qurl_setup_session=${cookieValue}`);
+        .set('Cookie', `${QURL_OAUTH_SESSION_COOKIE}=${encodeURIComponent(sessionCookieValue)}; `
+          + `${QURL_OAUTH_PKCE_COOKIE}=${encodeURIComponent(pkceCookieValue)}`);
       expect(stage1Callback.status).toBe(200);
+      const tokenBody = new URLSearchParams(globalThis.fetch.mock.calls[0][1].body.toString());
+      expect(tokenBody.get('code_verifier')).toBe(pkceCookieValue);
       // Reaching the success page proves the cookie/state CSRF check
       // passed — i.e., the cookie minted on /oauth/discord/callback
       // would actually travel to /oauth/qurl/callback in a real

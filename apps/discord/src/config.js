@@ -314,6 +314,14 @@ function takeGatewayHandoffHmac() {
   return value;
 }
 
+// /qurl send + /qurl detect cooldowns. Resolved here (not inline in the
+// export literal) so QURL_DETECT_COOLDOWN_MS can DEFAULT to the resolved
+// send value — i.e. unset detect knob == current behavior (no decoupling
+// surprise), but an operator can tune the deanonymization-oracle throttle
+// independently of send cadence. See setDetectCooldown in commands.js.
+const sendCooldownMs = intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true });
+const detectCooldownMs = intEnv('QURL_DETECT_COOLDOWN_MS', sendCooldownMs, { minPositive: true });
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -423,6 +431,18 @@ module.exports = {
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
 
+  // Slug of the qURL reverse-tunnel resource that fronts the watermark-detect
+  // endpoint (#1101). connector.js's resolveDetectTarget() resolves this slug to
+  // a resource_id (`GET /resources?slug=…`), then self-mints a FRESH ephemeral
+  // qURL on it (`POST /resources/{id}/qurls`) and resolves that — the NHP knock
+  // for the bot's current IP — immediately before each /api/detect POST. No
+  // pre-seeded access token: the bot mints per call with its own QURL_API_KEY.
+  // A plain NON-secret env (e.g. `detect-sandbox` / `detect-prod`), read
+  // verbatim; no default. When unset, /qurl detect surfaces a clear
+  // configured-error (resolveDetectTarget throws) rather than silently failing.
+  // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
+  DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG,
+
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL
     || (process.env.NODE_ENV === 'production' ? 'https://get.qurl.link:9808' : 'http://localhost:9808'),
@@ -446,6 +466,14 @@ module.exports = {
   // a no-op until the task restarts; the deploy model handles this
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
+
+  // DETECT_COMMAND_ENABLED gates /qurl detect (#1101) exactly as
+  // MAP_COMMAND_ENABLED gates /qurl map: default OFF, same snapshot/restart
+  // semantics. The connector /api/detect backend 503/404s until the watermark
+  // stack is ACTIVATED (a separate gated step AFTER the connector deploys), so
+  // detect stays DARK until an operator flips this at activation — no
+  // visible-but-failing command in the interim.
+  DETECT_COMMAND_ENABLED: process.env.DETECT_COMMAND_ENABLED === 'true',
 
   // qURL send limits (/qurl send + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
@@ -476,7 +504,23 @@ module.exports = {
   // Per-guild operators can dial this down via the env override if
   // their qurl-service plan or DM-throughput posture demands it.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 20000, { minPositive: true }),
-  QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
+  QURL_SEND_COOLDOWN_MS: sendCooldownMs,
+  // Throttle for /qurl detect (the deanonymization oracle). Defaults to the
+  // send cooldown so behavior is unchanged unless an operator sets
+  // QURL_DETECT_COOLDOWN_MS explicitly — decoupled so a future send-cadence
+  // change can't silently re-tune the oracle. See setDetectCooldown.
+  QURL_DETECT_COOLDOWN_MS: detectCooldownMs,
+  // Leading-edge debounce for the sub-second view-counter fast-path
+  // (qurl-webhook.js editSenderCounterInBackground). On a high-fan-out
+  // send (cap QURL_SEND_MAX_RECIPIENTS, default 20000) every recipient's
+  // first view fires a qurl.accessed webhook; un-coalesced, each would
+  // PATCH the sender confirmation, storming Discord's per-message edit
+  // budget (429s). This bounds fast-path edits per send to ~1 per window
+  // per replica; distinct first-view aggregate writes are sharded in
+  // qurl_views so they do not funnel through one send row. Default to the
+  // largest sub-second window (900ms); larger env overrides are rejected
+  // back to that default rather than clamped.
+  QURL_VIEW_COUNTER_COALESCE_MS: intEnv('QURL_VIEW_COUNTER_COALESCE_MS', 900, { minPositive: true, max: 900 }),
 
   SHARD_ID,
 

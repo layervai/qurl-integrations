@@ -21,6 +21,7 @@ const logger = require('../logger');
 //        - guild_configs.qurl_api_key
 //        - orphaned_oauth_tokens.access_token
 //        - qurl_send_configs.attachment_url
+//        - qurl_send_configs.interaction_token
 //      Read each row with the OLD key, then write back with the NEW key
 //      BEFORE the cutover deploy. There is no in-process dual-key support.
 // Missing step 2 → rows encrypted with the old key become unreadable after

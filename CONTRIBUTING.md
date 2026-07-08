@@ -29,6 +29,8 @@ apps/
   teams/          # Microsoft Teams (planned)
   discord/        # Discord bot (planned)
   cli/            # CLI tool
+origins/
+  s3-static-connector/ # Reusable private S3 static origin image
 shared/           # Shared libraries used by all integrations
 ```
 
@@ -37,6 +39,7 @@ shared/           # Shared libraries used by all integrations
 | Directory | Who owns it | Can you modify it? |
 |-----------|------------|-------------------|
 | `apps/{app}/` | Maintainers | Yes — open a PR |
+| `origins/{origin}/` | Maintainers | Yes — open a PR |
 | `shared/` | Maintainers | PR requires maintainer review |
 | `.github/` | Maintainers | PR requires maintainer review |
 
@@ -68,7 +71,7 @@ All of these must pass before merge:
   - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
     `build`, `ci`, `chore`, `revert`
   - Scopes: `slack`, `teams`, `discord`, `cli`, `zapier`,
-    `chrome-extension`, `shared`, `ci`
+    `chrome-extension`, `origins`, `shared`, `ci`
     (`.github/workflows/pr-title.yml` also accepts repository-maintenance
     scopes `infra` and `deps`, tracked in #463.)
 - **Linting** passes (golangci-lint with 28+ linters — see `.golangci.yml`)

@@ -29,6 +29,7 @@ jest.mock('../src/config', () => ({
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
   QURL_SEND_COOLDOWN_MS: 30000,
+  QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   PENDING_LINK_EXPIRY_MINUTES: 30,
   ADMIN_USER_IDS: ['admin-1'],
@@ -138,11 +139,23 @@ const mockDb = {
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
+  // Cross-replica fast-path render-state persist (PR-B). Default resolves
+  // so the send pipeline's best-effort call is a no-op in tests that
+  // don't assert on it.
+  saveSendConfirmState: jest.fn().mockResolvedValue(undefined),
   // qurl_views webhook-fed reader. Default is an empty Map so a test
   // that doesn't override gets the "no views yet" path. Per-test
   // mockResolvedValueOnce drives the status-transition assertions.
   getQurlViews: jest.fn(async () => new Map()),
   recordQurlView: jest.fn(),
+  // Shared monotonic floor between the poll and the webhook fast-path.
+  // The poll now advances it after a confirmed counter render (so the
+  // fast-path can't step backwards). Default resolves true (advanced);
+  // tests asserting commit-after-edit override per-case. MUST exist on
+  // the mock — without it runTick's call throws, gets swallowed by the
+  // floor-advance try/catch, and the assertions below go vacuous.
+  tryAdvanceRenderedCount: jest.fn().mockResolvedValue(true),
+  getSendRenderedCount: jest.fn().mockResolvedValue(0),
 };
 jest.mock('../src/store', () => mockDb);
 
@@ -227,12 +240,15 @@ const {
   revokeAllLinks,
   renderRevokeMsg,
   renderSendConfirm,
+  renderViewCounter,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
   mintLinksInBatches,
   activeMonitors,
   executeSendPipeline,
   persistDispatchResult,
+  clearCooldown,
+  revokingSendLocks,
 } = _test;
 
 // ---------------------------------------------------------------------------
@@ -280,6 +296,32 @@ function makePipelineParams(overrides = {}) {
   };
 }
 
+function defer() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForMicrotaskExpectation(assertion, attempts = 10) {
+  // The Add click should reach the picker in a couple of microtasks; 10 keeps
+  // this deterministic without hiding a path that stopped reaching the picker.
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      lastError = err;
+      await Promise.resolve();
+    }
+  }
+  throw lastError;
+}
+
 // Accept-path verifier: pin that the named gate did NOT reject the
 // given params. Two branches both count as success:
 //   - executeSendPipeline throws something downstream → assert the
@@ -314,6 +356,22 @@ const POLL_INTERVAL = 15000;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  revokingSendLocks.clear();
+  // clearAllMocks resets call records but NOT queued one-shot
+  // implementations, so a `mockResolvedValueOnce` a test queues but the
+  // monitor never consumes would bleed into the next test's first
+  // getQurlViews. The monitor's poll cadence (and thus how many
+  // getQurlViews calls a `advanceTimersByTimeAsync` drains) is an
+  // implementation detail tests shouldn't be coupled to — reset the
+  // implementation queue and restore the "no views yet" default so each
+  // test starts from a known baseline regardless of tick count.
+  mockDb.getQurlViews.mockReset();
+  mockDb.getQurlViews.mockResolvedValue(new Map());
+  // Same one-shot-bleed reset for the shared-floor advance.
+  mockDb.tryAdvanceRenderedCount.mockReset();
+  mockDb.tryAdvanceRenderedCount.mockResolvedValue(true);
+  mockDb.getSendRenderedCount.mockReset();
+  mockDb.getSendRenderedCount.mockResolvedValue(0);
   // Drain any monitors a prior test left registered. activeMonitors is the
   // module-private set; clearing it prevents the LRU-cap eviction test
   // from being polluted by happy-path leftovers.
@@ -411,6 +469,194 @@ describe('monitorLinkStatus — view-counter render from qurl_views', () => {
   });
 });
 
+describe('monitorLinkStatus — shared monotonic floor with the webhook fast-path', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  it('advances last_rendered_count to the DISPLAYED count after a confirmed counter render', async () => {
+    // The poll is now a first-class renderer (coalescing makes the burst
+    // tail poll-only), so it must share the monotonic floor — else a
+    // stale fast-path read could step the display backwards. After it
+    // renders "1 viewed" it advances the floor to 1.
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      TWO_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+      '1m', 'Sent to 2 users', { components: [] }, 2,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalled();
+    // Floor advanced to exactly what was displayed (1), AFTER the edit.
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 1);
+    const editOrder = interaction.editReply.mock.invocationCallOrder[0];
+    const advOrder = mockDb.tryAdvanceRenderedCount.mock.invocationCallOrder[0];
+    expect(editOrder).toBeLessThan(advOrder);
+    monitor.stop();
+  });
+
+  it('clamps poll render to the persisted floor so it cannot step backwards after a fast-path edit', async () => {
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      [
+        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa1', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa2', qurlLink: 'https://q.test/2', recipientId: 'r2' },
+        { resourceId: 'res-1', qurlId: 'q_aaaaaaaaaa3', qurlLink: 'https://q.test/3', recipientId: 'r3' },
+      ],
+      [
+        { id: 'r1', username: 'Alice' },
+        { id: 'r2', username: 'Bob' },
+        { id: 'r3', username: 'Carol' },
+      ],
+      '1m', 'Sent to 3 users', { components: [] }, 3,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    mockDb.getSendRenderedCount.mockResolvedValueOnce(2);
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('👀 2 viewed / 1 pending'),
+    }));
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 2);
+    // The local counter is not mutated to the floor; it catches up from
+    // source qurl_views rows to avoid double-counting later pending flips.
+    expect(monitor.getFullMsg()).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
+    monitor.stop();
+  });
+
+  it('falls back to the local poll count when the persisted floor read fails', async () => {
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      TWO_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }],
+      '1m', 'Sent to 2 users', { components: [] }, 2,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    mockDb.getSendRenderedCount.mockRejectedValueOnce(new Error('DDB floor read failed'));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('👀 1 viewed / 1 pending'),
+    }));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'Monitor floor-read failed; rendering local poll count',
+      { sendId: 'send-1', error: 'DDB floor read failed' },
+    );
+    expect(mockDb.tryAdvanceRenderedCount).toHaveBeenCalledWith('send-1', 1);
+    monitor.stop();
+  });
+
+  it('COMMIT-AFTER-EDIT: a failed poll render does NOT advance the floor (mirror of the fast-path fence)', async () => {
+    // If the poll advanced the floor on a render that DIDN'T land, the
+    // fast-path's N<=L skip would strand a count never displayed —
+    // stuck-counter, round two. So advance only on a confirmed edit.
+    const interaction = makeInteraction({
+      editReply: jest.fn().mockRejectedValue(new Error('Discord 500')),
+    });
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1,
+    );
+    mockDb.getQurlViews.mockResolvedValueOnce(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: false }],
+    ]));
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(interaction.editReply).toHaveBeenCalled(); // attempted…
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled(); // …but failed → no advance
+    monitor.stop();
+  });
+
+  it('does NOT advance the floor on a degraded send (no counter displayed)', async () => {
+    // Degraded sends render bare baseMsg (no counter) and the fast-path
+    // is disarmed; advancing the floor here would strand a counter that
+    // was never shown. The degraded early-return skips getQurlViews AND
+    // the advance.
+    const interaction = makeInteraction();
+    const DEGRADED_SET = [
+      { resourceId: 'res-1', qurlId: '', qurlLink: 'https://q.test/1', recipientId: 'r1' },
+    ];
+    const monitor = monitorLinkStatus(
+      'send-1', interaction,
+      DEGRADED_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '1m', 'Sent', { components: [] }, 1,
+    );
+    await jest.advanceTimersByTimeAsync(POLL_INTERVAL);
+
+    expect(mockDb.getQurlViews).not.toHaveBeenCalled();
+    expect(mockDb.tryAdvanceRenderedCount).not.toHaveBeenCalled();
+    monitor.stop();
+  });
+});
+
+describe('monitorLinkStatus — early-poll latency (long-expiry sends tick within seconds)', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  // Regression for the "👀 0 viewed" latency bug (operator-confirmed
+  // 2026-06-17): the sub-second SQS push silent-drops on the replicas
+  // that don't host the monitor (load-bearing by design — see
+  // view-update-registry.js), so the polling fallback is the path that
+  // actually renders the counter on most sends. Before the early-poll
+  // ramp, a long-expiry send polled on the flat steady interval
+  // (max(15s, min(60s, expiryMs/10)) = 60s for a 30m expiry), so a view
+  // that landed seconds after the send wasn't reflected until the next
+  // 60s tick — "far too much latency" for a counter the product calls
+  // sub-second. The dense early phase polls every few seconds for the
+  // first window of the monitor's life, so the view renders within
+  // seconds regardless of expiry.
+  //
+  // 30m expiry is load-bearing: at the old code's steady interval this
+  // is 60s, so advancing only ~20s would read 0 — that's the regression
+  // this test guards. (A short '1m' expiry already polled at 15s, so it
+  // would not exercise the bug.) Keep the early ramp at ~5s until the
+  // live cross-replica PATCH primitive is verified, so a missed fast-path
+  // still cannot regress the backstop below #839.
+  it('a view recorded seconds after a 30m-expiry send is reflected within ~5s, not ~60s', async () => {
+    const interaction = makeInteraction();
+    const monitor = monitorLinkStatus(
+      'send-latency', interaction,
+      ONE_LINK_SET,
+      [{ id: 'r1', username: 'Alice' }],
+      '30m', 'Sent to 1 user', { components: [] }, 1,
+    );
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
+
+    // First tick (~3s) runs before the view lands — counter stays 0.
+    await jest.advanceTimersByTimeAsync(3000);
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 0 viewed / 1 pending');
+
+    // The recipient opens the link a few seconds into the send.
+    mockDb.getQurlViews.mockResolvedValue(new Map([
+      ['q_aaaaaaaaaa1', { accessCount: 1, consumed: true }],
+    ]));
+
+    // Advance into the early window (next tick at ~8s) but well short of
+    // the old 60s steady interval. The early backstop must have caught the
+    // view by now — a flat-60s regression would still read 0.
+    await jest.advanceTimersByTimeAsync(6000);
+
+    expect(monitor.getFullMsg()).toBe('Sent to 1 user\n👀 1 viewed / 0 pending');
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('👀 1 viewed / 0 pending'),
+    }));
+    monitor.stop();
+  });
+});
+
 describe('monitorLinkStatus — empty-qurl_id boundary guard', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
@@ -463,23 +709,41 @@ describe('monitorLinkStatus — first-poll cadence (BatchGet replaces upstream f
     monitor.stop();
   });
 
-  it('subsequent ticks honor standard pollInterval after the fast first tick', async () => {
+  it('keeps the 5s early backstop during the early window, then decays to the steady interval', async () => {
+    // 30m expiry → steady interval = 60s; early phase = every ~5s for the
+    // first 90s. The webhook fast-path owns normal sub-second latency, but
+    // the poll backstop stays at #839's 5s floor until the live
+    // cross-replica PATCH primitive is verified.
     const monitor = monitorLinkStatus(
       'send-1', makeInteraction(),
       ONE_LINK_SET,
       [{ id: 'r1', username: 'Alice' }],
-      '1m', 'Sent', { components: [] }, 1,
+      '30m', 'Sent', { components: [] }, 1,
     );
 
+    // First tick at ~3s.
     await jest.advanceTimersByTimeAsync(3000);
-    const callsAfterFirstTick = mockDb.getQurlViews.mock.calls.length;
-    expect(callsAfterFirstTick).toBeGreaterThanOrEqual(1);
+    expect(mockDb.getQurlViews).toHaveBeenCalledTimes(1);
 
-    await jest.advanceTimersByTimeAsync(3000); // t=6s — no tick due
-    expect(mockDb.getQurlViews.mock.calls.length).toBe(callsAfterFirstTick);
+    // Dense early phase: ~5s spacing → several ticks over the next 20s.
+    // Floor-bound assertion so
+    // the exact boundary count isn't brittle; the point is the early
+    // phase still ticks several times within the window (a regression to
+    // the flat 60s steady would yield 0 more here).
+    await jest.advanceTimersByTimeAsync(20000);
+    const callsAfterEarly = mockDb.getQurlViews.mock.calls.length;
+    expect(callsAfterEarly).toBeGreaterThanOrEqual(4);
 
-    await jest.advanceTimersByTimeAsync(12500); // cross t=18s
-    expect(mockDb.getQurlViews.mock.calls.length).toBeGreaterThan(callsAfterFirstTick);
+    // After the 90s early window, cadence decays to the 60s steady
+    // interval. Drain past earlyPhaseUntil so the last early tick (~93s)
+    // has rescheduled at the 60s steady delay; a SHORT advance then yields
+    // no new tick (we're well inside that 60s gap), proving the decay.
+    // (A larger advance would cross the steady tick and false-fail — the
+    // point is the cadence widened, not that it stopped.)
+    await jest.advanceTimersByTimeAsync(90000); // past earlyPhaseUntil; drains remaining early ticks
+    const callsAtWindowEnd = mockDb.getQurlViews.mock.calls.length;
+    await jest.advanceTimersByTimeAsync(10000); // 10s ≪ 60s steady interval
+    expect(mockDb.getQurlViews.mock.calls.length).toBe(callsAtWindowEnd);
     monitor.stop();
   });
 });
@@ -669,6 +933,66 @@ describe('monitorLinkStatus — addRecipients() + stop() races', () => {
       expect.any(Object),
     );
   });
+
+  it('re-arm racing a mid-await tick keeps a single poll chain (loopGen guard)', async () => {
+    // The race cr flagged: a tick suspended inside `await getQurlViews`
+    // resumes AFTER the push path flipped the last link (allDone) and a
+    // /qurl add re-armed the loop with a fresh timer. Without the loopGen
+    // guard the stale resumed tick also arm()s, leaving TWO concurrent
+    // poll chains (double the BatchGet rate) until stop()/the 14-min cap.
+    // (Bounded + self-healing — stop() nulls the closure refs, so there's
+    // no leak past stop — but the guard keeps the "single timer handle"
+    // invariant exact rather than commented-around.)
+    //
+    // Driving allDone REQUIRES the push path: only handleViewUpdate →
+    // onAllDone() sets allDone from outside a running tick. So this test
+    // enables the push and dispatches through the real registry.
+    const config = require('../src/config');
+    const registry = require('../src/view-update-registry');
+    const prevFlag = config.ENABLE_VIEW_UPDATE_PUSH;
+    config.ENABLE_VIEW_UPDATE_PUSH = true;
+    try {
+      const interaction = makeInteraction();
+      // First tick blocks until released — simulates a tick suspended in
+      // its getQurlViews await across the re-arm; later ticks are instant.
+      let releaseFirstTick;
+      mockDb.getQurlViews
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseFirstTick = () => resolve(new Map()); }));
+
+      const monitor = monitorLinkStatus(
+        'send-rearm-race', interaction,
+        ONE_LINK_SET,
+        [{ id: 'r1', username: 'Alice' }],
+        '1m', 'Sent to 1 user', { components: [] }, 1,
+      );
+
+      // First tick (~3s) suspends inside getQurlViews.
+      await jest.advanceTimersByTimeAsync(3000);
+      expect(typeof releaseFirstTick).toBe('function');
+
+      // Push path flips the only link → onAllDone() sets allDone, then
+      // /qurl add re-arms the loop (allDone → false, fresh timer).
+      registry.dispatch('q_aaaaaaaaaa1', { accessCount: 1 });
+      monitor.addRecipients(1, [{ qurlId: 'q_aaaaaaaaaa9', username: 'Eve' }]);
+
+      // Resume the now-stale first tick. The guard must suppress its
+      // reschedule so only the re-arm's chain remains.
+      releaseFirstTick();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Measure the poll RATE over one dense window. One chain ticks
+      // every 5s (~3 ticks in 15s); a stale-tick orphan would double it.
+      const callsBefore = mockDb.getQurlViews.mock.calls.length;
+      await jest.advanceTimersByTimeAsync(15000);
+      const ticksInWindow = mockDb.getQurlViews.mock.calls.length - callsBefore;
+      expect(ticksInWindow).toBeLessThanOrEqual(4); // single chain; two would be ~6+
+      monitor.stop();
+    } finally {
+      config.ENABLE_VIEW_UPDATE_PUSH = prevFlag;
+      registry._test._resetForTest();
+    }
+  });
 });
 
 describe('monitorLinkStatus — edits always go through interaction.editReply (ephemeral-safe)', () => {
@@ -855,6 +1179,21 @@ describe('revokeAllLinks', () => {
     await expect(
       revokeAllLinks('send-throw', 'sender-1', 'apikey'),
     ).rejects.toThrow('DDB throttled');
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).not.toContain('revoke_success');
+    expect(events).not.toContain('revoke_failed');
+  });
+
+  it('does not delete links when recording the revoked state fails', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
+    mockDb.markSendRevoked.mockRejectedValueOnce(new Error('DDB write failed'));
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    await expect(
+      revokeAllLinks('send-mark-fail', 'sender-1', 'apikey'),
+    ).rejects.toThrow('DDB write failed');
 
     expect(mockDeleteLink).not.toHaveBeenCalled();
     const events = logger.audit.mock.calls.map(c => c[0]);
@@ -1249,6 +1588,39 @@ describe('persistDispatchResult — divergence guard', () => {
   });
 });
 
+describe('renderViewCounter — pure "👀 N viewed / M pending" line', () => {
+  // This is the byte-identity anchor: both the in-memory monitor's
+  // buildStatusMsg() and PR-B's off-monitor fast-path render through this
+  // pure fn, so pinning its exact output here guarantees the two render
+  // sites can't drift. The strings below MUST match what the pre-extraction
+  // buildStatusMsg() produced (PR-A is behavior-neutral).
+  it('degraded → baseMsg alone (no counter line)', () => {
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 3 users', viewed: 1, expectedCount: 3, degraded: true,
+    })).toBe('Sent to 3 users');
+  });
+
+  it('normal → "<base>\\n👀 X viewed / Y pending"', () => {
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 3 users', viewed: 1, expectedCount: 3, degraded: false,
+    })).toBe('Sent to 3 users\n👀 1 viewed / 2 pending');
+  });
+
+  it('all viewed → 0 pending', () => {
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 2 users', viewed: 2, expectedCount: 2, degraded: false,
+    })).toBe('Sent to 2 users\n👀 2 viewed / 0 pending');
+  });
+
+  it('pending floors at 0 when viewed > expectedCount (no negative pending)', () => {
+    // Race shape: a webhook double-fire / a count landing before
+    // expectedCount is bumped by /qurl add. Must never render "-1 pending".
+    expect(renderViewCounter({
+      baseMsg: 'Sent to 1 user', viewed: 3, expectedCount: 1, degraded: false,
+    })).toBe('Sent to 1 user\n👀 3 viewed / 0 pending');
+  });
+});
+
 describe('renderSendConfirm — post-send confirmation overflow', () => {
   // Common args.
   const baseArgs = {
@@ -1585,6 +1957,25 @@ describe('handleAddRecipients — pre-flight guards', () => {
     );
 
     expect(result.msg).toMatch(/incomplete/i);
+  });
+
+  it('refuses before minting when the send was revoked while Add Recipients was pending', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      revoked_at: '2026-06-17T20:00:00Z',
+    });
+
+    const result = await handleAddRecipients(
+      'send-revoked', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toBe('Cannot add recipients — this send has already been revoked.');
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
 
   // newRecipients carries {id, username} so callers can render added
@@ -1939,6 +2330,30 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
     }));
   });
 
+  it('file send: mint partial metadata reaches the primary failure log without links', async () => {
+    const interaction = makeInteraction();
+    const partialErr = Object.assign(new Error('Connector mint_link failed (502)'), {
+      status: 502,
+      partialLinkCount: 2,
+      partialQurlIds: ['q_partial_one', 'q_partial_two'],
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockRejectedValueOnce(partialErr);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to prepare QURL links',
+      expect.objectContaining({
+        status: 502,
+        partial_link_count: 2,
+        partial_qurl_ids: ['q_partial_one', 'q_partial_two'],
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('qurl.link');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('at_secret');
+  });
+
   it('file send: quota_exceeded does NOT emit at the primary site either', async () => {
     const interaction = makeInteraction();
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(8) });
@@ -1969,6 +2384,339 @@ describe('executeSendPipeline — QURL_SEND_CREATE_LINK_FAILURE emission (#276, 
   });
 });
 
+describe('executeSendPipeline — Revoke/Add Recipients mutual exclusion (#199)', () => {
+  async function setupRevocableSend() {
+    const collectHandlers = {};
+    const response = {
+      createMessageComponentCollector: jest.fn(() => ({
+        on: jest.fn((event, handler) => {
+          collectHandlers[event] = handler;
+        }),
+      })),
+    };
+    const interaction = makeInteraction({
+      editReply: jest.fn().mockResolvedValue(response),
+    });
+    const revokeStarted = defer();
+    const finishRevoke = defer();
+
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-initial', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/original', resource_id: 'res-initial', qurl_id: 'q_original' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    mockDb.saveSendConfig.mockResolvedValue(undefined);
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { recipient_discord_id: 'u1', resource_id: 'res-initial', dm_channel_id: 'dm-c', dm_message_id: 'dm-m' },
+    ]);
+    mockDb.markSendRevoked.mockResolvedValue(undefined);
+    mockDeleteLink.mockReset();
+    mockDeleteLink.mockImplementationOnce(async () => {
+      revokeStarted.resolve();
+      await finishRevoke.promise;
+      return undefined;
+    });
+
+    await executeSendPipeline(interaction, makePipelineParams({
+      recipients: [{ id: 'u1', username: 'Alice' }],
+    }));
+    expect(collectHandlers.collect).toEqual(expect.any(Function));
+    const sendId = mockDb.saveSendConfig.mock.calls[0][0].sendId;
+    const makeClick = (action) => ({
+      customId: `qurl_${action}_${sendId}`,
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+      reply: jest.fn().mockResolvedValue(undefined),
+    });
+
+    return {
+      collect: collectHandlers.collect,
+      finishRevoke,
+      interaction,
+      makeClick,
+      revokeStarted,
+      sendId,
+    };
+  }
+
+  it('rejects Add Recipients while Revoke is in flight so post-revoke mints cannot survive', async () => {
+    const {
+      collect, finishRevoke, interaction, makeClick, revokeStarted,
+    } = await setupRevocableSend();
+    const revokeClick = makeClick('revoke');
+    const addClick = makeClick('add');
+
+    const revokePromise = collect(revokeClick);
+    await revokeStarted.promise;
+    await collect(addClick);
+    finishRevoke.resolve();
+    await revokePromise;
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Already revoking links for this send.',
+      ephemeral: true,
+    });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+    }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked for: Alice'),
+    }));
+  });
+
+  it('rejects Add Recipients while another collector is revoking the same send', async () => {
+    const { collect, makeClick, sendId } = await setupRevocableSend();
+    revokingSendLocks.add(sendId);
+
+    try {
+      const addClick = makeClick('add');
+      await collect(addClick);
+
+      expect(addClick.reply).toHaveBeenCalledWith({
+        content: 'Already revoking links for this send.',
+        ephemeral: true,
+      });
+      expect(mockMintLinks).toHaveBeenCalledTimes(1);
+      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+      expect(mockDeleteLink).not.toHaveBeenCalled();
+    } finally {
+      revokingSendLocks.delete(sendId);
+    }
+  });
+
+  it('tells Revoke clicks when another collector is already revoking the send', async () => {
+    const { collect, makeClick, sendId } = await setupRevocableSend();
+    revokingSendLocks.add(sendId);
+
+    try {
+      const revokeClick = makeClick('revoke');
+      await collect(revokeClick);
+
+      expect(revokeClick.reply).toHaveBeenCalledWith({
+        content: 'Already revoking links for this send.',
+        ephemeral: true,
+      });
+      expect(revokeClick.deferUpdate).not.toHaveBeenCalled();
+      expect(mockDeleteLink).not.toHaveBeenCalled();
+    } finally {
+      revokingSendLocks.delete(sendId);
+    }
+  });
+
+  it('does not re-delete and uses generic Add wording when a stale collector sees the send already revoked', async () => {
+    const { collect, interaction, makeClick } = await setupRevocableSend();
+    mockDb.getSendConfig.mockResolvedValueOnce({ revoked_at: '2026-06-17T00:00:00.000Z' });
+    mockDeleteLink.mockReset();
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(revokeClick.deferUpdate).toHaveBeenCalled();
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockDb.markSendRevoked).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: 'Links for this send have already been revoked.',
+      components: [],
+    });
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'This send has already been revoked. Add Recipients is disabled.',
+      ephemeral: true,
+    });
+  });
+
+  it('continues button revoke when the revoked-state pre-check fails', async () => {
+    const {
+      collect, finishRevoke, interaction, makeClick, revokeStarted, sendId,
+    } = await setupRevocableSend();
+    mockDb.getSendConfig.mockRejectedValueOnce(new Error('DDB read failed'));
+
+    const revokePromise = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await revokePromise;
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Could not pre-check send revoked state before button revoke',
+      { sendId, error: 'DDB read failed' },
+    );
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+    expect(mockDb.markSendRevoked).toHaveBeenCalledWith(sendId, 'sender-1');
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Revoked 1/1 user.'),
+    }));
+  });
+
+  it('rejects Add Recipients after Revoke succeeds so stale clicks cannot mint new links', async () => {
+    const {
+      collect, finishRevoke, makeClick, revokeStarted, sendId,
+    } = await setupRevocableSend();
+    const revokePromise = collect(makeClick('revoke'));
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await revokePromise;
+    expect(revokingSendLocks.has(sendId)).toBe(false);
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Links for this send have already been revoked.',
+      ephemeral: true,
+    });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses no-live-links wording when stale Add clicks follow an empty revoke', async () => {
+    const { collect, makeClick } = await setupRevocableSend();
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockResolvedValueOnce([]);
+    mockDeleteLink.mockReset();
+
+    await collect(makeClick('revoke'));
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'No live links remain for this send.',
+      ephemeral: true,
+    });
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses partial-revoke wording when stale Add clicks follow a partial revoke', async () => {
+    const { collect, makeClick } = await setupRevocableSend();
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { recipient_discord_id: 'u1', resource_id: 'res-ok', dm_channel_id: 'dm-c', dm_message_id: 'dm-m', dm_status: 'sent' },
+      { recipient_discord_id: 'u2', resource_id: 'res-failed', dm_channel_id: 'dm-c2', dm_message_id: 'dm-m2', dm_status: 'sent' },
+    ]);
+    mockDeleteLink.mockReset();
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('delete failed'));
+
+    await collect(makeClick('revoke'));
+
+    const addClick = makeClick('add');
+    await collect(addClick);
+
+    expect(addClick.reply).toHaveBeenCalledWith({
+      content: 'Revoke already ran for this send. Add Recipients is disabled.',
+      ephemeral: true,
+    });
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows Add Recipients after Revoke fails because links still exist', async () => {
+    const { collect, makeClick, interaction } = await setupRevocableSend();
+    mockDb.getSendItems.mockReset();
+    mockDb.getSendItems.mockRejectedValueOnce(new Error('ddb unavailable'));
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'Failed to revoke links. Try `/qurl revoke` instead.',
+      components: [],
+    }));
+    mockDeleteLink.mockReset();
+
+    const selectInteraction = {
+      users: makeUsersCollection([{ id: 'u2', username: 'Bob', bot: false }]),
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+    };
+    const selectReply = {
+      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
+    };
+    const addClick = makeClick('add');
+    addClick.reply.mockResolvedValueOnce(selectReply);
+
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-initial', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-added', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValueOnce([
+      {
+        qurl_link: 'https://q.test/added',
+        qurl_id: 'q_added',
+        resource_id: 'res-added',
+      },
+    ]);
+
+    try {
+      await collect(addClick);
+
+      expect(addClick.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: 'Select additional recipients:',
+        fetchReply: true,
+      }));
+      expect(selectInteraction.deferUpdate).toHaveBeenCalled();
+      expect(mockMintLinks).toHaveBeenCalledTimes(2);
+      expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(2);
+      expect(selectInteraction.editReply).toHaveBeenCalledWith({
+        content: 'Added 1 recipient',
+        components: [],
+      });
+    } finally {
+      // Add sets the per-user send cooldown before opening the picker; clear it
+      // as test teardown so later tests do not inherit this sender's cooldown.
+      clearCooldown('sender-1');
+    }
+  });
+
+  it('rejects Revoke while Add Recipients is waiting on selection', async () => {
+    const {
+      collect, finishRevoke, makeClick, revokeStarted,
+    } = await setupRevocableSend();
+    const selectPending = defer();
+    const selectReply = {
+      awaitMessageComponent: jest.fn(() => selectPending.promise),
+    };
+    const addClick = makeClick('add');
+    addClick.reply.mockResolvedValueOnce(selectReply);
+    const addPromise = collect(addClick);
+    await waitForMicrotaskExpectation(() => {
+      expect(selectReply.awaitMessageComponent).toHaveBeenCalled();
+    });
+
+    const revokeClick = makeClick('revoke');
+    await collect(revokeClick);
+
+    expect(revokeClick.reply).toHaveBeenCalledWith({
+      content: 'Already processing an "Add Recipients" action. Finish the current selection or try again in a moment.',
+      ephemeral: true,
+    });
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+
+    selectPending.reject(Object.assign(new Error('time'), { code: 'InteractionCollectorError' }));
+    await addPromise;
+
+    const retryClick = makeClick('revoke');
+    const retryPromise = collect(retryClick);
+    await revokeStarted.promise;
+    finishRevoke.resolve();
+    await retryPromise;
+
+    expect(retryClick.deferUpdate).toHaveBeenCalled();
+    expect(mockDeleteLink).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch (#352)', () => {
   // Pins the invariant that a thrown `expiryToMs` aborts the dispatch
   // BEFORE any DDB rows are written. Today's `expiryToMs` falls back
@@ -1990,7 +2738,7 @@ describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     mockTime.expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs failure'); });
 
     await expect(handleAddRecipients(
@@ -2015,7 +2763,7 @@ describe('handleAddRecipients — DB failure mid-flow', () => {
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
     mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
-    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
     mockDb.recordQURLSendBatch.mockRejectedValueOnce(new Error('DB unavailable'));
 
     const result = await handleAddRecipients(
@@ -2294,6 +3042,178 @@ describe('mintLinksInBatches', () => {
 
     expect(result).toHaveLength(0);
     expect(mockMintLinks).not.toHaveBeenCalled();
+  });
+
+  it('forwards guildId to mintLinks on EVERY batch (#1101 attribution)', async () => {
+    // guildId threads through the batcher into mintLinks so the connector
+    // can guild-scope a watermark-attribution lookup. Pin it across a
+    // re-upload boundary (>TOKENS_PER_RESOURCE) so a regression that drops
+    // it on the second batch is caught too.
+    mockMintLinks
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/${i}` })))
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/10' }]);
+    const reuploadFn = jest.fn().mockResolvedValueOnce({ resource_id: 'res-2' });
+
+    await mintLinksInBatches({
+      initialResourceId: 'res-1',
+      reuploadFn,
+      expiresAt: new Date().toISOString(),
+      recipientCount: 11,
+      apiKey: 'apikey',
+      guildId: 'guild-77',
+    });
+
+    expect(mockMintLinks).toHaveBeenCalledTimes(2);
+    for (const call of mockMintLinks.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ guildId: 'guild-77' }));
+    }
+  });
+});
+
+// ===========================================================================
+// guild_id threading end-to-end (#1101) — the attribution linchpin
+// ===========================================================================
+//
+// These pin that the SEND pipelines actually pass interaction.guildId into
+// both the mint AND the DDB row write. The isolated connector/store tests
+// verify each function HONORS a guildId it's handed; these verify the
+// pipelines HAND it the right one. Without this, deleting the
+// `guildId: interaction.guildId` line would leave every other test green
+// while silently making every /qurl detect return "no match".
+describe('executeSendPipeline — guild_id threading (#1101)', () => {
+  it('threads interaction.guildId into BOTH mintLinks and recordQURLSendBatch (file send)', async () => {
+    const interaction = makeInteraction({ guildId: 'guild-1' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    // Mint carried the guild (via mintLinksInBatches → mintLinks).
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ guildId: 'guild-1' }),
+    );
+    // Every persisted row carried the guild for the detect read-path filter.
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+    );
+  });
+});
+
+// ===========================================================================
+// Cross-replica view-counter fast-path render-state persist (feat #60, PR-B)
+// ===========================================================================
+//
+// After the initial confirmation editReply, executeSendPipeline persists
+// the render state (token + appId + expectedCount + collapsed baseMsg +
+// TTL) so the webhook receiver can edit the counter from any replica.
+// These pin (a) the send-time persist carries the live token + the
+// COLLAPSED base (not getFullMsg's counter line), and (b) the /qurl add
+// re-persist updates ONLY count + base and NEVER nulls the token — the
+// silent regression that would permanently disarm the fast-path after a
+// single /qurl add.
+describe('executeSendPipeline — view-counter fast-path render-state persist', () => {
+  it('persists token + appId + collapsed baseMsg + expected_count after editReply', async () => {
+    const interaction = makeInteraction({
+      token: 'interaction-tok-live', applicationId: 'app-123', guildId: 'guild-1',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockDb.saveSendConfirmState).toHaveBeenCalledTimes(1);
+    const [sendId, fields] = mockDb.saveSendConfirmState.mock.calls[0];
+    expect(typeof sendId).toBe('string');
+    expect(fields.interactionToken).toBe('interaction-tok-live');
+    expect(fields.interactionAppId).toBe('app-123');
+    expect(fields.expectedCount).toBe(1);
+    expect(fields.viewedCount).toBe(0);
+    // The COLLAPSED base — the "Sent to N users | Expires…" header, NOT a
+    // string carrying the "👀 …" counter line (which would double-stamp
+    // when the fast-path re-renders through renderViewCounter).
+    expect(typeof fields.confirmBaseMsg).toBe('string');
+    expect(fields.confirmBaseMsg).toContain('Sent to 1 user');
+    expect(fields.confirmBaseMsg).not.toContain('👀');
+    // TTL is epoch seconds in the future (token self-reaps at ~the real
+    // ~15-min Discord token TTL, just above the 14-min monitor cap).
+    expect(fields.confirmExpiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  });
+
+  it('does NOT arm the fast-path on a view-counter-degraded send (link missing qurl_id)', async () => {
+    // A degraded send (any link without a qurl_id) renders the BARE
+    // baseMsg with no counter — the fast-path can't see the degrade and
+    // would stamp a forbidden partial-attribution "N viewed", so the
+    // send-time gate must skip persisting the render-state entirely.
+    const interaction = makeInteraction({ token: 'tok-live', applicationId: 'app-123', guildId: 'guild-1' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    // Mint returns a link WITHOUT qurl_id → qurlLinks[i].qurlId undefined → degraded.
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockDb.saveSendConfirmState).not.toHaveBeenCalled();
+  });
+
+  it('skips the persist when no interaction token is present (legacy/worker w/o token)', async () => {
+    const interaction = makeInteraction({ token: undefined, applicationId: 'app-123' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await executeSendPipeline(interaction, makePipelineParams());
+
+    expect(mockDb.saveSendConfirmState).not.toHaveBeenCalled();
+  });
+
+  it('a send-time persist failure is logged-swallowed, not thrown (DMs already delivered)', async () => {
+    const interaction = makeInteraction({ token: 'tok', applicationId: 'app-123' });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_id: 'q_aaaaaaaaaa1', qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+    mockDb.saveSendConfirmState.mockRejectedValueOnce(new Error('ddb throttle'));
+
+    // Must not reject — the send already delivered.
+    await expect(executeSendPipeline(interaction, makePipelineParams())).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('saveSendConfirmState failed'),
+      expect.objectContaining({ error: 'ddb throttle' }),
+    );
+  });
+});
+
+describe('handleAddRecipients — guild_id threading (#1101)', () => {
+  it('threads originalInteraction.guildId into BOTH mintLinks and recordQURLSendBatch', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-file-orig', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/add', resource_id: 'res-file-new' }]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-add', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction({ guildId: 'guild-1' }), 'apikey',
+    );
+
+    expect(mockMintLinks).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ guildId: 'guild-1' }),
+    );
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ guildId: 'guild-1' })]),
+    );
   });
 });
 
@@ -2705,13 +3625,12 @@ describe('executeSendPipeline — channel notification on @everyone / voice mode
     // U+202E (RIGHT-TO-LEFT OVERRIDE) in a public post would flip the
     // announcement RTL for every viewer in the channel.
     const interaction = makeInteraction({
-      member: { displayName: 'Alice‮Evil' },
+      member: { displayName: 'Alice\u202EEvil' },
       user: { id: 'sender-1', username: 'Alice' },
     });
     await executeSendPipeline(interaction, makePipelineParams({ recipientMode: 'everyone' }));
     expect(mockSendChannelMessage).toHaveBeenCalledTimes(1);
     const [, message] = mockSendChannelMessage.mock.calls[0];
-    expect(message.content).not.toMatch(/‮/);
+    expect(message.content).not.toMatch(/\u202E/u);
   });
 });
-
