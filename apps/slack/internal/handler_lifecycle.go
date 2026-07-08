@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -313,7 +315,8 @@ type workspaceStateBeforeIdentityDeleter interface {
 //   - workspace_state (auth provider): the encrypted Slack bot token + its data
 //     key, the encrypted qURL API key + its data key, and all install/setup
 //     metadata. Removed via the workspaceStateDeleter capability.
-//   - workspace_mappings (AdminStore): owner + admin set + agent toggle.
+//   - workspace_mappings (AdminStore): owner + admin set + agent toggle, plus
+//     TTL-backed synthetic slash-command rate-limit counters.
 //   - channel_policies (AdminStore): every channel's alias_bindings and
 //     allowed_resource_ids for this team.
 //   - qurl_agent_state (AgentStore): conversation transcripts, dedupe markers,
@@ -410,6 +413,12 @@ func (h *Handler) purgeWorkspace(ctx context.Context, log *slog.Logger, workspac
 	} else {
 		log.Info("purgeWorkspace: purged or retained workspace_mappings row")
 	}
+	if err := h.cfg.AdminStore.PurgeTeamRateLimitCountersBefore(ctx, workspaceID, cutoff); err != nil {
+		log.Error("purgeWorkspace: failed to purge workspace_mappings rate-limit counter rows", "error", err)
+		errs = append(errs, err)
+	} else {
+		log.Info("purgeWorkspace: purged or retained workspace_mappings rate-limit counter rows")
+	}
 	if err := h.cfg.AdminStore.PurgeTeamChannelPoliciesBefore(ctx, workspaceID, cutoff); err != nil {
 		log.Error("purgeWorkspace: failed to purge channel_policies rows", "error", err)
 		errs = append(errs, err)
@@ -472,6 +481,16 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 		if err == nil {
 			return
 		}
+		if lifecyclePurgeErrorIsNonRetryable(err) {
+			// Malformed local rows will not heal on a retry; surface the same
+			// manual-cleanup signal immediately instead of burning every backoff.
+			log.Error(op+": non-retryable purge failure; manual cleanup may be required",
+				"attempts", attempt,
+				"cleanup_action_required", true,
+				"error", err,
+			)
+			return
+		}
 		if attempt == lifecyclePurgeRetryAttempts {
 			// Keep cleanup_action_required stable: qurl-integrations-infra#1284
 			// tracks the CloudWatch alarm that should page on this field.
@@ -504,4 +523,30 @@ func retryLifecyclePurge(ctx context.Context, log *slog.Logger, op string, purge
 		case <-timer.C:
 		}
 	}
+}
+
+func lifecyclePurgeErrorIsNonRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !lifecyclePurgeErrorIsNonRetryable(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return lifecyclePurgeErrorIsNonRetryable(wrapped.Unwrap())
+	}
+	var storeErr *slackdata.Error
+	if errors.As(err, &storeErr) {
+		return storeErr.StatusCode == http.StatusBadRequest || storeErr.StatusCode == http.StatusInternalServerError
+	}
+	return false
 }

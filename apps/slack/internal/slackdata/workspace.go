@@ -23,7 +23,11 @@ const (
 	attrAdminSlackUserIDs = "admin_slack_user_ids"
 	attrCreatedAt         = "created_at"
 	attrUpdatedAt         = "updated_at"
-	attrUpdatedAtNano     = "updated_at_unix_nano"
+	// Every guarded workspace_mappings/channel_policies write must refresh
+	// attrUpdatedAtNano, including TTL-backed rate-limit counters. Lifecycle
+	// purges use it as the reinstall-race guard; a writer that skips it can let a
+	// delayed uninstall purge delete fresh rows.
+	attrUpdatedAtNano = "updated_at_unix_nano"
 	// attrSeedAdminSlackUser records who originally claimed the
 	// workspace (the user who ran /qurl setup — BindWorkspace seeds
 	// this from the OAuth callback's verified.UserID). Write-only
@@ -83,6 +87,8 @@ const (
 	// in a half-claimed state. Re-install OAuth to transfer ownership.
 	ErrCodeCannotRemoveOwner = "cannot_remove_owner"
 )
+
+const purgeCutoffCondition = "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano"
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
 // between the caller-already-bound (idempotent-continue) and
@@ -830,7 +836,7 @@ func (s *Store) deleteWorkspaceMapping(ctx context.Context, teamID string, cutof
 		},
 	}
 	if !cutoff.IsZero() {
-		input.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+		input.ConditionExpression = aws.String(purgeCutoffCondition)
 		input.ExpressionAttributeNames = map[string]string{
 			"#updated_at_nano": attrUpdatedAtNano,
 		}

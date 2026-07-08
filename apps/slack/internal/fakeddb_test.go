@@ -481,6 +481,31 @@ func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*d
 	return &dynamodb.QueryOutput{Items: items}, nil
 }
 
+// Scan supports the projected begins_with(slack_team_id, :prefix) shape
+// [slackdata.Store.PurgeTeamRateLimitCountersBefore] emits for synthetic
+// rate-limit rows in the PK-only workspace_mappings table.
+func (f *fakeDDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	table, _, err := f.tableAndSchema(aws.ToString(in.TableName))
+	if err != nil {
+		return nil, err
+	}
+	prefix, ok := in.ExpressionAttributeValues[":prefix"].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		return nil, fmt.Errorf("fakeDDB.Scan: expected a :prefix string value (FilterExpression %q)", aws.ToString(in.FilterExpression))
+	}
+	var items []map[string]ddbtypes.AttributeValue
+	for _, item := range table {
+		if pk, ok := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS); ok && strings.HasPrefix(pk.Value, prefix.Value) {
+			items = append(items, map[string]ddbtypes.AttributeValue{
+				fAttrSlackTeamID: stringMember(pk.Value),
+			})
+		}
+	}
+	return &dynamodb.ScanOutput{Items: items}, nil
+}
+
 // tableAndSchema looks up the table map and key schema, returning a
 // clear error on an unknown table name (catches typos in test setup).
 func (f *fakeDDB) tableAndSchema(name string) (table map[string]map[string]ddbtypes.AttributeValue, schema []string, err error) {

@@ -49,6 +49,7 @@ type stubDDB struct {
 	updateItemFn func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	deleteItemFn func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
 	queryFn      func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
+	scanFn       func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
 }
 
 func (s *stubDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -84,6 +85,13 @@ func (s *stubDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*d
 		return &dynamodb.QueryOutput{}, nil
 	}
 	return s.queryFn(in)
+}
+
+func (s *stubDDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	if s.scanFn == nil {
+		return &dynamodb.ScanOutput{}, nil
+	}
+	return s.scanFn(in)
 }
 
 func newStore(client DynamoDBClient) *Store {
@@ -1304,7 +1312,7 @@ func TestDeleteWorkspaceMapping(t *testing.T) {
 		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", cutoff); err != nil {
 			t.Fatalf("DeleteWorkspaceMappingBefore: %v", err)
 		}
-		if got := aws.ToString(captured.ConditionExpression); got != "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano" {
+		if got := aws.ToString(captured.ConditionExpression); got != purgeCutoffCondition {
 			t.Fatalf("ConditionExpression = %q", got)
 		}
 		if got := captured.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
@@ -1488,7 +1496,7 @@ func TestPurgeTeamChannelPolicies(t *testing.T) {
 			},
 			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
 				deleteCalls++
-				if got := aws.ToString(in.ConditionExpression); got != "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano" {
+				if got := aws.ToString(in.ConditionExpression); got != purgeCutoffCondition {
 					t.Fatalf("ConditionExpression = %q", got)
 				}
 				return nil, &ddbtypes.ConditionalCheckFailedException{}

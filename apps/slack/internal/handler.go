@@ -1760,6 +1760,11 @@ func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string 
 	var set orderedIDSet
 	set.add(teamID)
 	if strings.EqualFold(strings.TrimSpace(values.Get(fieldIsEnterpriseInstall)), slackFormBoolTrue) {
+		// The destructive command is still authorized against the signed
+		// team_id's owner/admin row. Slack signs is_enterprise_install and
+		// enterprise_id in the slash payload; adding the enterprise partition here
+		// only lets an authorized workspace admin clear the org-install rows that
+		// can back that same Slack app install.
 		set.add(values.Get(fieldEnterpriseID))
 	}
 	return set.ids
@@ -1864,6 +1869,10 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	// shutdown cancellation may abort the best-effort sweep before it completes.
 	schedulePurge := func(reason string) {
 		ids := append([]string(nil), purgeWorkspaceIDs...)
+		// Capture the cutoff only after DeleteAPIKey reaches a terminal local
+		// result. DeleteAPIKey itself stamps updated_at_unix_nano; taking this
+		// cutoff earlier would make the guarded workspace_state delete retain the
+		// row this uninstall just cleared.
 		purgeCutoff := h.now()
 		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids, "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
 		h.Go(func() {

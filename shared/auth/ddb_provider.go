@@ -80,6 +80,9 @@ const (
 	attrConfiguredBy  = "configured_by"
 	attrConfiguredAt  = "configured_at"
 	attrUpdatedAt     = "updated_at"
+	// Every workspace_state write must refresh attrUpdatedAtNano. Lifecycle
+	// purges use it as the reinstall-race guard; a writer that skips it can let a
+	// delayed uninstall purge delete freshly reinstalled credentials.
 	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"

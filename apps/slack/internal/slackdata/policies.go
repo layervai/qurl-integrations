@@ -562,7 +562,7 @@ func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cut
 				},
 			}
 			if !cutoff.IsZero() {
-				deleteInput.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
+				deleteInput.ConditionExpression = aws.String(purgeCutoffCondition)
 				deleteInput.ExpressionAttributeNames = map[string]string{
 					"#updated_at_nano": attrUpdatedAtNano,
 				}

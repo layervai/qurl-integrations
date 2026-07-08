@@ -3,6 +3,8 @@ package internal
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -565,6 +567,23 @@ func TestHandleLifecycleEvent_AckEvenWhenPurgeFails(t *testing.T) {
 	// story without changing Slack's 200 response.
 	if provider.deleteStateCalls != lifecyclePurgeRetryAttempts {
 		t.Fatalf("DeleteWorkspaceState calls = %d, want %d retry attempts", provider.deleteStateCalls, lifecyclePurgeRetryAttempts)
+	}
+}
+
+func TestRetryLifecyclePurgeStopsOnNonRetryableStoreError(t *testing.T) {
+	var attempts int
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	retryLifecyclePurge(context.Background(), log, "testPurge", func(*slog.Logger) error {
+		attempts++
+		return &slackdata.Error{
+			StatusCode: http.StatusInternalServerError,
+			Title:      "PurgeTeamChannelPolicies: queried row missing slack_channel_id",
+		}
+	})
+
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 for non-retryable store-shape error", attempts)
 	}
 }
 
