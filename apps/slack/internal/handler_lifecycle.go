@@ -24,10 +24,11 @@ const (
 
 // lifecyclePurgeTimeout bounds the asynchronous workspace purge kicked off by a
 // lifecycle event. It is generous relative to the few DeleteItem/Query calls a
-// purge makes (workspace_state row + workspace_mappings row + the team's
-// channel_policies rows) but still bounded so a DDB brownout can't pin an async
-// worker slot indefinitely. The purge runs off h.baseCtx (NOT the request ctx),
-// because the 200 OK is returned to Slack before the purge starts.
+// purge makes (workspace_state row + agent_state partition + workspace_mappings
+// row + the team's channel_policies rows) but still bounded so a DDB brownout
+// can't pin an async worker slot indefinitely. The purge runs off h.baseCtx (NOT
+// the request ctx), because the 200 OK is returned to Slack before the purge
+// starts.
 const lifecyclePurgeTimeout = 20 * time.Second
 
 // lifecyclePurgeRetryAttempts gives an ack-first purge a bounded transient-DDB
@@ -84,16 +85,16 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	}
 
 	enterpriseInstall := false
-	for _, auth := range env.Authorizations {
-		if auth.IsEnterpriseInstall {
+	for _, authz := range env.Authorizations {
+		if authz.IsEnterpriseInstall {
 			enterpriseInstall = true
 			break
 		}
 	}
 	if enterpriseInstall {
-		for _, auth := range env.Authorizations {
-			if auth.IsEnterpriseInstall {
-				add(auth.EnterpriseID)
+		for _, authz := range env.Authorizations {
+			if authz.IsEnterpriseInstall {
+				add(authz.EnterpriseID)
 			}
 		}
 		if len(ids) == 0 {
@@ -103,8 +104,8 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 	}
 
 	add(env.TeamID)
-	for _, auth := range env.Authorizations {
-		add(auth.TeamID)
+	for _, authz := range env.Authorizations {
+		add(authz.TeamID)
 	}
 	if len(ids) == 0 {
 		add(env.EnterpriseID)
