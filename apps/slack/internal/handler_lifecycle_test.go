@@ -301,6 +301,10 @@ func TestHandleLifecycleEvent_EnterpriseGridTeamInstallPurgesTeamKeyOnly(t *test
 func TestHandleLifecycleEvent_MultipleWorkspaceIDsPurgeEachID(t *testing.T) {
 	const secondTeamID = "T_second"
 
+	// Workspace-install lifecycle callbacks with multiple signed team
+	// authorizations intentionally full-cascade every delivered team partition.
+	// This fences that blast radius explicitly while #929 verifies real Grid
+	// uninstall fan-out before broad prod rollout depends on it.
 	h, provider, ts := newLifecycleTestHandler(t)
 	ts.seedWorkspace(t, secondTeamID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
 	ts.seedPolicyAliasBindings(t, secondTeamID, "C_three", map[string]string{"jenkins": "r_ccc"})

@@ -167,6 +167,11 @@ func resolveSlackEventPartitions(env *slackEventEnvelope) slackEventPartitionRes
 		}
 	}
 
+	// Workspace-install lifecycle payloads are keyed by team_id. If Slack signs
+	// multiple team authorizations on the same teardown, purge each team
+	// partition fully rather than picking only the first (ordinary agent events
+	// use only agentWrite). #929 tracks empirical Grid fan-out verification before
+	// broad prod rollout relies on this multi-team cascade.
 	purge.add(env.TeamID)
 	for _, authz := range env.Authorizations {
 		purge.add(authz.TeamID)
