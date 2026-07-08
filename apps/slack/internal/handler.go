@@ -1872,8 +1872,10 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		// Capture the cutoff only after DeleteAPIKey reaches a terminal local
 		// result. DeleteAPIKey itself stamps updated_at_unix_nano; taking this
 		// cutoff earlier would make the guarded workspace_state delete retain the
-		// row this uninstall just cleared.
-		purgeCutoff := h.now()
+		// row this uninstall just cleared. In production, source the cutoff from
+		// auth.DDBProvider's clock so the stamp and cutoff share one injectable
+		// clock; tests/fallback providers use the handler clock.
+		purgeCutoff := workspaceStatePurgeCutoff(h.cfg.AuthProvider, h.now)
 		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids, "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
 		h.Go(func() {
 			baseCtx := h.baseCtx
@@ -1931,6 +1933,16 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		return
 	}
 	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\n"+localSlackDataClearedReply+"\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.")
+}
+
+func workspaceStatePurgeCutoff(provider auth.Provider, fallbackNow func() time.Time) time.Time {
+	if ddb, ok := provider.(*auth.DDBProvider); ok && ddb.Now != nil {
+		return ddb.Now()
+	}
+	if fallbackNow != nil {
+		return fallbackNow()
+	}
+	return time.Now()
 }
 
 // revokeWorkspaceUpstreamKey best-effort revokes the workspace's upstream qURL

@@ -163,6 +163,23 @@ func TestCheckRateLimit_WorkspaceNotBoundDoesNotCreateCounter(t *testing.T) {
 }
 
 func TestPurgeTeamRateLimitCountersBefore(t *testing.T) {
+	t.Run("disabled skips full-table scan", func(t *testing.T) {
+		scanned := false
+		store := newRateLimitStore(&stubDDB{
+			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+				scanned = true
+				return &dynamodb.ScanOutput{}, nil
+			},
+		})
+
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("PurgeTeamRateLimitCountersBefore disabled: %v", err)
+		}
+		if scanned {
+			t.Fatal("disabled rate-limit purge issued a full-table scan")
+		}
+	})
+
 	t.Run("scans prefix and deletes paged counters with cutoff guard", func(t *testing.T) {
 		cutoff := time.Date(2026, 7, 8, 12, 0, 0, 123, time.UTC)
 		prefix := rateLimitTeamPrefix("T1")
@@ -226,6 +243,7 @@ func TestPurgeTeamRateLimitCountersBefore(t *testing.T) {
 				return &dynamodb.DeleteItemOutput{}, nil
 			},
 		})
+		store.RateLimitEnabled = true
 
 		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err != nil {
 			t.Fatalf("PurgeTeamRateLimitCountersBefore: %v", err)
@@ -257,6 +275,7 @@ func TestPurgeTeamRateLimitCountersBefore(t *testing.T) {
 				return &dynamodb.DeleteItemOutput{}, nil
 			},
 		})
+		store.RateLimitEnabled = true
 
 		err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Time{})
 		if err == nil {
@@ -287,6 +306,7 @@ func TestPurgeTeamRateLimitCountersBefore(t *testing.T) {
 				return nil, &ddbtypes.ConditionalCheckFailedException{}
 			},
 		})
+		store.RateLimitEnabled = true
 
 		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Now()); err != nil {
 			t.Fatalf("PurgeTeamRateLimitCountersBefore newer row err = %v, want nil", err)

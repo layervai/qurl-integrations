@@ -587,6 +587,19 @@ func TestRetryLifecyclePurgeStopsOnNonRetryableStoreError(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStatePurgeCutoffUsesDDBProviderClock(t *testing.T) {
+	providerNow := time.Date(2026, 7, 8, 13, 0, 0, 0, time.UTC)
+	fallbackNow := providerNow.Add(-time.Hour)
+
+	got := workspaceStatePurgeCutoff(&auth.DDBProvider{
+		Now: func() time.Time { return providerNow },
+	}, func() time.Time { return fallbackNow })
+
+	if !got.Equal(providerNow) {
+		t.Fatalf("workspaceStatePurgeCutoff = %s, want provider clock %s", got, providerNow)
+	}
+}
+
 // TestSlashCommandUninstallPurgesWorkspace fences the `/qurl uninstall` extension:
 // after the existing qURL-key delete, the command must also forget the rest of
 // the workspace (bot token via DeleteWorkspaceState, mappings, policies), so an

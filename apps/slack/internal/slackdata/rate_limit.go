@@ -225,12 +225,17 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, now t
 //
 // workspace_mappings is PK-only, so there is no partition Query for the
 // __slack_rate_limit#<team># prefix. Use a projected, paginated Scan with a
-// tight begins_with filter, then DeleteItem each observed key. The row count is
-// bounded by users who recently hit slash-command gates, and TTL remains the
-// backstop if this best-effort scan is interrupted.
+// tight begins_with filter, then DeleteItem each observed key. This is O(table
+// size), not O(matching counters), so it runs only when the rate-limit feature is
+// enabled. The row count is bounded by users who recently hit slash-command
+// gates, and TTL remains the backstop if this best-effort scan is interrupted or
+// rate limiting is disabled.
 func (s *Store) PurgeTeamRateLimitCountersBefore(ctx context.Context, teamID string, cutoff time.Time) error {
 	if teamID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamRateLimitCounters: team_id is required"}
+	}
+	if !s.RateLimitEnabled {
+		return nil
 	}
 	scanner, ok := s.Client.(dynamoDBScanner)
 	if !ok {
