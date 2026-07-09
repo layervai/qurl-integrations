@@ -1749,6 +1749,82 @@ func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T
 	}
 }
 
+func TestSlashCommandSetupWithEmail_RateLimitsSetupLinksPerWorkspaceUser(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	now := fixedNow
+	h.now = func() time.Time { return now }
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	invoke := func(t *testing.T, teamID, userID string) string {
+		t.Helper()
+		body := url.Values{
+			"command": {commandUser},
+			"text":    {"setup admin@example.com"},
+			"team_id": {teamID},
+			"user_id": {userID},
+		}.Encode()
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+		}
+		var result map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return result["text"]
+	}
+
+	for i := 0; i < setupLinkRateLimitMax; i++ {
+		if text := invoke(t, "T123ABCDEF", "U_ADMIN1"); !strings.Contains(text, "/oauth/qurl/start?state=") {
+			t.Fatalf("attempt %d should mint setup URL, got: %q", i+1, text)
+		}
+	}
+	limited := invoke(t, "T123ABCDEF", "U_ADMIN1")
+	if strings.Contains(limited, "/oauth/qurl/start?state=") {
+		t.Fatalf("rate-limited attempt minted setup URL: %q", limited)
+	}
+	if !strings.Contains(limited, "generated several qURL setup links") {
+		t.Fatalf("rate-limited attempt missing retry copy: %q", limited)
+	}
+	if otherUser := invoke(t, "T123ABCDEF", "U_ADMIN2"); !strings.Contains(otherUser, "/oauth/qurl/start?state=") {
+		t.Fatalf("different user in same workspace should not share setup-link quota, got: %q", otherUser)
+	}
+	if otherWorkspace := invoke(t, "T999ABCDEF", "U_ADMIN1"); !strings.Contains(otherWorkspace, "/oauth/qurl/start?state=") {
+		t.Fatalf("same user in different workspace should not share setup-link quota, got: %q", otherWorkspace)
+	}
+
+	now = now.Add(setupLinkRateLimitWindow)
+	if text := invoke(t, "T123ABCDEF", "U_ADMIN1"); !strings.Contains(text, "/oauth/qurl/start?state=") {
+		t.Fatalf("same user after window should mint setup URL, got: %q", text)
+	}
+}
+
+func TestSlashCommandSetupWithRotate_RateLimitCopyKeepsModeFlag(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	now := fixedNow
+	h.now = func() time.Time { return now }
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+
+	for i := 0; i < setupLinkRateLimitMax; i++ {
+		text := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
+		if !strings.Contains(text, "/oauth/qurl/start?state=") {
+			t.Fatalf("rotate attempt %d should mint setup URL, got: %q", i+1, text)
+		}
+	}
+
+	limited := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
+	if strings.Contains(limited, "/oauth/qurl/start?state=") {
+		t.Fatalf("rate-limited rotate attempt minted setup URL: %q", limited)
+	}
+	if !strings.Contains(limited, "`/qurl setup <email> --rotate`") {
+		t.Fatalf("rate-limited rotate attempt missing rotate retry command: %q", limited)
+	}
+}
+
 func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)

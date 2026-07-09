@@ -720,6 +720,10 @@ type Handler struct {
 	// missing env vars) — /qurl setup returns a "not configured"
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
+	// setupLinkRateLimiter bounds signed setup-link minting per Slack workspace/user.
+	// The owner/rebind checks still run first so invalid or refused setup attempts
+	// do not consume the caller's small retry budget.
+	setupLinkRateLimiter *setupLinkRateLimiter
 	// aliasStore persists per-channel alias bindings for the
 	// `/qurl-admin set-alias` / `/qurl-admin unset-alias` verbs. nil when not
 	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
@@ -901,6 +905,7 @@ func NewHandler(cfg Config) *Handler {
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),
 		channelMembers:        newChannelMembershipCache(channelMembershipTTL),
+		setupLinkRateLimiter:  newSetupLinkRateLimiter(),
 	}
 }
 
@@ -1741,7 +1746,24 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	// This is deliberately a minting throttle, not a general slash-command
+	// request shield: the owner gate above still runs first so refused setup
+	// attempts do not consume quota. That means repeat non-owner attempts can
+	// still spend the owner-gate read; avoiding that would need a separate
+	// request shield above this gate. The quota is consumed before MintState so
+	// repeated local mint failures still get throttled instead of retrying
+	// without bound.
+	now := h.now()
+	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
+		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
+		retryCommand := "`/qurl setup <email>`"
+		if setupCmd.mode.Explicit() {
+			retryCommand = fmt.Sprintf("`/qurl setup <email> %s`", setupModeFlag(setupCmd.mode))
+		}
+		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
+		return
+	}
+	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
 		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
