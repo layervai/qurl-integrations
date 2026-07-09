@@ -265,7 +265,7 @@ func MintStoredStateWithEmailMode(ctx context.Context, store StateStore, teamID,
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(stateMaxAge),
 	}
-	storeCtx, cancel := context.WithTimeout(ctx, stateStoreTimeout)
+	storeCtx, cancel := context.WithTimeout(ctx, stateStoreMintTimeout)
 	defer cancel()
 	if err := store.PutState(storeCtx, handle, state); err != nil {
 		return "", err
@@ -400,6 +400,14 @@ func validPKCEVerifier(verifier string) bool {
 		}
 	}
 	return true
+}
+
+func isOpaqueStateHandle(encoded string) bool {
+	if len(encoded) != stateHandleEncodedLen {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	return err == nil && len(raw) == stateHandleLen
 }
 
 func stateEmailNormalized(email string) bool {

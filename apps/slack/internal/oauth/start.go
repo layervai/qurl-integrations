@@ -85,7 +85,7 @@ func Start(cfg Config) http.HandlerFunc {
 //nolint:gocritic // hugeParam: mirrors Start/Callback's package-wide value-pass Config posture.
 func startState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
 	if cfg.StateStore != nil {
-		storeCtx, cancel := context.WithTimeout(ctx, stateStoreTimeout)
+		storeCtx, cancel := context.WithTimeout(ctx, stateStoreRequestTimeout)
 		verified, err := cfg.StateStore.StartState(storeCtx, stateParam, now)
 		cancel()
 		if err == nil {
@@ -94,9 +94,11 @@ func startState(ctx context.Context, cfg Config, stateParam string, now time.Tim
 		if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMalformed) {
 			return VerifiedState{}, err
 		}
+		if isOpaqueStateHandle(stateParam) {
+			return VerifiedState{}, err
+		}
 		// Fall through for legacy signed states minted shortly before the
-		// server-side state rollout. Expired/missing opaque handles are expected
-		// to fail the bounded legacy parser below.
+		// server-side state rollout.
 	}
 	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }

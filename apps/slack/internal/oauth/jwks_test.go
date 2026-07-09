@@ -103,6 +103,30 @@ func (f *jwksTestFixture) signToken(t *testing.T, claims map[string]any) []byte 
 	return signed
 }
 
+func verifyEmailForTest(ctx context.Context, verifier *JWKSVerifier, idToken string) (string, error) {
+	tok, err := verifier.verifiedToken(ctx, idToken)
+	if err != nil {
+		return "", err
+	}
+	return verifiedEmail(tok)
+}
+
+func verifySubForTest(ctx context.Context, verifier *JWKSVerifier, idToken string) (string, error) {
+	tok, err := verifier.verifiedToken(ctx, idToken)
+	if err != nil {
+		return "", err
+	}
+	return verifiedSub(tok)
+}
+
+func verifyNonceForTest(ctx context.Context, verifier *JWKSVerifier, idToken, expectedNonce string) error {
+	tok, err := verifier.verifiedToken(ctx, idToken)
+	if err != nil {
+		return err
+	}
+	return verifyNonceClaim(tok, expectedNonce)
+}
+
 func TestJWKSVerifierHappyPath(t *testing.T) {
 	f := newJWKSFixture(t, "client-aud")
 	now := time.Now()
@@ -116,7 +140,7 @@ func TestJWKSVerifierHappyPath(t *testing.T) {
 		"email_verified":  true,
 	})
 
-	email, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	email, err := verifyEmailForTest(context.Background(), f.verifier, string(signed))
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -135,7 +159,7 @@ func TestJWKSVerifierRejectsWrongIssuer(t *testing.T) {
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 		emailClaim:        "x@example.com",
 	})
-	if _, err := f.verifier.VerifyEmail(context.Background(), string(signed)); err == nil {
+	if _, err := verifyEmailForTest(context.Background(), f.verifier, string(signed)); err == nil {
 		t.Fatal("expected verify failure on wrong issuer")
 	}
 }
@@ -150,7 +174,7 @@ func TestJWKSVerifierRejectsWrongAudience(t *testing.T) {
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 		emailClaim:        "x@example.com",
 	})
-	if _, err := f.verifier.VerifyEmail(context.Background(), string(signed)); err == nil {
+	if _, err := verifyEmailForTest(context.Background(), f.verifier, string(signed)); err == nil {
 		t.Fatal("expected verify failure on wrong audience")
 	}
 }
@@ -172,7 +196,7 @@ func TestJWKSVerifierRejectsBadSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	if _, err := f.verifier.VerifyEmail(context.Background(), string(signed)); err == nil {
+	if _, err := verifyEmailForTest(context.Background(), f.verifier, string(signed)); err == nil {
 		t.Fatal("expected verify failure on signature mismatch")
 	}
 	// Sanity: the token did sign — confirm by parsing with the rogue key.
@@ -198,7 +222,7 @@ func TestJWKSVerifierSuppressesUnverifiedEmail(t *testing.T) {
 		emailClaim:        testAdminEmail,
 		"email_verified":  false,
 	})
-	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	got, err := verifyEmailForTest(context.Background(), f.verifier, string(signed))
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -218,7 +242,7 @@ func TestJWKSVerifierAcceptsVerifiedEmail(t *testing.T) {
 		emailClaim:        testAdminEmail,
 		"email_verified":  true,
 	})
-	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	got, err := verifyEmailForTest(context.Background(), f.verifier, string(signed))
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -242,7 +266,7 @@ func TestJWKSVerifierReturnsEmptyEmailWhenEmailVerifiedAbsent(t *testing.T) {
 		emailClaim:        testAdminEmail,
 		// email_verified deliberately omitted.
 	})
-	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	got, err := verifyEmailForTest(context.Background(), f.verifier, string(signed))
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -264,7 +288,7 @@ func TestJWKSVerifierReturnsEmptyEmailWhenClaimMissing(t *testing.T) {
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 		"email_verified":  true,
 	})
-	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	got, err := verifyEmailForTest(context.Background(), f.verifier, string(signed))
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -287,7 +311,7 @@ func TestJWKSVerifierVerifySubReturnsSub(t *testing.T) {
 		jwt.IssuedAtKey:   now,
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 	})
-	got, err := f.verifier.VerifySub(context.Background(), string(signed))
+	got, err := verifySubForTest(context.Background(), f.verifier, string(signed))
 	if err != nil {
 		t.Fatalf("VerifySub: %v", err)
 	}
@@ -308,7 +332,7 @@ func TestJWKSVerifierVerifyNonceAcceptsMatchingClaim(t *testing.T) {
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 		"nonce":           wantNonce,
 	})
-	if err := f.verifier.VerifyNonce(context.Background(), string(signed), wantNonce); err != nil {
+	if err := verifyNonceForTest(context.Background(), f.verifier, string(signed), wantNonce); err != nil {
 		t.Fatalf("VerifyNonce: %v", err)
 	}
 }
@@ -350,7 +374,7 @@ func TestJWKSVerifierVerifyNonceRejectsMismatch(t *testing.T) {
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 		"nonce":           "other-nonce",
 	})
-	if err := f.verifier.VerifyNonce(context.Background(), string(signed), "state-bound-nonce"); err == nil {
+	if err := verifyNonceForTest(context.Background(), f.verifier, string(signed), "state-bound-nonce"); err == nil {
 		t.Fatal("VerifyNonce must reject a nonce claim from a different authorization request")
 	}
 }
@@ -365,7 +389,7 @@ func TestJWKSVerifierVerifyNonceRejectsMissingClaim(t *testing.T) {
 		jwt.IssuedAtKey:   now,
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 	})
-	if err := f.verifier.VerifyNonce(context.Background(), string(signed), "state-bound-nonce"); err == nil {
+	if err := verifyNonceForTest(context.Background(), f.verifier, string(signed), "state-bound-nonce"); err == nil {
 		t.Fatal("VerifyNonce must reject a token without a nonce claim")
 	}
 }
@@ -385,7 +409,7 @@ func TestJWKSVerifierVerifySubRejectsEmptySub(t *testing.T) {
 		jwt.IssuedAtKey:   now,
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 	})
-	got, err := f.verifier.VerifySub(context.Background(), string(signed))
+	got, err := verifySubForTest(context.Background(), f.verifier, string(signed))
 	if err == nil {
 		t.Errorf("VerifySub must return an error on empty sub; got %q nil", got)
 	}
@@ -424,7 +448,7 @@ func TestJWKSVerifierVerifySubRejectsBadSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rogue sign: %v", err)
 	}
-	if _, err := f.verifier.VerifySub(context.Background(), string(signed)); err == nil {
+	if _, err := verifySubForTest(context.Background(), f.verifier, string(signed)); err == nil {
 		t.Error("VerifySub must reject a token signed with the wrong key — silent acceptance lets attacker-controlled sub flow to BindWorkspace")
 	}
 }
@@ -442,7 +466,7 @@ func TestJWKSVerifierVerifySubRejectsExpired(t *testing.T) {
 		jwt.IssuedAtKey:   now.Add(-10 * time.Minute),
 		jwt.ExpirationKey: now.Add(-5 * time.Minute),
 	})
-	if _, err := f.verifier.VerifySub(context.Background(), string(signed)); err == nil {
+	if _, err := verifySubForTest(context.Background(), f.verifier, string(signed)); err == nil {
 		t.Error("VerifySub must reject an expired id_token")
 	}
 }

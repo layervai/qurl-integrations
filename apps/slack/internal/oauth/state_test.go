@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -205,6 +206,28 @@ func TestVerifyStateAcceptsLegacyFormats(t *testing.T) {
 				t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
 			}
 		})
+	}
+}
+
+func TestOpaqueStateHandleClassificationDoesNotMatchLegacyState(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	store := newMemoryStateStore()
+	handle, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, testNormalizedSetupEmail, SetupModeReuse, now)
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if !isOpaqueStateHandle(handle) {
+		t.Fatalf("opaque handle not recognized: %q", handle)
+	}
+	legacy, err := MintState(testSecret, testStateTeamID, testStateUserID, now)
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	if isOpaqueStateHandle(legacy) {
+		t.Fatalf("legacy signed state misclassified as opaque handle: %q", legacy)
+	}
+	if isOpaqueStateHandle(strings.Repeat("!", stateHandleEncodedLen)) {
+		t.Fatal("malformed base64url input classified as opaque handle")
 	}
 }
 

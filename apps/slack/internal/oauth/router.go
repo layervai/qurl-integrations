@@ -51,10 +51,12 @@ const (
 // server-wide write timeout (which would mask hung /slack/* requests).
 const (
 	oauthHandlerTimeout = 60 * time.Second
-	// stateStoreTimeout stays below Slack's 3-second slash-command ack window
-	// while leaving headroom for a cold DynamoDB connection. Put/Start/Consume
-	// all apply this budget inside the oauth package so callers cannot drift.
-	stateStoreTimeout = 2 * time.Second
+	// stateStoreMintTimeout stays below Slack's 3-second slash-command ack
+	// window while leaving headroom for a cold DynamoDB connection.
+	stateStoreMintTimeout = 2 * time.Second
+	// Browser start/callback requests run under oauthHandlerTimeout rather than
+	// Slack's ack window, so they tolerate a longer transient DDB delay.
+	stateStoreRequestTimeout = 5 * time.Second
 )
 
 // apiKeyScopes is the qurl-service scope set requested by the legacy fallback

@@ -62,10 +62,9 @@ func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifie
 	return &JWKSVerifier{Issuer: issuer, Audience: audience, jwksURL: jwksURL, cache: c}, nil
 }
 
-// verifiedToken parses + verifies the id_token signature + claims
-// against Auth0's JWKS. Shared by VerifyEmail and VerifySub so the
-// verify posture (kid required, alg inferred from key, iss + aud
-// validated) lives in one place.
+// verifiedToken parses + verifies the id_token signature + claims against
+// Auth0's JWKS. The verify posture (kid required, alg inferred from key, iss +
+// aud validated) lives in one place.
 func (v *JWKSVerifier) verifiedToken(ctx context.Context, idToken string) (jwt.Token, error) {
 	if v.cache == nil {
 		return nil, errors.New("JWKSVerifier: cache not initialized")
@@ -91,17 +90,6 @@ func (v *JWKSVerifier) verifiedToken(ctx context.Context, idToken string) (jwt.T
 		return nil, fmt.Errorf("parse/verify: %w", err)
 	}
 	return tok, nil
-}
-
-// VerifyEmail verifies the id_token signature + claims and returns the
-// email claim. Returns ("", err) on any verify failure — the callback
-// treats this as non-fatal (success page renders without the email).
-func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string, error) {
-	tok, err := v.verifiedToken(ctx, idToken)
-	if err != nil {
-		return "", err
-	}
-	return verifiedEmail(tok)
 }
 
 func verifiedEmail(tok jwt.Token) (string, error) {
@@ -134,20 +122,6 @@ func verifiedEmail(tok jwt.Token) (string, error) {
 	return s, nil
 }
 
-// VerifySub verifies the id_token and returns the `sub` claim — Auth0's
-// stable identifier for the authenticated user, used as the workspace
-// OwnerID when BindWorkspace seeds the admin row. Returns ("", err) on
-// any verify failure or an absent / empty sub claim. The callback
-// treats this as fatal-to-bind (unlike VerifyEmail's best-effort
-// posture): an empty sub can't legitimately key a workspace.
-func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, error) {
-	tok, err := v.verifiedToken(ctx, idToken)
-	if err != nil {
-		return "", err
-	}
-	return verifiedSub(tok)
-}
-
 func verifiedSub(tok jwt.Token) (string, error) {
 	// jwt.Token.Subject() reads the standard `sub` claim (RFC 7519
 	// §4.1.2). Auth0 always populates it on id_tokens; an empty value
@@ -157,18 +131,6 @@ func verifiedSub(tok jwt.Token) (string, error) {
 		return "", errors.New("sub claim missing or empty")
 	}
 	return sub, nil
-}
-
-// VerifyNonce verifies the id_token nonce claim against the value carried in
-// the signed setup state. A mismatch means the id_token belongs to a different
-// authorization request and the callback must fail closed before binding or
-// minting workspace credentials.
-func (v *JWKSVerifier) VerifyNonce(ctx context.Context, idToken, expectedNonce string) error {
-	tok, err := v.verifiedToken(ctx, idToken)
-	if err != nil {
-		return err
-	}
-	return verifyNonceClaim(tok, expectedNonce)
 }
 
 func verifyNonceClaim(tok jwt.Token, expectedNonce string) error {
