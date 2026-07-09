@@ -17,20 +17,19 @@ import (
 const (
 	workspaceStatePKAttr = "team_id"
 
-	oauthStateKeyPrefix      = "oauth_state#"
-	oauthStateAttrItemType   = "item_type"
-	oauthStateItemType       = "oauth_state"
-	oauthStateAttrTeamID     = "oauth_team_id"
-	oauthStateAttrUserID     = "oauth_user_id"
-	oauthStateAttrNonce      = "oauth_nonce"
-	oauthStateAttrVerifier   = "oauth_code_verifier"
-	oauthStateAttrEmail      = "oauth_email"
-	oauthStateAttrMode       = "oauth_mode"
-	oauthStateAttrCreatedAt  = "oauth_created_at"
-	oauthStateAttrExpiresAt  = "oauth_expires_at"
-	oauthStateAttrStartedAt  = "oauth_started_at"
-	oauthStateAttrConsumedAt = "oauth_consumed_at"
-	oauthStateAttrTTL        = "ttl"
+	oauthStateKeyPrefix     = "oauth_state#"
+	oauthStateAttrItemType  = "item_type"
+	oauthStateItemType      = "oauth_state"
+	oauthStateAttrTeamID    = "oauth_team_id"
+	oauthStateAttrUserID    = "oauth_user_id"
+	oauthStateAttrNonce     = "oauth_nonce"
+	oauthStateAttrVerifier  = "oauth_code_verifier"
+	oauthStateAttrEmail     = "oauth_email"
+	oauthStateAttrMode      = "oauth_mode"
+	oauthStateAttrCreatedAt = "oauth_created_at"
+	oauthStateAttrExpiresAt = "oauth_expires_at"
+	oauthStateAttrStartedAt = "oauth_started_at"
+	oauthStateAttrTTL       = "ttl"
 )
 
 // DDBStateStore stores short-lived OAuth state in the existing workspace_state
@@ -107,7 +106,7 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 // needed to build the Auth0 authorization URL.
 func (s *DDBStateStore) StartState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
 	return s.updateAndReadState(ctx, handle, now, oauthStateAttrStartedAt,
-		"attribute_exists(#pk) AND attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
+		"attribute_exists(#pk) AND #expires_at > :now_epoch",
 		ddbtypes.ReturnValueAllNew)
 }
 
@@ -126,14 +125,12 @@ func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now tim
 			workspaceStatePKAttr: &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
 		},
 		ConditionExpression: aws.String(
-			"attribute_exists(#pk) AND attribute_exists(#started_at) AND " +
-				"attribute_not_exists(#consumed_at) AND #expires_at > :now_epoch",
+			"attribute_exists(#pk) AND attribute_exists(#started_at) AND #expires_at > :now_epoch",
 		),
 		ExpressionAttributeNames: map[string]string{
-			"#pk":          workspaceStatePKAttr,
-			"#started_at":  oauthStateAttrStartedAt,
-			"#consumed_at": oauthStateAttrConsumedAt,
-			"#expires_at":  oauthStateAttrExpiresAt,
+			"#pk":         workspaceStatePKAttr,
+			"#started_at": oauthStateAttrStartedAt,
+			"#expires_at": oauthStateAttrExpiresAt,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
@@ -158,10 +155,9 @@ func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, n
 		return VerifiedState{}, errStateMalformed
 	}
 	names := map[string]string{
-		"#pk":          workspaceStatePKAttr,
-		"#mark":        markAttr,
-		"#consumed_at": oauthStateAttrConsumedAt,
-		"#expires_at":  oauthStateAttrExpiresAt,
+		"#pk":         workspaceStatePKAttr,
+		"#mark":       markAttr,
+		"#expires_at": oauthStateAttrExpiresAt,
 	}
 	out, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.TableName),

@@ -14,6 +14,7 @@ type memoryStateStore struct {
 	items              map[string]StoredState
 	started            map[string]bool
 	consumed           map[string]bool
+	putHadDeadline     bool
 	startHadDeadline   bool
 	consumeHadDeadline bool
 }
@@ -26,9 +27,10 @@ func newMemoryStateStore() *memoryStateStore {
 	}
 }
 
-func (s *memoryStateStore) PutState(_ context.Context, handle string, state StoredState) error { //nolint:gocritic // test fake mirrors StateStore's value signature.
+func (s *memoryStateStore) PutState(ctx context.Context, handle string, state StoredState) error { //nolint:gocritic // test fake mirrors StateStore's value signature.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, s.putHadDeadline = ctx.Deadline()
 	if _, exists := s.items[handle]; exists {
 		return errors.New("duplicate handle")
 	}
@@ -67,6 +69,12 @@ func TestMintStoredStateProducesOpaqueHandle(t *testing.T) {
 	handle, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "Admin+Setup@Example.COM", SetupModeRotate, now)
 	if err != nil {
 		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	store.mu.Lock()
+	putHadDeadline := store.putHadDeadline
+	store.mu.Unlock()
+	if !putHadDeadline {
+		t.Fatal("PutState must receive an explicit deadline")
 	}
 	if len(handle) != stateHandleEncodedLen {
 		t.Fatalf("opaque handle len = %d, want %d-char base64url state handle", len(handle), stateHandleEncodedLen)

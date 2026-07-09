@@ -265,7 +265,9 @@ func MintStoredStateWithEmailMode(ctx context.Context, store StateStore, teamID,
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(stateMaxAge),
 	}
-	if err := store.PutState(ctx, handle, state); err != nil {
+	storeCtx, cancel := context.WithTimeout(ctx, stateStoreTimeout)
+	defer cancel()
+	if err := store.PutState(storeCtx, handle, state); err != nil {
 		return "", err
 	}
 	return handle, nil

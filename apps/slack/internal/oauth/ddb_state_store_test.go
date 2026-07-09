@@ -197,7 +197,7 @@ func TestDDBStateStoreConsumeStateIsConditionalOneShot(t *testing.T) {
 		t.Fatal("expected DeleteItem")
 	}
 	cond := aws.ToString(ddb.deleteInput.ConditionExpression)
-	for _, want := range []string{"attribute_exists(#started_at)", "attribute_not_exists(#consumed_at)", "#expires_at > :now_epoch"} {
+	for _, want := range []string{"attribute_exists(#started_at)", "#expires_at > :now_epoch"} {
 		if !strings.Contains(cond, want) {
 			t.Fatalf("consume condition missing %q in %q", want, cond)
 		}
