@@ -109,6 +109,7 @@ var (
 	errStateMalformed      = errors.New("state: malformed")
 	errStateBadHMAC        = errors.New("state: HMAC mismatch")
 	errStateExpired        = errors.New("state: expired")
+	errStateNotStarted     = errors.New("state: callback received before start")
 	errStateFuture         = errors.New("state: timestamp in future")
 	errStateShortKey       = errors.New("state: secret too short")
 	errStateEmptyTeam      = errors.New("state: empty teamID")
@@ -417,9 +418,24 @@ func stateEmailNormalized(email string) bool {
 
 func isStateValidationError(err error) bool {
 	return errors.Is(err, errStateExpired) ||
+		errors.Is(err, errStateNotStarted) ||
 		errors.Is(err, errStateBadHMAC) ||
 		errors.Is(err, errStateMalformed) ||
 		errors.Is(err, errStateFuture)
+}
+
+func loadStateWithLegacyFallback(secret []byte, encoded string, now time.Time, load func() (VerifiedState, error)) (VerifiedState, error) {
+	verified, err := load()
+	if err == nil {
+		return verified, nil
+	}
+	if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMalformed) {
+		return VerifiedState{}, err
+	}
+	if isOpaqueStateHandle(encoded) {
+		return VerifiedState{}, err
+	}
+	return VerifyState(secret, encoded, now)
 }
 
 // VerifyState validates and decodes a state token. Returns the recovered

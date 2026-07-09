@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -205,6 +206,9 @@ func TestDDBStateStoreConsumeStateIsConditionalOneShot(t *testing.T) {
 	if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
 		t.Fatalf("consume ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
 	}
+	if ddb.deleteInput.ReturnValuesOnConditionCheckFailure != ddbtypes.ReturnValuesOnConditionCheckFailureAllOld {
+		t.Fatalf("consume failure ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValuesOnConditionCheckFailure)
+	}
 }
 
 func TestDDBStateStoreStartStateUsesValidExpressionBindings(t *testing.T) {
@@ -219,5 +223,23 @@ func TestDDBStateStoreStartStateUsesValidExpressionBindings(t *testing.T) {
 	}
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem")
+	}
+	if len(ddb.updateInput.ExpressionAttributeValues) != 1 {
+		t.Fatalf("StartState values = %v, want one shared epoch value", ddb.updateInput.ExpressionAttributeValues)
+	}
+	if _, ok := ddb.updateInput.ExpressionAttributeValues[":now_epoch"].(*ddbtypes.AttributeValueMemberN); !ok {
+		t.Fatalf("StartState timestamp must be numeric epoch: %v", ddb.updateInput.ExpressionAttributeValues)
+	}
+}
+
+func TestDDBStateStoreConsumeStateDistinguishesNotStarted(t *testing.T) {
+	item := storedStateDDBItem()
+	item[workspaceStatePKAttr] = &ddbtypes.AttributeValueMemberS{Value: oauthStateKey("opaque-handle")}
+	ddb := &fakeOAuthStateDDB{
+		deleteErr: &ddbtypes.ConditionalCheckFailedException{Item: item},
+	}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	if _, err := store.ConsumeState(context.Background(), "opaque-handle", time.Unix(1700000030, 0)); !errors.Is(err, errStateNotStarted) {
+		t.Fatalf("ConsumeState error = %v, want errStateNotStarted", err)
 	}
 }

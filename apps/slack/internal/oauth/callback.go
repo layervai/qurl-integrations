@@ -461,20 +461,11 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 //nolint:gocritic // hugeParam: mirrors Callback's package-wide value-pass Config posture.
 func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
 	if cfg.StateStore != nil {
-		storeCtx, cancel := context.WithTimeout(ctx, stateStoreRequestTimeout)
-		verified, err := cfg.StateStore.ConsumeState(storeCtx, stateParam, now)
-		cancel()
-		if err == nil {
-			return verified, nil
-		}
-		if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMalformed) {
-			return VerifiedState{}, err
-		}
-		if isOpaqueStateHandle(stateParam) {
-			return VerifiedState{}, err
-		}
-		// Legacy signed states minted before StateStore rollout are not present
-		// in DDB; preserve a short deploy-overlap path.
+		return loadStateWithLegacyFallback(cfg.OAuthStateSecret, stateParam, now, func() (VerifiedState, error) {
+			storeCtx, cancel := context.WithTimeout(ctx, stateStoreRequestTimeout)
+			defer cancel()
+			return cfg.StateStore.ConsumeState(storeCtx, stateParam, now)
+		})
 	}
 	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }

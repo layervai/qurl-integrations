@@ -137,11 +137,15 @@ func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now tim
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
 		},
-		ReturnValues: ddbtypes.ReturnValueAllOld,
+		ReturnValues:                        ddbtypes.ReturnValueAllOld,
+		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld,
 	})
 	if err != nil {
 		var ccfe *ddbtypes.ConditionalCheckFailedException
 		if errors.As(err, &ccfe) {
+			if _, started := ccfe.Item[oauthStateAttrStartedAt]; len(ccfe.Item) > 0 && !started {
+				return VerifiedState{}, errStateNotStarted
+			}
 			return VerifiedState{}, errStateExpired
 		}
 		return VerifiedState{}, fmt.Errorf("oauth state store delete: %w", err)
@@ -166,11 +170,10 @@ func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, n
 		Key: map[string]ddbtypes.AttributeValue{
 			workspaceStatePKAttr: &ddbtypes.AttributeValueMemberS{Value: oauthStateKey(handle)},
 		},
-		UpdateExpression:         aws.String("SET #mark = if_not_exists(#mark, :now_iso)"),
+		UpdateExpression:         aws.String("SET #mark = if_not_exists(#mark, :now_epoch)"),
 		ConditionExpression:      aws.String(condition),
 		ExpressionAttributeNames: names,
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":now_iso":   &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
 			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
 		},
 		ReturnValues: returnValues,
