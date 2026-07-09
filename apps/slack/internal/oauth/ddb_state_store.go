@@ -39,7 +39,11 @@ const (
 // TODO(upstream-contract): qurl-integrations-infra#1286 enables the table's
 // native TTL on the numeric `ttl` attribute so abandoned rows are reaped. That
 // attribute is reserved for short-lived oauth_state rows; durable workspace
-// credential rows must never write it.
+// credential rows must never write it. Future scans, exports, or GSIs over this
+// shared table must filter item_type so ephemeral rows are not treated as
+// workspace credentials. State rows intentionally bypass credential encryption:
+// nonce and verifier are short-lived protocol values, and neither authorizes an
+// exchange without the browser-delivered Auth0 code and confidential-client key.
 type DDBStateStore struct {
 	Client    auth.DynamoDBClient
 	TableName string
@@ -143,7 +147,10 @@ func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now tim
 	if err != nil {
 		var ccfe *ddbtypes.ConditionalCheckFailedException
 		if errors.As(err, &ccfe) {
-			if _, started := ccfe.Item[oauthStateAttrStartedAt]; len(ccfe.Item) > 0 && !started {
+			if len(ccfe.Item) == 0 {
+				return VerifiedState{}, errStateMissing
+			}
+			if _, started := ccfe.Item[oauthStateAttrStartedAt]; !started {
 				return VerifiedState{}, errStateNotStarted
 			}
 			return VerifiedState{}, errStateExpired

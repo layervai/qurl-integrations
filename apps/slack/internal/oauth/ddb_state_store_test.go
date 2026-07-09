@@ -243,3 +243,13 @@ func TestDDBStateStoreConsumeStateDistinguishesNotStarted(t *testing.T) {
 		t.Fatalf("ConsumeState error = %v, want errStateNotStarted", err)
 	}
 }
+
+func TestDDBStateStoreConsumeStateDistinguishesMissingOrReplayed(t *testing.T) {
+	ddb := &fakeOAuthStateDDB{
+		deleteErr: &ddbtypes.ConditionalCheckFailedException{},
+	}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	if _, err := store.ConsumeState(context.Background(), "opaque-handle", time.Unix(1700000030, 0)); !errors.Is(err, errStateMissing) {
+		t.Fatalf("ConsumeState error = %v, want errStateMissing", err)
+	}
+}

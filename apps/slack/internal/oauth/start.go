@@ -29,6 +29,8 @@ func Start(cfg Config) http.HandlerFunc {
 			return
 		}
 		if len(cfg.OAuthStateSecret) < StateMinSecret {
+			// TODO(#864): remove this gate with the signed-state deploy-overlap
+			// parser once the longest legacy state window has elapsed.
 			slog.Error("oauth/start refused: OAUTH_STATE_SECRET unset or shorter than 32 bytes")
 			renderOAuthErrorPage(w, http.StatusServiceUnavailable, "qURL setup is unavailable",
 				"qURL™ setup is not configured for this Slack app.",

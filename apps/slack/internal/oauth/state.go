@@ -109,6 +109,7 @@ var (
 	errStateMalformed      = errors.New("state: malformed")
 	errStateBadHMAC        = errors.New("state: HMAC mismatch")
 	errStateExpired        = errors.New("state: expired")
+	errStateMissing        = errors.New("state: missing or already consumed")
 	errStateNotStarted     = errors.New("state: callback received before start")
 	errStateFuture         = errors.New("state: timestamp in future")
 	errStateShortKey       = errors.New("state: secret too short")
@@ -418,6 +419,7 @@ func stateEmailNormalized(email string) bool {
 
 func isStateValidationError(err error) bool {
 	return errors.Is(err, errStateExpired) ||
+		errors.Is(err, errStateMissing) ||
 		errors.Is(err, errStateNotStarted) ||
 		errors.Is(err, errStateBadHMAC) ||
 		errors.Is(err, errStateMalformed) ||
@@ -429,7 +431,10 @@ func loadStateWithLegacyFallback(secret []byte, encoded string, now time.Time, l
 	if err == nil {
 		return verified, nil
 	}
-	if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMalformed) {
+	if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMissing) && !errors.Is(err, errStateMalformed) {
+		// Availability failures never bypass the state store. Falling back on a
+		// DDB transport/throttle error could accept an opaque flow the backend
+		// could not authoritatively validate.
 		return VerifiedState{}, err
 	}
 	if isOpaqueStateHandle(encoded) {
