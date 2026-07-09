@@ -85,11 +85,11 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("nonce") != verified.Nonce {
 		t.Errorf("nonce: got %q want signed state nonce %q", q.Get("nonce"), verified.Nonce)
 	}
-	if q.Get("code_challenge") != pkceCodeChallenge(verified.CodeVerifier) {
-		t.Errorf("code_challenge: got %q want S256 challenge", q.Get("code_challenge"))
+	if q.Get("code_challenge") != "" {
+		t.Errorf("legacy state must not add a PKCE challenge, got %q", q.Get("code_challenge"))
 	}
-	if q.Get("code_challenge_method") != "S256" {
-		t.Errorf("code_challenge_method: got %q want S256", q.Get("code_challenge_method"))
+	if q.Get("code_challenge_method") != "" {
+		t.Errorf("legacy state must not add a PKCE challenge method, got %q", q.Get("code_challenge_method"))
 	}
 	if q.Get("code_verifier") != "" {
 		t.Errorf("code_verifier must not be sent to /authorize, got %q", q.Get("code_verifier"))
@@ -138,6 +138,12 @@ func TestStartUsesStoredOpaqueState(t *testing.T) {
 
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	store.mu.Lock()
+	startHadDeadline := store.startHadDeadline
+	store.mu.Unlock()
+	if !startHadDeadline {
+		t.Fatal("StartState must receive an explicit deadline")
 	}
 	loc := rec.Header().Get("Location")
 	u, err := url.Parse(loc)

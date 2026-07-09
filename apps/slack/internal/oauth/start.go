@@ -85,7 +85,9 @@ func Start(cfg Config) http.HandlerFunc {
 //nolint:gocritic // hugeParam: mirrors Start/Callback's package-wide value-pass Config posture.
 func startState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
 	if cfg.StateStore != nil {
-		verified, err := cfg.StateStore.StartState(ctx, stateParam, now)
+		storeCtx, cancel := context.WithTimeout(ctx, stateStoreTimeout)
+		verified, err := cfg.StateStore.StartState(storeCtx, stateParam, now)
+		cancel()
 		if err == nil {
 			return verified, nil
 		}

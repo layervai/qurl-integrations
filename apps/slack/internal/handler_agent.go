@@ -38,6 +38,29 @@ const agentProposalPreviewPrefix = "I can set that up, but applying changes from
 // internals never reach the channel.
 const agentErrorReply = "Something went wrong handling that. Please try again, or use a `/qurl` command."
 
+// agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
+// features. Surfaced in every AI-disclosure string below so users always have a
+// route to how their messages are processed.
+const agentAIPrivacyURL = "https://layerv.ai/privacy/"
+
+// agentAIDisclosure is the Slack-Marketplace-required AI disclosure for the
+// agent surface: it names the AI provider (Anthropic Claude), warns that AI can
+// be wrong (review before approving), notes the paid-plan requirement for Slack
+// AI apps, and links the privacy notice. Used as the pane's first-run intro and
+// kept as one const so the App Home / pane copy can't drift on the load-bearing
+// points (AI used + can be wrong + privacy link).
+const agentAIDisclosure = "I use AI (Anthropic Claude) to interpret requests and can make mistakes — review any proposed action before approving. AI features require a paid Slack plan. Privacy: " + agentAIPrivacyURL
+
+// agentAIDisclosureShort is the App Home context-block variant of
+// agentAIDisclosure — the same load-bearing points (AI used + can be wrong +
+// privacy link) in the tighter form a context block wants.
+const agentAIDisclosureShort = "🤖 Uses AI (Anthropic Claude) and can make mistakes — review actions before approving. Privacy: " + agentAIPrivacyURL
+
+// agentConfirmAIDisclosure is the small AI-provenance line on the proposed-action
+// confirm card, reminding the approver the proposal came from the AI agent before
+// they approve it.
+const agentConfirmAIDisclosure = "🤖 Proposed by the AI agent — review before approving."
+
 // agentTransientReply is posted when a turn fails for a likely-transient reason —
 // the turn-budget deadline elapsed, or the context was canceled — as opposed to
 // agentErrorReply's generic failure. Slack's agent-design guidance is to separate
@@ -91,13 +114,21 @@ const agentThinkingStatus = "is thinking…"
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
 type slackEventEnvelope struct {
-	Type         string          `json:"type"`
-	Challenge    string          `json:"challenge"`
-	TeamID       string          `json:"team_id"`
-	EnterpriseID string          `json:"enterprise_id"`
-	APIAppID     string          `json:"api_app_id"`
-	EventID      string          `json:"event_id"`
-	Event        slackInnerEvent `json:"event"`
+	Type           string                    `json:"type"`
+	Challenge      string                    `json:"challenge"`
+	TeamID         string                    `json:"team_id"`
+	EnterpriseID   string                    `json:"enterprise_id"`
+	APIAppID       string                    `json:"api_app_id"`
+	EventID        string                    `json:"event_id"`
+	EventTime      int64                     `json:"event_time,omitempty"`
+	Authorizations []slackEventAuthorization `json:"authorizations,omitempty"`
+	Event          slackInnerEvent           `json:"event"`
+}
+
+type slackEventAuthorization struct {
+	EnterpriseID        string `json:"enterprise_id,omitempty"`
+	TeamID              string `json:"team_id,omitempty"`
+	IsEnterpriseInstall bool   `json:"is_enterprise_install,omitempty"`
 }
 
 // slackInnerEvent is the inner `event` object for app_mention / message events,
@@ -120,7 +151,13 @@ type slackInnerEvent struct {
 	Tab string `json:"tab,omitempty"`
 	// AssistantThread is set on the container events (assistant_thread_started and
 	// assistant_thread_context_changed), which carry a nested object, not the flat fields.
-	AssistantThread *assistantThread `json:"assistant_thread,omitempty"`
+	AssistantThread *assistantThread    `json:"assistant_thread,omitempty"`
+	Tokens          *slackRevokedTokens `json:"tokens,omitempty"`
+}
+
+type slackRevokedTokens struct {
+	Bot   []string `json:"bot,omitempty"`
+	OAuth []string `json:"oauth,omitempty"`
 }
 
 // assistantThread is the assistant_thread object on a container event: the assistant DM
@@ -679,13 +716,14 @@ func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
 }
 
-// agentEventPartition is the conversation-state partition key: the Enterprise
-// Grid org id when present (stable across the org's workspaces), else the team.
+// agentEventPartition is the conversation/dedupe partition key. It deliberately
+// uses the same resolver as lifecycleWorkspaceIDs: org-level installs write those
+// rows under enterprise_id, workspace-level installs write under team_id, and the
+// lifecycle purge also sweeps any team-keyed agent-state partitions Slack
+// includes on org callbacks for pending actions, audit, pane context, and rate
+// counters.
 func agentEventPartition(env *slackEventEnvelope) string {
-	if env.EnterpriseID != "" {
-		return env.EnterpriseID
-	}
-	return env.TeamID
+	return resolveSlackEventPartitions(env).agentWrite
 }
 
 // agentEventRootTS is the thread root a turn belongs to: the parent thread_ts

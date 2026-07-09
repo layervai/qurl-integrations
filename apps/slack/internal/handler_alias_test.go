@@ -1051,6 +1051,24 @@ func TestUserHelpGatesGetAliasesAndUninstall(t *testing.T) {
 	}
 }
 
+// TestUserHelpGatesDMTrueOnPostDMBlocks fences that the `dm:true` help line is
+// advertised iff PostDMBlocks is wired — the SAME seam getWork gates its dm:true
+// refusal on. Without this lockstep, a deploy with PostDMBlocks nil would advertise
+// a path whose only reply is ":warning: DM delivery is not configured".
+func TestUserHelpGatesDMTrueOnPostDMBlocks(t *testing.T) {
+	const dmLine = "dm:true`"
+	h := newTestHandler(t, noopQURLServer(t))
+	// AdminStore gates the get verbs at all; the dm:true line nests under it.
+	seedAliasAdminGate(t, h, testAliasTeamID)
+	if got := h.userHelpMessage(commandUser); strings.Contains(got, dmLine) {
+		t.Errorf("user help advertised dm:true with PostDMBlocks nil: %q", got)
+	}
+	h.cfg.PostDMBlocks = func(context.Context, string, string, string, []any, string) error { return nil }
+	if got := h.userHelpMessage(commandUser); !strings.Contains(got, dmLine) {
+		t.Errorf("user help omitted dm:true with PostDMBlocks wired: %q", got)
+	}
+}
+
 // TestHelpHidesAliasVerbsWhenAliasStoreNil fences round-19 cr #2:
 // on a sandbox deploy without an aliasStore the setalias / unsetalias
 // verbs reply "not configured" — help text must not advertise them.

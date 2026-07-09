@@ -313,6 +313,32 @@ func TestJWKSVerifierVerifyNonceAcceptsMatchingClaim(t *testing.T) {
 	}
 }
 
+func TestJWKSVerifierVerifySetupClaimsUsesNonceBoundToken(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	const (
+		wantNonce = "state-bound-nonce"
+		wantSub   = "auth0|abc123def456"
+	)
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.SubjectKey:    wantSub,
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		emailClaim:        testAdminEmail,
+		"email_verified":  true,
+		"nonce":           wantNonce,
+	})
+	claims, err := f.verifier.VerifySetupClaims(context.Background(), string(signed), wantNonce)
+	if err != nil {
+		t.Fatalf("VerifySetupClaims: %v", err)
+	}
+	if claims.Email != testAdminEmail || claims.Sub != wantSub || claims.EmailErr != nil || claims.SubErr != nil {
+		t.Fatalf("claims = %+v", claims)
+	}
+}
+
 func TestJWKSVerifierVerifyNonceRejectsMismatch(t *testing.T) {
 	f := newJWKSFixture(t, "client-aud")
 	now := time.Now()

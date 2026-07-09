@@ -35,13 +35,21 @@ const (
 	// owner-scoped key-status lookup.
 	apiKeyRevokedMaxPages = 10
 
-	// errCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
+	externalBindingPath = "/v1/external-identity-bindings"
+	apiKeysPath         = "/v1/api-keys"
+	apiKeyPath          = "/v1/api-keys/:id"
+
+	// ErrorCodeAPIKeyLimit is the qurl-service error-envelope `code` returned
 	// when key provisioning is refused because the owner is already at
 	// their plan's API-key cap (free tier = 3). Mirrors qurl-service's
 	// validation.ErrorCodeAPIKeyLimit. Both that endpoint's qurl:write
 	// scope gate AND this quota check surface as HTTP 403, so the status
 	// code alone can't disambiguate — the body `code` is the only signal.
-	errCodeAPIKeyLimit = "api_key_limit"
+	ErrorCodeAPIKeyLimit = "api_key_limit"
+	// ErrorCodeQuotaExceeded is a quota-class qurl-service refusal. It is not
+	// an auth dependency failure, even when qurl-service returns HTTP 403.
+	ErrorCodeQuotaExceeded = "quota_exceeded"
+
 	// errCodeAlreadyExists must pair with HTTP 409. It means qurl-service has
 	// already bound the workspace identity and the Slack app should show the
 	// administrator recovery path instead of minting a second legacy key.
@@ -59,12 +67,12 @@ const (
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
 )
 
-// ErrAPIKeyLimitReached is returned when qurl-service refuses provisioning
-// because the account holds the maximum number of API keys for its plan. The
-// OAuth callback maps this to an actionable "revoke a key" page rather than
-// the generic "try again" message — retrying never clears a quota, so the old
+// ErrAPIKeyProvisioningQuotaReached is returned when qurl-service refuses key
+// provisioning because the account hit an API-key or quota-class cap. The OAuth
+// callback maps this to an actionable "revoke a key" page rather than the
+// generic "try again" message — retrying never clears a quota, so the old
 // advice was actively misleading.
-var ErrAPIKeyLimitReached = errors.New("qurl-service API key limit reached")
+var ErrAPIKeyProvisioningQuotaReached = errors.New("qurl-service API key provisioning quota reached")
 
 // ErrExternalIdentityAlreadyBound is returned when qurl-service reports that
 // the Slack workspace already has an external identity binding, but the bot
@@ -101,6 +109,56 @@ type HTTPAPIKeyMinter struct {
 	// doesn't churn under load.
 	defaultClient *http.Client
 	defaultOnce   sync.Once
+}
+
+// DependencyAuthFailureError marks an unexpected qurl-service auth-class
+// rejection so callers can emit the structured CloudWatch audit event without
+// parsing human error strings.
+type DependencyAuthFailureError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Code       string
+	RequestID  string
+}
+
+func (e *DependencyAuthFailureError) Error() string {
+	msg := fmt.Sprintf("qurl-service %s %s returned %d", e.Method, e.Path, e.StatusCode)
+	if e.Code != "" {
+		msg += " code=" + e.Code
+	}
+	if e.RequestID != "" {
+		msg += " request_id=" + e.RequestID
+	}
+	return msg
+}
+
+func dependencyAuthFailureError(method, path string, status int, code, requestID string) error {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return nil
+	}
+	if code == structuredErrorEnvelopeCode {
+		code = ""
+	}
+	return &DependencyAuthFailureError{
+		Method:     method,
+		Path:       path,
+		StatusCode: status,
+		Code:       code,
+		RequestID:  requestID,
+	}
+}
+
+func responseExceededError(method, path string, status int, label string, limit int) error {
+	msg := fmt.Sprintf("%s response exceeded %d bytes", label, limit)
+	if authErr := dependencyAuthFailureError(method, path, status, "", ""); authErr != nil {
+		// qurl-service error envelopes are tiny. If an auth-class response is
+		// unreadably large, classify it conservatively as a dependency auth
+		// failure with empty parsed fields rather than silently missing the
+		// alarm.
+		return fmt.Errorf("%w: %s", authErr, msg)
+	}
+	return errors.New(msg)
 }
 
 type mintRequest struct {
@@ -157,7 +215,7 @@ func (m *HTTPAPIKeyMinter) client() *http.Client {
 // joinAPIKeyURL composes BaseURL + "/v1/api-keys[/keyID]" so a BaseURL
 // that ends with a slash doesn't produce a "//v1/api-keys" path.
 func (m *HTTPAPIKeyMinter) joinAPIKeyURL(elem ...string) (string, error) {
-	parts := append([]string{"v1", "api-keys"}, elem...)
+	parts := append(strings.Split(strings.TrimPrefix(apiKeysPath, "/"), "/"), elem...)
 	u, err := url.JoinPath(m.BaseURL, parts...)
 	if err != nil {
 		return "", fmt.Errorf("compose qurl-service URL: %w", err)
@@ -167,7 +225,7 @@ func (m *HTTPAPIKeyMinter) joinAPIKeyURL(elem ...string) (string, error) {
 
 // joinExternalBindingURL composes BaseURL + "/v1/external-identity-bindings".
 func (m *HTTPAPIKeyMinter) joinExternalBindingURL() (string, error) {
-	u, err := url.JoinPath(m.BaseURL, "v1", "external-identity-bindings")
+	u, err := url.JoinPath(m.BaseURL, strings.TrimPrefix(externalBindingPath, "/"))
 	if err != nil {
 		return "", fmt.Errorf("compose qurl-service URL: %w", err)
 	}
@@ -266,26 +324,30 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		if bodyOversized {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+			return WorkspaceAPIKeyMint{}, responseExceededError(http.MethodPost, externalBindingPath, resp.StatusCode, "qurl-service "+externalBindingPath, minterBodyLimit)
 		}
-		code := errorEnvelopeCode(rb)
+		fields := errorEnvelopeFields(rb)
+		code := fields.Code
 		if shouldFallbackToLegacyMint(resp.StatusCode, code) {
 			// Legacy fallback keys are revoked on local persist failure, so omit
 			// Idempotency-Key and preserve mint-fresh retry behavior.
 			return m.mintLegacyAPIKey(ctx, accessToken, displayName, apiKeyScopes(), "")
 		}
-		if code == errCodeAPIKeyLimit && resp.StatusCode == http.StatusForbidden {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+		if isExpectedAPIKeyQuotaCode(code) && resp.StatusCode == http.StatusForbidden {
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyProvisioningQuotaReached, resp.StatusCode)
 		}
 		if code == errCodeAlreadyExists && resp.StatusCode == http.StatusConflict {
 			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrExternalIdentityAlreadyBound, resp.StatusCode)
 		}
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings returned %d", resp.StatusCode)
+		if authErr := dependencyAuthFailureError(http.MethodPost, externalBindingPath, resp.StatusCode, code, fields.RequestID); authErr != nil {
+			return WorkspaceAPIKeyMint{}, authErr
+		}
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d", externalBindingPath, resp.StatusCode)
 	}
 	// Success bodies never participate in fallback; reject oversized responses
 	// before parsing the api_key payload.
 	if bodyOversized {
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/external-identity-bindings response exceeded %d bytes", minterBodyLimit)
+		return WorkspaceAPIKeyMint{}, responseExceededError(http.MethodPost, externalBindingPath, resp.StatusCode, "qurl-service "+externalBindingPath, minterBodyLimit)
 	}
 	return bindingMintFromResponse(rb)
 }
@@ -366,16 +428,20 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("read body: %w", err)
 	}
 	if len(rb) > minterBodyLimit {
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+		return WorkspaceAPIKeyMint{}, responseExceededError(http.MethodPost, apiKeysPath, resp.StatusCode, "qurl-service "+apiKeysPath, minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		// Preserve the legacy endpoint's historical code-only limit
 		// classification; the binding endpoint uses stricter status+code
 		// pairing because its error contract is new and controlled.
-		if apiKeyLimitError(rb) {
-			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyLimitReached, resp.StatusCode)
+		if apiKeyQuotaError(rb) {
+			return WorkspaceAPIKeyMint{}, fmt.Errorf("%w (status %d)", ErrAPIKeyProvisioningQuotaReached, resp.StatusCode)
 		}
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
+		fields := errorEnvelopeFields(rb)
+		if authErr := dependencyAuthFailureError(http.MethodPost, apiKeysPath, resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
+			return WorkspaceAPIKeyMint{}, authErr
+		}
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d", apiKeysPath, resp.StatusCode)
 	}
 	var mr mintResponse
 	if err := json.Unmarshal(rb, &mr); err != nil {
@@ -421,7 +487,18 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("%w (status %d)", ErrAPIKeyNotFound, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("qurl-service DELETE /v1/api-keys returned %d", resp.StatusCode)
+		rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
+		if err != nil {
+			return fmt.Errorf("read body: %w", err)
+		}
+		if len(rb) > minterBodyLimit {
+			return responseExceededError(http.MethodDelete, apiKeyPath, resp.StatusCode, "qurl-service DELETE "+apiKeyPath, minterBodyLimit)
+		}
+		fields := errorEnvelopeFields(rb)
+		if authErr := dependencyAuthFailureError(http.MethodDelete, apiKeyPath, resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
+			return authErr
+		}
+		return fmt.Errorf("qurl-service DELETE %s returned %d", apiKeyPath, resp.StatusCode)
 	}
 	return nil
 }
@@ -586,16 +663,30 @@ func shouldFallbackToLegacyMint(status int, errorCode string) bool {
 	return errorCode == errCodeBindingsDisabled
 }
 
-// apiKeyLimitError reports whether body is a qurl-service error envelope
-// carrying the api-key-limit code. The envelope shape is
+// apiKeyQuotaError reports whether body is a qurl-service error envelope
+// carrying an expected API-key quota-class code. The envelope shape is
 // {"error":{"code":"...", ...}} — qurl-service's own nested form, NOT RFC
 // 7807 problem+json (where code/title/detail are top-level, not nested under
 // "error"), so the match is driven by the parsed JSON shape, not the
 // response Content-Type. A body that doesn't parse to that shape (e.g. a
 // bare {"error":"forbidden"} string, or non-JSON) returns false so the
 // caller falls back to the generic status-code error.
-func apiKeyLimitError(body []byte) bool {
-	return errorEnvelopeCode(body) == errCodeAPIKeyLimit
+func apiKeyQuotaError(body []byte) bool {
+	return isExpectedAPIKeyQuotaCode(errorEnvelopeCode(body))
+}
+
+func isExpectedAPIKeyQuotaCode(code string) bool {
+	switch code {
+	case ErrorCodeAPIKeyLimit, ErrorCodeQuotaExceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+type errorEnvelopeFieldsResult struct {
+	Code      string
+	RequestID string
 }
 
 // errorEnvelopeCode returns qurl-service's nested error.code when present.
@@ -603,20 +694,30 @@ func apiKeyLimitError(body []byte) bool {
 // closed (JSON strings and code-less error objects), and "" for generic
 // route-missing bodies that may use the rollout fallback.
 func errorEnvelopeCode(body []byte) string {
+	return errorEnvelopeFields(body).Code
+}
+
+// errorEnvelopeFields returns the nested qurl-service error code plus the
+// request_id correlation handle when the response body carries one.
+func errorEnvelopeFields(body []byte) errorEnvelopeFieldsResult {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return ""
+		return errorEnvelopeFieldsResult{}
 	}
 	var message string
 	if err := json.Unmarshal(trimmed, &message); err == nil {
-		return structuredErrorEnvelopeCode
+		return errorEnvelopeFieldsResult{Code: structuredErrorEnvelopeCode}
 	}
 	var env struct {
 		Error json.RawMessage `json:"error"`
+		Meta  struct {
+			RequestID string `json:"request_id"`
+		} `json:"meta"`
 	}
 	if err := json.Unmarshal(trimmed, &env); err == nil {
+		out := errorEnvelopeFieldsResult{RequestID: env.Meta.RequestID}
 		if len(env.Error) == 0 {
-			return ""
+			return out
 		}
 		var problem struct {
 			Code string `json:"code"`
@@ -624,15 +725,17 @@ func errorEnvelopeCode(body []byte) string {
 		if err := json.Unmarshal(env.Error, &problem); err != nil {
 			// Treat {"error":"..."} as a generic, non-qURL-envelope 404 so
 			// the rollout bridge still covers old route-missing JSON bodies.
-			return ""
+			return out
 		}
 		if problem.Code != "" {
-			return problem.Code
+			out.Code = problem.Code
+			return out
 		}
 		if bytes.HasPrefix(bytes.TrimSpace(env.Error), []byte("{")) {
-			return structuredErrorEnvelopeCode
+			out.Code = structuredErrorEnvelopeCode
+			return out
 		}
-		return ""
+		return out
 	}
-	return ""
+	return errorEnvelopeFieldsResult{}
 }

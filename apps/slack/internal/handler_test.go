@@ -508,8 +508,11 @@ func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
 		t.Fatalf("uninstall reply missing revocation caveat: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
-		t.Fatalf("uninstall reply missing reconnect ownership hint: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 }
 
@@ -531,31 +534,38 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
-		t.Fatalf("not-connected reply missing owner reconnect guidance: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("not-connected reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("not-connected reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "operator") {
 		t.Fatalf("not-connected reply missing operator recovery guidance: %q", resp[respFieldText])
 	}
 }
 
-func TestSlashCommandUninstallRepeatReportsNotConnected(t *testing.T) {
-	provider := &recordingAuthProvider{apiKey: "test-key"}
+func TestSlashCommandUninstallReportsNotConnectedWhenKeyAlreadyGone(t *testing.T) {
+	// An uninstall where the admin gate passes (the workspace_mappings row still
+	// records the caller as admin) but the qURL key columns are already cleared
+	// reports "isn't currently connected". This used to be reached by uninstalling
+	// twice, but `/qurl uninstall` now also forgets the workspace_mappings row
+	// (purgeWorkspace), so a second uninstall fails the admin gate instead. The
+	// partial-state path the not-connected copy is for is set up directly:
+	// DeleteAPIKey reports the qURL columns already gone.
+	provider := &recordingAuthProvider{apiKey: "test-key", deleteErr: auth.ErrWorkspaceNotConfigured}
 	h := newUninstallAdminTestHandler(t, provider)
 
-	first := slashUninstallAsAdmin(t, h)
-	if !strings.Contains(first[respFieldText], "disconnected from this workspace") {
-		t.Fatalf("first uninstall reply missing confirmation: %q", first[respFieldText])
-	}
+	resp := slashUninstallAsAdmin(t, h)
 
-	provider.deleteErr = auth.ErrWorkspaceNotConfigured
-	second := slashUninstallAsAdmin(t, h)
-
-	if provider.deleteCalls != 2 {
-		t.Fatalf("DeleteAPIKey calls = %d, want 2", provider.deleteCalls)
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
-	if !strings.Contains(second[respFieldText], "isn't currently connected") {
-		t.Fatalf("repeat uninstall reply missing not-connected message: %q", second[respFieldText])
+	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
+		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 }
 
@@ -1224,41 +1234,66 @@ func TestSlashCommandUninstallStrangerDoesNotProbeOwnerState(t *testing.T) {
 }
 
 func TestSlashCommandUninstallAllowsWorkspaceAdminOrOwner(t *testing.T) {
-	provider := &recordingAuthProvider{apiKey: "test-key"}
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	h := newAdminTestHandler(t, ts)
-	h.cfg.AuthProvider = provider
+	// A stranger is denied (no qURL-key delete); both an admin and the owner are
+	// allowed (one delete each). Each allowed role runs against its OWN fresh
+	// workspace because `/qurl uninstall` now fully forgets the workspace
+	// (purgeWorkspace removes the workspace_mappings row too), so a second
+	// uninstall against the same already-forgotten workspace would correctly find
+	// no admin row to gate on. Sharing one handler across roles (the pre-cascade
+	// shape) would make the owner's call hit an already-deleted mapping.
+	t.Run("stranger denied", func(t *testing.T) {
+		provider := &recordingAuthProvider{apiKey: "test-key"}
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		h.cfg.AuthProvider = provider
 
-	stranger := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "USTRANGER000")
-	if provider.deleteCalls != 0 {
-		t.Fatalf("stranger DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
-	}
-	if !strings.Contains(stranger[respFieldText], "qURL workspace admin") {
-		t.Fatalf("stranger reply missing admin-or-owner message: %q", stranger[respFieldText])
-	}
-	if strings.Contains(stranger[respFieldText], "<@") {
-		t.Fatalf("stranger reply disclosed owner mention: %q", stranger[respFieldText])
-	}
+		stranger := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "USTRANGER000")
+		if provider.deleteCalls != 0 {
+			t.Fatalf("stranger DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+		}
+		if !strings.Contains(stranger[respFieldText], "qURL workspace admin") {
+			t.Fatalf("stranger reply missing admin-or-owner message: %q", stranger[respFieldText])
+		}
+		if strings.Contains(stranger[respFieldText], "<@") {
+			t.Fatalf("stranger reply disclosed owner mention: %q", stranger[respFieldText])
+		}
+	})
 
-	admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
-	if provider.deleteCalls != 1 {
-		t.Fatalf("admin DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
-	}
-	if !strings.Contains(admin[respFieldText], "disconnected from this workspace") {
-		t.Fatalf("admin reply missing confirmation: %q", admin[respFieldText])
-	}
+	t.Run("admin allowed", func(t *testing.T) {
+		provider := &recordingAuthProvider{apiKey: "test-key"}
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		h.cfg.AuthProvider = provider
 
-	owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
-	if provider.deleteCalls != 2 {
-		t.Fatalf("owner DeleteAPIKey calls = %d, want 2", provider.deleteCalls)
-	}
-	if provider.deleteWorkspaceID != testAdminTeamID {
-		t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
-	}
-	if !strings.Contains(owner[respFieldText], "disconnected from this workspace") {
-		t.Fatalf("owner reply missing confirmation: %q", owner[respFieldText])
-	}
+		admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+		if provider.deleteCalls != 1 {
+			t.Fatalf("admin DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+		}
+		if !strings.Contains(admin[respFieldText], "disconnected from this workspace") {
+			t.Fatalf("admin reply missing confirmation: %q", admin[respFieldText])
+		}
+	})
+
+	t.Run("owner allowed", func(t *testing.T) {
+		provider := &recordingAuthProvider{apiKey: "test-key"}
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		h.cfg.AuthProvider = provider
+
+		owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
+		if provider.deleteCalls != 1 {
+			t.Fatalf("owner DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+		}
+		if provider.deleteWorkspaceID != testAdminTeamID {
+			t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
+		}
+		if !strings.Contains(owner[respFieldText], "disconnected from this workspace") {
+			t.Fatalf("owner reply missing confirmation: %q", owner[respFieldText])
+		}
+	})
 }
 
 func TestSlashCommandGetToken_AcksWithWorkingOnIt(t *testing.T) {
@@ -1628,8 +1663,7 @@ func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
 
 func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {"/qurl"},
@@ -1662,8 +1696,8 @@ func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	setupCfg := newTestOAuthSetupConfig()
+	h.SetOAuthSetup(setupCfg)
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1702,7 +1736,7 @@ func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T
 	if err != nil {
 		t.Fatalf("unescape state: %v", err)
 	}
-	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	verified, err := setupCfg.StateStore.StartState(context.Background(), stateRaw, fixedNow.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("minted state failed VerifyState: %v", err)
 	}
@@ -1714,11 +1748,85 @@ func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T
 	}
 }
 
+func TestSlashCommandSetupWithEmail_RateLimitsSetupLinksPerWorkspaceUser(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	now := fixedNow
+	h.now = func() time.Time { return now }
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
+
+	invoke := func(t *testing.T, teamID, userID string) string {
+		t.Helper()
+		body := url.Values{
+			"command": {commandUser},
+			"text":    {"setup admin@example.com"},
+			"team_id": {teamID},
+			"user_id": {userID},
+		}.Encode()
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+		}
+		var result map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return result["text"]
+	}
+
+	for i := 0; i < setupLinkRateLimitMax; i++ {
+		if text := invoke(t, "T123ABCDEF", "U_ADMIN1"); !strings.Contains(text, "/oauth/qurl/start?state=") {
+			t.Fatalf("attempt %d should mint setup URL, got: %q", i+1, text)
+		}
+	}
+	limited := invoke(t, "T123ABCDEF", "U_ADMIN1")
+	if strings.Contains(limited, "/oauth/qurl/start?state=") {
+		t.Fatalf("rate-limited attempt minted setup URL: %q", limited)
+	}
+	if !strings.Contains(limited, "generated several qURL setup links") {
+		t.Fatalf("rate-limited attempt missing retry copy: %q", limited)
+	}
+	if otherUser := invoke(t, "T123ABCDEF", "U_ADMIN2"); !strings.Contains(otherUser, "/oauth/qurl/start?state=") {
+		t.Fatalf("different user in same workspace should not share setup-link quota, got: %q", otherUser)
+	}
+	if otherWorkspace := invoke(t, "T999ABCDEF", "U_ADMIN1"); !strings.Contains(otherWorkspace, "/oauth/qurl/start?state=") {
+		t.Fatalf("same user in different workspace should not share setup-link quota, got: %q", otherWorkspace)
+	}
+
+	now = now.Add(setupLinkRateLimitWindow)
+	if text := invoke(t, "T123ABCDEF", "U_ADMIN1"); !strings.Contains(text, "/oauth/qurl/start?state=") {
+		t.Fatalf("same user after window should mint setup URL, got: %q", text)
+	}
+}
+
+func TestSlashCommandSetupWithRotate_RateLimitCopyKeepsModeFlag(t *testing.T) {
+	ts := newAdminTestServers(t)
+	h := newAdminTestHandler(t, ts)
+	now := fixedNow
+	h.now = func() time.Time { return now }
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
+
+	for i := 0; i < setupLinkRateLimitMax; i++ {
+		text := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
+		if !strings.Contains(text, "/oauth/qurl/start?state=") {
+			t.Fatalf("rotate attempt %d should mint setup URL, got: %q", i+1, text)
+		}
+	}
+
+	limited := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
+	if strings.Contains(limited, "/oauth/qurl/start?state=") {
+		t.Fatalf("rate-limited rotate attempt minted setup URL: %q", limited)
+	}
+	if !strings.Contains(limited, "`/qurl setup <email> --rotate`") {
+		t.Fatalf("rate-limited rotate attempt missing rotate retry command: %q", limited)
+	}
+}
+
 func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	setupCfg := newTestOAuthSetupConfig()
+	h.SetOAuthSetup(setupCfg)
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1757,7 +1865,7 @@ func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unescape state: %v", err)
 	}
-	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	verified, err := setupCfg.StateStore.StartState(context.Background(), stateRaw, fixedNow.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("minted state failed VerifyState: %v", err)
 	}
@@ -1771,8 +1879,7 @@ func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 
 func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1802,8 +1909,7 @@ func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
 
 func TestSlashCommandSetupWithRepoint_RejectsMissingAdminStore(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1835,8 +1941,7 @@ func TestSlashCommandSetupWithRotate_NonOwnerDeniedBeforeStateMint(t *testing.T)
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1868,8 +1973,8 @@ func TestSlashCommandSetupWithShapeBadLegacyOwner_AllowsPlainSetupReclaim(t *tes
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	setupCfg := newTestOAuthSetupConfig()
+	h.SetOAuthSetup(setupCfg)
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
 	text := resp[respFieldText]
@@ -1888,7 +1993,7 @@ func TestSlashCommandSetupWithShapeBadLegacyOwner_AllowsPlainSetupReclaim(t *tes
 	if err != nil {
 		t.Fatalf("unescape state: %v", err)
 	}
-	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	verified, err := setupCfg.StateStore.StartState(context.Background(), stateRaw, fixedNow.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("minted state failed VerifyState: %v", err)
 	}
@@ -1901,8 +2006,7 @@ func TestSlashCommandSetupWithRotate_RejectsShapeBadLegacyOwnerBeforeStateMint(t
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
 	text := resp[respFieldText]
@@ -1918,8 +2022,7 @@ func TestSlashCommandSetupWithRepoint_RejectsShapeBadLegacyOwnerBeforeStateMint(
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup --repoint Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
 	text := resp[respFieldText]
@@ -1959,8 +2062,7 @@ func TestParseSetupSubcommandModes(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1985,8 +2087,7 @@ func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RejectsUnknownFlagAsUsage(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -2014,8 +2115,7 @@ func TestSlashCommandSetupWithEmail_RejectsUnknownFlagAsUsage(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -2044,14 +2144,13 @@ func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 // future refactor that accidentally re-wires it.
 func TestSetOAuthSetupPanicsOnDoubleCall(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic on second SetOAuthSetup call")
 		}
 	}()
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 }
 
 func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {

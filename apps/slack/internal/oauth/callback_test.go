@@ -21,15 +21,20 @@ import (
 )
 
 const (
-	testTeamID        = "T123ABCDEF"
-	testUserID        = "U_ADMIN1"
-	testAuth0ClientID = "client-id"
-	testKeyID         = "k_1"
-	testKeyPrefix     = "lv_live_abcd"
-	testAPIKey        = "lv_live_abcd1234"
-	testOldAPIKey     = "lv_live_oldkey1234"
-	testOldKeyID      = "k_old"
-	testAdminEmail    = "admin@example.com"
+	testTeamID            = "T123ABCDEF"
+	testUserID            = "U_ADMIN1"
+	testAuth0ClientID     = "client-id"
+	testKeyID             = "k_1"
+	testKeyPrefix         = "lv_live_abcd"
+	testAPIKey            = "lv_live_abcd1234"
+	testOldAPIKey         = "lv_live_oldkey1234"
+	testOldKeyID          = "k_old"
+	testAdminEmail        = "admin@example.com"
+	testAuditAgent        = "slack"
+	testAuditFieldCode    = "code"
+	testInvalidToken      = "invalid_token"
+	testInsufficientScope = "insufficient_scope"
+	testRevokeKeyPath     = apiKeyPath
 )
 
 func captureDefaultSlogJSON(t *testing.T) func() []map[string]any {
@@ -72,6 +77,163 @@ func (b *lockedLogBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func TestLogOAuthDependencyAuthFailure(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testBindingPath,
+		StatusCode: http.StatusUnauthorized,
+		Code:       testInvalidToken,
+		RequestID:  "req_oauth401",
+	}, "oauth_callback_mint")
+
+	var record struct {
+		Audit map[string]any `json:"audit"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal audit log: %v\n%s", err, logs.String())
+	}
+	for k, want := range map[string]any{
+		"event":            "dependency_auth_failure",
+		"agent":            testAuditAgent,
+		"dependency":       "qurl_service",
+		"route":            "oauth_callback_mint",
+		"method":           http.MethodPost,
+		"path":             testBindingPath,
+		testAuditFieldCode: testInvalidToken,
+		"request_id":       "req_oauth401",
+	} {
+		if record.Audit[k] != want {
+			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, record.Audit[k], want, record.Audit)
+		}
+	}
+	if record.Audit["status"] != float64(http.StatusUnauthorized) {
+		t.Fatalf("audit[status] = %#v, want %d; audit=%#v", record.Audit["status"], http.StatusUnauthorized, record.Audit)
+	}
+
+	logs.Reset()
+	logOAuthDependencyAuthFailure(log, &DependencyAuthFailureError{
+		Method:     http.MethodDelete,
+		Path:       testRevokeKeyPath,
+		StatusCode: http.StatusForbidden,
+	}, "oauth_callback_orphan_revoke")
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal empty request-id audit log: %v\n%s", err, logs.String())
+	}
+	if record.Audit["request_id"] != "" {
+		t.Fatalf("audit[request_id] = %#v, want empty string; audit=%#v", record.Audit["request_id"], record.Audit)
+	}
+	if record.Audit[testAuditFieldCode] != "" {
+		t.Fatalf("audit[code] = %#v, want empty string; audit=%#v", record.Audit[testAuditFieldCode], record.Audit)
+	}
+
+	logs.Reset()
+	logOAuthDependencyAuthFailure(log, errors.New("ordinary failure"), "oauth_callback_mint")
+	if logs.Len() != 0 {
+		t.Fatalf("generic errors must not emit dependency auth audit: %s", logs.String())
+	}
+}
+
+func requireAuditRoute(t *testing.T, records []map[string]any, route string) map[string]any {
+	t.Helper()
+	for _, rec := range records {
+		audit, ok := rec["audit"].(map[string]any)
+		if ok && audit["route"] == route {
+			return audit
+		}
+	}
+	t.Fatalf("missing audit route %q in records: %#v", route, records)
+	return nil
+}
+
+func assertDependencyAuthFailureAudit(t *testing.T, audit map[string]any, route, method, path string, status int, code, requestID string) {
+	t.Helper()
+	for k, want := range map[string]any{
+		"event":            "dependency_auth_failure",
+		"agent":            testAuditAgent,
+		"dependency":       "qurl_service",
+		"route":            route,
+		"method":           method,
+		"path":             path,
+		testAuditFieldCode: code,
+		"request_id":       requestID,
+	} {
+		if audit[k] != want {
+			t.Fatalf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+		}
+	}
+	if audit["status"] != float64(status) {
+		t.Fatalf("audit[status] = %#v, want %d; audit=%#v", audit["status"], status, audit)
+	}
+}
+
+func TestMintAndPersistDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	cfg := Config{Minter: &fakeMinter{mintErr: &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testBindingPath,
+		StatusCode: http.StatusUnauthorized,
+		Code:       testInvalidToken,
+		RequestID:  "req_mint",
+	}}}
+
+	rec := httptest.NewRecorder()
+	_, ok := mintAndPersist(rec, cfg, "access-token", testTeamID, testUserID, testAdminSub)
+
+	if ok {
+		t.Fatal("mintAndPersist must fail when qurl-service returns a dependency auth failure")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_mint"),
+		"oauth_callback_mint", http.MethodPost, testBindingPath, http.StatusUnauthorized, testInvalidToken, "req_mint")
+}
+
+func TestMintReplacementAndPersistDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	cfg := Config{Minter: &fakeMinter{replacementMintErr: &DependencyAuthFailureError{
+		Method:     http.MethodPost,
+		Path:       testAPIKeysPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_replacement_mint",
+	}}}
+
+	rec := httptest.NewRecorder()
+	_, ok := mintReplacementAndPersist(rec, cfg, "access-token", testTeamID, testOldKeyID, testUserID, testAdminSub)
+
+	if ok {
+		t.Fatal("mintReplacementAndPersist must fail when qurl-service returns a dependency auth failure")
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_replacement_mint"),
+		"oauth_callback_replacement_mint", http.MethodPost, testAPIKeysPath, http.StatusForbidden, testInsufficientScope, "req_replacement_mint")
+}
+
+func TestRevokeOrphanKeyAsyncDependencyAuthFailureAuditWiring(t *testing.T) {
+	logs := captureDefaultSlogJSON(t)
+	minter := &fakeMinter{revokeErr: &DependencyAuthFailureError{
+		Method:     http.MethodDelete,
+		Path:       testRevokeKeyPath,
+		StatusCode: http.StatusForbidden,
+		Code:       testInsufficientScope,
+		RequestID:  "req_orphan_revoke",
+	}}
+
+	revokeOrphanKeyAsync(minter, "access-token", testOldKeyID, testTeamID)
+
+	assertDependencyAuthFailureAudit(t,
+		requireAuditRoute(t, logs(), "oauth_callback_orphan_revoke"),
+		"oauth_callback_orphan_revoke", http.MethodDelete, testRevokeKeyPath, http.StatusForbidden, testInsufficientScope, "req_orphan_revoke")
 }
 
 // fakeWorkspaceStore captures SetAPIKeyWithMetadata calls.
@@ -212,25 +374,14 @@ type fakeIDTokenVerifier struct {
 	subErr error
 }
 
-func (f *fakeIDTokenVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
-	return f.email, f.err
-}
-
-func (f *fakeIDTokenVerifier) VerifySub(_ context.Context, _ string) (string, error) {
-	if f.subErr != nil {
-		return "", f.subErr
-	}
-	return f.sub, nil
-}
-
-func (f *fakeIDTokenVerifier) VerifyNonce(_ context.Context, _, nonce string) error {
+func (f *fakeIDTokenVerifier) VerifySetupClaims(_ context.Context, _, nonce string) (IDTokenClaims, error) {
 	if nonce == "" {
-		return errors.New("missing nonce")
+		return IDTokenClaims{}, errors.New("missing nonce")
 	}
 	if f.nonce != "" && f.nonce != nonce {
-		return errors.New("nonce mismatch")
+		return IDTokenClaims{}, errors.New("nonce mismatch")
 	}
-	return nil
+	return IDTokenClaims{Email: f.email, Sub: f.sub, EmailErr: f.err, SubErr: f.subErr}, nil
 }
 
 // fakeSlackClient captures PostDirectMessage calls.
@@ -302,6 +453,7 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 	}))
 	t.Cleanup(auth0.Close)
 	store := &fakeWorkspaceStore{}
+	stateStore := newMemoryStateStore()
 	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix, bindingBacked: true}
 
 	// Re-point HTTPClient at the stub Auth0 by rewriting the request host
@@ -315,6 +467,7 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 		Auth0Audience:     "aud",
 		SlackBaseURL:      "https://slack-bot.example",
 		OAuthStateSecret:  testSecret,
+		StateStore:        stateStore,
 		Provider:          store,
 		IDTokenVerifier:   &fakeIDTokenVerifier{email: testAdminEmail},
 		Minter:            minter,
@@ -344,27 +497,30 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 func mintTestState(t *testing.T, cfg *Config) string {
 	t.Helper()
-	state, err := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, cfg.Now())
-	if err != nil {
-		t.Fatalf("MintState: %v", err)
-	}
-	return state
+	return mintStoredTestState(t, cfg, "", SetupModeReuse)
 }
 
 func mintTestStateWithEmail(t *testing.T, cfg *Config, email string) string {
 	t.Helper()
-	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testTeamID, testUserID, email, cfg.Now())
-	if err != nil {
-		t.Fatalf("MintStateWithEmail: %v", err)
-	}
-	return state
+	return mintStoredTestState(t, cfg, email, SetupModeReuse)
 }
 
 func mintTestStateWithMode(t *testing.T, cfg *Config, mode SetupMode) string {
 	t.Helper()
-	state, err := MintStateWithEmailMode(cfg.OAuthStateSecret, testTeamID, testUserID, testAdminEmail, mode, cfg.Now())
+	return mintStoredTestState(t, cfg, testAdminEmail, mode)
+}
+
+func mintStoredTestState(t *testing.T, cfg *Config, email string, mode SetupMode) string {
+	t.Helper()
+	if cfg.StateStore == nil {
+		t.Fatal("test callback config must provide StateStore")
+	}
+	state, err := MintStoredStateWithEmailMode(context.Background(), cfg.StateStore, testTeamID, testUserID, email, mode, cfg.Now())
 	if err != nil {
-		t.Fatalf("MintStateWithEmailMode: %v", err)
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if _, err := cfg.StateStore.StartState(context.Background(), state, cfg.Now()); err != nil {
+		t.Fatalf("StartState: %v", err)
 	}
 	return state
 }
@@ -542,6 +698,12 @@ func TestCallbackConsumesStoredStateOnce(t *testing.T) {
 	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first callback status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	stateStore.mu.Lock()
+	consumeHadDeadline := stateStore.consumeHadDeadline
+	stateStore.mu.Unlock()
+	if !consumeHadDeadline {
+		t.Fatal("ConsumeState must receive an explicit deadline")
 	}
 
 	rec = httptest.NewRecorder()
@@ -934,7 +1096,7 @@ func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
 // clears a quota). No key is minted, so nothing is persisted.
 func TestCallbackMintAPIKeyLimitRendersGuidance(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
-	minter.mintErr = ErrAPIKeyLimitReached
+	minter.mintErr = ErrAPIKeyProvisioningQuotaReached
 	state := mintTestState(t, &cfg)
 
 	h := Callback(cfg)
@@ -1136,11 +1298,10 @@ func TestCallbackHandlesAuth0Error(t *testing.T) {
 	assertOAuthErrorPage(t, rec, "Authorization didn't complete")
 }
 
-// TestCallbackRendersSuccessWhenVerifierFails locks the documented
-// non-fatal contract: a JWKS / id_token verify failure suppresses the
-// email line on the success page but never blocks the key mint or
-// the success render.
-func TestCallbackRendersSuccessWhenVerifierFails(t *testing.T) {
+// TestCallbackRendersSuccessWhenEmailExtractionFails locks the documented
+// non-fatal contract: an email-claim extraction failure suppresses the email
+// line but does not block the already-verified token's key mint.
+func TestCallbackRendersSuccessWhenEmailExtractionFails(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{err: errors.New("jwks fetch failed")}
 	state := mintTestState(t, &cfg)
@@ -1155,6 +1316,17 @@ func TestCallbackRendersSuccessWhenVerifierFails(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "qURL Connected") {
 		t.Errorf("expected success body even when verifier errored: %s", rec.Body.String())
+	}
+}
+
+func TestVerifyIDTokenClaimsFailsClosedWithoutTokenOrVerifier(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	if _, _, ok := verifyIDTokenClaims(context.Background(), cfg, "", "state-nonce"); ok {
+		t.Fatal("empty id_token must fail closed")
+	}
+	cfg.IDTokenVerifier = nil
+	if _, _, ok := verifyIDTokenClaims(context.Background(), cfg, "id-token", "state-nonce"); ok {
+		t.Fatal("nil verifier must fail closed")
 	}
 }
 
@@ -2169,7 +2341,7 @@ func TestCallbackExplicitRotationReplacementMintLimitRendersGuidance(t *testing.
 	const oldKeyID = testOldKeyID
 	store.existingKey = testOldAPIKey
 	store.existingKeyID = oldKeyID
-	minter.replacementMintErr = ErrAPIKeyLimitReached
+	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
 
 	h := Callback(cfg)

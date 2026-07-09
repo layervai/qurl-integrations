@@ -192,9 +192,45 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 }
 
 func TestAgentEventKeys(t *testing.T) {
-	grid := &slackEventEnvelope{TeamID: "T1", EnterpriseID: "E9", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
-	if agentEventPartition(grid) != "E9" {
-		t.Errorf("grid partition should be enterprise id")
+	gridTeam := &slackEventEnvelope{
+		TeamID:       "T1",
+		EnterpriseID: "E9",
+		Authorizations: []slackEventAuthorization{{
+			EnterpriseID:        "E9",
+			TeamID:              "T1",
+			IsEnterpriseInstall: false,
+		}},
+		Event: slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}
+	if agentEventPartition(gridTeam) != "T1" {
+		t.Errorf("grid workspace install partition should be team id")
+	}
+	gridOrg := &slackEventEnvelope{
+		TeamID:       "T1",
+		EnterpriseID: "E9",
+		Authorizations: []slackEventAuthorization{{
+			EnterpriseID:        "E9",
+			IsEnterpriseInstall: true,
+		}},
+		Event: slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}
+	if agentEventPartition(gridOrg) != "E9" {
+		t.Errorf("grid org install partition should be enterprise id")
+	}
+	partialGridOrg := &slackEventEnvelope{
+		TeamID:       "T1",
+		EnterpriseID: "E9",
+		Authorizations: []slackEventAuthorization{{
+			IsEnterpriseInstall: true,
+		}},
+		Event: slackInnerEvent{Channel: "C1", TS: "100.1"},
+	}
+	if agentEventPartition(partialGridOrg) != "E9" {
+		t.Errorf("partial grid org install partition should fall back to envelope enterprise id")
+	}
+	legacyGrid := &slackEventEnvelope{TeamID: "T1", EnterpriseID: "E9", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
+	if agentEventPartition(legacyGrid) != "T1" {
+		t.Errorf("legacy grid payload should use team-id fallback to match lifecycle purge")
 	}
 	noGrid := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{Channel: "C1", TS: "100.1"}}
 	if agentEventPartition(noGrid) != "T1" {
@@ -298,8 +334,9 @@ func (panicAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, 
 	panic("boom in the model call")
 }
 
-// memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem +
-// conditional PutItem (attribute_not_exists / version match).
+// memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem,
+// conditional PutItem (attribute_not_exists / version match), Query, UpdateItem,
+// and unconditional DeleteItem for purge tests.
 type memAgentDDB struct {
 	mu        sync.Mutex
 	items     map[string]map[string]ddbtypes.AttributeValue
@@ -430,7 +467,10 @@ func memNumberValue(av ddbtypes.AttributeValue) int64 {
 	return v
 }
 
-func (f *memAgentDDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+func (f *memAgentDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.items, memKey(in.Key))
 	return &dynamodb.DeleteItemOutput{}, nil
 }
 

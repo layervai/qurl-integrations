@@ -101,6 +101,10 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 	if err != nil {
 		return "", err
 	}
+	return verifiedEmail(tok)
+}
+
+func verifiedEmail(tok jwt.Token) (string, error) {
 	// Fail-closed on email_verified: surface the email only when the
 	// claim is present *and* a `bool` *and* explicitly true. Some
 	// Auth0 enterprise/SAML connections omit the claim entirely;
@@ -141,6 +145,10 @@ func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, e
 	if err != nil {
 		return "", err
 	}
+	return verifiedSub(tok)
+}
+
+func verifiedSub(tok jwt.Token) (string, error) {
 	// jwt.Token.Subject() reads the standard `sub` claim (RFC 7519
 	// §4.1.2). Auth0 always populates it on id_tokens; an empty value
 	// signals a misconfigured federation upstream.
@@ -156,12 +164,16 @@ func (v *JWKSVerifier) VerifySub(ctx context.Context, idToken string) (string, e
 // authorization request and the callback must fail closed before binding or
 // minting workspace credentials.
 func (v *JWKSVerifier) VerifyNonce(ctx context.Context, idToken, expectedNonce string) error {
-	if expectedNonce == "" {
-		return errors.New("expected nonce is empty")
-	}
 	tok, err := v.verifiedToken(ctx, idToken)
 	if err != nil {
 		return err
+	}
+	return verifyNonceClaim(tok, expectedNonce)
+}
+
+func verifyNonceClaim(tok jwt.Token, expectedNonce string) error {
+	if expectedNonce == "" {
+		return errors.New("expected nonce is empty")
 	}
 	rawNonce, ok := tok.Get("nonce")
 	if !ok {
@@ -175,4 +187,19 @@ func (v *JWKSVerifier) VerifyNonce(ctx context.Context, idToken, expectedNonce s
 		return errors.New("nonce claim mismatch")
 	}
 	return nil
+}
+
+// VerifySetupClaims performs the callback's token verification once, then
+// reads nonce, email, and sub from the same verified token.
+func (v *JWKSVerifier) VerifySetupClaims(ctx context.Context, idToken, expectedNonce string) (IDTokenClaims, error) {
+	tok, err := v.verifiedToken(ctx, idToken)
+	if err != nil {
+		return IDTokenClaims{}, err
+	}
+	if err := verifyNonceClaim(tok, expectedNonce); err != nil {
+		return IDTokenClaims{}, err
+	}
+	email, emailErr := verifiedEmail(tok)
+	sub, subErr := verifiedSub(tok)
+	return IDTokenClaims{Email: email, Sub: sub, EmailErr: emailErr, SubErr: subErr}, nil
 }

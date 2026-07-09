@@ -100,6 +100,21 @@ const STORE_METHODS = Object.freeze([
   'markConsumedDMEdited',
   'clearConsumedDMEdited',
 
+  // View-counter confirmation render state (cross-replica fast-path).
+  // saveSendConfirmState persists the render-state fields AFTER the
+  // initial editReply (separate from saveSendConfig, which runs earlier
+  // before the token/baseMsg exist); the rest are the read + mutate
+  // surface PR-B's webhook fast-path drives.
+  'saveSendConfirmState',
+  'getSendRenderState',
+  'incrementSendViewedCount',
+  'getSendViewedCount',
+  'getSendRenderedCount',
+  'tryAdvanceRenderedCount',
+  'touchRenderedAt',
+  'tryClaimRenderAttempt',
+  'markConfirmTerminal',
+
   // QURL views (webhook-fed view counter)
   'recordQurlView',
   'getQurlViews',

@@ -60,11 +60,14 @@ func blocksContain(t *testing.T, blocks []any, want string) bool {
 
 func TestBuildAgentHomeView_EmptyState(t *testing.T) {
 	blocks := buildAgentHomeView(nil)
-	if len(blocks) != 4 { // header + intro + divider + empty-state
-		t.Fatalf("empty view should have 4 blocks, got %d", len(blocks))
+	if len(blocks) != 5 { // header + intro + AI-disclosure + divider + empty-state
+		t.Fatalf("empty view should have 5 blocks, got %d", len(blocks))
 	}
 	if !blocksContain(t, blocks, agentHomeEmpty) {
 		t.Fatal("empty view must carry the empty-state copy")
+	}
+	if !blocksContain(t, blocks, agentAIDisclosureShort) {
+		t.Fatal("Home view must carry the AI disclosure")
 	}
 }
 
@@ -75,8 +78,8 @@ func TestBuildAgentHomeView_ListsEntriesWithLabels(t *testing.T) {
 		{Actor: "U1", Action: string(agent.ActionGet), Target: "staging", Channel: "C1", UnixSec: 1_700_000_000},
 	}
 	blocks := buildAgentHomeView(entries)
-	if len(blocks) != 6 { // 3 chrome + 3 entries
-		t.Fatalf("expected 6 blocks, got %d", len(blocks))
+	if len(blocks) != 7 { // 4 chrome (header + intro + AI-disclosure + divider) + 3 entries
+		t.Fatalf("expected 7 blocks, got %d", len(blocks))
 	}
 	// Neutral action label (not a success claim) + target.
 	if !blocksContain(t, blocks, "Revoke") || !blocksContain(t, blocks, "billing") {
@@ -194,7 +197,8 @@ func TestRecordAgentAudit_PersistsForApprover(t *testing.T) {
 	var payload interactionPayload
 	payload.Team.ID, payload.Channel.ID, payload.User.ID = "T1", "C1", "Uadmin"
 	pa := &pendingAction{Action: agent.ActionRevoke, Token: "metrics", Reason: "cleanup"}
-	h.recordAgentAudit(context.Background(), slog.Default(), &payload, pa, newAttributedActionResult(true, "Revoked `$metrics`.", "Resource and all of its qURLs were revoked."))
+	res := newAttributedActionResult(true, "Revoked `$metrics`.", "Resource and all of its qURLs were revoked.")
+	h.recordAgentAudit(context.Background(), slog.Default(), &payload, pa, &res)
 
 	got, err := store.ListAuditEntries(context.Background(), "T1", "Uadmin", 10)
 	if err != nil {
@@ -217,5 +221,6 @@ func TestRecordAgentAudit_NilStoreSafe(t *testing.T) {
 	var payload interactionPayload
 	payload.Team.ID, payload.User.ID = "T1", "U1"
 	// Must not panic with a nil store.
-	h.recordAgentAudit(context.Background(), slog.Default(), &payload, &pendingAction{Action: agent.ActionGet, Token: "x"}, newAttributedActionResult(true, "ok", "Access link was sent privately to the approver."))
+	res := newAttributedActionResult(true, "ok", "Access link was sent privately to the approver.")
+	h.recordAgentAudit(context.Background(), slog.Default(), &payload, &pendingAction{Action: agent.ActionGet, Token: "x"}, &res)
 }

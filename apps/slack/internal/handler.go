@@ -28,6 +28,10 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
+	// qurlContactURL is where users are pointed when a deployment can't serve a
+	// command itself (a feature isn't configured on this deployment). Replaces
+	// the dead-end "Contact the operator." tail so the user has a real next step.
+	qurlContactURL = "https://layerv.ai/contact"
 )
 
 // ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
@@ -106,6 +110,20 @@ func authErrorMessage(err error) string {
 		return workspaceNotSetupMessage
 	}
 	return authFailureMessage
+}
+
+// rateLimitErrorMessage maps the rate-limit gate's defensive storage errors to
+// user-facing copy. Most failures are DDB/service-health failures, but the
+// workspace-not-bound branch can happen if an admin unbinds the workspace
+// between the caller's auth lookup and the limiter's own existence read.
+func rateLimitErrorMessage(err error) string {
+	var storeErr *slackdata.Error
+	if errors.As(err, &storeErr) &&
+		storeErr.StatusCode == http.StatusNotFound &&
+		storeErr.Code == slackdata.ErrCodeWorkspaceNotBound {
+		return workspaceUnboundReply
+	}
+	return serviceUnreachableMessage
 }
 
 // ackWorkingOnIt is the user-visible ephemeral text returned synchronously
@@ -339,6 +357,12 @@ type Config struct {
 	// operator-only reinstall prompt.
 	SlackInstallURL string
 
+	// SlackBotTokenRotationEnabled means Slack may send tokens_revoked for a
+	// routine bot-token rotation while the workspace remains installed. When true,
+	// tokens_revoked is acknowledged but never treated as an uninstall teardown;
+	// app_uninstalled remains the destructive lifecycle signal.
+	SlackBotTokenRotationEnabled bool
+
 	// PostDM posts a direct message via chat.postMessage on the
 	// per-workspace bot token, with the same Enterprise Grid fallback as
 	// OpenView/PostMessage. `/qurl get dm:true` and qURL Connector
@@ -415,6 +439,20 @@ type Config struct {
 	// PostMessage (text-only) can't carry buttons. Nil keeps the confirm flow off
 	// (see agentConfirmEnabled); production wires it in cmd/main.go.
 	PostMessageBlocks PostMessageBlocksFunc
+
+	// PostDMBlocks posts a Block Kit direct message (conversations.open then a
+	// chat.postMessage with blocks) — the DM analog of PostMessageBlocks. It
+	// delivers the `/qurl get dm:true` minted link as an "Enter Portal" URL button
+	// instead of a raw hyperlink. Nil makes getWork refuse `dm:true` (the privacy
+	// contract can't be met without it); production wires it in cmd/main.go.
+	PostDMBlocks PostDMBlocksFunc
+
+	// PostEphemeralBlocks posts a Block Kit chat.postEphemeral (visible only to
+	// userID) — the Block Kit analog of PostEphemeral. The confirm flow delivers a
+	// get's minted link this way in a channel/private channel as an "Enter Portal"
+	// URL button. Nil → the channel get delivery reports failure and the card
+	// downgrades; it is NOT part of the agentEnabled gate.
+	PostEphemeralBlocks PostEphemeralBlocksFunc
 
 	// AgentConfirmEnabled gates the propose→confirm→execute flow on top of the
 	// read-only conversation surface. While false (the default), a proposed
@@ -552,6 +590,22 @@ type PostEphemeralFunc func(ctx context.Context, teamID, enterpriseID, channelID
 // post with mrkdwn disabled as defense-in-depth.
 type PostMessageBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS string, blocks []any, fallbackText string) error
 
+// PostDMBlocksFunc posts a Block Kit direct message to slackUserID (conversations.open
+// then a chat.postMessage with blocks) on the per-workspace bot token — the DM analog
+// of PostMessageBlocksFunc, used to deliver a `/qurl get dm:true` link as an Enter
+// Portal URL button. fallbackText is the notification/non-block fallback (it carries
+// the raw URL so a non-block client isn't dead-ended). enterpriseID is passed for
+// Enterprise Grid token resolution, matching PostDMFunc.
+type PostDMBlocksFunc func(ctx context.Context, teamID, enterpriseID, slackUserID string, blocks []any, fallbackText string) error
+
+// PostEphemeralBlocksFunc posts a Block Kit chat.postEphemeral (visible only to userID)
+// on the per-workspace bot token — the Block Kit analog of PostEphemeralFunc. threadTS
+// threads it into the card's conversation. Like PostEphemeralFunc it's a standalone
+// message a same-response_url card-replace can't clobber, and it returns an error on a
+// non-ok response so the caller can downgrade the card. fallbackText is the
+// notification/non-block fallback.
+type PostEphemeralBlocksFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID string, blocks []any, fallbackText string) error
+
 // AppHomePublishFunc publishes a user's App Home tab via views.publish on the
 // per-workspace bot token (enterpriseID for Grid token resolution). blocks is the
 // Home view's content (the map[string]any block shape the views.go builders emit); the
@@ -666,6 +720,10 @@ type Handler struct {
 	// missing env vars) — /qurl setup returns a "not configured"
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
+	// setupLinkRateLimiter bounds signed setup-link minting per Slack workspace/user.
+	// The owner/rebind checks still run first so invalid or refused setup attempts
+	// do not consume the caller's small retry budget.
+	setupLinkRateLimiter *setupLinkRateLimiter
 	// aliasStore persists per-channel alias bindings for the
 	// `/qurl-admin set-alias` / `/qurl-admin unset-alias` verbs. nil when not
 	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
@@ -758,7 +816,7 @@ func (h *Handler) SetAliasStore(store AliasStore) {
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
 // /qurl setup slash command. Must be called exactly once, before
-// srv.Serve. Empty/short secret or empty base URL is a no-op
+// srv.Serve. An empty base URL or nil state store is a no-op
 // (/qurl setup will reply that OAuth is not configured). A second call
 // panics — the field is read without synchronization on the request
 // hot path, and the only safe write window is before any goroutine can
@@ -767,18 +825,9 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	if h.oauthSetup != nil {
 		panic("SetOAuthSetup called twice — must be called once before Serve")
 	}
-	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
+	if cfg.SlackBaseURL == "" || cfg.StateStore == nil {
 		return
 	}
-	if len(cfg.StateSecret) < oauth.StateMinSecret {
-		// Fail-fast at startup: MintState would reject this later, but
-		// the operator-facing failure is more discoverable here.
-		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
-	}
-	// Defensive copy: the field is read on the request hot path without
-	// a lock. A caller mutating the original byte slice would silently
-	// poison every subsequent MintState call.
-	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
 }
 
@@ -847,6 +896,7 @@ func NewHandler(cfg Config) *Handler {
 		validateResponseURLFn: validateResponseURL,
 		channelNames:          newChannelNameCache(channelNameTTL),
 		channelMembers:        newChannelMembershipCache(channelMembershipTTL),
+		setupLinkRateLimiter:  newSetupLinkRateLimiter(),
 	}
 }
 
@@ -1548,15 +1598,17 @@ func setupModeFlag(mode oauth.SetupMode) string {
 }
 
 // setupModeAction is the user-facing verb for an explicit setup mode, for copy.
-//
-//nolint:exhaustive // default maps SetupModeReuse and the empty mode to the plain "setup" verb.
 func setupModeAction(mode oauth.SetupMode) string {
 	switch mode {
+	case "", oauth.SetupModeReuse:
+		return "setup"
 	case oauth.SetupModeRotate:
 		return "key rotation"
 	case oauth.SetupModeRepoint:
 		return "key repoint"
 	default:
+		// Unknown future modes fall back to the legacy setup copy until
+		// they get explicit user-facing language.
 		return "setup"
 	}
 }
@@ -1597,7 +1649,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd setupCommand) {
 	if h.oauthSetup == nil {
-		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -1687,15 +1739,26 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			slog.Warn("/qurl setup: stored owner_id is shape-bad (likely a pre-pivot Auth0 sub) — allowing setup to reclaim the legacy row", "team_id", teamID, "caller_user_id", userID, "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
 		}
 	}
-	var state string
-	var err error
-	if h.oauthSetup.StateStore != nil {
-		stateCtx, stateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
-		defer stateCancel()
-		state, err = oauth.MintStoredStateWithEmailMode(stateCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
-	} else {
-		state, err = oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, h.now())
+	// This is deliberately a minting throttle, not a general slash-command
+	// request shield: the owner gate above still runs first so refused setup
+	// attempts do not consume quota. That means repeat non-owner attempts can
+	// still spend the owner-gate read; avoiding that would need a separate
+	// request shield above this gate. The quota is consumed before state storage
+	// so repeated local failures still get throttled instead of retrying without
+	// bound.
+	now := h.now()
+	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
+		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
+		retryCommand := "`/qurl setup <email>`"
+		if setupCmd.mode.Explicit() {
+			retryCommand = fmt.Sprintf("`/qurl setup <email> %s`", setupModeFlag(setupCmd.mode))
+		}
+		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
+		return
 	}
+	stateCtx, stateCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
+	defer stateCancel()
+	state, err := oauth.MintStoredStateWithEmailMode(stateCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
 		slog.Error("/qurl setup: mint OAuth state failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
@@ -1711,7 +1774,21 @@ func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
 	if !ok {
 		return
 	}
-	h.deleteWorkspaceAPIKey(w, teamID, userID)
+	h.deleteWorkspaceAPIKey(w, teamID, userID, slashUninstallPurgeWorkspaceIDs(values, teamID))
+}
+
+func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
+	var set orderedIDSet
+	set.add(teamID)
+	if strings.EqualFold(strings.TrimSpace(values.Get(fieldIsEnterpriseInstall)), slackFormBoolTrue) {
+		// The destructive command is still authorized against the signed
+		// team_id's owner/admin row. Slack signs is_enterprise_install and
+		// enterprise_id in the slash payload; adding the enterprise partition here
+		// only lets an authorized workspace admin clear the org-install rows that
+		// can back that same Slack app install.
+		set.add(values.Get(fieldEnterpriseID))
+	}
+	return set.ids
 }
 
 // requireUninstallAvailableAndAuthorized is the single precondition path for
@@ -1765,7 +1842,20 @@ type workspaceKeyRevoker interface {
 // uninstall to local-only.
 var _ workspaceKeyRevoker = (*auth.DDBProvider)(nil)
 
-func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string) {
+// Ensure the production provider keeps satisfying the workspace-row teardown
+// capability so a refactor that drops DeleteWorkspaceState surfaces here rather
+// than silently leaving the encrypted bot token behind on uninstall.
+var _ workspaceStateDeleter = (*auth.DDBProvider)(nil)
+
+// Ensure production lifecycle purge keeps returning the deleted row's qURL key
+// identity for the deferred upstream-revoke follow-up (#926).
+var _ workspaceStateIdentityDeleter = (*auth.DDBProvider)(nil)
+
+// Ensure production lifecycle purge uses the reinstall-race guard when deleting
+// workspace_state rows.
+var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
+
+func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
 	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
 	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
 	// ack window. The revoke is best-effort within this ctx — the qURL client may
@@ -1774,10 +1864,52 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
+	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`."
+
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
 	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
 	// "(or was already revoked upstream)" hedge covers the 404 case it would surface.
-	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it."
+	const revokedReply = "qURL has been disconnected from this workspace's Slack commands, and this workspace's qURL API key has been revoked (or was already revoked upstream).\n\n" + localSlackDataPurgeScheduledReply
+
+	// DeleteAPIKey clears only the qURL key columns. Whenever the command reaches
+	// a terminal local-disconnect result (success, or already-no-qURL-key), forget
+	// the rest of the workspace too — the encrypted Slack bot token + data key,
+	// the workspace_mappings row, and every channel_policies row — so `/qurl
+	// uninstall` leaves nothing behind (the same teardown a Slack app_uninstalled
+	// event triggers). Enterprise Grid org installs can have local rows keyed by
+	// both team_id and enterprise_id, so the slash payload resolves the full set
+	// of local partitions to sweep while the primary qURL-key delete remains
+	// team-scoped. Best-effort and idempotent: the primary disconnect path has
+	// already reached a terminal reply, so a sweep failure is logged inside
+	// purgeWorkspace and does not change the Slack response. Run it on a tracked
+	// async goroutine off h.baseCtx (NOT this request's ctx, which `defer
+	// cancel()`s on return) so the extra DeleteItem/Query round-trips — which can
+	// be several on a workspace used in many channels — stay off the slash ack's
+	// tight sync budget. h.Go is wg-tracked so shutdown waits for the purge
+	// goroutine to unwind; because the purge context derives from h.baseCtx,
+	// shutdown cancellation may abort the best-effort sweep before it completes.
+	schedulePurge := func(reason string) {
+		ids := append([]string(nil), purgeWorkspaceIDs...)
+		// Capture the cutoff only after DeleteAPIKey reaches a terminal local
+		// result. DeleteAPIKey itself stamps updated_at_unix_nano; taking this
+		// cutoff earlier would make the guarded workspace_state delete retain the
+		// row this uninstall just cleared. In production, source the cutoff from
+		// auth.DDBProvider's clock so the stamp and cutoff share one injectable
+		// clock; tests/fallback providers use the handler clock.
+		purgeCutoff := workspaceStatePurgeCutoff(h.cfg.AuthProvider, h.now)
+		purgeLog := slog.With("surface", "uninstall", "team_id", teamID, "caller_user_id", userID, "reason", reason, "workspace_ids", ids, "purge_cutoff", purgeCutoff.UTC().Format(time.RFC3339))
+		h.Go(func() {
+			baseCtx := h.baseCtx
+			if baseCtx == nil {
+				baseCtx = context.Background()
+			}
+			for _, workspaceID := range ids {
+				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
+				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff)
+				purgeCancel()
+			}
+		})
+	}
 
 	// revoked reports whether the upstream key was revoked; a non-nil error means
 	// the key may still be live, so abort before local removal to preserve the
@@ -1799,10 +1931,12 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 				// / partial row), but this call did revoke the upstream key — report
 				// success, not the contradictory "isn't currently connected".
 				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
+				schedulePurge("qurl_key_already_cleared_after_revoke")
 				respondSlack(w, revokedReply)
 				return
 			}
-			respondSlack(w, "qURL isn't currently connected to this workspace. The recorded workspace owner can run `/qurl setup <email>` to connect it; contact your qURL operator if the owner is unavailable.")
+			schedulePurge("qurl_key_not_configured")
+			respondSlack(w, "qURL isn't currently connected to this workspace.\n\n"+localSlackDataPurgeScheduledReply+"\n\nContact your qURL operator if the owner is unavailable.")
 			return
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
 			respondUninstallUnsupported(w)
@@ -1813,12 +1947,23 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			return
 		}
 	}
+	schedulePurge("delete_api_key_succeeded")
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
 		respondSlack(w, revokedReply)
 		return
 	}
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.\n\nThe recorded workspace owner can run `/qurl setup <email>` to reconnect it.")
+	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\n"+localSlackDataPurgeScheduledReply+"\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.")
+}
+
+func workspaceStatePurgeCutoff(provider auth.Provider, fallbackNow func() time.Time) time.Time {
+	if ddb, ok := provider.(*auth.DDBProvider); ok && ddb.Now != nil {
+		return ddb.Now()
+	}
+	if fallbackNow != nil {
+		return fallbackNow()
+	}
+	return time.Now()
 }
 
 // revokeWorkspaceUpstreamKey best-effort revokes the workspace's upstream qURL
@@ -1948,7 +2093,7 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 }
 
 func respondUninstallUnsupported(w http.ResponseWriter) {
-	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
+	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 }
 
 type uninstallUnavailableReason int
@@ -1963,14 +2108,14 @@ const (
 func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavailableReason) {
 	switch reason {
 	case uninstallUnavailableCredentialStorage:
-		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	case uninstallUnavailableOwnerVerification:
-		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	default:
 		slog.Error("/qurl uninstall: unknown unavailable reason", "reason", int(reason))
-		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	}
 }
@@ -2034,7 +2179,24 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
-	case env.Type == "event_callback":
+	case env.Type == slackEnvelopeTypeEventCallback && h.cfg.SlackBotTokenRotationEnabled && isBotTokensRevokedEvent(&env.Event):
+		// In token-rotation deployments this callback can mean "Slack rotated the
+		// bot token" rather than "workspace uninstalled the app". Ack it, but do
+		// not wipe a still-installed workspace. This branch is log-only:
+		// isLifecycleEvent(..., true) already suppresses tokens_revoked teardown.
+		slog.Info("tokens_revoked bot-token event ignored because Slack bot-token rotation is enabled",
+			"has_team_id", env.TeamID != "",
+			"has_enterprise_id", env.EnterpriseID != "",
+			"has_event_id", env.EventID != "",
+		)
+	case env.Type == slackEnvelopeTypeEventCallback && isLifecycleEvent(&env.Event, h.cfg.SlackBotTokenRotationEnabled):
+		// App uninstall / token revoke. Routed here BEFORE handleAgentEvent
+		// because the cascade must run regardless of conversation-mode wiring
+		// (handleAgentEvent returns early when the agent is disabled). It only
+		// schedules the async purge; the 200 below is the ack Slack needs to stop
+		// retrying.
+		h.handleLifecycleEvent(&env)
+	case env.Type == slackEnvelopeTypeEventCallback:
 		// Conversation mode. handleAgentEvent only schedules async work (or
 		// no-ops when disabled/filtered); we always ack 200 below so Slack
 		// never retries a delivery we accepted.
@@ -2046,7 +2208,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 
 // userHelpMessage renders the `/qurl help` text — the user-facing verbs
 // only. Verbs that depend on optional Config wiring are omitted when that
-// wiring is nil — a workspace without PostDM won't see the dm:true
+// wiring is nil — a workspace without PostDMBlocks won't see the dm:true
 // variant. The verbs still dispatch if a user types them directly; the
 // omission is just so help text doesn't advertise a path that will reply
 // with ":warning: not configured". The admin verbs live on `/qurl-admin`
@@ -2092,7 +2254,10 @@ func (h *Handler) userHelpMessage(command string) string {
 			"",
 			"• `/qurl get <$id|$alias>` — Create a qURL for a resource `$id` or a `$alias` configured in this channel",
 		)
-		if h.cfg.PostDM != nil {
+		// Gate on PostDMBlocks (the seam deliverGetDM uses to deliver the Enter Portal
+		// button), matching getWork's dm:true refusal — so help never advertises dm:true
+		// when its only reply would be ":warning: DM delivery is not configured".
+		if h.cfg.PostDMBlocks != nil {
 			lines = append(lines, "• `/qurl get <$id|$alias> dm:true` — DM the link to you instead of posting it in-channel")
 		}
 		lines = append(lines,
@@ -2308,6 +2473,11 @@ const (
 	// respActionUpdate is the response_action value that swaps the current
 	// modal for a replacement view (the modal error responders use it).
 	respActionUpdate = "update"
+	// respFieldUnfurlLinks / respFieldUnfurlMedia disable link/media unfurling on a
+	// response_url block payload (postResponseBlocks) — kept as consts to match the
+	// other response-payload keys rather than bare literals.
+	respFieldUnfurlLinks = "unfurl_links"
+	respFieldUnfurlMedia = "unfurl_media"
 )
 
 func respondSlack(w http.ResponseWriter, text string) {

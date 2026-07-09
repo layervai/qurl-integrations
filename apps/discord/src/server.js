@@ -16,6 +16,20 @@ const webhookSubscriptions = require('./webhook-subscriptions');
 
 const app = express();
 
+function generateCspNonce() {
+  return crypto.randomBytes(16).toString('base64url');
+}
+
+function cspNonceSource(_req, res) {
+  return `'nonce-${res.locals.cspNonce}'`;
+}
+
+app.use((req, res, next) => {
+  res.locals.cspNonce = generateCspNonce();
+  res.renderPage = (options) => renderPage({ ...options, cspNonce: res.locals.cspNonce });
+  next();
+});
+
 // Trust proxy headers (ECS behind ALB) for correct req.ip in rate limiting.
 // Controlled by TRUST_PROXY env var: "1"=trust one hop, "2"=two hops, etc.
 // Leaving it unset (dev direct-connect) ignores X-Forwarded-For so a local
@@ -43,17 +57,16 @@ if (process.env.TRUST_PROXY) {
 }
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
-// Policy, X-DNS-Prefetch-Control, etc. We set a restrictive DEFAULT CSP
-// here so any future HTML route that forgets its own <meta http-equiv> CSP
-// still gets strong defaults. Templates that need specific policies (e.g.
-// a page that renders an inline style) can override with their own
-// <meta> tag, which takes precedence over the HTTP header.
+// Policy, X-DNS-Prefetch-Control, etc. The HTTP CSP is the single source of
+// truth for allowing renderPage's nonce'd inline stylesheet.
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: false,
     directives: {
       defaultSrc: ["'none'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+      // No legacy inline-style fallback: old CSP1-only browsers get a
+      // readable unstyled admin page instead of reopening 'unsafe-inline'.
+      styleSrc: [cspNonceSource],
       imgSrc: ["'self'", 'data:'],
       connectSrc: ["'self'"],
       baseUri: ["'none'"],
@@ -250,7 +263,7 @@ if (!config.isDiscordInstallConfigured) {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   logger.error('Express error', { error: err.message, stack: err.stack });
-  res.status(500).send(renderPage({
+  res.status(500).send(res.renderPage({
     title: 'Server Error',
     icon: '💥',
     heading: 'Internal Server Error',

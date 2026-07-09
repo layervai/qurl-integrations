@@ -9,15 +9,15 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"reflect"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -25,23 +25,33 @@ import (
 // doesn't hit the real internet trying to prime example.auth0.com's JWKS.
 type noopVerifier struct{}
 
-func (noopVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
-	return "", errors.New("noopVerifier: unused in env-var tests")
+func (noopVerifier) VerifySetupClaims(_ context.Context, _, _ string) (oauth.IDTokenClaims, error) {
+	return oauth.IDTokenClaims{}, errors.New("noopVerifier: unused in env-var tests")
 }
 
-func (noopVerifier) VerifySub(_ context.Context, _ string) (string, error) {
-	return "", errors.New("noopVerifier: unused in env-var tests")
+type noopDDBClient struct{}
+
+func (noopDDBClient) GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return &dynamodb.GetItemOutput{}, nil
 }
 
-func (noopVerifier) VerifyNonce(_ context.Context, _, _ string) error {
-	return errors.New("noopVerifier: unused in env-var tests")
+func (noopDDBClient) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+func (noopDDBClient) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	return &dynamodb.UpdateItemOutput{}, nil
+}
+
+func (noopDDBClient) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	return &dynamodb.DeleteItemOutput{}, nil
 }
 
 // newFakeProvider builds the minimum-viable DDBProvider buildOAuthConfig
 // will accept. The test only inspects the (cfg, ok) return — no DDB or
 // KMS calls are made through the returned provider.
 func newFakeProvider() *auth.DDBProvider {
-	return &auth.DDBProvider{}
+	return &auth.DDBProvider{Client: noopDDBClient{}, TableName: "workspace-state-test"}
 }
 
 const (
@@ -153,6 +163,33 @@ func TestValidateSlackBotToken(t *testing.T) {
 			err := auth.ValidateSlackBotTokenShape(tc.token)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadSlackBotTokenRotationEnabled(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{name: "unset", want: false},
+		{name: "true", raw: "true", want: true},
+		{name: "false", raw: "false", want: false},
+		{name: "malformed fails startup", raw: "definitely", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envSlackBotTokenRotation, tc.raw)
+			got, err := readSlackBotTokenRotationEnabled()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("readSlackBotTokenRotationEnabled() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Fatalf("readSlackBotTokenRotationEnabled() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -963,14 +1000,9 @@ func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
 	})
 }
 
-// TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired fences the
-// mismatched-degradation guard: when the JWKS prime fails AND AdminStore
-// is wired, every callback would reject the install (no sub → no
-// OwnerID → no bind → 500). Catching that at boot beats catching it
-// after the first user hits /qurl setup. The sandbox path (no
-// AdminStore) is the inverse — falls through to a warn + nil
-// verifier so the API-key surface keeps working.
-func TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired(t *testing.T) {
+// TestBuildOAuthConfigFailsFastOnJWKS fences the nonce-verification invariant:
+// every enabled OAuth deployment needs a verifier, regardless of AdminStore.
+func TestBuildOAuthConfigFailsFastOnJWKS(t *testing.T) {
 	prev := newJWKSVerifier
 	newJWKSVerifier = func(_ context.Context, _, _ string) (oauth.IDTokenVerifier, error) {
 		return nil, errors.New("simulated JWKS prime failure")
@@ -979,28 +1011,27 @@ func TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired(t *testing.T) {
 
 	applyEnv(t, validEnv())
 
-	t.Run("admin store wired — must fail-fast", func(t *testing.T) {
-		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, &fakeAdminStore{})
+	for _, adminStore := range []oauth.AdminStore{nil, &fakeAdminStore{}} {
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, adminStore)
 		if ok {
-			t.Error("expected ok=false when JWKS prime fails with AdminStore wired (every callback would 500)")
+			t.Error("expected ok=false when JWKS prime fails")
 		}
 		if err == nil || !strings.Contains(err.Error(), "JWKS") {
 			t.Errorf("expected fail-fast error mentioning JWKS, got %v", err)
 		}
-	})
+	}
+}
 
-	t.Run("admin store nil — must warn-and-continue", func(t *testing.T) {
-		cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
-		if err != nil {
-			t.Fatalf("expected nil err on sandbox path, got %v", err)
-		}
-		if !ok {
-			t.Fatal("expected ok=true on sandbox path (no AdminStore → bind is skipped, verifier is best-effort)")
-		}
-		if cfg.IDTokenVerifier != nil {
-			t.Error("expected verifier=nil when prime failed; callback gates on this to skip claim extraction")
-		}
-	})
+func TestBuildOAuthConfigFailsFastOnInvalidStateStore(t *testing.T) {
+	stubJWKSVerifier(t)
+	applyEnv(t, validEnv())
+	_, ok, err := buildOAuthConfig(context.Background(), &auth.DDBProvider{}, nil, nil)
+	if ok {
+		t.Fatal("expected ok=false for invalid OAuth state store wiring")
+	}
+	if err == nil || !strings.Contains(err.Error(), "state store") {
+		t.Fatalf("expected state-store initialization error, got %v", err)
+	}
 }
 
 // fakeAdminStore is the cmd-side stand-in for oauth.AdminStore in
@@ -1009,145 +1040,6 @@ type fakeAdminStore struct{}
 
 func (*fakeAdminStore) BindWorkspace(_ context.Context, _ *oauth.WorkspaceMapping, _ string) error {
 	return nil
-}
-
-// TestClassifyBindErrorMapping locks the slackdata.Error.Code →
-// oauth.BindConflictCode mapping that wires the callback's switch
-// arm to slackdata's 409 surface. The reflect-shape fence covers
-// the struct; this covers the code-string mapping which is its own
-// drift surface — rename slackdata.ErrCodeWorkspaceAlreadyBound and
-// the classifier silently falls through to the empty-string "generic
-// failure" arm, downgrading rebind-refused to a 500.
-func TestClassifyBindErrorMapping(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want oauth.BindConflictCode
-	}{
-		{
-			"already bound to caller (idempotent re-entry)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBoundToCaller},
-			oauth.BindConflictAlreadyBoundToCaller,
-		},
-		{
-			"already bound to different admin (rebind-refused)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBound},
-			oauth.BindConflictAlreadyBound,
-		},
-		{
-			"bind held but disambig read failed (unverified)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceBindUnverified},
-			oauth.BindConflictUnverified,
-		},
-		{
-			"non-409 *slackdata.Error → empty (generic failure)",
-			&slackdata.Error{StatusCode: http.StatusServiceUnavailable, Code: "ddb_error"},
-			"",
-		},
-		{
-			"409 with unknown Code → empty (default arm)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: "future_unmapped_code"},
-			"",
-		},
-		{
-			"non-*slackdata.Error → empty",
-			errors.New("plain string error"),
-			"",
-		},
-		{"nil → empty", nil, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := classifyBindError(c.err); got != c.want {
-				t.Errorf("classifyBindError(%v) = %q, want %q", c.err, got, c.want)
-			}
-		})
-	}
-}
-
-// TestAdminStoreAdapterForwardsAllFields exercises the production
-// adminStoreAdapter against a captor that satisfies slackdataBinder,
-// with a non-zero CreatedAt. The reflect-shape test fences the struct
-// field set; this fences the adapter's translation line so a future
-// regression that drops one of TeamID / OwnerID / CreatedAt from the
-// copy fails here rather than slipping through unnoticed because the
-// callback passes zero values today.
-func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
-	captured := &capturingSlackdataStore{}
-	adapter := &adminStoreAdapter{store: captured}
-	want := oauth.WorkspaceMapping{
-		TeamID:    "T_capture",
-		OwnerID:   "auth0|capture-owner",
-		CreatedAt: mustParseTime(t, "2026-05-20T12:34:56Z"),
-	}
-	if err := adapter.BindWorkspace(context.Background(), &want, "U_seed"); err != nil {
-		t.Fatalf("BindWorkspace: %v", err)
-	}
-	if captured.gotMapping == nil {
-		t.Fatal("adapter did not forward to the wrapped store")
-	}
-	if captured.gotMapping.TeamID != want.TeamID ||
-		captured.gotMapping.OwnerID != want.OwnerID ||
-		!captured.gotMapping.CreatedAt.Equal(want.CreatedAt) {
-		t.Errorf("forwarded mapping mismatch:\nwant TeamID=%q OwnerID=%q CreatedAt=%v\ngot  TeamID=%q OwnerID=%q CreatedAt=%v",
-			want.TeamID, want.OwnerID, want.CreatedAt,
-			captured.gotMapping.TeamID, captured.gotMapping.OwnerID, captured.gotMapping.CreatedAt)
-	}
-	if captured.gotSeedAdmin != "U_seed" {
-		t.Errorf("seedAdmin: got %q want %q", captured.gotSeedAdmin, "U_seed")
-	}
-}
-
-// capturingSlackdataStore satisfies slackdataBinder so the production
-// adminStoreAdapter can be exercised without standing up a real
-// slackdata.Store.
-type capturingSlackdataStore struct {
-	gotMapping   *slackdata.WorkspaceMapping
-	gotSeedAdmin string
-}
-
-func (c *capturingSlackdataStore) BindWorkspace(_ context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error {
-	c.gotMapping = m
-	c.gotSeedAdmin = seedAdmin
-	return nil
-}
-
-func mustParseTime(t *testing.T, s string) time.Time {
-	t.Helper()
-	v, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		t.Fatalf("parse %q: %v", s, err)
-	}
-	return v
-}
-
-// TestAdminStoreAdapterMappingShapesMatch fences the field-for-field
-// equivalence of oauth.WorkspaceMapping and slackdata.WorkspaceMapping.
-// The adminStoreAdapter copies between the two by named field; a new
-// field added to one and not the other would silently drop on the
-// adapter's copy. Reflect-walk the field sets so the build breaks
-// when they drift.
-func TestAdminStoreAdapterMappingShapesMatch(t *testing.T) {
-	oauthFields := structFieldSet(reflect.TypeOf(oauth.WorkspaceMapping{}))
-	storeFields := structFieldSet(reflect.TypeOf(slackdata.WorkspaceMapping{}))
-	if !reflect.DeepEqual(oauthFields, storeFields) {
-		t.Errorf("oauth.WorkspaceMapping vs slackdata.WorkspaceMapping fields differ — adminStoreAdapter copy would silently drop the diff\noauth:     %v\nslackdata: %v", oauthFields, storeFields)
-	}
-}
-
-// structFieldSet returns the {name → full type string} map for a
-// struct type. Used to compare field shapes across packages without
-// requiring identical declaration order. Type string (not Kind) so
-// a future drift like `OwnerID OwnerID` (named-string) vs
-// `OwnerID string` fails the test here rather than at the adapter
-// build line — the test owns the contract end-to-end.
-func structFieldSet(t reflect.Type) map[string]string {
-	out := make(map[string]string, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		out[f.Name] = f.Type.String()
-	}
-	return out
 }
 
 // TestBuildOAuthConfigRejectsEmptyHostSlackBaseURL locks the contract

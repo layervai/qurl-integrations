@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 type fakeOAuthStateDDB struct {
@@ -51,9 +53,25 @@ func storedStateDDBItem() map[string]ddbtypes.AttributeValue {
 		oauthStateAttrTeamID:   &ddbtypes.AttributeValueMemberS{Value: testStateTeamID},
 		oauthStateAttrUserID:   &ddbtypes.AttributeValueMemberS{Value: testStateUserID},
 		oauthStateAttrNonce:    &ddbtypes.AttributeValueMemberS{Value: strings.Repeat("a", stateNonceLen*2)},
-		oauthStateAttrVerifier: &ddbtypes.AttributeValueMemberS{Value: strings.Repeat("b", 43)},
+		oauthStateAttrVerifier: &ddbtypes.AttributeValueMemberS{Value: strings.Repeat("b", statePKCEVerifierMinLen)},
 		oauthStateAttrEmail:    &ddbtypes.AttributeValueMemberS{Value: testNormalizedSetupEmail},
 		oauthStateAttrMode:     &ddbtypes.AttributeValueMemberS{Value: string(SetupModeRotate)},
+	}
+}
+
+func TestNewDDBStateStoreValidatesWiringAtStartup(t *testing.T) {
+	if _, err := NewDDBStateStore(nil); err == nil {
+		t.Fatal("nil provider must fail")
+	}
+	if _, err := NewDDBStateStore(&auth.DDBProvider{Client: &fakeOAuthStateDDB{}}); err == nil {
+		t.Fatal("empty table name must fail")
+	}
+	store, err := NewDDBStateStore(&auth.DDBProvider{Client: &fakeOAuthStateDDB{}, TableName: "workspace-state"})
+	if err != nil {
+		t.Fatalf("NewDDBStateStore: %v", err)
+	}
+	if store.TableName != "workspace-state" || store.Client == nil {
+		t.Fatalf("store wiring = %+v", store)
 	}
 }
 
@@ -66,7 +84,7 @@ func TestDDBStateStorePutStateWritesOpaqueStateRow(t *testing.T) {
 			TeamID:       testStateTeamID,
 			UserID:       testStateUserID,
 			Nonce:        strings.Repeat("a", stateNonceLen*2),
-			CodeVerifier: strings.Repeat("b", 43),
+			CodeVerifier: strings.Repeat("b", statePKCEVerifierMinLen),
 			Email:        testNormalizedSetupEmail,
 			Mode:         SetupModeRotate,
 		},

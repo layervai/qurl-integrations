@@ -33,10 +33,10 @@
 const express = require('express');
 const config = require('../config');
 const logger = require('../logger');
-const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { createPkcePair } = require('../utils/oauth-pkce');
 const { rateLimit } = require('../utils/oauth-rate-limit');
-const { setQurlOAuthCookie } = require('../utils/oauth-cookies');
+const { setQurlOAuthCookie, setQurlOAuthPkceCookie } = require('../utils/oauth-cookies');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 
@@ -57,10 +57,10 @@ function renderNotConfigured(res, reason) {
 // `detail` describes the immediate failure; we append a remediation
 // hint that fits AFTER a Discord OAuth handshake failure (bot is
 // already installed, retry through /qurl setup in-Discord). Other
-// surfaces (the encryption-at-rest 503) use renderPage directly with
+// surfaces (the encryption-at-rest 503) use res.renderPage directly with
 // surface-specific copy — see the inline call site.
 function renderError(res, statusCode, headline, detail) {
-  return res.status(statusCode).send(renderPage({
+  return res.status(statusCode).send(res.renderPage({
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
@@ -89,7 +89,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Inline copy: the standard renderError tail ("run /qurl setup
     // directly") would fail too — same env-var gap. Specific copy
     // tells the admin to wait for the operator.
-    return res.status(503).send(renderPage({
+    return res.status(503).send(res.renderPage({
       title: 'Discord Install Failed',
       icon: '❌',
       heading: 'qURL setup not provisioned',
@@ -206,6 +206,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
   const qurlState = signQurlOAuthState(guildId, discordUserId);
+  const { codeVerifier, codeChallenge } = createPkcePair();
   // Same double-submit CSRF cookie /oauth/qurl/start sets — Stage-2
   // chain shares the cookie with the qurl-oauth callback. Mitigates
   // leaked install-callback URL replay across browsers; does NOT fully
@@ -214,6 +215,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   // the success-page binding readout in qurl-oauth.js's renderSuccess
   // surfaces (guild, qURL email) for visual sanity-check.
   setQurlOAuthCookie(res, req, qurlState);
+  setQurlOAuthPkceCookie(res, req, codeVerifier);
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -223,6 +225,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
+  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
   // ALWAYS prompt=consent on Stage-2 (per round-9 item #1) — see the
   // confused-deputy block at the top of this handler.
   authorizeUrl.searchParams.set('prompt', 'consent');

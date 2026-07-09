@@ -45,6 +45,11 @@ const (
 //     dodge encoding ambiguity in the upstream key hash.
 const HeaderIdempotencyKey = "Idempotency-Key"
 
+// CreateForResourcePathLabel is the canonical redacted qURL-service path label
+// for resource-scoped qURL creation. Keep audit/log code on this constant so it
+// cannot drift from Client.Create's ResourceID route label.
+const CreateForResourcePathLabel = "/v1/resources/:id/qurls"
+
 // MaxIdempotencyKeyLength is the byte cap mirrored from qurl-service's
 // idempotency-store schema (see `idempotency_dynamodb.go`). Since the
 // validator rejects ≥0x80, accepted keys are pure ASCII — bytes equal
@@ -151,9 +156,9 @@ const ResourceTypeURL = "url"
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
 
-// APIKeyPurposeTunnelBootstrap is the restricted key purpose used by the
+// APIKeyTypeTunnelBootstrap is the restricted key type used by the
 // Docker reverse-tunnel onboarding flow.
-const APIKeyPurposeTunnelBootstrap = "tunnel_bootstrap"
+const APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -403,7 +408,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		// if not in its schema; harmless either way and matches the
 		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
-		logLabel = "POST /v1/resources/:id/qurls"
+		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
 			Label:           input.Label,
 			ExpiresIn:       input.ExpiresIn,
@@ -699,7 +704,7 @@ type CreateAPIKeyInput struct {
 	Name       string   `json:"name"`
 	Scopes     []string `json:"scopes"`
 	ExpiresIn  string   `json:"expires_in,omitempty"`
-	Purpose    string   `json:"purpose,omitempty"`
+	KeyType    string   `json:"key_type,omitempty"`
 	TunnelSlug string   `json:"tunnel_slug,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
@@ -718,9 +723,8 @@ type APIKey struct {
 	Status    string     `json:"status,omitempty"`
 	CreatedAt time.Time  `json:"created_at,omitzero"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// Purpose is the optional constrained-key purpose, such as
-	// "tunnel_bootstrap".
-	Purpose string `json:"purpose,omitempty"`
+	// KeyType is the optional constrained key type, such as "tunnel_bootstrap".
+	KeyType string `json:"key_type,omitempty"`
 	// TunnelSlug is the sidecar slug this constrained key is bound to.
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }

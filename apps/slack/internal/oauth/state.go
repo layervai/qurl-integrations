@@ -22,9 +22,9 @@ import (
 //
 // Legacy signed state token format, accepted only for short deploy overlap:
 //
-//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + code_verifier + "|" + hmac_hex )
-//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + code_verifier + "|" + hmac_hex )
-//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + mode + "|" + code_verifier + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + email + "|" + mode + "|" + hmac_hex )
 //
 // where hmac_hex signs every payload field before it.
 //
@@ -49,22 +49,25 @@ import (
 // conditionally because table TTL is best-effort and may lag. The double-submit
 // cookie still binds the Auth0 callback to the browser that opened /start.
 const (
-	stateMaxAge          = time.Hour
-	stateLegacyParts     = 5
-	stateEmailParts      = 6
-	stateEmailModeParts  = 7
-	stateNonceLen        = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
-	statePKCEVerifierLen = 32 // 32 bytes base64url-encode to 43 chars, RFC 7636's lower bound.
-	stateHandleLen       = 32 // 256-bit opaque handle; no payload is encoded in the URL.
-	StateMinSecret       = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
-	stateFutureSkew      = 30 * time.Second
-	stateSeparator       = "|"
-	stateSeparatorB      = byte('|')
-	stateSeparatorRune   = '|'
-	stateUserIDIndex     = 1
-	stateTeamIDIndex     = 0
-	stateNonceIndex      = 2
-	stateTSIndex         = 3
+	stateMaxAge             = time.Hour
+	stateLegacyParts        = 5
+	stateEmailParts         = 6
+	stateEmailModeParts     = 7
+	stateNonceLen           = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
+	statePKCEVerifierLen    = 32 // 32 random bytes before base64url encoding.
+	statePKCEVerifierMinLen = 43 // RFC 7636 lower bound; 32 random bytes encode to 43 chars.
+	statePKCEVerifierMaxLen = 128
+	stateHandleLen          = 32 // 256-bit opaque handle; no payload is encoded in the URL.
+	stateHandleEncodedLen   = 43 // 32 random bytes encoded with unpadded base64url.
+	StateMinSecret          = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
+	stateFutureSkew         = 30 * time.Second
+	stateSeparator          = "|"
+	stateSeparatorB         = byte('|')
+	stateSeparatorRune      = '|'
+	stateUserIDIndex        = 1
+	stateTeamIDIndex        = 0
+	stateNonceIndex         = 2
+	stateTSIndex            = 3
 	// Slot 4 is the legacy signature; email states put the email there and
 	// shift the signature to slot 5.
 	stateLegacySigIndex    = 4
@@ -72,7 +75,6 @@ const (
 	stateEmailSigIndex     = 5
 	stateModeIndex         = 5
 	stateEmailModeSigIndex = 6
-	statePKCEVerifierIndex = 4
 )
 
 // SetupMode is the signed /qurl setup intent carried through Auth0.
@@ -137,12 +139,12 @@ func normalizeSetupMode(mode SetupMode) (SetupMode, error) {
 	}
 }
 
-func mintRandomHex(bytesLen int, label string) (string, error) {
-	b := make([]byte, bytesLen)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("state: read %s: %w", label, err)
+func mintNonce() (string, error) {
+	nonceBytes := make([]byte, stateNonceLen)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return "", fmt.Errorf("state: read nonce: %w", err)
 	}
-	return hex.EncodeToString(b), nil
+	return hex.EncodeToString(nonceBytes), nil
 }
 
 func mintCodeVerifier() (string, error) {
@@ -190,7 +192,7 @@ func newVerifiedState(teamID, userID, email string, mode SetupMode) (VerifiedSta
 	if err != nil {
 		return VerifiedState{}, err
 	}
-	nonce, err := mintRandomHex(stateNonceLen, "nonce")
+	nonce, err := mintNonce()
 	if err != nil {
 		return VerifiedState{}, err
 	}
@@ -214,19 +216,22 @@ func mintState(secret []byte, teamID, userID, email string, mode SetupMode, now 
 	if len(secret) < StateMinSecret {
 		return "", errStateShortKey
 	}
-	verified, err := newVerifiedState(teamID, userID, email, mode)
+	teamID, userID, email, mode, err := normalizeStateInputs(teamID, userID, email, mode)
+	if err != nil {
+		return "", err
+	}
+	nonce, err := mintNonce()
 	if err != nil {
 		return "", err
 	}
 	ts := strconv.FormatInt(now.Unix(), 10)
-	payloadParts := []string{verified.TeamID, verified.UserID, verified.Nonce, ts}
-	if verified.Email != "" {
-		payloadParts = append(payloadParts, verified.Email)
+	payloadParts := []string{teamID, userID, nonce, ts}
+	if email != "" {
+		payloadParts = append(payloadParts, email)
 	}
-	if verified.Mode != SetupModeReuse {
-		payloadParts = append(payloadParts, string(verified.Mode))
+	if mode != SetupModeReuse {
+		payloadParts = append(payloadParts, string(mode))
 	}
-	payloadParts = append(payloadParts, verified.CodeVerifier)
 	signed := signedPayload(payloadParts...)
 	mac := hmac.New(sha256.New, secret)
 	// hmac.Hash.Write never returns an error (documented in stdlib); the
@@ -319,11 +324,10 @@ type StateStore interface {
 }
 
 type parsedStateParts struct {
-	email        string
-	mode         SetupMode
-	codeVerifier string
-	sigIndex     int
-	signed       []byte
+	email    string
+	mode     SetupMode
+	sigIndex int
+	signed   []byte
 }
 
 func coreStatePayloadParts(parts [][]byte) []string {
@@ -344,31 +348,25 @@ func parseStateParts(parts [][]byte) (parsedStateParts, error) {
 			signed:   signedPayload(coreStatePayloadParts(parts)...),
 		}, nil
 	case stateEmailParts:
-		// Six parts can be either a pre-PKCE email state or a new
-		// no-email PKCE state. The PKCE verifier alphabet cannot produce
-		// a normalized email address, so the email check is the delimiter.
-		emailOrVerifier := string(parts[stateEmailIndex])
-		if !stateEmailNormalized(emailOrVerifier) {
-			return parsePKCEStateParts(parts, "", SetupModeReuse, statePKCEVerifierIndex, stateEmailSigIndex)
+		email := string(parts[stateEmailIndex])
+		if !stateEmailNormalized(email) {
+			return parsedStateParts{}, errStateMalformed
 		}
-		payload := append(coreStatePayloadParts(parts), emailOrVerifier)
+		payload := append(coreStatePayloadParts(parts), email)
 		return parsedStateParts{
-			email:    emailOrVerifier,
+			email:    email,
 			mode:     SetupModeReuse,
 			sigIndex: stateEmailSigIndex,
 			signed:   signedPayload(payload...),
 		}, nil
 	case stateEmailModeParts:
-		// Seven parts can be either a pre-PKCE email+mode state or a new
-		// email PKCE state. Explicit modes are fixed literals; anything
-		// else in slot 5 is parsed as the PKCE verifier.
 		email := string(parts[stateEmailIndex])
 		if !stateEmailNormalized(email) {
 			return parsedStateParts{}, errStateMalformed
 		}
 		mode, err := normalizeSetupMode(SetupMode(string(parts[stateModeIndex])))
 		if err != nil || mode == SetupModeReuse {
-			return parsePKCEStateParts(parts, email, SetupModeReuse, stateModeIndex, stateEmailModeSigIndex)
+			return parsedStateParts{}, errStateMalformed
 		}
 		payload := append(coreStatePayloadParts(parts), email, string(mode))
 		return parsedStateParts{
@@ -377,45 +375,13 @@ func parseStateParts(parts [][]byte) (parsedStateParts, error) {
 			sigIndex: stateEmailModeSigIndex,
 			signed:   signedPayload(payload...),
 		}, nil
-	case stateEmailModeParts + 1:
-		email := string(parts[stateEmailIndex])
-		if !stateEmailNormalized(email) {
-			return parsedStateParts{}, errStateMalformed
-		}
-		mode, err := normalizeSetupMode(SetupMode(string(parts[stateModeIndex])))
-		if err != nil || mode == SetupModeReuse {
-			return parsedStateParts{}, errStateMalformed
-		}
-		return parsePKCEStateParts(parts, email, mode, stateEmailModeSigIndex, stateEmailModeSigIndex+1)
 	default:
 		return parsedStateParts{}, errStateMalformed
 	}
 }
 
-func parsePKCEStateParts(parts [][]byte, email string, mode SetupMode, verifierIndex, sigIndex int) (parsedStateParts, error) {
-	codeVerifier := string(parts[verifierIndex])
-	if !validPKCEVerifier(codeVerifier) {
-		return parsedStateParts{}, errStateMalformed
-	}
-	payload := coreStatePayloadParts(parts)
-	if email != "" {
-		payload = append(payload, email)
-	}
-	if mode != SetupModeReuse {
-		payload = append(payload, string(mode))
-	}
-	payload = append(payload, codeVerifier)
-	return parsedStateParts{
-		email:        email,
-		mode:         mode,
-		codeVerifier: codeVerifier,
-		sigIndex:     sigIndex,
-		signed:       signedPayload(payload...),
-	}, nil
-}
-
 func validPKCEVerifier(verifier string) bool {
-	if len(verifier) < 43 || len(verifier) > 128 {
+	if len(verifier) < statePKCEVerifierMinLen || len(verifier) > statePKCEVerifierMaxLen {
 		return false
 	}
 	for _, c := range verifier {
@@ -494,11 +460,10 @@ func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, e
 		return VerifiedState{}, errStateExpired
 	}
 	return VerifiedState{
-		TeamID:       teamID,
-		UserID:       userID,
-		Nonce:        string(nonce),
-		CodeVerifier: parsed.codeVerifier,
-		Email:        parsed.email,
-		Mode:         parsed.mode,
+		TeamID: teamID,
+		UserID: userID,
+		Nonce:  string(nonce),
+		Email:  parsed.email,
+		Mode:   parsed.mode,
 	}, nil
 }

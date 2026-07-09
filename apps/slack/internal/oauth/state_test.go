@@ -35,11 +35,16 @@ func mintLegacyStateForTest(t *testing.T, secret []byte, payloadParts ...string)
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-func assertStateHasNonceAndVerifier(t *testing.T, nonce, codeVerifier string) {
+func assertStateHasNonce(t *testing.T, nonce string) {
 	t.Helper()
 	if nonce == "" {
 		t.Fatal("state nonce must be present")
 	}
+}
+
+func assertStateHasNonceAndVerifier(t *testing.T, nonce, codeVerifier string) {
+	t.Helper()
+	assertStateHasNonce(t, nonce)
 	if codeVerifier == "" {
 		t.Fatal("state PKCE code verifier must be present")
 	}
@@ -70,7 +75,10 @@ func TestMintAndVerifyStateRoundTrip(t *testing.T) {
 	if got.Mode != SetupModeReuse {
 		t.Errorf("legacy state mode: got %q want reuse", got.Mode)
 	}
-	assertStateHasNonceAndVerifier(t, got.Nonce, got.CodeVerifier)
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
 }
 
 func TestMintAndVerifyStateWithEmailRoundTrip(t *testing.T) {
@@ -95,7 +103,10 @@ func TestMintAndVerifyStateWithEmailRoundTrip(t *testing.T) {
 	if got.Mode != SetupModeReuse {
 		t.Errorf("email state mode: got %q want reuse", got.Mode)
 	}
-	assertStateHasNonceAndVerifier(t, got.Nonce, got.CodeVerifier)
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
 }
 
 func TestMintAndVerifyStateWithEmailRotateModeRoundTrip(t *testing.T) {
@@ -120,7 +131,10 @@ func TestMintAndVerifyStateWithEmailRotateModeRoundTrip(t *testing.T) {
 	if got.Mode != SetupModeRotate {
 		t.Errorf("mode round-trip: got %q want rotate", got.Mode)
 	}
-	assertStateHasNonceAndVerifier(t, got.Nonce, got.CodeVerifier)
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
 }
 
 func TestMintAndVerifyStateWithEmailRepointModeRoundTrip(t *testing.T) {
@@ -139,10 +153,13 @@ func TestMintAndVerifyStateWithEmailRepointModeRoundTrip(t *testing.T) {
 	if got.Mode != SetupModeRepoint {
 		t.Errorf("mode round-trip: got %q want repoint", got.Mode)
 	}
-	assertStateHasNonceAndVerifier(t, got.Nonce, got.CodeVerifier)
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
 }
 
-func TestVerifyStateAcceptsPrePKCELegacyFormats(t *testing.T) {
+func TestVerifyStateAcceptsLegacyFormats(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	cases := []struct {
 		name    string

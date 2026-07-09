@@ -635,6 +635,39 @@ failure rather than sleeping and retrying; rerun in the dedicated validation
 channel after the `Retry-After` window. If any Slack-rendered form still hides a
 destination, add code and tests before enablement.
 
+## In-Bot qURL Command Rate Limit
+
+Design decision: `/qurl get` and `/qurl aliases` use a DynamoDB-backed fixed
+window counter per `(Slack team, Slack user)`. The counter is stored as a
+synthetic, user-hashed item in `workspace_mappings` rather than as attributes on
+the real workspace row, so large workspaces do not grow or hot-spot that shared
+row. This was chosen over an in-memory token bucket because it survives task
+restarts and works across multiple Fargate tasks. The tradeoff is a workspace
+existence read plus a conditional counter `UpdateItem` for each gated command;
+rollovers may add one extra conditional `UpdateItem`; denied commands do not
+increment the counter. Counter items stamp `expires_at` for DynamoDB TTL at the
+current window start plus two full windows, so idle users age out after the
+active window plus a safety buffer once the table TTL is enabled. The existence
+read stays inside the limiter even though the current slash-command handlers
+authenticate first, so a future direct caller cannot create orphan counter rows
+for an unbound workspace. When the flag is enabled, DynamoDB read/update
+failures fail closed for `/qurl get` and `/qurl aliases` and surface
+retry-friendly copy.
+
+The default budget is 30 allowed commands per user per hour shared across both
+verbs, with the qurl-service API-key quota still acting as a defense-in-depth
+backstop. Because this is a fixed-window limiter, a caller can burst across the
+hour boundary; treat the practical short-term ceiling as roughly 2x the hourly
+limit. The 30/hour budget and 1-hour window are code-level defaults, not
+operator-tunable environment variables.
+
+The gate is staged behind `QURL_SLACK_RATE_LIMIT_ENABLED`. Leave it unset in
+sandbox/open-gate deployments; set it to `true` in production after confirming
+the task role can read and update `workspace_mappings` and that native TTL is
+enabled on `workspace_mappings.expires_at`. Durable workspace binding rows must
+not write `expires_at`; DynamoDB TTL is table-wide and would reap any real row
+that accidentally carried a numeric value.
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -669,6 +702,8 @@ destination, add code and tests before enablement.
 | `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
 | `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
+| `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |
+| `QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED` | No | Set `true` only if Slack bot-token rotation is enabled for the app. When true, `tokens_revoked` bot-token callbacks are acknowledged but not treated as uninstall teardowns; `app_uninstalled` still purges workspace data. Empty preserves the current Marketplace cleanup behavior. Malformed values fail startup because silently choosing either mode can suppress cleanup or make routine token rotation destructive. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
 | `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC` | No | Pool cap for the short **channel thread follow-up admission gate**: workspace-toggle read plus "is this already an agent thread?" transcript read. Empty/0 uses the built-in default (10). Each gate attempt has a 5s fail-closed budget; slow reads log as `agent: thread-continuity lookup failed; dropping channel reply`. During staged enablement, watch that line plus `agent: follow-up gate pool saturated — dropping channel reply`, and tune from observed DynamoDB latency and read volume. |
 | `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC` | No | Pool cap for in-flight **admitted channel thread follow-up turns** — separate from `QURL_SLACK_MAX_CONCURRENT_ASYNC` so a busy channel's follow-up work can't saturate the main pool that `@mention`/DM/slash/interaction work shares. Empty/0 uses the built-in default (same as the main pool, 50). During staged enablement, watch `agent: follow-up turn pool saturated — dropping admitted channel reply`; main-pool isolation holds at any size. |

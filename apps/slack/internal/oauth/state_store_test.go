@@ -3,16 +3,19 @@ package oauth
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 type memoryStateStore struct {
-	mu       sync.Mutex
-	items    map[string]StoredState
-	started  map[string]bool
-	consumed map[string]bool
+	mu                 sync.Mutex
+	items              map[string]StoredState
+	started            map[string]bool
+	consumed           map[string]bool
+	startHadDeadline   bool
+	consumeHadDeadline bool
 }
 
 func newMemoryStateStore() *memoryStateStore {
@@ -33,9 +36,10 @@ func (s *memoryStateStore) PutState(_ context.Context, handle string, state Stor
 	return nil
 }
 
-func (s *memoryStateStore) StartState(_ context.Context, handle string, now time.Time) (VerifiedState, error) {
+func (s *memoryStateStore) StartState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, s.startHadDeadline = ctx.Deadline()
 	state, ok := s.items[handle]
 	if !ok || s.consumed[handle] || !now.Before(state.ExpiresAt) {
 		return VerifiedState{}, errStateExpired
@@ -44,9 +48,10 @@ func (s *memoryStateStore) StartState(_ context.Context, handle string, now time
 	return state.VerifiedState, nil
 }
 
-func (s *memoryStateStore) ConsumeState(_ context.Context, handle string, now time.Time) (VerifiedState, error) {
+func (s *memoryStateStore) ConsumeState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, s.consumeHadDeadline = ctx.Deadline()
 	state, ok := s.items[handle]
 	if !ok || !s.started[handle] || s.consumed[handle] || !now.Before(state.ExpiresAt) {
 		return VerifiedState{}, errStateExpired
@@ -63,11 +68,11 @@ func TestMintStoredStateProducesOpaqueHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
 	}
-	if len(handle) != 43 {
-		t.Fatalf("opaque handle len = %d, want 43-char base64url state handle", len(handle))
+	if len(handle) != stateHandleEncodedLen {
+		t.Fatalf("opaque handle len = %d, want %d-char base64url state handle", len(handle), stateHandleEncodedLen)
 	}
 	for _, leaked := range []string{testStateTeamID, testStateUserID, testNormalizedSetupEmail, "rotate"} {
-		if handle == leaked || len(leaked) > 4 && containsForTest(handle, leaked) {
+		if handle == leaked || len(leaked) > 4 && strings.Contains(handle, leaked) {
 			t.Fatalf("opaque handle leaked payload %q in %q", leaked, handle)
 		}
 	}
@@ -94,13 +99,4 @@ func TestMintStoredStateExpiresAfterOneHour(t *testing.T) {
 	if got := state.ExpiresAt.Sub(now); got != time.Hour {
 		t.Fatalf("stored state lifetime = %s, want 1h", got)
 	}
-}
-
-func containsForTest(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

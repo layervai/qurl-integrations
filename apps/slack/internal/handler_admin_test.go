@@ -12,7 +12,6 @@ import (
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
@@ -872,15 +871,9 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		stranger = "USTRANGER000"   // Different Slack user — non-owner caller.
 		team     = testAdminTeamID  // T_team
 	)
-	const slackBaseURL = "https://slack-bot.example"
-	stateSecret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes.
-
 	wireSetup := func(t *testing.T, h *Handler) {
 		t.Helper()
-		h.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  stateSecret,
-			SlackBaseURL: slackBaseURL,
-		})
+		h.SetOAuthSetup(newTestOAuthSetupConfig())
 	}
 
 	invokeSetup := func(t *testing.T, h *Handler, userID string) string {
@@ -972,6 +965,29 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		// new framing stays.
 		if !strings.Contains(got, "connected qURL") {
 			t.Errorf("non-owner: reply missing 'connected qURL' framing for clarity, got: %q", got)
+		}
+	})
+
+	t.Run("non-owner refusals do not consume setup-link quota", func(t *testing.T) {
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		wireSetup(t, h)
+
+		for i := 0; i < setupLinkRateLimitMax; i++ {
+			got := invokeSetup(t, h, stranger)
+			if strings.Contains(got, "/oauth/qurl/start?state=") {
+				t.Fatalf("non-owner attempt %d minted setup URL: %q", i+1, got)
+			}
+			if strings.Contains(got, "generated several qURL setup links") {
+				t.Fatalf("non-owner attempt %d burned setup-link quota before owner gate: %q", i+1, got)
+			}
+		}
+
+		ts.seedWorkspace(t, team, stranger, stranger, testWorkspaceConfiguredAt.Add(time.Minute))
+		got := invokeSetup(t, h, stranger)
+		if !strings.Contains(got, "/oauth/qurl/start?state=") {
+			t.Fatalf("same caller after becoming owner should not be setup-link limited, got: %q", got)
 		}
 	})
 

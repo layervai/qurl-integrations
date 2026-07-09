@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -431,8 +432,9 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 		return VerifiedState{}, "", false
 	}
 
-	// Backend consume (or legacy HMAC + expiry) on the state token itself; the
-	// cookie check above proves "same browser" but not "minted by us".
+	// Consume before any Auth0, bind, or mint side effect. A transient failure
+	// therefore requires a fresh /qurl setup link, but no concurrent callback can
+	// race far enough to exchange or mint from the same one-shot state.
 	v, err := consumeCallbackState(r.Context(), cfg, stateParam, now())
 	if err != nil {
 		if !isStateValidationError(err) {
@@ -459,7 +461,9 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 //nolint:gocritic // hugeParam: mirrors Callback's package-wide value-pass Config posture.
 func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, now time.Time) (VerifiedState, error) {
 	if cfg.StateStore != nil {
-		verified, err := cfg.StateStore.ConsumeState(ctx, stateParam, now)
+		storeCtx, cancel := context.WithTimeout(ctx, stateStoreTimeout)
+		verified, err := cfg.StateStore.ConsumeState(storeCtx, stateParam, now)
+		cancel()
 		if err == nil {
 			return verified, nil
 		}
@@ -473,19 +477,10 @@ func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, no
 	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }
 
-// verifyIDTokenClaims extracts email + sub from the id_token. Email
-// is best-effort for legacy setup (failure logged, returned ""), but
-// becomes mandatory when the signed setup state carries an email; sub
-// is mandatory for the downstream bind (failure returned as "" so
-// checkBindAllowed can fail-closed). Nonce/email/sub verifies all share the
-// same skip boundary when idToken is empty or the verifier is unwired.
-//
-// In production the verifier is non-nil by construction —
-// cmd/main.go's buildOAuthConfig fails-fast at boot when AdminStore
-// is wired and JWKS prime fails — so the nil-verifier branch is
-// reachable only on the sandbox / no-DDB deploy path, where
-// checkBindAllowed short-circuits on AdminStore==nil before reading
-// the (empty) sub anyway.
+// verifyIDTokenClaims verifies the id_token once, including the state-bound
+// nonce, then extracts email + sub. Email remains best-effort for display but
+// becomes mandatory when setup state carries an email; sub remains mandatory
+// for the downstream bind. Missing token/verifier is anomalous and fails closed.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce string) (email, sub string, ok bool) {
@@ -497,28 +492,27 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce
 		// from "verifier rejected it" so on-call triaging the
 		// downstream 500 doesn't dig through JWKS logs that never
 		// fired.
-		slog.Warn("oauth/callback Auth0 returned empty id_token — sub-verify will be skipped (likely Auth0 application misconfigured without openid scope)")
-		return "", "", true
-	}
-	if cfg.IDTokenVerifier == nil {
-		return "", "", true
-	}
-	if err := cfg.IDTokenVerifier.VerifyNonce(ctx, idToken, expectedNonce); err != nil {
-		slog.Warn("oauth/callback id_token nonce-verify failed", "error", err)
+		slog.Warn("oauth/callback Auth0 returned empty id_token (likely Auth0 application misconfigured without openid scope)")
 		return "", "", false
 	}
-	// Keep these calls split even though JWKSVerifier parses the token for each:
-	// setup is rare, and the split preserves the intentional error contract
-	// (nonce/sub fail closed, email remains success-page best-effort).
-	if e, verr := cfg.IDTokenVerifier.VerifyEmail(ctx, idToken); verr != nil {
-		slog.Warn("oauth/callback id_token email-verify failed (non-fatal)", "error", verr)
-	} else {
-		email = e
+	if cfg.IDTokenVerifier == nil {
+		slog.Error("oauth/callback id_token verifier is not configured")
+		return "", "", false
 	}
-	if s, serr := cfg.IDTokenVerifier.VerifySub(ctx, idToken); serr != nil {
-		slog.Warn("oauth/callback id_token sub-verify failed — bind will be skipped (fatal in production where AdminStore is wired)", "error", serr)
+	claims, err := cfg.IDTokenVerifier.VerifySetupClaims(ctx, idToken, expectedNonce)
+	if err != nil {
+		slog.Warn("oauth/callback id_token or nonce verification failed", "error", err)
+		return "", "", false
+	}
+	if claims.EmailErr != nil {
+		slog.Warn("oauth/callback id_token email extraction failed (non-fatal)", "error", claims.EmailErr)
 	} else {
-		sub = s
+		email = claims.Email
+	}
+	if claims.SubErr != nil {
+		slog.Warn("oauth/callback id_token sub extraction failed — bind will be skipped", "error", claims.SubErr)
+	} else {
+		sub = claims.Sub
 	}
 	return email, sub, true
 }
@@ -530,8 +524,8 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce
 // key and never overwrites an existing admin's stored credential.
 //
 // AdminStore=nil is the sandbox / no-DDB path — log and skip.
-// qurlSub is the output of the upstream id_token verifier (VerifySub,
-// logged on failure earlier in the callback), not the gate itself.
+// qurlSub is the output of the upstream id_token claim extraction (logged on
+// failure earlier in the callback), not the gate itself.
 // qurlSub=="" therefore means that verification silently failed — we
 // have no proof the OAuth flow originated from a legit Auth0 session,
 // so we refuse the bind here rather than half-install. The Auth0
@@ -928,7 +922,8 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, teamID)
 	if err != nil {
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_mint")
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
 		alreadyBound := errors.Is(err, ErrExternalIdentityAlreadyBound)
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Error("oauth/callback qurl-service provision failed",
@@ -1016,7 +1011,8 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 	defer mintCancel()
 	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, teamID, oldKeyID)
 	if err != nil {
-		limitReached := errors.Is(err, ErrAPIKeyLimitReached)
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_replacement_mint")
+		limitReached := errors.Is(err, ErrAPIKeyProvisioningQuotaReached)
 		slog.Error("oauth/callback qurl-service replacement provision failed", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", err,
 			"team_id", teamID,
@@ -1070,9 +1066,30 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		// Count orphan-revoke auth failures in the dependency alarm: even
+		// though cleanup is background work, 401/403 means Slack cannot revoke
+		// qurl-service keys and may leave usable orphan credentials behind.
+		logOAuthDependencyAuthFailure(slog.Default(), err, "oauth_callback_orphan_revoke")
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)
 	}
+}
+
+func logOAuthDependencyAuthFailure(log *slog.Logger, err error, route string) {
+	var authErr *DependencyAuthFailureError
+	if !errors.As(err, &authErr) {
+		return
+	}
+	// Keep this stable WARN audit separate from the human ERROR/WARN log the
+	// caller emits with operator detail; CloudWatch filters should key here.
+	slackaudit.LogDependencyAuthFailure(log, slackaudit.DependencyAuthFailureAttrs(
+		route,
+		authErr.Method,
+		authErr.Path,
+		authErr.StatusCode,
+		authErr.Code,
+		authErr.RequestID,
+	)...)
 }
 
 func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
