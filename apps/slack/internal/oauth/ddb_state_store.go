@@ -164,6 +164,9 @@ func (s *DDBStateStore) ConsumeState(ctx context.Context, handle string, now tim
 		}
 		return VerifiedState{}, fmt.Errorf("oauth state store delete: %w", err)
 	}
+	if out == nil || len(out.Attributes) == 0 {
+		return VerifiedState{}, errStateMalformed
+	}
 	return verifiedStateFromDDBItem(out.Attributes)
 }
 

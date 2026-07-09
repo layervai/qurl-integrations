@@ -302,3 +302,11 @@ func TestDDBStateStoreConsumeStateDistinguishesMissingOrReplayed(t *testing.T) {
 		t.Fatalf("ConsumeState error = %v, want errStateMissing", err)
 	}
 }
+
+func TestDDBStateStoreConsumeStateRejectsSuccessfulDeleteWithoutAttributes(t *testing.T) {
+	ddb := &fakeOAuthStateDDB{deleteOutput: &dynamodb.DeleteItemOutput{}}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	if _, err := store.ConsumeState(context.Background(), "opaque-handle", time.Unix(1700000030, 0)); !errors.Is(err, errStateMalformed) {
+		t.Fatalf("ConsumeState error = %v, want errStateMalformed", err)
+	}
+}

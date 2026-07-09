@@ -399,7 +399,8 @@ func validPKCEVerifier(verifier string) bool {
 	if len(verifier) < statePKCEVerifierMinLen || len(verifier) > statePKCEVerifierMaxLen {
 		return false
 	}
-	for _, c := range verifier {
+	for i := 0; i < len(verifier); i++ {
+		c := verifier[i]
 		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
 			continue
 		}
