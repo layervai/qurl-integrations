@@ -417,8 +417,8 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 			"Return to Slack and run /qurl setup <email> again.")
 		return VerifiedState{}, "", false
 	}
-	// Both values come from the same MintState call so canonical
-	// length is fixed; hmac.Equal short-circuits to false on
+	// Both values carry the same opaque handle (or deploy-overlap legacy state),
+	// so canonical length is fixed; hmac.Equal short-circuits to false on
 	// length mismatch (length oracle is harmless here because an
 	// attacker who can probe arbitrary cookie+state pairs already
 	// has the HttpOnly cookie). Constant-time byte compare on
