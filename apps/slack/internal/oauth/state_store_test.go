@@ -19,6 +19,20 @@ type memoryStateStore struct {
 	consumeHadDeadline bool
 }
 
+type unavailableStateStore struct {
+	err error
+}
+
+func (s *unavailableStateStore) PutState(context.Context, string, StoredState) error { return s.err }
+
+func (s *unavailableStateStore) StartState(context.Context, string, time.Time) (VerifiedState, error) {
+	return VerifiedState{}, s.err
+}
+
+func (s *unavailableStateStore) ConsumeState(context.Context, string, time.Time) (VerifiedState, error) {
+	return VerifiedState{}, s.err
+}
+
 func newMemoryStateStore() *memoryStateStore {
 	return &memoryStateStore{
 		items:    map[string]StoredState{},
@@ -106,5 +120,19 @@ func TestMintStoredStateExpiresAfterOneHour(t *testing.T) {
 	store.mu.Unlock()
 	if got := state.ExpiresAt.Sub(now); got != time.Hour {
 		t.Fatalf("stored state lifetime = %s, want 1h", got)
+	}
+}
+
+func TestLoadStateWithLegacyFallbackPropagatesAvailabilityError(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	legacyState, err := MintState(testSecret, testStateTeamID, testStateUserID, now)
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	storeErr := errors.New("ddb throttled")
+	if _, err := loadStateWithLegacyFallback(testSecret, legacyState, now, func() (VerifiedState, error) {
+		return VerifiedState{}, storeErr
+	}); !errors.Is(err, storeErr) {
+		t.Fatalf("loadStateWithLegacyFallback error = %v, want store error", err)
 	}
 }

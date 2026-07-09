@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -373,4 +374,21 @@ func TestStartRefusesWithShortSecret(t *testing.T) {
 		t.Errorf("got %d want 503", rec.Code)
 	}
 	assertOAuthErrorPage(t, rec, "qURL setup is unavailable")
+}
+
+func TestStartDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T) {
+	cfg := newStartCfg()
+	state, err := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	cfg.StateStore = &unavailableStateStore{err: errors.New("ddb throttled")}
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d want 503 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup is temporarily unavailable")
 }

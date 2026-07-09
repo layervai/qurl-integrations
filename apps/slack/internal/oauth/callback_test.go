@@ -720,6 +720,32 @@ func TestCallbackConsumesStoredStateOnce(t *testing.T) {
 	}
 }
 
+func TestCallbackDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+	state, err := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	cfg.StateStore = &unavailableStateStore{err: errors.New("ddb throttled")}
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d want 503 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup is temporarily unavailable")
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs != nil {
+		t.Fatal("workspace credentials must not persist after a state-store availability failure")
+	}
+	minter.mintMu.Lock()
+	defer minter.mintMu.Unlock()
+	if minter.mintCalls != 0 {
+		t.Fatalf("mint calls = %d, want zero", minter.mintCalls)
+	}
+}
+
 func TestCallbackEmailSetupRequiresMatchingVerifiedEmail(t *testing.T) {
 	cfg, _, store, minter := newCallbackCfg(t)
 	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: "different@example.com"}
