@@ -171,12 +171,13 @@ type IDTokenVerifier interface {
 
 // WorkspaceMapping is the value BindWorkspace persists. Re-declared
 // here (vs importing slackdata) so the oauth package's only inbound
-// dependency stays the shared/auth package — slackdata depends on
-// oauth's interfaces in cmd/main.go but the reverse would create a
-// cycle.
+// dependency stays the shared/auth package; the slackdata bridge lives
+// in internal/oauth_bind_wiring.go, while importing slackdata here
+// would create a cycle.
 //
 // Fields mirror slackdata.WorkspaceMapping exactly; the drift fence
-// lives in cmd/main_test.go's TestAdminStoreAdapterMappingShapesMatch.
+// lives in internal/oauth_bind_wiring_test.go's
+// TestAdminStoreAdapterMappingShapesMatch.
 type WorkspaceMapping struct {
 	TeamID    string
 	OwnerID   string
@@ -198,9 +199,9 @@ type AdminStore interface {
 // slackdata.
 //
 // Values intentionally mirror slackdata.ErrCodeWorkspace* constants
-// verbatim — drift either side and the classifier wiring in
-// cmd/main.go silently routes the wrong 409 to the success-page
-// rebind-refusal branch.
+// verbatim — drift either side and ClassifyOAuthBindError in
+// internal/oauth_bind_wiring.go silently routes the wrong 409 to the
+// success-page rebind-refusal branch.
 type BindConflictCode string
 
 const (
@@ -290,7 +291,8 @@ type Config struct {
 	//
 	// Nil disables the bind (sandbox / no-DDB deploy) — the callback
 	// emits a slog.Warn and continues with the existing API-key
-	// surface. Production cmd/main.go wires a *slackdata.Store.
+	// surface. Production cmd/main.go wires NewOAuthAdminStoreAdapter
+	// over a *slackdata.Store.
 	AdminStore AdminStore
 
 	// BindClassifyError classifies a BindWorkspace error into a
@@ -299,17 +301,18 @@ type Config struct {
 	// validation failure that the callback should treat as a
 	// generic bind failure (500).
 	//
-	// Wired in cmd/main.go to a small classifier that errors.As's
-	// the *slackdata.Error and returns its Code field when
-	// StatusCode == 409. Nil falls back to "always treat as
-	// generic bind failure".
+	// Wired in cmd/main.go to internal.ClassifyOAuthBindError, which
+	// errors.As's the *slackdata.Error and returns its Code field when
+	// StatusCode == 409. Nil falls back to "always treat as generic
+	// bind failure".
 	//
 	// COUPLING: callers that set AdminStore MUST also set
 	// BindClassifyError. Otherwise every bind conflict — including
 	// idempotent same-caller re-entries — falls through to the
 	// default 500 arm in handleBindError, downgrading rebind-refused
-	// to a generic failure for the user. cmd/main.go wires both
-	// together; future callers should mirror that pairing.
+	// to a generic failure for the user. cmd/main.go wires both via
+	// internal/oauth_bind_wiring.go; future callers should mirror that
+	// pairing.
 	BindClassifyError func(err error) BindConflictCode
 
 	// HTTPClient is used for Auth0 token-exchange calls. Defaults to
