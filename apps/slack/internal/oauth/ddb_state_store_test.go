@@ -162,8 +162,7 @@ func TestDDBStateStorePutStateClassifiesHandleCollision(t *testing.T) {
 			CodeVerifier: strings.Repeat("b", statePKCEVerifierMinLen),
 			Mode:         SetupModeReuse,
 		},
-		CreatedAt: time.Unix(1700000000, 0),
-		ExpiresAt: time.Unix(1700003600, 0),
+		ExpiresAt: time.Unix(1700000300, 0),
 	}
 	if err := store.PutState(context.Background(), "opaque-handle", state); !errors.Is(err, errStateCollision) {
 		t.Fatalf("PutState error = %v, want errStateCollision", err)
@@ -183,7 +182,6 @@ func TestDDBStateStorePutStateWritesOpaqueStateRow(t *testing.T) {
 			Email:        testNormalizedSetupEmail,
 			Mode:         SetupModeRotate,
 		},
-		CreatedAt: now,
 		ExpiresAt: now.Add(stateMaxAge),
 	}
 	if err := store.PutState(context.Background(), "opaque-handle", state); err != nil {
@@ -204,8 +202,8 @@ func TestDDBStateStorePutStateWritesOpaqueStateRow(t *testing.T) {
 	if _, ok := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN); !ok {
 		t.Fatalf("ttl attr missing/wrong: %v", ddb.putInput.Item[oauthStateAttrTTL])
 	}
-	if got := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN).Value; got != "1700003600" {
-		t.Fatalf("ttl attr = %q, want one-hour expiry epoch", got)
+	if got := ddb.putInput.Item[oauthStateAttrTTL].(*ddbtypes.AttributeValueMemberN).Value; got != "1700000300" {
+		t.Fatalf("ttl attr = %q, want five-minute expiry epoch", got)
 	}
 	if got := aws.ToString(ddb.putInput.ConditionExpression); !strings.Contains(got, "attribute_not_exists") {
 		t.Fatalf("PutState must be conditional, got %q", got)

@@ -26,7 +26,6 @@ const (
 	oauthStateAttrVerifier  = "oauth_code_verifier"
 	oauthStateAttrEmail     = "oauth_email"
 	oauthStateAttrMode      = "oauth_mode"
-	oauthStateAttrCreatedAt = "oauth_created_at"
 	oauthStateAttrExpiresAt = "oauth_expires_at"
 	oauthStateAttrStartedAt = "oauth_started_at"
 	oauthStateAttrTTL       = "ttl"
@@ -96,7 +95,6 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 			oauthStateAttrVerifier:  &ddbtypes.AttributeValueMemberS{Value: state.CodeVerifier},
 			oauthStateAttrEmail:     &ddbtypes.AttributeValueMemberS{Value: state.Email},
 			oauthStateAttrMode:      &ddbtypes.AttributeValueMemberS{Value: string(state.Mode)},
-			oauthStateAttrCreatedAt: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.CreatedAt.Unix(), 10)},
 			oauthStateAttrExpiresAt: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
 			oauthStateAttrTTL:       &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
 		},
@@ -115,8 +113,10 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 	return nil
 }
 
-// StartState marks an opaque state as started and returns the backend payload
-// needed to build the Auth0 authorization URL.
+// StartState idempotently marks an opaque state as started and returns the
+// backend payload needed to build the Auth0 authorization URL. More than one
+// browser may start the same handle, but ConsumeState's conditional delete lets
+// exactly one callback complete.
 func (s *DDBStateStore) StartState(ctx context.Context, handle string, now time.Time) (VerifiedState, error) {
 	return s.updateAndReadState(ctx, handle, now, oauthStateAttrStartedAt,
 		"attribute_exists(#pk) AND #expires_at > :now_epoch",

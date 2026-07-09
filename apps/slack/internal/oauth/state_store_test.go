@@ -108,7 +108,7 @@ func TestMintStoredStateProducesOpaqueHandle(t *testing.T) {
 	assertStateHasNonceAndVerifier(t, got.Nonce, got.CodeVerifier)
 }
 
-func TestMintStoredStateExpiresAfterOneHour(t *testing.T) {
+func TestMintStoredStatePreservesFiveMinuteExpiry(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	store := newMemoryStateStore()
 	handle, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "", SetupModeReuse, now)
@@ -118,8 +118,8 @@ func TestMintStoredStateExpiresAfterOneHour(t *testing.T) {
 	store.mu.Lock()
 	state := store.items[handle]
 	store.mu.Unlock()
-	if got := state.ExpiresAt.Sub(now); got != time.Hour {
-		t.Fatalf("stored state lifetime = %s, want 1h", got)
+	if got := state.ExpiresAt.Sub(now); got != 5*time.Minute {
+		t.Fatalf("stored state lifetime = %s, want 5m", got)
 	}
 }
 

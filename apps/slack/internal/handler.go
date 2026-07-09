@@ -1764,7 +1764,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	}
 	setupURL := h.oauthSetup.SetupURL(state)
 	action := setupModeAction(setupCmd.mode)
-	respondSlack(w, "Continue "+action+" for `"+echoText(setupCmd.email)+"`: <"+setupURL+"|Continue "+action+">\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 1 hour and only works for you.")
+	respondSlack(w, "Continue "+action+" for `"+echoText(setupCmd.email)+"`: <"+setupURL+"|Continue "+action+">\n\nAuth0 will ask you to sign in with that email after you continue. This link is valid for 5 minutes and only works for you.")
 }
 
 func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {

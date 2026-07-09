@@ -41,12 +41,10 @@ import (
 // /qurl setup slash-command handler, which has already verified the
 // Slack signing secret and therefore the caller's workspace identity.
 //
-// Expiry: the prior 5-minute window is intentionally widened to 1 hour to match
-// the qURL Connector bootstrap key lifetime used by /qurl-admin
-// protect-connector, giving admins the same setup window whether they are
-// connecting the workspace account or bootstrapping a sidecar. This also lets a
-// legacy signed state reach /start for up to an hour during deploy overlap, but
-// it still cannot pass Callback's mandatory PKCE-verifier gate.
+// Expiry: 5 minutes from mint preserves the established slash-command-reply →
+// click → Auth0 authenticate → callback window. It remains independent of the
+// longer Connector bootstrap-key lifetime so a leaked setup link has the
+// smallest already-proven UX window.
 //
 // Replay posture: StateStore-backed states are consumed once on callback. The
 // store writes a `ttl` cleanup hint for abandoned states, but successful
@@ -54,7 +52,7 @@ import (
 // conditionally because table TTL is best-effort and may lag. The double-submit
 // cookie still binds the Auth0 callback to the browser that opened /start.
 const (
-	stateMaxAge             = time.Hour
+	stateMaxAge             = 5 * time.Minute
 	stateLegacyParts        = 5
 	stateEmailParts         = 6
 	stateEmailModeParts     = 7
@@ -272,7 +270,6 @@ func MintStoredStateWithEmailMode(ctx context.Context, store StateStore, teamID,
 	handle := base64.RawURLEncoding.EncodeToString(handleBytes)
 	state := StoredState{
 		VerifiedState: verified,
-		CreatedAt:     now,
 		ExpiresAt:     now.Add(stateMaxAge),
 	}
 	storeCtx, cancel := context.WithTimeout(ctx, stateStoreMintTimeout)
@@ -327,7 +324,6 @@ type VerifiedState struct {
 // front-channel URL.
 type StoredState struct {
 	VerifiedState
-	CreatedAt time.Time
 	ExpiresAt time.Time
 }
 
@@ -445,9 +441,10 @@ func loadStateWithLegacyFallback(secret []byte, encoded string, now time.Time, l
 		return verified, nil
 	}
 	if !errors.Is(err, errStateExpired) && !errors.Is(err, errStateMissing) && !errors.Is(err, errStateMalformed) {
-		// Availability failures never bypass the state store. Falling back on a
-		// DDB transport/throttle error could accept an opaque flow the backend
-		// could not authoritatively validate.
+		// Availability failures and sequencing violations never bypass the state
+		// store. Falling back on a DDB transport/throttle error could accept an
+		// opaque flow the backend could not authoritatively validate; falling back
+		// on errStateNotStarted would bypass the required /start ordering.
 		return VerifiedState{}, err
 	}
 	if isOpaqueStateHandle(encoded) {
