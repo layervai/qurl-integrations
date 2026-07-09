@@ -492,7 +492,7 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
-		log.Info("get: rate-limit denied mint", "team_id", args.teamID, "user_id", args.userID, "retry_after_ms", retry.Milliseconds())
+		log.Info("get: rate-limit denied mint", "retry_after_ms", retry.Milliseconds())
 		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
