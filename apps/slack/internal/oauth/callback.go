@@ -689,7 +689,7 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 		slog.Error("oauth/callback explicit-mode key identity lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"error", err, "team_id", teamID, "mode", string(mode))
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't update qURL key",
-			"qURL is connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL™ is connected to this Slack workspace, but the stored workspace key could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 	if storedAccountID != "" && storedAccountID != qurlAccountID {
@@ -704,7 +704,7 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 			slog.Error("oauth/callback explicit mode reached with empty qURL account against a provenance row", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 				"team_id", teamID, "mode", string(mode))
 			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
-				"qURL could not confirm the signed-in account needed to update this workspace key. Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
+				"qURL™ could not confirm the signed-in account needed to update this workspace key. Run /qurl setup <email> again. If it keeps failing, please contact your qURL administrator.")
 			return "", false
 		}
 		// A different qURL account holds the key. Do NOT echo it to the browser
@@ -720,7 +720,7 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 			"requested_qurl_account_id", qurlAccountID,
 			"operator_action", crossAccountRepointOperatorAction)
 		renderOAuthErrorPage(w, http.StatusConflict, "qURL key belongs to a different account",
-			"This Slack workspace's qURL key belongs to a different qURL account. To protect the current owner, qURL does not let another account take over a workspace connection automatically.",
+			"This Slack workspace's qURL™ key belongs to a different qURL account. To protect the current owner, qURL does not let another account take over a workspace connection automatically.",
 			"If you meant to replace the key on the account that already holds it, run /qurl setup <email> --rotate signed in as that account. To move this workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
 		return "", false
 	}
@@ -731,7 +731,7 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 			"event", repointLegacyRowRefusedEvent,
 			"team_id", teamID)
 		renderOAuthErrorPage(w, http.StatusConflict, "Can't repoint qURL key from Slack",
-			"This workspace was connected before Slack recorded which qURL account holds its key, so a cross-account move can't be verified safely. If you own the current qURL account, run /qurl setup <email> with --rotate to refresh the key (Slack will record the account for next time). To move the workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
+			"This workspace was connected before Slack recorded which qURL™ account holds its key, so a cross-account move can't be verified safely. If you own the current qURL account, run /qurl setup <email> with --rotate to refresh the key (Slack will record the account for next time). To move the workspace to a different qURL account, contact LayerV support for an operator-assisted transfer.")
 		return "", false
 	}
 	// Same qURL account, or --rotate against a legacy row: revoke-then-replace.
@@ -739,14 +739,14 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 		slog.Warn("oauth/callback rotation refused because stored key has no key_id", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"team_id", teamID)
 		renderOAuthErrorPage(w, http.StatusConflict, "Can't rotate qURL key from Slack",
-			"This workspace was connected before Slack stored qURL key identity. To avoid revoking the wrong key, rotate it from your qURL account or contact LayerV support.")
+			"This workspace was connected before Slack stored qURL™ key identity. To avoid revoking the wrong key, rotate it from your qURL account or contact LayerV support.")
 		return "", false
 	}
 	if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, keyID)); err != nil {
 		slog.Error("oauth/callback rotation replacement idempotency key invalid before revoke", //nolint:gosec // G706: team_id/key_id are non-secret qURL identifiers needed for operator triage.
 			"error", err, "team_id", teamID, "key_id", keyID)
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't rotate qURL key",
-			"Slack could not build a safe qURL retry key for this workspace key identity. No key was revoked. Contact LayerV support to rotate this workspace key.")
+			"Slack could not build a safe qURL™ retry key for this workspace key identity. No key was revoked. Contact LayerV support to rotate this workspace key.")
 		return "", false
 	}
 
@@ -782,19 +782,19 @@ func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg Config, accessTok
 			slog.Warn("oauth/callback rotation old-key revoke status check failed", //nolint:gosec // G706: key_id is qurl-service identifier needed for operator triage.
 				"error", err, "team_id", teamID, "key_id", keyID)
 			renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
-				"qURL could not confirm whether the previous workspace key was already revoked. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+				"qURL™ could not confirm whether the previous workspace key was already revoked. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 			return false
 		}
 		slog.Warn("oauth/callback rotation old key not found and not confirmed revoked", //nolint:gosec // G706: key_id is qurl-service identifier needed for operator triage.
 			"team_id", teamID, "key_id", keyID)
 		renderOAuthErrorPage(w, http.StatusConflict, "Couldn't rotate qURL key",
-			"The current workspace key could not be confirmed as revoked under this qURL account. A recent revoke may still be propagating, the stored key identity may be stale or deleted at qURL, or the key may belong to a different qURL account. Wait a minute, then sign in as the account that owns the existing key and run /qurl setup <email> with --rotate or --repoint again. If it keeps failing, rotate the workspace key from qURL account/API-key management or contact LayerV support.")
+			"The current workspace key could not be confirmed as revoked under this qURL™ account. A recent revoke may still be propagating, the stored key identity may be stale or deleted at qURL, or the key may belong to a different qURL account. Wait a minute, then sign in as the account that owns the existing key and run /qurl setup <email> with --rotate or --repoint again. If it keeps failing, rotate the workspace key from qURL account/API-key management or contact LayerV support.")
 		return false
 	}
 	slog.Warn("oauth/callback rotation old-key revoke failed", //nolint:gosec // G706: key_id is qurl-service identifier needed for operator triage.
 		"error", revokeErr, "team_id", teamID, "key_id", keyID)
 	renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
-		"qURL could not revoke the previous workspace key. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+		"qURL™ could not revoke the previous workspace key. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 	return false
 }
 
@@ -844,14 +844,14 @@ func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, teamID string) (
 				slog.Error("oauth/callback invalid workspace key metadata lookup failed", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 					"error", keyIDErr, "team_id", teamID)
 				renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't connect qURL",
-					"qURL is connected to this Slack workspace, but the stored workspace key metadata could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+					"qURL™ is connected to this Slack workspace, but the stored workspace key metadata could not be read. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 				return "", false, false
 			}
 			if keyID != "" {
 				slog.Warn("oauth/callback invalid metadata-bearing workspace key requires explicit rotation", //nolint:gosec // G706: team_id/key_id are non-secret qURL identifiers needed for operator triage.
 					"team_id", teamID, "key_id", keyID)
 				renderOAuthErrorPage(w, http.StatusConflict, "qURL key needs rotation",
-					"The stored workspace key is no longer accepted by qURL. It may have been revoked or deleted at qURL. Run /qurl setup <email> with --rotate or --repoint to recover safely; plain setup will not mint a separate replacement while Slack still has the old key identity.")
+					"The stored workspace key is no longer accepted by qURL™. It may have been revoked or deleted at qURL. Run /qurl setup <email> with --rotate or --repoint to recover safely; plain setup will not mint a separate replacement while Slack still has the old key identity.")
 				return "", false, false
 			}
 			// Only a definite auth failure is replaceable-invalid. We do
@@ -963,8 +963,8 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 	// Minter success guarantees keyID/keyPrefix are non-empty; the metadata
 	// setter keeps that cross-file contract explicit for future rotations.
 	// qurlAccountID records who minted the key so a later --repoint can detect a
-	// cross-account move; it is best-effort and tolerated empty on the sandbox
-	// path (see SetAPIKeyWithMetadata).
+	// cross-account move; it is best-effort and tolerated empty when admin
+	// storage is disabled (see SetAPIKeyWithMetadata).
 	if perr := cfg.Provider.SetAPIKeyWithMetadata(persistCtx, teamID, apiKey, keyID, keyPrefix, qurlAccountID, userID); perr != nil {
 		if minted.BindingBacked {
 			replayWindowHours := replayWindowHoursOrDefault(cfg.SetupBindingReplayWindowHours, DefaultSetupBindingReplayWindowHours)
@@ -1015,11 +1015,11 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 			"api_key_limit_reached", limitReached)
 		if limitReached {
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				"The previous workspace key was revoked, but your qURL account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with --rotate or --repoint again.")
+				"The previous workspace key was revoked, but your qURL™ account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with --rotate or --repoint again.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
-			"The previous workspace key was revoked, but a replacement could not be created. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			"qURL™ revoked the previous workspace key, but a replacement could not be created. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 
@@ -1039,7 +1039,7 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 			"retry_window_hours", replayWindowHours,
 			"operator_action", rotationReplacementPersistFailureAction)
 		renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't finish qURL key rotation",
-			"The previous workspace key was revoked, but the replacement could not be stored. Run /qurl setup <email> with --rotate or --repoint again soon to recover and store the same replacement key.")
+			"qURL™ revoked the previous workspace key, but the replacement could not be stored. Run /qurl setup <email> with --rotate or --repoint again soon to recover and store the same replacement key.")
 		return "", false
 	}
 	return minted.KeyPrefix, true

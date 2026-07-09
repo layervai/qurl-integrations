@@ -425,6 +425,12 @@ func (c Config) Validate() error {
 	if c.APIKeyMintReplayWindowHours < 0 {
 		return errors.New("APIKeyMintReplayWindowHours must be zero or positive")
 	}
+	if c.StateStore == nil {
+		return errors.New("StateStore is required for one-shot OAuth state")
+	}
+	if c.IDTokenVerifier == nil {
+		return errors.New("IDTokenVerifier is required for OAuth nonce verification")
+	}
 	return nil
 }
 

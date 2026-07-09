@@ -2162,7 +2162,7 @@ func assertLoggedEvent(t *testing.T, records []map[string]any, want string) {
 	}
 }
 
-// A configured row with no recorded qURL account (legacy/sandbox) cannot prove
+// A configured row with no recorded qURL account (legacy/unattributed) cannot prove
 // same-vs-cross account, so --repoint fails closed without minting or revoking.
 func TestCallbackRepointLegacyRowWithoutAccountFailsClosed(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
@@ -2179,7 +2179,7 @@ func TestCallbackRepointLegacyRowWithoutAccountFailsClosed(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status: got %d want 409 (legacy repoint, body=%s)", rec.Code, rec.Body.String())
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "before Slack recorded which qURL account") {
+	if body := rec.Body.String(); !strings.Contains(body, "before Slack recorded which qURL™ account") {
 		t.Errorf("legacy repoint page missing reclaim guidance: %q", body)
 	}
 	assertLoggedEvent(t, logs(), repointLegacyRowRefusedEvent)

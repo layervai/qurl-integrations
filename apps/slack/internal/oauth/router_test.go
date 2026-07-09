@@ -15,6 +15,19 @@ func (*noopAdminStore) BindWorkspace(_ context.Context, _ *WorkspaceMapping, _ s
 	return nil
 }
 
+type noopIDTokenVerifier struct{}
+
+func (noopIDTokenVerifier) VerifySetupClaims(context.Context, string, string) (IDTokenClaims, error) {
+	return IDTokenClaims{}, nil
+}
+
+func validConfigForValidation() Config {
+	return Config{
+		StateStore:      newMemoryStateStore(),
+		IDTokenVerifier: noopIDTokenVerifier{},
+	}
+}
+
 // TestConfigValidateRejectsAdminStoreWithoutClassifier fences the
 // AdminStore ↔ BindClassifyError pairing that handleBindError's
 // switch relies on. Without a classifier, every bind conflict —
@@ -40,10 +53,9 @@ func TestConfigValidateRejectsAdminStoreWithoutClassifier(t *testing.T) {
 // TestConfigValidateAcceptsPairedAdminStore mirrors the happy-path
 // shape: AdminStore + BindClassifyError both wired → Validate passes.
 func TestConfigValidateAcceptsPairedAdminStore(t *testing.T) {
-	cfg := Config{
-		AdminStore:        &noopAdminStore{},
-		BindClassifyError: func(_ error) BindConflictCode { return "" },
-	}
+	cfg := validConfigForValidation()
+	cfg.AdminStore = &noopAdminStore{}
+	cfg.BindClassifyError = func(_ error) BindConflictCode { return "" }
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate rejected a paired config: %v", err)
 	}
@@ -53,13 +65,27 @@ func TestConfigValidateAcceptsPairedAdminStore(t *testing.T) {
 // storage posture: AdminStore=nil means the callback skips the bind, so a
 // classifier is irrelevant. Validate must not reject this combination.
 func TestConfigValidateAcceptsAdminStoreDisabledConfig(t *testing.T) {
-	cfg := Config{
-		AdminStore:        nil,
-		BindClassifyError: nil,
-	}
+	cfg := validConfigForValidation()
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate rejected the sandbox config: %v", err)
 	}
+}
+
+func TestConfigValidateRequiresStateStoreAndIDTokenVerifier(t *testing.T) {
+	t.Run("state store", func(t *testing.T) {
+		cfg := validConfigForValidation()
+		cfg.StateStore = nil
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "StateStore") {
+			t.Fatalf("Validate error = %v, want missing StateStore", err)
+		}
+	})
+	t.Run("id token verifier", func(t *testing.T) {
+		cfg := validConfigForValidation()
+		cfg.IDTokenVerifier = nil
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "IDTokenVerifier") {
+			t.Fatalf("Validate error = %v, want missing IDTokenVerifier", err)
+		}
+	})
 }
 
 func TestConfigValidateRejectsNegativeSetupBindingReplayWindow(t *testing.T) {

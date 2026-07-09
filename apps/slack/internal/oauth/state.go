@@ -111,10 +111,12 @@ func (m SetupMode) Explicit() bool {
 // error strings. Kept un-exported because no caller outside this package
 // branches on them today — promote when one does.
 var (
-	errStateMalformed      = errors.New("state: malformed")
-	errStateBadHMAC        = errors.New("state: HMAC mismatch")
-	errStateExpired        = errors.New("state: expired")
-	errStateMissing        = errors.New("state: missing or already consumed")
+	errStateMalformed = errors.New("state: malformed")
+	errStateBadHMAC   = errors.New("state: HMAC mismatch")
+	errStateExpired   = errors.New("state: expired")
+	errStateMissing   = errors.New("state: missing or already consumed")
+	// errStateCollision is mint-only and intentionally excluded from
+	// isStateValidationError, which classifies /start and /callback failures.
 	errStateCollision      = errors.New("state: opaque handle collision")
 	errStateNotStarted     = errors.New("state: callback received before start")
 	errStateFuture         = errors.New("state: timestamp in future")
