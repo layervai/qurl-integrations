@@ -190,11 +190,15 @@ func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, n
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":now_epoch": &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(now.Unix(), 10)},
 		},
-		ReturnValues: returnValues,
+		ReturnValues:                        returnValues,
+		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld,
 	})
 	if err != nil {
 		var ccfe *ddbtypes.ConditionalCheckFailedException
 		if errors.As(err, &ccfe) {
+			if len(ccfe.Item) == 0 {
+				return VerifiedState{}, errStateMissing
+			}
 			return VerifiedState{}, errStateExpired
 		}
 		return VerifiedState{}, fmt.Errorf("oauth state store update: %w", err)

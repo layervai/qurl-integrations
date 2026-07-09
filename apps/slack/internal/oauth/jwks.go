@@ -20,9 +20,9 @@ const (
 	// well below 1 req/min.
 	jwksRefreshInterval = 15 * time.Minute
 	// jwksPrimeTimeout caps how long NewJWKSVerifier may wait on the
-	// initial refresh. If Auth0 is briefly unreachable at boot we'd
-	// rather start up degraded and warm the cache on the first /callback
-	// than wedge in init for the full request-timeout budget.
+	// initial refresh. The Slack app intentionally fails startup when this
+	// bounded prime fails: serving OAuth routes without nonce verification is
+	// not supported, and the orchestrator can retry once Auth0 recovers.
 	jwksPrimeTimeout = 5 * time.Second
 )
 
@@ -44,10 +44,10 @@ type JWKSVerifier struct {
 // cancels on shutdown (e.g. the signal-canceled context from
 // signal.NotifyContext) so the goroutine doesn't outlive the process.
 //
-// The initial prime fetch is bounded by jwksPrimeTimeout so a briefly
-// unreachable Auth0 doesn't wedge startup; on prime-failure the
-// returned error is surfaced and the caller decides whether to fall
-// back to the no-verifier code path.
+// The initial prime fetch is bounded by jwksPrimeTimeout so an unreachable
+// Auth0 does not wedge startup. Prime failure is returned to the caller; the
+// Slack app treats it as boot-fatal because nonce verification cannot operate
+// safely without a primed verifier.
 func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifier, error) {
 	jwksURL := issuer + ".well-known/jwks.json"
 	c := jwk.NewCache(ctx)

@@ -261,6 +261,26 @@ func TestDDBStateStoreStartStateUsesValidExpressionBindings(t *testing.T) {
 	if _, ok := ddb.updateInput.ExpressionAttributeValues[":now_epoch"].(*ddbtypes.AttributeValueMemberN); !ok {
 		t.Fatalf("StartState timestamp must be numeric epoch: %v", ddb.updateInput.ExpressionAttributeValues)
 	}
+	if ddb.updateInput.ReturnValuesOnConditionCheckFailure != ddbtypes.ReturnValuesOnConditionCheckFailureAllOld {
+		t.Fatalf("StartState failure ReturnValues = %v, want ALL_OLD", ddb.updateInput.ReturnValuesOnConditionCheckFailure)
+	}
+}
+
+func TestDDBStateStoreStartStateDistinguishesMissingFromExpired(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		ddb := &fakeOAuthStateDDB{updateErr: &ddbtypes.ConditionalCheckFailedException{}}
+		store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+		if _, err := store.StartState(context.Background(), "opaque-handle", time.Unix(1700000030, 0)); !errors.Is(err, errStateMissing) {
+			t.Fatalf("StartState error = %v, want errStateMissing", err)
+		}
+	})
+	t.Run("expired", func(t *testing.T) {
+		ddb := &fakeOAuthStateDDB{updateErr: &ddbtypes.ConditionalCheckFailedException{Item: storedStateDDBItem()}}
+		store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+		if _, err := store.StartState(context.Background(), "opaque-handle", time.Unix(1700000030, 0)); !errors.Is(err, errStateExpired) {
+			t.Fatalf("StartState error = %v, want errStateExpired", err)
+		}
+	})
 }
 
 func TestDDBStateStoreConsumeStateDistinguishesNotStarted(t *testing.T) {
