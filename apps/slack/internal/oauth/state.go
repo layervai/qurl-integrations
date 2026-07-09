@@ -414,6 +414,20 @@ func validPKCEVerifier(verifier string) bool {
 	return true
 }
 
+func validStateNonce(nonce string) bool {
+	if len(nonce) != stateNonceLen*2 {
+		return false
+	}
+	for i := 0; i < len(nonce); i++ {
+		c := nonce[i]
+		if c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func isOpaqueStateHandle(encoded string) bool {
 	if len(encoded) != stateHandleEncodedLen {
 		return false

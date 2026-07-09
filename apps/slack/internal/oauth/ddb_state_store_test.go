@@ -135,6 +135,16 @@ func TestVerifiedStateFromDDBItemRejectsExplicitModeWithoutEmail(t *testing.T) {
 	}
 }
 
+func TestVerifiedStateFromDDBItemRejectsMalformedNonce(t *testing.T) {
+	for _, nonce := range []string{"", "too-short", strings.Repeat("g", stateNonceLen*2)} {
+		item := storedStateDDBItem()
+		item[oauthStateAttrNonce] = &ddbtypes.AttributeValueMemberS{Value: nonce}
+		if _, err := verifiedStateFromDDBItem(item); !errors.Is(err, errStateMalformed) {
+			t.Fatalf("verifiedStateFromDDBItem nonce %q error = %v, want errStateMalformed", nonce, err)
+		}
+	}
+}
+
 func TestNewDDBStateStoreValidatesWiringAtStartup(t *testing.T) {
 	if _, err := NewDDBStateStore(nil); err == nil {
 		t.Fatal("nil provider must fail")

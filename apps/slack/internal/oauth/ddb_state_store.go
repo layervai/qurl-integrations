@@ -34,7 +34,7 @@ const (
 // DDBStateStore stores short-lived OAuth state in the existing workspace_state
 // table under reserved oauth_state# keys. It does not use the workspace API-key
 // cache/encryptor path: these rows are not workspace credentials, carry a
-// 1-hour TTL, and are deleted atomically on callback.
+// 5-minute TTL, and are deleted atomically on callback.
 // TODO(upstream-contract): qurl-integrations-infra#1286 enables the table's
 // native TTL on the numeric `ttl` attribute so abandoned rows are reaped. That
 // attribute is reserved for short-lived oauth_state rows; durable workspace
@@ -225,7 +225,7 @@ func verifiedStateFromDDBItem(item map[string]ddbtypes.AttributeValue) (Verified
 		Email:        readDDBString(item, oauthStateAttrEmail),
 		Mode:         mode,
 	}
-	if v.TeamID == "" || v.UserID == "" || v.Nonce == "" || !validPKCEVerifier(v.CodeVerifier) {
+	if v.TeamID == "" || v.UserID == "" || !validStateNonce(v.Nonce) || !validPKCEVerifier(v.CodeVerifier) {
 		return VerifiedState{}, errStateMalformed
 	}
 	if v.Mode.Explicit() && v.Email == "" {

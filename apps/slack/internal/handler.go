@@ -28,6 +28,11 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
+	// setupStateMintBudget combines with adminGateBudget on /qurl setup's
+	// synchronous path. 800ms + 1.5s leaves at least 700ms of Slack's 3s ack
+	// window for parsing, response encoding, and network overhead. The OAuth
+	// package retains its own broader 2s store ceiling for non-handler callers.
+	setupStateMintBudget = 1500 * time.Millisecond
 	// qurlContactURL is where users are pointed when a deployment can't serve a
 	// command itself (a feature isn't configured on this deployment). Replaces
 	// the dead-end "Contact the operator." tail so the user has a real next step.
@@ -1756,7 +1761,9 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
 		return
 	}
-	state, err := oauth.MintStoredStateWithEmailMode(h.baseCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
+	mintCtx, mintCancel := context.WithTimeout(h.baseCtx, setupStateMintBudget)
+	defer mintCancel()
+	state, err := oauth.MintStoredStateWithEmailMode(mintCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
 		slog.Error("/qurl setup: mint OAuth state failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")

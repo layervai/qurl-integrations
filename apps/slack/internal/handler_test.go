@@ -1661,6 +1661,13 @@ func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
 	}
 }
 
+func TestSetupSyncBudgetsFitSlackAckWindow(t *testing.T) {
+	const slackAckWindow = 3 * time.Second
+	if got := adminGateBudget + setupStateMintBudget; got >= slackAckWindow {
+		t.Fatalf("setup owner-gate + state-mint budgets = %s, want below Slack ack window %s", got, slackAckWindow)
+	}
+}
+
 func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	h.SetOAuthSetup(newTestOAuthSetupConfig())
