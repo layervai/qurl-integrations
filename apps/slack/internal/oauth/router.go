@@ -190,9 +190,8 @@ type WorkspaceMapping struct {
 
 // AdminStore is the slice of slackdata.Store the callback hits to
 // persist the workspace_mappings row that seeds the installer as the
-// first admin. Optional — when nil (sandbox / no-DDB deploy) the
-// callback skips the bind with a slog.Warn so the API-key surface
-// stays functional.
+// first admin. Optional — when nil (admin storage disabled) the callback
+// skips the bind with a slog.Warn so the API-key surface stays functional.
 type AdminStore interface {
 	BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error
 }
@@ -300,7 +299,7 @@ type Config struct {
 	// BindWorkspace before qurl-service key work, so a refused rebind
 	// cannot overwrite the existing owner's stored key.
 	//
-	// Nil disables the bind (sandbox / no-DDB deploy) — the callback
+	// Nil disables the bind (admin storage disabled) — the callback
 	// emits a slog.Warn and continues with the existing API-key
 	// surface. Production cmd/main.go wires NewOAuthAdminStoreAdapter
 	// over a *slackdata.Store.

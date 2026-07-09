@@ -2725,7 +2725,7 @@ func TestCallbackBindSucceedsThenMintFails(t *testing.T) {
 	}
 }
 
-// TestCallbackSkipsBindWhenAdminStoreNil fences the sandbox / no-DDB
+// TestCallbackSkipsBindWhenAdminStoreNil fences the admin-storage-disabled
 // contract: AdminStore=nil is the documented degraded path (cmd/main.go
 // surfaces it when slackdata.NewStore fails). The callback must still
 // complete the mint + render the success page so the API-key surface

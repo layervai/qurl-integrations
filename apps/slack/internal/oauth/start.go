@@ -95,7 +95,8 @@ func startState(ctx context.Context, cfg Config, stateParam string, now time.Tim
 			return VerifiedState{}, err
 		}
 		// Fall through for legacy signed states minted shortly before the
-		// server-side state rollout. Opaque handles won't verify below.
+		// server-side state rollout. Expired/missing opaque handles are expected
+		// to fail the bounded legacy parser below.
 	}
 	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }

@@ -337,7 +337,7 @@ type Config struct {
 	// AdminStore is the DDB-direct facade for workspace_mappings +
 	// channel_policies. When nil, the admin verbs short-circuit to a
 	// graceful "admin features are not configured" reply — fine for
-	// sandbox / no-DDB tests. Production wires one in cmd/main.go
+	// admin-storage-disabled tests. Production wires one in cmd/main.go
 	// from the QURL_*_TABLE env vars (see slackdata.NewStore).
 	AdminStore *slackdata.Store
 
@@ -1641,7 +1641,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // non-owners don't get a setup URL minted in their name at all (cleaner
 // audit, no half-completed OAuth flows).
 //
-// AdminStore=nil (sandbox / no-DDB) permits first-time setup but rejects
+// AdminStore=nil (admin storage disabled) permits first-time setup but rejects
 // explicit rotation because rotation must prove the caller is the workspace
 // owner before revoking a stored key. That is a separate short-circuit from
 // the oauthSetup==nil check below, which is the branch that returns "qURL
@@ -1663,7 +1663,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		return
 	}
 	// Owner gate. AdminStore==nil only reaches here for first-time/reuse setup
-	// (sandbox/no-DDB); explicit rotation/repoint was rejected above because it
+	// (admin storage disabled); explicit rotation/repoint was rejected above because it
 	// cannot skip the owner check. Otherwise check whether the workspace has an owner
 	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
@@ -2222,7 +2222,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	// setup is a user verb (first-come-claims), so it leads the user
 	// surface. The owner semantics only exist when AdminStore is wired; on
-	// the sandbox/no-DDB path the owner gate in handleSetup is skipped and
+	// the admin-storage-disabled path the owner gate in handleSetup is skipped and
 	// the OAuth callback still owns key reuse/replacement. Append the owner
 	// parenthetical only there so the help text matches the deployment's
 	// actual behavior.
@@ -2277,7 +2277,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	if h.cfg.PostFeedback != nil {
 		// feedback needs no AdminStore/setup — only the PostFeedback seam —
-		// so it gates on that alone and shows even on no-DDB deploys.
+		// so it gates on that alone and shows even when admin storage is disabled.
 		lines = append(lines,
 			"• `/qurl feedback` — Send a bug report or feature request to the qURL team",
 		)

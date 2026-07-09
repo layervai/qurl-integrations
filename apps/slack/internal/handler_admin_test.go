@@ -906,11 +906,11 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
-	t.Run("AdminStore nil (sandbox/no-DDB): normal setup URL minted", func(t *testing.T) {
+	t.Run("AdminStore nil: normal setup URL minted", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)
-		// Sandbox / no-DDB posture: normal /setup still mints without an
+		// Admin-storage-disabled posture: normal /setup still mints without an
 		// AdminStore, same as a fresh install. Null the store after construction
 		// to exercise that short-circuit (mirrors the sandbox cmd/main.go
 		// wiring). Explicit rotation is rejected separately because it must not

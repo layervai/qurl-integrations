@@ -383,6 +383,8 @@ func parseStateParts(parts [][]byte) (parsedStateParts, error) {
 }
 
 func validPKCEVerifier(verifier string) bool {
+	// Accept the full RFC 7636 unreserved alphabet. mintCodeVerifier emits the
+	// narrower base64url subset, but validation stays aligned with the protocol.
 	if len(verifier) < statePKCEVerifierMinLen || len(verifier) > statePKCEVerifierMaxLen {
 		return false
 	}

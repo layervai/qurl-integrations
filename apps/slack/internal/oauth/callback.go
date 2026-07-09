@@ -471,8 +471,8 @@ func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, no
 			return VerifiedState{}, err
 		}
 		// Legacy signed states minted before StateStore rollout are not present
-		// in DDB; preserve a short deploy-overlap path. Opaque handles fail the
-		// HMAC verifier below.
+		// in DDB; preserve a short deploy-overlap path. Expired/consumed opaque
+		// handles are expected to fail the bounded legacy parser below.
 	}
 	return VerifyState(cfg.OAuthStateSecret, stateParam, now)
 }
@@ -523,7 +523,8 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce
 // this runs BEFORE mint, a refused install never produces an orphan
 // key and never overwrites an existing admin's stored credential.
 //
-// AdminStore=nil is the sandbox / no-DDB path — log and skip.
+// AdminStore=nil is the admin-storage-disabled path — log and skip. The
+// workspace DDB provider is still mandatory at process startup.
 // qurlSub is the output of the upstream id_token claim extraction (logged on
 // failure earlier in the callback), not the gate itself.
 // qurlSub=="" therefore means that verification silently failed — we

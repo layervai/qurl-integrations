@@ -49,10 +49,10 @@ func TestConfigValidateAcceptsPairedAdminStore(t *testing.T) {
 	}
 }
 
-// TestConfigValidateAcceptsSandboxConfig fences the sandbox / no-DDB
-// posture: AdminStore=nil means the callback skips the bind, so a
+// TestConfigValidateAcceptsAdminStoreDisabledConfig fences the optional admin
+// storage posture: AdminStore=nil means the callback skips the bind, so a
 // classifier is irrelevant. Validate must not reject this combination.
-func TestConfigValidateAcceptsSandboxConfig(t *testing.T) {
+func TestConfigValidateAcceptsAdminStoreDisabledConfig(t *testing.T) {
 	cfg := Config{
 		AdminStore:        nil,
 		BindClassifyError: nil,
