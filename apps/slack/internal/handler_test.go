@@ -508,8 +508,11 @@ func TestSlashCommandUninstallDeletesWorkspaceAPIKey(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "does not revoke the qURL API key") {
 		t.Fatalf("uninstall reply missing revocation caveat: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
-		t.Fatalf("uninstall reply missing reconnect ownership hint: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 }
 
@@ -531,31 +534,38 @@ func TestSlashCommandUninstallNotConfigured(t *testing.T) {
 	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
 		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
 	}
-	if !strings.Contains(resp[respFieldText], "recorded workspace owner") {
-		t.Fatalf("not-connected reply missing owner reconnect guidance: %q", resp[respFieldText])
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("not-connected reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Slack features stay disconnected") {
+		t.Fatalf("not-connected reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 	if !strings.Contains(resp[respFieldText], "operator") {
 		t.Fatalf("not-connected reply missing operator recovery guidance: %q", resp[respFieldText])
 	}
 }
 
-func TestSlashCommandUninstallRepeatReportsNotConnected(t *testing.T) {
-	provider := &recordingAuthProvider{apiKey: "test-key"}
+func TestSlashCommandUninstallReportsNotConnectedWhenKeyAlreadyGone(t *testing.T) {
+	// An uninstall where the admin gate passes (the workspace_mappings row still
+	// records the caller as admin) but the qURL key columns are already cleared
+	// reports "isn't currently connected". This used to be reached by uninstalling
+	// twice, but `/qurl uninstall` now also forgets the workspace_mappings row
+	// (purgeWorkspace), so a second uninstall fails the admin gate instead. The
+	// partial-state path the not-connected copy is for is set up directly:
+	// DeleteAPIKey reports the qURL columns already gone.
+	provider := &recordingAuthProvider{apiKey: "test-key", deleteErr: auth.ErrWorkspaceNotConfigured}
 	h := newUninstallAdminTestHandler(t, provider)
 
-	first := slashUninstallAsAdmin(t, h)
-	if !strings.Contains(first[respFieldText], "disconnected from this workspace") {
-		t.Fatalf("first uninstall reply missing confirmation: %q", first[respFieldText])
-	}
+	resp := slashUninstallAsAdmin(t, h)
 
-	provider.deleteErr = auth.ErrWorkspaceNotConfigured
-	second := slashUninstallAsAdmin(t, h)
-
-	if provider.deleteCalls != 2 {
-		t.Fatalf("DeleteAPIKey calls = %d, want 2", provider.deleteCalls)
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
 	}
-	if !strings.Contains(second[respFieldText], "isn't currently connected") {
-		t.Fatalf("repeat uninstall reply missing not-connected message: %q", second[respFieldText])
+	if !strings.Contains(resp[respFieldText], "isn't currently connected") {
+		t.Fatalf("uninstall reply missing not-connected message: %q", resp[respFieldText])
+	}
+	if !strings.Contains(resp[respFieldText], "Local Slack app data for this workspace is being cleared") {
+		t.Fatalf("uninstall reply missing scheduled local Slack app data teardown: %q", resp[respFieldText])
 	}
 }
 
@@ -1224,41 +1234,66 @@ func TestSlashCommandUninstallStrangerDoesNotProbeOwnerState(t *testing.T) {
 }
 
 func TestSlashCommandUninstallAllowsWorkspaceAdminOrOwner(t *testing.T) {
-	provider := &recordingAuthProvider{apiKey: "test-key"}
-	ts := newAdminTestServers(t)
-	ts.seedAdmin(t)
-	h := newAdminTestHandler(t, ts)
-	h.cfg.AuthProvider = provider
+	// A stranger is denied (no qURL-key delete); both an admin and the owner are
+	// allowed (one delete each). Each allowed role runs against its OWN fresh
+	// workspace because `/qurl uninstall` now fully forgets the workspace
+	// (purgeWorkspace removes the workspace_mappings row too), so a second
+	// uninstall against the same already-forgotten workspace would correctly find
+	// no admin row to gate on. Sharing one handler across roles (the pre-cascade
+	// shape) would make the owner's call hit an already-deleted mapping.
+	t.Run("stranger denied", func(t *testing.T) {
+		provider := &recordingAuthProvider{apiKey: "test-key"}
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		h.cfg.AuthProvider = provider
 
-	stranger := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "USTRANGER000")
-	if provider.deleteCalls != 0 {
-		t.Fatalf("stranger DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
-	}
-	if !strings.Contains(stranger[respFieldText], "qURL workspace admin") {
-		t.Fatalf("stranger reply missing admin-or-owner message: %q", stranger[respFieldText])
-	}
-	if strings.Contains(stranger[respFieldText], "<@") {
-		t.Fatalf("stranger reply disclosed owner mention: %q", stranger[respFieldText])
-	}
+		stranger := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, "USTRANGER000")
+		if provider.deleteCalls != 0 {
+			t.Fatalf("stranger DeleteAPIKey calls = %d, want 0", provider.deleteCalls)
+		}
+		if !strings.Contains(stranger[respFieldText], "qURL workspace admin") {
+			t.Fatalf("stranger reply missing admin-or-owner message: %q", stranger[respFieldText])
+		}
+		if strings.Contains(stranger[respFieldText], "<@") {
+			t.Fatalf("stranger reply disclosed owner mention: %q", stranger[respFieldText])
+		}
+	})
 
-	admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
-	if provider.deleteCalls != 1 {
-		t.Fatalf("admin DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
-	}
-	if !strings.Contains(admin[respFieldText], "disconnected from this workspace") {
-		t.Fatalf("admin reply missing confirmation: %q", admin[respFieldText])
-	}
+	t.Run("admin allowed", func(t *testing.T) {
+		provider := &recordingAuthProvider{apiKey: "test-key"}
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		h.cfg.AuthProvider = provider
 
-	owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
-	if provider.deleteCalls != 2 {
-		t.Fatalf("owner DeleteAPIKey calls = %d, want 2", provider.deleteCalls)
-	}
-	if provider.deleteWorkspaceID != testAdminTeamID {
-		t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
-	}
-	if !strings.Contains(owner[respFieldText], "disconnected from this workspace") {
-		t.Fatalf("owner reply missing confirmation: %q", owner[respFieldText])
-	}
+		admin := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminUserID)
+		if provider.deleteCalls != 1 {
+			t.Fatalf("admin DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+		}
+		if !strings.Contains(admin[respFieldText], "disconnected from this workspace") {
+			t.Fatalf("admin reply missing confirmation: %q", admin[respFieldText])
+		}
+	})
+
+	t.Run("owner allowed", func(t *testing.T) {
+		provider := &recordingAuthProvider{apiKey: "test-key"}
+		ts := newAdminTestServers(t)
+		ts.seedAdmin(t)
+		h := newAdminTestHandler(t, ts)
+		h.cfg.AuthProvider = provider
+
+		owner := slashResponseForWorkspaceUser(t, h, commandUser, uninstallVerb, testAdminTeamID, testAdminOwnerID)
+		if provider.deleteCalls != 1 {
+			t.Fatalf("owner DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+		}
+		if provider.deleteWorkspaceID != testAdminTeamID {
+			t.Fatalf("DeleteAPIKey workspaceID = %q, want %q", provider.deleteWorkspaceID, testAdminTeamID)
+		}
+		if !strings.Contains(owner[respFieldText], "disconnected from this workspace") {
+			t.Fatalf("owner reply missing confirmation: %q", owner[respFieldText])
+		}
+	})
 }
 
 func TestSlashCommandGetToken_AcksWithWorkingOnIt(t *testing.T) {

@@ -42,6 +42,7 @@ const (
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
+	envSlackBotTokenRotation      = "QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -274,6 +275,14 @@ func run() error {
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
 	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
+	slackBotTokenRotationEnabled, err := readSlackBotTokenRotationEnabled()
+	if err != nil {
+		return err
+	}
+	slog.Info("Slack bot-token revoke handling configured",
+		"slack_bot_token_rotation_enabled", slackBotTokenRotationEnabled,
+		"tokens_revoked_bot_token_triggers_workspace_purge", !slackBotTokenRotationEnabled,
+	)
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
@@ -321,6 +330,7 @@ func run() error {
 	handler := internal.NewHandler(internal.Config{
 		AuthProvider:                   authProvider,
 		SlackSigningSecret:             slackSigningSecret,
+		SlackBotTokenRotationEnabled:   slackBotTokenRotationEnabled,
 		BaseContext:                    handlerCtx,
 		MaxConcurrentAsync:             maxConcurrentAsync,
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
@@ -1410,6 +1420,23 @@ func readAgentDefaultEnabled() bool {
 // unchanged until production explicitly enables the write path.
 func readSlackRateLimitEnabled() bool {
 	return readBoolEnvFailSafe(envSlackRateLimitEnabled, false, false)
+}
+
+// readSlackBotTokenRotationEnabled reads QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED.
+// Absent → false, preserving today's Marketplace cleanup behavior where a bot
+// tokens_revoked callback means local teardown. A set-but-unparseable value
+// fails startup: silently choosing either pole could suppress a Marketplace
+// cleanup signal or make a routine Slack token rotation destructive.
+func readSlackBotTokenRotationEnabled() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(envSlackBotTokenRotation))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", envSlackBotTokenRotation, err)
+	}
+	return v, nil
 }
 
 // Conservative per-hour turn caps applied when the operator doesn't set the env, so

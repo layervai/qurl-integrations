@@ -91,13 +91,21 @@ const agentThinkingStatus = "is thinking…"
 // slackEventEnvelope is the Events API outer payload. Only the fields the agent
 // surface needs are modeled.
 type slackEventEnvelope struct {
-	Type         string          `json:"type"`
-	Challenge    string          `json:"challenge"`
-	TeamID       string          `json:"team_id"`
-	EnterpriseID string          `json:"enterprise_id"`
-	APIAppID     string          `json:"api_app_id"`
-	EventID      string          `json:"event_id"`
-	Event        slackInnerEvent `json:"event"`
+	Type           string                    `json:"type"`
+	Challenge      string                    `json:"challenge"`
+	TeamID         string                    `json:"team_id"`
+	EnterpriseID   string                    `json:"enterprise_id"`
+	APIAppID       string                    `json:"api_app_id"`
+	EventID        string                    `json:"event_id"`
+	EventTime      int64                     `json:"event_time,omitempty"`
+	Authorizations []slackEventAuthorization `json:"authorizations,omitempty"`
+	Event          slackInnerEvent           `json:"event"`
+}
+
+type slackEventAuthorization struct {
+	EnterpriseID        string `json:"enterprise_id,omitempty"`
+	TeamID              string `json:"team_id,omitempty"`
+	IsEnterpriseInstall bool   `json:"is_enterprise_install,omitempty"`
 }
 
 // slackInnerEvent is the inner `event` object for app_mention / message events,
@@ -120,7 +128,13 @@ type slackInnerEvent struct {
 	Tab string `json:"tab,omitempty"`
 	// AssistantThread is set on the container events (assistant_thread_started and
 	// assistant_thread_context_changed), which carry a nested object, not the flat fields.
-	AssistantThread *assistantThread `json:"assistant_thread,omitempty"`
+	AssistantThread *assistantThread    `json:"assistant_thread,omitempty"`
+	Tokens          *slackRevokedTokens `json:"tokens,omitempty"`
+}
+
+type slackRevokedTokens struct {
+	Bot   []string `json:"bot,omitempty"`
+	OAuth []string `json:"oauth,omitempty"`
 }
 
 // assistantThread is the assistant_thread object on a container event: the assistant DM
@@ -679,13 +693,14 @@ func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
 }
 
-// agentEventPartition is the conversation-state partition key: the Enterprise
-// Grid org id when present (stable across the org's workspaces), else the team.
+// agentEventPartition is the conversation/dedupe partition key. It deliberately
+// uses the same resolver as lifecycleWorkspaceIDs: org-level installs write those
+// rows under enterprise_id, workspace-level installs write under team_id, and the
+// lifecycle purge also sweeps any team-keyed agent-state partitions Slack
+// includes on org callbacks for pending actions, audit, pane context, and rate
+// counters.
 func agentEventPartition(env *slackEventEnvelope) string {
-	if env.EnterpriseID != "" {
-		return env.EnterpriseID
-	}
-	return env.TeamID
+	return resolveSlackEventPartitions(env).agentWrite
 }
 
 // agentEventRootTS is the thread root a turn belongs to: the parent thread_ts
