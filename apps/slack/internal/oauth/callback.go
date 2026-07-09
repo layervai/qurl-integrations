@@ -305,8 +305,8 @@ func Callback(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		qurlEmail, qurlSub, claimsOK := verifyIDTokenClaims(r.Context(), cfg, idToken, verified.Nonce)
-		if !claimsOK {
+		qurlEmail, qurlSub, tokenVerified := verifyIDTokenClaims(r.Context(), cfg, idToken, verified.Nonce)
+		if !tokenVerified {
 			renderOAuthErrorPage(w, http.StatusBadRequest, "Authorization couldn't be verified",
 				"qURL™ could not verify the authorization response for this setup request.",
 				"Return to Slack and run /qurl setup <email> again.")
@@ -474,6 +474,8 @@ func consumeCallbackState(ctx context.Context, cfg Config, stateParam string, no
 // nonce, then extracts email + sub. Email remains best-effort for display but
 // becomes mandatory when setup state carries an email; sub remains mandatory
 // for the downstream bind. Missing token/verifier is anomalous and fails closed.
+// The returned ok reports token/nonce verification only; the email/sub policy is
+// intentionally enforced by checkSetupEmailMatches and checkBindAllowed below.
 //
 //nolint:gocritic // hugeParam: Config value-pass posture matches the rest of the package.
 func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce string) (email, sub string, ok bool) {
@@ -503,7 +505,7 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken, expectedNonce
 		email = claims.Email
 	}
 	if claims.SubErr != nil {
-		slog.Warn("oauth/callback id_token sub extraction failed — bind will be skipped", "error", claims.SubErr)
+		slog.Warn("oauth/callback id_token sub extraction failed — bind policy will fail closed", "error", claims.SubErr)
 	} else {
 		sub = claims.Sub
 	}

@@ -20,6 +20,8 @@ import (
 // team/user/email/mode/nonce/PKCE verifier stay in the backend store and the
 // callback consumes the row atomically.
 //
+//	opaque handle = base64url(32 random bytes)
+//
 // Legacy signed state token format, accepted only for short deploy overlap:
 //
 //	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + hmac_hex )
