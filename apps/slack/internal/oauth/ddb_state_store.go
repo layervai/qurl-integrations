@@ -214,6 +214,9 @@ func verifiedStateFromDDBItem(item map[string]ddbtypes.AttributeValue) (Verified
 	if v.TeamID == "" || v.UserID == "" || v.Nonce == "" || !validPKCEVerifier(v.CodeVerifier) {
 		return VerifiedState{}, errStateMalformed
 	}
+	if v.Mode.Explicit() && v.Email == "" {
+		return VerifiedState{}, errStateMalformed
+	}
 	if v.Email != "" && !stateEmailNormalized(v.Email) {
 		return VerifiedState{}, errStateMalformed
 	}

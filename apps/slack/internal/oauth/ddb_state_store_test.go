@@ -123,6 +123,14 @@ func storedStateDDBItem() map[string]ddbtypes.AttributeValue {
 	}
 }
 
+func TestVerifiedStateFromDDBItemRejectsExplicitModeWithoutEmail(t *testing.T) {
+	item := storedStateDDBItem()
+	delete(item, oauthStateAttrEmail)
+	if _, err := verifiedStateFromDDBItem(item); !errors.Is(err, errStateMalformed) {
+		t.Fatalf("verifiedStateFromDDBItem error = %v, want errStateMalformed", err)
+	}
+}
+
 func TestNewDDBStateStoreValidatesWiringAtStartup(t *testing.T) {
 	if _, err := NewDDBStateStore(nil); err == nil {
 		t.Fatal("nil provider must fail")

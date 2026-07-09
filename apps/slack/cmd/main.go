@@ -900,6 +900,9 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 //	AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE
 //	SLACK_BASE_URL, OAUTH_STATE_SECRET, QURL_ENDPOINT
 //
+// TODO(#864): remove OAUTH_STATE_SECRET from this required set and oauth.Config
+// after the signed-state deploy-overlap parser is retired.
+//
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
 // goroutine tears down on SIGTERM.

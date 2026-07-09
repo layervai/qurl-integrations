@@ -278,11 +278,12 @@ func MintStoredStateWithEmailMode(ctx context.Context, store StateStore, teamID,
 }
 
 // MintState produces a legacy no-email state token binding (teamID, userID)
-// under secret. New /qurl setup dispatches require an email address and call
-// MintStateWithEmail; this helper remains for tests that exercise the shared
-// verifier and old no-email setup links minted before that requirement.
+// under secret. This helper remains for tests that exercise the shared verifier
+// and old no-email setup links minted before the email requirement.
 //
 // Returns errStateShortKey if secret is shorter than StateMinSecret.
+//
+// Deprecated: use MintStoredStateWithEmailMode for new setup flows.
 func MintState(secret []byte, teamID, userID string, now time.Time) (string, error) {
 	return mintState(secret, teamID, userID, "", SetupModeReuse, now)
 }
@@ -291,11 +292,15 @@ func MintState(secret []byte, teamID, userID string, now time.Time) (string, err
 // plus the normalized email address entered in the setup command. The callback
 // requires the verified Auth0 email claim to match this value before it binds
 // or mints a workspace key.
+//
+// Deprecated: use MintStoredStateWithEmailMode for new setup flows.
 func MintStateWithEmail(secret []byte, teamID, userID, email string, now time.Time) (string, error) {
 	return mintState(secret, teamID, userID, email, SetupModeReuse, now)
 }
 
 // MintStateWithEmailMode is MintStateWithEmail plus a signed setup intent.
+//
+// Deprecated: use MintStoredStateWithEmailMode for new setup flows.
 func MintStateWithEmailMode(secret []byte, teamID, userID, email string, mode SetupMode, now time.Time) (string, error) {
 	return mintState(secret, teamID, userID, email, mode, now)
 }
