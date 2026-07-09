@@ -41,9 +41,12 @@ import (
 // /qurl setup slash-command handler, which has already verified the
 // Slack signing secret and therefore the caller's workspace identity.
 //
-// Expiry: 1 hour from mint matches the qURL Connector bootstrap key lifetime
-// used by /qurl-admin protect-connector, giving admins the same setup window
-// whether they are connecting the workspace account or bootstrapping a sidecar.
+// Expiry: the prior 5-minute window is intentionally widened to 1 hour to match
+// the qURL Connector bootstrap key lifetime used by /qurl-admin
+// protect-connector, giving admins the same setup window whether they are
+// connecting the workspace account or bootstrapping a sidecar. This also lets a
+// legacy signed state reach /start for up to an hour during deploy overlap, but
+// it still cannot pass Callback's mandatory PKCE-verifier gate.
 //
 // Replay posture: StateStore-backed states are consumed once on callback. The
 // store writes a `ttl` cleanup hint for abandoned states, but successful
@@ -112,6 +115,7 @@ var (
 	errStateBadHMAC        = errors.New("state: HMAC mismatch")
 	errStateExpired        = errors.New("state: expired")
 	errStateMissing        = errors.New("state: missing or already consumed")
+	errStateCollision      = errors.New("state: opaque handle collision")
 	errStateNotStarted     = errors.New("state: callback received before start")
 	errStateFuture         = errors.New("state: timestamp in future")
 	errStateShortKey       = errors.New("state: secret too short")

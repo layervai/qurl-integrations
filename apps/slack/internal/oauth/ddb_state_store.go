@@ -42,8 +42,11 @@ const (
 // credential rows must never write it. Future scans, exports, or GSIs over this
 // shared table must filter item_type so ephemeral rows are not treated as
 // workspace credentials. State rows intentionally bypass credential encryption:
-// nonce and verifier are short-lived protocol values, and neither authorizes an
-// exchange without the browser-delivered Auth0 code and confidential-client key.
+// the normalized email is needed for callback binding, nonce/verifier are
+// short-lived protocol values, the rows retain the table's existing IAM access
+// controls, and this store never logs row contents. None of these values can
+// authorize an exchange without the browser-delivered Auth0 code and
+// confidential-client key.
 type DDBStateStore struct {
 	Client    auth.DynamoDBClient
 	TableName string
@@ -103,6 +106,10 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 		},
 	})
 	if err != nil {
+		var ccfe *ddbtypes.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			return errStateCollision
+		}
 		return fmt.Errorf("oauth state store PutState: %w", err)
 	}
 	return nil

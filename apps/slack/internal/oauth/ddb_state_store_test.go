@@ -18,6 +18,7 @@ import (
 
 type fakeOAuthStateDDB struct {
 	putInput     *dynamodb.PutItemInput
+	putErr       error
 	updateInput  *dynamodb.UpdateItemInput
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
@@ -38,6 +39,9 @@ func (f *fakeOAuthStateDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput
 		in.ExpressionAttributeValues,
 	); err != nil {
 		return nil, err
+	}
+	if f.putErr != nil {
+		return nil, f.putErr
 	}
 	return &dynamodb.PutItemOutput{}, nil
 }
@@ -144,6 +148,25 @@ func TestNewDDBStateStoreValidatesWiringAtStartup(t *testing.T) {
 	}
 	if store.TableName != "workspace-state" || store.Client == nil {
 		t.Fatalf("store wiring = %+v", store)
+	}
+}
+
+func TestDDBStateStorePutStateClassifiesHandleCollision(t *testing.T) {
+	ddb := &fakeOAuthStateDDB{putErr: &ddbtypes.ConditionalCheckFailedException{}}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	state := StoredState{
+		VerifiedState: VerifiedState{
+			TeamID:       testStateTeamID,
+			UserID:       testStateUserID,
+			Nonce:        strings.Repeat("a", stateNonceLen*2),
+			CodeVerifier: strings.Repeat("b", statePKCEVerifierMinLen),
+			Mode:         SetupModeReuse,
+		},
+		CreatedAt: time.Unix(1700000000, 0),
+		ExpiresAt: time.Unix(1700003600, 0),
+	}
+	if err := store.PutState(context.Background(), "opaque-handle", state); !errors.Is(err, errStateCollision) {
+		t.Fatalf("PutState error = %v, want errStateCollision", err)
 	}
 }
 
