@@ -2,6 +2,8 @@ package oauth
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,11 +31,25 @@ func (f *fakeOAuthStateDDB) GetItem(context.Context, *dynamodb.GetItemInput, ...
 
 func (f *fakeOAuthStateDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
 	f.putInput = in
+	if err := validateDDBExpressionBindings(
+		[]string{aws.ToString(in.ConditionExpression)},
+		in.ExpressionAttributeNames,
+		in.ExpressionAttributeValues,
+	); err != nil {
+		return nil, err
+	}
 	return &dynamodb.PutItemOutput{}, nil
 }
 
 func (f *fakeOAuthStateDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	f.updateInput = in
+	if err := validateDDBExpressionBindings(
+		[]string{aws.ToString(in.UpdateExpression), aws.ToString(in.ConditionExpression)},
+		in.ExpressionAttributeNames,
+		in.ExpressionAttributeValues,
+	); err != nil {
+		return nil, err
+	}
 	if f.updateOutput != nil || f.updateErr != nil {
 		return f.updateOutput, f.updateErr
 	}
@@ -42,10 +58,57 @@ func (f *fakeOAuthStateDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateIte
 
 func (f *fakeOAuthStateDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
 	f.deleteInput = in
+	if err := validateDDBExpressionBindings(
+		[]string{aws.ToString(in.ConditionExpression)},
+		in.ExpressionAttributeNames,
+		in.ExpressionAttributeValues,
+	); err != nil {
+		return nil, err
+	}
 	if f.deleteOutput != nil || f.deleteErr != nil {
 		return f.deleteOutput, f.deleteErr
 	}
 	return &dynamodb.DeleteItemOutput{Attributes: storedStateDDBItem()}, nil
+}
+
+var (
+	ddbNamePlaceholderPattern  = regexp.MustCompile(`#[A-Za-z0-9_]+`)
+	ddbValuePlaceholderPattern = regexp.MustCompile(`:[A-Za-z0-9_]+`)
+)
+
+func validateDDBExpressionBindings(expressions []string, names map[string]string, values map[string]ddbtypes.AttributeValue) error {
+	joined := strings.Join(expressions, " ")
+	usedNames := stringSet(ddbNamePlaceholderPattern.FindAllString(joined, -1))
+	usedValues := stringSet(ddbValuePlaceholderPattern.FindAllString(joined, -1))
+	for name := range names {
+		if !usedNames[name] {
+			return fmt.Errorf("unused expression attribute name %s", name)
+		}
+	}
+	for name := range usedNames {
+		if _, ok := names[name]; !ok {
+			return fmt.Errorf("undeclared expression attribute name %s", name)
+		}
+	}
+	for value := range values {
+		if !usedValues[value] {
+			return fmt.Errorf("unused expression attribute value %s", value)
+		}
+	}
+	for value := range usedValues {
+		if _, ok := values[value]; !ok {
+			return fmt.Errorf("undeclared expression attribute value %s", value)
+		}
+	}
+	return nil
+}
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
 }
 
 func storedStateDDBItem() map[string]ddbtypes.AttributeValue {
@@ -141,5 +204,20 @@ func TestDDBStateStoreConsumeStateIsConditionalOneShot(t *testing.T) {
 	}
 	if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
 		t.Fatalf("consume ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
+	}
+}
+
+func TestDDBStateStoreStartStateUsesValidExpressionBindings(t *testing.T) {
+	ddb := &fakeOAuthStateDDB{}
+	store := &DDBStateStore{Client: ddb, TableName: "workspace-state"}
+	got, err := store.StartState(context.Background(), "opaque-handle", time.Unix(1700000030, 0))
+	if err != nil {
+		t.Fatalf("StartState: %v", err)
+	}
+	if got.TeamID != testStateTeamID || got.CodeVerifier == "" {
+		t.Fatalf("verified state mismatch: %+v", got)
+	}
+	if ddb.updateInput == nil {
+		t.Fatal("expected UpdateItem")
 	}
 }

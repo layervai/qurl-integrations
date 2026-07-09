@@ -160,7 +160,6 @@ func (s *DDBStateStore) updateAndReadState(ctx context.Context, handle string, n
 	names := map[string]string{
 		"#pk":          workspaceStatePKAttr,
 		"#mark":        markAttr,
-		"#started_at":  oauthStateAttrStartedAt,
 		"#consumed_at": oauthStateAttrConsumedAt,
 		"#expires_at":  oauthStateAttrExpiresAt,
 	}
