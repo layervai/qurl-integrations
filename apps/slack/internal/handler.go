@@ -28,6 +28,10 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
+	// qurlContactURL is where users are pointed when a deployment can't serve a
+	// command itself (a feature isn't configured on this deployment). Replaces
+	// the dead-end "Contact the operator." tail so the user has a real next step.
+	qurlContactURL = "https://layerv.ai/contact"
 )
 
 // ErrSlackTriggerExpired lets Config.OpenView report Slack's short-lived
@@ -1647,7 +1651,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // consulted).
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd setupCommand) {
 	if h.oauthSetup == nil {
-		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL OAuth is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	}
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
@@ -2072,7 +2076,7 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 }
 
 func respondUninstallUnsupported(w http.ResponseWriter) {
-	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact the operator.")
+	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 }
 
 type uninstallUnavailableReason int
@@ -2087,14 +2091,14 @@ const (
 func respondUninstallUnavailable(w http.ResponseWriter, reason uninstallUnavailableReason) {
 	switch reason {
 	case uninstallUnavailableCredentialStorage:
-		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL credential storage is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	case uninstallUnavailableOwnerVerification:
-		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL owner verification is not configured on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	default:
 		slog.Error("/qurl uninstall: unknown unavailable reason", "reason", int(reason))
-		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact the operator.")
+		respondSlack(w, "qURL uninstall is not available on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
 		return
 	}
 }

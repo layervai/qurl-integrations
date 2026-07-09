@@ -151,7 +151,7 @@ func (h *Handler) requireAdminSync(w http.ResponseWriter, teamID, userID string,
 		// filter distinguish e.g. "probed admin revoke" from
 		// "probed admin list".
 		slog.Warn("admin command denied: non-admin", "team_id", teamID, "user_id", userID, "action", string(action))
-		respondSlack(w, ":warning: this command is admin-only")
+		respondSlack(w, ":warning: That command is admin-only. Ask a workspace qURL admin to run it.")
 		return false
 	}
 	return true

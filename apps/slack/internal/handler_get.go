@@ -198,7 +198,7 @@ func (e *userError) Error() string { return e.msg }
 // facing message that doesn't expose the "AdminStore" implementation
 // term — it points the user at the workspace admin who would have
 // completed the install.
-var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Please contact your Slack admin for assistance."}
+var errAdminStoreNotConfigured = &userError{msg: "qURL admin features are not yet configured for this workspace. Ask the workspace owner who connected qURL, or contact qURL support at " + qurlContactURL + "."}
 
 // handleGet implements `/qurl get <$id|$alias>`:
 //  1. Parse the slash-command text → [Command]. The positional arg is a
