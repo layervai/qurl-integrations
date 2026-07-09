@@ -892,6 +892,8 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 // configured still serves the existing Slack surface. Returns
 // (_, false, err) when a required env var is set but malformed
 // (short secret, non-HTTPS SlackBaseURL) — the caller fails-fast.
+// run() initializes the workspace DDB provider unconditionally before this
+// function, so no supported deployment can enable OAuth without usable DDB.
 //
 // Required env vars:
 //

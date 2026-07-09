@@ -37,7 +37,9 @@ const (
 // cache/encryptor path: these rows are not workspace credentials, carry a
 // 1-hour TTL, and are deleted atomically on callback.
 // TODO(upstream-contract): qurl-integrations-infra#1286 enables the table's
-// native TTL on the numeric `ttl` attribute so abandoned rows are reaped.
+// native TTL on the numeric `ttl` attribute so abandoned rows are reaped. That
+// attribute is reserved for short-lived oauth_state rows; durable workspace
+// credential rows must never write it.
 type DDBStateStore struct {
 	Client    auth.DynamoDBClient
 	TableName string
