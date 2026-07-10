@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,7 @@ type stubDDB struct {
 	updateItemFn func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	deleteItemFn func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
 	queryFn      func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
+	scanFn       func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error)
 }
 
 func (s *stubDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -83,6 +85,13 @@ func (s *stubDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*d
 		return &dynamodb.QueryOutput{}, nil
 	}
 	return s.queryFn(in)
+}
+
+func (s *stubDDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	if s.scanFn == nil {
+		return &dynamodb.ScanOutput{}, nil
+	}
+	return s.scanFn(in)
 }
 
 func newStore(client DynamoDBClient) *Store {
@@ -797,10 +806,16 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("UpdateItem calls = %d, want 2", len(calls))
 	}
-	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty" {
+	if got := aws.ToString(calls[0].UpdateExpression); got != "SET #ab = :empty, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("seed UpdateExpression = %q", got)
 	}
-	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid" {
+	if now, ok := calls[0].ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf("seed :now = %#v, want timestamp", calls[0].ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := calls[0].ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf("seed :now_nano = %#v, want unix nanos", calls[0].ExpressionAttributeValues[":now_nano"])
+	}
+	if got := aws.ToString(calls[1].UpdateExpression); got != "SET #ab.#a = :rid, updated_at = :now, updated_at_unix_nano = :now_nano" {
 		t.Errorf("write UpdateExpression = %q", got)
 	}
 	if got := aws.ToString(calls[1].ConditionExpression); got != "attribute_not_exists(#ab.#a)" {
@@ -812,6 +827,12 @@ func TestBindChannelAlias_WritesAliasMapEntry(t *testing.T) {
 	rid, ok := calls[1].ExpressionAttributeValues[":rid"].(*ddbtypes.AttributeValueMemberS)
 	if !ok || rid.Value != "r_prod_dash01" {
 		t.Errorf(":rid = %#v, want r_prod_dash01", calls[1].ExpressionAttributeValues[":rid"])
+	}
+	if now, ok := calls[1].ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf(":now = %#v, want timestamp", calls[1].ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := calls[1].ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf(":now_nano = %#v, want unix nanos", calls[1].ExpressionAttributeValues[":now_nano"])
 	}
 }
 
@@ -886,14 +907,20 @@ func TestExposeResourceToChannel_AddsToAllowedSet(t *testing.T) {
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "ADD allowed_resource_ids :rids" {
-		t.Errorf("UpdateExpression = %q, want ADD allowed_resource_ids :rids", exp)
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids" {
+		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano ADD allowed_resource_ids :rids", exp)
 	}
 	if tbl := aws.ToString(got.TableName); tbl != "cp" {
 		t.Errorf("TableName = %q, want cp", tbl)
 	}
 	if rids, ok := got.ExpressionAttributeValues[":rids"].(*ddbtypes.AttributeValueMemberSS); !ok || len(rids.Value) != 1 || rids.Value[0] != "r_target01" {
 		t.Errorf(":rids = %#v, want SS[r_target01]", got.ExpressionAttributeValues[":rids"])
+	}
+	if now, ok := got.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf(":now = %#v, want timestamp", got.ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := got.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf(":now_nano = %#v, want unix nanos", got.ExpressionAttributeValues[":now_nano"])
 	}
 	if k, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); k == nil || k.Value != "T1" {
 		t.Errorf("Key team = %#v, want T1", got.Key[attrSlackTeamID])
@@ -920,8 +947,14 @@ func TestRevokeResourceFromChannel_DeletesFromAllowedSet(t *testing.T) {
 	if got == nil {
 		t.Fatal("UpdateItem not called")
 	}
-	if exp := aws.ToString(got.UpdateExpression); exp != "DELETE allowed_resource_ids :rids" {
-		t.Errorf("UpdateExpression = %q, want DELETE allowed_resource_ids :rids", exp)
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids" {
+		t.Errorf("UpdateExpression = %q, want SET updated_at = :now, updated_at_unix_nano = :now_nano DELETE allowed_resource_ids :rids", exp)
+	}
+	if now, ok := got.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+		t.Errorf(":now = %#v, want timestamp", got.ExpressionAttributeValues[":now"])
+	}
+	if nowNano, ok := got.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+		t.Errorf(":now_nano = %#v, want unix nanos", got.ExpressionAttributeValues[":now_nano"])
 	}
 	if rids, ok := got.ExpressionAttributeValues[":rids"].(*ddbtypes.AttributeValueMemberSS); !ok || len(rids.Value) != 1 || rids.Value[0] != "r_target01" {
 		t.Errorf(":rids = %#v, want SS[r_target01]", got.ExpressionAttributeValues[":rids"])
@@ -1085,6 +1118,15 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			t.Fatal("no UpdateItem issued")
 		}
 		expr := aws.ToString(captured.UpdateExpression)
+		if !strings.Contains(expr, "SET #updated_at = :now") {
+			t.Errorf("UpdateExpression missing updated_at SET: %q", expr)
+		}
+		if !strings.Contains(expr, "#updated_at_nano = :now_nano") {
+			t.Errorf("UpdateExpression missing updated_at_unix_nano SET: %q", expr)
+		}
+		if removeAt, deleteAt := strings.Index(expr, " REMOVE "), strings.Index(expr, " DELETE "); removeAt == -1 || deleteAt == -1 || removeAt > deleteAt {
+			t.Errorf("UpdateExpression clause order = %q, want REMOVE before DELETE", expr)
+		}
 		if !strings.Contains(expr, "DELETE "+attrAllowedResourceIDs+" :rid") {
 			t.Errorf("UpdateExpression missing SS DELETE of the revoked id: %q", expr)
 		}
@@ -1095,11 +1137,17 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 		if !ok || !reflect.DeepEqual(ss.Value, []string{deadID}) {
 			t.Errorf(":rid = %#v, want string-set [%q]", captured.ExpressionAttributeValues[":rid"], deadID)
 		}
-		// Every name ref other than the alias_bindings attr resolves to an alias
-		// key slated for REMOVE — it must be the STALE alias, never the survivor.
+		if now, ok := captured.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || now.Value == "" {
+			t.Errorf(":now = %#v, want timestamp", captured.ExpressionAttributeValues[":now"])
+		}
+		if nowNano, ok := captured.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || nowNano.Value == "" {
+			t.Errorf(":now_nano = %#v, want unix nanos", captured.ExpressionAttributeValues[":now_nano"])
+		}
+		// Every name ref other than metadata resolves to an alias key slated for
+		// REMOVE — it must be the STALE alias, never the survivor.
 		var removed []string
 		for ref, name := range captured.ExpressionAttributeNames {
-			if ref == exprAliasBindings {
+			if ref == exprAliasBindings || name == attrUpdatedAt || name == attrUpdatedAtNano {
 				continue
 			}
 			removed = append(removed, name)
@@ -1136,10 +1184,13 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			t.Fatal("no UpdateItem issued (the SS member must still be cleared)")
 		}
 		if expr := aws.ToString(captured.UpdateExpression); strings.Contains(expr, "REMOVE") {
-			t.Errorf("UpdateExpression should be DELETE-only, got %q", expr)
+			t.Errorf("UpdateExpression should not remove aliases, got %q", expr)
 		}
-		if len(captured.ExpressionAttributeNames) != 0 {
-			t.Errorf("DELETE-only update should carry no name refs, got %v", captured.ExpressionAttributeNames)
+		if captured.ExpressionAttributeNames["#updated_at"] != attrUpdatedAt {
+			t.Errorf("ExpressionAttributeNames = %v, want updated_at name ref", captured.ExpressionAttributeNames)
+		}
+		if captured.ExpressionAttributeNames["#updated_at_nano"] != attrUpdatedAtNano {
+			t.Errorf("ExpressionAttributeNames = %v, want updated_at_unix_nano name ref", captured.ExpressionAttributeNames)
 		}
 	})
 
@@ -1172,6 +1223,329 @@ func TestPurgeResourceFromChannel(t *testing.T) {
 			if _, err := store.PurgeResourceFromChannel(context.Background(), args[0], args[1], args[2]); err == nil {
 				t.Errorf("PurgeResourceFromChannel(%q,%q,%q): want bad-request error", args[0], args[1], args[2])
 			}
+		}
+	})
+}
+
+// TestDeleteWorkspaceMapping fences the workspace-forget half of the
+// Slack-lifecycle / `/qurl uninstall` cascade: a single unconditional DeleteItem
+// keyed by team_id, idempotent on an absent row, and a 400 on an empty team_id
+// before any DDB call.
+func TestDeleteWorkspaceMapping(t *testing.T) {
+	t.Run("deletes the row by team_id", func(t *testing.T) {
+		var captured *dynamodb.DeleteItemInput
+		store := newStore(&stubDDB{
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				captured = in
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		if err := store.DeleteWorkspaceMapping(context.Background(), "T1"); err != nil {
+			t.Fatalf("DeleteWorkspaceMapping: %v", err)
+		}
+		if captured == nil {
+			t.Fatal("no DeleteItem issued")
+		}
+		if got := aws.ToString(captured.TableName); got != "ws" {
+			t.Errorf("DeleteItem table = %q, want %q", got, "ws")
+		}
+		if v, ok := captured.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "T1" {
+			t.Errorf("DeleteItem key = %v, want slack_team_id=T1", captured.Key)
+		}
+		// Idempotent forget: unconditional delete (no ConditionExpression) so an
+		// absent row is a no-op rather than a ConditionalCheckFailed.
+		if captured.ConditionExpression != nil {
+			t.Errorf("ConditionExpression = %q, want none", aws.ToString(captured.ConditionExpression))
+		}
+	})
+
+	t.Run("absent row is a no-op", func(t *testing.T) {
+		// stubDDB's default DeleteItem returns success with no state — the same
+		// no-op DynamoDB performs for a missing key. A nil error proves the method
+		// does not synthesize a not-found.
+		store := newStore(&stubDDB{})
+		if err := store.DeleteWorkspaceMapping(context.Background(), "T_absent"); err != nil {
+			t.Fatalf("DeleteWorkspaceMapping on absent row: %v, want nil", err)
+		}
+	})
+
+	t.Run("empty team_id rejected before DDB", func(t *testing.T) {
+		called := false
+		store := newStore(&stubDDB{
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				called = true
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		err := store.DeleteWorkspaceMapping(context.Background(), "")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+			t.Fatalf("DeleteWorkspaceMapping(\"\") err = %v, want 400 *Error", err)
+		}
+		if called {
+			t.Error("must reject empty team_id before issuing DeleteItem")
+		}
+	})
+
+	t.Run("transport error maps to 503", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				return nil, errors.New("ddb down")
+			},
+		})
+		err := store.DeleteWorkspaceMapping(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("DeleteWorkspaceMapping transport err = %v, want 503 *Error", err)
+		}
+	})
+
+	t.Run("guarded delete uses updated_at cutoff", func(t *testing.T) {
+		var captured *dynamodb.DeleteItemInput
+		store := newStore(&stubDDB{
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				captured = in
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		cutoff := time.Date(2026, 7, 8, 12, 30, 45, 999, time.UTC)
+		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", cutoff); err != nil {
+			t.Fatalf("DeleteWorkspaceMappingBefore: %v", err)
+		}
+		if got := aws.ToString(captured.ConditionExpression); got != purgeCutoffCondition {
+			t.Fatalf("ConditionExpression = %q", got)
+		}
+		if got := captured.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
+			t.Fatalf("#updated_at_nano = %q, want %q", got, attrUpdatedAtNano)
+		}
+		if got := captured.ExpressionAttributeValues[":purge_cutoff_nano"].(*ddbtypes.AttributeValueMemberN).Value; got != strconv.FormatInt(cutoff.UTC().UnixNano(), 10) {
+			t.Fatalf(":purge_cutoff_nano = %q", got)
+		}
+	})
+
+	t.Run("guarded delete treats newer row as retained", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				return nil, &ddbtypes.ConditionalCheckFailedException{}
+			},
+		})
+		if err := store.DeleteWorkspaceMappingBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("DeleteWorkspaceMappingBefore newer row err = %v, want nil", err)
+		}
+	})
+}
+
+// TestPurgeTeamChannelPolicies fences the per-channel-policy half of the
+// Slack-lifecycle / `/qurl uninstall` cascade: Query every row for the team
+// (paging the LastEvaluatedKey loop) and DeleteItem each by its (team, channel)
+// key. It must delete EVERY page's rows, address each by the queried SK, tolerate
+// an empty team (nothing to delete), reject an empty team_id, and surface a Query
+// error so the caller can decide to retry. A per-row DeleteItem failure should
+// not stop deletion of the remaining observed rows.
+func TestPurgeTeamChannelPolicies(t *testing.T) {
+	t.Run("deletes every row across pages", func(t *testing.T) {
+		page := 0
+		var deletedChannels []string
+		store := newStore(&stubDDB{
+			queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				if got := aws.ToString(in.TableName); got != "cp" {
+					t.Errorf("Query table = %q, want %q", got, "cp")
+				}
+				if v, ok := in.ExpressionAttributeValues[":tid"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "T1" {
+					t.Errorf("Query :tid = %v, want T1", in.ExpressionAttributeValues[":tid"])
+				}
+				page++
+				if page == 1 {
+					if in.ExclusiveStartKey != nil {
+						t.Errorf("page 1 ExclusiveStartKey = %v, want nil", in.ExclusiveStartKey)
+					}
+					return &dynamodb.QueryOutput{
+						Items:            []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_p1", []string{"r1"}, nil)},
+						LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackChannelID: stringAttr("C_p1")},
+					}, nil
+				}
+				if len(in.ExclusiveStartKey) == 0 {
+					t.Errorf("page 2 ExclusiveStartKey is empty, want the prior LastEvaluatedKey")
+				}
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_p2", nil, map[string]string{"a": "r2"})},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				if got := aws.ToString(in.TableName); got != "cp" {
+					t.Errorf("DeleteItem table = %q, want %q", got, "cp")
+				}
+				if v, ok := in.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "T1" {
+					t.Errorf("DeleteItem PK = %v, want slack_team_id=T1", in.Key)
+				}
+				if in.ConditionExpression != nil {
+					t.Errorf("DeleteItem ConditionExpression = %q, want none (idempotent)", aws.ToString(in.ConditionExpression))
+				}
+				cid := in.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS).Value
+				deletedChannels = append(deletedChannels, cid)
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err != nil {
+			t.Fatalf("PurgeTeamChannelPolicies: %v", err)
+		}
+		if page != 2 {
+			t.Errorf("query pages = %d, want 2", page)
+		}
+		if want := []string{"C_p1", "C_p2"}; !reflect.DeepEqual(deletedChannels, want) {
+			t.Errorf("deleted channels = %v, want %v", deletedChannels, want)
+		}
+	})
+
+	t.Run("empty team deletes nothing", func(t *testing.T) {
+		deleteCalled := false
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deleteCalled = true
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err != nil {
+			t.Fatalf("PurgeTeamChannelPolicies(empty team): %v", err)
+		}
+		if deleteCalled {
+			t.Error("no rows queried — DeleteItem must not be called")
+		}
+	})
+
+	t.Run("empty team_id rejected before DDB", func(t *testing.T) {
+		queried := false
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				queried = true
+				return &dynamodb.QueryOutput{}, nil
+			},
+		})
+		err := store.PurgeTeamChannelPolicies(context.Background(), "")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest {
+			t.Fatalf("PurgeTeamChannelPolicies(\"\") err = %v, want 400 *Error", err)
+		}
+		if queried {
+			t.Error("must reject empty team_id before issuing Query")
+		}
+	})
+
+	t.Run("query error surfaces", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return nil, errors.New("AccessDenied: not authorized to perform dynamodb:Query")
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err == nil {
+			t.Error("PurgeTeamChannelPolicies: want error when Query fails")
+		}
+	})
+
+	t.Run("delete error surfaces", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C1", []string{"r1"}, nil)},
+				}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				return nil, errors.New("ddb delete down")
+			},
+		})
+		if err := store.PurgeTeamChannelPolicies(context.Background(), "T1"); err == nil {
+			t.Error("PurgeTeamChannelPolicies: want error when DeleteItem fails")
+		}
+	})
+
+	t.Run("malformed row surfaces cleanup error", func(t *testing.T) {
+		deleteCalled := false
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{{
+						attrSlackTeamID: stringAttr("T1"),
+					}},
+				}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deleteCalled = true
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		err := store.PurgeTeamChannelPolicies(context.Background(), "T1")
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("PurgeTeamChannelPolicies malformed row err = %v, want 500 *Error", err)
+		}
+		if deleteCalled {
+			t.Fatal("malformed row must not issue a DeleteItem with an incomplete key")
+		}
+	})
+
+	t.Run("guarded delete skips rows updated after cutoff", func(t *testing.T) {
+		var deleteCalls int
+		store := newStore(&stubDDB{
+			queryFn: func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_new", []string{"r1"}, nil)},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deleteCalls++
+				if got := aws.ToString(in.ConditionExpression); got != purgeCutoffCondition {
+					t.Fatalf("ConditionExpression = %q", got)
+				}
+				return nil, &ddbtypes.ConditionalCheckFailedException{}
+			},
+		})
+		if err := store.PurgeTeamChannelPoliciesBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("PurgeTeamChannelPoliciesBefore newer row err = %v, want nil", err)
+		}
+		if deleteCalls != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", deleteCalls)
+		}
+	})
+
+	t.Run("delete error does not stop remaining rows", func(t *testing.T) {
+		var deletedChannels []string
+		store := newStore(&stubDDB{
+			queryFn: func(in *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+				if len(in.ExclusiveStartKey) == 0 {
+					return &dynamodb.QueryOutput{
+						Items: []map[string]ddbtypes.AttributeValue{
+							channelPolicyRow("C_fail", []string{"r1"}, nil),
+							channelPolicyRow("C_ok1", []string{"r2"}, nil),
+						},
+						LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackChannelID: stringAttr("C_ok1")},
+					}, nil
+				}
+				return &dynamodb.QueryOutput{
+					Items: []map[string]ddbtypes.AttributeValue{channelPolicyRow("C_ok2", nil, map[string]string{"a": "r3"})},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				cid := in.Key[attrSlackChannelID].(*ddbtypes.AttributeValueMemberS).Value
+				deletedChannels = append(deletedChannels, cid)
+				if cid == "C_fail" {
+					return nil, errors.New("ddb delete down")
+				}
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		err := store.PurgeTeamChannelPolicies(context.Background(), "T1")
+		if err == nil {
+			t.Fatal("PurgeTeamChannelPolicies: want joined delete error")
+		}
+		var ae *Error
+		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("PurgeTeamChannelPolicies err = %v, want joined 503 *Error", err)
+		}
+		if want := []string{"C_fail", "C_ok1", "C_ok2"}; !reflect.DeepEqual(deletedChannels, want) {
+			t.Fatalf("deleted channels = %v, want %v", deletedChannels, want)
 		}
 	})
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -43,13 +44,15 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 		return fmt.Errorf("ensure alias_bindings map: %w", err)
 	}
 
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-		UpdateExpression:    aws.String("SET " + exprAliasBindings + "." + exprAliasName + " = " + exprResourceID),
+		UpdateExpression:    aws.String("SET " + exprAliasBindings + "." + exprAliasName + " = " + exprResourceID + ", " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String("attribute_not_exists(" + exprAliasBindings + "." + exprAliasName + ")"),
 		ExpressionAttributeNames: map[string]string{
 			exprAliasBindings: attrAliasBindings,
@@ -57,6 +60,8 @@ func (s *Store) BindChannelAlias(ctx context.Context, teamID, channelID, aliasNa
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			exprResourceID: stringAttr(resourceID),
+			exprNow:        stringAttr(nowISO),
+			exprNowNano:    unixNanoAttr(now),
 		},
 	})
 	if err != nil {
@@ -79,17 +84,23 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 		}
 	}
 
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-		UpdateExpression:    aws.String("REMOVE " + exprAliasBindings + "." + exprAliasName),
+		UpdateExpression:    aws.String("SET " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " REMOVE " + exprAliasBindings + "." + exprAliasName),
 		ConditionExpression: aws.String("attribute_exists(" + exprAliasBindings + "." + exprAliasName + ")"),
 		ExpressionAttributeNames: map[string]string{
 			exprAliasBindings: attrAliasBindings,
 			exprAliasName:     aliasName,
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err != nil {
@@ -103,19 +114,23 @@ func (s *Store) UnbindChannelAlias(ctx context.Context, teamID, channelID, alias
 }
 
 func (s *Store) ensureAliasBindingsMap(ctx context.Context, teamID, channelID string) error {
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-		UpdateExpression:    aws.String("SET " + exprAliasBindings + " = " + exprEmptyMap),
+		UpdateExpression:    aws.String("SET " + exprAliasBindings + " = " + exprEmptyMap + ", " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String("attribute_not_exists(" + exprAliasBindings + ")"),
 		ExpressionAttributeNames: map[string]string{
 			exprAliasBindings: attrAliasBindings,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			exprEmptyMap: &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{}},
+			exprNow:      stringAttr(nowISO),
+			exprNowNano:  unixNanoAttr(now),
 		},
 	})
 	if err != nil {

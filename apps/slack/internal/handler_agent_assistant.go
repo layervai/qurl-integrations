@@ -112,12 +112,16 @@ func (h *Handler) persistAssistantContext(ctx context.Context, log *slog.Logger,
 	}
 }
 
-// setAssistantFirstRun sets the freshly-opened pane's suggested prompts and title. The
-// per-workspace opt-in is already checked by the caller, so this only does the UX. A nil
-// AssistantThreads seam (pre-enablement, or unwired in a test) is a no-op. The two calls
-// are independent best-effort: a failure is logged and the other still runs; prompts go
-// first so they land even if ctx expires before the title call — the higher-value affordance.
+// setAssistantFirstRun sets the freshly-opened pane's suggested prompts and title, and
+// posts the AI-disclosure intro. The per-workspace opt-in is already checked by the
+// caller, so this only does the UX. A nil AssistantThreads seam (pre-enablement, or
+// unwired in a test) skips the title/prompts; the intro post is independently guarded on
+// its own PostMessage seam. The calls are independent best-effort: a failure is logged
+// and the others still run. The disclosure is attempted first because it is the
+// compliance-critical first-touch notice; prompts/title follow when AssistantThreads is
+// available.
 func (h *Handler) setAssistantFirstRun(ctx context.Context, log *slog.Logger, teamID, enterpriseID string, at *assistantThread) {
+	h.postAssistantDisclosure(ctx, log, teamID, enterpriseID, at)
 	port := h.cfg.AssistantThreads
 	if port == nil {
 		return
@@ -128,6 +132,21 @@ func (h *Handler) setAssistantFirstRun(ctx context.Context, log *slog.Logger, te
 	}
 	if err := port.SetTitle(ctx, teamID, enterpriseID, at.ChannelID, at.ThreadTS, assistantThreadTitle); err != nil {
 		log.Warn("agent: set assistant title failed", "error", err)
+	}
+}
+
+// postAssistantDisclosure posts the Slack-AI-required disclosure (agentAIDisclosure)
+// as the pane's first-run intro message, into the pane thread (at.ChannelID/ThreadTS)
+// via the PostMessage seam. It is the user's first-touch AI notice on the assistant
+// surface — AI is used, it can be wrong, and where the privacy notice lives.
+// Best-effort: a nil PostMessage seam (pre-enablement, or a test that wires only the
+// AssistantThreads seam) is a no-op, and a post failure is logged, never surfaced.
+func (h *Handler) postAssistantDisclosure(ctx context.Context, log *slog.Logger, teamID, enterpriseID string, at *assistantThread) {
+	if h.cfg.PostMessage == nil {
+		return
+	}
+	if err := h.cfg.PostMessage(ctx, teamID, enterpriseID, at.ChannelID, at.ThreadTS, agentAIDisclosure); err != nil {
+		log.Warn("agent: post assistant disclosure failed", "error", err)
 	}
 }
 

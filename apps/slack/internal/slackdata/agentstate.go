@@ -470,6 +470,72 @@ func (s *AgentStore) ClaimPendingAction(ctx context.Context, partition, id strin
 	return claimed, nil // false → already claimed (double-click / replay)
 }
 
+// PurgeWorkspaceAgentState deletes every qurl_agent_state row under partition.
+// It is part of the Slack app-uninstall / token-revoke cascade: unlike the table's
+// normal TTL cleanup, this explicitly removes conversation transcripts, dedupe
+// markers, pending actions, pane context, rate counters, and audit entries when a
+// workspace install is being forgotten.
+//
+// The table is keyed by (pk, sk), so the purge queries one partition and deletes
+// each observed sort key. Deletes are unconditional and therefore idempotent; an
+// already-removed row is a no-op. Unlike the durable workspace_state /
+// workspace_mappings / channel_policies rows, this ephemeral TTL-backed state is
+// intentionally not reinstall-cutoff guarded, so delayed teardown can remove
+// fresh agent conversation or pane context but cannot remove credentials or
+// policy. The method attempts every delete in a page even after an individual
+// DeleteItem error, then returns the joined errors so the lifecycle retry path
+// can retry any residue.
+func (s *AgentStore) PurgeWorkspaceAgentState(ctx context.Context, partition string) error {
+	if partition == "" {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeWorkspaceAgentState: partition is required"}
+	}
+	var startKey map[string]ddbtypes.AttributeValue
+	var deleteErrs []error
+	for {
+		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.TableName),
+			KeyConditionExpression: aws.String("#pk = :pk"),
+			ExpressionAttributeNames: map[string]string{
+				"#pk": attrAgentPK,
+				"#sk": attrAgentSK,
+			},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":pk": stringAttr(partition),
+			},
+			// Only the SK is needed because the PK is the requested partition.
+			ProjectionExpression: aws.String("#sk"),
+			ExclusiveStartKey:    startKey,
+		})
+		if err != nil {
+			return joinSweepErrors(deleteErrs, ddbToError("PurgeWorkspaceAgentState", err))
+		}
+		for _, item := range out.Items {
+			sk := readString(item, attrAgentSK)
+			if sk == "" {
+				deleteErrs = append(deleteErrs, &Error{
+					StatusCode: http.StatusInternalServerError,
+					Title:      "PurgeWorkspaceAgentState: queried row missing sk",
+				})
+				continue
+			}
+			if _, err := s.Client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+				TableName: aws.String(s.TableName),
+				Key: map[string]ddbtypes.AttributeValue{
+					attrAgentPK: stringAttr(partition),
+					attrAgentSK: stringAttr(sk),
+				},
+			}); err != nil {
+				deleteErrs = append(deleteErrs, ddbToError("PurgeWorkspaceAgentState", err))
+			}
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	return errors.Join(deleteErrs...)
+}
+
 // numberAttr builds a DynamoDB Number attribute from an int64.
 func numberAttr(n int64) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)}
