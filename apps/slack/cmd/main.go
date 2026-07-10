@@ -42,6 +42,7 @@ const (
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
+	envSlackBotTokenRotation      = "QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
 	connectorImageFallbackHint    = "dev/sandbox fallback requires leaving " + envQURLConnectorImage + " empty and setting " + connectorImageFallbackOptIn
@@ -274,6 +275,14 @@ func run() error {
 	agentConfirmEnabled := readAgentConfirmEnabled()
 	agentChannelFollowups := readAgentChannelFollowups()
 	agentSurfaceExclusiveAcks := readAgentSurfaceExclusiveAcks()
+	slackBotTokenRotationEnabled, err := readSlackBotTokenRotationEnabled()
+	if err != nil {
+		return err
+	}
+	slog.Info("Slack bot-token revoke handling configured",
+		"slack_bot_token_rotation_enabled", slackBotTokenRotationEnabled,
+		"tokens_revoked_bot_token_triggers_workspace_purge", !slackBotTokenRotationEnabled,
+	)
 	// Per-workspace toggle default: false during the staged opt-in rollout, flipped
 	// true at GA (every workspace on unless it explicitly opted out). Fail-safe to
 	// false. The per-workspace flag itself lives in workspace_mappings (AdminStore).
@@ -321,6 +330,7 @@ func run() error {
 	handler := internal.NewHandler(internal.Config{
 		AuthProvider:                   authProvider,
 		SlackSigningSecret:             slackSigningSecret,
+		SlackBotTokenRotationEnabled:   slackBotTokenRotationEnabled,
 		BaseContext:                    handlerCtx,
 		MaxConcurrentAsync:             maxConcurrentAsync,
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
@@ -385,7 +395,7 @@ func run() error {
 	// slash-command async workers.
 	var oauthAdminStore oauth.AdminStore
 	if adminStore != nil {
-		oauthAdminStore = &adminStoreAdapter{store: adminStore}
+		oauthAdminStore = internal.NewOAuthAdminStoreAdapter(adminStore)
 	}
 	oauthCfg, ok, err := buildOAuthConfig(shutdownSignals.ctx, ddbProvider, handler, oauthAdminStore)
 	if err != nil {
@@ -1008,7 +1018,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		Minter:                        &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
 		AsyncTracker:                  tracker,
 		AdminStore:                    adminStore,
-		BindClassifyError:             classifyBindError,
+		BindClassifyError:             internal.ClassifyOAuthBindError,
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
@@ -1083,66 +1093,6 @@ func missingSlackInstallEnvVars(values map[string]string) []string {
 		}
 	}
 	return missing
-}
-
-// adminStoreAdapter bridges *slackdata.Store to the oauth.AdminStore
-// interface. The two declare WorkspaceMapping in their own packages
-// so the callback doesn't import slackdata directly; the adapter
-// translates the field-for-field equivalent shape and forwards the
-// call.
-//
-// `store` is typed as the slackdataBinder interface (not concrete
-// *slackdata.Store) so the adapter's translation logic can be
-// exercised end-to-end in tests against a captor without standing
-// up a real Store. *slackdata.Store satisfies the interface by
-// declaring BindWorkspace with the matching signature.
-type adminStoreAdapter struct {
-	store slackdataBinder
-}
-
-// slackdataBinder is the slice of slackdata.Store that the adapter
-// depends on. Defined here (rather than imported from slackdata)
-// so cmd/main_test.go can inject a captor that fences the
-// translation without dragging in the full Store surface.
-type slackdataBinder interface {
-	BindWorkspace(ctx context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error
-}
-
-func (a *adminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
-	return a.store.BindWorkspace(ctx, &slackdata.WorkspaceMapping{
-		TeamID:    m.TeamID,
-		OwnerID:   m.OwnerID,
-		CreatedAt: m.CreatedAt,
-	}, seedAdmin)
-}
-
-// classifyBindError errors.As's the slackdata.Error and returns the
-// matching oauth.BindConflictCode for 409 paths so the callback can
-// branch idempotent vs. rebind-refused vs. generic-failure. Non-409
-// or non-*slackdata.Error returns "" so the callback treats it as a
-// generic failure (500).
-func classifyBindError(err error) oauth.BindConflictCode {
-	var ae *slackdata.Error
-	if !errors.As(err, &ae) || ae.StatusCode != http.StatusConflict {
-		return ""
-	}
-	switch ae.Code {
-	case slackdata.ErrCodeWorkspaceAlreadyBoundToCaller:
-		return oauth.BindConflictAlreadyBoundToCaller
-	case slackdata.ErrCodeWorkspaceAlreadyBound:
-		return oauth.BindConflictAlreadyBound
-	case slackdata.ErrCodeWorkspaceBindUnverified:
-		return oauth.BindConflictUnverified
-	default:
-		// A 409 from slackdata with an unmapped Code means a new
-		// conflict variant was added on the producer side without
-		// the classifier here being updated. Surface a warn so
-		// on-call sees the drift on CloudWatch before users start
-		// reporting "every rebind 500s."
-		slog.Warn("classifyBindError: slackdata returned 409 with unmapped Code — defaulting to generic 500 (classifier and slackdata.ErrCodeWorkspace* have drifted)",
-			"code", ae.Code, "title", ae.Title)
-		return ""
-	}
 }
 
 // missingAdminStoreEnvVars returns the slackdata table env-var names
@@ -1410,6 +1360,23 @@ func readAgentDefaultEnabled() bool {
 // unchanged until production explicitly enables the write path.
 func readSlackRateLimitEnabled() bool {
 	return readBoolEnvFailSafe(envSlackRateLimitEnabled, false, false)
+}
+
+// readSlackBotTokenRotationEnabled reads QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED.
+// Absent → false, preserving today's Marketplace cleanup behavior where a bot
+// tokens_revoked callback means local teardown. A set-but-unparseable value
+// fails startup: silently choosing either pole could suppress a Marketplace
+// cleanup signal or make a routine Slack token rotation destructive.
+func readSlackBotTokenRotationEnabled() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(envSlackBotTokenRotation))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", envSlackBotTokenRotation, err)
+	}
+	return v, nil
 }
 
 // Conservative per-hour turn caps applied when the operator doesn't set the env, so

@@ -26,17 +26,18 @@ import (
 // it would risk SSRF if the signature gate ever broke, so postResponse
 // validates the scheme and host before dialing.
 const (
-	fieldResponseURL  = "response_url"
-	fieldTeamID       = "team_id"
-	fieldTeamDomain   = "team_domain"
-	fieldUserID       = "user_id"
-	fieldUserName     = "user_name"
-	fieldChannelID    = "channel_id"
-	fieldChannelName  = "channel_name"
-	fieldCommand      = "command"
-	fieldText         = "text"
-	fieldTriggerID    = "trigger_id"
-	fieldEnterpriseID = "enterprise_id"
+	fieldResponseURL         = "response_url"
+	fieldTeamID              = "team_id"
+	fieldTeamDomain          = "team_domain"
+	fieldUserID              = "user_id"
+	fieldUserName            = "user_name"
+	fieldChannelID           = "channel_id"
+	fieldChannelName         = "channel_name"
+	fieldCommand             = "command"
+	fieldText                = "text"
+	fieldTriggerID           = "trigger_id"
+	fieldEnterpriseID        = "enterprise_id"
+	fieldIsEnterpriseInstall = "is_enterprise_install"
 )
 
 // slackResponseURLHost is Slack's webhook ingress for slash-command
@@ -46,6 +47,8 @@ const (
 // The host string is the only Slack-controlled identifier the Slack
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
+
+const slackFormBoolTrue = "true"
 
 const responseURLRetryDelay = 250 * time.Millisecond
 

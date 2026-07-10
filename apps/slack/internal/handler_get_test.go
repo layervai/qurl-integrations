@@ -435,8 +435,8 @@ func TestHandleGet_LoneSigil(t *testing.T) {
 // AdminStore is nil (sandbox / no-DDB deployment) and the user
 // requested the alias form: the channel-scoped lookup can't run, so
 // the user sees the "qURL admin features are not yet configured"
-// message that routes them to a workspace admin. The customer API is
-// never reached for the mint.
+// message that routes them to the workspace owner / qURL support. The
+// customer API is never reached for the mint.
 func TestHandleGet_AdminStoreNil(t *testing.T) {
 	ts := newAdminTestServers(t)
 	var mintHits atomic.Int32
@@ -453,8 +453,8 @@ func TestHandleGet_AdminStoreNil(t *testing.T) {
 	if !strings.Contains(async, "qURL admin features are not yet configured") {
 		t.Errorf("async reply missing not-configured message: %q", async)
 	}
-	if !strings.Contains(async, "contact your Slack admin") {
-		t.Errorf("async reply missing admin-contact fallback: %q", async)
+	if !strings.Contains(async, "https://layerv.ai/contact") {
+		t.Errorf("async reply missing actionable support contact: %q", async)
 	}
 	if mintHits.Load() != 0 {
 		t.Errorf("mint reached despite nil AdminStore (hits = %d)", mintHits.Load())

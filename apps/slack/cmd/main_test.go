@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -149,6 +147,33 @@ func TestValidateSlackBotToken(t *testing.T) {
 			err := auth.ValidateSlackBotTokenShape(tc.token)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateSlackBotTokenShape(%q) err=%v, wantErr=%v", tc.token, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestReadSlackBotTokenRotationEnabled(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{name: "unset", want: false},
+		{name: "true", raw: "true", want: true},
+		{name: "false", raw: "false", want: false},
+		{name: "malformed fails startup", raw: "definitely", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envSlackBotTokenRotation, tc.raw)
+			got, err := readSlackBotTokenRotationEnabled()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("readSlackBotTokenRotationEnabled() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Fatalf("readSlackBotTokenRotationEnabled() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -1005,145 +1030,6 @@ type fakeAdminStore struct{}
 
 func (*fakeAdminStore) BindWorkspace(_ context.Context, _ *oauth.WorkspaceMapping, _ string) error {
 	return nil
-}
-
-// TestClassifyBindErrorMapping locks the slackdata.Error.Code →
-// oauth.BindConflictCode mapping that wires the callback's switch
-// arm to slackdata's 409 surface. The reflect-shape fence covers
-// the struct; this covers the code-string mapping which is its own
-// drift surface — rename slackdata.ErrCodeWorkspaceAlreadyBound and
-// the classifier silently falls through to the empty-string "generic
-// failure" arm, downgrading rebind-refused to a 500.
-func TestClassifyBindErrorMapping(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want oauth.BindConflictCode
-	}{
-		{
-			"already bound to caller (idempotent re-entry)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBoundToCaller},
-			oauth.BindConflictAlreadyBoundToCaller,
-		},
-		{
-			"already bound to different admin (rebind-refused)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceAlreadyBound},
-			oauth.BindConflictAlreadyBound,
-		},
-		{
-			"bind held but disambig read failed (unverified)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: slackdata.ErrCodeWorkspaceBindUnverified},
-			oauth.BindConflictUnverified,
-		},
-		{
-			"non-409 *slackdata.Error → empty (generic failure)",
-			&slackdata.Error{StatusCode: http.StatusServiceUnavailable, Code: "ddb_error"},
-			"",
-		},
-		{
-			"409 with unknown Code → empty (default arm)",
-			&slackdata.Error{StatusCode: http.StatusConflict, Code: "future_unmapped_code"},
-			"",
-		},
-		{
-			"non-*slackdata.Error → empty",
-			errors.New("plain string error"),
-			"",
-		},
-		{"nil → empty", nil, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := classifyBindError(c.err); got != c.want {
-				t.Errorf("classifyBindError(%v) = %q, want %q", c.err, got, c.want)
-			}
-		})
-	}
-}
-
-// TestAdminStoreAdapterForwardsAllFields exercises the production
-// adminStoreAdapter against a captor that satisfies slackdataBinder,
-// with a non-zero CreatedAt. The reflect-shape test fences the struct
-// field set; this fences the adapter's translation line so a future
-// regression that drops one of TeamID / OwnerID / CreatedAt from the
-// copy fails here rather than slipping through unnoticed because the
-// callback passes zero values today.
-func TestAdminStoreAdapterForwardsAllFields(t *testing.T) {
-	captured := &capturingSlackdataStore{}
-	adapter := &adminStoreAdapter{store: captured}
-	want := oauth.WorkspaceMapping{
-		TeamID:    "T_capture",
-		OwnerID:   "auth0|capture-owner",
-		CreatedAt: mustParseTime(t, "2026-05-20T12:34:56Z"),
-	}
-	if err := adapter.BindWorkspace(context.Background(), &want, "U_seed"); err != nil {
-		t.Fatalf("BindWorkspace: %v", err)
-	}
-	if captured.gotMapping == nil {
-		t.Fatal("adapter did not forward to the wrapped store")
-	}
-	if captured.gotMapping.TeamID != want.TeamID ||
-		captured.gotMapping.OwnerID != want.OwnerID ||
-		!captured.gotMapping.CreatedAt.Equal(want.CreatedAt) {
-		t.Errorf("forwarded mapping mismatch:\nwant TeamID=%q OwnerID=%q CreatedAt=%v\ngot  TeamID=%q OwnerID=%q CreatedAt=%v",
-			want.TeamID, want.OwnerID, want.CreatedAt,
-			captured.gotMapping.TeamID, captured.gotMapping.OwnerID, captured.gotMapping.CreatedAt)
-	}
-	if captured.gotSeedAdmin != "U_seed" {
-		t.Errorf("seedAdmin: got %q want %q", captured.gotSeedAdmin, "U_seed")
-	}
-}
-
-// capturingSlackdataStore satisfies slackdataBinder so the production
-// adminStoreAdapter can be exercised without standing up a real
-// slackdata.Store.
-type capturingSlackdataStore struct {
-	gotMapping   *slackdata.WorkspaceMapping
-	gotSeedAdmin string
-}
-
-func (c *capturingSlackdataStore) BindWorkspace(_ context.Context, m *slackdata.WorkspaceMapping, seedAdmin string) error {
-	c.gotMapping = m
-	c.gotSeedAdmin = seedAdmin
-	return nil
-}
-
-func mustParseTime(t *testing.T, s string) time.Time {
-	t.Helper()
-	v, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		t.Fatalf("parse %q: %v", s, err)
-	}
-	return v
-}
-
-// TestAdminStoreAdapterMappingShapesMatch fences the field-for-field
-// equivalence of oauth.WorkspaceMapping and slackdata.WorkspaceMapping.
-// The adminStoreAdapter copies between the two by named field; a new
-// field added to one and not the other would silently drop on the
-// adapter's copy. Reflect-walk the field sets so the build breaks
-// when they drift.
-func TestAdminStoreAdapterMappingShapesMatch(t *testing.T) {
-	oauthFields := structFieldSet(reflect.TypeOf(oauth.WorkspaceMapping{}))
-	storeFields := structFieldSet(reflect.TypeOf(slackdata.WorkspaceMapping{}))
-	if !reflect.DeepEqual(oauthFields, storeFields) {
-		t.Errorf("oauth.WorkspaceMapping vs slackdata.WorkspaceMapping fields differ — adminStoreAdapter copy would silently drop the diff\noauth:     %v\nslackdata: %v", oauthFields, storeFields)
-	}
-}
-
-// structFieldSet returns the {name → full type string} map for a
-// struct type. Used to compare field shapes across packages without
-// requiring identical declaration order. Type string (not Kind) so
-// a future drift like `OwnerID OwnerID` (named-string) vs
-// `OwnerID string` fails the test here rather than at the adapter
-// build line — the test owns the contract end-to-end.
-func structFieldSet(t reflect.Type) map[string]string {
-	out := make(map[string]string, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		out[f.Name] = f.Type.String()
-	}
-	return out
 }
 
 // TestBuildOAuthConfigRejectsEmptyHostSlackBaseURL locks the contract

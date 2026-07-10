@@ -436,6 +436,18 @@ func (f *fakeDDB) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ 
 	if err != nil {
 		return nil, err
 	}
+	if cond := aws.ToString(in.ConditionExpression); cond != "" {
+		item, present := table[key]
+		ok, err := evalCondition(cond, item, present, in.ExpressionAttributeValues, in.ExpressionAttributeNames)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, &ddbtypes.ConditionalCheckFailedException{
+				Message: aws.String("ConditionalCheckFailedException"),
+			}
+		}
+	}
 	delete(table, key)
 	return &dynamodb.DeleteItemOutput{}, nil
 }
@@ -471,6 +483,31 @@ func (f *fakeDDB) Query(_ context.Context, in *dynamodb.QueryInput, _ ...func(*d
 		}
 	}
 	return &dynamodb.QueryOutput{Items: items}, nil
+}
+
+// Scan supports the projected begins_with(slack_team_id, :prefix) shape
+// [slackdata.Store.PurgeTeamRateLimitCountersBefore] emits for synthetic
+// rate-limit rows in the PK-only workspace_mappings table.
+func (f *fakeDDB) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	table, _, err := f.tableAndSchema(aws.ToString(in.TableName))
+	if err != nil {
+		return nil, err
+	}
+	prefix, ok := in.ExpressionAttributeValues[":prefix"].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		return nil, fmt.Errorf("fakeDDB.Scan: expected a :prefix string value (FilterExpression %q)", aws.ToString(in.FilterExpression))
+	}
+	var items []map[string]ddbtypes.AttributeValue
+	for _, item := range table {
+		if pk, ok := item[fAttrSlackTeamID].(*ddbtypes.AttributeValueMemberS); ok && strings.HasPrefix(pk.Value, prefix.Value) {
+			items = append(items, map[string]ddbtypes.AttributeValue{
+				fAttrSlackTeamID: stringMember(pk.Value),
+			})
+		}
+	}
+	return &dynamodb.ScanOutput{Items: items}, nil
 }
 
 // tableAndSchema looks up the table map and key schema, returning a
@@ -927,7 +964,7 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 	expr = strings.TrimSpace(expr)
 	parts := splitTopLevelKeyword(expr, "AND")
 	for _, p := range parts {
-		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		ok, err := evalConditionAnyTerm(strings.TrimSpace(p), item, present, vals, names)
 		if err != nil {
 			return false, err
 		}
@@ -936,6 +973,20 @@ func evalCondition(expr string, item map[string]ddbtypes.AttributeValue, present
 		}
 	}
 	return true, nil
+}
+
+func evalConditionAnyTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
+	parts := strings.Split(term, " OR ")
+	for _, p := range parts {
+		ok, err := evalConditionTerm(strings.TrimSpace(p), item, present, vals, names)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func evalConditionTerm(term string, item map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue, names map[string]string) (bool, error) {
