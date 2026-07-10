@@ -3,6 +3,7 @@
   "apps/teams": "0.1.0",
   "apps/discord": "0.1.0",
   "apps/chrome-extension": "1.0.2",
+  "apps/edge-extension": "1.0.0",
   "apps/cli": "0.1.0",
   "apps/zapier": "0.1.0"
 }

@@ -36,6 +36,7 @@ jobs:
             cli
             zapier
             chrome-extension
+            edge-extension
             origins
             shared
             infra

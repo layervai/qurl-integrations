@@ -67,6 +67,18 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		unchangedOutput:      "No Chrome extension-impacting changes detected",
 	},
 	{
+		name:                 "edge-extension",
+		path:                 "edge-extension.yml",
+		checkNamePrefix:      "edge-extension / ",
+		changeOutput:         "edge_extension",
+		changedEnv:           "EDGE_EXTENSION_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.edge_extension == 'true'",
+		detectChangesName:    "edge-extension / detect changes",
+		requiredName:         "edge-extension / required",
+		verifierStepName:     "Verify Edge extension CI result",
+		unchangedOutput:      "No Edge extension-impacting changes detected",
+	},
+	{
 		name:                 "shared",
 		path:                 "shared-test.yml",
 		checkNamePrefix:      "shared / ",

@@ -69,6 +69,7 @@ body:
         - cli
         - zapier
         - chrome-extension
+        - edge-extension
         - origins
         - shared
         - ci
