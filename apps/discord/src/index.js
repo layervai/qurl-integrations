@@ -1,6 +1,9 @@
 const config = require('./config');
 const logger = require('./logger');
 const { isPositiveFinite } = require('./utils/time');
+const {
+  enforceProductionOAuthStateSecrets,
+} = require('./utils/oauth-state-secrets');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -204,16 +207,16 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-  // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). Require it only when that surface is live.
-  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
-    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
-    // rotating GitHub's client secret would invalidate all in-flight
-    // OAuth states and vice versa. A prod deploy must set this explicitly.
-    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
-    process.exit(1);
-  }
+  // Dedicated OAuth state secrets guard GitHub and qURL/Auth0 callbacks.
+  // OAUTH_STATE_SECRET remains accepted only during the migration window, and
+  // all accepted state-secret envs must be real 32+ char values rather than the
+  // Terraform SSM PLACEHOLDER sentinel.
+  enforceProductionOAuthStateSecrets(process.env, {
+    isOpenNHPActive: config.isOpenNHPActive,
+    isQurlOAuthConfigured: config.isQurlOAuthConfigured,
+  }, {
+    logger,
+  });
 }
 
 // Any deploy that issues real GitHub OAuth tokens must encrypt persisted

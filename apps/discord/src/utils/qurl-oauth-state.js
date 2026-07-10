@@ -27,14 +27,21 @@
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const config = require('../config');
+const logger = require('../logger');
+const {
+  collectOAuthFlowStateSecrets,
+  collectStateSecrets,
+} = require('./oauth-state-secrets');
 
 const STATE_KIND = 'qurl-oauth';
 const STATE_TTL_SECONDS = 5 * 60;
 
 let _warnedFallback = false;
+let _warnedShortLegacy = false;
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
-// Secret precedence (highest first):
+// Signing uses the first secret below; verification tries every configured
+// secret in order so already-clicked links survive the migration window:
 //   1. QURL_OAUTH_STATE_SECRET — flow-dedicated, lets ops rotate the
 //      qURL OAuth signer without invalidating in-flight GitHub OAuth
 //      links. Preferred going forward.
@@ -42,51 +49,66 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 //      kind-binding on the state token already prevents cross-purpose
 //      forgery, so sharing was secure; the precedence here is purely
 //      operational hygiene per PR #177 review (issue #184).
-//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for env-parity with
-//      the GitHub OAuth flow's signer.
+//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for old/dev env-parity;
+//      production boot requires #1 or #2 and will not start on this fallback.
 //   4. Test fallback          — per-process random secret for jest only.
 //
-// Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM, deploy
-// (the dual-read happens automatically); once every replica has the
-// new var, drop OAUTH_STATE_SECRET. The 5-minute state TTL bounds the
-// "old links don't validate against the new key" window — no separate
-// dual-key reader needed.
-// Minimum acceptable secret length — per round-9 #4. 32 chars is the
-// floor for an HMAC-SHA256 secret with adequate entropy (matches the
-// `0`.repeat(64) test fixture's order of magnitude, well below the
-// 128-char hex secrets ops actually provisions). A 4-char accidental
-// value would HMAC just fine with no security; reject upfront.
-const MIN_STATE_SECRET_LENGTH = 32;
-
-function stateSecret() {
-  const dedicated = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
-  if (dedicated) {
-    if (dedicated.length < MIN_STATE_SECRET_LENGTH) {
-      throw new Error(`Refusing to mint qURL OAuth state: state-signing secret is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${dedicated.length}). Provision a 64+ char value in SSM.`);
-    }
-    return dedicated;
+// Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM while leaving
+// OAUTH_STATE_SECRET present, deploy, wait longer than STATE_TTL_SECONDS, then
+// replace OAUTH_STATE_SECRET with the SSM PLACEHOLDER sentinel. Verification
+// accepts both configured keys during that window; after the legacy key is
+// disabled it stops validating. If rotating both GitHub and qURL OAuth state
+// together, pace legacy removal by the longer GitHub pending-link window.
+function warnShortLegacySecret(label, length) {
+  if (!_warnedShortLegacy) {
+    logger.warn(
+      `Ignoring ${label} for qURL OAuth state: secret is too short `
+      + `(got ${length}) while a dedicated secret is active.`
+    );
+    _warnedShortLegacy = true;
   }
+}
+
+function stateSecrets() {
+  // If a dedicated secret is present but too short, fail closed instead of
+  // silently falling back; the production boot guard catches that before serve.
+  // Production boot intentionally rejects the GITHUB_CLIENT_SECRET fallback;
+  // keep this dev/test escape hatch in sync with enforceProductionOAuthStateSecrets().
+  const secrets = collectOAuthFlowStateSecrets({
+    primaryEnvName: 'QURL_OAUTH_STATE_SECRET',
+    errorPrefix: 'Refusing to mint qURL OAuth state',
+    warnShortOptional: warnShortLegacySecret,
+  });
+  if (secrets.length > 0) return secrets;
+
   if (!config.GITHUB_CLIENT_SECRET) {
     const inTestHarness = process.env.NODE_ENV === 'test'
       && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
     if (!inTestHarness) {
-      throw new Error('Refusing to mint qURL OAuth state: QURL_OAUTH_STATE_SECRET or OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
+      throw new Error(
+        'Refusing to mint qURL OAuth state: QURL_OAUTH_STATE_SECRET, OAUTH_STATE_SECRET, '
+        + 'or GITHUB_CLIENT_SECRET must be set.'
+      );
     }
     if (!_warnedFallback) {
-      // eslint-disable-next-line no-console
-      console.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
+      logger.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
       _warnedFallback = true;
     }
-    return _testFallbackSecret;
+    return [_testFallbackSecret];
   }
   // GITHUB_CLIENT_SECRET fallback is also length-checked — Auth0 /
   // GitHub provision 32+ char client secrets by default, but a manual
   // /placeholder env on a misconfigured dev box would slip past
   // otherwise.
-  if (config.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
-    throw new Error(`Refusing to mint qURL OAuth state: GITHUB_CLIENT_SECRET fallback is shorter than ${MIN_STATE_SECRET_LENGTH} chars.`);
-  }
-  return config.GITHUB_CLIENT_SECRET;
+  return collectStateSecrets([
+    { value: config.GITHUB_CLIENT_SECRET, label: 'GITHUB_CLIENT_SECRET fallback' },
+  ], {
+    errorPrefix: 'Refusing to mint qURL OAuth state',
+  });
+}
+
+function stateSecret() {
+  return stateSecrets()[0];
 }
 
 function b64urlEncode(buf) {
@@ -117,6 +139,8 @@ function signQurlOAuthState(guildId, discordUserId) {
     e: expirySec,
   };
   const encoded = b64urlEncode(JSON.stringify(payload));
+  // By design this throws on unusable signing config; production boot validates
+  // state secrets before serving, so a sign-time throw is a dev/test signal.
   const sig = crypto.createHmac('sha256', stateSecret())
     .update(encoded)
     .digest('hex');
@@ -135,12 +159,22 @@ function verifyQurlOAuthState(state) {
   if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[0-9a-f]{64}$/.test(sig)) {
     return { ok: false, reason: 'malformed_chars' };
   }
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(encoded)
-    .digest('hex');
-  let sigOk = false;
+  const sigBuf = Buffer.from(sig, 'hex');
+  let secrets;
   try {
-    sigOk = crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+    secrets = stateSecrets();
+  } catch {
+    return { ok: false, reason: 'config_error' };
+  }
+  let sigOk;
+  try {
+    sigOk = false;
+    for (const secret of secrets) {
+      const expected = crypto.createHmac('sha256', secret)
+        .update(encoded)
+        .digest('hex');
+      if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) sigOk = true;
+    }
   } catch {
     return { ok: false, reason: 'sig_compare_threw' };
   }

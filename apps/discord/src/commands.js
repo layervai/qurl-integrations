@@ -35,6 +35,10 @@ const {
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
+const {
+  collectOAuthFlowStateSecrets,
+  collectStateSecrets,
+} = require('./utils/oauth-state-secrets');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
@@ -172,7 +176,7 @@ const { renderViewCounter } = require('./view-counter-render');
 
 // Generate an OAuth state token bound to the initiating Discord user.
 //
-// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(OAUTH_STATE_SECRET,
+// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(GITHUB_OAUTH_STATE_SECRET,
 // `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
 // discord_id pulled from consumePendingLink(); a mismatch means the state
 // was tampered with or replayed across users, even if the random nonce
@@ -182,19 +186,44 @@ const { renderViewCounter } = require('./view-counter-render');
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
 let _warnedStateSecretFallback = false;
+let _warnedShortLegacyStateSecret = false;
 // Random per-process fallback so even inside the Jest harness there's no
 // static key that, if accidentally shipped, would be forgeable. Regenerated
 // on every process start; tests that need a stable secret should set
-// OAUTH_STATE_SECRET explicitly in their own mocks.
+// GITHUB_OAUTH_STATE_SECRET explicitly in their own mocks.
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-function stateSecret() {
-  // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
-  // can be rotated without also invalidating in-flight OAuth state tokens —
-  // and vice versa. Blast-radius isolation: leaking one doesn't enable
-  // forgery of the other's use cases. Fall back to GITHUB_CLIENT_SECRET for
-  // backward-compat with existing deployments.
-  const dedicated = process.env.OAUTH_STATE_SECRET;
-  if (dedicated) return dedicated;
+
+function warnShortLegacyStateSecret(label, length) {
+  if (!_warnedShortLegacyStateSecret) {
+    logger.warn(
+      `Ignoring ${label} for GitHub OAuth state: secret is too short `
+      + `(got ${length}) while a dedicated secret is active.`
+    );
+    _warnedShortLegacyStateSecret = true;
+  }
+}
+
+function stateSecrets() {
+  // Prefer a GitHub-flow secret, with OAUTH_STATE_SECRET as the legacy shared
+  // reader during cutover. Once OAUTH_STATE_SECRET is removed, old shared-key
+  // states stop validating after the pending-link TTL has elapsed.
+  //
+  // Rotation playbook: provision GITHUB_OAUTH_STATE_SECRET in SSM while
+  // leaving OAUTH_STATE_SECRET present, deploy, wait longer than
+  // PENDING_LINK_EXPIRY_MINUTES, then replace OAUTH_STATE_SECRET with the SSM
+  // PLACEHOLDER sentinel. Dual-read covers OAUTH_STATE_SECRET only; migrating
+  // directly from GITHUB_CLIENT_SECRET fallback can invalidate in-flight links.
+  // If a dedicated secret is present but too short, fail closed instead of
+  // silently falling back; the production boot guard catches that before serve.
+  // Production boot intentionally rejects the GITHUB_CLIENT_SECRET fallback;
+  // keep this dev/test escape hatch in sync with enforceProductionOAuthStateSecrets().
+  const secrets = collectOAuthFlowStateSecrets({
+    primaryEnvName: 'GITHUB_OAUTH_STATE_SECRET',
+    errorPrefix: 'Refusing to mint OAuth state',
+    warnShortOptional: warnShortLegacyStateSecret,
+  });
+  if (secrets.length > 0) return secrets;
+
   if (!config.GITHUB_CLIENT_SECRET) {
     // Only use the static fallback inside Jest (NODE_ENV=test AND either
     // JEST_WORKER_ID set by Jest, or CI=true). This raises the bar: merely
@@ -203,18 +232,34 @@ function stateSecret() {
     const inTestHarness = process.env.NODE_ENV === 'test'
       && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
     if (!inTestHarness) {
-      throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
+      throw new Error(
+        'Refusing to mint OAuth state: GITHUB_OAUTH_STATE_SECRET, OAUTH_STATE_SECRET, '
+        + 'or GITHUB_CLIENT_SECRET must be set.'
+      );
     }
     if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
+      logger.warn(
+        'OAuth state HMAC using per-process random test fallback — set '
+        + 'GITHUB_OAUTH_STATE_SECRET or OAUTH_STATE_SECRET'
+      );
       _warnedStateSecretFallback = true;
     }
-    return _testFallbackSecret;
+    return [_testFallbackSecret];
   }
-  return config.GITHUB_CLIENT_SECRET;
+  return collectStateSecrets([
+    { value: config.GITHUB_CLIENT_SECRET, label: 'GITHUB_CLIENT_SECRET fallback' },
+  ], {
+    errorPrefix: 'Refusing to mint OAuth state',
+  });
+}
+
+function stateSecret() {
+  return stateSecrets()[0];
 }
 function generateState(discordId) {
   const nonce = crypto.randomBytes(16).toString('hex');
+  // By design this throws on unusable signing config; production boot validates
+  // state secrets before serving, so a sign-time throw is a dev/test signal.
   const sig = crypto.createHmac('sha256', stateSecret())
     .update(`${discordId}:${nonce}`)
     .digest('hex');
@@ -226,11 +271,22 @@ function verifyStateBinding(state, discordId) {
   if (parts.length !== 2) return false;
   const [nonce, sig] = parts;
   if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
+  const sigBuf = Buffer.from(sig, 'hex');
+  let secrets;
   try {
-    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+    secrets = stateSecrets();
+  } catch {
+    return false;
+  }
+  try {
+    let sigOk = false;
+    for (const secret of secrets) {
+      const expected = crypto.createHmac('sha256', secret)
+        .update(`${discordId}:${nonce}`)
+        .digest('hex');
+      if (crypto.timingSafeEqual(sigBuf, Buffer.from(expected, 'hex'))) sigOk = true;
+    }
+    return sigOk;
   } catch { return false; }
 }
 
