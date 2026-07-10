@@ -17,6 +17,8 @@ const {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  discordInstallStateConfigProblems,
+  discordInstallStateConfigWarnings,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
@@ -215,6 +217,105 @@ describe('missingViewUpdatePushKeys', () => {
         QURL_BOT_VIEW_UPDATES_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-view-updates',
       }),
     ).toEqual([]);
+  });
+});
+
+describe('discordInstallStateConfigProblems', () => {
+  it('returns empty while required-state rollout flag is off', () => {
+    expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: false,
+      DISCORD_INSTALL_STATE_SECRET: '',
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
+  });
+
+  it('returns empty when required-state mode is set before the Discord install callback is configured', () => {
+    expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: false,
+      DISCORD_INSTALL_STATE_REQUIRED: true,
+      DISCORD_INSTALL_STATE_SECRET: '',
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
+  });
+
+  it('requires the signing secret after the required-state flag flips', () => {
+    expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: true,
+      DISCORD_INSTALL_STATE_SECRET: '',
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([
+      'DISCORD_INSTALL_STATE_SECRET is required when DISCORD_INSTALL_STATE_REQUIRED=true',
+    ]);
+  });
+
+  it('rejects a too-short signing secret after the required-state flag flips', () => {
+    expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: true,
+      DISCORD_INSTALL_STATE_SECRET: '2'.repeat(63),
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([
+      'DISCORD_INSTALL_STATE_SECRET must be at least 64 characters when DISCORD_INSTALL_STATE_REQUIRED=true',
+    ]);
+  });
+
+  it('returns empty when required-state mode has a 32-byte-hex-length secret', () => {
+    expect(discordInstallStateConfigProblems({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: true,
+      DISCORD_INSTALL_STATE_SECRET: '2'.repeat(64),
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
+  });
+});
+
+describe('discordInstallStateConfigWarnings', () => {
+  it('warns while state-bearing install links would fail because the bot secret is unset before required-state rollout', () => {
+    expect(discordInstallStateConfigWarnings({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: false,
+      DISCORD_INSTALL_STATE_SECRET: '',
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([
+      expect.stringContaining('DISCORD_INSTALL_STATE_SECRET is unset'),
+    ]);
+  });
+
+  it('warns while state-bearing install links would fail because the bot secret is too short before required-state rollout', () => {
+    expect(discordInstallStateConfigWarnings({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: false,
+      DISCORD_INSTALL_STATE_SECRET: '2'.repeat(63),
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([
+      expect.stringContaining('shorter than 64 characters'),
+    ]);
+  });
+
+  it('does not warn when the Discord install callback is not configured or the rollout secret can verify state', () => {
+    expect(discordInstallStateConfigWarnings({
+      isDiscordInstallConfigured: false,
+      DISCORD_INSTALL_STATE_REQUIRED: false,
+      DISCORD_INSTALL_STATE_SECRET: '',
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
+    expect(discordInstallStateConfigWarnings({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: false,
+      DISCORD_INSTALL_STATE_SECRET: '2'.repeat(64),
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
+  });
+
+  it('does not warn in required-state mode because invalid config is a boot problem instead', () => {
+    expect(discordInstallStateConfigWarnings({
+      isDiscordInstallConfigured: true,
+      DISCORD_INSTALL_STATE_REQUIRED: true,
+      DISCORD_INSTALL_STATE_SECRET: '2'.repeat(63),
+      DISCORD_INSTALL_STATE_SECRET_MIN_CHARS: 64,
+    })).toEqual([]);
   });
 });
 

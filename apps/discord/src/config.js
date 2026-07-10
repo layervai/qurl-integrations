@@ -321,6 +321,8 @@ function takeGatewayHandoffHmac() {
 // independently of send cadence. See setDetectCooldown in commands.js.
 const sendCooldownMs = intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true });
 const detectCooldownMs = intEnv('QURL_DETECT_COOLDOWN_MS', sendCooldownMs, { minPositive: true });
+const DISCORD_INSTALL_STATE_SECRET_MIN_CHARS = 64;
+const discordInstallStateSecret = process.env.DISCORD_INSTALL_STATE_SECRET?.trim() || '';
 
 // Configuration from environment variables
 module.exports = {
@@ -334,6 +336,15 @@ module.exports = {
   // /oauth/discord/callback route will return 503 with a documented
   // "not configured" page until Justin sets the secret.
   DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
+  // Shared HMAC secret for layerv.ai's signed "Add to Discord" links.
+  // Trimmed at config load so an SSM newline/space does not turn every
+  // state-bearing install into a signature mismatch. Presence/length are
+  // enforced at boot only once DISCORD_INSTALL_STATE_REQUIRED=true.
+  DISCORD_INSTALL_STATE_SECRET: discordInstallStateSecret,
+  DISCORD_INSTALL_STATE_SECRET_MIN_CHARS,
+  // Rollout switch: false accepts missing `state` while marketing flips
+  // links; true rejects missing state so the bypass closes after rollout.
+  DISCORD_INSTALL_STATE_REQUIRED: process.env.DISCORD_INSTALL_STATE_REQUIRED === 'true',
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,

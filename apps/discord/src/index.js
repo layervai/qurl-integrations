@@ -35,6 +35,8 @@ const {
   missingKekRequiredKeys,
   missingEventShipperKeys,
   missingViewUpdatePushKeys,
+  discordInstallStateConfigProblems,
+  discordInstallStateConfigWarnings,
   missingMapCommandKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -311,6 +313,16 @@ if (viewUpdatePushMissing.length > 0) {
   logger.error(`ENABLE_VIEW_UPDATE_PUSH=true but missing required env vars: ${viewUpdatePushMissing.join(', ')}`);
   process.exit(1);
 }
+
+// Discord install signed-state rollout. Keep the default lenient while
+// marketing deploys signed links, but once the required-state flag is
+// flipped, fail at boot if the verifier cannot possibly accept tokens.
+const discordInstallStateProblems = discordInstallStateConfigProblems(config);
+if (discordInstallStateProblems.length > 0) {
+  discordInstallStateProblems.forEach(problem => logger.error(problem));
+  process.exit(1);
+}
+discordInstallStateConfigWarnings(config).forEach(warning => logger.warn(warning));
 
 // Reject combined + flag-on. In combined mode the gateway-side
 // publish hook AND the worker-side consumer would both arm in one

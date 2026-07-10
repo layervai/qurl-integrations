@@ -93,6 +93,8 @@ setup) means required to use that feature.
 | `QURL_ENDPOINT` | No | qURL API base URL (defaults to production; localhost in dev) |
 | `CONNECTOR_URL` | No | qURL connector URL for file upload + serving |
 | `BASE_URL` | OAuth setup | Public `https://` origin of the bot; required to complete the OAuth `/qurl setup` flow (defaults to `http://localhost:3000`). |
+| `DISCORD_INSTALL_STATE_SECRET` | Discord install state | Shared 64-character hex HMAC secret for signed layerv.ai "Add to Discord" links; the bot and marketing both use the hex string as the raw HMAC key, and the state signature segment is lowercase SHA-256 hex. Set on the bot before marketing flips the link to include `state`. |
+| `DISCORD_INSTALL_STATE_REQUIRED` | Discord install state | Set to `true` only after the bot secret is deployed and all layerv.ai install links send signed `state`; then callbacks missing `state` are rejected. |
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
@@ -101,6 +103,12 @@ setup) means required to use that feature.
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
+
+Signed Discord install state has a strict rollout order: deploy
+`DISCORD_INSTALL_STATE_SECRET` to the bot first, then let layerv.ai marketing
+send state-bearing install links, then set `DISCORD_INSTALL_STATE_REQUIRED=true`.
+If a state-bearing callback arrives before the bot secret is deployed, the
+callback fails closed with `400 Install link expired`.
 
 When enabling `/qurl detect`, the minted `qurl_site` must be host-only, and the
 host must be the tunnel resource id (`r_<id>`) under a supported qURL tunnel

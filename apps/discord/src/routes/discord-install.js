@@ -16,10 +16,12 @@
 // admin-visible step between Discord consent and Auth0 consent.
 //
 // CSRF posture (LOAD-BEARING — do not remove without replacing):
-//   Discord's echoed `state` param is intentionally NOT validated here —
-//   admins land via a static "Add to Discord" link on layerv.ai, not a
-//   per-session form, so there's no session-bound token to check
-//   against. Defense stacks on two surfaces:
+//   During rollout, the callback accepts a missing Discord `state`
+//   because the public layerv.ai install link may lag the bot deploy.
+//   After rollout, DISCORD_INSTALL_STATE_REQUIRED=true makes missing
+//   state fail closed. When `state` is present, it MUST be a short-
+//   lived HMAC token minted by the marketing page and verified here.
+//   Defense stacks on:
 //     1. Token exchange — only Discord can mint a `code` that pairs
 //        with our DISCORD_CLIENT_ID/SECRET; a forged callback can't
 //        get past the POST /oauth2/token call.
@@ -27,8 +29,9 @@
 //        surfaces (guildId, qurlAccountEmail, keyPrefix) so a victim
 //        of attacker-pre-runs-install-then-forwards-URL can spot the
 //        mismatch before usage starts.
-//   Issue #179 tracks the cross-repo signed-install-state work that
-//   would close the asterisk on (2) by validating state at the entry.
+//     3. Signed install `state` narrows the forwarded-link window to
+//        the marketing token TTL, and the required-state flag closes
+//        the "drop the state param" bypass once layerv.ai flips links.
 
 const express = require('express');
 const config = require('../config');
@@ -39,6 +42,7 @@ const { rateLimit } = require('../utils/oauth-rate-limit');
 const { setQurlOAuthCookie, setQurlOAuthPkceCookie } = require('../utils/oauth-cookies');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
+const { verifyMarketingInstallState } = require('../utils/marketing-install-state');
 
 // Network-call timeouts — same shape as routes/qurl-oauth.js. Centralized
 // so a future "Discord OAuth2 is slow under load" tuning is one constant
@@ -109,6 +113,7 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
   const code = singleStringParam(req.query.code);
   const guildId = singleStringParam(req.query.guild_id);
+  const marketingState = singleStringParam(req.query.state);
   if (!code) {
     return renderError(res, 400, 'Missing authorization code', 'Discord did not return an authorization code.');
   }
@@ -119,6 +124,25 @@ router.get('/callback', rateLimit, async (req, res) => {
     // scope=bot — flag for triage.
     logger.warn('Discord install callback missing guild_id', { ip: req.ip });
     return renderError(res, 400, 'Bot install incomplete', 'Discord did not return the server you selected. Please click "Add to Discord" again.');
+  }
+  if (!marketingState) {
+    if (config.DISCORD_INSTALL_STATE_REQUIRED) {
+      logger.warn('Discord install callback rejected missing required marketing state', {
+        guildId,
+        ip: req.ip,
+      });
+      return renderError(res, 400, 'Install link expired', 'Please click "Add to Discord" again.');
+    }
+  } else {
+    const stateCheck = verifyMarketingInstallState(marketingState);
+    if (!stateCheck.ok) {
+      logger.warn('Discord install callback rejected invalid marketing state', {
+        reason: stateCheck.reason,
+        guildId,
+        ip: req.ip,
+      });
+      return renderError(res, 400, 'Install link expired', 'Please click "Add to Discord" again.');
+    }
   }
 
   // Stage-2 ALWAYS sets prompt=consent on the chained Auth0 redirect,
