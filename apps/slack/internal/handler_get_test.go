@@ -287,21 +287,21 @@ func TestHandleGet_UnknownSlugColdChannelNoUpstreamHop(t *testing.T) {
 	}
 }
 
-// TestHandleGet_MintTunnelDisabled fences the 403/tunnel_disabled
+// TestHandleGet_MintConnectorDisabled fences the 403/connector_disabled
 // mint error → user-facing "Protected resources are not yet enabled"
 // reply.
-func TestHandleGet_MintTunnelDisabled(t *testing.T) {
+func TestHandleGet_MintConnectorDisabled(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(t, w, http.StatusForbidden, "tunnel_disabled", "Forbidden")
+		writeAPIError(t, w, http.StatusForbidden, "connector_disabled", "Forbidden")
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "Protected resources are not yet enabled") {
-		t.Errorf("async reply missing tunnel-disabled message: %q", async)
+		t.Errorf("async reply missing Connector-disabled message: %q", async)
 	}
 }
 
@@ -1255,11 +1255,11 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			wantAudit: true,
 		},
 		{
-			name: "expected tunnel_disabled 403 stays quiet",
+			name: "expected connector_disabled 403 stays quiet",
 			apiErr: &client.APIError{
 				StatusCode: http.StatusForbidden,
-				Code:       "tunnel_disabled",
-				RequestID:  "req_tunnel_disabled",
+				Code:       "connector_disabled",
+				RequestID:  "req_connector_disabled",
 			},
 			wantAudit: false,
 		},

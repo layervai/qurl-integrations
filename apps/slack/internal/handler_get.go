@@ -98,11 +98,11 @@ func ambiguousResourceAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` matches multiple resources in this channel. Ask your Slack admin to set a channel-specific alias for the one you need.", alias)
 }
 
-// tunnelDisabledMessage is shown when the qURL service returns the
-// `tunnel_disabled` error code (the workspace doesn't have
-// tunnel-resource minting enabled yet). Lifted because both alias
+// connectorDisabledMessage is shown when the qURL service returns the
+// `connector_disabled` error code (the workspace doesn't have
+// qURL Connector resource minting enabled yet). Lifted because both alias
 // resolution and mint can surface this.
-const tunnelDisabledMessage = "Protected resources are not yet enabled for this workspace. Ask LayerV support."
+const connectorDisabledMessage = "Protected resources are not yet enabled for this workspace. Ask LayerV support."
 
 // serviceUnreachableMessage is the "honest retry-friendly" copy
 // surfaced for transport-class failures (5xx, dial errors, network
@@ -808,7 +808,7 @@ func (h *Handler) deliverGetDM(ctx context.Context, log *slog.Logger, teamID, en
 }
 
 // mapMintError converts an [*client.APIError] from the mint into a
-// friendly message. Rate-limit + tunnel-disabled get specific text;
+// friendly message. Rate-limit + Connector-disabled get specific text;
 // transport-class (5xx/network) gets the retry-friendly
 // [serviceUnreachableMessage]; everything else gets the generic
 // [commonGetMintFailedMessage].
@@ -820,8 +820,8 @@ func mapMintError(log *slog.Logger, err error) error {
 			retry := time.Duration(apiErr.RetryAfter) * time.Second
 			return &userError{msg: rateLimitMessage(retry, apiErr.RequestID)}
 		case http.StatusForbidden:
-			if apiErr.Code == "tunnel_disabled" {
-				return &userError{msg: tunnelDisabledMessage}
+			if apiErr.Code == "connector_disabled" {
+				return &userError{msg: connectorDisabledMessage}
 			}
 			if isExpectedGetMintForbiddenCode(apiErr.Code) {
 				log.Info("get: mint rejected with expected quota-class 403", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
@@ -830,7 +830,7 @@ func mapMintError(log *slog.Logger, err error) error {
 			logGetDependencyAuthFailure(log, apiErr)
 			// 403 with an unrecognized code is a server-contract
 			// surprise — log loud so a future rename of
-			// `tunnel_disabled` doesn't get silently masked.
+			// `connector_disabled` doesn't get silently masked.
 			log.Error("get: mint rejected with 403 — unmapped error code", withRequestIDAttr(apiErr.RequestID, "code", apiErr.Code, "detail", apiErr.Detail)...)
 			return &userError{msg: commonGetMintFailedMessage}
 		case http.StatusBadRequest:
