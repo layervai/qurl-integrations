@@ -100,8 +100,11 @@ func ambiguousResourceAliasMessage(alias string) string {
 
 // connectorDisabledMessage is shown when the qURL service returns the
 // `connector_disabled` error code (the workspace doesn't have
-// qURL Connector resource minting enabled yet). Lifted because both alias
-// resolution and mint can surface this.
+// qURL Connector resource minting enabled yet).
+// TODO(upstream-contract): keep in lockstep with qurl-service's public
+// connector-disabled error contract.
+const errCodeConnectorDisabled = "connector_disabled"
+
 const connectorDisabledMessage = "Protected resources are not yet enabled for this workspace. Ask LayerV support."
 
 // serviceUnreachableMessage is the "honest retry-friendly" copy
@@ -820,7 +823,7 @@ func mapMintError(log *slog.Logger, err error) error {
 			retry := time.Duration(apiErr.RetryAfter) * time.Second
 			return &userError{msg: rateLimitMessage(retry, apiErr.RequestID)}
 		case http.StatusForbidden:
-			if apiErr.Code == "connector_disabled" {
+			if apiErr.Code == errCodeConnectorDisabled {
 				return &userError{msg: connectorDisabledMessage}
 			}
 			if isExpectedGetMintForbiddenCode(apiErr.Code) {
