@@ -31,9 +31,9 @@ const logger = require('../logger');
 const { verifyHmacSha256 } = require('./webhook-hardening');
 
 // Minimum acceptable secret length — per round-9 #4. 32 chars is the
-// floor for an HMAC-SHA256 secret with adequate entropy (matches the
-// `0`.repeat(64) test fixture's order of magnitude, well below the
-// 128-char hex secrets ops actually provisions). A 4-char accidental
+// floor for an HMAC-SHA256 secret with adequate entropy — half the
+// 64-char values the documented generator (`openssl rand -hex 32`)
+// and the `0`.repeat(64) test fixture produce. A 4-char accidental
 // value would HMAC just fine with no security; reject upfront. Applies
 // to whichever key in the resolution order wins — dedicated secrets
 // and the GITHUB_CLIENT_SECRET fallback alike (Auth0 / GitHub

@@ -78,4 +78,25 @@ describe('verifyStateBinding', () => {
     const state = makeState('12345', 'other-secret');
     expect(verifyStateBinding(state, '12345')).toBe(false);
   });
+
+  it('throws (not false) on a well-formed state when the resolved secret is under the floor', () => {
+    // Pins the headline behavior change at the surface the /auth
+    // callback route actually calls (routes/oauth.js): a sub-32-char
+    // secret makes verifyStateBinding THROW once the state passes the
+    // format gates — the Express 5 async handler forwards it to the
+    // error middleware as a 500. Previously it silently verified
+    // against the short secret. The signer resolves config lazily per
+    // call, so mutating the mocked config object here is observed.
+    const config = require('../src/config');
+    const saved = config.GITHUB_CLIENT_SECRET;
+    config.GITHUB_CLIENT_SECRET = 'shrt';
+    try {
+      const state = makeState('12345', 'shrt');
+      expect(() => verifyStateBinding(state, '12345')).toThrow(
+        /Refusing to mint OAuth state: GITHUB_CLIENT_SECRET is shorter than 32 chars/,
+      );
+    } finally {
+      config.GITHUB_CLIENT_SECRET = saved;
+    }
+  });
 });
