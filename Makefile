@@ -89,8 +89,10 @@ pre-commit-run:
 
 ## Discord bot (Node.js)
 
+# Matches CI's jest flags minus --silent, kept verbose for local debugging
+# (discord.yml runs `npm test -- --ci --silent`).
 test-discord:
-	@if [ "$$(node --version)" != "v$$(cat apps/discord/.nvmrc)" ]; then \
+	@if command -v node >/dev/null 2>&1 && [ "$$(node --version)" != "v$$(cat apps/discord/.nvmrc)" ]; then \
 		echo "warning: node $$(node --version) differs from apps/discord/.nvmrc v$$(cat apps/discord/.nvmrc) (CI uses the pinned version)" >&2; \
 	fi
 	cd apps/discord && npm ci --no-audit --no-fund && npm test -- --ci
