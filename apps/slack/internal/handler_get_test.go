@@ -1255,7 +1255,7 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			wantAudit: true,
 		},
 		{
-			name: "expected connector_disabled 403 stays quiet",
+			name: "connector_disabled 403 returns friendly message without logs",
 			apiErr: &client.APIError{
 				StatusCode: http.StatusForbidden,
 				Code:       "connector_disabled",
@@ -1327,6 +1327,15 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 				}
 			} else if audit != nil {
 				t.Fatalf("unexpected dependency auth audit: %#v; logs=%s", audit, logs.String())
+			}
+			if tc.apiErr.Code == "connector_disabled" {
+				if logs.Len() != 0 {
+					t.Fatalf("connector_disabled 403 must not emit logs: %s", logs.String())
+				}
+				var ue *userError
+				if !errors.As(gotErr, &ue) || ue.msg != connectorDisabledMessage {
+					t.Fatalf("connector_disabled 403 msg = %#v (%T), want Connector-disabled copy", gotErr, gotErr)
+				}
 			}
 			if isExpectedGetMintForbiddenCode(tc.apiErr.Code) {
 				if strings.Contains(logs.String(), `"level":"ERROR"`) {
