@@ -16,21 +16,46 @@ name: Release Please
 # (`v0.2.0`, not `cli-v0.2.0`; `include-component-in-tag: false` in
 # release-please-config.json). OSS GoReleaser derives {{ .Version }} from the
 # current semver tag and cannot parse prefixed tags (monorepo tag_prefix is a
-# GoReleaser Pro feature), and nothing else consumes bare v* tags in this
-# repo. scripts/install.sh and Formula/qurl.rb rely on this contract.
+# GoReleaser Pro feature). scripts/install.sh and Formula/qurl.rb rely on
+# this contract, and GORELEASER_CURRENT_TAG pins it below — a combined
+# release PR can put several components' tags on one commit, and GoReleaser
+# must not guess which one is the CLI's.
+#
+# Failure/recovery semantics: if release-cli fails, the tag and the GitHub
+# Release already exist without binaries (the installer 404s on that version
+# until assets land; a normal minutes-long window like this also exists on
+# every release while GoReleaser uploads). Recover with "Re-run failed jobs"
+# on the failed run, or run this workflow via workflow_dispatch with cli_tag
+# set to the affected tag. Do NOT "Re-run all jobs": release-please then
+# sees the release already exists and skips release-cli. Asset re-uploads
+# are idempotent (release.replace_existing_artifacts in .goreleaser.yml).
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      cli_tag:
+        description: "Existing bare CLI release tag (e.g. v0.2.0) to build and attach assets for"
+        required: true
+        type: string
 
-permissions:
-  contents: write
-  pull-requests: write
+# Serialize runs: canceling a release mid-publish is exactly the
+# half-published state the recovery notes above exist for.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       cli_release_created: ${{ steps.release.outputs['apps/cli--release_created'] }}
       cli_tag: ${{ steps.release.outputs['apps/cli--tag_name'] }}
@@ -43,21 +68,30 @@ jobs:
 
   release-cli:
     needs: release-please
-    if: needs.release-please.outputs.cli_release_created == 'true'
+    if: >-
+      !cancelled() && (
+        needs.release-please.outputs.cli_release_created == 'true' ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ needs.release-please.outputs.cli_tag }}
+          ref: ${{ env.CLI_TAG }}
           fetch-depth: 0
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
 
-      # release.mode defaults to keep-existing: GoReleaser uploads artifacts
-      # to the release release-please just created and keeps its notes.
+      # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
+      # uploads artifacts to the release release-please just created and
+      # keeps its notes.
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -66,3 +100,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Pin which tag is being released. A combined release PR can tag
+          # this commit for several components at once, and GoReleaser's
+          # auto-detection would otherwise pick one by version-sort luck.
+          GORELEASER_CURRENT_TAG: ${{ env.CLI_TAG }}
+
+      - name: Post recovery instructions on failure
+        if: failure()
+        run: |
+          {
+            echo "## CLI release incomplete"
+            echo ""
+            echo "Tag and GitHub Release \`${CLI_TAG}\` exist, but GoReleaser did not finish attaching assets — \`scripts/install.sh\` 404s on this version and the Homebrew tap was not updated."
+            echo ""
+            echo "Recovery: fix the cause, then re-run via workflow_dispatch with \`cli_tag=${CLI_TAG}\`, or use **Re-run failed jobs** on this run. Do NOT use 'Re-run all jobs' (release-please will skip this job because the release already exists). Re-uploads are idempotent."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -89,7 +89,7 @@ jobs:
               impact="Security CI failed on main. Review the run before trusting this SHA for deploy or promotion."
               ;;
             "Release Please")
-              impact="Release automation failed on main. Release PRs, tags, or changelog updates may be stale until the run is repaired."
+              impact="Release automation failed on main. Release PRs, tags, or changelogs may be stale — and if the release-cli job failed, a CLI release may exist without binaries (installer 404s on the newest version, Homebrew tap not updated). Fix the cause, then re-run failed jobs on the linked run or dispatch Release Please with cli_tag=<tag>."
               ;;
             "Validate issue templates")
               impact="Issue-template validation failed on main. GitHub issue forms may be broken until the schema is fixed."
