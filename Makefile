@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -12,8 +12,15 @@ fmt:
 
 ## Linting
 
+# Pinned so local runs match CI exactly. Keep in sync with every pin site:
+# .github/workflows/slack.yml (2), .github/workflows/shared-test.yml (2),
+# and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
+# drifts: newer golangci-lint versions flag issues the pinned config is
+# clean on.
+GOLANGCI_LINT_VERSION := v2.10.1
+
 lint:
-	golangci-lint run --timeout=5m ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./...
 
 vet:
 	go vet ./...
@@ -90,14 +97,29 @@ pre-commit-install:
 pre-commit-run:
 	pre-commit run --all-files
 
-## Discord bot (Python)
+## Discord bot (Node.js)
 
+define discord_node_warning
+@if command -v node >/dev/null 2>&1 && [ "$$(node --version)" != "v$$(cat apps/discord/.nvmrc)" ]; then \
+	echo "warning: node $$(node --version) differs from apps/discord/.nvmrc v$$(cat apps/discord/.nvmrc) (CI uses the pinned version)" >&2; \
+fi
+endef
+
+# Matches CI's jest flags minus --silent, kept verbose for local debugging
+# (discord.yml runs `npm test -- --ci --silent`); --no-audit --no-fund are
+# local-only conveniences that mute npm output without changing the tree.
 test-discord:
-	cd apps/discord && pip install -q -r requirements-dev.txt && python -m pytest tests/ -q
+	$(discord_node_warning)
+	cd apps/discord && npm ci --no-audit --no-fund && npm test -- --ci
 
-check-discord: test-discord
+# CI's discord gate minus `npm audit` (network-dependent and can newly fail
+# with no code change; CI owns that gate).
+check-discord:
+	$(discord_node_warning)
+	cd apps/discord && npm ci --no-audit --no-fund && npm run lint && npm test -- --ci
 
-## Full check (CI parity)
+## Full check (Go + repo checks, matching the Go CI path; app suites
+## run via their own CI gates or make check-discord)
 
 check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync lint test-race
 
