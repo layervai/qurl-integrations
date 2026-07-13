@@ -49,7 +49,7 @@ beforeEach(() => {
 });
 
 describe('oauth-state createStateSigner', () => {
-  it('pins MIN_STATE_SECRET_LENGTH at 32 (round-9 #4 floor)', () => {
+  it('pins MIN_STATE_SECRET_LENGTH at 32', () => {
     expect(MIN_STATE_SECRET_LENGTH).toBe(32);
   });
 

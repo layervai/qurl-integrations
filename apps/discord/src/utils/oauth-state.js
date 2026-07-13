@@ -49,12 +49,15 @@ const MIN_STATE_SECRET_LENGTH = 32;
 //
 //   sign(data)           → hex HMAC-SHA256 signature over `data`.
 //   verify(data, sigHex) → timing-safe boolean; false (never throws)
-//                          when sigHex is malformed hex or wrong length.
-//                          NOT total over misconfiguration: a missing or
+//                          when sigHex is malformed hex or wrong length
+//                          — but only once the secret resolves. NOT
+//                          total over misconfiguration: a missing or
 //                          sub-floor secret throws out of verify exactly
-//                          as it does out of sign — a fail-loud 500 on
-//                          the callback beats silently rejecting every
-//                          legitimate state until someone notices.
+//                          as it does out of sign (secret resolution
+//                          runs first, before sigHex is inspected) — a
+//                          fail-loud 500 on the callback beats silently
+//                          rejecting every legitimate state until
+//                          someone notices.
 //
 // Secret precedence (highest first):
 //   1. secretConfigKeys, in order — flow-dedicated secrets, so ops can
