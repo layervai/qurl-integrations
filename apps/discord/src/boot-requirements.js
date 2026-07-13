@@ -402,12 +402,16 @@ function invalidHotStandbyValues(cfg) {
 //
 // Returns an array of operator-facing message strings, [] on success
 // (same shape as invalidHotStandbyValues above).
+//
+// Every message ends with the same remediation clause — one constant
+// so the four sites can't drift on the recommended generator.
+const STATE_SECRET_REMEDIATION = 'Generate with: openssl rand -hex 32';
 function invalidStateSecretValues(cfg) {
   const problems = [];
   if (cfg.isOpenNHPActive && !cfg.OAUTH_STATE_SECRET) {
     problems.push(
       'OAUTH_STATE_SECRET must be set in production (OpenNHP mode mounts the GitHub OAuth surface). ' +
-      'Generate with: openssl rand -hex 32'
+      STATE_SECRET_REMEDIATION
     );
   }
   if (cfg.isQurlOAuthConfigured
@@ -415,7 +419,7 @@ function invalidStateSecretValues(cfg) {
     if (!cfg.GITHUB_CLIENT_SECRET) {
       problems.push(
         'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
-        'set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. Generate with: openssl rand -hex 32'
+        `set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
       );
     } else if (cfg.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
       // Winning-key check — see the GITHUB_CLIENT_SECRET note above.
@@ -423,7 +427,7 @@ function invalidStateSecretValues(cfg) {
         'qURL OAuth is configured (AUTH0_* set) and GITHUB_CLIENT_SECRET is its only available ' +
         `state-signing key, but it is shorter than ${MIN_STATE_SECRET_LENGTH} chars ` +
         `(got ${cfg.GITHUB_CLIENT_SECRET.length}); the state signer will refuse to mint with it. ` +
-        'Set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. Generate with: openssl rand -hex 32'
+        `Set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
       );
     }
   }
@@ -432,7 +436,7 @@ function invalidStateSecretValues(cfg) {
     if (value && value.length < MIN_STATE_SECRET_LENGTH) {
       problems.push(
         `${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${value.length}); ` +
-        'the state signer will refuse to mint with it. Generate with: openssl rand -hex 32'
+        `the state signer will refuse to mint with it. ${STATE_SECRET_REMEDIATION}`
       );
     }
   }
