@@ -1,8 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "commonjs",
-    "moduleResolution": "node",
+    // node16 resolves extensionless relative imports only because this
+    // package is CommonJS (no "type": "module" in package.json). Adding
+    // "type": "module" later would force `.js` extensions on every
+    // relative import across the suite.
+    "module": "node16",
+    "moduleResolution": "node16",
+    "isolatedModules": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

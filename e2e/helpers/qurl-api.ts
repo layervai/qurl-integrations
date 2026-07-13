@@ -212,15 +212,129 @@ export async function revokeLink(
   return res.ok;
 }
 
-/** Get link status */
+export interface LinkStatus {
+  use_count: number;
+  status: string;
+  expires_at: string;
+}
+
+/** Thrown by getLinkStatus on a non-2xx response. Carries the HTTP
+ * status structurally so getLinkStatusOrNull's 404 branch tests
+ * `.status` instead of regexing it back out of the message (the same
+ * string-matching debt discord-commands.smoke.test.ts tracks as #104 —
+ * here there's no module boundary forcing it, so the error is typed
+ * from the start). Module-private: tests assert via
+ * `.rejects.toThrow(/404/)`, whose message keeps the code embedded
+ * ("Status check failed: 404") exactly for that. */
+class StatusCheckError extends Error {
+  constructor(readonly status: number) {
+    super(`Status check failed: ${status}`);
+    this.name = 'StatusCheckError';
+  }
+}
+
+/** Get link status.
+ *
+ * NOTE on the id (#950): callers currently disagree on what keys
+ * `${mintUrl}/{id}/status` — smoke/concurrency pass qurl_id (q_…) for
+ * use-count checks, the revoke-focused suites pass resource_id (r_…)
+ * for post-revoke 404 assertions — and no non-test consumer of the
+ * endpoint exists in this repo to settle it. Every calling suite
+ * therefore carries a freshly-minted/live-resource canary
+ * (`pollLinkStatus(..., (s) => s !== null)` + `assertStatusVisible`)
+ * so a wrong key reds loudly on the first live run instead of letting
+ * 404-tolerant checks pass vacuously. Once a live run settles the key,
+ * unify the callers and fold this note (tracked in #950). */
 export async function getLinkStatus(
   mintUrl: string,
   apiKey: string,
   resourceId: string,
-): Promise<{ use_count: number; status: string; expires_at: string }> {
-  const res = await fetch(`${mintUrl}/${resourceId}/status`, {
+): Promise<LinkStatus> {
+  // Through the shared bounded transient retry (GET → also retries
+  // 502/504, see http.ts): the canaries built on this run a mint-then-
+  // read against a live API on every suite, and a single drain-gap blip
+  // shouldn't red a correct deployment. 404 is not in any retry set, so
+  // the not-found contract below stays immediate; network REJECTIONS
+  // still propagate (the helper deliberately doesn't catch those).
+  const res = await fetchWithTransientRetry(`${mintUrl}/${resourceId}/status`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
-  if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
-  return res.json() as any;
+  if (!res.ok) throw new StatusCheckError(res.status);
+  return (await res.json()) as LinkStatus;
+}
+
+/** Like getLinkStatus, but the 404 shape — "resource fully consumed or
+ * revoked" — resolves to null instead of throwing. Any OTHER failure
+ * (auth, network, 5xx) still throws, so tests can assert the valid
+ * post-consumption shapes without swallowing unrelated errors (the
+ * try/catch-around-expect anti-pattern this replaces). */
+export async function getLinkStatusOrNull(
+  mintUrl: string,
+  apiKey: string,
+  resourceId: string,
+): Promise<LinkStatus | null> {
+  try {
+    return await getLinkStatus(mintUrl, apiKey, resourceId);
+  } catch (e) {
+    if (e instanceof StatusCheckError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+/** Canary assertion for the #950 id-kind ambiguity. A bare
+ * `expect(status).not.toBeNull()` red says "expected not null"; this
+ * one says WHICH id kind failed and points the runner at the #950
+ * playbook — the canaries exist precisely to produce that actionable
+ * red on the first live run. `asserts` narrowing keeps any later use
+ * of the status typed. */
+export function assertStatusVisible(
+  status: LinkStatus | null,
+  idDescription: string,
+): asserts status is LinkStatus {
+  if (status === null) {
+    throw new Error(
+      `status canary: ${idDescription} is not visible at the status endpoint (404). ` +
+        `Likely the #950 id-kind mismatch (qurl_id vs resource_id) — follow that issue's ` +
+        `playbook; the run's 404-tolerant checks can't be trusted until it's settled.`,
+    );
+  }
+}
+
+/** Bounded-poll wrapper over getLinkStatusOrNull: re-reads until
+ * `predicate(status)` holds or the budget elapses, returning the LAST
+ * observation either way (the caller still owns the assertion, so a
+ * predicate that never holds fails there with the real final state).
+ *
+ * Exists for the mint-time canaries: they're read-after-write against a
+ * live API whose consistency model isn't pinned, and a brief replica /
+ * propagation lag shouldn't red a correct deployment. A first
+ * observation that already satisfies the predicate returns immediately,
+ * so a strongly-consistent endpoint pays zero extra latency. Non-404
+ * errors throw straight through — THIS loop only re-reads the data
+ * shape, not failures — while transient HTTP blips (5xx drain-gaps,
+ * 429s) are already absorbed one level down by getLinkStatus's
+ * fetchWithTransientRetry; network rejections still propagate.
+ *
+ * Deliberately NOT used for the post-revoke `.rejects.toThrow(/404/)`
+ * assertions: those keep the pre-existing single-shot canonical
+ * contract (smoke / link-lifecycle / file-revoke all share it).
+ * Revisit only if a live run shows revoke-propagation lag. */
+export async function pollLinkStatus(
+  mintUrl: string,
+  apiKey: string,
+  resourceId: string,
+  predicate: (status: LinkStatus | null) => boolean,
+  // 5s default: generous for the mint-then-read propagation lag this
+  // tolerates, while bounding the cost of the FAILING path — on a
+  // wrong-key deployment (#950) every canary burns its full budget
+  // before assertStatusVisible reds, and that cost repeats per suite.
+  { timeoutMs = 5_000, intervalMs = 1_000 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<LinkStatus | null> {
+  const deadline = Date.now() + timeoutMs;
+  let last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);
+  while (!predicate(last) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);
+  }
+  return last;
 }

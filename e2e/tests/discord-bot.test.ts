@@ -4,18 +4,24 @@
  * - Bot can read channel history
  * - Message format verification
  * - Channel permissions
+ *
+ * Every message this suite posts is tracked and best-effort deleted in
+ * afterAll (helpers/cleanup.ts) so repeated runs don't pile noise into
+ * the shared test channel.
  */
-
-// TODO: Add afterAll cleanup to revoke/delete test resources
 
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
+import { trackedDiscordMessages } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as discord from '../helpers/discord-api';
 
 const env = loadEnv();
+const sentMessages = trackedDiscordMessages(env);
+
+afterAll(() => sentMessages.deleteAll());
 
 describe('Discord Bot: Channel Operations', () => {
   test('bot user info is correct', async () => {
@@ -27,6 +33,7 @@ describe('Discord Bot: Channel Operations', () => {
   test('send and immediately read back a message', async () => {
     const unique = `e2e-${Date.now()}`;
     const sent = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, unique);
+    sentMessages.track(sent);
     expect(sent.id).toBeDefined();
 
     const messages = await discord.getMessages(env.BOT_TOKEN, env.CHANNEL_ID, 5);
@@ -37,31 +44,68 @@ describe('Discord Bot: Channel Operations', () => {
 
   test('send message with content', async () => {
     const msg = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, '[E2E] embed placeholder test');
+    sentMessages.track(msg);
     expect(msg.id).toBeDefined();
     expect(msg.content).toContain('embed placeholder');
   });
 
   test('read messages after a specific message ID', async () => {
     const m1 = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, `before-${Date.now()}`);
-    await new Promise((r) => setTimeout(r, 1000));
-    const m2 = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, `after-${Date.now()}`);
+    sentMessages.track(m1);
+    const m2Content = `after-${Date.now()}`;
+    const m2 = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, m2Content);
+    sentMessages.track(m2);
 
-    const after = await discord.getMessagesAfter(env.BOT_TOKEN, env.CHANNEL_ID, m1.id);
-    expect(after.length).toBeGreaterThanOrEqual(1);
-    expect(after.some((m) => m.id === m2.id)).toBe(true);
+    // waitForMessage with afterMessageId drives getMessagesAfter under
+    // the hood (helpers/discord-api.ts), polling until m2 is visible in
+    // channel history — replacing the previous undocumented bare 1s
+    // sleep between the sends with an explicit, bounded wait that
+    // tolerates history-read lag.
+    const found = await discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
+      afterMessageId: m1.id,
+      fromAuthorId: env.BOT_CLIENT_ID,
+      containsText: m2Content,
+      timeoutMs: 10_000,
+      pollIntervalMs: 500,
+    });
+    expect(found.id).toBe(m2.id);
   });
 
   test('waitForMessage finds a message by content', async () => {
     const unique = `wait-test-${Date.now()}`;
-    // Send after a short delay
-    setTimeout(() => discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, unique), 500);
-
-    const msg = await discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
-      containsText: unique,
-      timeoutMs: 10_000,
-      pollIntervalMs: 500,
-    });
-    expect(msg.content).toBe(unique);
+    // Race the delayed send against the poll so the message lands while
+    // waitForMessage is already polling — exercising the poll loop, not
+    // just its first read. allSettled (instead of the previous floating
+    // `setTimeout(() => discord.sendMessage(...))` with no .catch) so
+    // BOTH arms always run to completion: a send failure surfaces as the
+    // root-cause error (not an unhandled rejection plus a baffling 10s
+    // poll timeout), no poll keeps running past the test ("Cannot log
+    // after tests are done"), and the send arm's track() always executes
+    // so a sent message is cleaned up even when the poll arm fails.
+    const [pollRes, sendRes] = await Promise.allSettled([
+      discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
+        // Author-scoped: the unique text already makes cross-author
+        // collisions implausible, but the poll only ever wants the
+        // bot's own send. (Message author id === BOT_CLIENT_ID relies
+        // on a bot's user id equalling its application id — a Discord
+        // invariant this suite's smoke getMe check corroborates.)
+        fromAuthorId: env.BOT_CLIENT_ID,
+        containsText: unique,
+        timeoutMs: 10_000,
+        pollIntervalMs: 500,
+      }),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        const msg = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, unique);
+        sentMessages.track(msg);
+        return msg;
+      })(),
+    ]);
+    // Send failure first: if the send never landed, the poll timeout is
+    // just its symptom.
+    if (sendRes.status === 'rejected') throw sendRes.reason;
+    if (pollRes.status === 'rejected') throw pollRes.reason;
+    expect(pollRes.value.content).toBe(unique);
   });
 });
 

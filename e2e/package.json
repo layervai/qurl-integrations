@@ -1,6 +1,16 @@
 {
-  "dependencies": {
+  "name": "qurl-e2e",
+  "private": true,
+  "description": "Live-API end-to-end tests for the qURL integrations (Jest + ts-jest)",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
     "@types/jest": "^30.0.0",
+    "@types/node": "^24.0.0",
     "dotenv": "^17.4.2",
     "jest": "^30.3.0",
     "playwright": "^1.60.0",
