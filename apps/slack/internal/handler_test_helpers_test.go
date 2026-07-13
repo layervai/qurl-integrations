@@ -25,7 +25,11 @@ const (
 	testKeyType        = "type"
 	testKeyTargetURL   = "target_url"
 	testKeyDescription = "description"
-	testResourceIDFix  = "r_prod_db" // canonical test resource_id
+	// A production-shaped public resource ID. Keeping the canonical get-flow
+	// fixture above the old r_ length ensures Slack and the shared client do not
+	// accidentally reintroduce the pre-cutover identifier contract.
+	testPublicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg"
+	testResourceIDFix    = testPublicResourceID
 	// mintByTestResourcePath is the resource-scoped mint endpoint
 	// that `client.Create` hits when given a ResourceID (alias-form
 	// /qurl get). Lifted so the alias-form tests register their

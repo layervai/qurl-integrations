@@ -18,8 +18,8 @@ import (
 const (
 	testTeam      = "T1"
 	testChannel   = "C1"
-	testDeadID    = "r_dead0001"
-	testLiveID    = "r_app00001"
+	testDeadID    = "public-dead0001"
+	testLiveID    = "public-app00001"
 	testLiveSlug  = "app"
 	testDeadAlias = "dashboard"
 )
@@ -92,7 +92,7 @@ func TestCrawl_DryRunMakesNoMutations(t *testing.T) {
 	if snap.OrphanAliases != 1 || snap.OrphanAllowedIDs != 1 {
 		t.Errorf("orphan counts = (alias %d, allowed %d), want (1, 1)", snap.OrphanAliases, snap.OrphanAllowedIDs)
 	}
-	if snap.AliasNameMismatch != 0 || snap.LegacyAliases != 0 {
+	if snap.AliasNameMismatch != 0 || snap.LegacyAliases != 0 || snap.LegacyResourceIDs != 0 {
 		t.Errorf("unexpected informational findings: %+v", snap)
 	}
 }
@@ -214,7 +214,7 @@ func TestCrawl_AllHealthyNoFindings(t *testing.T) {
 	if fake.mutationCount() != 0 {
 		t.Errorf("healthy workspace triggered %d mutations, want 0", fake.mutationCount())
 	}
-	if snap.OrphanAliases+snap.OrphanAllowedIDs+snap.AliasNameMismatch+snap.LegacyAliases != 0 {
+	if snap.OrphanAliases+snap.OrphanAllowedIDs+snap.AliasNameMismatch+snap.LegacyAliases+snap.LegacyResourceIDs != 0 {
 		t.Errorf("healthy workspace produced findings: %+v", snap)
 	}
 	if snap.ChannelsScanned != 1 || snap.TeamsResolved != 1 {
