@@ -90,7 +90,7 @@ pre-commit-run:
 ## Discord bot (Node.js)
 
 test-discord:
-	cd apps/discord && npm ci --no-audit --no-fund && npm test
+	cd apps/discord && npm ci --no-audit --no-fund && npm test -- --ci
 
 check-discord: test-discord
 
