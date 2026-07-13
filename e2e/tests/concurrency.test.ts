@@ -58,7 +58,11 @@ describe('Concurrency: Parallel Minting', () => {
     fulfilled.forEach((r) => tracked.track(r.value.resource_id));
 
     console.log(`50 parallel mints: ${fulfilled.length} succeeded, ${results.length - fulfilled.length} failed`);
-    // At least 80% should succeed (allow for rate limiting)
+    // At least 80% should succeed. Env assumption: the target's mint
+    // rate limit tolerates a 50-burst with <=20% shed — true of the
+    // test/staging envs this suite targets. If a stricter limiter makes
+    // this flake, tune the threshold alongside that env change rather
+    // than loosening it blind (a big drop in fulfilled mints is signal).
     expect(fulfilled.length).toBeGreaterThanOrEqual(40);
   }, 30_000);
 });

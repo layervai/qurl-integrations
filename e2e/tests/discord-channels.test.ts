@@ -160,8 +160,9 @@ describe('Discord: Send to Channel', () => {
     const msg = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, unique);
     sentMessages.track(msg);
 
-    // Poll for the message
+    // Poll for the message (author-scoped to the bot's own send)
     const found = await discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
+      fromAuthorId: env.BOT_CLIENT_ID,
       containsText: unique,
       timeoutMs: 10_000,
       pollIntervalMs: 500,

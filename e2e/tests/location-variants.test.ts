@@ -78,7 +78,9 @@ describe('Location Variants', () => {
     tracked.track(result.resource_id);
     expect(result.qurl_link).toBeDefined();
     expect(result.resource_id).toMatch(/^r_/);
-    console.log(`${id}: ${result.qurl_link}`);
+    // resource_id only — qurl_link carries the access token in its
+    // #at_… fragment and must not land in retained CI logs.
+    console.log(`${id}: resource_id=${result.resource_id}`);
   });
 
   test('HTTP (non-HTTPS) URL is rejected', async () => {

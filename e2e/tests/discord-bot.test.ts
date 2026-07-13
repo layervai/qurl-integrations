@@ -83,6 +83,10 @@ describe('Discord Bot: Channel Operations', () => {
     // so a sent message is cleaned up even when the poll arm fails.
     const [pollRes, sendRes] = await Promise.allSettled([
       discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
+        // Author-scoped: the unique text already makes cross-author
+        // collisions implausible, but the poll only ever wants the
+        // bot's own send.
+        fromAuthorId: env.BOT_CLIENT_ID,
         containsText: unique,
         timeoutMs: 10_000,
         pollIntervalMs: 500,

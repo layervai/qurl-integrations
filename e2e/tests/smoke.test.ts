@@ -71,7 +71,10 @@ describe('Smoke: qURL link lifecycle', () => {
     expect(result.qurl_id).toBeDefined();
     qurlLink = result.qurl_link;
     qurlId = result.qurl_id;
-    console.log(`Minted: ${qurlLink}`);
+    // Log ids, not the link: qurl_link carries the access token in its
+    // #at_… fragment, which must not land in retained CI logs (same
+    // rule as http.ts's origin-only retry logging).
+    console.log(`Minted: qurl_id=${qurlId} resource_id=${result.resource_id}`);
   });
 
   test('status endpoint sees the freshly-minted link (canary)', async () => {
