@@ -1,7 +1,12 @@
 #!/bin/sh
 # qURL CLI installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
-set -e
+#
+# Release contract (see .github/workflows/release-please.yml): this monorepo
+# tags most components with a prefix (slack-v*, discord-v*, ...), but CLI
+# releases are the bare `v<semver>` tags, and GoReleaser publishes assets
+# named qurl_<semver>_<os>_<arch>.tar.gz plus checksums.txt on them.
+set -eu
 
 REPO="layervai/qurl-integrations"
 BINARY="qurl"
@@ -22,17 +27,29 @@ case "$OS" in
     *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
-# Get latest version
+# Determine version. VERSION may be provided by the caller ("0.2.0" or
+# "v0.2.0"); otherwise pick the newest CLI release. `releases/latest` is
+# useless here — it returns the newest release of ANY component — so list
+# releases (newest first) and take the first bare `v<digit>` tag, which
+# component-prefixed tags like slack-v0.4.0 can never match. Parsing with
+# grep/sed instead of jq is deliberate: the installer must not have
+# dependencies beyond curl and a POSIX shell. Releases are capped at the
+# last 100; a CLI release older than 100 releases would need VERSION=...
+VERSION="${VERSION:-}"
 if [ -z "$VERSION" ]; then
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')
+    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100" \
+        | grep -o '"tag_name": *"v[0-9][^"]*"' \
+        | head -n 1 \
+        | sed -E 's/.*"v([^"]+)".*/\1/')
     if [ -z "$VERSION" ]; then
-        echo "Error: Could not determine latest version" >&2
+        echo "Error: Could not find a CLI release (bare v* tag) for ${REPO}" >&2
         exit 1
     fi
 fi
+VERSION="${VERSION#v}"
 
 ARCHIVE="qurl_${VERSION}_${OS}_${ARCH}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARCHIVE}"
+RELEASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
 
 echo "Installing qurl v${VERSION} (${OS}/${ARCH})..."
 
@@ -40,57 +57,41 @@ echo "Installing qurl v${VERSION} (${OS}/${ARCH})..."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -fsSL "$URL" -o "${TMP_DIR}/${ARCHIVE}"
+curl -fsSL "${RELEASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}"
 
-# Verify checksum
-CHECKSUM_URL="https://github.com/${REPO}/releases/download/v${VERSION}/checksums.txt"
-curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"
-(cd "$TMP_DIR" && grep "${ARCHIVE}" checksums.txt > "${TMP_DIR}/verify.txt") || {
-    echo "Error: Archive not found in checksums.txt" >&2
+# Verify checksum. No tool, no install: silently skipping verification would
+# defeat the point of shipping checksums.
+curl -fsSL "${RELEASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt"
+(cd "$TMP_DIR" && grep "  ${ARCHIVE}\$" checksums.txt > verify.txt) || {
+    echo "Error: ${ARCHIVE} not found in checksums.txt" >&2
     exit 1
 }
-VERIFIED=0
 if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$TMP_DIR" && sha256sum -c verify.txt --status) && VERIFIED=1
+    (cd "$TMP_DIR" && sha256sum -c verify.txt --status) || {
+        echo "Error: Checksum verification failed" >&2
+        exit 1
+    }
 elif command -v shasum >/dev/null 2>&1; then
-    (cd "$TMP_DIR" && shasum -a 256 -c verify.txt --status) && VERIFIED=1
+    (cd "$TMP_DIR" && shasum -a 256 -c verify.txt --status) || {
+        echo "Error: Checksum verification failed" >&2
+        exit 1
+    }
 else
-    echo "Warning: No sha256sum or shasum found, skipping checksum verification" >&2
-    VERIFIED=1
-fi
-if [ "$VERIFIED" -ne 1 ]; then
-    echo "Error: Checksum verification failed" >&2
+    echo "Error: Neither sha256sum nor shasum is available; refusing to install unverified binaries" >&2
+    echo "  Install coreutils (sha256sum) or perl (shasum) and retry." >&2
     exit 1
-fi
-
-# Verify GPG signature if gpg is available and a signature exists
-SIG_URL="https://github.com/${REPO}/releases/download/v${VERSION}/checksums.txt.sig"
-if command -v gpg >/dev/null 2>&1; then
-    if curl -fsSL "$SIG_URL" -o "${TMP_DIR}/checksums.txt.sig" 2>/dev/null; then
-        # Import the LayerV release signing key if not already present
-        LAYERV_KEY_URL="https://raw.githubusercontent.com/${REPO}/main/scripts/release-key.pub"
-        if curl -fsSL "$LAYERV_KEY_URL" 2>/dev/null | gpg --import 2>/dev/null; then
-            if gpg --verify "${TMP_DIR}/checksums.txt.sig" "${TMP_DIR}/checksums.txt" 2>/dev/null; then
-                echo "GPG signature verified."
-            else
-                echo "Warning: GPG signature verification failed — checksums may have been tampered with" >&2
-                echo "  Continuing because SHA256 checksum passed, but investigate if unexpected." >&2
-            fi
-        fi
-    fi
 fi
 
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 
-# Install binary
+# Install binary. chmod before the move: the target may end up root-owned.
+chmod +x "${TMP_DIR}/${BINARY}"
 if [ -w "$INSTALL_DIR" ]; then
     mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 else
     echo "Installing to ${INSTALL_DIR} (requires sudo)..."
     sudo mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
 fi
-
-chmod +x "${INSTALL_DIR}/${BINARY}"
 
 echo "Installed qurl v${VERSION} to ${INSTALL_DIR}/${BINARY}"
 echo ""
