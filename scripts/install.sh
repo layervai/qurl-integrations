@@ -23,12 +23,12 @@ main() {
     case "$ARCH" in
         x86_64|amd64) ARCH="amd64" ;;
         aarch64|arm64) ARCH="arm64" ;;
-        *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
+        *) echo "Error: Unsupported architecture: $ARCH" >&2; exit 1 ;;
     esac
 
     case "$OS" in
         linux|darwin) ;;
-        *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
+        *) echo "Error: Unsupported OS: $OS" >&2; exit 1 ;;
     esac
 
     # Determine version. VERSION may be provided by the caller ("0.2.0" or
@@ -41,23 +41,26 @@ main() {
     # callers.
     #
     # Parsing with tr/grep/sed instead of jq is deliberate — the installer
-    # must not depend on anything beyond curl and a POSIX shell. The tr '}'
-    # chunking puts each release's tag_name and prerelease flag on the same
-    # line (they share a chunk in the API's stable field order); a release
-    # whose *name* contains a literal '}' would split that chunk and be
-    # skipped — harmless here since release names are the bare tags.
-    # Prereleases are excluded twice over: by the prerelease flag, and by
-    # rejecting hyphenated tags (semver spells prereleases v1.2.3-rc.1).
-    # scripts/test-install.sh pins all of this against fixture payloads.
-    # Only the newest 100 releases are scanned; anything older needs an
-    # explicit VERSION=...
+    # must not depend on anything beyond curl and a POSIX shell. The payload
+    # is collapsed to a single line first (the API pretty-prints one field
+    # per line), then split at '}' so each release's tag_name and prerelease
+    # flag share a chunk (they sit between the author object's closing brace
+    # and the next brace in the API's stable field order). A release whose
+    # *name* contains a literal '}' splits its own chunk and is skipped —
+    # harmless here since release names are the bare tags. Prereleases are
+    # excluded twice over: by the prerelease flag, and by rejecting
+    # hyphenated tags (semver spells prereleases v1.2.3-rc.1).
+    # scripts/test-install.sh pins all of this against fixture payloads in
+    # both the API's pretty-printed shape and compact JSON. Only the newest
+    # 100 releases are scanned; anything older needs an explicit VERSION=...
     VERSION="${VERSION:-}"
     if [ -z "$VERSION" ]; then
-        RELEASES_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100") || {
-            echo "Error: Failed to query GitHub releases for ${REPO}" >&2
+        RELEASES_JSON=$(curl -fsSL --retry 3 --connect-timeout 15 "https://api.github.com/repos/${REPO}/releases?per_page=100") || {
+            echo "Error: Failed to query GitHub releases for ${REPO} (network or rate limit); set VERSION=<x.y.z> to skip the release query" >&2
             exit 1
         }
         VERSION=$(printf '%s\n' "$RELEASES_JSON" \
+            | tr -d '\n\r' \
             | tr '}' '\n' \
             | grep '"prerelease": *false' \
             | grep -o '"tag_name": *"v[0-9][^"-]*"' \
@@ -79,24 +82,32 @@ main() {
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' EXIT
 
-    curl -fsSL "${RELEASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}"
+    curl -fsSL --retry 3 --connect-timeout 15 "${RELEASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}" || {
+        echo "Error: Failed to download ${ARCHIVE} — on a just-published release, assets may still be uploading; retry in a few minutes" >&2
+        exit 1
+    }
 
     # Verify checksum. No tool, no install: silently skipping verification
     # would defeat the point of shipping checksums. awk field-equality avoids
     # treating the archive name as a regex (its dots would be wildcards).
-    curl -fsSL "${RELEASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt"
+    curl -fsSL --retry 3 --connect-timeout 15 "${RELEASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt" || {
+        echo "Error: Failed to download checksums.txt — on a just-published release, assets may still be uploading; retry in a few minutes" >&2
+        exit 1
+    }
     awk -v f="$ARCHIVE" '$2 == f' "${TMP_DIR}/checksums.txt" > "${TMP_DIR}/verify.txt"
     if ! [ -s "${TMP_DIR}/verify.txt" ]; then
         echo "Error: ${ARCHIVE} not found in checksums.txt" >&2
         exit 1
     fi
+    # Quiet via redirect rather than --status/-s: BusyBox and GNU spell the
+    # flag differently, and options after operands break strict-POSIX getopt.
     if command -v sha256sum >/dev/null 2>&1; then
-        (cd "$TMP_DIR" && sha256sum --status -c verify.txt) || {
+        (cd "$TMP_DIR" && sha256sum -c verify.txt) >/dev/null 2>&1 || {
             echo "Error: Checksum verification failed" >&2
             exit 1
         }
     elif command -v shasum >/dev/null 2>&1; then
-        (cd "$TMP_DIR" && shasum -a 256 --status -c verify.txt) || {
+        (cd "$TMP_DIR" && shasum -a 256 -c verify.txt) >/dev/null 2>&1 || {
             echo "Error: Checksum verification failed" >&2
             exit 1
         }

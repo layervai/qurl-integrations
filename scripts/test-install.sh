@@ -10,7 +10,9 @@
 # every URL the installer requests is logged to $FIXDIR/curl.log for
 # assertions. These cases pin the version-selection policy documented in
 # install.sh: newest-first, bare v<digit> tags only, prereleases excluded by
-# flag and by hyphen, VERSION= override skips the API entirely.
+# flag and by hyphen, VERSION= override skips the API entirely. Fixtures
+# default to the API's real pretty-printed shape (one field per line);
+# case 4 covers compact JSON.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -19,6 +21,7 @@ tmp_parent="$(mktemp -d)"
 trap 'rm -rf "$tmp_parent"' EXIT
 
 case_no=0
+fixdir=""
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch_raw="$(uname -m)"
@@ -36,9 +39,10 @@ sha256_of() {
   fi
 }
 
-# Stub curl. install.sh invokes exactly two shapes:
-#   curl -fsSL <url>            (releases API, to stdout)
-#   curl -fsSL <url> -o <path>  (asset downloads)
+# Stub curl. install.sh invokes exactly two shapes, both carrying the
+# value-flags --retry N and --connect-timeout N:
+#   curl -fsSL --retry 3 --connect-timeout 15 <url>            (API, stdout)
+#   curl -fsSL --retry 3 --connect-timeout 15 <url> -o <path>  (downloads)
 make_curl_stub() {
   local stub_dir="$1"
   cat > "$stub_dir/curl" <<'STUB'
@@ -48,6 +52,7 @@ url="" out=""
 while (( $# )); do
   case "$1" in
     -o) out="$2"; shift 2 ;;
+    --retry|--connect-timeout) shift 2 ;;
     -*) shift ;;
     *) url="$1"; shift ;;
   esac
@@ -72,36 +77,38 @@ STUB
 # Build a release archive + goreleaser-style checksums.txt ("<sha>  <name>")
 # for the given version under $FIXDIR/assets.
 make_release_assets() {
-  local fixdir="$1" version="$2"
-  local build="$fixdir/build"
-  mkdir -p "$build" "$fixdir/assets"
+  local dir="$1" version="$2"
+  local build="$dir/build"
+  mkdir -p "$build" "$dir/assets"
   printf '#!/bin/sh\necho "qurl-fixture %s"\n' "$version" > "$build/qurl"
   local archive="qurl_${version}_${os}_${arch}.tar.gz"
-  tar -czf "$fixdir/assets/$archive" -C "$build" qurl
-  printf '%s  %s\n' "$(sha256_of "$fixdir/assets/$archive")" "$archive" \
-    > "$fixdir/assets/checksums.txt"
+  tar -czf "$dir/assets/$archive" -C "$build" qurl
+  printf '%s  %s\n' "$(sha256_of "$dir/assets/$archive")" "$archive" \
+    > "$dir/assets/checksums.txt"
 }
 
-# run_case <name> <expected_status> <expected_output_substring> [VERSION=...]
-# The caller prepares $tmp_parent/<case_no+1>-<name> as FIXDIR beforehand via
-# new_fixdir.
+# new_fixdir <name> — prepares the next case's fixture dir and assigns the
+# global $fixdir consumed by run_case (assigning directly instead of echoing
+# keeps the path derived exactly once).
 new_fixdir() {
-  local name="$1"
-  local dir="$tmp_parent/$((case_no + 1))-$name"
-  mkdir -p "$dir/assets" "$dir/bin"
-  make_curl_stub "$dir"
-  printf '%s' "$dir"
+  fixdir="$tmp_parent/$((case_no + 1))-$1"
+  mkdir -p "$fixdir/assets" "$fixdir/bin"
+  make_curl_stub "$fixdir"
 }
 
+# run_case <name> <expected_status> <expected_output_substring> [version] [path]
+# Runs the installer against the $fixdir prepared by new_fixdir. The optional
+# 5th arg replaces PATH entirely (for cases that must hide host tools); the
+# default prepends FIXDIR so its stubs win.
 run_case() {
   local name="$1" expected_status="$2" expected_output="$3" version="${4:-}"
   case_no=$((case_no + 1))
-  local fixdir="$tmp_parent/$case_no-$name"
+  local run_path="${5:-$fixdir:$PATH}"
 
   set +e
   local output
   output="$(cd "$fixdir" \
-    && FIXDIR="$fixdir" PATH="$fixdir:$PATH" INSTALL_DIR="$fixdir/bin" \
+    && FIXDIR="$fixdir" PATH="$run_path" INSTALL_DIR="$fixdir/bin" \
        VERSION="$version" sh "$installer" 2>&1)"
   local status="$?"
   set -e
@@ -117,7 +124,7 @@ run_case() {
 }
 
 assert_installed() {
-  local fixdir="$1" version="$2"
+  local version="$1"
   local bin="$fixdir/bin/qurl"
   [[ -x "$bin" ]] || { echo "$fixdir: expected executable $bin" >&2; exit 1; }
   [[ "$("$bin")" == "qurl-fixture $version" ]] \
@@ -127,101 +134,166 @@ assert_installed() {
 }
 
 assert_no_api_call() {
-  local fixdir="$1"
   if grep -q "releases?per_page" "$fixdir/curl.log" 2>/dev/null; then
     echo "$fixdir: VERSION override must not query the releases API" >&2
     exit 1
   fi
 }
 
-# Fixture releases mirror the API's field order (author object before
-# tag_name; draft/prerelease after it; assets with an uploader object),
-# which the installer's tr-chunk parse depends on.
+# Fixture releases default to the API's real pretty-printed shape — one field
+# per line — and mirror its field order (author object before tag_name;
+# draft/prerelease after it; assets with an uploader object), which the
+# installer's collapse-then-chunk parse depends on.
 release_json() {
-  local tag="$1" prerelease="$2"
-  printf '{"url":"https://api.github.com/x","author":{"login":"github-actions[bot]","id":41898282},"node_id":"RE_x","tag_name":"%s","target_commitish":"main","name":"%s","draft":false,"prerelease":%s,"created_at":"2026-07-01T00:00:00Z","assets":[{"name":"a.txt","uploader":{"login":"bot","id":1}}],"body":"notes"}' \
-    "$tag" "$tag" "$prerelease"
+  local tag="$1" prerelease="$2" name="${3:-$1}"
+  cat <<EOF
+  {
+    "url": "https://api.github.com/x",
+    "author": {
+      "login": "github-actions[bot]",
+      "id": 41898282
+    },
+    "node_id": "RE_x",
+    "tag_name": "$tag",
+    "target_commitish": "main",
+    "name": "$name",
+    "draft": false,
+    "prerelease": $prerelease,
+    "created_at": "2026-07-01T00:00:00Z",
+    "assets": [
+      {
+        "name": "a.txt",
+        "uploader": {
+          "login": "bot",
+          "id": 1
+        }
+      }
+    ],
+    "body": "notes"
+  }
+EOF
+}
+
+json_list() {
+  local sep="" item
+  printf '[\n'
+  for item in "$@"; do
+    printf '%s%s' "$sep" "$item"
+    sep=$',\n'
+  done
+  printf '\n]\n'
 }
 
 # --- Case 1: newest bare tag wins; prefixed component tags never match.
-fixdir="$(new_fixdir picks-newest-bare-tag)"
-printf '[%s,\n%s,\n%s,\n%s]\n' \
-  "$(release_json slack-v0.9.9 false)" \
-  "$(release_json chrome-extension-v1.0.2 false)" \
-  "$(release_json v0.2.0 false)" \
-  "$(release_json v0.1.0 false)" > "$fixdir/releases.json"
+new_fixdir picks-newest-bare-tag
+json_list "$(release_json slack-v0.9.9 false)" \
+          "$(release_json chrome-extension-v1.0.2 false)" \
+          "$(release_json v0.2.0 false)" \
+          "$(release_json v0.1.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
 run_case picks-newest-bare-tag 0 "Installed qurl v0.2.0"
-assert_installed "$fixdir" 0.2.0
+assert_installed 0.2.0
 
 # --- Case 2: prerelease-flagged releases are skipped.
-fixdir="$(new_fixdir skips-prerelease-flag)"
-printf '[%s,\n%s]\n' \
-  "$(release_json v0.3.0 true)" \
-  "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
+new_fixdir skips-prerelease-flag
+json_list "$(release_json v0.3.0 true)" \
+          "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
 run_case skips-prerelease-flag 0 "Installed qurl v0.2.0"
-assert_installed "$fixdir" 0.2.0
+assert_installed 0.2.0
 
 # --- Case 3: hyphenated (semver prerelease) tags are skipped even when the
 # prerelease flag is (wrongly) false.
-fixdir="$(new_fixdir skips-hyphenated-tag)"
-printf '[%s,\n%s]\n' \
-  "$(release_json v0.3.0-rc.1 false)" \
-  "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
+new_fixdir skips-hyphenated-tag
+json_list "$(release_json v0.3.0-rc.1 false)" \
+          "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
 run_case skips-hyphenated-tag 0 "Installed qurl v0.2.0"
-assert_installed "$fixdir" 0.2.0
+assert_installed 0.2.0
 
-# --- Case 4: compact single-line JSON (release_json emits no whitespace)
-# parses identically to the API's pretty-printed form.
-fixdir="$(new_fixdir compact-json)"
-printf '[%s,%s]' \
-  "$(release_json slack-v1.0.0 false)" \
-  "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
+# --- Case 4: compact single-line JSON parses identically to the default
+# pretty-printed fixtures.
+new_fixdir compact-json
+json_list "$(release_json slack-v1.0.0 false)" \
+          "$(release_json v0.2.0 false)" | tr -d ' \n' > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
 run_case compact-json 0 "Installed qurl v0.2.0"
-assert_installed "$fixdir" 0.2.0
+assert_installed 0.2.0
 
 # --- Case 5: only prefixed tags -> explicit no-CLI-release error.
-fixdir="$(new_fixdir no-cli-release)"
-printf '[%s,\n%s]\n' \
-  "$(release_json slack-v0.9.9 false)" \
-  "$(release_json discord-v0.3.0 false)" > "$fixdir/releases.json"
+new_fixdir no-cli-release
+json_list "$(release_json slack-v0.9.9 false)" \
+          "$(release_json discord-v0.3.0 false)" > "$fixdir/releases.json"
 run_case no-cli-release 1 "Could not find a CLI release"
 
 # --- Case 6: releases API failure -> network error, not "no release".
-fixdir="$(new_fixdir api-failure)"
-rm -f "$fixdir/releases.json"
+# new_fixdir writes no releases.json, so the stub fails the API call.
+new_fixdir api-failure
 run_case api-failure 1 "Failed to query GitHub releases"
 
 # --- Case 7: VERSION override installs without touching the releases API.
-fixdir="$(new_fixdir version-override)"
+new_fixdir version-override
 make_release_assets "$fixdir" 0.2.0
 run_case version-override 0 "Installed qurl v0.2.0" 0.2.0
-assert_installed "$fixdir" 0.2.0
-assert_no_api_call "$fixdir"
+assert_installed 0.2.0
+assert_no_api_call
 
 # --- Case 8: VERSION override tolerates a leading v.
-fixdir="$(new_fixdir version-override-v)"
+new_fixdir version-override-v
 make_release_assets "$fixdir" 0.2.0
 run_case version-override-v 0 "Installed qurl v0.2.0" v0.2.0
-assert_installed "$fixdir" 0.2.0
-assert_no_api_call "$fixdir"
+assert_installed 0.2.0
+assert_no_api_call
 
 # --- Case 9: checksum mismatch is fatal.
-fixdir="$(new_fixdir checksum-mismatch)"
+new_fixdir checksum-mismatch
 make_release_assets "$fixdir" 0.2.0
-archive="qurl_0.2.0_${os}_${arch}.tar.gz"
-printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" "$archive" \
-  > "$fixdir/assets/checksums.txt"
+printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" \
+  "qurl_0.2.0_${os}_${arch}.tar.gz" > "$fixdir/assets/checksums.txt"
 run_case checksum-mismatch 1 "Checksum verification failed" 0.2.0
 
 # --- Case 10: archive absent from checksums.txt is fatal.
-fixdir="$(new_fixdir missing-from-checksums)"
+new_fixdir missing-from-checksums
 make_release_assets "$fixdir" 0.2.0
+archive="qurl_0.2.0_${os}_${arch}.tar.gz"
 printf '%s  %s\n' "$(sha256_of "$fixdir/assets/$archive")" "some-other-file.tar.gz" \
   > "$fixdir/assets/checksums.txt"
 run_case missing-from-checksums 1 "not found in checksums.txt" 0.2.0
+
+# --- Case 11: unsupported architecture is rejected before any download.
+new_fixdir unsupported-arch
+cat > "$fixdir/uname" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -m) echo riscv64 ;;
+  *) echo Linux ;;
+esac
+STUB
+chmod +x "$fixdir/uname"
+run_case unsupported-arch 1 "Unsupported architecture: riscv64"
+
+# --- Case 12: no sha256 tool on PATH -> refuse to install. A toolbox PATH
+# holds only the tools the installer needs, minus sha256sum/shasum.
+# sh/bash: the replaced PATH is used to locate the installer's interpreter
+# and the stub's env-resolved bash; gzip: GNU tar execs it for -z; cat/cp:
+# used by the curl stub; rm: the installer's EXIT trap.
+new_fixdir no-sha-tool
+make_release_assets "$fixdir" 0.2.0
+toolbox="$fixdir/toolbox"
+mkdir -p "$toolbox"
+for tool in sh bash gzip uname tr grep sed head mktemp tar awk chmod mv cat cp rm; do
+  ln -s "$(command -v "$tool")" "$toolbox/$tool"
+done
+ln -s "$fixdir/curl" "$toolbox/curl"
+run_case no-sha-tool 1 "refusing to install unverified binaries" 0.2.0 "$toolbox"
+
+# --- Case 13: a release *name* containing '}' splits that release's chunk;
+# the release is skipped (documented parse limitation), not misparsed.
+new_fixdir brace-name-skipped
+json_list "$(release_json v0.3.0 false 'v0.3.0 } hotfix')" \
+          "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
+make_release_assets "$fixdir" 0.2.0
+run_case brace-name-skipped 0 "Installed qurl v0.2.0"
+assert_installed 0.2.0
 
 echo "install.sh tests passed (${case_no} cases)"
