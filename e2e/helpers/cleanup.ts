@@ -2,9 +2,9 @@
  * Per-run test-resource hygiene shared by the suites that mint real qURL
  * resources or post real Discord messages.
  *
- * Ports the two patterns proven in location-variants.test.ts (added for
- * qurl-integrations#657 — that file keeps its own inline copy alongside
- * bespoke comments about its raw-unicode URL fixtures):
+ * Generalizes the two patterns proven in location-variants.test.ts
+ * (added for qurl-integrations#657; that file now imports them from
+ * here):
  *
  *  - RUN_NONCE / withRunNonce(): qurl-service dedups resources by
  *    (owner_id, target_url, type), so a generic fixture URL like
@@ -24,7 +24,8 @@
  *    API key lost `qurl:write`, so every DELETE 403s) must stay visible
  *    in CI logs, since silently-resumed resource leaks are the exact
  *    class this module exists to close. Transient single failures are
- *    harmless: the short-TTL (≤1h) links expire on their own.
+ *    harmless: every nonced mint carries its own expiry, so stragglers
+ *    lapse on their own.
  *
  *  - trackedDiscordMessages(): the same idea for the Discord suites,
  *    whose leaked "resources" are bot messages piling up in the shared
@@ -37,12 +38,14 @@ import * as qurl from './qurl-api';
 
 /** Per-RUN nonce baked into every minted target_url. URL-safe
  * (alphanumeric + hyphen), so it never alters the escaping a fixture
- * exercises. */
-export const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+ * exercises. Module-private: consumers go through withRunNonce(). */
+const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 /** Append RUN_NONCE as a query param without disturbing the URL's shape:
  * inserted before any `#fragment`, `?` vs `&` chosen from the existing
- * query. (Same insertion rules as location-variants' inline copy.) */
+ * query. Deliberately NOT a `new URL()` round-trip — that would
+ * percent-encode the raw unicode / special chars location-variants'
+ * fixtures exist to exercise. */
 export function withRunNonce(url: string): string {
   const hashIdx = url.indexOf('#');
   const base = hashIdx === -1 ? url : url.slice(0, hashIdx);
@@ -57,9 +60,14 @@ export interface QurlResourceTracker {
    * mint fails only its own assertions, not also a spurious
    * `revokeLink(undefined)` warning in afterAll. */
   track(resourceId: string | undefined): void;
-  /** Drop a resource the test itself already verifiably revoked, so
-   * afterAll doesn't re-revoke it and warn about the expected not-ok. */
-  untrack(resourceId: string | undefined): void;
+  /** Revoke a tracked resource NOW, with the tracker's credentials, and
+   * drop it from the afterAll ledger on success (so cleanup doesn't
+   * re-revoke it and warn about the expected not-ok); on failure it
+   * stays tracked for the afterAll retry. Returns revokeLink's boolean
+   * so revoke-under-test call sites assert on it directly. Negative
+   * revoke tests (wrong key, nonexistent id) should keep calling
+   * qurl.revokeLink directly — those must not touch the ledger. */
+  revoke(resourceId: string): Promise<boolean>;
   /** Best-effort revocation of everything still tracked — see the module
    * header for the warn-but-never-throw contract. Wire up as
    * `afterAll(() => tracked.revokeAll())`. */
@@ -78,13 +86,19 @@ export function trackedQurlResources(env: {
     track(resourceId) {
       if (resourceId) ids.add(resourceId);
     },
-    untrack(resourceId) {
-      if (resourceId) ids.delete(resourceId);
+    async revoke(resourceId) {
+      const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+      if (ok) ids.delete(resourceId);
+      return ok;
     },
     async revokeAll() {
       // revokeLink returns res.ok (false on a 4xx, NO throw) and only
       // throws on a network error, so surface BOTH paths — the
       // systematic-403 one is the dangerous one (see module header).
+      // Deliberately serial: this is the best-effort path, and a
+      // parallel burst (up to 50 DELETEs after the concurrency stress
+      // test) invites 429s that would leave stragglers leaked until
+      // their TTL — gentleness beats wall-clock here.
       for (const id of ids) {
         try {
           const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, id);
@@ -114,6 +128,9 @@ export function trackedDiscordMessages(env: { BOT_TOKEN: string }): DiscordMessa
       messages.push({ id: msg.id, channel_id: msg.channel_id });
     },
     async deleteAll() {
+      // Serial for the same reason as revokeAll: Discord's per-channel
+      // delete bucket rate-limits bursts, and best-effort cleanup would
+      // rather be slow than shed messages to 429s.
       for (const { id, channel_id } of messages) {
         try {
           await discord.deleteMessage(env.BOT_TOKEN, channel_id, id);

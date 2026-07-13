@@ -55,8 +55,8 @@ describe('Link Lifecycle: Minting', () => {
   });
 
   test('mint two links to same target get distinct qurl_ids', async () => {
-    // Same nonced URL for both mints (RUN_NONCE is per-run constant) —
-    // the dedup-by-target scenario this test exists to pin.
+    // Same nonced URL for both mints (the run nonce is a per-run
+    // constant) — the dedup-by-target scenario this test exists to pin.
     const target = withRunNonce('https://example.com/same-target');
     const r1 = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: target,
@@ -112,8 +112,8 @@ describe('Link Lifecycle: Revocation', () => {
       target_url: withRunNonce('https://example.com/revoke-test'),
     });
     tracked.track(result.resource_id);
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id);
-    if (revoked) tracked.untrack(result.resource_id);
+    // tracked.revoke = revokeLink + drop from the afterAll ledger on success.
+    const revoked = await tracked.revoke(result.resource_id);
     expect(revoked).toBe(true);
   });
 
@@ -122,8 +122,7 @@ describe('Link Lifecycle: Revocation', () => {
       target_url: withRunNonce('https://example.com/revoke-then-status'),
     });
     tracked.track(result.resource_id);
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id);
-    if (revoked) tracked.untrack(result.resource_id);
+    const revoked = await tracked.revoke(result.resource_id);
     expect(revoked).toBe(true);
 
     await expect(
@@ -136,12 +135,12 @@ describe('Link Lifecycle: Revocation', () => {
       target_url: withRunNonce('https://example.com/double-revoke'),
     });
     tracked.track(result.resource_id);
-    const first = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id);
-    if (first) tracked.untrack(result.resource_id);
+    const first = await tracked.revoke(result.resource_id);
     expect(first).toBe(true);
 
     // Second revoke must not throw (404 or 200 both acceptable) — the
-    // same contract file-revoke.test.ts pins for file resources. (The
+    // same contract file-revoke.test.ts pins for file resources; raw
+    // revokeLink here since the resource already left the ledger. (The
     // previous `expect(typeof second).toBe('boolean')` could never fail:
     // revokeLink is typed Promise<boolean>.)
     await expect(

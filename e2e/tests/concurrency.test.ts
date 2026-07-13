@@ -71,6 +71,13 @@ describe('Concurrency: Parallel Access', () => {
     });
     tracked.track(result.resource_id);
 
+    // Canary before the race: the never-accessed link must be visible at
+    // the status endpoint, otherwise the post-race dual-shape check below
+    // would pass vacuously through its 404 arm (same guard as
+    // smoke.test.ts's canary test — see the rationale there).
+    const pre = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id);
+    expect(pre).not.toBeNull();
+
     const results = await Promise.all(
       Array.from({ length: 10 }, () => qurl.accessLink(result.qurl_link)),
     );
@@ -103,9 +110,9 @@ describe('Concurrency: Mint and Revoke Race', () => {
       target_url: withRunNonce('https://example.com/mint-then-revoke'),
     });
     tracked.track(result.resource_id);
-    // Revoke immediately
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id);
-    if (revoked) tracked.untrack(result.resource_id);
+    // Revoke immediately (tracked.revoke also drops it from the afterAll
+    // ledger on success)
+    const revoked = await tracked.revoke(result.resource_id);
     expect(revoked).toBe(true);
   });
 
@@ -120,14 +127,12 @@ describe('Concurrency: Mint and Revoke Race', () => {
     );
     minted.forEach((r) => tracked.track(r.resource_id));
 
-    // Revoke all in parallel; untrack only what verifiably revoked so a
-    // partial failure leaves the stragglers for afterAll.
+    // Revoke all in parallel; tracked.revoke drops each verifiably-revoked
+    // id from the afterAll ledger, so a partial failure leaves the
+    // stragglers for cleanup.
     const revokes = await Promise.all(
-      minted.map((r) => qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, r.resource_id)),
+      minted.map((r) => tracked.revoke(r.resource_id)),
     );
-    minted.forEach((r, i) => {
-      if (revokes[i]) tracked.untrack(r.resource_id);
-    });
     expect(revokes.every((r) => r === true)).toBe(true);
   });
 });

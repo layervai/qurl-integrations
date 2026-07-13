@@ -25,8 +25,9 @@ const tracked = trackedQurlResources(env);
 const sentMessages = trackedDiscordMessages(env);
 
 afterAll(async () => {
-  await tracked.revokeAll();
-  await sentMessages.deleteAll();
+  // Independent backends (qURL API / Discord) with no shared rate-limit
+  // bucket — run the two best-effort sweeps concurrently.
+  await Promise.all([tracked.revokeAll(), sentMessages.deleteAll()]);
 });
 
 describe('Smoke: Bot connectivity', () => {
@@ -71,6 +72,20 @@ describe('Smoke: qURL link lifecycle', () => {
     qurlLink = result.qurl_link;
     qurlId = result.qurl_id;
     console.log(`Minted: ${qurlLink}`);
+  });
+
+  test('status endpoint sees the freshly-minted link (canary)', async () => {
+    expect(qurlId).toBeDefined();
+    // CANARY for every null-tolerant status check in this suite (and the
+    // one in concurrency.test.ts): a freshly-minted, never-accessed link
+    // MUST be visible at the status endpoint. If this lookup 404s — say
+    // the endpoint keys on resource_id rather than qurl_id, or moved —
+    // then all the `if (status !== null)` guards below would degrade
+    // into passing vacuously through their 404 arm: the exact
+    // silent-green this suite exists to kill. This test turns that
+    // degradation into a loud red instead.
+    const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+    expect(status).not.toBeNull();
   });
 
   test('first access succeeds', async () => {
@@ -143,8 +158,8 @@ describe('Smoke: Revocation', () => {
     tracked.track(result.resource_id);
     resourceId = result.resource_id;
 
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
-    if (revoked) tracked.untrack(resourceId);
+    // tracked.revoke = revokeLink + drop from the afterAll ledger on success.
+    const revoked = await tracked.revoke(resourceId);
     expect(revoked).toBe(true);
     console.log(`Revoked resource: ${resourceId}`);
   });

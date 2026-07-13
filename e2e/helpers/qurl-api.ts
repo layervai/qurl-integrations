@@ -218,6 +218,20 @@ export interface LinkStatus {
   expires_at: string;
 }
 
+/** Thrown by getLinkStatus on a non-2xx response. Carries the HTTP
+ * status structurally so callers branch on `.status` instead of
+ * regexing it back out of the message (the same string-matching debt
+ * discord-commands.smoke.test.ts tracks as #104 — here there's no
+ * module boundary forcing it, so the error is typed from the start).
+ * The message keeps the code embedded ("Status check failed: 404") so
+ * `.rejects.toThrow(/404/)` assertions read naturally. */
+export class StatusCheckError extends Error {
+  constructor(readonly status: number) {
+    super(`Status check failed: ${status}`);
+    this.name = 'StatusCheckError';
+  }
+}
+
 /** Get link status */
 export async function getLinkStatus(
   mintUrl: string,
@@ -227,7 +241,7 @@ export async function getLinkStatus(
   const res = await fetch(`${mintUrl}/${resourceId}/status`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
-  if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
+  if (!res.ok) throw new StatusCheckError(res.status);
   return res.json() as any;
 }
 
@@ -244,7 +258,7 @@ export async function getLinkStatusOrNull(
   try {
     return await getLinkStatus(mintUrl, apiKey, resourceId);
   } catch (e) {
-    if (/\b404\b|\bnot found\b/i.test((e as Error).message)) return null;
+    if (e instanceof StatusCheckError && e.status === 404) return null;
     throw e;
   }
 }
