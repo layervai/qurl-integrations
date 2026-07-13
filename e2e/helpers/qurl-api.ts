@@ -274,23 +274,6 @@ export async function getLinkStatusOrNull(
   }
 }
 
-/** Bounded-poll wrapper over getLinkStatusOrNull: re-reads until
- * `predicate(status)` holds or the budget elapses, returning the LAST
- * observation either way (the caller still owns the assertion, so a
- * predicate that never holds fails there with the real final state).
- *
- * Exists for the mint-time canaries: they're read-after-write against a
- * live API whose consistency model isn't pinned, and a brief replica /
- * propagation lag shouldn't red a correct deployment. A first
- * observation that already satisfies the predicate returns immediately,
- * so a strongly-consistent endpoint pays zero extra latency. Non-404
- * errors throw straight through (never retried) — only the data shape
- * is polled, not failures.
- *
- * Deliberately NOT used for the post-revoke `.rejects.toThrow(/404/)`
- * assertions: those keep the pre-existing single-shot canonical
- * contract (smoke / link-lifecycle / file-revoke all share it).
- * Revisit only if a live run shows revoke-propagation lag. */
 /** Canary assertion for the #950 id-kind ambiguity. A bare
  * `expect(status).not.toBeNull()` red says "expected not null"; this
  * one says WHICH id kind failed and points the runner at the #950
@@ -310,6 +293,23 @@ export function assertStatusVisible(
   }
 }
 
+/** Bounded-poll wrapper over getLinkStatusOrNull: re-reads until
+ * `predicate(status)` holds or the budget elapses, returning the LAST
+ * observation either way (the caller still owns the assertion, so a
+ * predicate that never holds fails there with the real final state).
+ *
+ * Exists for the mint-time canaries: they're read-after-write against a
+ * live API whose consistency model isn't pinned, and a brief replica /
+ * propagation lag shouldn't red a correct deployment. A first
+ * observation that already satisfies the predicate returns immediately,
+ * so a strongly-consistent endpoint pays zero extra latency. Non-404
+ * errors throw straight through (never retried) — only the data shape
+ * is polled, not failures.
+ *
+ * Deliberately NOT used for the post-revoke `.rejects.toThrow(/404/)`
+ * assertions: those keep the pre-existing single-shot canonical
+ * contract (smoke / link-lifecycle / file-revoke all share it).
+ * Revisit only if a live run shows revoke-propagation lag. */
 export async function pollLinkStatus(
   mintUrl: string,
   apiKey: string,

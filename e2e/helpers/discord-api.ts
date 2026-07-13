@@ -108,14 +108,33 @@ export async function waitForMessage(
 
     for (const msg of messages) {
       if (opts.fromAuthorId && msg.author.id !== opts.fromAuthorId) continue;
+      // Match against the embed's actual TEXT surfaces (like
+      // extractQurlLink does), not JSON.stringify(embed) — the
+      // serialized form includes keys/structure, so a containsText that
+      // happens to be a substring of the shape would false-match.
       if (opts.containsText && !msg.content.includes(opts.containsText) &&
-          !msg.embeds.some(e => JSON.stringify(e).includes(opts.containsText!))) continue;
+          !msg.embeds.some(e => embedText(e).includes(opts.containsText!))) continue;
       return msg;
     }
 
     await new Promise((r) => setTimeout(r, interval));
   }
   throw new Error(`No matching message in ${channelId} within ${timeout}ms`);
+}
+
+/** All human-visible text surfaces of an embed, joined for substring
+ * matching (title, description, author name, field names/values,
+ * footer). */
+function embedText(e: DiscordMessage['embeds'][number]): string {
+  return [
+    e.title,
+    e.description,
+    e.author?.name,
+    ...(e.fields?.flatMap((f) => [f.name, f.value]) ?? []),
+    e.footer?.text,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 /** Extract qURL link from an embed */

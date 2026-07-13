@@ -19,7 +19,12 @@ import * as qurl from '../helpers/qurl-api';
 const env = loadEnv();
 const tracked = trackedQurlResources(env);
 
-afterAll(() => tracked.revokeAll());
+// Explicit hook timeout: this file can leave ~60+ resources for the
+// deliberately-serial revokeAll (worst case: the whole 50-mint stress
+// batch), and at a slow ~2s/DELETE that's ~130s — past jest's default
+// 120s. 180s keeps the leak-prevention sweep from timing out (and
+// leaking) on a slow API without letting a hung API stall CI for long.
+afterAll(() => tracked.revokeAll(), 180_000);
 
 describe('Concurrency: Parallel Minting', () => {
   test('mint 10 links in parallel', async () => {
