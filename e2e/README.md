@@ -41,9 +41,10 @@ Optional variables gate extra suites, which skip themselves
 
 ```sh
 npm ci
-npm test                        # full suite (needs .env)
-npx jest smoke.test             # one file
-npx jest -t 'mint 10 links'     # one (self-contained) test by name
+npm test                        # unit tests, then live E2E (needs .env)
+npm run test:unit               # offline helper tests only (no .env)
+npm run test:e2e -- smoke.test  # one live file
+npm run test:e2e -- -t 'mint 10 links' # one self-contained live test by name
 npx tsc --noEmit                # typecheck only (no .env needed)
 ```
 
@@ -58,14 +59,17 @@ their mid-flow tests carry explicit `toBeDefined` dependency guards. So
 running one of those tests by name fails its guard **by design** — run
 the whole file instead.
 
-**First live run:** the qURL status endpoint's id key (`qurl_id` vs
-`resource_id`) can't be settled offline, so the suites carry canaries on
-*both* kinds — unless the endpoint accepts both, expect one side's
-canaries to fail with a message pointing at layervai/qurl-integrations#950.
-That red is the designed outcome; follow the issue's playbook (usually a
-one-word id swap) rather than treating it as a suite regression.
+Management-state assertions use the real resource-centric API contract:
+`GET /v1/qurls/{id}` accepts either an opaque public `resource_id` or a
+`q_…` display ID. Resource lifecycle comes from the returned resource;
+per-token `use_count` / status comes from its matching `qurls[]` summary.
+Revocation is soft: the resource remains readable with `status=revoked`.
+Do not derive public resource-ID syntax from the internal `r_…` routing
+labels that can still appear in `qurl.site` hostnames.
 
-Tests run serially (`maxWorkers: 1` in `jest.config.ts`) because they
-share Discord channel state. After each run, `helpers/discord-reporter.js`
-posts a per-file pass/fail rollup embed to the test channel (missing env
-or Discord errors make it warn, never fail the run).
+Live tests run serially (`maxWorkers: 1` in `jest.config.ts`) because they
+share Discord channel state. Their config alone loads
+`helpers/discord-reporter.js`, so offline unit tests never appear in the
+sandbox-health embed. After each live run the reporter posts a per-file
+pass/fail rollup to the test channel (missing env or Discord errors warn,
+never fail the run).

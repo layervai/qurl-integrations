@@ -77,7 +77,8 @@ describe('Location Variants', () => {
     // assertion below, not also a spurious revoke warning in afterAll.)
     tracked.track(result.resource_id);
     expect(result.qurl_link).toBeDefined();
-    expect(result.resource_id).toMatch(/^r_/);
+    // Public resource IDs are opaque qurl-service-owned values.
+    expect(result.resource_id).toBeTruthy();
     // resource_id only — qurl_link carries the access token in its
     // #at_… fragment and must not land in retained CI logs.
     console.log(`${id}: resource_id=${result.resource_id}`);

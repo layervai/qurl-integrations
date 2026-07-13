@@ -137,7 +137,10 @@ export async function mintConnectorView(
   return { qurl_link: link.qurl_link };
 }
 
-/** Mint a one-time qURL link for a resource */
+/** Mint a one-time qURL link for a resource.
+ * This non-idempotent POST deliberately uses one bare fetch: after an
+ * ambiguous transport failure the helper cannot know whether a link was
+ * created, so replaying the request could mint an unintended extra qURL. */
 export async function mintLink(
   mintUrl: string,
   apiKey: string,
@@ -149,7 +152,7 @@ export async function mintLink(
     max_uses?: number;
   },
 ): Promise<MintResult> {
-  const res = await fetch(mintUrl, {
+  const res = await fetch(stripTrailingSlashes(mintUrl), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -165,13 +168,10 @@ export async function mintLink(
   });
 
   if (!res.ok) throw new Error(`Mint failed: ${res.status} ${await res.text()}`);
-  const json = await res.json() as any;
-  const d = json.data ?? json;
-  return {
-    resource_id: d.resource_id,
-    qurl_link: d.qurl_link ?? d.link ?? d.url,
-    qurl_id: d.qurl_id ?? d.id,
-  };
+  const body = await res.json() as unknown;
+  const result = parseBareOrEnveloped(body, parseMintResult);
+  if (!result) throw new Error('Mint returned an invalid response shape');
+  return result;
 }
 
 /** Access a qURL link and return the HTTP result */
@@ -213,128 +213,263 @@ export async function revokeLink(
 }
 
 export interface LinkStatus {
+  qurl_id: string;
   use_count: number;
   status: string;
-  expires_at: string;
+  expires_at?: string;
 }
 
-/** Thrown by getLinkStatus on a non-2xx response. Carries the HTTP
- * status structurally so getLinkStatusOrNull's 404 branch tests
- * `.status` instead of regexing it back out of the message (the same
- * string-matching debt discord-commands.smoke.test.ts tracks as #104 —
- * here there's no module boundary forcing it, so the error is typed
- * from the start). Module-private: tests assert via
- * `.rejects.toThrow(/404/)`, whose message keeps the code embedded
- * ("Status check failed: 404") exactly for that. */
+export interface ResourceStatus {
+  resource_id: string;
+  status: string;
+  expires_at?: string;
+  qurls?: LinkStatus[];
+}
+
+interface PollOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stripTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+function unwrapDataEnvelope(value: unknown): unknown {
+  return isJsonObject(value) && 'data' in value ? value.data : value;
+}
+
+/** Prefer a complete bare response recognized by `parse`; otherwise parse the
+ * API's `data` envelope. This preserves future unrelated top-level data fields.
+ * A parser throw intentionally aborts: only an unrecognized (`null`) top-level
+ * shape may fall through to the envelope. */
+function parseBareOrEnveloped<T>(
+  value: unknown,
+  parse: (candidate: unknown) => T | null,
+): T | null {
+  return parse(value) ?? parse(unwrapDataEnvelope(value));
+}
+
+function parseMintResult(value: unknown): MintResult | null {
+  if (
+    !isJsonObject(value) ||
+    typeof value.resource_id !== 'string' ||
+    value.resource_id.length === 0
+  ) {
+    return null;
+  }
+  const qurlLink = value.qurl_link ?? value.link ?? value.url;
+  const qurlId = value.qurl_id ?? value.id;
+  if (typeof qurlLink !== 'string' || typeof qurlId !== 'string') return null;
+  return { resource_id: value.resource_id, qurl_link: qurlLink, qurl_id: qurlId };
+}
+
+function parseLinkStatus(value: unknown, resourceId: string, index: number): LinkStatus {
+  if (
+    !isJsonObject(value) ||
+    typeof value.qurl_id !== 'string' ||
+    typeof value.use_count !== 'number' ||
+    typeof value.status !== 'string' ||
+    (value.expires_at !== undefined && typeof value.expires_at !== 'string')
+  ) {
+    throw new Error(
+      `qURL lookup returned an invalid token status shape for resource ${resourceId} at qurls[${index}]`,
+    );
+  }
+  return {
+    qurl_id: value.qurl_id,
+    use_count: value.use_count,
+    status: value.status,
+    ...(value.expires_at === undefined ? {} : { expires_at: value.expires_at }),
+  };
+}
+
+function parseResourceStatus(value: unknown, id: string): ResourceStatus | null {
+  if (
+    !isJsonObject(value) ||
+    typeof value.resource_id !== 'string' ||
+    typeof value.status !== 'string'
+  ) {
+    return null;
+  }
+  if (value.expires_at !== undefined && typeof value.expires_at !== 'string') {
+    throw new Error(`qURL lookup returned an invalid expires_at for resource ${id}`);
+  }
+  if (value.qurls !== undefined && !Array.isArray(value.qurls)) {
+    throw new Error(`qURL lookup returned an invalid qURL preview for resource ${id}`);
+  }
+
+  const resourceId = value.resource_id;
+  // Deliberately validate every returned summary even for resource-lifecycle
+  // callers: a malformed management response must red the E2E gate rather than
+  // let a revoke assertion pass while silently ignoring preview corruption.
+  const qurls = value.qurls?.map((qurl, index) => (
+    parseLinkStatus(qurl, resourceId, index)
+  ));
+  return {
+    resource_id: resourceId,
+    status: value.status,
+    ...(value.expires_at === undefined ? {} : { expires_at: value.expires_at }),
+    ...(qurls === undefined ? {} : { qurls }),
+  };
+}
+
+/** A typed HTTP failure from the qURL management lookup. */
 class StatusCheckError extends Error {
   constructor(readonly status: number) {
-    super(`Status check failed: ${status}`);
+    super(`qURL lookup failed: ${status}`);
     this.name = 'StatusCheckError';
   }
 }
 
-/** Get link status.
- *
- * NOTE on the id (#950): callers currently disagree on what keys
- * `${mintUrl}/{id}/status` — smoke/concurrency pass qurl_id (q_…) for
- * use-count checks, the revoke-focused suites pass resource_id (r_…)
- * for post-revoke 404 assertions — and no non-test consumer of the
- * endpoint exists in this repo to settle it. Every calling suite
- * therefore carries a freshly-minted/live-resource canary
- * (`pollLinkStatus(..., (s) => s !== null)` + `assertStatusVisible`)
- * so a wrong key reds loudly on the first live run instead of letting
- * 404-tolerant checks pass vacuously. Once a live run settles the key,
- * unify the callers and fold this note (tracked in #950). */
-export async function getLinkStatus(
-  mintUrl: string,
+/** The parent resource is readable, but its bounded qURL preview has not made
+ * the requested token visible. Direct reads fail closed on this condition;
+ * only bounded read-after-write polling may retry it. */
+class TokenSummaryNotVisibleError extends Error {
+  constructor(qurlId: string, resourceId: string) {
+    super(
+      `qURL lookup for ${qurlId} returned resource ${resourceId} without the requested token summary`,
+    );
+    this.name = 'TokenSummaryNotVisibleError';
+  }
+}
+
+/** Read the documented resource-centric management endpoint. It accepts
+ * either a public resource ID or a q_ display ID and returns the parent
+ * resource. There is no `/status` sub-route: per-qURL status lives in the
+ * response's `qurls` summaries. */
+async function getQurlResource(
+  managementUrl: string,
   apiKey: string,
-  resourceId: string,
-): Promise<LinkStatus> {
-  // Through the shared bounded transient retry (GET → also retries
-  // 502/504, see http.ts): the canaries built on this run a mint-then-
-  // read against a live API on every suite, and a single drain-gap blip
-  // shouldn't red a correct deployment. 404 is not in any retry set, so
-  // the not-found contract below stays immediate; network REJECTIONS
-  // still propagate (the helper deliberately doesn't catch those).
-  const res = await fetchWithTransientRetry(`${mintUrl}/${resourceId}/status`, {
+  id: string,
+): Promise<ResourceStatus> {
+  const base = stripTrailingSlashes(managementUrl);
+  const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!res.ok) throw new StatusCheckError(res.status);
-  return (await res.json()) as LinkStatus;
+
+  const body = await res.json() as unknown;
+  const resource = parseBareOrEnveloped(body, (value) => parseResourceStatus(value, id));
+  if (!resource) throw new Error(`qURL lookup returned an invalid resource shape for ${id}`);
+  return resource;
 }
 
-/** Like getLinkStatus, but the 404 shape — "resource fully consumed or
- * revoked" — resolves to null instead of throwing. Any OTHER failure
- * (auth, network, 5xx) still throws, so tests can assert the valid
- * post-consumption shapes without swallowing unrelated errors (the
- * try/catch-around-expect anti-pattern this replaces). */
-export async function getLinkStatusOrNull(
-  mintUrl: string,
+/** Get one qURL token's status from its parent resource response. The id must
+ * be a qurl_id; use getResourceStatus for an opaque public resource_id.
+ * TODO(upstream-contract): layervai/qurl-service#1233 tracks the bounded qURL
+ * detail-preview and terminal-row retention contract.
+ * The E2E fixtures nonce their target URLs, so each resource has a small qURL
+ * set and the requested token must be present in the bounded detail preview.
+ * Missing it is an ambiguous/invalid response, not a synthetic 404 pass. */
+export async function getLinkStatus(
+  managementUrl: string,
+  apiKey: string,
+  qurlId: string,
+): Promise<LinkStatus> {
+  // TODO(upstream-contract): layervai/qurl-service#1233 tracks whether `q_`
+  // remains the stable discriminator between qurl_id and opaque resource_id.
+  if (!qurlId.startsWith('q_')) {
+    throw new TypeError('qURL token lookup requires a qurl_id; use getResourceStatus for resource IDs');
+  }
+  const resource = await getQurlResource(managementUrl, apiKey, qurlId);
+  const status = resource.qurls?.find((qurl) => qurl.qurl_id === qurlId);
+  if (!status) {
+    throw new TokenSummaryNotVisibleError(qurlId, resource.resource_id);
+  }
+  return status;
+}
+
+/** Get resource-level lifecycle status by its opaque public resource ID. */
+export async function getResourceStatus(
+  managementUrl: string,
   apiKey: string,
   resourceId: string,
-): Promise<LinkStatus | null> {
+): Promise<ResourceStatus> {
+  const resource = await getQurlResource(managementUrl, apiKey, resourceId);
+  // Resource-level callers pass the canonical public resource_id, never a qURL
+  // display ID; require the management response to echo that encoding exactly.
+  if (resource.resource_id !== resourceId) {
+    throw new Error(
+      `qURL lookup for resource ${resourceId} returned mismatched resource ${resource.resource_id}`,
+    );
+  }
+  return resource;
+}
+
+/** Map an actual management-API 404 to null. Any other HTTP, network, or
+ * response-shape failure still throws. */
+async function readStatusOrNull<T>(read: () => Promise<T>): Promise<T | null> {
   try {
-    return await getLinkStatus(mintUrl, apiKey, resourceId);
+    return await read();
   } catch (e) {
     if (e instanceof StatusCheckError && e.status === 404) return null;
     throw e;
   }
 }
 
-/** Canary assertion for the #950 id-kind ambiguity. A bare
- * `expect(status).not.toBeNull()` red says "expected not null"; this
- * one says WHICH id kind failed and points the runner at the #950
- * playbook — the canaries exist precisely to produce that actionable
- * red on the first live run. `asserts` narrowing keeps any later use
- * of the status typed. */
-export function assertStatusVisible(
-  status: LinkStatus | null,
+/** Turn a nullable lookup into an actionable canary failure. */
+export function assertStatusVisible<T>(
+  status: T | null,
   idDescription: string,
-): asserts status is LinkStatus {
+): asserts status is T {
   if (status === null) {
     throw new Error(
-      `status canary: ${idDescription} is not visible at the status endpoint (404). ` +
-        `Likely the #950 id-kind mismatch (qurl_id vs resource_id) — follow that issue's ` +
-        `playbook; the run's 404-tolerant checks can't be trusted until it's settled.`,
+      `status canary: ${idDescription} did not become visible at GET /v1/qurls/{id} within the poll window`,
     );
   }
 }
 
-/** Bounded-poll wrapper over getLinkStatusOrNull: re-reads until
- * `predicate(status)` holds or the budget elapses, returning the LAST
- * observation either way (the caller still owns the assertion, so a
- * predicate that never holds fails there with the real final state).
- *
- * Exists for the mint-time canaries: they're read-after-write against a
- * live API whose consistency model isn't pinned, and a brief replica /
- * propagation lag shouldn't red a correct deployment. A first
- * observation that already satisfies the predicate returns immediately,
- * so a strongly-consistent endpoint pays zero extra latency. Non-404
- * errors throw straight through — THIS loop only re-reads the data
- * shape, not failures — while transient HTTP blips (5xx drain-gaps,
- * 429s) are already absorbed one level down by getLinkStatus's
- * fetchWithTransientRetry; network rejections still propagate.
- *
- * Deliberately NOT used for the post-revoke `.rejects.toThrow(/404/)`
- * assertions: those keep the pre-existing single-shot canonical
- * contract (smoke / link-lifecycle / file-revoke all share it).
- * Revisit only if a live run shows revoke-propagation lag. */
-export async function pollLinkStatus(
-  mintUrl: string,
-  apiKey: string,
-  resourceId: string,
-  predicate: (status: LinkStatus | null) => boolean,
-  // 5s default: generous for the mint-then-read propagation lag this
-  // tolerates, while bounding the cost of the FAILING path — on a
-  // wrong-key deployment (#950) every canary burns its full budget
-  // before assertStatusVisible reds, and that cost repeats per suite.
-  { timeoutMs = 5_000, intervalMs = 1_000 }: { timeoutMs?: number; intervalMs?: number } = {},
-): Promise<LinkStatus | null> {
+/** Bounded read-after-write poll shared by token and resource canaries. */
+async function pollStatus<T>(
+  read: () => Promise<T | null>,
+  predicate: (status: T | null) => boolean,
+  { timeoutMs = 5_000, intervalMs = 1_000 }: PollOptions = {},
+): Promise<T | null> {
   const deadline = Date.now() + timeoutMs;
-  let last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);
+  let last = await read();
   while (!predicate(last) && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, intervalMs));
-    last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);
+    last = await read();
   }
   return last;
+}
+
+export async function pollLinkStatus(
+  managementUrl: string,
+  apiKey: string,
+  qurlId: string,
+  predicate: (status: LinkStatus | null) => boolean,
+  options?: PollOptions,
+): Promise<LinkStatus | null> {
+  const readAfterWrite = async (): Promise<LinkStatus | null> => {
+    try {
+      return await readStatusOrNull(() => getLinkStatus(managementUrl, apiKey, qurlId));
+    } catch (e) {
+      // A freshly minted parent resource can become readable before its token
+      // reaches the bounded preview. Retry that one explicit visibility lag;
+      // invalid shapes, auth failures, and all other errors still abort.
+      if (e instanceof TokenSummaryNotVisibleError) return null;
+      throw e;
+    }
+  };
+  return pollStatus(readAfterWrite, predicate, options);
+}
+
+export async function pollResourceStatus(
+  managementUrl: string,
+  apiKey: string,
+  resourceId: string,
+  predicate: (status: ResourceStatus | null) => boolean,
+  options?: PollOptions,
+): Promise<ResourceStatus | null> {
+  return pollStatus(
+    () => readStatusOrNull(() => getResourceStatus(managementUrl, apiKey, resourceId)),
+    predicate,
+    options,
+  );
 }

@@ -1,7 +1,7 @@
 /**
  * Link lifecycle tests:
  * - Mint with various expiry values
- * - One-time access enforcement (via resource status API)
+ * - One-time access coherence (via per-qURL management summaries)
  * - Revocation
  * - Expiry enforcement (using short TTLs)
  * - Multiple links to same target
@@ -31,7 +31,8 @@ describe('Link Lifecycle: Minting', () => {
     });
     tracked.track(result.resource_id);
     expect(result.qurl_link).toContain('qurl');
-    expect(result.resource_id).toMatch(/^r_/);
+    // Public resource IDs are opaque qurl-service-owned values.
+    expect(result.resource_id).toBeTruthy();
     expect(result.qurl_id).toMatch(/^q_/);
   });
 
@@ -117,16 +118,15 @@ describe('Link Lifecycle: Revocation', () => {
     expect(revoked).toBe(true);
   });
 
-  test('resource returns 404 after revocation', async () => {
+  test('resource reports revoked after revocation', async () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/revoke-then-status'),
     });
     tracked.track(result.resource_id);
 
-    // #950 canary, resource_id side: without it, this suite's
-    // post-revoke 404 assertions could pass vacuously for a lookup that
-    // 404s unconditionally (rationale in qurl-api.ts's getLinkStatus doc).
-    const pre = await qurl.pollLinkStatus(
+    // Resource-level canary: without it, a broken lookup could make the
+    // post-revoke lifecycle assertion meaningless.
+    const pre = await qurl.pollResourceStatus(
       env.MINT_API_URL, env.QURL_API_KEY, result.resource_id, (s) => s !== null,
     );
     qurl.assertStatusVisible(pre, `pre-revoke resource_id ${result.resource_id}`);
@@ -134,9 +134,10 @@ describe('Link Lifecycle: Revocation', () => {
     const revoked = await tracked.revoke(result.resource_id);
     expect(revoked).toBe(true);
 
-    await expect(
-      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id),
-    ).rejects.toThrow(/404/);
+    const status = await qurl.getResourceStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, result.resource_id,
+    );
+    expect(status.status).toBe('revoked');
   });
 
   test('double revoke is idempotent (no error)', async () => {
@@ -157,9 +158,10 @@ describe('Link Lifecycle: Revocation', () => {
     ).resolves.not.toThrow();
 
     // And the resource is still revoked after the redundant call.
-    await expect(
-      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id),
-    ).rejects.toThrow(/404/);
+    const status = await qurl.getResourceStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, result.resource_id,
+    );
+    expect(status.status).toBe('revoked');
   });
 });
 

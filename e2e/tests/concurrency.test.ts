@@ -45,7 +45,8 @@ describe('Concurrency: Parallel Minting', () => {
     // All should have valid links
     results.forEach((r) => {
       expect(r.qurl_link).toBeDefined();
-      expect(r.resource_id).toMatch(/^r_/);
+      // Public resource IDs are opaque qurl-service-owned values.
+      expect(r.resource_id).toBeTruthy();
     });
   });
 
@@ -83,9 +84,8 @@ describe('Concurrency: Parallel Access', () => {
     });
     tracked.track(result.resource_id);
 
-    // #950 canary, qurl_id side, before the race — otherwise the
-    // post-race dual-shape check below could pass vacuously through its
-    // 404 arm (rationale in qurl-api.ts's getLinkStatus doc).
+    // qurl_id canary before the race — otherwise the post-race dual-shape
+    // check below could pass vacuously through its 404 arm.
     const pre = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id, (s) => s !== null,
     );
@@ -99,7 +99,7 @@ describe('Concurrency: Parallel Access', () => {
     // and resolves client-side), so all ten come back 200 …
     expect(results.filter((r) => r.ok)).toHaveLength(10);
 
-    // … and the counter check lives at the status endpoint. Honest
+    // … and the counter check lives in the management response. Honest
     // scope: the knock that consumes a use is client-side JS, so ten
     // bare GETs may consume nothing at all — this pins parallel SPA
     // serving plus counter COHERENCE (never past the max_uses:1 cap),
@@ -107,17 +107,13 @@ describe('Concurrency: Parallel Access', () => {
     // ten parallel browsers; the single-consumption guarantee itself is
     // pinned knock-driven in file-revoke.test.ts ("a consumed one-time
     // link does not serve a second knock"), and URL-target knock
-    // coverage is #951. Two valid coherence shapes, same as
-    // smoke.test.ts's second-access guard:
-    //   (a) status 404s (→ null) — resource fully consumed;
-    //   (b) status resolves with use_count <= 1 — the racing accesses
-    //       never advanced the counter past the cap.
-    // getLinkStatusOrNull rethrows any non-404 failure, so an unrelated
-    // auth/network error still fails loudly instead of false-passing.
-    const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id);
-    if (status !== null) {
-      expect(status.use_count).toBeLessThanOrEqual(1);
-    }
+    // coverage is #951. This management coherence check depends on terminal-token
+    // retention in the preview.
+    // TODO(upstream-contract): layervai/qurl-service#1233 tracks that behavior.
+    // The summary must resolve and its use_count must stay within the max_uses:1
+    // cap. Missing summaries are hard failures.
+    const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id);
+    expect(status.use_count).toBeLessThanOrEqual(1);
   });
 });
 
