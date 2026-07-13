@@ -362,7 +362,7 @@ func TestHandleGet_InBotRateLimitDeniesAfterLimit(t *testing.T) {
 	}
 
 	_, _, second := newAdminSlashInvoker(t, h).invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
-	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "60m") {
+	if !strings.Contains(second, "Rate limit hit") || !strings.Contains(second, "1h") {
 		t.Fatalf("second get = %q, want in-bot rate-limit copy with retry hint", second)
 	}
 	if got := mintHits.Load(); got != 1 {
@@ -1143,7 +1143,8 @@ func TestHandleGet_DMRidesOneTimeSuffix(t *testing.T) {
 
 // TestHumanizeRetry fences the rate-limit retry-after rendering.
 // Sub-second collapses to "a moment" (so 0.4s doesn't print as "0s"
-// from int(0.4+0.5) rounding); minute-or-more rounds to integer.
+// from int(0.4+0.5) rounding); minute-or-more rounds to the nearest minute
+// and switches to hours when that reads better.
 func TestHumanizeRetry(t *testing.T) {
 	cases := []struct {
 		in   time.Duration
@@ -1163,6 +1164,11 @@ func TestHumanizeRetry(t *testing.T) {
 		{59500 * time.Millisecond, "1m"},
 		{60 * time.Second, "1m"},
 		{2 * time.Minute, "2m"},
+		{59*time.Minute + 30*time.Second, "1h"},
+		{60 * time.Minute, "1h"},
+		{61 * time.Minute, "1h1m"},
+		{90 * time.Minute, "1h30m"},
+		{119*time.Minute + 31*time.Second, "2h"},
 	}
 	for _, c := range cases {
 		got := humanizeRetry(c.in)

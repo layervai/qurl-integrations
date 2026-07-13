@@ -484,12 +484,15 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	// so an undeliverable privacy request consumes nothing either. (Resolution
 	// work for unknown aliases is instead bounded by Slack's own per-user
 	// slash-command throttle, not by spending the user's mint quota on typos.)
+	// The atomic check-and-consume happens here, so an upstream Create failure
+	// still spends an attempt; see apps/slack/docs/operating.md.
 	ok, retry, err := h.cfg.AdminStore.CheckRateLimit(ctx, args.userID, args.teamID)
 	if err != nil {
 		log.Warn("get: rate-limit check failed", "error", err, "team_id", args.teamID, "user_id", args.userID)
 		return getResult{}, &userError{msg: rateLimitErrorMessage(err)}
 	}
 	if !ok {
+		log.Info("get: rate-limit denied mint", "retry_after_ms", retry.Milliseconds())
 		return getResult{}, &userError{msg: rateLimitMessage(retry, "")}
 	}
 
@@ -921,6 +924,14 @@ func humanizeRetry(d time.Duration) string {
 		}
 		return fmt.Sprintf("%ds", secs)
 	}
-	mins := int(d.Minutes() + 0.5)
-	return fmt.Sprintf("%dm", mins)
+	totalMins := int(d.Minutes() + 0.5)
+	if totalMins < 60 {
+		return fmt.Sprintf("%dm", totalMins)
+	}
+	hours := totalMins / 60
+	mins := totalMins % 60
+	if mins == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%dm", hours, mins)
 }
