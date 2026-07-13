@@ -1,16 +1,11 @@
 // Tests for multi-tenant mode (activated when GUILD_ID env is unset or
 // not a valid Discord snowflake). Covers the code paths added to
 // config.js, commands.js, discord.js, and server.js.
-
-// Stable state-signing secret — SAME OAUTH_STATE_SECRET as
-// qurl-oauth-state.test.js so cross-test ordering doesn't matter (per
-// PR #177 review on env-var leakage). This suite re-requires the REAL
-// config + commands modules per test, and the OpenNHP-mode /link
-// dispatch below reaches generateState; without the pin, the resolved
-// secret would depend on whatever GITHUB_CLIENT_SECRET another suite
-// in the same worker happened to leave in process.env — including
-// sub-32-char fixtures the shared signer now rejects.
-process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
+//
+// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js — the
+// OpenNHP-mode /link dispatch below reaches the shared state signer
+// through the REAL config, and the signer's 32-char floor would
+// otherwise make resolution depend on worker-level env leakage.
 
 describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
   // Each case re-requires config fresh after setting process.env, because

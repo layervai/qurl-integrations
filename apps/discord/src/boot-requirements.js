@@ -4,6 +4,8 @@
 // the highest-risk branch in the module: a regression here could either
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
+const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
+
 // Required at boot in EVERY environment. Gated on `isOpenNHPActive`,
 // NOT `isMultiTenant`: the GITHUB_* vars only matter when /auth +
 // /webhook routes are actually mounted. A single-guild-plain deployment
@@ -341,6 +343,32 @@ function invalidHotStandbyValues(cfg) {
   return problems;
 }
 
+// OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
+// unless OpenNHP mode is active (the only mode that mounts /auth +
+// /webhook routes). Required — at the state signer's minimum length —
+// only when that surface is live, and only in production (the caller
+// in index.js sits inside the NODE_ENV=production block, keeping dev
+// localhost workflows convenient). The same floor is enforced lazily
+// at sign/verify time (utils/oauth-state.js); rejecting here too makes
+// a short secret refuse to boot instead of deferring a 500 to the
+// first /link interaction. Falling back to GITHUB_CLIENT_SECRET is
+// deliberately NOT accepted in production: coupling the two secrets
+// means rotating GitHub's client secret would invalidate all in-flight
+// OAuth states and vice versa.
+//
+// Returns the operator-facing message on rejection or null on success
+// (same string-or-null shape as the combo rejectors above).
+function invalidOauthStateSecret(cfg) {
+  if (!cfg.isOpenNHPActive) return null;
+  if ((cfg.OAUTH_STATE_SECRET || '').length < MIN_STATE_SECRET_LENGTH) {
+    return (
+      `OAUTH_STATE_SECRET must be set (at least ${MIN_STATE_SECRET_LENGTH} chars) in production. ` +
+      'Generate with: openssl rand -hex 32'
+    );
+  }
+  return null;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -443,6 +471,7 @@ module.exports = {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidOauthStateSecret,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

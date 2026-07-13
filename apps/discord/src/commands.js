@@ -183,13 +183,11 @@ const { renderViewCounter } = require('./view-counter-render');
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
 //
-// Secret resolution (OAUTH_STATE_SECRET, then GITHUB_CLIENT_SECRET for
-// backward-compat with existing deployments — blast-radius isolation:
-// leaking one doesn't enable forgery of the other's use cases), the
-// 32-char length floor, and the jest-only random fallback live in the
-// shared signer; see utils/oauth-state.js. The payload shape here is
-// deliberately distinct from the qURL OAuth state's — see
-// utils/qurl-oauth-state.js for the cross-purpose forgery analysis.
+// Secret resolution, the 32-char length floor, and the jest-only
+// random fallback live in the shared signer — see utils/oauth-state.js.
+// The payload shape here is deliberately distinct from the qURL OAuth
+// state's; see utils/qurl-oauth-state.js for the cross-purpose forgery
+// analysis.
 const githubOAuthStateSigner = createStateSigner({
   flowLabel: 'OAuth state',
   secretConfigKeys: ['OAUTH_STATE_SECRET'],

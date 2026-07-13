@@ -1,7 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
 const { isPositiveFinite } = require('./utils/time');
-const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
 const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { createGatewayWsShim } = require('./gateway-ws-shim');
@@ -42,6 +41,7 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidOauthStateSecret,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
@@ -205,18 +205,12 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-  // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). Require it only when that surface is live, and
-  // hold it to the same length floor the state signer enforces at
-  // sign/verify time (utils/oauth-state.js) — refusing to boot here
-  // beats the deferred 500 on the first /link interaction.
-  if (config.isOpenNHPActive
-      && (config.OAUTH_STATE_SECRET || '').length < MIN_STATE_SECRET_LENGTH) {
-    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
-    // rotating GitHub's client secret would invalidate all in-flight
-    // OAuth states and vice versa. A prod deploy must set this explicitly.
-    logger.error(`OAUTH_STATE_SECRET must be set (at least ${MIN_STATE_SECRET_LENGTH} chars) in production. Generate with: openssl rand -hex 32`);
+  // Presence + length-floor policy lives in boot-requirements.js
+  // (invalidOauthStateSecret) so it's unit-testable; this is just the
+  // log-and-exit plumbing, same pattern as the combo rejectors below.
+  const oauthStateSecretProblem = invalidOauthStateSecret(config);
+  if (oauthStateSecretProblem) {
+    logger.error(oauthStateSecretProblem);
     process.exit(1);
   }
 }

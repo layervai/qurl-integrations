@@ -369,8 +369,9 @@ module.exports = {
   // GITHUB_CLIENT_SECRET fallback so a compromised client secret can be
   // rotated without also invalidating in-flight OAuth state tokens —
   // and vice versa. Resolution precedence + the 32-char minimum live in
-  // src/utils/oauth-state.js (createStateSigner); index.js enforces
-  // presence at boot when the OpenNHP surface is live.
+  // src/utils/oauth-state.js (createStateSigner); boot-requirements.js's
+  // invalidOauthStateSecret enforces presence + the floor at boot when
+  // the OpenNHP surface is live in production.
   OAUTH_STATE_SECRET: process.env.OAUTH_STATE_SECRET,
 
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar

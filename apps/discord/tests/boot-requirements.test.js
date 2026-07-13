@@ -22,12 +22,14 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidOauthStateSecret,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
+const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 
 describe('bootRequired', () => {
   it('OpenNHP-active mode demands DISCORD_TOKEN + GITHUB_* (but not GUILD_ID or BASE_URL — those are enforced upstream)', () => {
@@ -683,5 +685,41 @@ describe('invalidHotStandbyValues', () => {
     // skipped here to avoid duplicate operator-facing messages.
     expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: '' }))).toEqual([]);
     expect(invalidHotStandbyValues(cfg({ INSTANCE_ID: '' }))).toEqual([]);
+  });
+});
+
+describe('invalidOauthStateSecret', () => {
+  // The GitHub OAuth state surface only mounts in OpenNHP mode, and the
+  // caller in index.js sits inside the NODE_ENV=production block —
+  // these tests pin the predicate itself, per-mode.
+
+  it('returns null when OpenNHP is inactive, regardless of the secret', () => {
+    expect(invalidOauthStateSecret({ isOpenNHPActive: false })).toBeNull();
+    expect(invalidOauthStateSecret({ isOpenNHPActive: false, OAUTH_STATE_SECRET: 'shrt' })).toBeNull();
+    expect(invalidOauthStateSecret({ isOpenNHPActive: false, OAUTH_STATE_SECRET: '0'.repeat(64) })).toBeNull();
+  });
+
+  it('flags a missing secret when OpenNHP is active', () => {
+    const msg = invalidOauthStateSecret({ isOpenNHPActive: true });
+    expect(msg).toMatch(/OAUTH_STATE_SECRET must be set/);
+    expect(msg).toMatch(/openssl rand -hex 32/);
+  });
+
+  it('flags a secret under the signer length floor (a short secret must fail at boot, not at the first /link)', () => {
+    const oneShort = 'x'.repeat(MIN_STATE_SECRET_LENGTH - 1);
+    const msg = invalidOauthStateSecret({ isOpenNHPActive: true, OAUTH_STATE_SECRET: oneShort });
+    expect(msg).toMatch(new RegExp(`at least ${MIN_STATE_SECRET_LENGTH} chars`));
+  });
+
+  it('accepts secrets at and above the floor', () => {
+    expect(invalidOauthStateSecret({
+      isOpenNHPActive: true,
+      OAUTH_STATE_SECRET: 'x'.repeat(MIN_STATE_SECRET_LENGTH),
+    })).toBeNull();
+    // openssl rand -hex 32 → 64 chars, the documented generator.
+    expect(invalidOauthStateSecret({
+      isOpenNHPActive: true,
+      OAUTH_STATE_SECRET: '0'.repeat(64),
+    })).toBeNull();
   });
 });

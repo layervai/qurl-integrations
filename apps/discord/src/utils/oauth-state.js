@@ -13,9 +13,10 @@
 //                      'qURL OAuth state' (brand spelling) or 'OAuth state'.
 //   secretConfigKeys — ordered config-key precedence for the flow's
 //                      dedicated secret(s), highest first. The first
-//                      truthy value wins; GITHUB_CLIENT_SECRET is always
-//                      the last-ditch fallback after these (env-parity
-//                      with the original GitHub OAuth signer).
+//                      truthy value wins. GITHUB_CLIENT_SECRET is
+//                      appended internally as the always-last fallback
+//                      (env-parity with the original GitHub OAuth
+//                      signer) — callers cannot omit or reorder it.
 //
 // Secrets are read through config (src/config.js snapshots process.env
 // at load) rather than raw process.env — config is the validating
@@ -27,15 +28,17 @@
 const crypto = require('crypto');
 const config = require('../config');
 const logger = require('../logger');
+const { verifyHmacSha256 } = require('./webhook-hardening');
 
 // Minimum acceptable secret length — per round-9 #4. 32 chars is the
 // floor for an HMAC-SHA256 secret with adequate entropy (matches the
 // `0`.repeat(64) test fixture's order of magnitude, well below the
 // 128-char hex secrets ops actually provisions). A 4-char accidental
 // value would HMAC just fine with no security; reject upfront. Applies
-// to BOTH the dedicated secrets and the GITHUB_CLIENT_SECRET fallback
-// (Auth0 / GitHub provision 32+ char client secrets by default, but a
-// manual /placeholder env on a misconfigured dev box would slip past
+// to whichever key in the resolution order wins — dedicated secrets
+// and the GITHUB_CLIENT_SECRET fallback alike (Auth0 / GitHub
+// provision 32+ char client secrets by default, but a manual
+// /placeholder env on a misconfigured dev box would slip past
 // otherwise). Historically only the qURL flow enforced this; the
 // GitHub flow silently accepted any length — extracting the shared
 // resolver closed that drift.
@@ -69,12 +72,14 @@ const MIN_STATE_SECRET_LENGTH = 32;
 //      env doesn't enable the forgeable key — everywhere else throws
 //      hard so a misconfig is loud.
 function createStateSigner({ flowLabel, secretConfigKeys }) {
-  if (typeof flowLabel !== 'string' || !flowLabel) {
-    throw new TypeError('createStateSigner: flowLabel must be a non-empty string');
-  }
+  // A missing/empty key list would silently resolve straight to
+  // GITHUB_CLIENT_SECRET — a precedence change, not a cosmetic bug —
+  // so it fails loudly at construction. flowLabel only feeds message
+  // prose; a bad value surfaces legibly in the first error string.
   if (!Array.isArray(secretConfigKeys) || secretConfigKeys.length === 0) {
     throw new TypeError('createStateSigner: secretConfigKeys must be a non-empty array');
   }
+  const resolutionOrder = [...secretConfigKeys, 'GITHUB_CLIENT_SECRET'];
   let warnedFallback = false;
   const testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
@@ -84,18 +89,12 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
   // interaction that needs the secret, not at require time of a module
   // whose flow may be dormant in this deploy mode.
   function stateSecret() {
-    const dedicated = secretConfigKeys.map((key) => config[key]).find(Boolean);
-    if (dedicated) {
-      if (dedicated.length < MIN_STATE_SECRET_LENGTH) {
-        throw new Error(`Refusing to mint ${flowLabel}: state-signing secret is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${dedicated.length}). Provision a 64+ char value in SSM.`);
-      }
-      return dedicated;
-    }
-    if (!config.GITHUB_CLIENT_SECRET) {
+    const key = resolutionOrder.find((k) => config[k]);
+    if (!key) {
       const inTestHarness = process.env.NODE_ENV === 'test'
         && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
       if (!inTestHarness) {
-        throw new Error(`Refusing to mint ${flowLabel}: ${secretConfigKeys.join(' or ')} or GITHUB_CLIENT_SECRET must be set.`);
+        throw new Error(`Refusing to mint ${flowLabel}: ${resolutionOrder.join(' or ')} must be set.`);
       }
       if (!warnedFallback) {
         logger.warn(`${flowLabel} HMAC using per-process random test fallback — set ${secretConfigKeys[0]}`);
@@ -103,10 +102,11 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
       }
       return testFallbackSecret;
     }
-    if (config.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
-      throw new Error(`Refusing to mint ${flowLabel}: GITHUB_CLIENT_SECRET fallback is shorter than ${MIN_STATE_SECRET_LENGTH} chars.`);
+    const secret = config[key];
+    if (secret.length < MIN_STATE_SECRET_LENGTH) {
+      throw new Error(`Refusing to mint ${flowLabel}: ${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${secret.length}). Provision a 64+ char value in SSM.`);
     }
-    return config.GITHUB_CLIENT_SECRET;
+    return secret;
   }
 
   function sign(data) {
@@ -115,16 +115,13 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
       .digest('hex');
   }
 
+  // Delegates the constant-time compare to the shared webhook helper
+  // (third hand-rolled copy avoided; see webhook-hardening.js's header
+  // on why these drift). Its falsy-input guard means empty `data` never
+  // verifies — both callers regex-validate their inputs as non-empty
+  // before signing, so the guard is unreachable defense-in-depth here.
   function verify(data, sigHex) {
-    const expected = sign(data);
-    try {
-      return crypto.timingSafeEqual(Buffer.from(sigHex, 'hex'), Buffer.from(expected, 'hex'));
-    } catch {
-      // Length/charset mismatch between the buffers. Both callers regex-
-      // validate sigHex as /^[0-9a-f]{64}$/ before calling, so this is
-      // defense-in-depth for a future caller that doesn't.
-      return false;
-    }
+    return verifyHmacSha256(data, stateSecret(), sigHex);
   }
 
   return { sign, verify };
