@@ -98,13 +98,14 @@ func ambiguousResourceAliasMessage(alias string) string {
 	return fmt.Sprintf("`$%s` matches multiple resources in this channel. Ask your Slack admin to set a channel-specific alias for the one you need.", alias)
 }
 
-// connectorDisabledMessage is shown when the qURL service returns the
-// `connector_disabled` error code (the workspace doesn't have
-// qURL Connector resource minting enabled yet).
+// errCodeConnectorDisabled is the qurl-service error-envelope `code` returned
+// when qURL Connector resource minting is disabled for the workspace.
 // TODO(upstream-contract): keep in lockstep with qurl-service's public
 // connector-disabled error contract.
 const errCodeConnectorDisabled = "connector_disabled"
 
+// connectorDisabledMessage is shown when qurl-service returns
+// [errCodeConnectorDisabled].
 const connectorDisabledMessage = "Protected resources are not yet enabled for this workspace. Ask LayerV support."
 
 // serviceUnreachableMessage is the "honest retry-friendly" copy
