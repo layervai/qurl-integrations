@@ -400,12 +400,13 @@ function invalidHotStandbyValues(cfg) {
 // participate in resolution (the signer falls through), so only set
 // values are shape-checked, and each problem gets its own message.
 //
+// Every invalidStateSecretValues message ends with the same remediation
+// clause — one constant so the four sites can't drift on the
+// recommended generator.
+const STATE_SECRET_REMEDIATION = 'Generate with: openssl rand -hex 32';
+
 // Returns an array of operator-facing message strings, [] on success
 // (same shape as invalidHotStandbyValues above).
-//
-// Every message ends with the same remediation clause — one constant
-// so the four sites can't drift on the recommended generator.
-const STATE_SECRET_REMEDIATION = 'Generate with: openssl rand -hex 32';
 function invalidStateSecretValues(cfg) {
   const problems = [];
   if (cfg.isOpenNHPActive && !cfg.OAUTH_STATE_SECRET) {
