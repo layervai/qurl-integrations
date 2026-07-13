@@ -7,7 +7,7 @@
 //   - 302 happy path: redirects to Auth0 with a qURL OAuth state binding
 //     guild_id + discord_user_id
 
-process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
+// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js.
 // KEY_ENCRYPTION_KEY required for the fail-fast guard added in PR #177
 // review round 3; matches the legacy modal-paste path's existing check.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);

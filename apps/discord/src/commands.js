@@ -34,6 +34,7 @@ const {
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
+const { createStateSigner } = require('./utils/oauth-state');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
@@ -172,7 +173,7 @@ const { renderViewCounter } = require('./view-counter-render');
 
 // Generate an OAuth state token bound to the initiating Discord user.
 //
-// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(OAUTH_STATE_SECRET,
+// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(stateSecret,
 // `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
 // discord_id pulled from consumePendingLink(); a mismatch means the state
 // was tampered with or replayed across users, even if the random nonce
@@ -181,44 +182,19 @@ const { renderViewCounter } = require('./view-counter-render');
 // Defense-in-depth only — the primary binding is the single-use DB row
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
-let _warnedStateSecretFallback = false;
-// Random per-process fallback so even inside the Jest harness there's no
-// static key that, if accidentally shipped, would be forgeable. Regenerated
-// on every process start; tests that need a stable secret should set
-// OAUTH_STATE_SECRET explicitly in their own mocks.
-const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-function stateSecret() {
-  // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
-  // can be rotated without also invalidating in-flight OAuth state tokens —
-  // and vice versa. Blast-radius isolation: leaking one doesn't enable
-  // forgery of the other's use cases. Fall back to GITHUB_CLIENT_SECRET for
-  // backward-compat with existing deployments.
-  const dedicated = process.env.OAUTH_STATE_SECRET;
-  if (dedicated) return dedicated;
-  if (!config.GITHUB_CLIENT_SECRET) {
-    // Only use the static fallback inside Jest (NODE_ENV=test AND either
-    // JEST_WORKER_ID set by Jest, or CI=true). This raises the bar: merely
-    // setting NODE_ENV=test by accident in a deployed env doesn't enable
-    // the forgeable key. Everywhere else throws hard so a misconfig is loud.
-    const inTestHarness = process.env.NODE_ENV === 'test'
-      && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
-    if (!inTestHarness) {
-      throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
-    }
-    if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
-      _warnedStateSecretFallback = true;
-    }
-    return _testFallbackSecret;
-  }
-  return config.GITHUB_CLIENT_SECRET;
-}
+//
+// Secret resolution, the 32-char length floor, and the jest-only
+// random fallback live in the shared signer — see utils/oauth-state.js.
+// The payload shape here is deliberately distinct from the qURL OAuth
+// state's; see utils/qurl-oauth-state.js for the cross-purpose forgery
+// analysis.
+const githubOAuthStateSigner = createStateSigner({
+  flowLabel: 'OAuth state',
+  secretConfigKeys: ['OAUTH_STATE_SECRET'],
+});
 function generateState(discordId) {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const sig = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  return `${nonce}.${sig}`;
+  return `${nonce}.${githubOAuthStateSigner.sign(`${discordId}:${nonce}`)}`;
 }
 function verifyStateBinding(state, discordId) {
   if (typeof state !== 'string') return false;
@@ -226,12 +202,7 @@ function verifyStateBinding(state, discordId) {
   if (parts.length !== 2) return false;
   const [nonce, sig] = parts;
   if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  } catch { return false; }
+  return githubOAuthStateSigner.verify(`${discordId}:${nonce}`, sig);
 }
 
 // --- QURL send helpers ---

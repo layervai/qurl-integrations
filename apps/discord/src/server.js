@@ -202,6 +202,14 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
 // Symmetry with commands.js — the full OpenNHP surface (commands +
 // routes) turns on together when config.isOpenNHPActive is true;
 // everything else gets the plain qURL sharing tool.
+//
+// LOAD-BEARING for the boot gate: invalidStateSecretValues
+// (boot-requirements.js) assumes isOpenNHPActive is the ONLY gate that
+// mounts /auth — its GitHub-flow presence rule fires on exactly that
+// flag, and it deliberately skips shape-checking GITHUB_CLIENT_SECRET
+// outside the qURL winning-key case. If a future mode mounts /auth
+// under a different condition, extend that predicate in lockstep or a
+// short fallback secret will deferred-500 there undetected.
 if (config.isOpenNHPActive) {
   app.use('/auth', oauthRouter);
   app.use('/webhook', webhooksRouter);
