@@ -324,7 +324,11 @@ export async function pollLinkStatus(
   apiKey: string,
   resourceId: string,
   predicate: (status: LinkStatus | null) => boolean,
-  { timeoutMs = 10_000, intervalMs = 1_000 }: { timeoutMs?: number; intervalMs?: number } = {},
+  // 5s default: generous for the mint-then-read propagation lag this
+  // tolerates, while bounding the cost of the FAILING path — on a
+  // wrong-key deployment (#950) every canary burns its full budget
+  // before assertStatusVisible reds, and that cost repeats per suite.
+  { timeoutMs = 5_000, intervalMs = 1_000 }: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<LinkStatus | null> {
   const deadline = Date.now() + timeoutMs;
   let last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);

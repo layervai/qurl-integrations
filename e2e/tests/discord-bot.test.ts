@@ -63,6 +63,7 @@ describe('Discord Bot: Channel Operations', () => {
     // tolerates history-read lag.
     const found = await discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
       afterMessageId: m1.id,
+      fromAuthorId: env.BOT_CLIENT_ID,
       containsText: m2Content,
       timeoutMs: 10_000,
       pollIntervalMs: 500,

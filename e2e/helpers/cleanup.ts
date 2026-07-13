@@ -101,14 +101,19 @@ export function trackedQurlResources(env: {
       // revokeLink returns res.ok (false on a 4xx, NO throw) and only
       // throws on a network error, so surface BOTH paths — the
       // systematic-403 one is the dangerous one (see module header).
-      // Deliberately serial: this is the best-effort path, and a
-      // parallel burst invites 429s that would leave stragglers leaked
-      // until their TTL — gentleness beats wall-clock here. (Consumers
+      // Deliberately serial WITH a short pause between requests
+      // (symmetric with deleteAll): this is the best-effort path, and a
+      // burst — even a serial back-to-back one, ~50-60 DELETEs after the
+      // concurrency stress test — invites 429s that would leave
+      // stragglers leaked until their TTL, the exact failure this module
+      // exists to prevent. Gentleness beats wall-clock here; consumers
       // that track enough resources to threaten jest's hook budget own
-      // that math via an afterAll timeout override — see
-      // concurrency.test.ts.)
+      // that math via an afterAll timeout override (concurrency.test.ts).
       // Snapshot the ids: revoke() deletes from the Set mid-iteration.
+      let first = true;
       for (const id of [...ids]) {
+        if (!first) await new Promise((r) => setTimeout(r, 250));
+        first = false;
         try {
           const ok = await revoke(id);
           if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
