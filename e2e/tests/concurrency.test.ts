@@ -78,8 +78,11 @@ describe('Concurrency: Parallel Access', () => {
     // Canary before the race: the never-accessed link must be visible at
     // the status endpoint, otherwise the post-race dual-shape check below
     // would pass vacuously through its 404 arm (same guard as
-    // smoke.test.ts's canary test — see the rationale there).
-    const pre = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id);
+    // smoke.test.ts's canary test — see the rationale there; bounded
+    // poll for mint-read lag).
+    const pre = await qurl.pollLinkStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id, (s) => s !== null,
+    );
     expect(pre).not.toBeNull();
 
     const results = await Promise.all(

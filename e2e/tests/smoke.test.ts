@@ -86,8 +86,12 @@ describe('Smoke: qURL link lifecycle', () => {
     // moved — then all the `if (status !== null)` guards below would
     // degrade into passing vacuously through their 404 arm: the exact
     // silent-green this suite exists to kill. This test turns that
-    // degradation into a loud red instead.
-    const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+    // degradation into a loud red instead. Bounded poll (not a single
+    // shot): mint-then-read races an unpinned consistency model, and a
+    // brief propagation lag shouldn't red a correct deployment.
+    const status = await qurl.pollLinkStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, qurlId, (s) => s !== null,
+    );
     expect(status).not.toBeNull();
   });
 
@@ -170,8 +174,10 @@ describe('Smoke: Revocation', () => {
     // canary above covers the qurl_id key — #950): the live resource
     // must be VISIBLE at the status endpoint before revocation, or the
     // 404 assertion in the next test would pass vacuously for a lookup
-    // that 404s unconditionally.
-    const pre = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+    // that 404s unconditionally. Bounded poll for mint-read lag.
+    const pre = await qurl.pollLinkStatus(
+      env.MINT_API_URL, env.QURL_API_KEY, resourceId, (s) => s !== null,
+    );
     expect(pre).not.toBeNull();
 
     // tracked.revoke = revokeLink + drop from the afterAll ledger on success.

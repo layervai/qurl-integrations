@@ -38,9 +38,20 @@ Optional variables gate extra suites, which skip themselves
 npm ci
 npm test                        # full suite (needs .env)
 npx jest smoke.test             # one file
-npx jest -t 'second access'     # one test by name
+npx jest -t 'mint 10 links'     # one (self-contained) test by name
 npx tsc --noEmit                # typecheck only (no .env needed)
 ```
+
+Everything — including `playwright`, which the tunnel-view tests
+load-bear at runtime — lives in `devDependencies` (nothing here is
+published). Never install this package with `--omit=dev` /
+`--production` in CI: the install goes green but the suite can't run.
+
+Caveat on `-t`: the lifecycle suites (smoke, link-lifecycle) are
+deliberately order-dependent (mint → access → re-access → revoke), and
+their mid-flow tests carry explicit `toBeDefined` dependency guards. So
+running one of those tests by name fails its guard **by design** — run
+the whole file instead.
 
 Tests run serially (`maxWorkers: 1` in `jest.config.ts`) because they
 share Discord channel state. After each run, `helpers/discord-reporter.js`

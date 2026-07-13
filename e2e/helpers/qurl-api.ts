@@ -273,3 +273,36 @@ export async function getLinkStatusOrNull(
     throw e;
   }
 }
+
+/** Bounded-poll wrapper over getLinkStatusOrNull: re-reads until
+ * `predicate(status)` holds or the budget elapses, returning the LAST
+ * observation either way (the caller still owns the assertion, so a
+ * predicate that never holds fails there with the real final state).
+ *
+ * Exists for the mint-time canaries: they're read-after-write against a
+ * live API whose consistency model isn't pinned, and a brief replica /
+ * propagation lag shouldn't red a correct deployment. A first
+ * observation that already satisfies the predicate returns immediately,
+ * so a strongly-consistent endpoint pays zero extra latency. Non-404
+ * errors throw straight through (never retried) — only the data shape
+ * is polled, not failures.
+ *
+ * Deliberately NOT used for the post-revoke `.rejects.toThrow(/404/)`
+ * assertions: those keep the pre-existing single-shot canonical
+ * contract (smoke / link-lifecycle / file-revoke all share it).
+ * Revisit only if a live run shows revoke-propagation lag. */
+export async function pollLinkStatus(
+  mintUrl: string,
+  apiKey: string,
+  resourceId: string,
+  predicate: (status: LinkStatus | null) => boolean,
+  { timeoutMs = 10_000, intervalMs = 1_000 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<LinkStatus | null> {
+  const deadline = Date.now() + timeoutMs;
+  let last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);
+  while (!predicate(last) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    last = await getLinkStatusOrNull(mintUrl, apiKey, resourceId);
+  }
+  return last;
+}
