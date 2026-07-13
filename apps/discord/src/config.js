@@ -364,6 +364,15 @@ module.exports = {
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
 
+  // Dedicated HMAC secret for GitHub OAuth state tokens (commands.js
+  // generateState/verifyStateBinding). Preferred over the
+  // GITHUB_CLIENT_SECRET fallback so a compromised client secret can be
+  // rotated without also invalidating in-flight OAuth state tokens —
+  // and vice versa. Resolution precedence + the 32-char minimum live in
+  // src/utils/oauth-state.js (createStateSigner); index.js enforces
+  // presence at boot when the OpenNHP surface is live.
+  OAUTH_STATE_SECRET: process.env.OAUTH_STATE_SECRET,
+
   // qURL webhook receiver HMAC. Written to SSM by the webhook-registrar
   // Lambda (apps/discord/lambda/webhook-registrar/) on each deploy
   // invocation, then injected into the bot's task env. The bot reads
@@ -380,6 +389,14 @@ module.exports = {
   AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
   AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
   AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+
+  // Flow-dedicated HMAC secret for the qURL OAuth state token
+  // (utils/qurl-oauth-state.js) — lets ops rotate the qURL OAuth signer
+  // without invalidating in-flight GitHub OAuth links (#184). Falls
+  // back to OAUTH_STATE_SECRET (legacy shared secret), then
+  // GITHUB_CLIENT_SECRET; precedence + the 32-char minimum live in
+  // src/utils/oauth-state.js (createStateSigner).
+  QURL_OAUTH_STATE_SECRET: process.env.QURL_OAUTH_STATE_SECRET,
 
   // Allowed GitHub organizations (comma-separated)
   ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),

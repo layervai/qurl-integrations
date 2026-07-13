@@ -1,11 +1,20 @@
 /**
  * Tests for generateState/verifyStateBinding in commands.js — OAuth state
  * HMAC binding to discord user id (round 28 defense-in-depth).
+ *
+ * The mocked config deliberately omits OAUTH_STATE_SECRET, so the shared
+ * signer (src/utils/oauth-state.js) resolves the GITHUB_CLIENT_SECRET
+ * fallback — deterministic regardless of what other suites in the same
+ * worker leave in process.env. The fixture must clear the signer's
+ * 32-char MIN_STATE_SECRET_LENGTH floor, which now applies to the
+ * GitHub OAuth flow too (it used to accept any length).
  */
+
+const mockGithubClientSecret = 'test-client-secret-0123456789abcdef';
 
 jest.mock('../src/config', () => ({
   GITHUB_CLIENT_ID: 'client',
-  GITHUB_CLIENT_SECRET: 'test-client-secret',
+  GITHUB_CLIENT_SECRET: mockGithubClientSecret,
   ALLOWED_GITHUB_ORGS: ['opennhp'],
   QURL_SEND_MAX_RECIPIENTS: 10,
   PENDING_LINK_EXPIRY_MINUTES: 10,
@@ -28,7 +37,7 @@ const crypto = require('crypto');
 
 // Re-implement generateState locally so we can sign test states without
 // going through the full /link command path.
-function makeState(discordId, secret = 'test-client-secret') {
+function makeState(discordId, secret = mockGithubClientSecret) {
   const nonce = crypto.randomBytes(16).toString('hex');
   const sig = crypto.createHmac('sha256', secret)
     .update(`${discordId}:${nonce}`).digest('hex');
