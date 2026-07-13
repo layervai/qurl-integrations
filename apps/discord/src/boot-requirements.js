@@ -371,7 +371,12 @@ function invalidHotStandbyValues(cfg) {
 //   leave a short secret to deferred-500 the first /qurl setup in a
 //   multi-tenant deploy — exactly the late failure this check exists
 //   to move to boot. The signer re-enforces the same floor lazily at
-//   sign/verify time; this is the loud-at-deploy copy.
+//   sign/verify time; this is the loud-at-deploy copy. Note this rule
+//   is deliberately fail-loud-on-any-set-value: unlike the winning-key
+//   rule below (whose rejections are all guaranteed first-use 500s), a
+//   short dedicated secret fails boot even in a mode where no OAuth
+//   surface would resolve it — set-but-wrong is a misconfig in its own
+//   right, and mode flips shouldn't unearth latent bad values.
 //
 //   GITHUB_CLIENT_SECRET is NOT shape-checked unconditionally: it is a
 //   provider-issued value (GitHub mints 40 chars) rather than an

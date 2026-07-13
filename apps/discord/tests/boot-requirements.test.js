@@ -694,7 +694,10 @@ describe('invalidStateSecretValues', () => {
   // (only mode that mounts the GitHub OAuth surface), shape applies to
   // any SET secret in every mode (the qURL OAuth flow mounts outside
   // OpenNHP too, so a short secret would deferred-500 /qurl setup in a
-  // multi-tenant deploy).
+  // multi-tenant deploy). Unset keys are never shape-checked — they
+  // simply fall out of the signer's resolution (the separation-of-
+  // concerns mirroring invalidHotStandbyValues) — pinned implicitly by
+  // every []-returning case below.
 
   it('returns [] when OpenNHP is inactive and no state secret is set', () => {
     expect(invalidStateSecretValues({ isOpenNHPActive: false })).toEqual([]);
@@ -804,13 +807,4 @@ describe('invalidStateSecretValues', () => {
     })).toEqual([]);
   });
 
-  it('does not shape-check unset keys (an unset key simply falls out of the signer resolution)', () => {
-    // Separation of concerns mirroring invalidHotStandbyValues: the
-    // presence rule handles "must exist"; unset optional keys are not
-    // problems.
-    expect(invalidStateSecretValues({
-      isOpenNHPActive: false,
-      OAUTH_STATE_SECRET: '0'.repeat(64),
-    })).toEqual([]);
-  });
 });

@@ -30,7 +30,7 @@ const config = require('../config');
 const logger = require('../logger');
 const { verifyHmacSha256 } = require('./webhook-hardening');
 
-// Minimum acceptable secret length — per round-9 #4. 32 chars is the
+// Minimum acceptable secret length. 32 chars is the
 // floor for an HMAC-SHA256 secret with adequate entropy — half the
 // 64-char values the documented generator (`openssl rand -hex 32`)
 // and the `0`.repeat(64) test fixture produce. A 4-char accidental
@@ -86,6 +86,10 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
   }
   const resolutionOrder = [...secretConfigKeys, 'GITHUB_CLIENT_SECRET'];
   let warnedFallback = false;
+  // Computed eagerly at construction even where it's never read
+  // (production, where a real secret always resolves) — two signers
+  // per process at single-digit microseconds each. Deliberate: an
+  // unconditional value beats a lazy-init branch inside stateSecret().
   const testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
   // Resolved lazily on every sign/verify (not captured at construction)
