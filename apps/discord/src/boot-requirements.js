@@ -373,15 +373,16 @@ function invalidHotStandbyValues(cfg) {
 //   to move to boot. The signer re-enforces the same floor lazily at
 //   sign/verify time; this is the loud-at-deploy copy.
 //
-//   Deliberately NOT shape-checked here: GITHUB_CLIENT_SECRET. It is a
+//   GITHUB_CLIENT_SECRET is NOT shape-checked unconditionally: it is a
 //   provider-issued value (GitHub mints 40 chars) rather than an
 //   operator-minted one, and a short value means GitHub OAuth token
 //   exchange itself is misconfigured — a bigger problem than state
 //   signing, and one this gate shouldn't turn into a boot failure for
-//   deploy modes that never exercise it. The residual case (qURL flow
-//   configured, GITHUB_CLIENT_SECRET is the winning key, and it's a
-//   hand-typed sub-32 placeholder) is caught lazily by the signer with
-//   a named-key refusal.
+//   deploy modes that never exercise it. The ONE case where it is
+//   checked: when the qURL flow is configured and it is the winning
+//   (only) key in the signer's chain — there, a sub-32 value is
+//   guaranteed to make the first /qurl setup 500, so rejecting the
+//   boot has zero false positives.
 //
 // Presence-vs-shape separation mirrors missingHotStandbyKeys /
 // invalidHotStandbyValues: a key that is unset simply doesn't
@@ -399,11 +400,21 @@ function invalidStateSecretValues(cfg) {
     );
   }
   if (cfg.isQurlOAuthConfigured
-      && !cfg.QURL_OAUTH_STATE_SECRET && !cfg.OAUTH_STATE_SECRET && !cfg.GITHUB_CLIENT_SECRET) {
-    problems.push(
-      'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
-      'set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. Generate with: openssl rand -hex 32'
-    );
+      && !cfg.QURL_OAUTH_STATE_SECRET && !cfg.OAUTH_STATE_SECRET) {
+    if (!cfg.GITHUB_CLIENT_SECRET) {
+      problems.push(
+        'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
+        'set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. Generate with: openssl rand -hex 32'
+      );
+    } else if (cfg.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
+      // Winning-key check — see the GITHUB_CLIENT_SECRET note above.
+      problems.push(
+        'qURL OAuth is configured (AUTH0_* set) and GITHUB_CLIENT_SECRET is its only available ' +
+        `state-signing key, but it is shorter than ${MIN_STATE_SECRET_LENGTH} chars ` +
+        `(got ${cfg.GITHUB_CLIENT_SECRET.length}); the state signer will refuse to mint with it. ` +
+        'Set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. Generate with: openssl rand -hex 32'
+      );
+    }
   }
   for (const key of ['OAUTH_STATE_SECRET', 'QURL_OAUTH_STATE_SECRET']) {
     const value = cfg[key];

@@ -731,6 +731,32 @@ describe('invalidStateSecretValues', () => {
     })).toEqual([]);
   });
 
+  it('flags a short GITHUB_CLIENT_SECRET only when it is the winning key for a configured qURL flow', () => {
+    // Winning key + configured flow → the first /qurl setup is
+    // guaranteed to 500, so boot rejection has zero false positives.
+    const problems = invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      GITHUB_CLIENT_SECRET: 'shrt',
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/GITHUB_CLIENT_SECRET is its only available state-signing key/);
+    expect(problems[0]).toMatch(/shorter than \d+ chars \(got 4\)/);
+
+    // Not the winning key (a valid dedicated key outranks it) → no problem.
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
+      GITHUB_CLIENT_SECRET: 'shrt',
+    })).toEqual([]);
+
+    // Flow not configured → provider-issued value is not this gate's
+    // business, however short.
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: false,
+      GITHUB_CLIENT_SECRET: 'shrt',
+    })).toEqual([]);
+  });
+
   it('does not demand a signer key when qURL OAuth is unconfigured (signer call sites all gate on isQurlOAuthConfigured)', () => {
     expect(invalidStateSecretValues({ isQurlOAuthConfigured: false })).toEqual([]);
   });
