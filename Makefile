@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins check-discord test-discord clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord clean
 
 VERSION ?= dev
 
@@ -73,9 +73,13 @@ check-actions-pins:
 test-actions-pins:
 	scripts/test-validate-github-actions-pins.sh
 
-.PHONY: test-install-script
+## Scripts
+
 test-install-script:
 	scripts/test-install.sh
+
+check-release-please-sync:
+	scripts/check-release-please-sync.sh
 
 ## Pre-commit
 
@@ -95,7 +99,7 @@ check-discord: test-discord
 
 ## Full check (CI parity)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync lint test-race
 
 ## Cleanup
 

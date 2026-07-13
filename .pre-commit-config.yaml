@@ -43,6 +43,13 @@ repos:
         pass_filenames: false
         files: '^scripts/(install|test-install)\.sh$'
 
+      - id: release-please-sync
+        name: release-please config/manifest sync
+        entry: scripts/check-release-please-sync.sh
+        language: system
+        pass_filenames: false
+        files: '^(release-please-config\.json|\.release-please-manifest\.json|scripts/check-release-please-sync\.sh)$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w

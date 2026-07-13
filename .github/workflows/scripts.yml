@@ -6,6 +6,7 @@ name: Scripts
 
 on:
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -23,24 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # --severity=warning: SC2094 (info) false-positives on
-      # validate-github-actions-pins.sh's fail() helper, which shellcheck
-      # cannot tell does not write $file.
       - name: shellcheck
-        run: shellcheck --severity=warning scripts/*.sh
+        run: shellcheck scripts/*.sh
 
       - name: Test install.sh
         run: scripts/test-install.sh
 
       - name: Check release-please config/manifest sync
-        run: |
-          python3 - <<'EOF'
-          import json
-
-          config = set(json.load(open("release-please-config.json"))["packages"])
-          manifest = set(json.load(open(".release-please-manifest.json")))
-          drift = sorted(config ^ manifest)
-          if drift:
-              raise SystemExit(f"release-please config/manifest key drift: {drift}")
-          print("release-please config and manifest are in sync")
-          EOF
+        run: scripts/check-release-please-sync.sh
