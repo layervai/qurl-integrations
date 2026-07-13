@@ -32,13 +32,14 @@ main() {
     esac
 
     # Determine version. VERSION may be provided by the caller ("0.2.0" or
-    # "v0.2.0"); otherwise pick the newest CLI release. `releases/latest` is
-    # useless here — it returns the newest release of ANY component — so list
-    # releases and take the first non-prerelease bare `v<digit>` tag, which
-    # component-prefixed tags like slack-v0.4.0 can never match. "First" is
-    # load-bearing: the API orders releases newest-created-first, and CLI
-    # versions release monotonically. Drafts never appear to unauthenticated
-    # callers.
+    # "v0.2.0"); otherwise pick the highest-versioned non-prerelease bare
+    # `v<digit>` tag, which component-prefixed tags like slack-v0.4.0 can
+    # never match. `releases/latest` is useless here — it returns the newest
+    # release of ANY component. Candidates are max-selected by numeric
+    # x.y.z sort rather than API order, so a backport released after a
+    # newer version can never downgrade an install (sort -V is not on stock
+    # macOS; per-field numeric sort is POSIX). Drafts never appear to
+    # unauthenticated callers.
     #
     # Parsing with tr/grep/sed instead of jq is deliberate — the installer
     # must not depend on anything beyond curl and a POSIX shell. The payload
@@ -64,8 +65,9 @@ main() {
             | tr '}' '\n' \
             | grep '"prerelease": *false' \
             | grep -o '"tag_name": *"v[0-9][^"-]*"' \
-            | head -n 1 \
-            | sed -E 's/.*"v([^"]+)".*/\1/')
+            | sed -E 's/.*"v([^"]+)".*/\1/' \
+            | sort -t. -k1,1n -k2,2n -k3,3n \
+            | tail -n 1)
         if [ -z "$VERSION" ]; then
             echo "Error: Could not find a CLI release (bare v* tag) for ${REPO}" >&2
             exit 1

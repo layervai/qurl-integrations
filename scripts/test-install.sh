@@ -184,7 +184,7 @@ json_list() {
   printf '\n]\n'
 }
 
-# --- Case 1: newest bare tag wins; prefixed component tags never match.
+# --- Case 1: highest bare tag wins; prefixed component tags never match.
 new_fixdir picks-newest-bare-tag
 json_list "$(release_json slack-v0.9.9 false)" \
           "$(release_json chrome-extension-v1.0.2 false)" \
@@ -193,6 +193,17 @@ json_list "$(release_json slack-v0.9.9 false)" \
 make_release_assets "$fixdir" 0.2.0
 run_case picks-newest-bare-tag 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
+
+# --- Case 1b: a backport created after a newer version must not win — the
+# highest version is selected numerically per x.y.z field, not by API
+# (creation) order, including across multi-digit components.
+new_fixdir backport-does-not-downgrade
+json_list "$(release_json v0.2.1 false)" \
+          "$(release_json v0.10.0 false)" \
+          "$(release_json v0.9.9 false)" > "$fixdir/releases.json"
+make_release_assets "$fixdir" 0.10.0
+run_case backport-does-not-downgrade 0 "Installed qurl v0.10.0"
+assert_installed 0.10.0
 
 # --- Case 2: prerelease-flagged releases are skipped.
 new_fixdir skips-prerelease-flag

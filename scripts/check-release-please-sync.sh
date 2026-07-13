@@ -9,8 +9,10 @@ cd "$(git rev-parse --show-toplevel)"
 python3 - <<'EOF'
 import json
 
-config = set(json.load(open("release-please-config.json"))["packages"])
-manifest = set(json.load(open(".release-please-manifest.json")))
+with open("release-please-config.json") as f:
+    config = set(json.load(f)["packages"])
+with open(".release-please-manifest.json") as f:
+    manifest = set(json.load(f))
 drift = sorted(config ^ manifest)
 if drift:
     raise SystemExit(f"release-please config/manifest key drift: {drift}")
