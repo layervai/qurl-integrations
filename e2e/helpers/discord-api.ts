@@ -98,13 +98,14 @@ export async function waitForMessage(
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
-    // 25-message window (not 10): the shared test channel also receives
-    // reporter rollups and sibling-suite posts, and a burst between the
-    // send and the first successful poll could push the target past a
-    // narrow window — a spurious timeout that looks like a delivery bug.
     const messages = opts.afterMessageId
       ? await getMessagesAfter(token, channelId, opts.afterMessageId)
-      : await getMessages(token, channelId, 25);
+      : // 25-message window (not 10) for the content-only branch: the
+        // shared test channel also receives reporter rollups and
+        // sibling-suite posts, and a burst between the send and the
+        // first successful poll could push the target past a narrow
+        // window — a spurious timeout that looks like a delivery bug.
+        await getMessages(token, channelId, 25);
 
     for (const msg of messages) {
       if (opts.fromAuthorId && msg.author.id !== opts.fromAuthorId) continue;
