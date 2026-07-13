@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins check-discord test-discord clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins check-discord test-discord pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -12,8 +12,13 @@ fmt:
 
 ## Linting
 
+# Pinned so local runs match CI exactly (keep in sync with the golangci-lint
+# steps in .github/workflows/slack.yml). An unpinned PATH install drifts:
+# newer golangci-lint versions flag issues the pinned config is clean on.
+GOLANGCI_LINT_VERSION := v2.10.1
+
 lint:
-	golangci-lint run --timeout=5m ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./...
 
 vet:
 	go vet ./...
@@ -82,10 +87,10 @@ pre-commit-install:
 pre-commit-run:
 	pre-commit run --all-files
 
-## Discord bot (Python)
+## Discord bot (Node.js)
 
 test-discord:
-	cd apps/discord && pip install -q -r requirements-dev.txt && python -m pytest tests/ -q
+	cd apps/discord && npm ci --no-audit --no-fund && npm test
 
 check-discord: test-discord
 
