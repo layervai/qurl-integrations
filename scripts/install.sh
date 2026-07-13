@@ -11,6 +11,14 @@
 # `curl | sh` stream parses to completion or runs nothing.
 set -eu
 
+# download <asset-name> — fetch a release asset into TMP_DIR.
+download() {
+    curl -fsSL --retry 3 --connect-timeout 15 "${RELEASE_URL}/$1" -o "${TMP_DIR}/$1" || {
+        echo "Error: Failed to download $1 — on a just-published release, assets may still be uploading; retry in a few minutes" >&2
+        exit 1
+    }
+}
+
 main() {
     REPO="layervai/qurl-integrations"
     BINARY="qurl"
@@ -84,18 +92,12 @@ main() {
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' EXIT
 
-    curl -fsSL --retry 3 --connect-timeout 15 "${RELEASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}" || {
-        echo "Error: Failed to download ${ARCHIVE} — on a just-published release, assets may still be uploading; retry in a few minutes" >&2
-        exit 1
-    }
+    download "$ARCHIVE"
 
     # Verify checksum. No tool, no install: silently skipping verification
     # would defeat the point of shipping checksums. awk field-equality avoids
     # treating the archive name as a regex (its dots would be wildcards).
-    curl -fsSL --retry 3 --connect-timeout 15 "${RELEASE_URL}/checksums.txt" -o "${TMP_DIR}/checksums.txt" || {
-        echo "Error: Failed to download checksums.txt — on a just-published release, assets may still be uploading; retry in a few minutes" >&2
-        exit 1
-    }
+    download checksums.txt
     awk -v f="$ARCHIVE" '$2 == f' "${TMP_DIR}/checksums.txt" > "${TMP_DIR}/verify.txt"
     if ! [ -s "${TMP_DIR}/verify.txt" ]; then
         echo "Error: ${ARCHIVE} not found in checksums.txt" >&2

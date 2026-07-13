@@ -9,10 +9,10 @@
 # at a per-case writable directory so the sudo branch never triggers, and
 # every URL the installer requests is logged to $FIXDIR/curl.log for
 # assertions. These cases pin the version-selection policy documented in
-# install.sh: newest-first, bare v<digit> tags only, prereleases excluded by
-# flag and by hyphen, VERSION= override skips the API entirely. Fixtures
-# default to the API's real pretty-printed shape (one field per line);
-# case 4 covers compact JSON.
+# install.sh: highest x.y.z wins regardless of release order, bare v<digit>
+# tags only, prereleases excluded by flag and by hyphen, VERSION= override
+# skips the API entirely. Fixtures default to the API's real pretty-printed
+# shape (one field per line); case 4 covers compact JSON.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -96,14 +96,15 @@ new_fixdir() {
   make_curl_stub "$fixdir"
 }
 
-# run_case <name> <expected_status> <expected_output_substring> [version] [path]
-# Runs the installer against the $fixdir prepared by new_fixdir. The optional
-# 5th arg replaces PATH entirely (for cases that must hide host tools); the
-# default prepends FIXDIR so its stubs win.
+# run_case <expected_status> <expected_output_substring> [version] [path]
+# Runs the installer against the $fixdir prepared by new_fixdir (whose
+# basename names the case in failure output). The optional 4th arg replaces
+# PATH entirely (for cases that must hide host tools); the default prepends
+# FIXDIR so its stubs win.
 run_case() {
-  local name="$1" expected_status="$2" expected_output="$3" version="${4:-}"
+  local name="${fixdir##*/}" expected_status="$1" expected_output="$2" version="${3:-}"
   case_no=$((case_no + 1))
-  local run_path="${5:-$fixdir:$PATH}"
+  local run_path="${4:-$fixdir:$PATH}"
 
   set +e
   local output
@@ -191,7 +192,7 @@ json_list "$(release_json slack-v0.9.9 false)" \
           "$(release_json v0.2.0 false)" \
           "$(release_json v0.1.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
-run_case picks-newest-bare-tag 0 "Installed qurl v0.2.0"
+run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
 
 # --- Case 1b: a backport created after a newer version must not win — the
@@ -202,7 +203,7 @@ json_list "$(release_json v0.2.1 false)" \
           "$(release_json v0.10.0 false)" \
           "$(release_json v0.9.9 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.10.0
-run_case backport-does-not-downgrade 0 "Installed qurl v0.10.0"
+run_case 0 "Installed qurl v0.10.0"
 assert_installed 0.10.0
 
 # --- Case 2: prerelease-flagged releases are skipped.
@@ -210,7 +211,7 @@ new_fixdir skips-prerelease-flag
 json_list "$(release_json v0.3.0 true)" \
           "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
-run_case skips-prerelease-flag 0 "Installed qurl v0.2.0"
+run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
 
 # --- Case 3: hyphenated (semver prerelease) tags are skipped even when the
@@ -219,7 +220,7 @@ new_fixdir skips-hyphenated-tag
 json_list "$(release_json v0.3.0-rc.1 false)" \
           "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
-run_case skips-hyphenated-tag 0 "Installed qurl v0.2.0"
+run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
 
 # --- Case 4: compact single-line JSON parses identically to the default
@@ -228,31 +229,31 @@ new_fixdir compact-json
 json_list "$(release_json slack-v1.0.0 false)" \
           "$(release_json v0.2.0 false)" | tr -d ' \n' > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
-run_case compact-json 0 "Installed qurl v0.2.0"
+run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
 
 # --- Case 5: only prefixed tags -> explicit no-CLI-release error.
 new_fixdir no-cli-release
 json_list "$(release_json slack-v0.9.9 false)" \
           "$(release_json discord-v0.3.0 false)" > "$fixdir/releases.json"
-run_case no-cli-release 1 "Could not find a CLI release"
+run_case 1 "Could not find a CLI release"
 
 # --- Case 6: releases API failure -> network error, not "no release".
 # new_fixdir writes no releases.json, so the stub fails the API call.
 new_fixdir api-failure
-run_case api-failure 1 "Failed to query GitHub releases"
+run_case 1 "Failed to query GitHub releases"
 
 # --- Case 7: VERSION override installs without touching the releases API.
 new_fixdir version-override
 make_release_assets "$fixdir" 0.2.0
-run_case version-override 0 "Installed qurl v0.2.0" 0.2.0
+run_case 0 "Installed qurl v0.2.0" 0.2.0
 assert_installed 0.2.0
 assert_no_api_call
 
 # --- Case 8: VERSION override tolerates a leading v.
 new_fixdir version-override-v
 make_release_assets "$fixdir" 0.2.0
-run_case version-override-v 0 "Installed qurl v0.2.0" v0.2.0
+run_case 0 "Installed qurl v0.2.0" v0.2.0
 assert_installed 0.2.0
 assert_no_api_call
 
@@ -261,7 +262,7 @@ new_fixdir checksum-mismatch
 make_release_assets "$fixdir" 0.2.0
 printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" \
   "qurl_0.2.0_${os}_${arch}.tar.gz" > "$fixdir/assets/checksums.txt"
-run_case checksum-mismatch 1 "Checksum verification failed" 0.2.0
+run_case 1 "Checksum verification failed" 0.2.0
 
 # --- Case 10: archive absent from checksums.txt is fatal.
 new_fixdir missing-from-checksums
@@ -269,7 +270,7 @@ make_release_assets "$fixdir" 0.2.0
 archive="qurl_0.2.0_${os}_${arch}.tar.gz"
 printf '%s  %s\n' "$(sha256_of "$fixdir/assets/$archive")" "some-other-file.tar.gz" \
   > "$fixdir/assets/checksums.txt"
-run_case missing-from-checksums 1 "not found in checksums.txt" 0.2.0
+run_case 1 "not found in checksums.txt" 0.2.0
 
 # --- Case 11: unsupported architecture is rejected before any download.
 new_fixdir unsupported-arch
@@ -281,7 +282,7 @@ case "${1:-}" in
 esac
 STUB
 chmod +x "$fixdir/uname"
-run_case unsupported-arch 1 "Unsupported architecture: riscv64"
+run_case 1 "Unsupported architecture: riscv64"
 
 # --- Case 12: no sha256 tool on PATH -> refuse to install. A toolbox PATH
 # holds only the tools the installer needs, minus sha256sum/shasum.
@@ -292,11 +293,11 @@ new_fixdir no-sha-tool
 make_release_assets "$fixdir" 0.2.0
 toolbox="$fixdir/toolbox"
 mkdir -p "$toolbox"
-for tool in sh bash gzip uname tr grep sed head mktemp tar awk chmod mv cat cp rm; do
+for tool in sh bash gzip uname tr grep sed mktemp tar awk chmod mv cat cp rm; do
   ln -s "$(command -v "$tool")" "$toolbox/$tool"
 done
 ln -s "$fixdir/curl" "$toolbox/curl"
-run_case no-sha-tool 1 "refusing to install unverified binaries" 0.2.0 "$toolbox"
+run_case 1 "refusing to install unverified binaries" 0.2.0 "$toolbox"
 
 # --- Case 13: a release *name* containing '}' splits that release's chunk;
 # the release is skipped (documented parse limitation), not misparsed.
@@ -304,7 +305,7 @@ new_fixdir brace-name-skipped
 json_list "$(release_json v0.3.0 false 'v0.3.0 } hotfix')" \
           "$(release_json v0.2.0 false)" > "$fixdir/releases.json"
 make_release_assets "$fixdir" 0.2.0
-run_case brace-name-skipped 0 "Installed qurl v0.2.0"
+run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
 
 echo "install.sh tests passed (${case_no} cases)"
