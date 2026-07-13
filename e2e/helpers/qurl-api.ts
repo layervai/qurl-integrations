@@ -212,15 +212,39 @@ export async function revokeLink(
   return res.ok;
 }
 
+export interface LinkStatus {
+  use_count: number;
+  status: string;
+  expires_at: string;
+}
+
 /** Get link status */
 export async function getLinkStatus(
   mintUrl: string,
   apiKey: string,
   resourceId: string,
-): Promise<{ use_count: number; status: string; expires_at: string }> {
+): Promise<LinkStatus> {
   const res = await fetch(`${mintUrl}/${resourceId}/status`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
   return res.json() as any;
+}
+
+/** Like getLinkStatus, but the 404 shape — "resource fully consumed or
+ * revoked" — resolves to null instead of throwing. Any OTHER failure
+ * (auth, network, 5xx) still throws, so tests can assert the valid
+ * post-consumption shapes without swallowing unrelated errors (the
+ * try/catch-around-expect anti-pattern this replaces). */
+export async function getLinkStatusOrNull(
+  mintUrl: string,
+  apiKey: string,
+  resourceId: string,
+): Promise<LinkStatus | null> {
+  try {
+    return await getLinkStatus(mintUrl, apiKey, resourceId);
+  } catch (e) {
+    if (/\b404\b|\bnot found\b/i.test((e as Error).message)) return null;
+    throw e;
+  }
 }

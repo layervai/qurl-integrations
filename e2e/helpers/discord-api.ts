@@ -55,6 +55,12 @@ export async function sendMessage(token: string, channelId: string, content: str
   return api(token, 'POST', `/channels/${channelId}/messages`, { content });
 }
 
+/** Delete a message the bot posted (test cleanup — bots may always delete
+ * their own posts; MANAGE_MESSAGES is only needed for others'). */
+export async function deleteMessage(token: string, channelId: string, messageId: string): Promise<void> {
+  await api(token, 'DELETE', `/channels/${channelId}/messages/${messageId}`);
+}
+
 /** Get recent messages from a channel */
 export async function getMessages(token: string, channelId: string, limit = 25): Promise<DiscordMessage[]> {
   return api(token, 'GET', `/channels/${channelId}/messages?limit=${limit}`);
