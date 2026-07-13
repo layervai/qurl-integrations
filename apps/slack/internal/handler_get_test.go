@@ -1341,6 +1341,39 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 	}
 }
 
+// TestMapMintError_RetiredTunnelDisabledFailsLoud fences the deliberate
+// greenfield break: the retired public code is not accepted as an alias for
+// connector_disabled.
+func TestMapMintError_RetiredTunnelDisabledFailsLoud(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	gotErr := mapMintError(log, &client.APIError{
+		StatusCode: http.StatusForbidden,
+		Code:       "tunnel_disabled",
+		RequestID:  "req_retired_tunnel_disabled",
+	})
+
+	var userErr *userError
+	if !errors.As(gotErr, &userErr) || userErr.msg != commonGetMintFailedMessage {
+		t.Fatalf("retired tunnel_disabled error = %#v (%T), want generic mint failure", gotErr, gotErr)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		if record.Level == slog.LevelError.String() && record.Msg == "get: mint rejected with 403 — unmapped error code" {
+			return
+		}
+	}
+	t.Fatalf("retired tunnel_disabled did not emit the unmapped-403 ERROR log: %s", logs.String())
+}
+
 // TestCreateInputJSON_OneTimeDefault fences that one-time use is the
 // unconditional default for `/qurl get`: with no flag at all, the wire
 // body carries `one_time_use: true` and the async reply carries the
