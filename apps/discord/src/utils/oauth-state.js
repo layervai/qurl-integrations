@@ -113,7 +113,7 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
     }
     const secret = config[key];
     if (secret.length < MIN_STATE_SECRET_LENGTH) {
-      throw new Error(`Refusing to mint ${flowLabel}: ${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${secret.length}). Provision a 64+ char value in SSM.`);
+      throw new Error(`Refusing to mint ${flowLabel}: ${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${secret.length}). Provision a value from \`openssl rand -hex 32\` in SSM.`);
     }
     return secret;
   }
