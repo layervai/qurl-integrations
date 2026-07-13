@@ -250,7 +250,13 @@ export async function getLinkStatus(
   apiKey: string,
   resourceId: string,
 ): Promise<LinkStatus> {
-  const res = await fetch(`${mintUrl}/${resourceId}/status`, {
+  // Through the shared bounded transient retry (GET → also retries
+  // 502/504, see http.ts): the canaries built on this run a mint-then-
+  // read against a live API on every suite, and a single drain-gap blip
+  // shouldn't red a correct deployment. 404 is not in any retry set, so
+  // the not-found contract below stays immediate; network REJECTIONS
+  // still propagate (the helper deliberately doesn't catch those).
+  const res = await fetchWithTransientRetry(`${mintUrl}/${resourceId}/status`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!res.ok) throw new StatusCheckError(res.status);
@@ -304,8 +310,10 @@ export function assertStatusVisible(
  * propagation lag shouldn't red a correct deployment. A first
  * observation that already satisfies the predicate returns immediately,
  * so a strongly-consistent endpoint pays zero extra latency. Non-404
- * errors throw straight through (never retried) — only the data shape
- * is polled, not failures.
+ * errors throw straight through — THIS loop only re-reads the data
+ * shape, not failures — while transient HTTP blips (5xx drain-gaps,
+ * 429s) are already absorbed one level down by getLinkStatus's
+ * fetchWithTransientRetry; network rejections still propagate.
  *
  * Deliberately NOT used for the post-revoke `.rejects.toThrow(/404/)`
  * assertions: those keep the pre-existing single-shot canonical

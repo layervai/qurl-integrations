@@ -174,9 +174,10 @@ describe('Discord: Send to Channel', () => {
 describe('Discord: DM Delivery', () => {
   test('bot can open a DM channel with a guild member', async () => {
     // The bot's real DM surface (recipient notifications) starts with
-    // Create DM, so exercise that against the guild OWNER — a user the
-    // bot provably shares a guild with. Create DM only opens the channel
-    // object; it does NOT send a message or notify anyone. (The previous
+    // Create DM, so exercise that against the guild OWNER — a human user
+    // (bots can't own guilds) the bot provably shares a guild with.
+    // Create DM only opens the channel object; it does NOT send a
+    // message or notify anyone. (The previous
     // self-DM version was undefined behavior in the Discord API and
     // swallowed its failures, so it could never fail — or prove
     // anything.)
