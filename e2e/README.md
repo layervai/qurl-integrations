@@ -21,6 +21,11 @@ Required variables (validated by `helpers/env.ts`; the suite fails fast
 if any is missing): `BOT_TOKEN`, `BOT_CLIENT_ID`, `QURL_API_KEY`,
 `UPLOAD_API_URL`, `MINT_API_URL`, `GUILD_ID`, `CHANNEL_ID`.
 
+The test bot's application must have the **Server Members privileged
+intent enabled** in the Discord developer portal — the guild-members
+tests assert it hard, because the production bot load-bears that intent
+for `/qurl send` recipient resolution (`apps/discord/src/discord.js`).
+
 Optional variables gate extra suites, which skip themselves
 (`describe.skip`) when unset:
 

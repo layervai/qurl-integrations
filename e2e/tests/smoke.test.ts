@@ -170,11 +170,8 @@ describe('Smoke: Revocation', () => {
     tracked.track(result.resource_id);
     resourceId = result.resource_id;
 
-    // Pre-revoke canary for the resource_id key (the lifecycle suite's
-    // canary above covers the qurl_id key — #950): the live resource
-    // must be VISIBLE at the status endpoint before revocation, or the
-    // 404 assertion in the next test would pass vacuously for a lookup
-    // that 404s unconditionally. Bounded poll for mint-read lag.
+    // #950 canary, resource_id side (the lifecycle canary above covers
+    // qurl_id; rationale in qurl-api.ts's getLinkStatus doc).
     const pre = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, resourceId, (s) => s !== null,
     );
