@@ -36,9 +36,12 @@
 import * as discord from './discord-api';
 import * as qurl from './qurl-api';
 
-/** Per-RUN nonce baked into every minted target_url. URL-safe
+/** Per-run nonce baked into every minted target_url. URL-safe
  * (alphanumeric + hyphen), so it never alters the escaping a fixture
- * exercises. Module-private: consumers go through withRunNonce(). */
+ * exercises. Module-private: consumers go through withRunNonce().
+ * Under Jest's per-file module sandbox this evaluates once per test
+ * FILE, so each suite gets its own nonce — even more isolation than
+ * the per-run framing above implies. */
 const RUN_NONCE = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 /** Append RUN_NONCE as a query param without disturbing the URL's shape:
@@ -126,22 +129,28 @@ export interface DiscordMessageTracker {
 }
 
 export function trackedDiscordMessages(env: { BOT_TOKEN: string }): DiscordMessageTracker {
-  const messages: Array<{ id: string; channel_id: string }> = [];
+  // Keyed by message id (symmetric with the resource tracker's Set):
+  // tracking the same message twice must not queue a second delete
+  // that would 404 and emit a spurious warning.
+  const messages = new Map<string, string>(); // message id -> channel_id
   return {
     track(msg) {
-      messages.push({ id: msg.id, channel_id: msg.channel_id });
+      messages.set(msg.id, msg.channel_id);
     },
     async deleteAll() {
-      // Serial for the same reason as revokeAll: Discord's per-channel
-      // delete bucket rate-limits bursts, and best-effort cleanup would
-      // rather be slow than shed messages to 429s.
-      for (const { id, channel_id } of messages) {
+      // Serial for the same reason as revokeAll, PLUS a short pause
+      // between deletes: Discord's per-channel delete bucket rate-limits
+      // bursts, api() doesn't honor Retry-After, and best-effort cleanup
+      // would rather be slow than shed messages to 429s.
+      let first = true;
+      for (const [id, channelId] of messages) {
+        if (!first) await new Promise((r) => setTimeout(r, 250));
+        first = false;
         try {
-          await discord.deleteMessage(env.BOT_TOKEN, channel_id, id);
+          await discord.deleteMessage(env.BOT_TOKEN, channelId, id);
         } catch (err) {
-          // Best-effort (e.g. a 429 burst on the delete bucket): stale
-          // test messages are channel noise, not live grants — warn for
-          // visibility, never fail the run.
+          // Best-effort: stale test messages are channel noise, not live
+          // grants — warn for visibility, never fail the run.
           console.warn(`afterAll: best-effort delete of message ${id} threw: ${String(err)}`);
         }
       }

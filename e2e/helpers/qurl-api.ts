@@ -253,7 +253,7 @@ export async function getLinkStatus(
     headers: { Authorization: `Bearer ${apiKey}` },
   });
   if (!res.ok) throw new StatusCheckError(res.status);
-  return res.json() as any;
+  return (await res.json()) as LinkStatus;
 }
 
 /** Like getLinkStatus, but the 404 shape — "resource fully consumed or
