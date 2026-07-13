@@ -41,7 +41,7 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
-  invalidOauthStateSecret,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
@@ -205,12 +205,13 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // Presence + length-floor policy lives in boot-requirements.js
-  // (invalidOauthStateSecret) so it's unit-testable; this is just the
-  // log-and-exit plumbing, same pattern as the combo rejectors below.
-  const oauthStateSecretProblem = invalidOauthStateSecret(config);
-  if (oauthStateSecretProblem) {
-    logger.error(oauthStateSecretProblem);
+  // Presence + length-floor policy for the OAuth state-signing secrets
+  // lives in boot-requirements.js (invalidStateSecretValues) so it's
+  // unit-testable; this is just the log-and-exit plumbing, same
+  // pattern as the hot-standby value checks below.
+  const stateSecretProblems = invalidStateSecretValues(config);
+  if (stateSecretProblems.length > 0) {
+    stateSecretProblems.forEach(problem => logger.error(problem));
     process.exit(1);
   }
 }

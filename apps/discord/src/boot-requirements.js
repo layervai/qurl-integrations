@@ -343,30 +343,52 @@ function invalidHotStandbyValues(cfg) {
   return problems;
 }
 
-// OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-// unless OpenNHP mode is active (the only mode that mounts /auth +
-// /webhook routes). Required — at the state signer's minimum length —
-// only when that surface is live, and only in production (the caller
+// State-signing secret checks for the shared OAuth state signer
+// (utils/oauth-state.js). Two rules, both production-only (the caller
 // in index.js sits inside the NODE_ENV=production block, keeping dev
-// localhost workflows convenient). The same floor is enforced lazily
-// at sign/verify time (utils/oauth-state.js); rejecting here too makes
-// a short secret refuse to boot instead of deferring a 500 to the
-// first /link interaction. Falling back to GITHUB_CLIENT_SECRET is
-// deliberately NOT accepted in production: coupling the two secrets
-// means rotating GitHub's client secret would invalidate all in-flight
-// OAuth states and vice versa.
+// localhost workflows convenient):
 //
-// Returns the operator-facing message on rejection or null on success
-// (same string-or-null shape as the combo rejectors above).
-function invalidOauthStateSecret(cfg) {
-  if (!cfg.isOpenNHPActive) return null;
-  if ((cfg.OAUTH_STATE_SECRET || '').length < MIN_STATE_SECRET_LENGTH) {
-    return (
-      `OAUTH_STATE_SECRET must be set (at least ${MIN_STATE_SECRET_LENGTH} chars) in production. ` +
+//   Presence — OAUTH_STATE_SECRET is required when OpenNHP mode is
+//   active (the only mode that mounts the GitHub OAuth /auth surface).
+//   Falling back to GITHUB_CLIENT_SECRET is deliberately NOT accepted
+//   in production: coupling the two secrets means rotating GitHub's
+//   client secret would invalidate all in-flight OAuth states and
+//   vice versa.
+//
+//   Shape — ANY set state secret must clear the signer's length floor,
+//   in EVERY mode. The qURL OAuth flow (which resolves
+//   QURL_OAUTH_STATE_SECRET, then OAUTH_STATE_SECRET) mounts outside
+//   OpenNHP mode too, so gating the floor on isOpenNHPActive would
+//   leave a short secret to deferred-500 the first /qurl setup in a
+//   multi-tenant deploy — exactly the late failure this check exists
+//   to move to boot. The signer re-enforces the same floor lazily at
+//   sign/verify time; this is the loud-at-deploy copy.
+//
+// Presence-vs-shape separation mirrors missingHotStandbyKeys /
+// invalidHotStandbyValues: a key that is unset simply doesn't
+// participate in resolution (the signer falls through), so only set
+// values are shape-checked, and each problem gets its own message.
+//
+// Returns an array of operator-facing message strings, [] on success
+// (same shape as invalidHotStandbyValues above).
+function invalidStateSecretValues(cfg) {
+  const problems = [];
+  if (cfg.isOpenNHPActive && !cfg.OAUTH_STATE_SECRET) {
+    problems.push(
+      'OAUTH_STATE_SECRET must be set in production (OpenNHP mode mounts the GitHub OAuth surface). ' +
       'Generate with: openssl rand -hex 32'
     );
   }
-  return null;
+  for (const key of ['OAUTH_STATE_SECRET', 'QURL_OAUTH_STATE_SECRET']) {
+    const value = cfg[key];
+    if (value && value.length < MIN_STATE_SECRET_LENGTH) {
+      problems.push(
+        `${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${value.length}); ` +
+        'the state signer will refuse to mint with it. Generate with: openssl rand -hex 32'
+      );
+    }
+  }
+  return problems;
 }
 
 // PLACEHOLDER is treated as missing because the SSM parameter
@@ -471,7 +493,7 @@ module.exports = {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
-  invalidOauthStateSecret,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

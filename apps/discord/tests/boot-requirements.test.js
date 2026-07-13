@@ -22,7 +22,7 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
-  invalidOauthStateSecret,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
@@ -688,38 +688,75 @@ describe('invalidHotStandbyValues', () => {
   });
 });
 
-describe('invalidOauthStateSecret', () => {
-  // The GitHub OAuth state surface only mounts in OpenNHP mode, and the
-  // caller in index.js sits inside the NODE_ENV=production block —
-  // these tests pin the predicate itself, per-mode.
+describe('invalidStateSecretValues', () => {
+  // The caller in index.js sits inside the NODE_ENV=production block —
+  // these tests pin the predicate itself: presence is OpenNHP-gated
+  // (only mode that mounts the GitHub OAuth surface), shape applies to
+  // any SET secret in every mode (the qURL OAuth flow mounts outside
+  // OpenNHP too, so a short secret would deferred-500 /qurl setup in a
+  // multi-tenant deploy).
 
-  it('returns null when OpenNHP is inactive, regardless of the secret', () => {
-    expect(invalidOauthStateSecret({ isOpenNHPActive: false })).toBeNull();
-    expect(invalidOauthStateSecret({ isOpenNHPActive: false, OAUTH_STATE_SECRET: 'shrt' })).toBeNull();
-    expect(invalidOauthStateSecret({ isOpenNHPActive: false, OAUTH_STATE_SECRET: '0'.repeat(64) })).toBeNull();
+  it('returns [] when OpenNHP is inactive and no state secret is set', () => {
+    expect(invalidStateSecretValues({ isOpenNHPActive: false })).toEqual([]);
   });
 
-  it('flags a missing secret when OpenNHP is active', () => {
-    const msg = invalidOauthStateSecret({ isOpenNHPActive: true });
-    expect(msg).toMatch(/OAUTH_STATE_SECRET must be set/);
-    expect(msg).toMatch(/openssl rand -hex 32/);
+  it('flags a missing OAUTH_STATE_SECRET only when OpenNHP is active', () => {
+    const problems = invalidStateSecretValues({ isOpenNHPActive: true });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/OAUTH_STATE_SECRET must be set/);
+    expect(problems[0]).toMatch(/openssl rand -hex 32/);
   });
 
-  it('flags a secret under the signer length floor (a short secret must fail at boot, not at the first /link)', () => {
+  it('flags a set-but-short OAUTH_STATE_SECRET in every mode (a short secret must fail at boot, not at first use)', () => {
     const oneShort = 'x'.repeat(MIN_STATE_SECRET_LENGTH - 1);
-    const msg = invalidOauthStateSecret({ isOpenNHPActive: true, OAUTH_STATE_SECRET: oneShort });
-    expect(msg).toMatch(new RegExp(`at least ${MIN_STATE_SECRET_LENGTH} chars`));
+    for (const isOpenNHPActive of [true, false]) {
+      const problems = invalidStateSecretValues({ isOpenNHPActive, OAUTH_STATE_SECRET: oneShort });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(new RegExp(`OAUTH_STATE_SECRET is shorter than ${MIN_STATE_SECRET_LENGTH} chars \\(got ${oneShort.length}\\)`));
+    }
+  });
+
+  it('flags a set-but-short QURL_OAUTH_STATE_SECRET in every mode (the qURL flow must not deferred-500)', () => {
+    for (const isOpenNHPActive of [true, false]) {
+      const problems = invalidStateSecretValues({
+        isOpenNHPActive,
+        OAUTH_STATE_SECRET: '0'.repeat(64),
+        QURL_OAUTH_STATE_SECRET: 'shrt',
+      });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/QURL_OAUTH_STATE_SECRET is shorter than/);
+    }
+  });
+
+  it('reports every problem on a single call (one-shot operator remediation)', () => {
+    const problems = invalidStateSecretValues({
+      isOpenNHPActive: false,
+      OAUTH_STATE_SECRET: 'shrt',
+      QURL_OAUTH_STATE_SECRET: 'also-shrt',
+    });
+    expect(problems).toHaveLength(2);
   });
 
   it('accepts secrets at and above the floor', () => {
-    expect(invalidOauthStateSecret({
+    expect(invalidStateSecretValues({
       isOpenNHPActive: true,
       OAUTH_STATE_SECRET: 'x'.repeat(MIN_STATE_SECRET_LENGTH),
-    })).toBeNull();
+    })).toEqual([]);
     // openssl rand -hex 32 → 64 chars, the documented generator.
-    expect(invalidOauthStateSecret({
+    expect(invalidStateSecretValues({
       isOpenNHPActive: true,
       OAUTH_STATE_SECRET: '0'.repeat(64),
-    })).toBeNull();
+      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
+    })).toEqual([]);
+  });
+
+  it('does not shape-check unset keys (an unset key simply falls out of the signer resolution)', () => {
+    // Separation of concerns mirroring invalidHotStandbyValues: the
+    // presence rule handles "must exist"; unset optional keys are not
+    // problems.
+    expect(invalidStateSecretValues({
+      isOpenNHPActive: false,
+      OAUTH_STATE_SECRET: '0'.repeat(64),
+    })).toEqual([]);
   });
 });
