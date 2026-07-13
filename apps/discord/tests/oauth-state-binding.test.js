@@ -83,8 +83,11 @@ describe('verifyStateBinding', () => {
     // Pins the headline behavior change at the surface the /auth
     // callback route actually calls (routes/oauth.js): a sub-32-char
     // secret makes verifyStateBinding THROW once the state passes the
-    // format gates — the callback's own try/catch renders its 500
-    // page. Previously it silently verified against the short secret.
+    // format gates. The call sits BEFORE the route's own try block
+    // (which wraps only the token-exchange section), so the throw
+    // escapes the async handler and Express 5 forwards it to the
+    // error middleware in server.js, which renders the 500 page.
+    // Previously it silently verified against the short secret.
     // The signer resolves config lazily per call, so mutating the
     // mocked config object here is observed.
     const config = require('../src/config');
