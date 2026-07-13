@@ -17,7 +17,8 @@ type Stats struct {
 	OrphanAllowedIDs  atomic.Int64 // allowed_resource_ids member that is revoked/deleted (#654)
 	AliasNameMismatch atomic.Int64 // live tunnel reachable by an alias whose name != slug (#669)
 	AliasURLTargets   atomic.Int64 // $alias bound to a live URL resource
-	LegacyAliases     atomic.Int64 // $alias whose value is a non-r_ legacy raw-URL binding
+	LegacyAliases     atomic.Int64 // $alias whose value is a legacy raw-URL binding
+	LegacyResourceIDs atomic.Int64 // pre-public-ID r_ references that require migration
 	Indeterminate     atomic.Int64 // references on a team whose liveness couldn't be verified
 
 	DryRunWouldPurge atomic.Int64 // orphaned ids that WOULD be purged (dry-run)
@@ -38,6 +39,7 @@ type Snapshot struct {
 	AliasNameMismatch int64
 	AliasURLTargets   int64
 	LegacyAliases     int64
+	LegacyResourceIDs int64
 	Indeterminate     int64
 
 	DryRunWouldPurge int64
@@ -59,6 +61,7 @@ func (s *Stats) Snapshot() Snapshot {
 		AliasNameMismatch:  s.AliasNameMismatch.Load(),
 		AliasURLTargets:    s.AliasURLTargets.Load(),
 		LegacyAliases:      s.LegacyAliases.Load(),
+		LegacyResourceIDs:  s.LegacyResourceIDs.Load(),
 		Indeterminate:      s.Indeterminate.Load(),
 		DryRunWouldPurge:   s.DryRunWouldPurge.Load(),
 		Purged:             s.Purged.Load(),
@@ -78,6 +81,7 @@ func (s *Snapshot) logAttrs() []any {
 		"alias_name_mismatch", s.AliasNameMismatch,
 		"alias_url_targets", s.AliasURLTargets,
 		"legacy_aliases", s.LegacyAliases,
+		"legacy_resource_ids", s.LegacyResourceIDs,
 		"indeterminate", s.Indeterminate,
 		"dry_run_would_purge", s.DryRunWouldPurge,
 		"purged", s.Purged,

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -130,6 +132,35 @@ func classifyResource(live liveness, rid string) (status resourceStatus, slug st
 	return statusLiveURL, ""
 }
 
+// storedResourceReferenceKind describes the resource-reference formats that
+// can exist in channel policy rows across qURL API generations. Public
+// resource IDs are intentionally opaque; only the two retired formats are
+// recognized explicitly so the crawler never mistakes them for purgeable
+// resource IDs.
+type storedResourceReferenceKind uint8
+
+const (
+	storedReferenceInvalid storedResourceReferenceKind = iota
+	storedReferenceLegacyURL
+	storedReferenceLegacyInternalID
+	storedReferenceOpaqueID
+)
+
+func classifyStoredResourceReference(s string) storedResourceReferenceKind {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return storedReferenceInvalid
+	}
+	if strings.HasPrefix(s, "r_") {
+		return storedReferenceLegacyInternalID
+	}
+	u, err := url.Parse(s)
+	if err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") {
+		return storedReferenceLegacyURL
+	}
+	return storedReferenceOpaqueID
+}
+
 // classifyRow walks one policy row's alias bindings and allowed-id set,
 // recording every finding into the report. For an unresolved team it records
 // each reference as indeterminate so the operator sees the row but no purge is
@@ -147,11 +178,19 @@ func classifyRow(row policyRow, live liveness, rep *report) {
 func classifyAliasBindings(row policyRow, live liveness, rep *report) {
 	for alias, rid := range row.aliasBindings {
 		f := finding{teamID: row.teamID, channelID: row.channelID, alias: alias, resourceID: rid}
-		if !isResourceID(rid) {
+		switch classifyStoredResourceReference(rid) {
+		case storedReferenceLegacyInternalID:
+			f.kind = findingLegacyResourceID
+			f.detail = "alias uses a pre-public-ID resource reference; migrate it before normal reconciliation"
+			rep.add(&f)
+			continue
+		case storedReferenceLegacyURL, storedReferenceInvalid:
 			f.kind = findingLegacyAlias
 			f.detail = "alias points at a non-resource target (legacy raw-URL binding); set-alias to re-bind"
 			rep.add(&f)
 			continue
+		case storedReferenceOpaqueID:
+			// Continue below and classify the opaque id against the live API.
 		}
 		switch status, slug := classifyResource(live, rid); status {
 		case statusOrphan:
@@ -178,11 +217,20 @@ func classifyAliasBindings(row policyRow, live liveness, rep *report) {
 // is deleted — #654 clears them too.
 func classifyAllowedIDs(row policyRow, live liveness, rep *report) {
 	for _, rid := range row.allowedResourceIDs {
-		// The SS holds resource ids by construction, but guard the same way the
-		// alias path does so a malformed non-`r_` member is never treated as an
-		// orphan (and thus never becomes a purge target). Mirrors classifyAliasBindings.
-		if !isResourceID(rid) {
+		switch classifyStoredResourceReference(rid) {
+		case storedReferenceLegacyInternalID:
+			rep.add(&finding{
+				teamID: row.teamID, channelID: row.channelID, resourceID: rid,
+				kind:   findingLegacyResourceID,
+				detail: "allowed_resource_ids contains a pre-public-ID reference; migrate it before normal reconciliation",
+			})
 			continue
+		case storedReferenceLegacyURL, storedReferenceInvalid:
+			// Malformed historical members require manual repair. They are never
+			// classified as orphans because the live API cannot verify them.
+			continue
+		case storedReferenceOpaqueID:
+			// Continue below and classify the opaque id against the live API.
 		}
 		if status, _ := classifyResource(live, rid); status == statusOrphan {
 			rep.add(&finding{
@@ -192,6 +240,7 @@ func classifyAllowedIDs(row policyRow, live liveness, rep *report) {
 				kind:       findingOrphanAllowedID,
 				detail:     "allowed_resource_ids member is a revoked/deleted resource — #654 purge target",
 			})
+			continue
 		}
 	}
 }
@@ -211,13 +260,6 @@ func recordIndeterminate(row policyRow, reason string, rep *report) {
 			kind: findingIndeterminate, detail: reason,
 		})
 	}
-}
-
-// isResourceID reports whether s is a qURL resource id (the `r_` prefix), the
-// same guard the display-name/get paths use before treating a binding value as
-// a resource rather than a legacy raw URL.
-func isResourceID(s string) bool {
-	return len(s) > 2 && s[0] == 'r' && s[1] == '_'
 }
 
 // quote wraps a value in double quotes for a finding detail string.

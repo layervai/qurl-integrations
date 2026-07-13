@@ -43,13 +43,12 @@ func validateDuration(d string) error {
 	return nil
 }
 
-// validateResourceID checks that the ID has the expected prefix.
+// validateResourceID checks only presence. qurl-service owns the opaque resource
+// ID syntax; duplicating its former r_ prefix contract here broke the public-key
+// REST-ID cutover before the request could reach the authoritative validator.
 func validateResourceID(id string) error {
-	if !strings.HasPrefix(id, "r_") {
-		return fmt.Errorf("invalid resource ID %q: expected prefix \"r_\"", id)
-	}
-	if len(id) < 4 {
-		return fmt.Errorf("invalid resource ID %q: too short", id)
+	if strings.TrimSpace(id) == "" {
+		return errors.New("resource ID is required")
 	}
 	return nil
 }
