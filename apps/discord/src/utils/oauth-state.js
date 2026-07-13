@@ -122,9 +122,13 @@ function createStateSigner({ flowLabel, secretConfigKeys }) {
 
   // Delegates the constant-time compare to the shared webhook helper
   // (third hand-rolled copy avoided; see webhook-hardening.js's header
-  // on why these drift). Its falsy-input guard means empty `data` never
-  // verifies — both callers regex-validate their inputs as non-empty
-  // before signing, so the guard is unreachable defense-in-depth here.
+  // on why these drift). Two semantics inherited from it, both
+  // unobservable behind the callers' /^[0-9a-f]{64}$/ gates: the
+  // compare runs over the ASCII-hex rendering (case-sensitive — an
+  // uppercase rendering of a valid sig would be rejected, where the
+  // old decoded-bytes compare accepted it), and its falsy-input guard
+  // means empty `data` never verifies (both callers regex-validate
+  // their inputs as non-empty before signing).
   function verify(data, sigHex) {
     return verifyHmacSha256(data, stateSecret(), sigHex);
   }

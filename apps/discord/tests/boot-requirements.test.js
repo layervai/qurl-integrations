@@ -707,6 +707,34 @@ describe('invalidStateSecretValues', () => {
     expect(problems[0]).toMatch(/openssl rand -hex 32/);
   });
 
+  it('flags a configured qURL OAuth flow with NO available signer key (would deferred-500 the first /qurl setup)', () => {
+    const problems = invalidStateSecretValues({ isOpenNHPActive: false, isQurlOAuthConfigured: true });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/qURL OAuth is configured .* but no state-signing secret/);
+    expect(problems[0]).toMatch(/QURL_OAUTH_STATE_SECRET \(preferred\) or OAUTH_STATE_SECRET/);
+  });
+
+  it('accepts a configured qURL OAuth flow when any chain key exists — including the GITHUB_CLIENT_SECRET fallback tier', () => {
+    // Unlike the OpenNHP presence rule, the documented backward-compat
+    // fallback satisfies the qURL flow.
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      GITHUB_CLIENT_SECRET: 'g'.repeat(40),
+    })).toEqual([]);
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
+    })).toEqual([]);
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      OAUTH_STATE_SECRET: '0'.repeat(64),
+    })).toEqual([]);
+  });
+
+  it('does not demand a signer key when qURL OAuth is unconfigured (signer call sites all gate on isQurlOAuthConfigured)', () => {
+    expect(invalidStateSecretValues({ isQurlOAuthConfigured: false })).toEqual([]);
+  });
+
   it('flags a set-but-short OAUTH_STATE_SECRET in every mode (a short secret must fail at boot, not at first use)', () => {
     const oneShort = 'x'.repeat(MIN_STATE_SECRET_LENGTH - 1);
     for (const isOpenNHPActive of [true, false]) {

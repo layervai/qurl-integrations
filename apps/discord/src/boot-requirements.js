@@ -348,12 +348,21 @@ function invalidHotStandbyValues(cfg) {
 // in index.js sits inside the NODE_ENV=production block, keeping dev
 // localhost workflows convenient):
 //
-//   Presence — OAUTH_STATE_SECRET is required when OpenNHP mode is
-//   active (the only mode that mounts the GitHub OAuth /auth surface).
-//   Falling back to GITHUB_CLIENT_SECRET is deliberately NOT accepted
-//   in production: coupling the two secrets means rotating GitHub's
-//   client secret would invalidate all in-flight OAuth states and
-//   vice versa.
+//   Presence, GitHub flow — OAUTH_STATE_SECRET is required when OpenNHP
+//   mode is active (the only mode that mounts the GitHub OAuth /auth
+//   surface). Falling back to GITHUB_CLIENT_SECRET is deliberately NOT
+//   accepted in production: coupling the two secrets means rotating
+//   GitHub's client secret would invalidate all in-flight OAuth states
+//   and vice versa.
+//
+//   Presence, qURL flow — when qURL OAuth is configured (AUTH0_* set;
+//   every sign/verify call site gates on isQurlOAuthConfigured), SOME
+//   key in the signer's resolution chain must exist. Unlike the GitHub
+//   rule, the GITHUB_CLIENT_SECRET fallback satisfies this one: it's
+//   the documented backward-compat tier for the qURL chain, not a
+//   coupling accident. Without the rule, a multi-tenant deploy with
+//   Auth0 configured and no secrets would boot and 500 on the first
+//   /qurl setup.
 //
 //   Shape — ANY set state secret must clear the signer's length floor,
 //   in EVERY mode. The qURL OAuth flow (which resolves
@@ -363,6 +372,16 @@ function invalidHotStandbyValues(cfg) {
 //   multi-tenant deploy — exactly the late failure this check exists
 //   to move to boot. The signer re-enforces the same floor lazily at
 //   sign/verify time; this is the loud-at-deploy copy.
+//
+//   Deliberately NOT shape-checked here: GITHUB_CLIENT_SECRET. It is a
+//   provider-issued value (GitHub mints 40 chars) rather than an
+//   operator-minted one, and a short value means GitHub OAuth token
+//   exchange itself is misconfigured — a bigger problem than state
+//   signing, and one this gate shouldn't turn into a boot failure for
+//   deploy modes that never exercise it. The residual case (qURL flow
+//   configured, GITHUB_CLIENT_SECRET is the winning key, and it's a
+//   hand-typed sub-32 placeholder) is caught lazily by the signer with
+//   a named-key refusal.
 //
 // Presence-vs-shape separation mirrors missingHotStandbyKeys /
 // invalidHotStandbyValues: a key that is unset simply doesn't
@@ -377,6 +396,13 @@ function invalidStateSecretValues(cfg) {
     problems.push(
       'OAUTH_STATE_SECRET must be set in production (OpenNHP mode mounts the GitHub OAuth surface). ' +
       'Generate with: openssl rand -hex 32'
+    );
+  }
+  if (cfg.isQurlOAuthConfigured
+      && !cfg.QURL_OAUTH_STATE_SECRET && !cfg.OAUTH_STATE_SECRET && !cfg.GITHUB_CLIENT_SECRET) {
+    problems.push(
+      'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
+      'set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. Generate with: openssl rand -hex 32'
     );
   }
   for (const key of ['OAUTH_STATE_SECRET', 'QURL_OAUTH_STATE_SECRET']) {
