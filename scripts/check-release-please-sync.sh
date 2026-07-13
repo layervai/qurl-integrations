@@ -11,6 +11,11 @@ set -eu
 
 cd "$(git rev-parse --show-toplevel)"
 
+command -v python3 >/dev/null 2>&1 || {
+    echo "Error: python3 is required (JSON parsing); install python3 and retry" >&2
+    exit 1
+}
+
 python3 - <<'EOF'
 import json
 

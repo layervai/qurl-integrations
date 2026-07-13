@@ -41,8 +41,11 @@ sha256_of() {
 
 # Stub curl. install.sh invokes exactly two shapes, both carrying the
 # value-flags --retry N and --connect-timeout N:
-#   curl -fsSL --retry 3 --connect-timeout 15 <url>            (API, stdout)
-#   curl -fsSL --retry 3 --connect-timeout 15 <url> -o <path>  (downloads)
+#   curl ... <api-url>?per_page=100&page=N              (API, stdout)
+#   curl ... <download-url> -o <path>                   (downloads)
+# API pages are served from $FIXDIR/releases-pageN.json; page 1 falls back
+# to $FIXDIR/releases.json (absent = curl failure) so single-page cases
+# stay simple, and pages beyond the fixtures are empty lists.
 make_curl_stub() {
   local stub_dir="$1"
   cat > "$stub_dir/curl" <<'STUB'
@@ -60,8 +63,15 @@ done
 echo "$url" >> "$FIXDIR/curl.log"
 case "$url" in
   *"/releases?per_page="*)
-    [[ -f "$FIXDIR/releases.json" ]] || exit 22
-    cat "$FIXDIR/releases.json"
+    page="${url##*page=}"
+    if [[ -f "$FIXDIR/releases-page${page}.json" ]]; then
+      cat "$FIXDIR/releases-page${page}.json"
+    elif [[ "$page" == "1" ]]; then
+      [[ -f "$FIXDIR/releases.json" ]] || exit 22
+      cat "$FIXDIR/releases.json"
+    else
+      printf '[]'
+    fi
     ;;
   *"/releases/download/"*)
     name="${url##*/}"
@@ -307,5 +317,20 @@ json_list "$(release_json v0.3.0 false 'v0.3.0 } hotfix')" \
 make_release_assets "$fixdir" 0.2.0
 run_case 0 "Installed qurl v0.2.0"
 assert_installed 0.2.0
+
+# --- Case 14: a full page of other components' releases must not hide the
+# CLI tag on page 2 — pagination continues past a 100-entry page.
+new_fixdir cli-tag-beyond-page-1
+page1_items=()
+for i in $(seq 1 100); do
+  page1_items+=("$(release_json "slack-v1.${i}.0" false)")
+done
+json_list "${page1_items[@]}" > "$fixdir/releases-page1.json"
+json_list "$(release_json v0.2.0 false)" > "$fixdir/releases-page2.json"
+make_release_assets "$fixdir" 0.2.0
+run_case 0 "Installed qurl v0.2.0"
+assert_installed 0.2.0
+grep -q 'page=2' "$fixdir/curl.log" \
+  || { echo "$fixdir: expected a page-2 request" >&2; exit 1; }
 
 echo "install.sh tests passed (${case_no} cases)"

@@ -50,30 +50,47 @@ main() {
     # unauthenticated callers.
     #
     # Parsing with tr/grep/sed instead of jq is deliberate — the installer
-    # must not depend on anything beyond curl and a POSIX shell. The payload
-    # is collapsed to a single line first (the API pretty-prints one field
-    # per line), then split at '}' so each release's tag_name and prerelease
-    # flag share a chunk (they sit between the author object's closing brace
-    # and the next brace in the API's stable field order). A release whose
-    # *name* contains a literal '}' splits its own chunk and is skipped —
-    # harmless here since release names are the bare tags. Prereleases are
-    # excluded twice over: by the prerelease flag, and by rejecting
-    # hyphenated tags (semver spells prereleases v1.2.3-rc.1).
-    # scripts/test-install.sh pins all of this against fixture payloads in
-    # both the API's pretty-printed shape and compact JSON. Only the newest
-    # 100 releases are scanned; anything older needs an explicit VERSION=...
+    # must not depend on anything beyond curl and a POSIX shell. Each page's
+    # payload is collapsed to a single line first (the API pretty-prints one
+    # field per line), then split at '}' so each release's tag_name and
+    # prerelease flag share a chunk (they sit between the author object's
+    # closing brace and the next brace in the API's stable field order). A
+    # release whose *name* contains a literal '}' splits its own chunk and
+    # is skipped — harmless here since release names are the bare tags.
+    # Prereleases are excluded twice over: by the prerelease flag, and by
+    # rejecting hyphenated tags (semver spells prereleases v1.2.3-rc.1).
+    #
+    # Pagination matters in this monorepo: every component's releases share
+    # the list, so a burst of other components' releases must not push the
+    # CLI's tags out of a single page. Candidates accumulate across pages
+    # (capped at 10 pages / 1000 releases; VERSION= is the escape hatch
+    # beyond that) and the highest x.y.z wins, so neither release order nor
+    # page boundaries can select a stale version. scripts/test-install.sh
+    # pins all of this against fixture payloads in the API's pretty-printed
+    # shape, compact JSON, and multi-page form.
     VERSION="${VERSION:-}"
     if [ -z "$VERSION" ]; then
-        RELEASES_JSON=$(curl -fsSL --retry 3 --connect-timeout 15 "https://api.github.com/repos/${REPO}/releases?per_page=100") || {
-            echo "Error: Failed to query GitHub releases for ${REPO} (network or rate limit); set VERSION=<x.y.z> to skip the release query" >&2
-            exit 1
-        }
-        VERSION=$(printf '%s\n' "$RELEASES_JSON" \
-            | tr -d '\n\r' \
-            | tr '}' '\n' \
-            | grep '"prerelease": *false' \
-            | grep -o '"tag_name": *"v[0-9][^"-]*"' \
-            | sed -E 's/.*"v([^"]+)".*/\1/' \
+        CANDIDATES=""
+        PAGE=1
+        while [ "$PAGE" -le 10 ]; do
+            RELEASES_JSON=$(curl -fsSL --retry 3 --connect-timeout 15 "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${PAGE}") || {
+                echo "Error: Failed to query GitHub releases for ${REPO} (network or rate limit); set VERSION=<x.y.z> to skip the release query" >&2
+                exit 1
+            }
+            PAGE_FLAT=$(printf '%s\n' "$RELEASES_JSON" | tr -d '\n\r')
+            CANDIDATES="${CANDIDATES}
+$(printf '%s\n' "$PAGE_FLAT" \
+                | tr '}' '\n' \
+                | grep '"prerelease": *false' \
+                | grep -o '"tag_name": *"v[0-9][^"-]*"' \
+                | sed -E 's/.*"v([^"]+)".*/\1/')"
+            # A short page is the last page.
+            RELEASE_COUNT=$(printf '%s\n' "$PAGE_FLAT" | tr '}' '\n' | grep -c '"tag_name"' || true)
+            [ "$RELEASE_COUNT" -ge 100 ] || break
+            PAGE=$((PAGE + 1))
+        done
+        # Blank lines from empty pages sort before any real version.
+        VERSION=$(printf '%s\n' "$CANDIDATES" \
             | sort -t. -k1,1n -k2,2n -k3,3n \
             | tail -n 1)
         if [ -z "$VERSION" ]; then
