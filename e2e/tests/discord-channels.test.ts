@@ -30,6 +30,18 @@ async function discordApi(method: string, path: string, body?: unknown): Promise
   return discord.api(env.BOT_TOKEN, method, path, body);
 }
 
+// Minimal shapes for the fields these tests actually read — typed so a
+// Discord payload drift fails an assertion instead of any-swallowing it.
+interface GuildChannel {
+  id: string;
+  type: number;
+  guild_id?: string;
+  name?: string;
+}
+interface GuildMember {
+  user?: { id: string; bot?: boolean; username?: string };
+}
+
 describe('Discord: Channel Operations', () => {
   test('bot can read channel info', async () => {
     const channel = await discordApi('GET', `/channels/${env.CHANNEL_ID}`);
@@ -40,23 +52,23 @@ describe('Discord: Channel Operations', () => {
   });
 
   test('bot can list guild channels', async () => {
-    const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
+    const channels: GuildChannel[] = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
     expect(channels.length).toBeGreaterThan(0);
 
-    const textChannels = channels.filter((c: any) => c.type === 0);
-    const voiceChannels = channels.filter((c: any) => c.type === 2);
+    const textChannels = channels.filter((c) => c.type === 0);
+    const voiceChannels = channels.filter((c) => c.type === 2);
     console.log(`Guild has ${textChannels.length} text + ${voiceChannels.length} voice channels`);
 
     expect(textChannels.length).toBeGreaterThan(0);
   });
 
   test('bot can identify voice channels in guild', async () => {
-    const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
-    const voiceChannels = channels.filter((c: any) => c.type === 2);
+    const channels: GuildChannel[] = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
+    const voiceChannels = channels.filter((c) => c.type === 2);
 
     // The test guild should have at least one voice channel
     expect(voiceChannels.length).toBeGreaterThan(0);
-    console.log('Voice channels:', voiceChannels.map((c: any) => `#${c.name} (${c.id})`));
+    console.log('Voice channels:', voiceChannels.map((c) => `#${c.name} (${c.id})`));
   });
 });
 
@@ -77,8 +89,8 @@ describe('Discord: Voice State', () => {
   });
 
   test('bot can check if a specific voice channel exists', async () => {
-    const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
-    const voiceChannels = channels.filter((c: any) => c.type === 2);
+    const channels: GuildChannel[] = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
+    const voiceChannels = channels.filter((c) => c.type === 2);
 
     // Hard requirement, not a soft-skip: the sibling test above already
     // pins that the test guild has at least one voice channel, so
@@ -102,15 +114,15 @@ describe('Discord: Guild Members', () => {
   // broken in this environment; that must fail the suite loudly, not
   // get logged away (the old try/catch swallowed its own expects too).
   test('bot can list guild members', async () => {
-    const members = await discordApi('GET', `/guilds/${env.GUILD_ID}/members?limit=100`);
+    const members: GuildMember[] = await discordApi('GET', `/guilds/${env.GUILD_ID}/members?limit=100`);
     expect(members.length).toBeGreaterThan(0);
 
-    const bots = members.filter((m: any) => m.user?.bot);
-    const humans = members.filter((m: any) => !m.user?.bot);
+    const bots = members.filter((m) => m.user?.bot);
+    const humans = members.filter((m) => !m.user?.bot);
     console.log(`Members: ${humans.length} humans + ${bots.length} bots`);
 
     // The qURL bot should be in the list
-    const qurlBot = members.find((m: any) => m.user?.id === env.BOT_CLIENT_ID);
+    const qurlBot = members.find((m) => m.user?.id === env.BOT_CLIENT_ID);
     expect(qurlBot).toBeDefined();
   });
 

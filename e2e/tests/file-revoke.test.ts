@@ -50,11 +50,21 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
+import { trackedQurlResources } from '../helpers/cleanup';
 import { loadEnv } from '../helpers/env';
 import * as qurl from '../helpers/qurl-api';
 import { mintIdFromTunnelViewUrl, viewViaQurlLink } from '../helpers/tunnelView';
 
 const env = loadEnv();
+
+// Track-before-validate, same as every other minting suite: an upload is
+// recorded before any expect() can throw, so a failed knock/assertion
+// can't strand the resource past cleanup (previously this file revoked
+// only inline, leaking to TTL on a mid-test failure). In-test revokes go
+// through tracked.revoke so the assertion stays while the ledger syncs.
+const tracked = trackedQurlResources(env);
+
+afterAll(() => tracked.revokeAll());
 
 // Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
 // checks pass). Exercises the image-upload path including the fileviewer's
@@ -79,6 +89,7 @@ describe('File Revoke', () => {
       { bytes: ONE_PIXEL_PNG, filename: 'revoke-test.png', mime: 'image/png' },
       env.QURL_API_KEY,
     );
+    tracked.track(upload.resource_id);
     expect(upload.resource_id).toMatch(/^r_/);
 
     // Mint the RECIPIENT view, then drive the real knock against THAT link.
@@ -108,7 +119,7 @@ describe('File Revoke', () => {
     );
     qurl.assertStatusVisible(pre, `pre-revoke uploaded resource_id ${upload.resource_id}`);
 
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
 
     // Canonical post-revoke assertion: the resource status API reports 404 once
@@ -130,6 +141,7 @@ describe('File Revoke', () => {
       { bytes: ONE_PIXEL_PNG, filename: 'distinct-viewer.png', mime: 'image/png' },
       env.QURL_API_KEY,
     );
+    tracked.track(upload.resource_id);
     expect(upload.resource_id).toMatch(/^r_/);
 
     // Mint two independent views for the SAME resource. expires_at is required by
@@ -199,7 +211,7 @@ describe('File Revoke', () => {
     }
 
     // Cleanup: revoke the shared resource (kills both views' token chains).
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
     await expect(
       qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id),
@@ -222,6 +234,7 @@ describe('File Revoke', () => {
       { bytes: ONE_PIXEL_PNG, filename: 'single-use.png', mime: 'image/png' },
       env.QURL_API_KEY,
     );
+    tracked.track(upload.resource_id);
     expect(upload.resource_id).toMatch(/^r_/);
 
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -245,8 +258,8 @@ describe('File Revoke', () => {
       viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000 }),
     ).rejects.toThrow(/no tunnel-view response|tunnel-view returned/);
 
-    // Cleanup (inline, matching this file's revoke-as-assertion style).
-    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    // Cleanup as assertion (tracked.revoke also syncs the afterAll ledger).
+    const revoked = await tracked.revoke(upload.resource_id);
     expect(revoked).toBe(true);
     // Generous timeout: upload + connector mint + one served cold-chromium
     // knock + one negative knock that waits out its full 20s budget + revoke.
@@ -258,8 +271,9 @@ describe('File Revoke', () => {
       { bytes: ONE_PIXEL_PNG, filename: 'double-revoke.png', mime: 'image/png' },
       env.QURL_API_KEY,
     );
+    tracked.track(upload.resource_id);
 
-    const first = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    const first = await tracked.revoke(upload.resource_id);
     expect(first).toBe(true);
 
     // Second revoke should not throw. `revokeLink` is typed Promise<boolean>

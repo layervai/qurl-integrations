@@ -68,6 +68,9 @@ describe('Concurrency: Parallel Minting', () => {
     // test/staging envs this suite targets. If a stricter limiter makes
     // this flake, tune the threshold alongside that env change rather
     // than loosening it blind (a big drop in fulfilled mints is signal).
+    // The 30s test timeout is the other knob: a limiter that slows
+    // mints (vs shedding them) times out before this assertion runs,
+    // which reads differently from a threshold failure.
     expect(fulfilled.length).toBeGreaterThanOrEqual(40);
   }, 30_000);
 });
