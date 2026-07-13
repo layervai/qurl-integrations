@@ -85,3 +85,14 @@ nfpms:
     contents:
       - src: manpages/qurl.1
         dst: /usr/share/man/man1/qurl.1
+
+release:
+  # release-please creates the GitHub Release (tag + changelog notes) before
+  # GoReleaser runs (see .github/workflows/release-please.yml); GoReleaser
+  # must attach artifacts to it without replacing those notes. keep-existing
+  # is the current default — pinned because the handshake breaks if the
+  # default ever changes.
+  mode: keep-existing
+  # Make re-runs idempotent: without this, re-running the release-cli job
+  # after a partial upload 422s on the assets that did make it.
+  replace_existing_artifacts: true
