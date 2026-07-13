@@ -91,15 +91,15 @@ pre-commit-run:
 
 ## Discord bot (Node.js)
 
-# Matches CI's jest flags minus --silent, kept verbose for local debugging
-# (discord.yml runs `npm test -- --ci --silent`); --no-audit --no-fund are
-# local-only conveniences that mute npm output without changing the tree.
 define discord_node_warning
 @if command -v node >/dev/null 2>&1 && [ "$$(node --version)" != "v$$(cat apps/discord/.nvmrc)" ]; then \
 	echo "warning: node $$(node --version) differs from apps/discord/.nvmrc v$$(cat apps/discord/.nvmrc) (CI uses the pinned version)" >&2; \
 fi
 endef
 
+# Matches CI's jest flags minus --silent, kept verbose for local debugging
+# (discord.yml runs `npm test -- --ci --silent`); --no-audit --no-fund are
+# local-only conveniences that mute npm output without changing the tree.
 test-discord:
 	$(discord_node_warning)
 	cd apps/discord && npm ci --no-audit --no-fund && npm test -- --ci
@@ -110,7 +110,8 @@ check-discord:
 	$(discord_node_warning)
 	cd apps/discord && npm ci --no-audit --no-fund && npm run lint && npm test -- --ci
 
-## Full check (CI parity)
+## Full check (Go + repo checks, matching the Go CI path; app suites
+## run via their own CI gates or make check-discord)
 
 check: fmt vet check-actions-pins test-actions-pins lint test-race
 
