@@ -101,7 +101,7 @@ func ambiguousResourceAliasMessage(alias string) string {
 // errCodeConnectorDisabled is the qurl-service error-envelope `code` returned
 // when qURL Connector resource minting is disabled for the workspace.
 // TODO(upstream-contract): keep in lockstep with qurl-service's public
-// connector-disabled error contract.
+// connector-disabled error contract (layervai/qurl-service#1211).
 const errCodeConnectorDisabled = "connector_disabled"
 
 // connectorDisabledMessage is shown when qurl-service returns
