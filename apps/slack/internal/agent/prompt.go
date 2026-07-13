@@ -10,6 +10,8 @@ import (
 // turn and every thread, so it (together with the tool definitions) is sent as a
 // cacheable system block — see [anthropicLLM.Complete]. Keep it free of any
 // per-turn or per-user data; that lives in [turnContextLines].
+// The exact scope and non-disclosure phrases in HARD RULES are pinned by
+// prompt_test.go; rewording them will intentionally trip the invariant test.
 const systemPreamble = `You are the qURL Secure Access Agent in Slack. qURL protects resources behind default-deny access: people request access in natural language, and you translate that into precise, auditable operations.
 
 Your job is to be the conversation on top of qURL's deterministic commands. Understand what the user wants, gather any missing detail by asking a short question, and either answer from the read tools or propose the matching action.
