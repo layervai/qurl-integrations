@@ -94,6 +94,13 @@ describe('File Revoke', () => {
     const view = await viewViaQurlLink(minted.qurl_link);
     expect(view.status).toBe(200);
 
+    // Pre-revoke canary for the resource_id key at the status endpoint
+    // (#950, same guard as smoke/link-lifecycle): the live resource must
+    // be visible here, or this file's post-revoke 404 assertions would
+    // pass vacuously for a lookup that 404s unconditionally.
+    const pre = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    expect(pre).not.toBeNull();
+
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
     expect(revoked).toBe(true);
 

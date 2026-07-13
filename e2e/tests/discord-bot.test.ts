@@ -74,11 +74,14 @@ describe('Discord Bot: Channel Operations', () => {
     const unique = `wait-test-${Date.now()}`;
     // Race the delayed send against the poll so the message lands while
     // waitForMessage is already polling — exercising the poll loop, not
-    // just its first read. Promise.all (instead of the previous floating
-    // `setTimeout(() => discord.sendMessage(...))` with no .catch) so a
-    // send failure rejects the test with the real error instead of an
-    // unhandled rejection plus a baffling 10s poll timeout.
-    const [found] = await Promise.all([
+    // just its first read. allSettled (instead of the previous floating
+    // `setTimeout(() => discord.sendMessage(...))` with no .catch) so
+    // BOTH arms always run to completion: a send failure surfaces as the
+    // root-cause error (not an unhandled rejection plus a baffling 10s
+    // poll timeout), no poll keeps running past the test ("Cannot log
+    // after tests are done"), and the send arm's track() always executes
+    // so a sent message is cleaned up even when the poll arm fails.
+    const [pollRes, sendRes] = await Promise.allSettled([
       discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
         containsText: unique,
         timeoutMs: 10_000,
@@ -87,13 +90,15 @@ describe('Discord Bot: Channel Operations', () => {
       (async () => {
         await new Promise((r) => setTimeout(r, 500));
         const msg = await discord.sendMessage(env.BOT_TOKEN, env.CHANNEL_ID, unique);
-        // Track inside the send arm so the message is cleaned up even if
-        // the poll arm fails the test.
         sentMessages.track(msg);
         return msg;
       })(),
     ]);
-    expect(found.content).toBe(unique);
+    // Send failure first: if the send never landed, the poll timeout is
+    // just its symptom.
+    if (sendRes.status === 'rejected') throw sendRes.reason;
+    if (pollRes.status === 'rejected') throw pollRes.reason;
+    expect(pollRes.value.content).toBe(unique);
   });
 });
 

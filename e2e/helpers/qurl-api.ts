@@ -232,7 +232,18 @@ export class StatusCheckError extends Error {
   }
 }
 
-/** Get link status */
+/** Get link status.
+ *
+ * NOTE on the id (#950): callers currently disagree on what keys
+ * `${mintUrl}/{id}/status` — smoke/concurrency pass qurl_id (q_…) for
+ * use-count checks, the revoke-focused suites pass resource_id (r_…)
+ * for post-revoke 404 assertions — and no non-test consumer of the
+ * endpoint exists in this repo to settle it. Every calling suite
+ * therefore carries a freshly-minted/live-resource canary
+ * (`getLinkStatusOrNull(...) !== null`) so a wrong key reds loudly on
+ * the first live run instead of letting 404-tolerant checks pass
+ * vacuously. Once a live run settles the key, unify the callers and
+ * fold this note (tracked in #950). */
 export async function getLinkStatus(
   mintUrl: string,
   apiKey: string,

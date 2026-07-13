@@ -122,6 +122,15 @@ describe('Link Lifecycle: Revocation', () => {
       target_url: withRunNonce('https://example.com/revoke-then-status'),
     });
     tracked.track(result.resource_id);
+
+    // Pre-revoke canary (mirror of smoke's qurl_id canary, here for the
+    // resource_id key — #950): the live resource must be VISIBLE at the
+    // status endpoint before revocation. Without this, the post-revoke
+    // 404 assertions in this suite would pass vacuously if the endpoint
+    // keyed on qurl_id and 404'd every resource_id lookup unconditionally.
+    const pre = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id);
+    expect(pre).not.toBeNull();
+
     const revoked = await tracked.revoke(result.resource_id);
     expect(revoked).toBe(true);
 

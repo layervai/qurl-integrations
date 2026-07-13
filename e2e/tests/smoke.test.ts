@@ -79,9 +79,9 @@ describe('Smoke: qURL link lifecycle', () => {
     // CANARY for every null-tolerant status check in this suite (and the
     // one in concurrency.test.ts): a freshly-minted, never-accessed link
     // MUST be visible at the status endpoint. If this lookup 404s — say
-    // the endpoint keys on resource_id rather than qurl_id, or moved —
-    // then all the `if (status !== null)` guards below would degrade
-    // into passing vacuously through their 404 arm: the exact
+    // the endpoint keys on resource_id rather than qurl_id (#950), or
+    // moved — then all the `if (status !== null)` guards below would
+    // degrade into passing vacuously through their 404 arm: the exact
     // silent-green this suite exists to kill. This test turns that
     // degradation into a loud red instead.
     const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
@@ -157,6 +157,14 @@ describe('Smoke: Revocation', () => {
     });
     tracked.track(result.resource_id);
     resourceId = result.resource_id;
+
+    // Pre-revoke canary for the resource_id key (the lifecycle suite's
+    // canary above covers the qurl_id key — #950): the live resource
+    // must be VISIBLE at the status endpoint before revocation, or the
+    // 404 assertion in the next test would pass vacuously for a lookup
+    // that 404s unconditionally.
+    const pre = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+    expect(pre).not.toBeNull();
 
     // tracked.revoke = revokeLink + drop from the afterAll ledger on success.
     const revoked = await tracked.revoke(resourceId);
