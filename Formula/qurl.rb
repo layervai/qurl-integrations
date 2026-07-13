@@ -12,7 +12,7 @@
 # 2. Copy this formula to Formula/q/qurl.rb
 # 3. Set url to the target CLI release tag (bare v*, from
 #    https://github.com/layervai/qurl-integrations/releases) and set sha256
-#    to `curl -fsSL <url> | shasum -a 256`
+#    to `curl -fsSL <url> | shasum -a 256 | cut -d' ' -f1`
 # 4. Run `brew audit --strict --new qurl` and fix any issues
 # 5. Run `brew install --build-from-source qurl` to verify
 # 6. Submit a PR to homebrew/homebrew-core

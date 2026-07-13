@@ -14,7 +14,7 @@ set -eu
 # download <asset-name> — fetch a release asset into TMP_DIR.
 download() {
     curl -fsSL --retry 3 --connect-timeout 15 "${RELEASE_URL}/$1" -o "${TMP_DIR}/$1" || {
-        echo "Error: Failed to download $1 — on a just-published release, assets may still be uploading; retry in a few minutes" >&2
+        echo "Error: Failed to download $1 from ${RELEASE_URL} — check that the version exists (on a just-published release, assets may still be uploading; retry in a few minutes)" >&2
         exit 1
     }
 }
@@ -89,8 +89,14 @@ $(printf '%s\n' "$PAGE_FLAT" \
             [ "$RELEASE_COUNT" -ge 100 ] || break
             PAGE=$((PAGE + 1))
         done
-        # Blank lines from empty pages sort before any real version.
+        if [ "$PAGE" -gt 10 ]; then
+            echo "warning: stopped scanning after 1000 releases; set VERSION=<x.y.z> if the expected version is missing" >&2
+        fi
+        # The anchored grep defensively drops any tag that is not plain
+        # x.y.z (e.g. build metadata) rather than letting the numeric
+        # field-sort mis-rank it; empty input yields an empty VERSION.
         VERSION=$(printf '%s\n' "$CANDIDATES" \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
             | sort -t. -k1,1n -k2,2n -k3,3n \
             | tail -n 1)
         if [ -z "$VERSION" ]; then
@@ -112,8 +118,11 @@ $(printf '%s\n' "$PAGE_FLAT" \
     download "$ARCHIVE"
 
     # Verify checksum. No tool, no install: silently skipping verification
-    # would defeat the point of shipping checksums. awk field-equality avoids
-    # treating the archive name as a regex (its dots would be wildcards).
+    # would defeat the point of shipping checksums. Trust model: checksums.txt
+    # ships from the same release as the archive, so this verifies integrity
+    # (corruption, truncation), not publisher provenance — real signing is
+    # tracked in #943. awk field-equality avoids treating the archive name as
+    # a regex (its dots would be wildcards).
     download checksums.txt
     awk -v f="$ARCHIVE" '$2 == f' "${TMP_DIR}/checksums.txt" > "${TMP_DIR}/verify.txt"
     if ! [ -s "${TMP_DIR}/verify.txt" ]; then
