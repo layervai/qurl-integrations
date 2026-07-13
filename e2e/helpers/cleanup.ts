@@ -82,15 +82,18 @@ export function trackedQurlResources(env: {
   // target_url to one resource_id (link-lifecycle's same-target test),
   // and one revoke per resource is enough.
   const ids = new Set<string>();
+  // Shared by revoke() and revokeAll() so EVERY successful revoke —
+  // test-time or cleanup-time — drops the id from the ledger.
+  const revoke = async (resourceId: string): Promise<boolean> => {
+    const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+    if (ok) ids.delete(resourceId);
+    return ok;
+  };
   return {
     track(resourceId) {
       if (resourceId) ids.add(resourceId);
     },
-    async revoke(resourceId) {
-      const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
-      if (ok) ids.delete(resourceId);
-      return ok;
-    },
+    revoke,
     async revokeAll() {
       // revokeLink returns res.ok (false on a 4xx, NO throw) and only
       // throws on a network error, so surface BOTH paths — the
@@ -99,9 +102,10 @@ export function trackedQurlResources(env: {
       // parallel burst (up to 50 DELETEs after the concurrency stress
       // test) invites 429s that would leave stragglers leaked until
       // their TTL — gentleness beats wall-clock here.
-      for (const id of ids) {
+      // Snapshot the ids: revoke() deletes from the Set mid-iteration.
+      for (const id of [...ids]) {
         try {
-          const ok = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, id);
+          const ok = await revoke(id);
           if (!ok) console.warn(`afterAll: best-effort revoke of ${id} returned not-ok`);
         } catch (err) {
           console.warn(`afterAll: best-effort revoke of ${id} threw: ${String(err)}`);

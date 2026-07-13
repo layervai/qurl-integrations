@@ -102,8 +102,9 @@ describe('Smoke: qURL link lifecycle', () => {
     // try/catch-swallowed assertion of it could never fail anyway). What
     // IS guaranteed after one access of a max_uses:1 link: the status
     // endpoint answers coherently — either 404 (fully consumed → null) or
-    // at most one recorded use. The hard reusable-links regression guard
-    // is the second-access test below.
+    // at most one recorded use. Knock-driven single-use ENFORCEMENT is
+    // pinned in file-revoke.test.ts ("a consumed one-time link does not
+    // serve a second knock"); URL-target knock coverage is #951.
     const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
     console.log('Link status after first access:', status === null ? '404 (consumed)' : JSON.stringify(status));
     if (status !== null) {
@@ -111,10 +112,19 @@ describe('Smoke: qURL link lifecycle', () => {
     }
   });
 
-  test('second access of the same one-time link FAILS (use count consumed)', async () => {
-    // Regression guard for the reusable-links bug. Depends on prior
-    // tests setting qurlLink + qurlId — guard explicitly so a jest
-    // rerandomize doesn't silently no-op.
+  test('second access of the same one-time link never over-counts (status coherence)', async () => {
+    // Status-endpoint COHERENCE guard on the bare-fetch path — honest
+    // scope: the SPA knock that consumes a use is client-side JS, so a
+    // bare accessLink() GET may never advance use_count at all. In a
+    // deployment where bare GETs don't consume, the counter stays 0 here
+    // and only the knock-driven test in file-revoke.test.ts ("a consumed
+    // one-time link does not serve a second knock") can catch the
+    // reusable-links bug (URL-target knock coverage: #951). Where bare
+    // GETs DO consume, `use_count === 2` here is that exact bug shape.
+    // Either way the counter must never exceed the max_uses:1 cap.
+    //
+    // Depends on prior tests setting qurlLink + qurlId — guard explicitly
+    // so a jest rerandomize doesn't silently no-op.
     expect(qurlLink).toBeDefined();
     expect(qurlId).toBeDefined();
 
@@ -124,23 +134,18 @@ describe('Smoke: qURL link lifecycle', () => {
     const res2 = await qurl.accessLink(qurlLink);
     console.log(`Second access: ${res2.status} -> ${res2.finalUrl}`);
 
-    // Single-use enforcement produces one of two observable shapes at
-    // the status endpoint. Both are valid passes; what we're guarding
-    // against is `use_count === 2` (the exact "links were reusable"
-    // bug shape).
-    //   (a) 404 (→ null) — the resource was fully consumed on first
-    //       access. This is the stronger signal and is what the
-    //       upstream API returns when `one_time_use: true` is honored.
-    //   (b) success with `use_count === 1` — resource still queryable,
-    //       but the token is dead and the failed second attempt did NOT
-    //       advance the counter.
+    // Two valid coherence shapes at the status endpoint:
+    //   (a) 404 (→ null) — the resource was fully consumed. The stronger
+    //       signal, and what the upstream API returns when
+    //       `one_time_use: true` is honored on this path.
+    //   (b) success with `use_count <= 1` — the second attempt did NOT
+    //       advance the counter past the cap.
     // getLinkStatusOrNull rethrows any non-404 failure, so an unrelated
     // network/auth error still fails loudly instead of false-passing.
     const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
     console.log('Link status after 2nd access:', status === null ? '404 (consumed)' : JSON.stringify(status));
     if (status !== null) {
-      // Counter MUST NOT have advanced past 1. An increment to 2 is the
-      // exact bug shape this test is here to catch.
+      // An increment to 2 is the exact "links were reusable" bug shape.
       expect(status.use_count).toBeLessThan(2);
     }
   });

@@ -19,6 +19,13 @@
  * connector-uploaded resources would ship silently (URL-mint revoke
  * already covered by smoke.test.ts).
  *
+ * Also home to the knock-driven SINGLE-USE enforcement test ("a consumed
+ * one-time link does not serve a second knock") — this file is the only
+ * place a real consuming knock is driven (viewViaQurlLink); the URL-mint
+ * suites can only exercise bare fetches, which don't run the SPA knock,
+ * so their status checks pin counter coherence rather than enforcement
+ * (URL-target knock coverage tracked in #951).
+ *
  * Also pins two render-at-mint security guarantees (#1027, EPIC #1019), in the
  * "distinct-per-viewer watermark + `_`/`-` resource-id SNI" test below:
  *
@@ -200,6 +207,50 @@ describe('File Revoke', () => {
     // Generous timeout: two connector mints + TWO sequential cold-chromium knocks
     // (each with the helper's own 30s tunnel-view budget) + revoke, on CI.
   }, 180_000);
+
+  test('a consumed one-time link does not serve a second knock (single-use enforced)', async () => {
+    // THE knock-driven enforcement guard for one-time links. The URL-mint
+    // suites (smoke/concurrency) can only exercise the bare-fetch path —
+    // the SPA knock that CONSUMES a use is client-side JS, so their
+    // status checks pin counter coherence, not enforcement (a bare GET
+    // may never advance use_count; URL-target knock coverage is #951).
+    // This test drives the real recipient flow twice: the first knock
+    // serves the view (consuming the link); a second knock on the SAME
+    // link must not serve.
+    const upload = await qurl.uploadFile(
+      env.UPLOAD_API_URL,
+      { bytes: ONE_PIXEL_PNG, filename: 'single-use.png', mime: 'image/png' },
+      env.QURL_API_KEY,
+    );
+    expect(upload.resource_id).toMatch(/^r_/);
+
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const minted = await qurl.mintConnectorView(env.UPLOAD_API_URL, upload.resource_id, env.QURL_API_KEY, {
+      expiresAt,
+      oneTimeUse: true,
+    });
+
+    const first = await viewViaQurlLink(minted.qurl_link);
+    expect(first.status).toBe(200);
+
+    // Both rejection messages are valid "did not serve" shapes (knock
+    // rejected → no …/views/ response at all, or a non-200 view). A
+    // RESOLVING second view fails this assertion — the exact
+    // reusable-links bug. Message-narrowed so an unrelated goto/network
+    // failure still reds instead of false-passing as "not served".
+    // Reduced budget for the negative arm: a real view lands in seconds
+    // (tunnelView.ts's sandbox-proven note), so 20s amply proves "did
+    // not serve" without spending the default 30s on a pass-by-timeout.
+    await expect(
+      viewViaQurlLink(minted.qurl_link, { timeoutMs: 20_000 }),
+    ).rejects.toThrow(/no tunnel-view response|tunnel-view returned/);
+
+    // Cleanup (inline, matching this file's revoke-as-assertion style).
+    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
+    expect(revoked).toBe(true);
+    // Generous timeout: upload + connector mint + one served cold-chromium
+    // knock + one negative knock that waits out its full 20s budget + revoke.
+  }, 150_000);
 
   test('double revoke on file is idempotent', async () => {
     const upload = await qurl.uploadFile(

@@ -64,7 +64,7 @@ describe('Concurrency: Parallel Minting', () => {
 });
 
 describe('Concurrency: Parallel Access', () => {
-  test('10 parallel accesses of a max_uses:1 link never over-count server-side', async () => {
+  test('10 parallel accesses of a max_uses:1 link: SPA serves all, counter stays coherent', async () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/parallel-access'),
       max_uses: 1,
@@ -86,15 +86,19 @@ describe('Concurrency: Parallel Access', () => {
     // and resolves client-side), so all ten come back 200 …
     expect(results.filter((r) => r.ok)).toHaveLength(10);
 
-    // … which means the RACE assertion lives at the status endpoint, not
-    // in the HTTP statuses: however the ten parallel GETs interleaved, a
-    // max_uses:1 link must never record more than one consumed use. Two
-    // valid pass shapes, same as smoke.test.ts's second-access guard:
+    // … and the counter check lives at the status endpoint. Honest
+    // scope: the knock that consumes a use is client-side JS, so ten
+    // bare GETs may consume nothing at all — this pins parallel SPA
+    // serving plus counter COHERENCE (never past the max_uses:1 cap),
+    // not consumption-race enforcement. Racing real knocks would need
+    // ten parallel browsers; the single-consumption guarantee itself is
+    // pinned knock-driven in file-revoke.test.ts ("a consumed one-time
+    // link does not serve a second knock"), and URL-target knock
+    // coverage is #951. Two valid coherence shapes, same as
+    // smoke.test.ts's second-access guard:
     //   (a) status 404s (→ null) — resource fully consumed;
-    //   (b) status resolves with use_count <= 1 — a bare fetch of the SPA
-    //       may or may not consume a use (the knock is client-side JS),
-    //       but ten racing accesses must never advance the counter past
-    //       the cap.
+    //   (b) status resolves with use_count <= 1 — the racing accesses
+    //       never advanced the counter past the cap.
     // getLinkStatusOrNull rethrows any non-404 failure, so an unrelated
     // auth/network error still fails loudly instead of false-passing.
     const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id);
