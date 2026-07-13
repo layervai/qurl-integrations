@@ -83,7 +83,7 @@ describe('Concurrency: Parallel Access', () => {
     const pre = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, result.qurl_id, (s) => s !== null,
     );
-    expect(pre).not.toBeNull();
+    qurl.assertStatusVisible(pre, `pre-race qurl_id ${result.qurl_id}`);
 
     const results = await Promise.all(
       Array.from({ length: 10 }, () => qurl.accessLink(result.qurl_link)),

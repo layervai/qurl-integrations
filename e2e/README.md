@@ -53,6 +53,13 @@ their mid-flow tests carry explicit `toBeDefined` dependency guards. So
 running one of those tests by name fails its guard **by design** — run
 the whole file instead.
 
+**First live run:** the qURL status endpoint's id key (`qurl_id` vs
+`resource_id`) can't be settled offline, so the suites carry canaries on
+*both* kinds — unless the endpoint accepts both, expect one side's
+canaries to fail with a message pointing at layervai/qurl-integrations#950.
+That red is the designed outcome; follow the issue's playbook (usually a
+one-word id swap) rather than treating it as a suite regression.
+
 Tests run serially (`maxWorkers: 1` in `jest.config.ts`) because they
 share Discord channel state. After each run, `helpers/discord-reporter.js`
 posts a per-file pass/fail rollup embed to the test channel (missing env

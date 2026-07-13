@@ -291,6 +291,25 @@ export async function getLinkStatusOrNull(
  * assertions: those keep the pre-existing single-shot canonical
  * contract (smoke / link-lifecycle / file-revoke all share it).
  * Revisit only if a live run shows revoke-propagation lag. */
+/** Canary assertion for the #950 id-kind ambiguity. A bare
+ * `expect(status).not.toBeNull()` red says "expected not null"; this
+ * one says WHICH id kind failed and points the runner at the #950
+ * playbook — the canaries exist precisely to produce that actionable
+ * red on the first live run. `asserts` narrowing keeps any later use
+ * of the status typed. */
+export function assertStatusVisible(
+  status: LinkStatus | null,
+  idDescription: string,
+): asserts status is LinkStatus {
+  if (status === null) {
+    throw new Error(
+      `status canary: ${idDescription} is not visible at the status endpoint (404). ` +
+        `Likely the #950 id-kind mismatch (qurl_id vs resource_id) — follow that issue's ` +
+        `playbook; the run's 404-tolerant checks can't be trusted until it's settled.`,
+    );
+  }
+}
+
 export async function pollLinkStatus(
   mintUrl: string,
   apiKey: string,

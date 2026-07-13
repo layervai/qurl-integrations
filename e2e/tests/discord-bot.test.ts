@@ -85,7 +85,9 @@ describe('Discord Bot: Channel Operations', () => {
       discord.waitForMessage(env.BOT_TOKEN, env.CHANNEL_ID, {
         // Author-scoped: the unique text already makes cross-author
         // collisions implausible, but the poll only ever wants the
-        // bot's own send.
+        // bot's own send. (Message author id === BOT_CLIENT_ID relies
+        // on a bot's user id equalling its application id — a Discord
+        // invariant this suite's smoke getMe check corroborates.)
         fromAuthorId: env.BOT_CLIENT_ID,
         containsText: unique,
         timeoutMs: 10_000,

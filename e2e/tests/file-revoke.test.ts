@@ -109,7 +109,7 @@ describe('File Revoke', () => {
     const pre = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id, (s) => s !== null,
     );
-    expect(pre).not.toBeNull();
+    qurl.assertStatusVisible(pre, `pre-revoke uploaded resource_id ${upload.resource_id}`);
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resource_id);
     expect(revoked).toBe(true);

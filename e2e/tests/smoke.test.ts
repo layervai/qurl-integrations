@@ -92,7 +92,7 @@ describe('Smoke: qURL link lifecycle', () => {
     const status = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, qurlId, (s) => s !== null,
     );
-    expect(status).not.toBeNull();
+    qurl.assertStatusVisible(status, `freshly-minted qurl_id ${qurlId}`);
   });
 
   test('first access succeeds', async () => {
@@ -178,7 +178,7 @@ describe('Smoke: Revocation', () => {
     const pre = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, resourceId, (s) => s !== null,
     );
-    expect(pre).not.toBeNull();
+    qurl.assertStatusVisible(pre, `pre-revoke resource_id ${resourceId}`);
 
     // tracked.revoke = revokeLink + drop from the afterAll ledger on success.
     const revoked = await tracked.revoke(resourceId);

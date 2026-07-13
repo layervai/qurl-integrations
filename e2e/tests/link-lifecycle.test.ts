@@ -132,7 +132,7 @@ describe('Link Lifecycle: Revocation', () => {
     const pre = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, result.resource_id, (s) => s !== null,
     );
-    expect(pre).not.toBeNull();
+    qurl.assertStatusVisible(pre, `pre-revoke resource_id ${result.resource_id}`);
 
     const revoked = await tracked.revoke(result.resource_id);
     expect(revoked).toBe(true);

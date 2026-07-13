@@ -104,7 +104,9 @@ export function trackedQurlResources(env: {
       // Deliberately serial: this is the best-effort path, and a
       // parallel burst (up to 50 DELETEs after the concurrency stress
       // test) invites 429s that would leave stragglers leaked until
-      // their TTL — gentleness beats wall-clock here.
+      // their TTL — gentleness beats wall-clock here. Budget note: 50
+      // serial DELETEs at ~1s/request approaches half of jest's 120s
+      // hook budget — revisit pacing before growing the stress count.
       // Snapshot the ids: revoke() deletes from the Set mid-iteration.
       for (const id of [...ids]) {
         try {
