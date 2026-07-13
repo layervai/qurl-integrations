@@ -81,6 +81,11 @@ function signQurlOAuthState(guildId, discordUserId) {
 // failure. Reasons are intentionally coarse-grained on the wire ("invalid",
 // "expired") so a probing attacker can't distinguish "wrong format" from
 // "wrong signature" — caller logs the granular reason for triage.
+//
+// Not total over misconfiguration: a missing or sub-floor signing secret
+// THROWS (same contract as signing — see utils/oauth-state.js) rather
+// than returning { ok: false }. Boot-time enforcement rules that out in
+// production; in dev the route's error handling turns it into a 500.
 function verifyQurlOAuthState(state) {
   if (typeof state !== 'string') return { ok: false, reason: 'not_a_string' };
   const parts = state.split('.');

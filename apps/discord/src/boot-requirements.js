@@ -384,6 +384,12 @@ function invalidHotStandbyValues(cfg) {
 //   guaranteed to make the first /qurl setup 500, so rejecting the
 //   boot has zero false positives.
 //
+//   The winning-key condition mirrors the signer's resolution order
+//   (utils/oauth-state.js: dedicated keys, then GITHUB_CLIENT_SECRET)
+//   rather than consulting it — if a flow's secretConfigKeys ordering
+//   ever changes, update this block in lockstep. Single-sourcing the
+//   precedence through a signer-exposed resolver is tracked in #952.
+//
 // Presence-vs-shape separation mirrors missingHotStandbyKeys /
 // invalidHotStandbyValues: a key that is unset simply doesn't
 // participate in resolution (the signer falls through), so only set
