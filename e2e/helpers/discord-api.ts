@@ -122,9 +122,10 @@ export async function waitForMessage(
   throw new Error(`No matching message in ${channelId} within ${timeout}ms`);
 }
 
-/** All human-visible text surfaces of an embed, joined for substring
- * matching (title, description, author name, field names/values,
- * footer). */
+/** All human-visible text surfaces of an embed (title, description,
+ * author name, field names/values, footer), joined — the single shared
+ * haystack for waitForMessage's containsText match and
+ * extractQurlLink's URL regex. */
 function embedText(e: DiscordMessage['embeds'][number]): string {
   return [
     e.title,
@@ -139,9 +140,7 @@ function embedText(e: DiscordMessage['embeds'][number]): string {
 
 /** Extract qURL link from an embed */
 export function extractQurlLink(msg: DiscordMessage): string | null {
-  const allText = msg.embeds.map(e =>
-    [e.description, ...(e.fields?.map(f => f.value) ?? [])].join(' ')
-  ).join(' ');
+  const allText = msg.embeds.map(embedText).join(' ');
   const match = allText.match(/https:\/\/qurl\.(link|io|dev|site)\/[A-Za-z0-9_-]+/);
   return match ? match[0] : null;
 }

@@ -219,13 +219,14 @@ export interface LinkStatus {
 }
 
 /** Thrown by getLinkStatus on a non-2xx response. Carries the HTTP
- * status structurally so callers branch on `.status` instead of
- * regexing it back out of the message (the same string-matching debt
- * discord-commands.smoke.test.ts tracks as #104 — here there's no
- * module boundary forcing it, so the error is typed from the start).
- * The message keeps the code embedded ("Status check failed: 404") so
- * `.rejects.toThrow(/404/)` assertions read naturally. */
-export class StatusCheckError extends Error {
+ * status structurally so getLinkStatusOrNull's 404 branch tests
+ * `.status` instead of regexing it back out of the message (the same
+ * string-matching debt discord-commands.smoke.test.ts tracks as #104 —
+ * here there's no module boundary forcing it, so the error is typed
+ * from the start). Module-private: tests assert via
+ * `.rejects.toThrow(/404/)`, whose message keeps the code embedded
+ * ("Status check failed: 404") exactly for that. */
+class StatusCheckError extends Error {
   constructor(readonly status: number) {
     super(`Status check failed: ${status}`);
     this.name = 'StatusCheckError';
@@ -240,10 +241,10 @@ export class StatusCheckError extends Error {
  * for post-revoke 404 assertions — and no non-test consumer of the
  * endpoint exists in this repo to settle it. Every calling suite
  * therefore carries a freshly-minted/live-resource canary
- * (`getLinkStatusOrNull(...) !== null`) so a wrong key reds loudly on
- * the first live run instead of letting 404-tolerant checks pass
- * vacuously. Once a live run settles the key, unify the callers and
- * fold this note (tracked in #950). */
+ * (`pollLinkStatus(..., (s) => s !== null)` + `assertStatusVisible`)
+ * so a wrong key reds loudly on the first live run instead of letting
+ * 404-tolerant checks pass vacuously. Once a live run settles the key,
+ * unify the callers and fold this note (tracked in #950). */
 export async function getLinkStatus(
   mintUrl: string,
   apiKey: string,

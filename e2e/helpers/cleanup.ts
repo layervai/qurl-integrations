@@ -102,11 +102,11 @@ export function trackedQurlResources(env: {
       // throws on a network error, so surface BOTH paths — the
       // systematic-403 one is the dangerous one (see module header).
       // Deliberately serial: this is the best-effort path, and a
-      // parallel burst (up to 50 DELETEs after the concurrency stress
-      // test) invites 429s that would leave stragglers leaked until
-      // their TTL — gentleness beats wall-clock here. Budget note: 50
-      // serial DELETEs at ~1s/request approaches half of jest's 120s
-      // hook budget — revisit pacing before growing the stress count.
+      // parallel burst invites 429s that would leave stragglers leaked
+      // until their TTL — gentleness beats wall-clock here. (Consumers
+      // that track enough resources to threaten jest's hook budget own
+      // that math via an afterAll timeout override — see
+      // concurrency.test.ts.)
       // Snapshot the ids: revoke() deletes from the Set mid-iteration.
       for (const id of [...ids]) {
         try {
