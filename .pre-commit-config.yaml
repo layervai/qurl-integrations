@@ -36,6 +36,13 @@ repos:
         pass_filenames: false
         files: '^scripts/(validate|test-validate)-github-actions-pins\.sh$'
 
+      - id: install-script-tests
+        name: install.sh tests
+        entry: scripts/test-install.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(install|test-install)\.sh$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w

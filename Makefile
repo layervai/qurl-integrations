@@ -73,6 +73,10 @@ check-actions-pins:
 test-actions-pins:
 	scripts/test-validate-github-actions-pins.sh
 
+.PHONY: test-install-script
+test-install-script:
+	scripts/test-install.sh
+
 ## Pre-commit
 
 pre-commit-install:
@@ -91,7 +95,7 @@ check-discord: test-discord
 
 ## Full check (CI parity)
 
-check: fmt vet check-actions-pins test-actions-pins lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script lint test-race
 
 ## Cleanup
 
