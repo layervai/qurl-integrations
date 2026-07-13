@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins check-discord test-discord pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -80,6 +80,14 @@ check-actions-pins:
 test-actions-pins:
 	scripts/test-validate-github-actions-pins.sh
 
+## Scripts
+
+test-install-script:
+	scripts/test-install.sh
+
+check-release-please-sync:
+	scripts/check-release-please-sync.sh
+
 ## Pre-commit
 
 pre-commit-install:
@@ -113,7 +121,7 @@ check-discord:
 ## Full check (Go + repo checks, matching the Go CI path; app suites
 ## run via their own CI gates or make check-discord)
 
-check: fmt vet check-actions-pins test-actions-pins lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync lint test-race
 
 ## Cleanup
 
