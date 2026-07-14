@@ -45,6 +45,11 @@ const (
 //     dodge encoding ambiguity in the upstream key hash.
 const HeaderIdempotencyKey = "Idempotency-Key"
 
+// CreateForResourcePathLabel is the canonical redacted qURL-service path label
+// for resource-scoped qURL creation. Keep audit/log code on this constant so it
+// cannot drift from Client.Create's ResourceID route label.
+const CreateForResourcePathLabel = "/v1/resources/:id/qurls"
+
 // MaxIdempotencyKeyLength is the byte cap mirrored from qurl-service's
 // idempotency-store schema (see `idempotency_dynamodb.go`). Since the
 // validator rejects ≥0x80, accepted keys are pure ASCII — bytes equal
@@ -403,7 +408,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		// if not in its schema; harmless either way and matches the
 		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
-		logLabel = "POST /v1/resources/:id/qurls"
+		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
 			Label:           input.Label,
 			ExpiresIn:       input.ExpiresIn,
@@ -898,10 +903,10 @@ func (c *Client) RevokeAPIKey(ctx context.Context, keyID string) error {
 	return err
 }
 
-// DeleteResource revokes a resource by its `r_…` ID. The server revokes the
+// DeleteResource revokes a resource by its opaque REST ID. The server revokes the
 // resource AND every qURL minted against it (DELETE /v1/resources/{id} —
 // "Revoke resource and all its qURLs"); the action is not reversible.
-// resourceID must be a resolved `r_…` ID — callers holding a slug/alias must
+// resourceID must be resolved — callers holding a slug/alias must
 // resolve it first (see the Slack bot's resolveTokenForGet). A 200/204 maps to
 // nil; 404/401/403/5xx surface as a *APIError for the caller to map.
 func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
@@ -918,7 +923,7 @@ func (c *Client) DeleteResource(ctx context.Context, resourceID string) error {
 }
 
 // UpdateResource updates a resource's mutable properties (alias, description,
-// access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
+// access policy, etc.). resourceID is opaque; alias-keyed updates
 // must first resolve the alias to its resource_id.
 //
 // Validation order (first match wins): trim resourceID → empty

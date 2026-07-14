@@ -20,7 +20,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `origins/s3-static-connector/` — reusable private S3 static origin image
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
-- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`)
+- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it
 
 ## Commit format
 

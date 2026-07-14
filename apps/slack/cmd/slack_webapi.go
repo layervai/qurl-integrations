@@ -464,6 +464,34 @@ func newSlackPostDMFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, co
 	}
 }
 
+// newSlackPostDMBlocksFuncWithTokenLookup builds the [internal.PostDMBlocksFunc] seam:
+// the Block Kit analog of [newSlackPostDMFuncWithTokenLookup]. It opens (or resumes) the
+// 1:1 IM with conversations.open, then posts the blocks into that DM channel via the
+// shared Block Kit chat.postMessage poster — so `/qurl get dm:true` delivers an Enter
+// Portal URL button instead of a raw hyperlink. Both hops use the same per-workspace
+// token lookup and Enterprise Grid fallback as the text DM seam.
+func newSlackPostDMBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsOpenURL, postMessageURL string, httpClient *http.Client) internal.PostDMBlocksFunc {
+	open := newSlackWebAPIPoster(lookup, userAgent, conversationsOpenURL, "conversations.open", slackConversationsOpenResponseError, httpClient)
+	postBlocks := newSlackPostMessageBlocksFuncWithTokenLookup(lookup, userAgent, postMessageURL, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, slackUserID string, blocks []any, fallbackText string) error {
+		body, err := json.Marshal(struct {
+			Users string `json:"users"`
+		}{Users: slackUserID})
+		if err != nil {
+			return fmt.Errorf("conversations.open request marshal: %w", err)
+		}
+		raw, err := open.gridPost(ctx, teamID, enterpriseID, body)
+		if err != nil {
+			return err
+		}
+		channelID, err := slackConversationsOpenChannelID(raw)
+		if err != nil {
+			return err
+		}
+		return postBlocks(ctx, teamID, enterpriseID, channelID, "", blocks, fallbackText)
+	}
+}
+
 // newSlackPostEphemeralFuncWithTokenLookup builds the [internal.PostEphemeralFunc] seam:
 // a threaded chat.postEphemeral visible only to userID — used to deliver a get's one-time
 // link privately in a (multi-party) channel, as a standalone message the click's
@@ -479,6 +507,35 @@ func newSlackPostEphemeralFuncWithTokenLookup(lookup slackBotTokenLookup, userAg
 			ThreadTS string `json:"thread_ts,omitempty"`
 			Text     string `json:"text"`
 		}{Channel: channelID, User: userID, ThreadTS: threadTS, Text: text})
+		if err != nil {
+			return fmt.Errorf("chat.postEphemeral request marshal: %w", err)
+		}
+		return poster.post(ctx, teamID, enterpriseID, body)
+	}
+}
+
+// newSlackPostEphemeralBlocksFuncWithTokenLookup builds the
+// [internal.PostEphemeralBlocksFunc] seam: the Block Kit analog of
+// [newSlackPostEphemeralFuncWithTokenLookup]. A threaded chat.postEphemeral carrying
+// blocks (the confirm flow's Enter Portal link button in a channel), visible only to
+// userID. fallbackText is the notification/non-block fallback; mrkdwn:false renders it
+// literally, mirroring the Block Kit chat.postMessage seam's defense-in-depth. Shares
+// the poster (token lookup + Grid fallback + ok:false parse) with the text ephemeral
+// seam — only the JSON body (which adds `blocks`) differs.
+func newSlackPostEphemeralBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, postEphemeralURL string, httpClient *http.Client) internal.PostEphemeralBlocksFunc {
+	poster := newSlackWebAPIPoster(lookup, userAgent, postEphemeralURL, "chat.postEphemeral", slackChatPostEphemeralResponseError, httpClient)
+	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, userID string, blocks []any, fallbackText string) error {
+		body, err := json.Marshal(struct {
+			Channel  string `json:"channel"`
+			User     string `json:"user"`
+			ThreadTS string `json:"thread_ts,omitempty"`
+			Text     string `json:"text"`
+			Blocks   []any  `json:"blocks"`
+			Mrkdwn   bool   `json:"mrkdwn"`
+			// No unfurl_links/unfurl_media here (unlike the chat.postMessage block seam):
+			// Slack does not unfurl ephemeral messages, so the raw one-time URL riding in
+			// the fallback text can't be brushed by an unfurl fetch on this surface.
+		}{Channel: channelID, User: userID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false})
 		if err != nil {
 			return fmt.Errorf("chat.postEphemeral request marshal: %w", err)
 		}
@@ -678,7 +735,15 @@ func newSlackPostMessageBlocksFuncWithTokenLookup(lookup slackBotTokenLookup, us
 			// link) in the notification / non-block-client preview, regardless of whether
 			// the caller also escaped it. The card itself renders the summary as plain_text.
 			Mrkdwn bool `json:"mrkdwn"`
-		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false})
+			// unfurl_links/unfurl_media:false: chat.postMessage is the one unfurl-capable
+			// seam here, and a block-message fallback can carry a raw URL (the Enter Portal
+			// one-time link on the PostDMBlocks path). Suppress explicitly so a background
+			// unfurl fetch can't brush a one-time link — making the "never unfurled"
+			// invariant airtight rather than relying on Slack not unfurling the fallback
+			// when blocks are present. Harmless for the confirm card (no links to unfurl).
+			UnfurlLinks bool `json:"unfurl_links"`
+			UnfurlMedia bool `json:"unfurl_media"`
+		}{Channel: channelID, ThreadTS: threadTS, Text: fallbackText, Blocks: blocks, Mrkdwn: false, UnfurlLinks: false, UnfurlMedia: false})
 		if err != nil {
 			return fmt.Errorf("chat.postMessage request marshal: %w", err)
 		}

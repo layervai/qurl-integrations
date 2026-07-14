@@ -26,17 +26,18 @@ import (
 // it would risk SSRF if the signature gate ever broke, so postResponse
 // validates the scheme and host before dialing.
 const (
-	fieldResponseURL  = "response_url"
-	fieldTeamID       = "team_id"
-	fieldTeamDomain   = "team_domain"
-	fieldUserID       = "user_id"
-	fieldUserName     = "user_name"
-	fieldChannelID    = "channel_id"
-	fieldChannelName  = "channel_name"
-	fieldCommand      = "command"
-	fieldText         = "text"
-	fieldTriggerID    = "trigger_id"
-	fieldEnterpriseID = "enterprise_id"
+	fieldResponseURL         = "response_url"
+	fieldTeamID              = "team_id"
+	fieldTeamDomain          = "team_domain"
+	fieldUserID              = "user_id"
+	fieldUserName            = "user_name"
+	fieldChannelID           = "channel_id"
+	fieldChannelName         = "channel_name"
+	fieldCommand             = "command"
+	fieldText                = "text"
+	fieldTriggerID           = "trigger_id"
+	fieldEnterpriseID        = "enterprise_id"
+	fieldIsEnterpriseInstall = "is_enterprise_install"
 )
 
 // slackResponseURLHost is Slack's webhook ingress for slash-command
@@ -46,6 +47,8 @@ const (
 // The host string is the only Slack-controlled identifier the Slack
 // docs guarantee for this surface.
 const slackResponseURLHost = "hooks.slack.com"
+
+const slackFormBoolTrue = "true"
 
 const responseURLRetryDelay = 250 * time.Millisecond
 
@@ -234,11 +237,30 @@ func responseURLTextBody(text string) ([]byte, error) {
 // blocks message's `text` as the accessibility/notification fallback, so
 // it MUST still carry the full listing. Same SSRF-fenced delivery,
 // single-attempt-with-logging posture as [Handler.postResponse].
+//
+// It sets unfurl_links/unfurl_media:false for parity with the chat.postMessage
+// block seams: a response_url message is not link-unfurled by Slack today, but the
+// `/qurl get` fallback carries a static one-time URL, so suppressing explicitly keeps
+// the "never unfurled" invariant uniform across surfaces (this is the highest-traffic
+// get path) rather than resting on assumed behavior. The suppression is repo-wide —
+// it applies to EVERY caller (get, /qurl list, revoke, tunnel install) — which is
+// harmless: none of their fallbacks want unfurl.
+//
+// mrkdwn is left at Slack's default (true), unlike the chat.post* block seams
+// (Mrkdwn:false) — deliberately. Those seams set it to neutralize a prompt-injected
+// LLM confirm-card summary in their fallback; postResponseBlocks has no LLM input.
+// Both its fallback shapes are safe (and want) mrkdwn: revoke/list/tunnel pass mrkdwn
+// prose (revoke even uses escaped backtick code, which mrkdwn:false would render
+// literally), and the `/qurl get` fallback carries a STATIC one-time URL — mrkdwn:true
+// merely linkifies it, which is what a "usable link for non-block clients" fallback
+// wants and is safe (static, so no injection; unfurl is already off above).
 func (h *Handler) postResponseBlocks(log *slog.Logger, responseURL, fallbackText string, blocks []any) bool {
 	body, err := json.Marshal(map[string]any{
 		respFieldResponseType: respTypeEphemeral,
 		respFieldText:         fallbackText,
 		blockKitFieldBlocks:   blocks,
+		respFieldUnfurlLinks:  false,
+		respFieldUnfurlMedia:  false,
 	})
 	if err != nil {
 		log.Error("marshal response_url blocks payload failed", "error", err)

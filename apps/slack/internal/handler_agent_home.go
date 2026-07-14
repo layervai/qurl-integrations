@@ -72,14 +72,18 @@ func (h *Handler) publishAgentHome(ctx context.Context, log *slog.Logger, teamID
 	}
 }
 
-// buildAgentHomeView renders the Home tab blocks: a title, a one-line intro, then one
-// section per recent action (newest-first, as ListAuditEntries returns them), or an
-// empty-state line when there are none.
+// buildAgentHomeView renders the Home tab blocks: a title, a one-line intro, the
+// AI-disclosure context line, then one section per recent action (newest-first, as
+// ListAuditEntries returns them), or an empty-state line when there are none.
 func buildAgentHomeView(entries []slackdata.AuditEntry) []any {
-	blocks := make([]any, 0, 4+len(entries)) // header + intro + divider + entries (or the empty-state line)
+	blocks := make([]any, 0, 5+len(entries)) // header + intro + AI-disclosure + divider + entries (or the empty-state line)
 	blocks = append(blocks,
 		headerBlock(agentHomeTitle),
 		sectionBlock(agentHomeIntro),
+		// Slack-AI-required disclosure near the top: AI is used, it can be wrong, and
+		// where the privacy notice lives. A context block reads as subtext, matching
+		// the modal "subtext" pattern (contextBlock).
+		contextBlock(agentAIDisclosureShort),
 		map[string]any{"type": "divider"},
 	)
 	if len(entries) == 0 {

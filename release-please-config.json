@@ -8,13 +8,6 @@
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true
     },
-    "apps/teams": {
-      "release-type": "go",
-      "component": "teams",
-      "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
-    },
     "apps/discord": {
       "release-type": "node",
       "component": "discord",
@@ -41,14 +34,8 @@
       "component": "cli",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
-    },
-    "apps/zapier": {
-      "release-type": "go",
-      "component": "zapier",
-      "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true
+      "bump-patch-for-minor-pre-major": true,
+      "include-component-in-tag": false
     }
   }
 }

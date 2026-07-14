@@ -137,7 +137,10 @@ export async function mintConnectorView(
   return { qurl_link: link.qurl_link };
 }
 
-/** Mint a one-time qURL link for a resource */
+/** Mint a one-time qURL link for a resource.
+ * This non-idempotent POST deliberately uses one bare fetch: after an
+ * ambiguous transport failure the helper cannot know whether a link was
+ * created, so replaying the request could mint an unintended extra qURL. */
 export async function mintLink(
   mintUrl: string,
   apiKey: string,
@@ -149,7 +152,7 @@ export async function mintLink(
     max_uses?: number;
   },
 ): Promise<MintResult> {
-  const res = await fetch(mintUrl, {
+  const res = await fetch(stripTrailingSlashes(mintUrl), {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -165,13 +168,10 @@ export async function mintLink(
   });
 
   if (!res.ok) throw new Error(`Mint failed: ${res.status} ${await res.text()}`);
-  const json = await res.json() as any;
-  const d = json.data ?? json;
-  return {
-    resource_id: d.resource_id,
-    qurl_link: d.qurl_link ?? d.link ?? d.url,
-    qurl_id: d.qurl_id ?? d.id,
-  };
+  const body = await res.json() as unknown;
+  const result = parseBareOrEnveloped(body, parseMintResult);
+  if (!result) throw new Error('Mint returned an invalid response shape');
+  return result;
 }
 
 /** Access a qURL link and return the HTTP result */
@@ -212,15 +212,264 @@ export async function revokeLink(
   return res.ok;
 }
 
-/** Get link status */
-export async function getLinkStatus(
-  mintUrl: string,
+export interface LinkStatus {
+  qurl_id: string;
+  use_count: number;
+  status: string;
+  expires_at?: string;
+}
+
+export interface ResourceStatus {
+  resource_id: string;
+  status: string;
+  expires_at?: string;
+  qurls?: LinkStatus[];
+}
+
+interface PollOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stripTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+function unwrapDataEnvelope(value: unknown): unknown {
+  return isJsonObject(value) && 'data' in value ? value.data : value;
+}
+
+/** Prefer a complete bare response recognized by `parse`; otherwise parse the
+ * API's `data` envelope. This preserves future unrelated top-level data fields.
+ * A parser throw intentionally aborts: only an unrecognized (`null`) top-level
+ * shape may fall through to the envelope. */
+function parseBareOrEnveloped<T>(
+  value: unknown,
+  parse: (candidate: unknown) => T | null,
+): T | null {
+  return parse(value) ?? parse(unwrapDataEnvelope(value));
+}
+
+function parseMintResult(value: unknown): MintResult | null {
+  if (
+    !isJsonObject(value) ||
+    typeof value.resource_id !== 'string' ||
+    value.resource_id.length === 0
+  ) {
+    return null;
+  }
+  const qurlLink = value.qurl_link ?? value.link ?? value.url;
+  const qurlId = value.qurl_id ?? value.id;
+  if (typeof qurlLink !== 'string' || typeof qurlId !== 'string') return null;
+  return { resource_id: value.resource_id, qurl_link: qurlLink, qurl_id: qurlId };
+}
+
+function parseLinkStatus(value: unknown, resourceId: string, index: number): LinkStatus {
+  if (
+    !isJsonObject(value) ||
+    typeof value.qurl_id !== 'string' ||
+    typeof value.use_count !== 'number' ||
+    typeof value.status !== 'string' ||
+    (value.expires_at !== undefined && typeof value.expires_at !== 'string')
+  ) {
+    throw new Error(
+      `qURL lookup returned an invalid token status shape for resource ${resourceId} at qurls[${index}]`,
+    );
+  }
+  return {
+    qurl_id: value.qurl_id,
+    use_count: value.use_count,
+    status: value.status,
+    ...(value.expires_at === undefined ? {} : { expires_at: value.expires_at }),
+  };
+}
+
+function parseResourceStatus(value: unknown, id: string): ResourceStatus | null {
+  if (
+    !isJsonObject(value) ||
+    typeof value.resource_id !== 'string' ||
+    typeof value.status !== 'string'
+  ) {
+    return null;
+  }
+  if (value.expires_at !== undefined && typeof value.expires_at !== 'string') {
+    throw new Error(`qURL lookup returned an invalid expires_at for resource ${id}`);
+  }
+  if (value.qurls !== undefined && !Array.isArray(value.qurls)) {
+    throw new Error(`qURL lookup returned an invalid qURL preview for resource ${id}`);
+  }
+
+  const resourceId = value.resource_id;
+  // Deliberately validate every returned summary even for resource-lifecycle
+  // callers: a malformed management response must red the E2E gate rather than
+  // let a revoke assertion pass while silently ignoring preview corruption.
+  const qurls = value.qurls?.map((qurl, index) => (
+    parseLinkStatus(qurl, resourceId, index)
+  ));
+  return {
+    resource_id: resourceId,
+    status: value.status,
+    ...(value.expires_at === undefined ? {} : { expires_at: value.expires_at }),
+    ...(qurls === undefined ? {} : { qurls }),
+  };
+}
+
+/** A typed HTTP failure from the qURL management lookup. */
+class StatusCheckError extends Error {
+  constructor(readonly status: number) {
+    super(`qURL lookup failed: ${status}`);
+    this.name = 'StatusCheckError';
+  }
+}
+
+/** The parent resource is readable, but its bounded qURL preview has not made
+ * the requested token visible. Direct reads fail closed on this condition;
+ * only bounded read-after-write polling may retry it. */
+class TokenSummaryNotVisibleError extends Error {
+  constructor(qurlId: string, resourceId: string) {
+    super(
+      `qURL lookup for ${qurlId} returned resource ${resourceId} without the requested token summary`,
+    );
+    this.name = 'TokenSummaryNotVisibleError';
+  }
+}
+
+/** Read the documented resource-centric management endpoint. It accepts
+ * either a public resource ID or a q_ display ID and returns the parent
+ * resource. There is no `/status` sub-route: per-qURL status lives in the
+ * response's `qurls` summaries. */
+async function getQurlResource(
+  managementUrl: string,
   apiKey: string,
-  resourceId: string,
-): Promise<{ use_count: number; status: string; expires_at: string }> {
-  const res = await fetch(`${mintUrl}/${resourceId}/status`, {
+  id: string,
+): Promise<ResourceStatus> {
+  const base = stripTrailingSlashes(managementUrl);
+  const res = await fetchWithTransientRetry(`${base}/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
   });
-  if (!res.ok) throw new Error(`Status check failed: ${res.status}`);
-  return res.json() as any;
+  if (!res.ok) throw new StatusCheckError(res.status);
+
+  const body = await res.json() as unknown;
+  const resource = parseBareOrEnveloped(body, (value) => parseResourceStatus(value, id));
+  if (!resource) throw new Error(`qURL lookup returned an invalid resource shape for ${id}`);
+  return resource;
+}
+
+/** Get one qURL token's status from its parent resource response. The id must
+ * be a qurl_id; use getResourceStatus for an opaque public resource_id.
+ * TODO(upstream-contract): layervai/qurl-service#1233 tracks the bounded qURL
+ * detail-preview and terminal-row retention contract.
+ * The E2E fixtures nonce their target URLs, so each resource has a small qURL
+ * set and the requested token must be present in the bounded detail preview.
+ * Missing it is an ambiguous/invalid response, not a synthetic 404 pass. */
+export async function getLinkStatus(
+  managementUrl: string,
+  apiKey: string,
+  qurlId: string,
+): Promise<LinkStatus> {
+  // TODO(upstream-contract): layervai/qurl-service#1233 tracks whether `q_`
+  // remains the stable discriminator between qurl_id and opaque resource_id.
+  if (!qurlId.startsWith('q_')) {
+    throw new TypeError('qURL token lookup requires a qurl_id; use getResourceStatus for resource IDs');
+  }
+  const resource = await getQurlResource(managementUrl, apiKey, qurlId);
+  const status = resource.qurls?.find((qurl) => qurl.qurl_id === qurlId);
+  if (!status) {
+    throw new TokenSummaryNotVisibleError(qurlId, resource.resource_id);
+  }
+  return status;
+}
+
+/** Get resource-level lifecycle status by its opaque public resource ID. */
+export async function getResourceStatus(
+  managementUrl: string,
+  apiKey: string,
+  resourceId: string,
+): Promise<ResourceStatus> {
+  const resource = await getQurlResource(managementUrl, apiKey, resourceId);
+  // Resource-level callers pass the canonical public resource_id, never a qURL
+  // display ID; require the management response to echo that encoding exactly.
+  if (resource.resource_id !== resourceId) {
+    throw new Error(
+      `qURL lookup for resource ${resourceId} returned mismatched resource ${resource.resource_id}`,
+    );
+  }
+  return resource;
+}
+
+/** Map an actual management-API 404 to null. Any other HTTP, network, or
+ * response-shape failure still throws. */
+async function readStatusOrNull<T>(read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch (e) {
+    if (e instanceof StatusCheckError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+/** Turn a nullable lookup into an actionable canary failure. */
+export function assertStatusVisible<T>(
+  status: T | null,
+  idDescription: string,
+): asserts status is T {
+  if (status === null) {
+    throw new Error(
+      `status canary: ${idDescription} did not become visible at GET /v1/qurls/{id} within the poll window`,
+    );
+  }
+}
+
+/** Bounded read-after-write poll shared by token and resource canaries. */
+async function pollStatus<T>(
+  read: () => Promise<T | null>,
+  predicate: (status: T | null) => boolean,
+  { timeoutMs = 5_000, intervalMs = 1_000 }: PollOptions = {},
+): Promise<T | null> {
+  const deadline = Date.now() + timeoutMs;
+  let last = await read();
+  while (!predicate(last) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    last = await read();
+  }
+  return last;
+}
+
+export async function pollLinkStatus(
+  managementUrl: string,
+  apiKey: string,
+  qurlId: string,
+  predicate: (status: LinkStatus | null) => boolean,
+  options?: PollOptions,
+): Promise<LinkStatus | null> {
+  const readAfterWrite = async (): Promise<LinkStatus | null> => {
+    try {
+      return await readStatusOrNull(() => getLinkStatus(managementUrl, apiKey, qurlId));
+    } catch (e) {
+      // A freshly minted parent resource can become readable before its token
+      // reaches the bounded preview. Retry that one explicit visibility lag;
+      // invalid shapes, auth failures, and all other errors still abort.
+      if (e instanceof TokenSummaryNotVisibleError) return null;
+      throw e;
+    }
+  };
+  return pollStatus(readAfterWrite, predicate, options);
+}
+
+export async function pollResourceStatus(
+  managementUrl: string,
+  apiKey: string,
+  resourceId: string,
+  predicate: (status: ResourceStatus | null) => boolean,
+  options?: PollOptions,
+): Promise<ResourceStatus | null> {
+  return pollStatus(
+    () => readStatusOrNull(() => getResourceStatus(managementUrl, apiKey, resourceId)),
+    predicate,
+    options,
+  );
 }

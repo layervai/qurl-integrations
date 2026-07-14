@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,10 @@ type fakeDDBClient struct {
 	updateFunc   func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
+	deleteInput  *dynamodb.DeleteItemInput
+	deleteOutput *dynamodb.DeleteItemOutput
+	deleteCalls  int
+	deleteErr    error
 }
 
 func (f *fakeDDBClient) GetItem(ctx context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -62,6 +67,14 @@ func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemI
 		return f.updateOutput, f.updateErr
 	}
 	return &dynamodb.UpdateItemOutput{}, f.updateErr
+}
+func (f *fakeDDBClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	f.deleteCalls++
+	f.deleteInput = in
+	if f.deleteOutput != nil {
+		return f.deleteOutput, f.deleteErr
+	}
+	return &dynamodb.DeleteItemOutput{}, f.deleteErr
 }
 
 // emptyPlaintextEncryptor decrypts any ciphertext to zero bytes. Used
@@ -134,6 +147,14 @@ func cachedAPIKeyResult(apiKey string) ttlcache.Result[cachedAPIKey] {
 			apiKey:     apiKey,
 			cacheToken: newAPIKeyCacheToken([]byte(apiKey), []byte(passthroughWrappedKey)),
 		},
+	}
+}
+
+func ddbItemForTestAPIKey(apiKey string) map[string]ddbtypes.AttributeValue {
+	return map[string]ddbtypes.AttributeValue{
+		attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+		attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte(apiKey)},
+		attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
 	}
 }
 
@@ -2010,6 +2031,9 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "slack_bot_installed_at = if_not_exists(slack_bot_installed_at, :now)") {
 		t.Errorf("UpdateExpression should preserve original Slack installed_at, got %q", got)
 	}
+	if got := *ddb.updateInput.UpdateExpression; !strings.Contains(got, "updated_at = :now") {
+		t.Errorf("UpdateExpression should bump row updated_at, got %q", got)
+	}
 }
 
 func TestDDBProviderSetSlackBotTokenRemovesEmptyOptionalMetadata(t *testing.T) {
@@ -2070,7 +2094,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
 			t.Errorf("delete key wrong: %v", ddb.updateInput.Key)
 		}
-		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"; got != want {
+		if got, want := *ddb.updateInput.UpdateExpression, "SET #updated_at = :now, #updated_at_nano = :now_nano REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"; got != want {
 			t.Errorf("UpdateExpression = %q, want %q", got, want)
 		}
 		if got, want := *ddb.updateInput.ConditionExpression, "attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)"; got != want {
@@ -2078,6 +2102,9 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		}
 		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "2026-06-13T12:34:56Z" {
 			t.Errorf("ExpressionAttributeValues[:now] = %v, want timestamp", ddb.updateInput.ExpressionAttributeValues[":now"])
+		}
+		if v, ok := ddb.updateInput.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN); !ok || v.Value != strconv.FormatInt(time.Date(2026, 6, 13, 12, 34, 56, 0, time.UTC).UnixNano(), 10) {
+			t.Errorf("ExpressionAttributeValues[:now_nano] = %v, want unix nanos", ddb.updateInput.ExpressionAttributeValues[":now_nano"])
 		}
 		wantNames := map[string]string{
 			"#qurl_api_key":        attrQURLAPIKey,
@@ -2088,6 +2115,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 			"#configured_by":       attrConfiguredBy,
 			"#configured_at":       attrConfiguredAt,
 			"#updated_at":          attrUpdatedAt,
+			"#updated_at_nano":     attrUpdatedAtNano,
 		}
 		for name, want := range wantNames {
 			if got := ddb.updateInput.ExpressionAttributeNames[name]; got != want {
@@ -2119,6 +2147,7 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 					delete(row, attrName)
 				}
 				row[attrUpdatedAt] = in.ExpressionAttributeValues[":now"]
+				row[attrUpdatedAtNano] = in.ExpressionAttributeValues[":now_nano"]
 				return &dynamodb.UpdateItemOutput{}, nil
 			},
 		}
@@ -2177,6 +2206,197 @@ func TestDDBProviderDeleteAPIKey(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "UpdateItem") {
 			t.Fatalf("wrapped error should name UpdateItem, got %v", err)
+		}
+	})
+}
+
+func TestDDBProviderDeleteWorkspaceState(t *testing.T) {
+	itemForKey := ddbItemForTestAPIKey
+
+	t.Run("deletes the whole row by team_id", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: &passthroughEncryptor{},
+			Now:       func() time.Time { return time.Date(2026, 6, 13, 12, 34, 56, 0, time.UTC) },
+		}
+		if err := p.DeleteWorkspaceState(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteWorkspaceState: %v", err)
+		}
+		if ddb.deleteCalls != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", ddb.deleteCalls)
+		}
+		if ddb.deleteInput == nil {
+			t.Fatal("expected DeleteItem called")
+		}
+		if got := aws.ToString(ddb.deleteInput.TableName); got != "ws" {
+			t.Errorf("DeleteItem table = %q, want %q", got, "ws")
+		}
+		if v, ok := ddb.deleteInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
+			t.Errorf("DeleteItem key = %v, want team_id=%q", ddb.deleteInput.Key, testTeamID)
+		}
+		// Whole-row delete: no ConditionExpression (idempotent on an absent row).
+		if ddb.deleteInput.ConditionExpression != nil {
+			t.Errorf("DeleteItem ConditionExpression = %q, want none (delete must be unconditional/idempotent)", aws.ToString(ddb.deleteInput.ConditionExpression))
+		}
+	})
+
+	t.Run("absent row is a no-op (no error)", func(t *testing.T) {
+		// fakeDDBClient.DeleteItem returns success with no item state, mirroring
+		// DynamoDB's no-op DeleteItem on a missing key. A nil error here proves
+		// DeleteWorkspaceState does not invent a not-found error.
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		if err := p.DeleteWorkspaceState(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteWorkspaceState on absent row: %v, want nil", err)
+		}
+		if ddb.deleteCalls != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", ddb.deleteCalls)
+		}
+	})
+
+	t.Run("delete with identity returns old key provenance", func(t *testing.T) {
+		ddb := &fakeDDBClient{
+			deleteOutput: &dynamodb.DeleteItemOutput{Attributes: map[string]ddbtypes.AttributeValue{
+				attrQURLAPIKeyID: &ddbtypes.AttributeValueMemberS{Value: " " + testKeyID + " "},
+				attrQURLAccountID: &ddbtypes.AttributeValueMemberS{
+					Value: " " + testQURLAccount + " ",
+				},
+			}},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateWithIdentity(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("DeleteWorkspaceStateWithIdentity: %v", err)
+		}
+		if identity.QURLAPIKeyID != testKeyID || identity.QURLAccountID != testQURLAccount {
+			t.Fatalf("identity = %+v, want key/account %q/%q", identity, testKeyID, testQURLAccount)
+		}
+		if !identity.Deleted {
+			t.Fatalf("identity.Deleted = false, want true")
+		}
+		if ddb.deleteInput.ReturnValues != ddbtypes.ReturnValueAllOld {
+			t.Fatalf("ReturnValues = %v, want ALL_OLD", ddb.deleteInput.ReturnValues)
+		}
+	})
+
+	t.Run("guarded delete uses updated_at cutoff and returns identity", func(t *testing.T) {
+		cutoff := time.Date(2026, 7, 8, 12, 30, 45, 987, time.UTC)
+		ddb := &fakeDDBClient{
+			deleteOutput: &dynamodb.DeleteItemOutput{Attributes: map[string]ddbtypes.AttributeValue{
+				attrQURLAPIKeyID: &ddbtypes.AttributeValueMemberS{Value: testKeyID},
+			}},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateBeforeWithIdentity(context.Background(), testTeamID, cutoff)
+		if err != nil {
+			t.Fatalf("DeleteWorkspaceStateBeforeWithIdentity: %v", err)
+		}
+		if !identity.Deleted || identity.QURLAPIKeyID != testKeyID {
+			t.Fatalf("identity = %+v, want deleted key %q", identity, testKeyID)
+		}
+		if got := aws.ToString(ddb.deleteInput.ConditionExpression); got != "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano" {
+			t.Fatalf("ConditionExpression = %q", got)
+		}
+		if got := ddb.deleteInput.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
+			t.Fatalf("#updated_at_nano = %q, want %q", got, attrUpdatedAtNano)
+		}
+		if got := ddb.deleteInput.ExpressionAttributeValues[":purge_cutoff_nano"].(*ddbtypes.AttributeValueMemberN).Value; got != strconv.FormatInt(cutoff.UTC().UnixNano(), 10) {
+			t.Fatalf(":purge_cutoff_nano = %q", got)
+		}
+	})
+
+	t.Run("guarded delete keeps newer row as no-op sentinel", func(t *testing.T) {
+		ddb := &fakeDDBClient{deleteErr: &ddbtypes.ConditionalCheckFailedException{}}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateBeforeWithIdentity(context.Background(), testTeamID, time.Now())
+		if !errors.Is(err, ErrWorkspaceStateUpdatedAfterCutoff) {
+			t.Fatalf("err = %v, want ErrWorkspaceStateUpdatedAfterCutoff", err)
+		}
+		if identity != (DeletedWorkspaceStateIdentity{}) {
+			t.Fatalf("identity = %+v, want empty", identity)
+		}
+	})
+
+	t.Run("delete with identity is empty on absent row", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+
+		identity, err := p.DeleteWorkspaceStateWithIdentity(context.Background(), testTeamID)
+		if err != nil {
+			t.Fatalf("DeleteWorkspaceStateWithIdentity absent row: %v", err)
+		}
+		if identity != (DeletedWorkspaceStateIdentity{}) {
+			t.Fatalf("identity = %+v, want empty", identity)
+		}
+	})
+
+	t.Run("evicts stale cached API key", func(t *testing.T) {
+		now := time.Unix(1700000000, 0)
+		encryptor := &passthroughEncryptor{}
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)},
+		}
+		p := &DDBProvider{
+			Client:    ddb,
+			TableName: "ws",
+			Encryptor: encryptor,
+			Now:       func() time.Time { return now },
+		}
+		if _, err := p.APIKey(context.Background(), testTeamID); err != nil {
+			t.Fatalf("prime APIKey cache: %v", err)
+		}
+
+		if err := p.DeleteWorkspaceState(context.Background(), testTeamID); err != nil {
+			t.Fatalf("DeleteWorkspaceState: %v", err)
+		}
+		ddb.getFunc = func(_ context.Context, in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			if getItemConsistentRead(in) {
+				return &dynamodb.GetItemOutput{Item: nil}, nil
+			}
+			return &dynamodb.GetItemOutput{Item: itemForKey(testOldAPIKey)}, nil
+		}
+
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if !errors.Is(err, ErrWorkspaceNotConfigured) {
+			t.Fatalf("want ErrWorkspaceNotConfigured after workspace delete, got %v", err)
+		}
+		if len(ddb.getInputs) != 2 || !getItemConsistentRead(ddb.getInputs[1]) {
+			t.Fatalf("post-delete refill should use a strongly consistent read, inputs=%v", ddb.getInputs)
+		}
+		if encryptor.openCalls != 1 {
+			t.Fatalf("Open calls = %d, want 1; stale post-delete row must not be decrypted", encryptor.openCalls)
+		}
+	})
+
+	t.Run("empty workspace id errors before any DDB call", func(t *testing.T) {
+		ddb := &fakeDDBClient{}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		if err := p.DeleteWorkspaceState(context.Background(), ""); err == nil {
+			t.Fatal("DeleteWorkspaceState(\"\") = nil, want error")
+		}
+		if ddb.deleteCalls != 0 {
+			t.Fatalf("DeleteItem calls = %d, want 0 (must reject empty id before DDB)", ddb.deleteCalls)
+		}
+	})
+
+	t.Run("delete error is wrapped", func(t *testing.T) {
+		deleteErr := errors.New("ddb delete down")
+		ddb := &fakeDDBClient{deleteErr: deleteErr}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		err := p.DeleteWorkspaceState(context.Background(), testTeamID)
+		if err == nil {
+			t.Fatal("want delete error, got nil")
+		}
+		if !errors.Is(err, deleteErr) {
+			t.Fatalf("want wrapped delete error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "DeleteItem") {
+			t.Fatalf("wrapped error should name DeleteItem, got %v", err)
 		}
 	})
 }

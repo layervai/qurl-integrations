@@ -125,6 +125,17 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 		h.handleListEditClick(w, payload, editAction)
 		return
 	}
+	// The Enter Portal button on a minted qURL is a Slack URL button: the click
+	// opens the qURL directly in the user's browser, so there is NO server work.
+	// Slack still POSTs a block_actions interaction, which we ack 200 and drop.
+	// Handled explicitly (not via the catch-all below) so a legitimate click — now
+	// the primary CTA of every successful get — doesn't fire the "no recognized
+	// action" breadcrumb, keeping that log reserved for a button genuinely rendered
+	// but never wired.
+	if _, ok := findActionByID(payload.Actions, enterPortalActionID); ok {
+		respondJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
 	action, ok := findActionByID(payload.Actions, listCreateQurlActionID)
 	if !ok {
 		// A button we don't handle (or an empty actions array). Ack and
@@ -192,7 +203,7 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
-	text, err := h.getWork(ctx, log, &getWorkArgs{
+	res, err := h.getWork(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -200,7 +211,7 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		userID:       userID,
 		triggerID:    triggerID,
 	})
-	h.finishGet(log, responseURL, text, err)
+	h.finishGet(log, responseURL, res, err)
 }
 
 // findActionByID returns the first action in a block_actions payload whose
