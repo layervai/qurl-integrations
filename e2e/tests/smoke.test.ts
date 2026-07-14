@@ -77,18 +77,14 @@ describe('Smoke: qURL link lifecycle', () => {
     console.log(`Minted: qurl_id=${qurlId} resource_id=${result.resource_id}`);
   });
 
-  test('status endpoint sees the freshly-minted link (canary)', async () => {
+  test('management API sees the freshly-minted link (canary)', async () => {
     expect(qurlId).toBeDefined();
-    // CANARY for every null-tolerant status check in this suite (and the
-    // one in concurrency.test.ts): a freshly-minted, never-accessed link
-    // MUST be visible at the status endpoint. If this lookup 404s — say
-    // the endpoint keys on resource_id rather than qurl_id (#950), or
-    // moved — then all the `if (status !== null)` guards below would
-    // degrade into passing vacuously through their 404 arm: the exact
-    // silent-green this suite exists to kill. This test turns that
-    // degradation into a loud red instead. Bounded poll (not a single
-    // shot): mint-then-read races an unpinned consistency model, and a
-    // brief propagation lag shouldn't red a correct deployment.
+    // CANARY for every later status check in this suite (and the one in
+    // concurrency.test.ts): a freshly-minted, never-accessed link
+    // MUST be visible in GET /v1/qurls/{qurl_id}. If this lookup 404s,
+    // the remaining checks cannot be trusted. Bounded poll (not a single
+    // shot): mint-then-read races an unpinned consistency model, and a brief
+    // propagation lag should not red a correct deployment.
     const status = await qurl.pollLinkStatus(
       env.MINT_API_URL, env.QURL_API_KEY, qurlId, (s) => s !== null,
     );
@@ -101,22 +97,24 @@ describe('Smoke: qURL link lifecycle', () => {
     console.log(`First access: ${res.status} -> ${res.finalUrl}`);
   });
 
-  test('status endpoint never over-counts the first access', async () => {
+  test('management API never over-counts the first access', async () => {
     expect(qurlId).toBeDefined();
     // qURL links resolve their token client-side (fragment-based SPA), so
     // a bare HTTP GET may or may not register a consumed use server-side —
     // `use_count >= 1` is NOT a contract this suite can hold (the old
     // try/catch-swallowed assertion of it could never fail anyway). What
     // IS guaranteed after one access of a max_uses:1 link: the status
-    // endpoint answers coherently — either 404 (fully consumed → null) or
-    // at most one recorded use. Knock-driven single-use ENFORCEMENT is
+    // TODO(upstream-contract): layervai/qurl-service#1233 tracks the current
+    // contract: the management API retains this token summary and reports at
+    // most one use.
+    // qurl-service's resource preview does not filter terminal token statuses;
+    // a consumed token stays present with status=consumed until TTL cleanup.
+    // Knock-driven single-use ENFORCEMENT is
     // pinned in file-revoke.test.ts ("a consumed one-time link does not
     // serve a second knock"); URL-target knock coverage is #951.
-    const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
-    console.log('Link status after first access:', status === null ? '404 (consumed)' : JSON.stringify(status));
-    if (status !== null) {
-      expect(status.use_count).toBeLessThanOrEqual(1);
-    }
+    const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+    console.log('Link status after first access:', JSON.stringify(status));
+    expect(status.use_count).toBeLessThanOrEqual(1);
   });
 
   test('second access of the same one-time link never over-counts (status coherence)', async () => {
@@ -141,20 +139,13 @@ describe('Smoke: qURL link lifecycle', () => {
     const res2 = await qurl.accessLink(qurlLink);
     console.log(`Second access: ${res2.status} -> ${res2.finalUrl}`);
 
-    // Two valid coherence shapes at the status endpoint:
-    //   (a) 404 (→ null) — the resource was fully consumed. The stronger
-    //       signal, and what the upstream API returns when
-    //       `one_time_use: true` is honored on this path.
-    //   (b) success with `use_count <= 1` — the second attempt did NOT
-    //       advance the counter past the cap.
-    // getLinkStatusOrNull rethrows any non-404 failure, so an unrelated
-    // network/auth error still fails loudly instead of false-passing.
-    const status = await qurl.getLinkStatusOrNull(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
-    console.log('Link status after 2nd access:', status === null ? '404 (consumed)' : JSON.stringify(status));
-    if (status !== null) {
-      // An increment to 2 is the exact "links were reusable" bug shape.
-      expect(status.use_count).toBeLessThan(2);
-    }
+    // The retained token summary must show that the second attempt did not
+    // advance the counter past the cap. Missing summaries and all HTTP/network
+    // failures stay hard reds rather than becoming a nullable pass.
+    const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+    console.log('Link status after 2nd access:', JSON.stringify(status));
+    // An increment to 2 is the exact "links were reusable" bug shape.
+    expect(status.use_count).toBeLessThan(2);
   });
 });
 
@@ -170,9 +161,9 @@ describe('Smoke: Revocation', () => {
     tracked.track(result.resource_id);
     resourceId = result.resource_id;
 
-    // #950 canary, resource_id side (the lifecycle canary above covers
-    // qurl_id; rationale in qurl-api.ts's getLinkStatus doc).
-    const pre = await qurl.pollLinkStatus(
+    // Resource-level canary before revoke: this makes the later lifecycle
+    // assertion meaningful instead of allowing an always-404 lookup to pass.
+    const pre = await qurl.pollResourceStatus(
       env.MINT_API_URL, env.QURL_API_KEY, resourceId, (s) => s !== null,
     );
     qurl.assertStatusVisible(pre, `pre-revoke resource_id ${resourceId}`);
@@ -183,13 +174,12 @@ describe('Smoke: Revocation', () => {
     console.log(`Revoked resource: ${resourceId}`);
   });
 
-  test('resource status returns 404 after revoke', async () => {
+  test('resource status is revoked after revoke', async () => {
     // Depends on the prior test minting + revoking — guard explicitly.
     expect(resourceId).toBeDefined();
-    // After revocation, the resource status API should return 404.
-    // Use a definitive assertion instead of catch-all error swallowing.
-    await expect(
-      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, resourceId),
-    ).rejects.toThrow(/404/);
+    // Resource revocation is a soft lifecycle transition: management reads
+    // retain the resource and report `revoked`.
+    const status = await qurl.getResourceStatus(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
+    expect(status.status).toBe('revoked');
   });
 });

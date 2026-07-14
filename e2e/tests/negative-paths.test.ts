@@ -7,6 +7,7 @@
  * helpers/cleanup.ts.
  */
 
+import { generateKeyPairSync } from 'crypto';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
@@ -17,6 +18,17 @@ import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
 const tracked = trackedQurlResources(env);
+let nonExistentPublicResourceId: string;
+
+beforeAll(() => {
+  // Generate a fresh, structurally valid P-256 SPKI public key. It is
+  // astronomically unlikely to identify a provisioned resource, so this
+  // exercises "well-formed but absent" rather than malformed-ID rejection.
+  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  nonExistentPublicResourceId = Buffer.from(
+    publicKey.export({ type: 'spki', format: 'der' }),
+  ).toString('base64url');
+});
 
 afterAll(() => tracked.revokeAll());
 
@@ -68,7 +80,9 @@ describe('Negative: Invalid Access', () => {
 
 describe('Negative: Invalid Revocation', () => {
   test('revoke non-existent resource returns false', async () => {
-    const result = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, 'r_nonexistent_xxx');
+    const result = await qurl.revokeLink(
+      env.MINT_API_URL, env.QURL_API_KEY, nonExistentPublicResourceId,
+    );
     expect(result).toBe(false);
   });
 
@@ -87,7 +101,7 @@ describe('Negative: Invalid Revocation', () => {
 describe('Negative: Status Checks', () => {
   test('status of non-existent resource throws 404', async () => {
     await expect(
-      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, 'r_nonexistent'),
+      qurl.getResourceStatus(env.MINT_API_URL, env.QURL_API_KEY, nonExistentPublicResourceId),
     ).rejects.toThrow(/404/);
   });
 });

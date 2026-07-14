@@ -287,21 +287,21 @@ func TestHandleGet_UnknownSlugColdChannelNoUpstreamHop(t *testing.T) {
 	}
 }
 
-// TestHandleGet_MintTunnelDisabled fences the 403/tunnel_disabled
+// TestHandleGet_MintConnectorDisabled fences the 403/connector_disabled
 // mint error → user-facing "Protected resources are not yet enabled"
 // reply.
-func TestHandleGet_MintTunnelDisabled(t *testing.T) {
+func TestHandleGet_MintConnectorDisabled(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
-		writeAPIError(t, w, http.StatusForbidden, "tunnel_disabled", "Forbidden")
+		writeAPIError(t, w, http.StatusForbidden, "connector_disabled", "Forbidden")
 	})
 	h := newAdminTestHandler(t, ts)
 	inv := newAdminSlashInvoker(t, h)
 
 	_, _, async := inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
 	if !strings.Contains(async, "Protected resources are not yet enabled") {
-		t.Errorf("async reply missing tunnel-disabled message: %q", async)
+		t.Errorf("async reply missing Connector-disabled message: %q", async)
 	}
 }
 
@@ -1255,11 +1255,11 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			wantAudit: true,
 		},
 		{
-			name: "expected tunnel_disabled 403 stays quiet",
+			name: "connector_disabled 403 returns friendly message without logs",
 			apiErr: &client.APIError{
 				StatusCode: http.StatusForbidden,
-				Code:       "tunnel_disabled",
-				RequestID:  "req_tunnel_disabled",
+				Code:       "connector_disabled",
+				RequestID:  "req_connector_disabled",
 			},
 			wantAudit: false,
 		},
@@ -1328,6 +1328,15 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			} else if audit != nil {
 				t.Fatalf("unexpected dependency auth audit: %#v; logs=%s", audit, logs.String())
 			}
+			if tc.apiErr.Code == "connector_disabled" {
+				if logs.Len() != 0 {
+					t.Fatalf("connector_disabled 403 must not emit logs: %s", logs.String())
+				}
+				var ue *userError
+				if !errors.As(gotErr, &ue) || ue.msg != connectorDisabledMessage {
+					t.Fatalf("connector_disabled 403 msg = %#v (%T), want Connector-disabled copy", gotErr, gotErr)
+				}
+			}
 			if isExpectedGetMintForbiddenCode(tc.apiErr.Code) {
 				if strings.Contains(logs.String(), `"level":"ERROR"`) {
 					t.Fatalf("expected quota-class 403 must not log at ERROR: %s", logs.String())
@@ -1339,6 +1348,39 @@ func TestMapMintErrorDependencyAuthAudit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMapMintError_RetiredTunnelDisabledFailsLoud fences the deliberate
+// greenfield break: the retired public code is not accepted as an alias for
+// connector_disabled.
+func TestMapMintError_RetiredTunnelDisabledFailsLoud(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	gotErr := mapMintError(log, &client.APIError{
+		StatusCode: http.StatusForbidden,
+		Code:       "tunnel_disabled",
+		RequestID:  "req_retired_tunnel_disabled",
+	})
+
+	var userErr *userError
+	if !errors.As(gotErr, &userErr) || userErr.msg != commonGetMintFailedMessage {
+		t.Fatalf("retired tunnel_disabled error = %#v (%T), want generic mint failure", gotErr, gotErr)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("unmarshal log line %q: %v", line, err)
+		}
+		if record.Level == slog.LevelError.String() && record.Msg == "get: mint rejected with 403 — unmapped error code" {
+			return
+		}
+	}
+	t.Fatalf("retired tunnel_disabled did not emit the unmapped-403 ERROR log: %s", logs.String())
 }
 
 // TestCreateInputJSON_OneTimeDefault fences that one-time use is the

@@ -6,7 +6,9 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "jest"
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:e2e": "jest --config jest.config.ts",
+    "test:unit": "jest --config jest.unit.config.ts"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
