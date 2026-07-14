@@ -8,11 +8,9 @@
 //     (separate describe — uses jest.isolateModules to load the router
 //     with the env temporarily wiped).
 
-// Auth0 + state-secret env vars must be set BEFORE requiring the modules
-// that read them at load time. SAME OAUTH_STATE_SECRET as
-// qurl-oauth-state.test.js so cross-test ordering doesn't matter (per
-// PR #177 review on env-var leakage).
-process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
+// Auth0 env vars must be set BEFORE requiring the modules that read
+// them at load time. OAUTH_STATE_SECRET is pinned globally in
+// tests/setup-env.js (per PR #177 review on env-var leakage).
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';

@@ -1041,6 +1041,25 @@ func TestCreateSessionDurationOnWire(t *testing.T) {
 	}
 }
 
+func TestCreateForPublicResourceID(t *testing.T) {
+	const publicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": publicResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{ResourceID: publicResourceID}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wantPath := "/v1/resources/" + publicResourceID + "/qurls"
+	if gotPath != wantPath {
+		t.Fatalf("request path = %q, want %q", gotPath, wantPath)
+	}
+}
+
 // TestCreateSessionDurationOmittedWhenEmpty pins the omitempty contract so a
 // zero SessionDuration inherits the server/plan default rather than forcing 0.
 func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
@@ -1584,8 +1603,8 @@ func TestDeleteResourceEscapesIDPathSegment(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	// A resolved resource_id is always `r_…`, but defend the path segment the
-	// same way RevokeAPIKey/UpdateResource do: a stray slash must not escape
+	// Defend the opaque path segment the same way RevokeAPIKey/UpdateResource do:
+	// a stray slash must not escape
 	// the /v1/resources/ collection.
 	if err := c.DeleteResource(context.Background(), "r_a/b"); err != nil {
 		t.Fatalf("DeleteResource: %v", err)
@@ -2177,8 +2196,7 @@ func TestUpdateResourceNilInputRejected(t *testing.T) {
 
 // TestUpdateResourceEscapesIDPathSegment pins the path-escape contract
 // for UpdateResource's resource-id path segment.
-// Server-side resource_id format is `^r_[a-z0-9_-]{11}$` so reserved
-// bytes won't reach this method via normal flows; the test is
+// Current server-generated IDs contain no reserved bytes; the test remains
 // defensive for direct programmatic callers and keeps a future
 // `url.PathEscape` removal from tripping silently.
 func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {

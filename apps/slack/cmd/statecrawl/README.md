@@ -122,5 +122,10 @@ Finding kinds:
 | `orphan-allowed-id`   | `allowed_resource_ids` member that is revoked/deleted (#654)      | **yes**              |
 | `alias-name-mismatch` | live tunnel reachable by an alias whose name ≠ slug (#669)        | no                   |
 | `alias-url-target`    | `$alias` bound to a live URL resource (not display-name-able)     | no                   |
-| `legacy-alias`        | `$alias` whose value is a non-`r_` legacy raw-URL binding         | no                   |
+| `legacy-alias`        | `$alias` whose value is a legacy raw-URL binding                  | no                   |
+| `legacy-resource-id`  | pre-public-ID `r_` reference that requires migration              | no                   |
 | `indeterminate`       | team's liveness couldn't be verified (no key / list failed)       | no                   |
+
+`legacy-resource-id` findings are migration blockers, not orphan evidence.
+Even in apply mode the crawler leaves them untouched so a qURL API identifier
+cutover can never turn into an accidental policy purge.

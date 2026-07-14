@@ -22,12 +22,14 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
+const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 
 describe('bootRequired', () => {
   it('OpenNHP-active mode demands DISCORD_TOKEN + GITHUB_* (but not GUILD_ID or BASE_URL — those are enforced upstream)', () => {
@@ -684,4 +686,125 @@ describe('invalidHotStandbyValues', () => {
     expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: '' }))).toEqual([]);
     expect(invalidHotStandbyValues(cfg({ INSTANCE_ID: '' }))).toEqual([]);
   });
+});
+
+describe('invalidStateSecretValues', () => {
+  // The caller in index.js sits inside the NODE_ENV=production block —
+  // these tests pin the predicate itself: presence is OpenNHP-gated
+  // (only mode that mounts the GitHub OAuth surface), shape applies to
+  // any SET secret in every mode (the qURL OAuth flow mounts outside
+  // OpenNHP too, so a short secret would deferred-500 /qurl setup in a
+  // multi-tenant deploy). Unset keys are never shape-checked — they
+  // simply fall out of the signer's resolution (the separation-of-
+  // concerns mirroring invalidHotStandbyValues) — pinned implicitly by
+  // every []-returning case below.
+
+  it('returns [] when OpenNHP is inactive and no state secret is set', () => {
+    expect(invalidStateSecretValues({ isOpenNHPActive: false })).toEqual([]);
+  });
+
+  it('flags a missing OAUTH_STATE_SECRET only when OpenNHP is active', () => {
+    const problems = invalidStateSecretValues({ isOpenNHPActive: true });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/OAUTH_STATE_SECRET must be set/);
+    expect(problems[0]).toMatch(/openssl rand -hex 32/);
+  });
+
+  it('flags a configured qURL OAuth flow with NO available signer key (would deferred-500 the first /qurl setup)', () => {
+    const problems = invalidStateSecretValues({ isOpenNHPActive: false, isQurlOAuthConfigured: true });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/qURL OAuth is configured .* but no state-signing secret/);
+    expect(problems[0]).toMatch(/QURL_OAUTH_STATE_SECRET \(preferred\) or OAUTH_STATE_SECRET/);
+  });
+
+  it('accepts a configured qURL OAuth flow when any chain key exists — including the GITHUB_CLIENT_SECRET fallback tier', () => {
+    // Unlike the OpenNHP presence rule, the documented backward-compat
+    // fallback satisfies the qURL flow.
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      GITHUB_CLIENT_SECRET: 'g'.repeat(40),
+    })).toEqual([]);
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
+    })).toEqual([]);
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      OAUTH_STATE_SECRET: '0'.repeat(64),
+    })).toEqual([]);
+  });
+
+  it('flags a short GITHUB_CLIENT_SECRET only when it is the winning key for a configured qURL flow', () => {
+    // Winning key + configured flow → the first /qurl setup is
+    // guaranteed to 500, so boot rejection has zero false positives.
+    const problems = invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      GITHUB_CLIENT_SECRET: 'shrt',
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/GITHUB_CLIENT_SECRET is its only available state-signing key/);
+    expect(problems[0]).toMatch(/shorter than \d+ chars \(got 4\)/);
+
+    // Not the winning key (a valid dedicated key outranks it) → no problem.
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: true,
+      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
+      GITHUB_CLIENT_SECRET: 'shrt',
+    })).toEqual([]);
+
+    // Flow not configured → provider-issued value is not this gate's
+    // business, however short.
+    expect(invalidStateSecretValues({
+      isQurlOAuthConfigured: false,
+      GITHUB_CLIENT_SECRET: 'shrt',
+    })).toEqual([]);
+  });
+
+  it('does not demand a signer key when qURL OAuth is unconfigured (signer call sites all gate on isQurlOAuthConfigured)', () => {
+    expect(invalidStateSecretValues({ isQurlOAuthConfigured: false })).toEqual([]);
+  });
+
+  it('flags a set-but-short OAUTH_STATE_SECRET in every mode (a short secret must fail at boot, not at first use)', () => {
+    const oneShort = 'x'.repeat(MIN_STATE_SECRET_LENGTH - 1);
+    for (const isOpenNHPActive of [true, false]) {
+      const problems = invalidStateSecretValues({ isOpenNHPActive, OAUTH_STATE_SECRET: oneShort });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(new RegExp(`OAUTH_STATE_SECRET is shorter than ${MIN_STATE_SECRET_LENGTH} chars \\(got ${oneShort.length}\\)`));
+    }
+  });
+
+  it('flags a set-but-short QURL_OAUTH_STATE_SECRET in every mode (the qURL flow must not deferred-500)', () => {
+    for (const isOpenNHPActive of [true, false]) {
+      const problems = invalidStateSecretValues({
+        isOpenNHPActive,
+        OAUTH_STATE_SECRET: '0'.repeat(64),
+        QURL_OAUTH_STATE_SECRET: 'shrt',
+      });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/QURL_OAUTH_STATE_SECRET is shorter than/);
+    }
+  });
+
+  it('reports every problem on a single call (one-shot operator remediation)', () => {
+    const problems = invalidStateSecretValues({
+      isOpenNHPActive: false,
+      OAUTH_STATE_SECRET: 'shrt',
+      QURL_OAUTH_STATE_SECRET: 'also-shrt',
+    });
+    expect(problems).toHaveLength(2);
+  });
+
+  it('accepts secrets at and above the floor', () => {
+    expect(invalidStateSecretValues({
+      isOpenNHPActive: true,
+      OAUTH_STATE_SECRET: 'x'.repeat(MIN_STATE_SECRET_LENGTH),
+    })).toEqual([]);
+    // openssl rand -hex 32 → 64 chars, the documented generator.
+    expect(invalidStateSecretValues({
+      isOpenNHPActive: true,
+      OAUTH_STATE_SECRET: '0'.repeat(64),
+      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
+    })).toEqual([]);
+  });
+
 });

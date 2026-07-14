@@ -437,6 +437,21 @@ func isHTTPSURL(s string) bool {
 	return u.Scheme == resourceExposeSchemeHTTPS && u.Host != ""
 }
 
+// isLegacyDirectURLBinding identifies the pre-resource channel-alias shape,
+// where alias_bindings stored an absolute URL instead of an opaque qURL
+// resource identifier. Resource IDs are intentionally NOT validated here:
+// qurl-service owns their format and may change it (the public-key REST-ID
+// cutover replaced the former r_ prefix). Slack only needs to keep historical
+// direct URLs out of resource-scoped API paths; every non-URL value is
+// round-tripped opaquely and validated by qurl-service.
+func isLegacyDirectURLBinding(s string) bool {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == resourceExposeSchemeHTTPS
+}
+
 // getWork runs the inner resolve→rate-limit→mint pipeline for the token form
 // (`/qurl get $id` or `/qurl get $alias`). Raw URLs and `$r_<id>` resource IDs
 // are rejected at parse time. Returns a [getResult] (the Enter Portal link
@@ -609,16 +624,10 @@ func (h *Handler) resolveTokenForGet(ctx context.Context, log *slog.Logger, team
 		// stored raw URLs verbatim in alias_bindings, and those rows can
 		// survive. Resolving one would hand a URL to the resource-scoped mint
 		// call and surface as the generic retry error, stranding the user.
-		// Gate on the `r_` prefix (not
-		// an exact id-shape check — a stored id is whatever qurl-service
-		// issued, length not guaranteed to match the 11-char get-token
-		// shape): a `r_<id>` is a real resource and still mints, only a
-		// non-`r_` value (a raw URL) is refused with a re-bind hint.
-		// Residual: a junk `r_<typo>` row (the old parser rejected only
-		// the bare `r_` sigil) passes this prefix check and 404s at mint
-		// → the generic retry copy. Accepted as rare — an admin re-bind
-		// is the same fix as for a raw URL row.
-		if !strings.HasPrefix(resourceID, "r_") {
+		// Reject the historical URL SHAPE rather than requiring an ID prefix:
+		// qurl-service resource IDs are opaque and the public-key cutover
+		// intentionally replaced the former internal `r_` REST identifier.
+		if isLegacyDirectURLBinding(resourceID) {
 			log.Warn("get: channel alias bound to a non-resource-id target — refusing to mint", "team_id", teamID, "channel_id", channelID, "token", token)
 			return "", &userError{msg: legacyAliasBindingMessage(token)}
 		}

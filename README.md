@@ -85,8 +85,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, PR requirements
 This repo uses [Release Please](https://github.com/googleapis/release-please) in monorepo mode.
 Each app has an independent version track:
 
-- Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack/v0.2.0`
-- Changes to `shared/` bump all apps
+- Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack-v0.2.0`
+- The CLI is the one component tagged **without** its prefix (`v0.2.0`, not `cli-v0.2.0`) so OSS
+  GoReleaser can parse the tag — see the header of
+  [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml) before "normalizing" it
+- Only commits touching an app's directory trigger its release; `shared/` changes ship with each
+  app's next release
 - Each app has its own `CHANGELOG.md`
 
 ## CI

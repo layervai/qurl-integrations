@@ -4,6 +4,8 @@
 // the highest-risk branch in the module: a regression here could either
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
+const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
+
 // Required at boot in EVERY environment. Gated on `isOpenNHPActive`,
 // NOT `isMultiTenant`: the GITHUB_* vars only matter when /auth +
 // /webhook routes are actually mounted. A single-guild-plain deployment
@@ -341,6 +343,107 @@ function invalidHotStandbyValues(cfg) {
   return problems;
 }
 
+// State-signing secret checks for the shared OAuth state signer
+// (utils/oauth-state.js). Two rules, both production-only (the caller
+// in index.js sits inside the NODE_ENV=production block, keeping dev
+// localhost workflows convenient):
+//
+//   Presence, GitHub flow — OAUTH_STATE_SECRET is required when OpenNHP
+//   mode is active (the only mode that mounts the GitHub OAuth /auth
+//   surface). Falling back to GITHUB_CLIENT_SECRET is deliberately NOT
+//   accepted in production: coupling the two secrets means rotating
+//   GitHub's client secret would invalidate all in-flight OAuth states
+//   and vice versa.
+//
+//   Presence, qURL flow — when qURL OAuth is configured (AUTH0_* set;
+//   every sign/verify call site gates on isQurlOAuthConfigured), SOME
+//   key in the signer's resolution chain must exist. Unlike the GitHub
+//   rule, the GITHUB_CLIENT_SECRET fallback satisfies this one: it's
+//   the documented backward-compat tier for the qURL chain, not a
+//   coupling accident. Without the rule, a multi-tenant deploy with
+//   Auth0 configured and no secrets would boot and 500 on the first
+//   /qurl setup.
+//
+//   Shape — ANY set state secret must clear the signer's length floor,
+//   in EVERY mode. The qURL OAuth flow (which resolves
+//   QURL_OAUTH_STATE_SECRET, then OAUTH_STATE_SECRET) mounts outside
+//   OpenNHP mode too, so gating the floor on isOpenNHPActive would
+//   leave a short secret to deferred-500 the first /qurl setup in a
+//   multi-tenant deploy — exactly the late failure this check exists
+//   to move to boot. The signer re-enforces the same floor lazily at
+//   sign/verify time; this is the loud-at-deploy copy. Note this rule
+//   is deliberately fail-loud-on-any-set-value: unlike the winning-key
+//   rule below (whose rejections are all guaranteed first-use 500s), a
+//   short dedicated secret fails boot even in a mode where no OAuth
+//   surface would resolve it — set-but-wrong is a misconfig in its own
+//   right, and mode flips shouldn't unearth latent bad values.
+//
+//   GITHUB_CLIENT_SECRET is NOT shape-checked unconditionally: it is a
+//   provider-issued value (GitHub mints 40 chars) rather than an
+//   operator-minted one, and a short value means GitHub OAuth token
+//   exchange itself is misconfigured — a bigger problem than state
+//   signing, and one this gate shouldn't turn into a boot failure for
+//   deploy modes that never exercise it. The ONE case where it is
+//   checked: when the qURL flow is configured and it is the winning
+//   (only) key in the signer's chain — there, a sub-32 value is
+//   guaranteed to make the first /qurl setup 500, so rejecting the
+//   boot has zero false positives.
+//
+//   The winning-key condition mirrors the signer's resolution order
+//   (utils/oauth-state.js: dedicated keys, then GITHUB_CLIENT_SECRET)
+//   rather than consulting it — if a flow's secretConfigKeys ordering
+//   ever changes, update this block in lockstep. Single-sourcing the
+//   precedence through a signer-exposed resolver is tracked in #952.
+//
+// Presence-vs-shape separation mirrors missingHotStandbyKeys /
+// invalidHotStandbyValues: a key that is unset simply doesn't
+// participate in resolution (the signer falls through), so only set
+// values are shape-checked, and each problem gets its own message.
+//
+// Every invalidStateSecretValues message ends with the same remediation
+// clause — one constant so the four sites can't drift on the
+// recommended generator.
+const STATE_SECRET_REMEDIATION = 'Generate with: openssl rand -hex 32';
+
+// Returns an array of operator-facing message strings, [] on success
+// (same shape as invalidHotStandbyValues above).
+function invalidStateSecretValues(cfg) {
+  const problems = [];
+  if (cfg.isOpenNHPActive && !cfg.OAUTH_STATE_SECRET) {
+    problems.push(
+      'OAUTH_STATE_SECRET must be set in production (OpenNHP mode mounts the GitHub OAuth surface). ' +
+      STATE_SECRET_REMEDIATION
+    );
+  }
+  if (cfg.isQurlOAuthConfigured
+      && !cfg.QURL_OAUTH_STATE_SECRET && !cfg.OAUTH_STATE_SECRET) {
+    if (!cfg.GITHUB_CLIENT_SECRET) {
+      problems.push(
+        'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
+        `set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
+      );
+    } else if (cfg.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
+      // Winning-key check — see the GITHUB_CLIENT_SECRET note above.
+      problems.push(
+        'qURL OAuth is configured (AUTH0_* set) and GITHUB_CLIENT_SECRET is its only available ' +
+        `state-signing key, but it is shorter than ${MIN_STATE_SECRET_LENGTH} chars ` +
+        `(got ${cfg.GITHUB_CLIENT_SECRET.length}); the state signer will refuse to mint with it. ` +
+        `Set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
+      );
+    }
+  }
+  for (const key of ['OAUTH_STATE_SECRET', 'QURL_OAUTH_STATE_SECRET']) {
+    const value = cfg[key];
+    if (value && value.length < MIN_STATE_SECRET_LENGTH) {
+      problems.push(
+        `${key} is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${value.length}); ` +
+        `the state signer will refuse to mint with it. ${STATE_SECRET_REMEDIATION}`
+      );
+    }
+  }
+  return problems;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -443,6 +546,7 @@ module.exports = {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

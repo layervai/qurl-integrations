@@ -9,12 +9,10 @@
 //   4. cross-purpose — a state minted for a different `kind` rejects
 //      (defense-in-depth against replaying a GitHub-OAuth state here)
 
-// Stable shared secret across the qurl-oauth-state and qurl-oauth route
-// suites. Both files set the SAME value so a Jest worker that loads the
-// state module from one test and uses it from the other doesn't see a
-// signature mismatch from the per-process cached fallback in the module
-// (cross-test leakage flagged in PR #177 review).
-process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
+// OAUTH_STATE_SECRET is pinned to '0'.repeat(64) globally in
+// tests/setup-env.js (cross-suite convention from PR #177 review on
+// env-var leakage); this suite reads process.env.OAUTH_STATE_SECRET
+// below when hand-signing forged states.
 
 const crypto = require('crypto');
 const { signQurlOAuthState, verifyQurlOAuthState, STATE_TTL_SECONDS } = require('../src/utils/qurl-oauth-state');
