@@ -2295,6 +2295,8 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
+	// Bare literal: a write-start liveness bound, unrelated to the audit ctx the
+	// slot-claim timeout below derives from.
 	select {
 	case <-ddb.started:
 	case <-time.After(2 * time.Second):
