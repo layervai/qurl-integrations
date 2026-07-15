@@ -321,6 +321,11 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	msgs := make([]Message, 0, len(history)+1)
 	msgs = append(msgs, history...)
 	msgs = append(msgs, Message{Role: roleUser, Text: userText})
+	// Eager prefetch hides one model round-trip for explicit site-summary asks:
+	// when the user's wording clearly requests "what is on $token", fetch the
+	// inspect_token grounding before the first LLM call. The synthetic
+	// tool_use/tool_result are stripped from persisted history, and inspectMemo
+	// dedupes any later model-issued inspect_token call in the same turn.
 	if token, ok := inspectIntentToken(userText); ok {
 		call := syntheticInspectToolCall(token)
 		msgs = append(msgs, Message{Role: roleAssistant, ToolCalls: []ToolCall{call}})
@@ -457,13 +462,13 @@ func containsAny(s string, needles ...string) bool {
 func stripSyntheticPrefetchMessages(msgs []Message) []Message {
 	out := make([]Message, 0, len(msgs))
 	for i := 0; i < len(msgs); i++ {
-		if isSyntheticPrefetchAssistant(msgs[i]) {
-			if i+1 < len(msgs) && isSyntheticPrefetchResult(msgs[i+1]) {
+		if isSyntheticPrefetchAssistant(&msgs[i]) {
+			if i+1 < len(msgs) && isSyntheticPrefetchResult(&msgs[i+1]) {
 				i++
 			}
 			continue
 		}
-		if isSyntheticPrefetchResult(msgs[i]) {
+		if isSyntheticPrefetchResult(&msgs[i]) {
 			continue
 		}
 		out = append(out, msgs[i])
@@ -471,14 +476,14 @@ func stripSyntheticPrefetchMessages(msgs []Message) []Message {
 	return out
 }
 
-func isSyntheticPrefetchAssistant(m Message) bool {
+func isSyntheticPrefetchAssistant(m *Message) bool {
 	return m.Role == roleAssistant &&
 		m.Text == "" &&
 		len(m.ToolCalls) == 1 &&
 		m.ToolCalls[0].ID == syntheticInspectToolID
 }
 
-func isSyntheticPrefetchResult(m Message) bool {
+func isSyntheticPrefetchResult(m *Message) bool {
 	return m.Role == roleUser &&
 		m.Text == "" &&
 		len(m.ToolResults) == 1 &&

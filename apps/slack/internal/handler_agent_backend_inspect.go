@@ -23,18 +23,20 @@ const (
 	agentInspectFetchTimeout    = 15 * time.Second
 	agentInspectBodyMaxBytes    = 128 << 10
 	agentInspectSessionDuration = "1m"
+	agentInspectTitleMaxRunes   = 120
+	agentInspectMetaMaxRunes    = 240
 	agentInspectHeadingMaxCount = 6
 	agentInspectHeadingMaxRunes = 80
 )
 
 var (
-	agentInspectTitlePattern       = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-	agentInspectHeadingPattern     = regexp.MustCompile(`(?is)<h[1-3][^>]*>(.*?)</h[1-3]>`)
-	agentInspectMetaTagPattern     = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
-	agentInspectAttrPattern        = regexp.MustCompile(`(?is)([a-z_:][-a-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>` + "`" + `]+))`)
-	agentInspectScriptStylePattern = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<noscript[^>]*>.*?</noscript>|<svg[^>]*>.*?</svg>`)
-	agentInspectTagPattern         = regexp.MustCompile(`(?is)<[^>]+>`)
-	agentInspectSpacePattern       = regexp.MustCompile(`\s+`)
+	agentInspectTitlePattern   = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	agentInspectHeadingPattern = regexp.MustCompile(`(?is)<h[123][^>]*>(.*?)</h[123]>`)
+	agentInspectMetaTagPattern = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+	agentInspectAttrPattern    = regexp.MustCompile(`(?is)([a-z_:][-a-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>` + "`" + `]+))`)
+	agentInspectNoisePattern   = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<noscript[^>]*>.*?</noscript>|<svg[^>]*>.*?</svg>`)
+	agentInspectTagPattern     = regexp.MustCompile(`(?is)<[^>]+>`)
+	agentInspectSpacePattern   = regexp.MustCompile(`\s+`)
 )
 
 type inspectedResource struct {
@@ -57,7 +59,7 @@ type protectedInspectableContentError struct {
 }
 
 func (e *protectedInspectableContentError) Error() string {
-	parts := []string{"qurl fetch returned protected document or downloadable content"}
+	parts := []string{"qURL fetch returned protected document or downloadable content"}
 	if e.ContentType != "" {
 		parts = append(parts, "content_type="+e.ContentType)
 	}
@@ -110,7 +112,7 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 		OneTimeUse:      true,
 		MaxSessions:     resourceMaxSessions,
 		SessionDuration: agentInspectSessionDuration,
-		Reason:          fmt.Sprintf("Slack agent summary lookup for $%s", token),
+		Reason:          "Slack agent summary lookup for $" + token,
 	})
 	if err != nil {
 		b.log.Error("agent inspect mint failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
@@ -129,7 +131,7 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	return formatInspectedSnapshot(token, resolved, snapshot), nil
 }
 
-func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (*inspectedResource, string) {
+func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (resolved *inspectedResource, userMsg string) {
 	byID := make(map[string]*client.Resource, len(resources))
 	for i := range resources {
 		byID[resources[i].ResourceID] = &resources[i]
@@ -169,23 +171,23 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlSite string) (*inspectedSnapshot, error) {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return nil, fmt.Errorf("parse qurl link: %w", err)
+		return nil, fmt.Errorf("parse qURL link: %w", err)
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported qurl link scheme %q", parsed.Scheme)
+	if !isInspectableFetchScheme(parsed.Scheme) {
+		return nil, fmt.Errorf("unsupported qURL link scheme %q", parsed.Scheme)
 	}
 	if parsed.Host == "" {
-		return nil, fmt.Errorf("qurl link missing host")
+		return nil, errors.New("qURL link missing host")
 	}
 	parsedSite, err := url.Parse(strings.TrimSpace(qurlSite))
 	if err != nil {
-		return nil, fmt.Errorf("parse qurl site: %w", err)
+		return nil, fmt.Errorf("parse qURL site: %w", err)
 	}
-	if parsedSite.Scheme != "http" && parsedSite.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported qurl site scheme %q", parsedSite.Scheme)
+	if !isInspectableFetchScheme(parsedSite.Scheme) {
+		return nil, fmt.Errorf("unsupported qURL site scheme %q", parsedSite.Scheme)
 	}
 	if parsedSite.Host == "" {
-		return nil, fmt.Errorf("qurl site missing host")
+		return nil, errors.New("qURL site missing host")
 	}
 	if err := inspectAllowedEntryHost(parsed, parsedSite, b.allowInspectableLoopbackHosts); err != nil {
 		return nil, err
@@ -196,23 +198,25 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 
 	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, parsed.String(), http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("build qurl fetch request: %w", err)
+		return nil, fmt.Errorf("build qURL fetch request: %w", err)
 	}
 	req.Header.Set("User-Agent", "qurl-slack-agent/inspect")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1")
 
 	resp, err := b.inspectedFetchClient(allowedHosts).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch qurl link: %w", err)
+		return nil, fmt.Errorf("fetch qURL link: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, agentInspectBodyMaxBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read qurl response: %w", err)
+		return nil, fmt.Errorf("read qURL response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("unexpected qurl fetch status %s", resp.Status)
+		return nil, fmt.Errorf("unexpected qURL fetch status %s", resp.Status)
 	}
 
 	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
@@ -224,10 +228,10 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 		}
 	}
 	if !inspectableContentType(contentType, string(body)) {
-		return nil, fmt.Errorf("qurl fetch returned unsupported content type %q", contentType)
+		return nil, fmt.Errorf("qURL fetch returned unsupported content type %q", contentType)
 	}
 	if looksLikeInteractiveAuthPage(contentType, string(body)) {
-		return nil, fmt.Errorf("qurl fetch landed on an interactive authentication page")
+		return nil, errors.New("qURL fetch landed on an interactive authentication page")
 	}
 	title, metaDesc, headings := extractInspectedContent(contentType, string(body))
 	return &inspectedSnapshot{
@@ -254,11 +258,11 @@ func (b *agentBackend) inspectedFetchClient(allowedHosts map[string]struct{}) *h
 func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) error {
 	linkHost := strings.ToLower(strings.TrimSpace(qurlLink.Hostname()))
 	if linkHost == "" {
-		return fmt.Errorf("qurl link missing host name")
+		return errors.New("qURL link missing host name")
 	}
 	siteHost := strings.ToLower(strings.TrimSpace(qurlSite.Hostname()))
 	if siteHost == "" {
-		return fmt.Errorf("qurl site missing host name")
+		return errors.New("qURL site missing host name")
 	}
 	if allowLoopback && isLoopbackHostname(linkHost) && isLoopbackHostname(siteHost) {
 		return nil
@@ -267,9 +271,9 @@ func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) er
 		if isInspectableQURLSiteHost(siteHost) {
 			return nil
 		}
-		return fmt.Errorf("inspect qurl site host %q is outside the expected qURL hosts", qurlSite.Host)
+		return fmt.Errorf("inspect qURL site host %q is outside the expected qURL hosts", qurlSite.Host)
 	}
-	return fmt.Errorf("inspect qurl link host %q is outside the expected qURL entry hosts", qurlLink.Host)
+	return fmt.Errorf("inspect qURL link host %q is outside the expected qURL entry hosts", qurlLink.Host)
 }
 
 func inspectAllowedRedirectHosts(qurlLink, qurlSite *url.URL) map[string]struct{} {
@@ -285,6 +289,10 @@ func inspectAllowedRedirectHosts(qurlLink, qurlSite *url.URL) map[string]struct{
 
 func isInspectableQURLLinkHost(hostname string) bool {
 	return hostname == "qurl.link"
+}
+
+func isInspectableFetchScheme(scheme string) bool {
+	return scheme == resourceExposeSchemeHTTP || scheme == resourceExposeSchemeHTTPS
 }
 
 func isInspectableQURLSiteHost(hostname string) bool {
@@ -333,9 +341,9 @@ func inspectRedirectPolicy(allowedHosts map[string]struct{}) func(*http.Request,
 			return nil
 		}
 		if req.URL == nil {
-			return fmt.Errorf("inspect redirect missing target url")
+			return errors.New("inspect redirect missing target url")
 		}
-		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		if !isInspectableFetchScheme(req.URL.Scheme) {
 			return fmt.Errorf("inspect redirect has unsupported scheme %q", req.URL.Scheme)
 		}
 		host := strings.ToLower(req.URL.Host)
@@ -353,11 +361,16 @@ func inspectRedirectPolicy(allowedHosts map[string]struct{}) func(*http.Request,
 func extractInspectedContent(contentType, raw string) (title, metaDesc string, headings []string) {
 	trimmed := strings.TrimSpace(raw)
 	if looksLikeHTML(contentType, trimmed) {
-		title = normalizeInspectedText(extractHTMLCapture(agentInspectTitlePattern, trimmed))
-		metaDesc = normalizeInspectedText(extractMetaDescription(trimmed))
-		headings = extractHeadings(trimmed)
+		sanitized := stripInspectableHTMLNoise(trimmed)
+		title = truncateRunes(normalizeInspectedText(extractHTMLCapture(agentInspectTitlePattern, sanitized)), agentInspectTitleMaxRunes)
+		metaDesc = truncateRunes(normalizeInspectedText(extractMetaDescription(sanitized)), agentInspectMetaMaxRunes)
+		headings = extractHeadings(sanitized)
 	}
 	return title, metaDesc, headings
+}
+
+func stripInspectableHTMLNoise(raw string) string {
+	return agentInspectNoisePattern.ReplaceAllString(raw, " ")
 }
 
 func looksLikeHTML(contentType, raw string) bool {
@@ -527,18 +540,12 @@ func writeResolvedInspectableResourceLines(b *strings.Builder, resolved *inspect
 	b.WriteString(resolved.Via)
 	b.WriteString(" in this channel.\n")
 	if resolved.Resource != nil {
-		switch {
-		case resolved.Resource.Description != "":
+		if resolved.Resource.Description != "" {
 			b.WriteString("- Resource description: ")
 			b.WriteString(resolved.Resource.Description)
 			b.WriteString("\n")
-		case resolved.Resource.Type != "":
-			b.WriteString("- Resource type: ")
-			b.WriteString(resolved.Resource.Type)
-			b.WriteString("\n")
 		}
-		if resolved.Resource.Description != "" && resolved.Resource.Type != "" {
-			// Keep the type visible when we already used description above.
+		if resolved.Resource.Type != "" {
 			b.WriteString("- Resource type: ")
 			b.WriteString(resolved.Resource.Type)
 			b.WriteString("\n")

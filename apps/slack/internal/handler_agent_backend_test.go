@@ -27,6 +27,7 @@ const (
 	testAgentCreatedURLResourceID = "r_agent_url"
 	testAgentGetResourceID        = "r_2"
 	testAgentGetQURLLink          = "https://qurl.link/agent-confirm-get"
+	testDashboardQURLsPath        = "/v1/resources/r_dashboard/qurls"
 )
 
 // qurlBackendServer is an httptest qURL API returning canned resources + quota.
@@ -342,7 +343,7 @@ func TestAgentBackend_InspectToken(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_dashboard/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: "r_dashboard",
 				"qurl_link":       page.URL,
@@ -377,6 +378,72 @@ func TestAgentBackend_InspectToken(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_InspectToken_StripsHTMLNoiseAndTruncatesSummaryFields(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	const injectedTitle = "Injected Script Title"
+	const injectedHeading = "Injected Script Heading"
+	realTitle := "Team Dashboard " + strings.Repeat("alpha ", 40)
+	realMeta := "Operational dashboards and release status. " + strings.Repeat("beta ", 60)
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><script>document.write("<title>` + injectedTitle + `</title><h1>` + injectedHeading + `</h1>")</script><title>` + realTitle + `</title><meta name="description" content="` + realMeta + `"></head><body><main><h1>Dashboard</h1></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	wantTitle := truncateRunes(normalizeInspectedText(realTitle), agentInspectTitleMaxRunes)
+	wantMeta := truncateRunes(normalizeInspectedText(realMeta), agentInspectMetaMaxRunes)
+	for _, want := range []string{wantTitle, wantMeta, "Dashboard"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inspect output missing %q: %q", want, out)
+		}
+	}
+	for _, unwanted := range []string{injectedTitle, injectedHeading, realTitle, realMeta} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("inspect output leaked unbounded or noisy HTML content %q: %q", unwanted, out)
+		}
+	}
+}
+
 func TestAgentBackend_InspectToken_RejectsAuthPage(t *testing.T) {
 	names := defaultTestTableNames()
 	row := map[string]ddbtypes.AttributeValue{
@@ -403,7 +470,7 @@ func TestAgentBackend_InspectToken_RejectsAuthPage(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_dashboard/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: "r_dashboard",
 				"qurl_link":       page.URL,
@@ -456,7 +523,7 @@ func TestAgentBackend_InspectToken_JSONReturnsGenericFallback(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_dashboard/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: "r_dashboard",
 				"qurl_link":       page.URL,
@@ -665,7 +732,7 @@ func TestAgentBackend_InspectToken_AllowsQURLLinkRedirectToQURLSite(t *testing.T
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_dashboard/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: "r_dashboard",
 				"qurl_link":       link.URL,
@@ -724,7 +791,7 @@ func TestAgentBackend_InspectToken_RejectsCrossHostRedirect(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_dashboard/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: "r_dashboard",
 				"qurl_link":       page.URL,
@@ -838,7 +905,7 @@ func TestAgentBackend_InspectToken_RejectsUnexpectedInitialLinkHost(t *testing.T
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_dashboard/qurls":
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
 			respondQURLEnvelope(t, w, map[string]any{
 				testKeyResourceID: "r_dashboard",
 				"qurl_link":       "https://evil.example/summary",
