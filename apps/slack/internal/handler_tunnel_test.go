@@ -302,6 +302,7 @@ func TestValidateTunnelConnectorContract(t *testing.T) {
 		{name: "missing api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "" }, wantErr: "QURL_API_URL is missing"},
 		{name: "relative api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "/v1" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "remote http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://api.example.test/v1" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "invalid api url takes precedence over incomplete identity", mutate: func(a *tunnelInstallArgs) { a.APIURL = "/v1"; a.ConnectorRoutingID = "" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "loopback http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://127.0.0.1:8080/v1" }},
 	}
 	for _, tc := range cases {
