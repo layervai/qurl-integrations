@@ -173,6 +173,11 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 		if isLegacyDirectURLBinding(entries[i].ResourceID) {
 			return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp)
 		}
+		// Resource may be nil if the binding's id isn't in the scanned channel set (a
+		// stale scan) — the mint still runs (the binding IS in THIS channel's policy, so
+		// scope holds) and Create fails server-side for a truly dead id; the formatters
+		// nil-guard, so a live-but-unscanned resource just yields a description-less card.
+		// This differs from resolveTokenForGet's live lookup; tracked for unification in #961.
 		return &inspectedResource{ResourceID: entries[i].ResourceID, Resource: byID[entries[i].ResourceID], Via: "channel alias"}, ""
 	}
 
@@ -229,6 +234,9 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 		return nil, err
 	}
 	allowedHosts := inspectAllowedRedirectHosts(parsed, parsedSite)
+	// Plaintext is only ever acceptable on the loopback test path; production redirects
+	// (like the entry) must stay https.
+	requireHTTPS := !b.allowInspectableLoopbackHosts
 	fetchCtx, cancel := context.WithTimeout(ctx, agentInspectFetchTimeout)
 	defer cancel()
 
@@ -239,7 +247,7 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 	req.Header.Set("User-Agent", "qurl-slack-agent/inspect")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1")
 
-	resp, err := b.inspectedFetchClient(allowedHosts).Do(req)
+	resp, err := b.inspectedFetchClient(allowedHosts, requireHTTPS).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch qURL link: %w", err)
 	}
@@ -280,16 +288,22 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 	}, nil
 }
 
-func (b *agentBackend) inspectedFetchClient(allowedHosts map[string]struct{}) *http.Client {
+// inspectedFetchClient builds the client for the inspect fetch. It intentionally has
+// NO cookie jar: qurl-service's qurl.link -> *.qurl.site resolution is an IP-knock (NHP)
+// grant of network access, not a Set-Cookie session, so a redirect carries nothing to
+// persist across hops.
+// TODO(upstream-contract): if the service ever makes that resolution cookie-dependent,
+// add a jar here — safe, since redirects are host-allowlisted to qurl hosts.
+func (b *agentBackend) inspectedFetchClient(allowedHosts map[string]struct{}, requireHTTPS bool) *http.Client {
 	if b.fetchClient != nil {
 		clone := *b.fetchClient
 		if clone.Timeout == 0 {
 			clone.Timeout = agentInspectFetchTimeout
 		}
-		clone.CheckRedirect = inspectRedirectPolicy(allowedHosts)
+		clone.CheckRedirect = inspectRedirectPolicy(allowedHosts, requireHTTPS)
 		return &clone
 	}
-	return &http.Client{Timeout: agentInspectFetchTimeout, CheckRedirect: inspectRedirectPolicy(allowedHosts)}
+	return &http.Client{Timeout: agentInspectFetchTimeout, CheckRedirect: inspectRedirectPolicy(allowedHosts, requireHTTPS)}
 }
 
 func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) error {
@@ -305,10 +319,15 @@ func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) er
 		return nil
 	}
 	if isInspectableQURLLinkHost(linkHost) {
-		if isInspectableQURLSiteHost(siteHost) {
-			return nil
+		if !isInspectableQURLSiteHost(siteHost) {
+			return fmt.Errorf("inspect qURL site host %q is outside the expected qURL hosts", qurlSite.Host)
 		}
-		return fmt.Errorf("inspect qURL site host %q is outside the expected qURL hosts", qurlSite.Host)
+		// The production entry MUST be https: never fetch a downgraded / MITM'd qurl.link
+		// over plaintext. (The http allowance is scoped to the loopback test branch above.)
+		if qurlLink.Scheme != resourceExposeSchemeHTTPS || qurlSite.Scheme != resourceExposeSchemeHTTPS {
+			return fmt.Errorf("inspect qURL entry must be https (link=%q site=%q)", qurlLink.Scheme, qurlSite.Scheme)
+		}
+		return nil
 	}
 	return fmt.Errorf("inspect qURL link host %q is outside the expected qURL entry hosts", qurlLink.Host)
 }
@@ -381,7 +400,7 @@ func isProtectedInspectableContentType(contentType string) bool {
 		strings.HasPrefix(lower, "application/vnd.oasis.opendocument.")
 }
 
-func inspectRedirectPolicy(allowedHosts map[string]struct{}) func(*http.Request, []*http.Request) error {
+func inspectRedirectPolicy(allowedHosts map[string]struct{}, requireHTTPS bool) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if len(via) == 0 {
 			return nil
@@ -391,6 +410,11 @@ func inspectRedirectPolicy(allowedHosts map[string]struct{}) func(*http.Request,
 		}
 		if !isInspectableFetchScheme(req.URL.Scheme) {
 			return fmt.Errorf("inspect redirect has unsupported scheme %q", req.URL.Scheme)
+		}
+		// Production redirects must stay https (matches the entry check); plaintext is
+		// allowed only on the loopback test path where requireHTTPS is false.
+		if requireHTTPS && req.URL.Scheme != resourceExposeSchemeHTTPS {
+			return fmt.Errorf("inspect redirect must be https, got %q", req.URL.Scheme)
 		}
 		host := strings.ToLower(req.URL.Host)
 		if _, ok := allowedHosts[host]; !ok {

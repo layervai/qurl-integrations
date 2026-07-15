@@ -630,6 +630,25 @@ func TestInspectAllowedEntryHost_RejectsLoopbackWithoutOverride(t *testing.T) {
 	}
 }
 
+func TestInspectAllowedEntryHost_RequiresHTTPSInProduction(t *testing.T) {
+	mustURL := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		return u
+	}
+	// https qurl.link -> *.qurl.site is the expected production entry.
+	if err := inspectAllowedEntryHost(mustURL("https://qurl.link/abc"), mustURL("https://tunnel.qurl.site/"), false); err != nil {
+		t.Fatalf("https qurl.link -> qurl.site entry must be allowed: %v", err)
+	}
+	// A downgraded/MITM'd plaintext qurl.link must be rejected in production (the http
+	// allowance is scoped to the loopback test override only).
+	if err := inspectAllowedEntryHost(mustURL("http://qurl.link/abc"), mustURL("http://tunnel.qurl.site/"), false); err == nil {
+		t.Fatal("plaintext http qurl.link entry must be rejected without the loopback override")
+	}
+}
+
 func TestAgentBackend_InspectToken_PDFReturnsProtectedResource(t *testing.T) {
 	names := defaultTestTableNames()
 	row := map[string]ddbtypes.AttributeValue{
