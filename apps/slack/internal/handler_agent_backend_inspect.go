@@ -19,9 +19,17 @@ import (
 )
 
 const (
-	agentInspectLinkLabel       = "Slack agent summary preview"
-	agentInspectFetchTimeout    = 15 * time.Second
-	agentInspectBodyMaxBytes    = 128 << 10
+	agentInspectLinkLabel = "Slack agent summary preview"
+	// agentInspectFetchTimeout bounds the outbound page fetch. It is intentionally
+	// well under the confirm click's asyncWorkTimeout (25s), since InspectToken also
+	// spends part of that budget on the pre-fetch channel reads + resource scan + mint
+	// before the fetch starts; a tighter cap keeps a slow page from starving that work
+	// (and the fetch ctx is still additionally bounded by the parent's deadline).
+	agentInspectFetchTimeout = 10 * time.Second
+	agentInspectBodyMaxBytes = 128 << 10
+	// agentInspectSessionDuration is the redeem window for the internal inspect qURL.
+	// It matches resourceLinkExpiry ("1m") by intent — both are "just long enough to
+	// redeem once" — but stays a distinct constant since the two can diverge.
 	agentInspectSessionDuration = "1m"
 	agentInspectTitleMaxRunes   = 120
 	agentInspectMetaMaxRunes    = 240
@@ -110,6 +118,9 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 		return msg, nil
 	}
 
+	// Each confirmed summary mints a real one-time qURL, so it counts toward the
+	// workspace's qURL usage/quota the same way a `/qurl get` does — a summary is not
+	// a free "read". The confirm gate keeps this human-paced rather than model-driven.
 	out, err := c.Create(ctx, client.CreateInput{
 		ResourceID:      resolved.ResourceID,
 		Label:           agentInspectLinkLabel,
@@ -176,26 +187,32 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 	}
 }
 
+// parseInspectableURL parses and validates one qURL endpoint the fetch touches (the
+// minted link, then its resolved site): a well-formed http(s) URL with a host. label
+// names the endpoint in errors ("qURL link" / "qURL site"). Shared so the two
+// endpoints can't drift in how they're validated.
+func parseInspectableURL(raw, label string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", label, err)
+	}
+	if !isInspectableFetchScheme(u.Scheme) {
+		return nil, fmt.Errorf("unsupported %s scheme %q", label, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%s missing host", label)
+	}
+	return u, nil
+}
+
 func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlSite string) (*inspectedSnapshot, error) {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	parsed, err := parseInspectableURL(rawURL, "qURL link")
 	if err != nil {
-		return nil, fmt.Errorf("parse qURL link: %w", err)
+		return nil, err
 	}
-	if !isInspectableFetchScheme(parsed.Scheme) {
-		return nil, fmt.Errorf("unsupported qURL link scheme %q", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return nil, errors.New("qURL link missing host")
-	}
-	parsedSite, err := url.Parse(strings.TrimSpace(qurlSite))
+	parsedSite, err := parseInspectableURL(qurlSite, "qURL site")
 	if err != nil {
-		return nil, fmt.Errorf("parse qURL site: %w", err)
-	}
-	if !isInspectableFetchScheme(parsedSite.Scheme) {
-		return nil, fmt.Errorf("unsupported qURL site scheme %q", parsedSite.Scheme)
-	}
-	if parsedSite.Host == "" {
-		return nil, errors.New("qURL site missing host")
+		return nil, err
 	}
 	if err := inspectAllowedEntryHost(parsed, parsedSite, b.allowInspectableLoopbackHosts); err != nil {
 		return nil, err
@@ -235,13 +252,16 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 			ContentDisposition: contentDisposition,
 		}
 	}
-	if !inspectableContentType(contentType, string(body)) {
+	// Convert the (≤128KiB) body once; the three scans below each escape it as a
+	// function arg, so a repeated string(body) would copy it three times.
+	bodyStr := string(body)
+	if !looksLikeHTML(contentType, bodyStr) {
 		return nil, fmt.Errorf("qURL fetch returned unsupported content type %q", contentType)
 	}
-	if looksLikeInteractiveAuthPage(contentType, string(body)) {
+	if looksLikeInteractiveAuthPage(contentType, bodyStr) {
 		return nil, errors.New("qURL fetch landed on an interactive authentication page")
 	}
-	title, metaDesc, headings := extractInspectedContent(contentType, string(body))
+	title, metaDesc, headings := extractInspectedContent(contentType, bodyStr)
 	return &inspectedSnapshot{
 		Title:           title,
 		MetaDescription: metaDesc,
@@ -387,12 +407,11 @@ func looksLikeHTML(contentType, raw string) bool {
 	return strings.Contains(lower, "<html") || strings.Contains(lower, "<body") || strings.Contains(lower, "<title") || strings.HasPrefix(lower, "<!doctype html")
 }
 
-func inspectableContentType(contentType, raw string) bool {
-	return looksLikeHTML(contentType, raw)
-}
-
 func isDownloadDisposition(contentDisposition string) bool {
 	lower := strings.ToLower(strings.TrimSpace(contentDisposition))
+	// HasPrefix catches the RFC-6266 form ("attachment; filename=…"); the Contains is a
+	// belt-and-suspenders guard for a malformed header where "attachment" isn't the
+	// first token (e.g. "form-data; attachment;") — still treat it as a download.
 	return strings.HasPrefix(lower, "attachment") || strings.Contains(lower, "attachment;")
 }
 

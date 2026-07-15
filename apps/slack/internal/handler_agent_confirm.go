@@ -1032,6 +1032,9 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// InspectToken escapes them for mrkdwn and returns a compact card body that is
 		// posted straight to the channel. It never enters the model's context, so there
 		// is no prompt-injection surface to defend on this path.
+		// Only TeamID/ChannelID are consulted here (InspectToken's channel scoping); the
+		// remaining fields are set for parity. CallerIsAdmin is deliberately left zero —
+		// inspect is not admin-gated, so no code on this path reads it.
 		tc := &agent.TurnContext{
 			TeamID:       payload.Team.ID,
 			EnterpriseID: payload.Enterprise.ID,
@@ -1044,9 +1047,12 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			// backend; the public card stays a neutral failure with no token echo.
 			return newAttributedActionResult(false, agentConfirmInspectFailedReply, "Website summary could not be generated.")
 		}
-		// summary is already user-facing and mrkdwn-escaped (soft outcomes — an
-		// unresolvable token or a protected download — arrive here too, as benign text).
-		return newAttributedActionResult(true, summary, "Website summary posted.")
+		// summary is already user-facing and mrkdwn-escaped. The audit line is
+		// outcome-NEUTRAL on purpose: the same non-error return covers a real summary,
+		// a protected-download report, and an "unresolvable token" note — the card
+		// carries the specific result, so the audit records only that a lookup ran
+		// (never a false "posted a summary" for the soft outcomes).
+		return newAttributedActionResult(true, summary, "Ran website summary lookup.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {

@@ -99,10 +99,6 @@ func (unusedAgentReadBackend) ResolveToken(context.Context, *agent.TurnContext, 
 	return "", nil
 }
 
-func (unusedAgentReadBackend) InspectToken(context.Context, *agent.TurnContext, string) (string, error) {
-	return "", nil
-}
-
 func (unusedAgentReadBackend) Quota(context.Context, *agent.TurnContext) (string, error) {
 	return "", nil
 }

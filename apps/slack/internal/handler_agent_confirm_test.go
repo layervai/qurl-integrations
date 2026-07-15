@@ -384,6 +384,12 @@ func TestConfirm_InspectExecutesForNonAdminAndIsAudited(t *testing.T) {
 	if entry.Action != string(agent.ActionInspect) || entry.Target != testAliasName {
 		t.Fatalf("audit entry = %+v, want action=inspect target=%s", entry, testAliasName)
 	}
+	// testAliasName does not resolve in this empty-policy channel — a soft (non-summary)
+	// outcome. The audit line must never falsely claim a summary was posted for it
+	// (regression guard for the outcome-neutral audit display).
+	if strings.Contains(strings.ToLower(entry.Result), "posted") {
+		t.Fatalf("soft-outcome audit must not claim a summary was posted, got Result=%q", entry.Result)
+	}
 }
 
 func TestConfirm_GetApproveByAskerIsEphemeral(t *testing.T) {
