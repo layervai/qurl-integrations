@@ -1259,10 +1259,15 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 }
 
 func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
-	if err := validateTunnelRouteIdentity(args); err != nil {
+	if args == nil {
+		return validateTunnelRouteIdentity(args)
+	}
+	// Deployment configuration is independent of the API response and gives
+	// the operator the more actionable error when both contracts are invalid.
+	if err := ValidateConnectorAPIURL(args.APIURL); err != nil {
 		return err
 	}
-	return ValidateConnectorAPIURL(args.APIURL)
+	return validateTunnelRouteIdentity(args)
 }
 
 func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
