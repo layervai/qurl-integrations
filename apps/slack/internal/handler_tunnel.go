@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -56,10 +57,13 @@ const (
 	kubernetesNameHashHexLen = 12
 )
 
-var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
-
-// TODO(upstream-contract): keep in lockstep with the qurl-service connector_routing_id format (layervai/qurl-service#1225).
-var connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+var (
+	tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+	// TODO(upstream-contract): keep in lockstep with qurl-service#1206/#1225.
+	connectorResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+	connectorRoutingIDPattern  = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+	connectorKnockIDPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+)
 
 // Docker does not publish a tight practical length limit for container names;
 // keep Slack input bounded so an accidental paste cannot dominate the rendered
@@ -1252,6 +1256,9 @@ func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
 	if strings.TrimSpace(args.APIURL) == "" {
 		return errors.New("QURL_API_URL is missing")
 	}
+	if !validConnectorAPIURL(args.APIURL) {
+		return errors.New("QURL_API_URL is invalid")
+	}
 	return nil
 }
 
@@ -1259,8 +1266,12 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 	if args == nil {
 		return errors.New("tunnel install args are missing")
 	}
-	if strings.TrimSpace(args.ResourceID) == "" {
+	resourceID := strings.TrimSpace(args.ResourceID)
+	if resourceID == "" {
 		return errors.New("resource_id is missing")
+	}
+	if !connectorResourceIDPattern.MatchString(resourceID) {
+		return errors.New("resource_id is invalid")
 	}
 	if strings.TrimSpace(args.ConnectorRoutingID) == "" {
 		return errors.New("connector_routing_id is missing")
@@ -1271,7 +1282,32 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 	if strings.TrimSpace(args.KnockResourceID) == "" {
 		return errors.New("knock_resource_id is missing")
 	}
+	if !connectorKnockIDPattern.MatchString(args.KnockResourceID) {
+		return errors.New("knock_resource_id is invalid")
+	}
 	return nil
+}
+
+func validConnectorAPIURL(raw string) bool {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	if !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/v1") {
+		return false
+	}
+	if parsed.Scheme == resourceExposeSchemeHTTPS {
+		return true
+	}
+	if parsed.Scheme != "http" {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func renderPortablePipefailShell() string {
