@@ -11,7 +11,7 @@ import (
 type ecsContainerDefinition struct {
 	Name             string              `json:"name"`
 	Image            string              `json:"image"`
-	User             string              `json:"user,omitempty"`
+	User             string              `json:"user"`
 	Essential        bool                `json:"essential"`
 	Environment      []ecsEnvironmentVar `json:"environment"`
 	Secrets          []ecsSecret         `json:"secrets"`
