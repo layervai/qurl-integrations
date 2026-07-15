@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -1326,12 +1325,7 @@ func ValidateConnectorAPIURL(raw string) error {
 	if parsed.Scheme != resourceExposeSchemeHTTP {
 		return errConnectorAPIURLInvalid
 	}
-	host := parsed.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
+	if !isLoopbackHostname(strings.ToLower(parsed.Hostname())) {
 		return errConnectorAPIURLInvalid
 	}
 	return nil
