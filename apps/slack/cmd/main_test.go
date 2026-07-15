@@ -336,29 +336,31 @@ func TestConnectorAPIURLFromEndpoint(t *testing.T) {
 	cases := []struct {
 		name     string
 		endpoint string
+		wantBase string
 		want     string
 		wantErr  string
 	}{
-		{name: "https", endpoint: " https://api.qurl.invalid/ ", want: "https://api.qurl.invalid/v1"},
-		{name: "loopback http", endpoint: "http://127.0.0.1:8080", want: "http://127.0.0.1:8080/v1"},
+		{name: "https", endpoint: " https://api.qurl.invalid/ ", wantBase: "https://api.qurl.invalid", want: "https://api.qurl.invalid/v1"},
+		{name: "loopback http", endpoint: "http://127.0.0.1:8080", wantBase: "http://127.0.0.1:8080", want: "http://127.0.0.1:8080/v1"},
 		{name: "remote http", endpoint: "http://api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
 		{name: "versioned endpoint", endpoint: "https://api.qurl.invalid/v1", wantErr: "must omit the /v1 API suffix"},
 		{name: "case variant versioned endpoint", endpoint: "https://api.qurl.invalid/V1/", wantErr: "must omit the /v1 API suffix"},
 		{name: "endpoint with path", endpoint: "https://api.qurl.invalid/private", wantErr: "must not include a path"},
+		{name: "nested versioned path", endpoint: "https://api.qurl.invalid/private/v1", wantErr: "must not include a path"},
 		{name: "relative", endpoint: "api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := connectorAPIURLFromEndpoint(tc.endpoint)
+			gotBase, got, err := connectorAPIURLFromEndpoint(tc.endpoint)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("connectorAPIURLFromEndpoint() err = %v, want %q", err, tc.wantErr)
 				}
 				return
 			}
-			if err != nil || got != tc.want {
-				t.Fatalf("connectorAPIURLFromEndpoint() = %q, %v; want %q, nil", got, err, tc.want)
+			if err != nil || gotBase != tc.wantBase || got != tc.want {
+				t.Fatalf("connectorAPIURLFromEndpoint() = %q, %q, %v; want %q, %q, nil", gotBase, got, err, tc.wantBase, tc.want)
 			}
 		})
 	}
