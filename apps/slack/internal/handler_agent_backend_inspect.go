@@ -338,6 +338,13 @@ func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) er
 	return fmt.Errorf("inspect qURL link host %q is outside the expected qURL entry hosts", qurlLink.Host)
 }
 
+// inspectAllowedRedirectHosts pins the redirect allowlist to exactly the two hosts the
+// API returned (the minted qurl_link + its qurl_site) — tighter than the *.qurl.site
+// suffix the entry check permits. This assumes qurl-service resolves in a single
+// qurl.link -> qurl_site hop; a chain across *different* *.qurl.site subdomains would
+// fail-closed to the generic "couldn't read" fallback.
+// TODO(upstream-contract): if the service ever does multi-subdomain redirects, widen this
+// to the *.qurl.site suffix (isInspectableQURLSiteHost) to match the entry policy.
 func inspectAllowedRedirectHosts(qurlLink, qurlSite *url.URL) map[string]struct{} {
 	allowed := map[string]struct{}{}
 	if qurlLink != nil && qurlLink.Host != "" {

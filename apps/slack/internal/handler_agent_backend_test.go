@@ -668,6 +668,28 @@ func TestResolveInspectableResource_Branches(t *testing.T) {
 	}
 }
 
+func TestInspectRedirectPolicy_RequiresHTTPSInProduction(t *testing.T) {
+	allowed := map[string]struct{}{"tunnel.qurl.site": {}}
+	policy := inspectRedirectPolicy(allowed, true) // requireHTTPS (production)
+	req := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		return &http.Request{URL: u}
+	}
+	via := []*http.Request{req("https://qurl.link/abc")}
+	// An https hop to an allowed host is fine.
+	if err := policy(req("https://tunnel.qurl.site/"), via); err != nil {
+		t.Fatalf("https redirect to an allowed host must pass: %v", err)
+	}
+	// A plaintext http hop to that same allowed host must be rejected in production —
+	// symmetric with the entry-host https requirement.
+	if err := policy(req("http://tunnel.qurl.site/"), via); err == nil {
+		t.Fatal("plaintext http redirect hop must be rejected when requireHTTPS is set")
+	}
+}
+
 func TestAgentBackend_InspectToken_PDFReturnsProtectedResource(t *testing.T) {
 	names := defaultTestTableNames()
 	row := map[string]ddbtypes.AttributeValue{
