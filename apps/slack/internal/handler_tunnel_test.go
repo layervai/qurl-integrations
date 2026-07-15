@@ -293,10 +293,15 @@ func TestValidateTunnelConnectorContract(t *testing.T) {
 	}{
 		{name: "valid", mutate: func(*tunnelInstallArgs) {}},
 		{name: "missing resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "" }, wantErr: "resource_id is missing"},
+		{name: "malformed resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "public key with spaces" }, wantErr: "resource_id is invalid"},
 		{name: "missing routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "" }, wantErr: "connector_routing_id is missing"},
 		{name: "malformed routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "c-not-a-routing-id" }, wantErr: "connector_routing_id is invalid"},
 		{name: "missing knock id", mutate: func(a *tunnelInstallArgs) { a.KnockResourceID = "" }, wantErr: "knock_resource_id is missing"},
+		{name: "malformed knock id", mutate: func(a *tunnelInstallArgs) { a.KnockResourceID = "bad knock id" }, wantErr: "knock_resource_id is invalid"},
 		{name: "missing api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "" }, wantErr: "QURL_API_URL is missing"},
+		{name: "relative api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "/v1" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "remote http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://api.example.test/v1" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "loopback http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://127.0.0.1:8080/v1" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
