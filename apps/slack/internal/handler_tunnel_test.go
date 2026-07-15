@@ -2295,34 +2295,31 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
+	// stepTimeout bounds each synchronization step below: comfortably above the
+	// goroutine-spawn / slot-release latency of a legitimate run on loaded CI, and —
+	// via the guard — under agentConnectorAuditWriteTimeout, so a regressed synchronous
+	// audit (which pins the worker in PutItem until that ctx fires) is still holding the
+	// slot when the claim times out instead of freeing first. Fixed, not derived from the
+	// constant, so the CI headroom stays stable if that timeout is retuned.
+	const stepTimeout = 2 * time.Second
+	if stepTimeout >= agentConnectorAuditWriteTimeout {
+		t.Fatalf("stepTimeout (%s) must stay under agentConnectorAuditWriteTimeout (%s)", stepTimeout, agentConnectorAuditWriteTimeout)
+	}
 	select {
 	case <-ddb.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(stepTimeout):
 		t.Fatal("tail audit write did not start")
 	}
-	// The tail audit is parked in its h.Go goroutine until releaseAudit below.
-	// Don't sample len(h.sem): the pooled worker frees its slot in runOnPool's
-	// deferred <-sem — a different goroutine with no happens-before to ddb.started
-	// — so the read is nondeterministic and was the original flake. Claim the slot
-	// instead; the send blocks until the worker frees it. The claimed slot is
-	// intentionally left held afterward — no further pool work runs here.
+	// Don't sample len(h.sem): the pooled worker frees its slot in runOnPool's deferred
+	// <-sem — a different goroutine with no happens-before to ddb.started, so the read is
+	// nondeterministic (the original flake). Claim the slot instead; with cap(h.sem)==1 the
+	// send blocks until the worker frees it. The slot is then left held — no more pool work.
 	if cap(h.sem) != 1 {
-		// A spare slot would let the claim succeed without the worker releasing.
 		t.Fatalf("test assumes cap(h.sem) == 1, got %d", cap(h.sem))
-	}
-	// slotClaimWait stays a fixed literal, not derived from agentConnectorAuditWriteTimeout,
-	// so a legitimate release keeps stable, generous CI headroom regardless of how that
-	// constant is tuned. The guard ties it to the audit ctx bound: a regressed synchronous
-	// audit pins the worker in PutItem until that ctx fires, so the wait must expire first
-	// to surface it rather than passing once the slot frees — fail loud if it ever creeps
-	// above the bound instead of silently going false-negative.
-	const slotClaimWait = 2 * time.Second
-	if slotClaimWait >= agentConnectorAuditWriteTimeout {
-		t.Fatalf("slotClaimWait (%s) must stay under agentConnectorAuditWriteTimeout (%s)", slotClaimWait, agentConnectorAuditWriteTimeout)
 	}
 	select {
 	case h.sem <- struct{}{}:
-	case <-time.After(slotClaimWait):
+	case <-time.After(stepTimeout):
 		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
