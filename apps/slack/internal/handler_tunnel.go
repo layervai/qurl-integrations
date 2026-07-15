@@ -58,7 +58,9 @@ const (
 )
 
 var (
-	tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+	errConnectorAPIURLMissing = errors.New("QURL_API_URL is missing")
+	errConnectorAPIURLInvalid = errors.New("QURL_API_URL is invalid")
+	tunnelSlugPattern         = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
 	// TODO(upstream-contract): keep in lockstep with qurl-service#1206/#1225.
 	connectorResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 	connectorRoutingIDPattern  = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
@@ -678,6 +680,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.KnockResourceID = strings.TrimSpace(resource.KnockResourceID)
 	resolvedArgs.APIURL = strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := validateTunnelConnectorContract(&resolvedArgs); err != nil {
+		if errors.Is(err, errConnectorAPIURLMissing) || errors.Is(err, errConnectorAPIURLInvalid) {
+			log.Error("tunnel install: local connector API URL configuration invalid", "error", err, "slug", args.Slug)
+			return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
+		}
 		log.Error("tunnel install: resource response missing connector contract", "error", err, "slug", args.Slug)
 		return nil, "qURL Connector setup could not obtain complete sandbox routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}
@@ -729,7 +735,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
 		return nil, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
-	secretMsg, err := renderTunnelBootstrapSecretMessage(args, key, h.now())
+	secretMsg, err := renderTunnelBootstrapSecretMessage(&resolvedArgs, key, h.now())
 	if err != nil {
 		log.Error("tunnel install: secret message render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "secret_message_render_failed")
@@ -1253,13 +1259,7 @@ func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
 	if err := validateTunnelRouteIdentity(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(args.APIURL) == "" {
-		return errors.New("QURL_API_URL is missing")
-	}
-	if !validConnectorAPIURL(args.APIURL) {
-		return errors.New("QURL_API_URL is invalid")
-	}
-	return nil
+	return ValidateConnectorAPIURL(args.APIURL)
 }
 
 func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
@@ -1273,41 +1273,52 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 	if !connectorResourceIDPattern.MatchString(resourceID) {
 		return errors.New("resource_id is invalid")
 	}
-	if strings.TrimSpace(args.ConnectorRoutingID) == "" {
+	routingID := strings.TrimSpace(args.ConnectorRoutingID)
+	if routingID == "" {
 		return errors.New("connector_routing_id is missing")
 	}
-	if !connectorRoutingIDPattern.MatchString(args.ConnectorRoutingID) {
+	if !connectorRoutingIDPattern.MatchString(routingID) {
 		return errors.New("connector_routing_id is invalid")
 	}
-	if strings.TrimSpace(args.KnockResourceID) == "" {
+	knockResourceID := strings.TrimSpace(args.KnockResourceID)
+	if knockResourceID == "" {
 		return errors.New("knock_resource_id is missing")
 	}
-	if !connectorKnockIDPattern.MatchString(args.KnockResourceID) {
+	if !connectorKnockIDPattern.MatchString(knockResourceID) {
 		return errors.New("knock_resource_id is invalid")
 	}
 	return nil
 }
 
-func validConnectorAPIURL(raw string) bool {
+// ValidateConnectorAPIURL validates the API base rendered into customer
+// connector manifests. It is exported so the Slack process can reject an
+// invalid QURL_ENDPOINT at startup, before an admin attempts an install.
+func ValidateConnectorAPIURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return errConnectorAPIURLMissing
+	}
 	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false
+		return errConnectorAPIURLInvalid
 	}
 	if !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/v1") {
-		return false
+		return errConnectorAPIURLInvalid
 	}
 	if parsed.Scheme == resourceExposeSchemeHTTPS {
-		return true
+		return nil
 	}
 	if parsed.Scheme != "http" {
-		return false
+		return errConnectorAPIURLInvalid
 	}
 	host := parsed.Hostname()
 	if strings.EqualFold(host, "localhost") {
-		return true
+		return nil
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil || !ip.IsLoopback() {
+		return errConnectorAPIURLInvalid
+	}
+	return nil
 }
 
 func renderPortablePipefailShell() string {

@@ -4370,6 +4370,40 @@ func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *test
 	}
 }
 
+func TestTunnelInstallRefusesInvalidLocalEndpointBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:      testTunnelResourceID,
+			"connector_routing_id": testTunnelRoutingID,
+			testKeyType:            client.ResourceTypeTunnel,
+			testKeySlug:            testTunnelSlug,
+			testKeyStatus:          client.StatusActive,
+			"knock_resource_id":    "qurl-tunnel-server",
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.ConnectorAPIURL = "http://api.example.test/v1"
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "invalid QURL_ENDPOINT") || !strings.Contains(async, "Contact the operator") {
+		t.Fatalf("async reply = %q, want local endpoint configuration refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; invalid local endpoint must not consume a bootstrap key", apiKeyHits)
+	}
+}
+
 type raceBindAliasStore struct {
 	store *slackdata.Store
 }
@@ -4501,6 +4535,9 @@ func TestSlackCodeBlock(t *testing.T) {
 
 func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
+	// Most tests exercise unrelated Slack behavior, so tunnel responses receive
+	// the current routing fields by default. Contract-gap tests must encode their
+	// response directly when they intentionally need a field to stay absent.
 	if resource, ok := data.(map[string]any); ok &&
 		resource[testKeyType] == client.ResourceTypeTunnel &&
 		resource[testKeyResourceID] != nil {

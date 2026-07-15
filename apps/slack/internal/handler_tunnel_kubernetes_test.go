@@ -15,10 +15,14 @@ import (
 func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
 	t.Parallel()
 	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvKubernetes,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    "qurl-tunnel-server",
+		APIURL:             testTunnelAPIURL,
 	}
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 
@@ -101,6 +105,12 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"securityContext:",
 		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"knock_resource_id: 'qurl-tunnel-server'",
+		"name: QURL_API_URL",
+		"name: QURL_BOOTSTRAP_URL",
+		"value: '" + testTunnelAPIURL + "'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
 		"runAsNonRoot: true",

@@ -331,6 +331,48 @@ func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 	}
 }
 
+func TestConnectorAPIURLFromEndpoint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		endpoint string
+		want     string
+		wantErr  string
+	}{
+		{name: "https", endpoint: " https://api.qurl.invalid/ ", want: "https://api.qurl.invalid/v1"},
+		{name: "loopback http", endpoint: "http://127.0.0.1:8080", want: "http://127.0.0.1:8080/v1"},
+		{name: "remote http", endpoint: "http://api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
+		{name: "versioned endpoint", endpoint: "https://api.qurl.invalid/v1", wantErr: "must omit the /v1 API suffix"},
+		{name: "relative", endpoint: "api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := connectorAPIURLFromEndpoint(tc.endpoint)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("connectorAPIURLFromEndpoint() err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("connectorAPIURLFromEndpoint() = %q, %v; want %q, nil", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunValidatesConnectorAPIURLBeforeInfraSetup(t *testing.T) {
+	t.Setenv("QURL_ENDPOINT", "http://api.qurl.invalid")
+	t.Setenv("SLACK_SIGNING_SECRET", "signing-secret")
+
+	err := run()
+
+	if err == nil || !strings.Contains(err.Error(), "QURL_ENDPOINT is invalid") {
+		t.Fatalf("run() err = %v, want connector endpoint fail-fast error", err)
+	}
+}
+
 func TestShutdownBudgetsLeaveLameduckDrainHeadroom(t *testing.T) {
 	if lameduckDuration <= 0 {
 		t.Fatalf("lameduckDuration = %s, want positive ALB drain head start", lameduckDuration)

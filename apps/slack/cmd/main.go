@@ -163,9 +163,10 @@ func run() error {
 	// Required env vars are explicit by design: a missing QURL_ENDPOINT
 	// previously fell back to the sandbox URL, which is the kind of silent
 	// misconfiguration that ships a prod deploy at sandbox.
-	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
-	if qurlEndpoint == "" {
-		return errors.New("QURL_ENDPOINT is required")
+	qurlEndpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
+	connectorAPIURL, err := connectorAPIURLFromEndpoint(qurlEndpoint)
+	if err != nil {
+		return err
 	}
 
 	slackSigningSecret := os.Getenv("SLACK_SIGNING_SECRET")
@@ -338,7 +339,7 @@ func run() error {
 		AdminStore:                     adminStore,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
-		ConnectorAPIURL:                strings.TrimRight(strings.TrimSpace(qurlEndpoint), "/") + "/v1",
+		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -516,6 +517,21 @@ func run() error {
 	}
 	slog.Info("server stopped cleanly")
 	return nil
+}
+
+func connectorAPIURLFromEndpoint(raw string) (string, error) {
+	endpoint := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if endpoint == "" {
+		return "", errors.New("QURL_ENDPOINT is required")
+	}
+	if parsed, err := url.ParseRequestURI(endpoint); err == nil && strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/v1") {
+		return "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+	}
+	apiURL := endpoint + "/v1"
+	if err := internal.ValidateConnectorAPIURL(apiURL); err != nil {
+		return "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", err)
+	}
+	return apiURL, nil
 }
 
 func lameduckForSignal(sig os.Signal) time.Duration {
