@@ -168,6 +168,14 @@ func testTunnelInstallArgs() *tunnelInstallArgs {
 	}
 }
 
+func testPinnedTunnelInstallArgs() *tunnelInstallArgs {
+	args := testTunnelInstallArgs()
+	args.ResourceID = testTunnelResourceID
+	args.ConnectorRoutingID = testTunnelRoutingID
+	args.KnockResourceID = testTunnelKnockID
+	return args
+}
+
 func testTunnelInstallAgentAudit() *tunnelInstallAgentAudit {
 	return &tunnelInstallAgentAudit{
 		target: testTunnelSlug,
@@ -2700,12 +2708,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 
 	h := NewHandler(Config{})
 	freezeTunnelBootstrapNow(t, h, now)
-	got, err := h.renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	got, err := h.renderTunnelInstallMessage(testPinnedTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
@@ -2722,8 +2725,13 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 	if imageIdx < 0 || envIdx < 0 || instructionsIdx < 0 || imageIdx > envIdx || envIdx > instructionsIdx {
 		t.Fatalf("fallback image warning should appear before target environment and install block:\n%s", got)
 	}
-	if strings.Contains(got, testForbiddenResourceLabel) || strings.Contains(got, testTunnelResourceID) {
-		t.Fatalf("rendered install message leaked resource details:\n%s", got)
+	if strings.Contains(got, testForbiddenResourceLabel) {
+		t.Fatalf("rendered install message leaked retired resource label:\n%s", got)
+	}
+	for _, identity := range []string{testTunnelResourceID, testTunnelRoutingID, testTunnelKnockID} {
+		if !strings.Contains(got, identity) {
+			t.Fatalf("rendered install message missing pinned identity %q:\n%s", identity, got)
+		}
 	}
 }
 
@@ -2731,12 +2739,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	t.Parallel()
 	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
 
-	_, err := NewHandler(Config{}).renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	_, err := NewHandler(Config{}).renderTunnelInstallMessage(testPinnedTunnelInstallArgs(), &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
 	}
@@ -2746,12 +2749,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
 	t.Parallel()
 	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
 
-	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(testPinnedTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "tunnel image reference must use only") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want tunnel image rejection", err)
 	}
@@ -2765,12 +2763,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
 func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
 	now := fixedNow
 	expiresAt := now.Add(time.Hour)
-	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-	}
+	args := testPinnedTunnelInstallArgs()
 	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
 	freezeTunnelBootstrapNow(t, h, now)
 	prepared, err := h.prepareTunnelInstallMessage(args)

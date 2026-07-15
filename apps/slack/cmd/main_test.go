@@ -350,6 +350,7 @@ func TestConnectorAPIURLFromEndpoint(t *testing.T) {
 		{name: "endpoint with credentials", endpoint: "https://user:secret@api.qurl.invalid", wantErr: "must not include credentials"},
 		{name: "endpoint with query", endpoint: "https://api.qurl.invalid?region=sandbox", wantErr: "must not include a query"},
 		{name: "endpoint with fragment", endpoint: "https://api.qurl.invalid#sandbox", wantErr: "must not include a fragment"},
+		{name: "slashes only", endpoint: "///", wantErr: "must be an absolute URL origin"},
 		{name: "relative", endpoint: "api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
 	}
 	for _, tc := range cases {

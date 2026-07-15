@@ -520,9 +520,13 @@ func run() error {
 }
 
 func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
-	endpoint = strings.TrimRight(strings.TrimSpace(raw), "/")
-	if endpoint == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return "", "", errors.New("QURL_ENDPOINT is required")
+	}
+	endpoint = strings.TrimRight(trimmed, "/")
+	if endpoint == "" {
+		return "", "", errors.New("QURL_ENDPOINT must be an absolute URL origin")
 	}
 	// These pre-checks add operator-specific messages. ValidateConnectorAPIURL
 	// remains the canonical security and endpoint-shape validator.
