@@ -536,6 +536,8 @@ func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error
 		if parsed.Fragment != "" {
 			return "", "", errors.New("QURL_ENDPOINT must not include a fragment")
 		}
+		// Give the common already-versioned value a migration-specific error;
+		// every other non-empty path is rejected by the general shape check.
 		if strings.EqualFold(strings.Trim(parsed.Path, "/"), "v1") {
 			return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
 		}

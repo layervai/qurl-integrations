@@ -153,6 +153,8 @@ type tunnelInstallArgs struct {
 	// retired env var and use QURL_API_URL/QURL_REGISTRATION_URL. Verified at
 	// qurl-connector 760c1a9^: Bootstrap calls c.do("/agent/bootstrap") on the
 	// QURL_BOOTSTRAP_URL-derived client base.
+	// TODO(upstream-contract): remove the legacy renderers after
+	// layervai/qurl-integrations#964 closes the old-image support window.
 	APIURL string
 }
 
@@ -658,6 +660,11 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: failed to get API key", "error", err)
 		return nil, authErrorMessage(err), err
 	}
+	connectorAPIURL := strings.TrimSpace(h.cfg.ConnectorAPIURL)
+	if err := ValidateConnectorAPIURL(connectorAPIURL); err != nil {
+		log.Error("tunnel install: local connector API URL configuration invalid", "error", err)
+		return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
+	}
 
 	// The description doubles as the tunnel's user-facing Display Name
 	// (see handleSetDisplayName — there's no separate field). Install
@@ -681,12 +688,8 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.ResourceID = strings.TrimSpace(resource.ResourceID)
 	resolvedArgs.ConnectorRoutingID = strings.TrimSpace(resource.ConnectorRoutingID)
 	resolvedArgs.KnockResourceID = strings.TrimSpace(resource.KnockResourceID)
-	resolvedArgs.APIURL = strings.TrimSpace(h.cfg.ConnectorAPIURL)
-	if err := validateTunnelConnectorContract(&resolvedArgs); err != nil {
-		if errors.Is(err, errConnectorAPIURLMissing) || errors.Is(err, errConnectorAPIURLInvalid) {
-			log.Error("tunnel install: local connector API URL configuration invalid", "slug", resolvedArgs.Slug, "error", err)
-			return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
-		}
+	resolvedArgs.APIURL = connectorAPIURL
+	if err := validateTunnelRouteIdentity(&resolvedArgs); err != nil {
 		log.Error("tunnel install: resource response missing connector contract", "slug", resolvedArgs.Slug, "error", err)
 		return nil, "qURL Connector setup could not obtain complete sandbox routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}

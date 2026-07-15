@@ -4370,8 +4370,9 @@ func TestTunnelInstallRefusesInvalidLocalEndpointBeforeMintingKey(t *testing.T) 
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
-	var apiKeyHits int
+	var resourceHits, apiKeyHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		resourceHits++
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyResourceID:      testTunnelResourceID,
 			"connector_routing_id": testTunnelRoutingID,
@@ -4394,6 +4395,9 @@ func TestTunnelInstallRefusesInvalidLocalEndpointBeforeMintingKey(t *testing.T) 
 
 	if !strings.Contains(async, "invalid QURL_ENDPOINT") || !strings.Contains(async, "Contact the operator") {
 		t.Fatalf("async reply = %q, want local endpoint configuration refusal", async)
+	}
+	if resourceHits != 0 {
+		t.Fatalf("resource route hit %d times; invalid local endpoint must fail before find-or-create", resourceHits)
 	}
 	if apiKeyHits != 0 {
 		t.Fatalf("api key route hit %d times; invalid local endpoint must not consume a bootstrap key", apiKeyHits)
