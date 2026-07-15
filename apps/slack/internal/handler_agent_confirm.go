@@ -41,6 +41,10 @@ const (
 	// copy is self-contained — it does not promise a detail message that a rare mint-fail +
 	// delivery-fail double fault may never have delivered.
 	agentConfirmGetFailedReply = "Couldn't generate the access link — check the request and ask me again."
+	// agentConfirmInspectFailedReply covers a HARD read failure while summarizing
+	// (auth/store/scope) — the backend logs the detail; the public card stays a
+	// neutral failure with no token echo, matching the get-failed posture.
+	agentConfirmInspectFailedReply = "Couldn't read that page to summarize it — check the request and ask me again."
 	// agentConfirmGetUnsupportedSurfaceReply is a pre-mint boundary for confirmed
 	// group DMs. A normal post would leak the link to other members, and until mpim
 	// ephemerals are proven visible we refuse instead of minting a credential that
@@ -161,7 +165,8 @@ func confirmValidProtectURL(rawURL, rawAlias string) (args *resourceExposeArgs, 
 // via executeAgentAction, protect-connector via openAgentConnectorModal (the modal
 // path). Keep in lockstep with both of those.
 func confirmExecutable(kind agent.ActionKind) bool {
-	return kind == agent.ActionGet || kind == agent.ActionRevoke ||
+	return kind == agent.ActionGet || kind == agent.ActionInspect ||
+		kind == agent.ActionRevoke ||
 		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias ||
 		kind == agent.ActionProtectURL || kind == agent.ActionProtectConnector
 }
@@ -228,9 +233,12 @@ func (h *Handler) confirmDeliverable(prop *agent.Proposal) bool {
 
 // adminGatedFor is the SINGLE source of truth for whether an action needs an
 // admin re-check at confirm time, used both when snapshotting a proposal and at
-// click time. An unrecognized kind fails closed (gated).
+// click time. An unrecognized kind fails closed (gated). Get and inspect are the
+// only non-gated kinds: both are channel-member reads of a channel-reachable
+// resource (inspect reveals strictly less than the link get hands out), so both
+// match /qurl get's "any channel member" posture rather than the admin verbs.
 func adminGatedFor(kind agent.ActionKind) bool {
-	return kind != agent.ActionGet
+	return kind != agent.ActionGet && kind != agent.ActionInspect
 }
 
 // askerOnly reports whether a kind may be approved ONLY by the member who requested
@@ -1016,6 +1024,29 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			return newAttributedPrivateActionResult(false, agentConfirmGetFailedReply, ":warning: "+commonGetMintFailedMessage, "Access link could not be generated.")
 		}
 		return newAttributedPrivateActionResultBlocks(true, agentConfirmGetDeliveredReply, res.text, res.blocks, "Access link was sent privately to the approver.")
+	case agent.ActionInspect:
+		// Summarizing FETCHES the page behind the token — minting a short-lived internal
+		// qURL is a network-access grant — so it runs only HERE, after the human Confirm,
+		// re-resolving in the CLICK's channel (channel scope enforced at execute exactly
+		// like a typed read). The fetched page signals are UNTRUSTED third-party content:
+		// InspectToken escapes them for mrkdwn and returns a compact card body that is
+		// posted straight to the channel. It never enters the model's context, so there
+		// is no prompt-injection surface to defend on this path.
+		tc := &agent.TurnContext{
+			TeamID:       payload.Team.ID,
+			EnterpriseID: payload.Enterprise.ID,
+			ChannelID:    payload.Channel.ID,
+			UserID:       payload.User.ID,
+		}
+		summary, err := h.newAgentBackend(log).InspectToken(ctx, tc, pa.Token)
+		if err != nil {
+			// Hard read failure (auth/store/scope): the detail is logged inside the
+			// backend; the public card stays a neutral failure with no token echo.
+			return newAttributedActionResult(false, agentConfirmInspectFailedReply, "Website summary could not be generated.")
+		}
+		// summary is already user-facing and mrkdwn-escaped (soft outcomes — an
+		// unresolvable token or a protected download — arrive here too, as benign text).
+		return newAttributedActionResult(true, summary, "Website summary posted.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {
@@ -1119,7 +1150,7 @@ func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, t
 // as untrusted echo by the render surface (see [slackdata.AuditEntry]).
 func auditTargetFor(pa *pendingAction) string {
 	switch pa.Action {
-	case agent.ActionGet, agent.ActionRevoke, agent.ActionProtectConnector:
+	case agent.ActionGet, agent.ActionInspect, agent.ActionRevoke, agent.ActionProtectConnector:
 		return pa.Token
 	case agent.ActionSetAlias:
 		return pa.Alias + " → " + pa.Target

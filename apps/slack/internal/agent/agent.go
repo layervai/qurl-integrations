@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -30,10 +29,6 @@ const (
 	roleUser      = "user"
 	roleAssistant = "assistant"
 )
-
-const syntheticInspectToolID = "tu_inspect_prefetch"
-
-var inspectIntentTokenPattern = regexp.MustCompile(`\$[a-z][a-z0-9-]*`)
 
 // defaultMaxIterations bounds the read-tool gathering loop. A natural-language
 // request resolves to a handful of read tool calls before the agent either
@@ -52,15 +47,22 @@ const iterationCapMessage = "I wasn't able to work that out — could you rephra
 // tool_result), so a later turn in the same thread is a valid request.
 const proposalAckResult = "Proposed to the user for confirmation."
 
-// ActionKind names the mutation an agent [Proposal] represents. Each maps to an
-// existing deterministic slash operation that the confirm path executes after a
-// human click + admin re-check.
+// ActionKind names the action an agent [Proposal] represents. Each maps to a
+// deterministic operation the confirm path executes after a human click (+ an
+// admin re-check for the admin-gated kinds). Most mirror a slash command;
+// ActionInspect is the exception — it has no slash verb, but it still fetches
+// protected content (a network-access grant), so it takes the same confirm gate.
 type ActionKind string
 
 // Recognized proposal actions.
 const (
 	// ActionGet mints a one-time access link for a tunnel slug or channel alias.
 	ActionGet ActionKind = "get"
+	// ActionInspect fetches the page behind a channel-reachable token and posts a
+	// compact summary (title, description, section headings). Fetching mints a
+	// short-lived internal qURL — a network-access grant — so, like ActionGet, it
+	// runs only after a human confirm and never on the model's say-so alone.
+	ActionInspect ActionKind = "inspect"
 	// ActionRevoke revokes a protected resource (and all its qURLs).
 	ActionRevoke ActionKind = "revoke"
 	// ActionSetAlias binds a channel alias to a tunnel slug.
@@ -195,10 +197,6 @@ type Backend interface {
 	// ResolveToken resolves a $slug/$alias to a resource identity, channel
 	// scoped and read-only (it never mints or grants access).
 	ResolveToken(ctx context.Context, tc *TurnContext, token string) (string, error)
-	// InspectToken resolves a $slug/$alias, mints an internal short-lived qURL,
-	// fetches the linked content, and returns a compact snapshot the model can
-	// summarize back to the user without exposing the link itself.
-	InspectToken(ctx context.Context, tc *TurnContext, token string) (string, error)
 	// Quota reports the workspace plan and usage.
 	Quota(ctx context.Context, tc *TurnContext) (string, error)
 }
@@ -234,9 +232,6 @@ type Agent struct {
 	llm           LLM
 	backend       Backend
 	maxIterations int
-	// inspectMemo dedupes inspect_token within a single turn so an eager prefetch
-	// and a later model-issued inspect call don't mint/fetch the same qURL twice.
-	inspectMemo map[string]ToolResult
 	// streamLLM is llm if it implements [streamingLLM], else nil — the streaming
 	// capability is detected once in [New] so [roundTrip] is a single nil check per
 	// round rather than a per-round type assertion.
@@ -310,7 +305,6 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	if a.llm == nil || a.backend == nil {
 		return Result{}, history, errMissingDeps
 	}
-	a.inspectMemo = map[string]ToolResult{}
 
 	// Split the system prompt: the stable preamble + tools are the cache prefix;
 	// the per-turn context varies and sits after it.
@@ -321,21 +315,6 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	msgs := make([]Message, 0, len(history)+1)
 	msgs = append(msgs, history...)
 	msgs = append(msgs, Message{Role: roleUser, Text: userText})
-	// Eager prefetch hides one model round-trip for explicit site-summary asks:
-	// when the user's wording clearly requests "what is on $token", fetch the
-	// inspect_token grounding before the first LLM call. The synthetic
-	// tool_use/tool_result are stripped from persisted history, and inspectMemo
-	// dedupes any later model-issued inspect_token call in the same turn.
-	if token, ok := inspectIntentToken(userText); ok {
-		call := syntheticInspectToolCall(token)
-		msgs = append(msgs, Message{Role: roleAssistant, ToolCalls: []ToolCall{call}})
-		content, isErr := a.executeRead(ctx, tc, call)
-		msgs = append(msgs, Message{Role: roleUser, ToolResults: []ToolResult{{
-			ToolUseID: call.ID,
-			Content:   content,
-			IsError:   isErr,
-		}}})
-	}
 
 	var usage Usage
 	for range a.maxIterations {
@@ -343,7 +322,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		if err != nil {
 			// Path-neutral: roundTrip fans out to Complete or StreamComplete, so don't
 			// hardcode "complete" (the streaming error already says "messages stream").
-			return Result{Usage: usage}, stripSyntheticPrefetchMessages(msgs), fmt.Errorf("agent: llm round-trip: %w", err)
+			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm round-trip: %w", err)
 		}
 		usage.add(resp.Usage)
 
@@ -358,7 +337,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 			if strings.TrimSpace(reply) == "" {
 				reply = iterationCapMessage
 			}
-			return Result{Reply: reply, Usage: usage}, stripSyntheticPrefetchMessages(msgs), nil
+			return Result{Reply: reply, Usage: usage}, msgs, nil
 		}
 
 		// Parallel tool use is disabled, so there is normally one call; handle
@@ -383,7 +362,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 					results = append(results, ToolResult{ToolUseID: rest.ID, Content: proposalAckResult})
 				}
 				msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
-				return Result{Proposal: prop, Usage: usage}, stripSyntheticPrefetchMessages(msgs), nil
+				return Result{Proposal: prop, Usage: usage}, msgs, nil
 			default:
 				content, isErr := a.executeRead(ctx, tc, call)
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: content, IsError: isErr})
@@ -392,7 +371,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
 	}
 
-	return Result{Reply: iterationCapMessage, Usage: usage}, stripSyntheticPrefetchMessages(msgs), nil
+	return Result{Reply: iterationCapMessage, Usage: usage}, msgs, nil
 }
 
 // roundTrip runs one model round-trip, routing to the streaming path when a per-turn
@@ -404,88 +383,4 @@ func (a *Agent) roundTrip(ctx context.Context, req *Request) (Response, error) {
 		return a.streamLLM.StreamComplete(ctx, req, a.streamSink)
 	}
 	return a.llm.Complete(ctx, req)
-}
-
-func inspectIntentToken(userText string) (string, bool) {
-	lower := strings.ToLower(userText)
-	matches := inspectIntentTokenPattern.FindAllString(lower, -1)
-	if len(matches) != 1 {
-		return "", false
-	}
-	token := normalizeToken(matches[0])
-	if token == "" {
-		return "", false
-	}
-	tokenRef := "$" + token
-	if containsAny(lower,
-		"access link", "grant access", "mint access", "mint a link",
-		"qurl link", "open access", "/qurl get",
-		"revoke "+tokenRef, "protect "+tokenRef,
-		"why did "+tokenRef, "why is "+tokenRef,
-		"status of "+tokenRef, "state of "+tokenRef,
-		"error on "+tokenRef, "error with "+tokenRef,
-		"failure on "+tokenRef, "failure with "+tokenRef,
-	) {
-		return "", false
-	}
-	if !containsAny(lower,
-		"tell me about "+tokenRef, "describe "+tokenRef,
-		"give me a summary of "+tokenRef, "summarize "+tokenRef,
-		"summary of "+tokenRef, "summary for "+tokenRef,
-		"overview of "+tokenRef, "overview for "+tokenRef,
-		tokenRef+" summary", tokenRef+" overview",
-		"what is on "+tokenRef, "what's on "+tokenRef,
-		"what is at "+tokenRef, "what's at "+tokenRef,
-		"info of "+tokenRef, "info on "+tokenRef, "info about "+tokenRef,
-		"information on "+tokenRef, "information about "+tokenRef,
-		"details on "+tokenRef, "details about "+tokenRef,
-	) {
-		return "", false
-	}
-	return token, token != ""
-}
-
-func syntheticInspectToolCall(token string) ToolCall {
-	raw, _ := json.Marshal(map[string]string{fieldToken: token})
-	return ToolCall{ID: syntheticInspectToolID, Name: toolInspectToken, Input: raw}
-}
-
-func containsAny(s string, needles ...string) bool {
-	for _, needle := range needles {
-		if strings.Contains(s, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-func stripSyntheticPrefetchMessages(msgs []Message) []Message {
-	out := make([]Message, 0, len(msgs))
-	for i := 0; i < len(msgs); i++ {
-		if isSyntheticPrefetchAssistant(&msgs[i]) {
-			if i+1 < len(msgs) && isSyntheticPrefetchResult(&msgs[i+1]) {
-				i++
-			}
-			continue
-		}
-		if isSyntheticPrefetchResult(&msgs[i]) {
-			continue
-		}
-		out = append(out, msgs[i])
-	}
-	return out
-}
-
-func isSyntheticPrefetchAssistant(m *Message) bool {
-	return m.Role == roleAssistant &&
-		m.Text == "" &&
-		len(m.ToolCalls) == 1 &&
-		m.ToolCalls[0].ID == syntheticInspectToolID
-}
-
-func isSyntheticPrefetchResult(m *Message) bool {
-	return m.Role == roleUser &&
-		m.Text == "" &&
-		len(m.ToolResults) == 1 &&
-		m.ToolResults[0].ToolUseID == syntheticInspectToolID
 }

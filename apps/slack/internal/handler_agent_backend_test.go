@@ -378,6 +378,69 @@ func TestAgentBackend_InspectToken(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_InspectToken_EscapesUntrustedPageContent(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	// Hostile page: title/description/heading carry mrkdwn control chars and Slack
+	// broadcast mentions. The summary posts straight to the channel, so these MUST be
+	// escaped — otherwise a page could spoof the card or @-broadcast the channel.
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Pwn &lt;!channel&gt; *bold*</title><meta name="description" content="click &lt;https://evil.example|here&gt;"></head><body><main><h1>&lt;!here&gt; run this</h1></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	// Raw mrkdwn / broadcast controls from the page must NOT survive into the card.
+	for _, banned := range []string{"<!channel>", "<!here>", "<https://evil.example|here>", "*bold*"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unescaped untrusted content %q leaked into the card: %q", banned, out)
+		}
+	}
+	// ...they should appear in their escaped form instead.
+	if !strings.Contains(out, "&lt;!channel&gt;") {
+		t.Fatalf("expected the hostile title to be mrkdwn-escaped, got %q", out)
+	}
+}
+
 func TestAgentBackend_InspectToken_StripsHTMLNoiseAndTruncatesSummaryFields(t *testing.T) {
 	names := defaultTestTableNames()
 	row := map[string]ddbtypes.AttributeValue{

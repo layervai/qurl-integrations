@@ -46,8 +46,6 @@ type inspectedResource struct {
 }
 
 type inspectedSnapshot struct {
-	Status          string
-	ContentType     string
 	Title           string
 	MetaDescription string
 	Headings        []string
@@ -70,9 +68,16 @@ func (e *protectedInspectableContentError) Error() string {
 }
 
 // InspectToken resolves a token to a channel-reachable resource, mints a
-// short-lived internal qURL, fetches the page behind it, and returns a compact
-// snapshot for the LLM to summarize. The qURL itself is intentionally never
-// surfaced to the model or the user.
+// short-lived internal qURL, fetches the page behind it, and returns a compact,
+// mrkdwn-escaped summary (title, description, section headings) ready to post to
+// the channel.
+//
+// It runs ONLY from the confirm path (the ActionInspect case of executeAgentAction),
+// AFTER a human approves the propose_inspect card — minting the qURL is a
+// network-access grant, so it is gated on a click like every other grant, never a
+// read the model performs on its own. The fetched page content is escaped and
+// returned for DIRECT delivery to the channel: it never enters the model's context
+// (so there is no prompt-injection surface), and the qURL itself is never surfaced.
 func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, token string) (string, error) {
 	if b.store == nil {
 		return agentBackendUnconfigured, nil
@@ -116,7 +121,7 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	})
 	if err != nil {
 		b.log.Error("agent inspect mint failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
-		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't open it for a summary right now.", token), nil
+		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't open it for a summary right now.", escapeMrkdwnCode(token)), nil
 	}
 
 	snapshot, err := b.fetchInspectedSnapshot(ctx, out.QURLLink, out.QURLSite)
@@ -126,12 +131,15 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 			return formatProtectedInspectableResource(token, resolved, unsupported), nil
 		}
 		b.log.Error("agent inspect fetch failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
-		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't read its page content right now.", token), nil
+		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't read its page content right now.", escapeMrkdwnCode(token)), nil
 	}
 	return formatInspectedSnapshot(token, resolved, snapshot), nil
 }
 
 func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (resolved *inspectedResource, userMsg string) {
+	// token drives matching (below) raw; disp is the mrkdwn-escaped echo used in the
+	// user-facing messages, which post to a public card on the confirm path.
+	disp := escapeMrkdwnCode(token)
 	byID := make(map[string]*client.Resource, len(resources))
 	for i := range resources {
 		byID[resources[i].ResourceID] = &resources[i]
@@ -141,7 +149,7 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 			continue
 		}
 		if isLegacyDirectURLBinding(entries[i].ResourceID) {
-			return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", token)
+			return nil, fmt.Sprintf("`$%s` is bound in this channel, but it still points at a legacy direct URL binding that can't be summarized automatically. Ask your Slack admin to rebind it to a protected resource.", disp)
 		}
 		return &inspectedResource{ResourceID: entries[i].ResourceID, Resource: byID[entries[i].ResourceID], Via: "channel alias"}, ""
 	}
@@ -160,11 +168,11 @@ func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, r
 	}
 	switch len(aliasMatches) {
 	case 0:
-		return nil, fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", token)
+		return nil, fmt.Sprintf("`$%s` doesn't resolve to anything reachable in this channel.", disp)
 	case 1:
 		return &inspectedResource{ResourceID: aliasMatches[0].ResourceID, Resource: aliasMatches[0], Via: "resource alias"}, ""
 	default:
-		return nil, fmt.Sprintf("`$%s` matches multiple resources reachable in this channel, so I can't tell which page to summarize.", token)
+		return nil, fmt.Sprintf("`$%s` matches multiple resources reachable in this channel, so I can't tell which page to summarize.", disp)
 	}
 }
 
@@ -235,8 +243,6 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 	}
 	title, metaDesc, headings := extractInspectedContent(contentType, string(body))
 	return &inspectedSnapshot{
-		Status:          resp.Status,
-		ContentType:     contentType,
 		Title:           title,
 		MetaDescription: metaDesc,
 		Headings:        headings,
@@ -487,48 +493,41 @@ func containsAnyString(s string, needles ...string) bool {
 
 func formatInspectedSnapshot(token string, resolved *inspectedResource, snapshot *inspectedSnapshot) string {
 	var b strings.Builder
-	b.WriteString("Inspectable content for `$")
-	b.WriteString(token)
+	b.WriteString("Summary of the page behind `$")
+	b.WriteString(escapeMrkdwnCode(token))
 	b.WriteString("`:\n")
 	writeResolvedInspectableResourceLines(&b, resolved)
-	if snapshot.Status != "" {
-		b.WriteString("- Fetch status: ")
-		b.WriteString(snapshot.Status)
-		b.WriteString("\n")
-	}
-	if snapshot.ContentType != "" {
-		b.WriteString("- Content type: ")
-		b.WriteString(snapshot.ContentType)
-		b.WriteString("\n")
-	}
+	// Title/description/headings are UNTRUSTED fetched page content posted straight to
+	// the channel — escape each for mrkdwn so a hostile page can't spoof the card or
+	// smuggle in a mention/link.
 	if snapshot.Title != "" {
 		b.WriteString("- Page title: ")
-		b.WriteString(snapshot.Title)
+		b.WriteString(escapeMrkdwnText(snapshot.Title))
 		b.WriteString("\n")
 	}
 	if snapshot.MetaDescription != "" {
-		b.WriteString("- Meta description: ")
-		b.WriteString(snapshot.MetaDescription)
+		b.WriteString("- Description: ")
+		b.WriteString(escapeMrkdwnText(snapshot.MetaDescription))
 		b.WriteString("\n")
 	}
 	if len(snapshot.Headings) > 0 {
-		b.WriteString("- Page sections for summarization only: ")
-		b.WriteString(strings.Join(snapshot.Headings, " | "))
+		b.WriteString("- Page sections: ")
+		b.WriteString(escapeMrkdwnText(strings.Join(snapshot.Headings, " | ")))
 		return b.String()
 	}
-	b.WriteString("- Page sections for summarization only: No section headings were extracted from the page.")
+	b.WriteString("- Page sections: No section headings were found on the page.")
 	return b.String()
 }
 
 func formatProtectedInspectableResource(token string, resolved *inspectedResource, unsupported *protectedInspectableContentError) string {
 	var b strings.Builder
 	b.WriteString("Protected resource for `$")
-	b.WriteString(token)
+	b.WriteString(escapeMrkdwnCode(token))
 	b.WriteString("`:\n")
 	writeResolvedInspectableResourceLines(&b, resolved)
 	if unsupported != nil && unsupported.ContentType != "" {
 		b.WriteString("- Content type: ")
-		b.WriteString(unsupported.ContentType)
+		b.WriteString(escapeMrkdwnText(unsupported.ContentType))
 		b.WriteString("\n")
 	}
 	b.WriteString("- Summary availability: This resolves here as a protected resource, but it serves a document or download rather than a web page, so no website summary is available.")
@@ -536,18 +535,20 @@ func formatProtectedInspectableResource(token string, resolved *inspectedResourc
 }
 
 func writeResolvedInspectableResourceLines(b *strings.Builder, resolved *inspectedResource) {
+	// Via is an internal constant (trusted). Description/Type come from the qURL API
+	// (admin-set) but are still echoed to a public card, so escape them for mrkdwn.
 	b.WriteString("- Resolved via ")
 	b.WriteString(resolved.Via)
 	b.WriteString(" in this channel.\n")
 	if resolved.Resource != nil {
 		if resolved.Resource.Description != "" {
 			b.WriteString("- Resource description: ")
-			b.WriteString(resolved.Resource.Description)
+			b.WriteString(escapeMrkdwnText(resolved.Resource.Description))
 			b.WriteString("\n")
 		}
 		if resolved.Resource.Type != "" {
 			b.WriteString("- Resource type: ")
-			b.WriteString(resolved.Resource.Type)
+			b.WriteString(escapeMrkdwnText(resolved.Resource.Type))
 			b.WriteString("\n")
 		}
 	}

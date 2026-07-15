@@ -33,11 +33,9 @@ type fakeBackend struct {
 	resources    string
 	aliases      string
 	resolve      string
-	inspect      string
 	quota        string
 	err          error
 	resolveCalls []string
-	inspectCalls []string
 }
 
 func (f *fakeBackend) ListResources(_ context.Context, _ *TurnContext) (string, error) {
@@ -51,11 +49,6 @@ func (f *fakeBackend) ListAliases(_ context.Context, _ *TurnContext) (string, er
 func (f *fakeBackend) ResolveToken(_ context.Context, _ *TurnContext, token string) (string, error) {
 	f.resolveCalls = append(f.resolveCalls, token)
 	return f.resolve, f.err
-}
-
-func (f *fakeBackend) InspectToken(_ context.Context, _ *TurnContext, token string) (string, error) {
-	f.inspectCalls = append(f.inspectCalls, token)
-	return f.inspect, f.err
 }
 
 func (f *fakeBackend) Quota(_ context.Context, _ *TurnContext) (string, error) {
@@ -137,206 +130,32 @@ func TestRun_ReadThenAnswer_GroundsOnToolResult(t *testing.T) {
 	}
 }
 
-func TestRun_InspectIntentPrefetchesBeforeFirstModelCall(t *testing.T) {
+func TestRun_ProposeInspectStopsForConfirmation(t *testing.T) {
+	// A summary request resolves to propose_inspect: the loop must STOP and hand back
+	// an ActionInspect proposal. Fetching the page mints a qURL (a grant), so it is
+	// gated on a human Confirm — never a read the model performs on its own, and the
+	// backend is never touched during the turn.
 	llm := &scriptedLLM{responses: []Response{
-		textResp("`$dashboard` is the production dashboard. It shows incidents and release health."),
+		toolResp(toolProposeInspect, map[string]any{fieldToken: "$dashboard", fieldReason: "onboarding"}),
 	}}
-	backend := &fakeBackend{inspect: "Inspectable content for `$dashboard`:\n- Page title: Team Dashboard\n- Page sections for summarization only: Dashboard | Deploy health | Incidents"}
+	backend := &fakeBackend{}
 	a := New(llm, backend)
 
 	ctx, tc := testCtx()
-	res, history, err := a.Run(ctx, tc, nil, "pls get the info of $dashboard for me")
+	res, history, err := a.Run(ctx, tc, nil, "what's on $dashboard?")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Proposal != nil {
-		t.Fatalf("expected a text reply, got proposal %+v", res.Proposal)
+	if res.Proposal == nil || res.Proposal.Action != ActionInspect {
+		t.Fatalf("expected an inspect proposal, got %+v", res.Proposal)
 	}
-	if len(backend.inspectCalls) != 1 || backend.inspectCalls[0] != "dashboard" {
-		t.Fatalf("inspect prefetch calls = %+v, want [dashboard]", backend.inspectCalls)
+	if res.Proposal.Token != "dashboard" {
+		t.Fatalf("inspect proposal token = %q, want dashboard", res.Proposal.Token)
 	}
-	if len(llm.captured) != 1 {
-		t.Fatalf("expected 1 model call after prefetch, got %d", len(llm.captured))
-	}
-	found := false
-	for _, m := range llm.captured[0].Messages {
-		for _, tr := range m.ToolResults {
-			if tr.ToolUseID == syntheticInspectToolID && tr.Content == backend.inspect {
-				found = true
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("inspect prefetch tool_result was not present in the first model call: %+v", llm.captured[0].Messages)
-	}
-	for _, m := range history {
-		for _, tc := range m.ToolCalls {
-			if tc.ID == syntheticInspectToolID {
-				t.Fatalf("synthetic prefetch tool call leaked into persisted history: %+v", history)
-			}
-		}
-		for _, tr := range m.ToolResults {
-			if tr.ToolUseID == syntheticInspectToolID {
-				t.Fatalf("synthetic prefetch tool result leaked into persisted history: %+v", history)
-			}
-		}
+	if len(backend.resolveCalls) != 0 {
+		t.Fatalf("propose_inspect must not touch the backend before confirmation, got %+v", backend.resolveCalls)
 	}
 	assertWellFormed(t, history)
-}
-
-func TestRun_InspectIntentMemoizesRepeatedInspectToolCall(t *testing.T) {
-	llm := &scriptedLLM{responses: []Response{
-		toolResp(toolInspectToken, map[string]any{fieldToken: "$dashboard"}),
-		textResp("`$dashboard` is the production dashboard."),
-	}}
-	backend := &fakeBackend{inspect: "Inspectable content for `$dashboard`:\n- Page title: Team Dashboard"}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	res, history, err := a.Run(ctx, tc, nil, "pls get the info of $dashboard for me")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Proposal != nil {
-		t.Fatalf("expected a text reply, got proposal %+v", res.Proposal)
-	}
-	if len(backend.inspectCalls) != 1 {
-		t.Fatalf("inspect should be memoized within one turn, calls = %+v", backend.inspectCalls)
-	}
-	assertWellFormed(t, history)
-}
-
-func TestRun_InspectIntentErrorPathStripsSyntheticPrefetch(t *testing.T) {
-	llm := &scriptedLLM{}
-	backend := &fakeBackend{inspect: "Inspectable content for `$dashboard`:\n- Page title: Team Dashboard"}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	_, history, err := a.Run(ctx, tc, nil, "pls get the info of $dashboard for me")
-	if err == nil {
-		t.Fatalf("expected llm error")
-	}
-	for _, m := range history {
-		for _, tc := range m.ToolCalls {
-			if tc.ID == syntheticInspectToolID {
-				t.Fatalf("synthetic prefetch tool call leaked into error-path history: %+v", history)
-			}
-		}
-		for _, tr := range m.ToolResults {
-			if tr.ToolUseID == syntheticInspectToolID {
-				t.Fatalf("synthetic prefetch tool result leaked into error-path history: %+v", history)
-			}
-		}
-	}
-}
-
-func TestRun_InspectIntentDoesNotHijackAccessRequest(t *testing.T) {
-	llm := &scriptedLLM{responses: []Response{
-		toolResp(toolProposeGet, map[string]any{fieldToken: "$dashboard", fieldReason: "incident 412"}),
-	}}
-	backend := &fakeBackend{}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	res, _, err := a.Run(ctx, tc, nil, "please mint an access link for $dashboard for incident 412")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Proposal == nil || res.Proposal.Action != ActionGet {
-		t.Fatalf("expected get proposal, got %+v", res.Proposal)
-	}
-	if len(backend.inspectCalls) != 0 {
-		t.Fatalf("access request must not trigger inspect prefetch, got %+v", backend.inspectCalls)
-	}
-}
-
-func TestRun_InspectIntentDoesNotTriggerForOperationalQuestion(t *testing.T) {
-	llm := &scriptedLLM{responses: []Response{
-		textResp("I can help inspect the site if you ask for a summary."),
-	}}
-	backend := &fakeBackend{}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	res, history, err := a.Run(ctx, tc, nil, "why did $dashboard fail yesterday?")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Proposal != nil {
-		t.Fatalf("expected a text reply, got proposal %+v", res.Proposal)
-	}
-	if len(backend.inspectCalls) != 0 {
-		t.Fatalf("operational question must not trigger inspect prefetch, got %+v", backend.inspectCalls)
-	}
-	if len(history) != 2 {
-		t.Fatalf("history len = %d, want 2 without prefetch side effects", len(history))
-	}
-}
-
-func TestRun_InspectIntentAllowsStatusPageSummary(t *testing.T) {
-	llm := &scriptedLLM{responses: []Response{
-		textResp("`$status-page` is a public status overview for the platform."),
-	}}
-	backend := &fakeBackend{inspect: "Inspectable content for `$status-page`:\n- Page title: Status Page"}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	res, _, err := a.Run(ctx, tc, nil, "give me a summary of $status-page")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Proposal != nil {
-		t.Fatalf("expected a text reply, got proposal %+v", res.Proposal)
-	}
-	if len(backend.inspectCalls) != 1 || backend.inspectCalls[0] != "status-page" {
-		t.Fatalf("explicit summary request for status-page should prefetch inspect, got %+v", backend.inspectCalls)
-	}
-}
-
-func TestRun_InspectIntentDoesNotTriggerForTokenIdentityQuestion(t *testing.T) {
-	llm := &scriptedLLM{responses: []Response{
-		textResp("`$status-page` resolves in this channel."),
-	}}
-	backend := &fakeBackend{}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	res, history, err := a.Run(ctx, tc, nil, "what is $status-page")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Proposal != nil {
-		t.Fatalf("expected a text reply, got proposal %+v", res.Proposal)
-	}
-	if len(backend.inspectCalls) != 0 {
-		t.Fatalf("token identity question must not trigger inspect prefetch, got %+v", backend.inspectCalls)
-	}
-	if len(history) != 2 {
-		t.Fatalf("history len = %d, want 2 without prefetch side effects", len(history))
-	}
-}
-
-func TestRun_InspectIntentDoesNotTriggerForUnrelatedSummaryWord(t *testing.T) {
-	llm := &scriptedLLM{responses: []Response{
-		textResp("`$dashboard` is recognized in this channel."),
-	}}
-	backend := &fakeBackend{}
-	a := New(llm, backend)
-
-	ctx, tc := testCtx()
-	res, history, err := a.Run(ctx, tc, nil, "need a summary for the incident report; $dashboard is the alias")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Proposal != nil {
-		t.Fatalf("expected a text reply, got proposal %+v", res.Proposal)
-	}
-	if len(backend.inspectCalls) != 0 {
-		t.Fatalf("unrelated summary wording must not trigger inspect prefetch, got %+v", backend.inspectCalls)
-	}
-	if len(history) != 2 {
-		t.Fatalf("history len = %d, want 2 without prefetch side effects", len(history))
-	}
 }
 
 func TestRun_ProposeAlongsideReadInSameTurn_KeepsHistoryValid(t *testing.T) {

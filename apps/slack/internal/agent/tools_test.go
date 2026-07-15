@@ -62,6 +62,25 @@ func TestParseProposal(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:       "inspect strips sigil, keeps reason, not admin gated",
+			tool:       toolProposeInspect,
+			input:      map[string]any{fieldToken: testSlugSigil, fieldReason: "onboarding"},
+			wantOK:     true,
+			wantAction: ActionInspect,
+			check: func(t *testing.T, p *Proposal) {
+				if p.Token != testSlug || p.Reason != "onboarding" {
+					t.Errorf("got %+v", p)
+				}
+			},
+		},
+		{
+			name:    "inspect requires token",
+			tool:    toolProposeInspect,
+			input:   map[string]any{},
+			wantOK:  true,
+			wantErr: true,
+		},
+		{
 			name:       "revoke is admin gated",
 			tool:       toolProposeRevoke,
 			input:      map[string]any{fieldToken: "analytics"},
@@ -230,8 +249,8 @@ func TestParseProposal_NumericPortSurvives(t *testing.T) {
 func TestToolSpecs_CoverEveryToolWithSchemas(t *testing.T) {
 	specs := toolSpecs()
 	want := []string{
-		toolListResources, toolListAliases, toolResolveToken, toolInspectToken, toolGetQuota,
-		toolProposeGet, toolProposeRevoke, toolProposeSetAlias, toolProposeUnsetAlias,
+		toolListResources, toolListAliases, toolResolveToken, toolGetQuota,
+		toolProposeGet, toolProposeInspect, toolProposeRevoke, toolProposeSetAlias, toolProposeUnsetAlias,
 		toolProposeProtectConnector, toolProposeProtectURL,
 	}
 	got := map[string]ToolSpec{}

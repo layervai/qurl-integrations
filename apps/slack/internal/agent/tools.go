@@ -15,7 +15,6 @@ const (
 	toolListResources = "list_resources"
 	toolListAliases   = "list_aliases"
 	toolResolveToken  = "resolve_token"
-	toolInspectToken  = "inspect_token"
 	toolGetQuota      = "get_quota"
 
 	// proposeToolPrefix marks the mutation tools — calls with this prefix stop
@@ -23,6 +22,7 @@ const (
 	proposeToolPrefix = "propose_"
 
 	toolProposeGet              = proposeToolPrefix + "get"
+	toolProposeInspect          = proposeToolPrefix + "inspect"
 	toolProposeRevoke           = proposeToolPrefix + "revoke"
 	toolProposeSetAlias         = proposeToolPrefix + "set_alias"
 	toolProposeUnsetAlias       = proposeToolPrefix + "unset_alias"
@@ -68,12 +68,6 @@ func toolSpecs() []ToolSpec {
 			Required:    []string{fieldToken},
 		},
 		{
-			Name:        toolInspectToken,
-			Description: "Resolve a single $slug or $alias to its channel-reachable resource, mint a short-lived internal qURL, fetch the linked content, and return a compact page/content snapshot for summarization. Use this only when the user explicitly asks for page/site/content information such as a description, summary, overview, or what's on the resource. It never exposes the qURL link to the user.",
-			Schema:      map[string]any{fieldToken: stringProp("The $slug or $alias to inspect (with or without the leading $).")},
-			Required:    []string{fieldToken},
-		},
-		{
 			Name:        toolGetQuota,
 			Description: "Report this workspace's plan and current usage. Read-only.",
 			Schema:      map[string]any{},
@@ -84,6 +78,15 @@ func toolSpecs() []ToolSpec {
 			Schema: map[string]any{
 				fieldToken:  stringProp("The $slug or $alias to mint a link for."),
 				fieldReason: stringProp("Short reason distilled from the request, for the audit trail (e.g. 'incident #412')."),
+			},
+			Required: []string{fieldToken},
+		},
+		{
+			Name:        toolProposeInspect,
+			Description: "Propose fetching the page behind a channel-reachable $slug or $alias and posting a short summary of it (page title, description, section headings). Fetching mints a short-lived internal qURL — a network-access grant — so this does NOT execute: the user must confirm, and only then is the page fetched. Use ONLY when the user explicitly asks what a resource's page is about — a description, summary, overview, or 'what's on' it. The fetched content is posted directly to the channel; it never enters your context, so do not try to describe the page yourself.",
+			Schema: map[string]any{
+				fieldToken:  stringProp("The $slug or $alias to summarize (with or without the leading $)."),
+				fieldReason: stringProp("Short reason distilled from the request, for the audit trail (e.g. 'onboarding')."),
 			},
 			Required: []string{fieldToken},
 		},
@@ -187,29 +190,14 @@ func coerceToString(v any) string {
 // adapt rather than aborting the turn.
 func (a *Agent) executeRead(ctx context.Context, tc *TurnContext, call ToolCall) (content string, isErr bool) {
 	var (
-		out              string
-		err              error
-		inspectMemoToken string
+		out string
+		err error
 	)
 	switch call.Name {
 	case toolListResources:
 		out, err = a.backend.ListResources(ctx, tc)
 	case toolListAliases:
 		out, err = a.backend.ListAliases(ctx, tc)
-	case toolInspectToken:
-		fields, derr := decodeFields(call.Input)
-		if derr != nil {
-			return "Invalid input for inspect_token.", true
-		}
-		token := normalizeToken(fields[fieldToken])
-		if token == "" {
-			return "inspect_token requires a non-empty token.", true
-		}
-		if memo, ok := a.inspectMemo[token]; ok {
-			return memo.Content, memo.IsError
-		}
-		inspectMemoToken = token
-		out, err = a.backend.InspectToken(ctx, tc, token)
 	case toolGetQuota:
 		out, err = a.backend.Quota(ctx, tc)
 	case toolResolveToken:
@@ -227,14 +215,7 @@ func (a *Agent) executeRead(ctx context.Context, tc *TurnContext, call ToolCall)
 	}
 	if err != nil {
 		// Keep the model's context clean: a stable, non-leaky message.
-		generic := "That lookup didn't succeed. Try a different approach or ask the user for clarification."
-		if inspectMemoToken != "" {
-			a.inspectMemo[inspectMemoToken] = ToolResult{Content: generic, IsError: true}
-		}
-		return generic, true
-	}
-	if inspectMemoToken != "" {
-		a.inspectMemo[inspectMemoToken] = ToolResult{Content: out}
+		return "That lookup didn't succeed. Try a different approach or ask the user for clarification.", true
 	}
 	return out, false
 }
@@ -264,6 +245,8 @@ func parseProposal(call ToolCall) (*Proposal, bool, error) {
 	switch call.Name {
 	case toolProposeGet:
 		p, err = proposalGet(fields)
+	case toolProposeInspect:
+		p, err = proposalInspect(fields)
 	case toolProposeRevoke:
 		p, err = proposalRevoke(fields)
 	case toolProposeSetAlias:
@@ -290,6 +273,19 @@ func proposalGet(f map[string]string) (*Proposal, error) {
 		Token:   token,
 		Reason:  strings.TrimSpace(f[fieldReason]),
 		Summary: fmt.Sprintf("Mint a one-time access link for `$%s`.", token),
+	}, nil
+}
+
+func proposalInspect(f map[string]string) (*Proposal, error) {
+	token := normalizeToken(f[fieldToken])
+	if token == "" {
+		return nil, errEmptyField(toolProposeInspect, fieldToken)
+	}
+	return &Proposal{
+		Action:  ActionInspect,
+		Token:   token,
+		Reason:  strings.TrimSpace(f[fieldReason]),
+		Summary: fmt.Sprintf("Fetch the page behind `$%s` and post a short summary of it.", token),
 	}, nil
 }
 
