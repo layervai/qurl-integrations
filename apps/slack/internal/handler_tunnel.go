@@ -148,9 +148,9 @@ type tunnelInstallArgs struct {
 	ConnectorRoutingID string
 	KnockResourceID    string
 	// APIURL is the canonical /v1 base. QURL_BOOTSTRAP_URL intentionally gets
-	// the same value only for older production connector images, which append
-	// the legacy /agent/bootstrap path; current images ignore that retired env
-	// var and use QURL_API_URL/QURL_REGISTRATION_URL.
+	// the same value only for older production connector images: their API
+	// client appends /agent/bootstrap to this base. Current images ignore that
+	// retired env var and use QURL_API_URL/QURL_REGISTRATION_URL.
 	APIURL string
 }
 
@@ -682,10 +682,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.APIURL = strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := validateTunnelConnectorContract(&resolvedArgs); err != nil {
 		if errors.Is(err, errConnectorAPIURLMissing) || errors.Is(err, errConnectorAPIURLInvalid) {
-			log.Error("tunnel install: local connector API URL configuration invalid", "error", err)
+			log.Error("tunnel install: local connector API URL configuration invalid", "slug", resolvedArgs.Slug, "error", err)
 			return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
 		}
-		log.Error("tunnel install: resource response missing connector contract", "error", err)
+		log.Error("tunnel install: resource response missing connector contract", "slug", resolvedArgs.Slug, "error", err)
 		return nil, "qURL Connector setup could not obtain complete sandbox routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
