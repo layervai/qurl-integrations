@@ -681,10 +681,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.APIURL = strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := validateTunnelConnectorContract(&resolvedArgs); err != nil {
 		if errors.Is(err, errConnectorAPIURLMissing) || errors.Is(err, errConnectorAPIURLInvalid) {
-			log.Error("tunnel install: local connector API URL configuration invalid", "error", err, "slug", args.Slug)
+			log.Error("tunnel install: local connector API URL configuration invalid", "error", err)
 			return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
 		}
-		log.Error("tunnel install: resource response missing connector contract", "error", err, "slug", args.Slug)
+		log.Error("tunnel install: resource response missing connector contract", "error", err)
 		return nil, "qURL Connector setup could not obtain complete sandbox routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
