@@ -22,6 +22,7 @@ const (
 	proposeToolPrefix = "propose_"
 
 	toolProposeGet              = proposeToolPrefix + "get"
+	toolProposeInspect          = proposeToolPrefix + "inspect"
 	toolProposeRevoke           = proposeToolPrefix + "revoke"
 	toolProposeSetAlias         = proposeToolPrefix + "set_alias"
 	toolProposeUnsetAlias       = proposeToolPrefix + "unset_alias"
@@ -77,6 +78,15 @@ func toolSpecs() []ToolSpec {
 			Schema: map[string]any{
 				fieldToken:  stringProp("The $slug or $alias to mint a link for."),
 				fieldReason: stringProp("Short reason distilled from the request, for the audit trail (e.g. 'incident #412')."),
+			},
+			Required: []string{fieldToken},
+		},
+		{
+			Name:        toolProposeInspect,
+			Description: "Propose fetching the page behind a channel-reachable $slug or $alias and posting a short summary of it (page title, description, section headings). Fetching mints a short-lived internal qURL — a network-access grant — so this does NOT execute: the user must confirm, and only then is the page fetched. Use ONLY when the user explicitly asks what a resource's page is about — a description, summary, overview, or 'what's on' it. The fetched content is posted directly to the channel; it never enters your context, so do not try to describe the page yourself.",
+			Schema: map[string]any{
+				fieldToken:  stringProp("The $slug or $alias to summarize (with or without the leading $)."),
+				fieldReason: stringProp("Short reason distilled from the request, for the audit trail (e.g. 'onboarding')."),
 			},
 			Required: []string{fieldToken},
 		},
@@ -235,6 +245,8 @@ func parseProposal(call ToolCall) (*Proposal, bool, error) {
 	switch call.Name {
 	case toolProposeGet:
 		p, err = proposalGet(fields)
+	case toolProposeInspect:
+		p, err = proposalInspect(fields)
 	case toolProposeRevoke:
 		p, err = proposalRevoke(fields)
 	case toolProposeSetAlias:
@@ -261,6 +273,19 @@ func proposalGet(f map[string]string) (*Proposal, error) {
 		Token:   token,
 		Reason:  strings.TrimSpace(f[fieldReason]),
 		Summary: fmt.Sprintf("Mint a one-time access link for `$%s`.", token),
+	}, nil
+}
+
+func proposalInspect(f map[string]string) (*Proposal, error) {
+	token := normalizeToken(f[fieldToken])
+	if token == "" {
+		return nil, errEmptyField(toolProposeInspect, fieldToken)
+	}
+	return &Proposal{
+		Action:  ActionInspect,
+		Token:   token,
+		Reason:  strings.TrimSpace(f[fieldReason]),
+		Summary: fmt.Sprintf("Fetch the page behind `$%s` and post a short summary of it.", token),
 	}, nil
 }
 
