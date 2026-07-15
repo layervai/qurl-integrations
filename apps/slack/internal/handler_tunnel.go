@@ -1295,10 +1295,11 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 // connector manifests. It is exported so the Slack process can reject an
 // invalid QURL_ENDPOINT at startup, before an admin attempts an install.
 func ValidateConnectorAPIURL(raw string) error {
-	if strings.TrimSpace(raw) == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return errConnectorAPIURLMissing
 	}
-	parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
+	parsed, err := url.ParseRequestURI(trimmed)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errConnectorAPIURLInvalid
 	}
