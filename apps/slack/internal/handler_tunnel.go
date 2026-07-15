@@ -1309,7 +1309,7 @@ func ValidateConnectorAPIURL(raw string) error {
 	if parsed.Scheme == resourceExposeSchemeHTTPS {
 		return nil
 	}
-	if parsed.Scheme != "http" {
+	if parsed.Scheme != resourceExposeSchemeHTTP {
 		return errConnectorAPIURLInvalid
 	}
 	host := parsed.Hostname()
