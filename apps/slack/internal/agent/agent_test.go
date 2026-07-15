@@ -130,6 +130,34 @@ func TestRun_ReadThenAnswer_GroundsOnToolResult(t *testing.T) {
 	}
 }
 
+func TestRun_ProposeInspectStopsForConfirmation(t *testing.T) {
+	// A summary request resolves to propose_inspect: the loop must STOP and hand back
+	// an ActionInspect proposal. Fetching the page mints a qURL (a grant), so it is
+	// gated on a human Confirm — never a read the model performs on its own, and the
+	// backend is never touched during the turn.
+	llm := &scriptedLLM{responses: []Response{
+		toolResp(toolProposeInspect, map[string]any{fieldToken: "$dashboard", fieldReason: "onboarding"}),
+	}}
+	backend := &fakeBackend{}
+	a := New(llm, backend)
+
+	ctx, tc := testCtx()
+	res, history, err := a.Run(ctx, tc, nil, "what's on $dashboard?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Proposal == nil || res.Proposal.Action != ActionInspect {
+		t.Fatalf("expected an inspect proposal, got %+v", res.Proposal)
+	}
+	if res.Proposal.Token != "dashboard" {
+		t.Fatalf("inspect proposal token = %q, want dashboard", res.Proposal.Token)
+	}
+	if len(backend.resolveCalls) != 0 {
+		t.Fatalf("propose_inspect must not touch the backend before confirmation, got %+v", backend.resolveCalls)
+	}
+	assertWellFormed(t, history)
+}
+
 func TestRun_ProposeAlongsideReadInSameTurn_KeepsHistoryValid(t *testing.T) {
 	// A single assistant turn carrying both a read call and a propose call.
 	// Parallel tool use is disabled in production, but the loop must still
