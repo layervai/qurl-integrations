@@ -2295,8 +2295,6 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
-	// Bare literal: a write-start liveness bound, unrelated to the audit ctx the
-	// slot-claim timeout below derives from.
 	select {
 	case <-ddb.started:
 	case <-time.After(2 * time.Second):
@@ -2312,12 +2310,19 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 		// A spare slot would let the claim succeed without the worker releasing.
 		t.Fatalf("test assumes cap(h.sem) == 1, got %d", cap(h.sem))
 	}
-	// Wait under agentConnectorAuditWriteTimeout (the audit's ctx bound): a regressed
-	// synchronous audit pins the worker in PutItem until that ctx fires, so the send
-	// must time out first to surface it rather than passing once the slot frees.
+	// slotClaimWait stays a fixed literal, not derived from agentConnectorAuditWriteTimeout,
+	// so a legitimate release keeps stable, generous CI headroom regardless of how that
+	// constant is tuned. The guard ties it to the audit ctx bound: a regressed synchronous
+	// audit pins the worker in PutItem until that ctx fires, so the wait must expire first
+	// to surface it rather than passing once the slot frees — fail loud if it ever creeps
+	// above the bound instead of silently going false-negative.
+	const slotClaimWait = 2 * time.Second
+	if slotClaimWait >= agentConnectorAuditWriteTimeout {
+		t.Fatalf("slotClaimWait (%s) must stay under agentConnectorAuditWriteTimeout (%s)", slotClaimWait, agentConnectorAuditWriteTimeout)
+	}
 	select {
 	case h.sem <- struct{}{}:
-	case <-time.After(agentConnectorAuditWriteTimeout / 2):
+	case <-time.After(slotClaimWait):
 		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
