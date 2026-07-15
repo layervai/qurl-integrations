@@ -347,6 +347,9 @@ func TestConnectorAPIURLFromEndpoint(t *testing.T) {
 		{name: "case variant versioned endpoint", endpoint: "https://api.qurl.invalid/V1/", wantErr: "must omit the /v1 API suffix"},
 		{name: "endpoint with path", endpoint: "https://api.qurl.invalid/private", wantErr: "must not include a path"},
 		{name: "nested versioned path", endpoint: "https://api.qurl.invalid/private/v1", wantErr: "must not include a path"},
+		{name: "endpoint with credentials", endpoint: "https://user:secret@api.qurl.invalid", wantErr: "must not include credentials"},
+		{name: "endpoint with query", endpoint: "https://api.qurl.invalid?region=sandbox", wantErr: "must not include a query"},
+		{name: "endpoint with fragment", endpoint: "https://api.qurl.invalid#sandbox", wantErr: "must not include a fragment"},
 		{name: "relative", endpoint: "api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
 	}
 	for _, tc := range cases {

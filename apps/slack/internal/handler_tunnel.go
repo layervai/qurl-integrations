@@ -150,7 +150,9 @@ type tunnelInstallArgs struct {
 	// APIURL is the canonical /v1 base. QURL_BOOTSTRAP_URL intentionally gets
 	// the same value only for older production connector images: their API
 	// client appends /agent/bootstrap to this base. Current images ignore that
-	// retired env var and use QURL_API_URL/QURL_REGISTRATION_URL.
+	// retired env var and use QURL_API_URL/QURL_REGISTRATION_URL. Verified at
+	// qurl-connector 760c1a9^: Bootstrap calls c.do("/agent/bootstrap") on the
+	// QURL_BOOTSTRAP_URL-derived client base.
 	APIURL string
 }
 
