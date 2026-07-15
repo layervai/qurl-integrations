@@ -60,7 +60,9 @@ var (
 	errConnectorAPIURLMissing = errors.New("QURL_API_URL is missing")
 	errConnectorAPIURLInvalid = errors.New("QURL_API_URL is invalid")
 	tunnelSlugPattern         = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
-	// TODO(upstream-contract): keep in lockstep with qurl-service#1206/#1225.
+	// TODO(upstream-contract): keep the unpadded base64url public-key charset
+	// in lockstep with qurl-service#1206/#1225. This shape cannot distinguish
+	// a public key from a legacy r_ label, so producer-first rollout is required.
 	connectorResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 	connectorRoutingIDPattern  = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
 	connectorKnockIDPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -1318,6 +1320,8 @@ func ValidateConnectorAPIURL(raw string) error {
 		return errConnectorAPIURLMissing
 	}
 	parsed, err := url.ParseRequestURI(trimmed)
+	// ParseRequestURI retains a literal #fragment in Path; the /v1 suffix
+	// requirement below therefore rejects it even though Fragment stays empty.
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" {
 		return errConnectorAPIURLInvalid
 	}

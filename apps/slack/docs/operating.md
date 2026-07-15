@@ -184,6 +184,10 @@ at the OAuth-callback bind layer.
     the enrollment token with terminal echo disabled when possible.
   - **Constraint** — do not share one agent state volume across concurrently
     running sidecars.
+  - **Promotion gate** — deploy and verify qurl-service #1225 before promoting
+    this Slack build. The local character validator cannot distinguish the new
+    client-safe public-key `resource_id` from a legacy internal `r_` label; an
+    out-of-order deploy could render the legacy label into customer config.
   - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
     an enrollment token, it retries the final text post once, revokes the token, and
     posts a discard notice when possible. Cleanup uses the handler's base
