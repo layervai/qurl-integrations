@@ -649,6 +649,25 @@ func TestInspectAllowedEntryHost_RequiresHTTPSInProduction(t *testing.T) {
 	}
 }
 
+func TestResolveInspectableResource_Branches(t *testing.T) {
+	// A channel alias bound to a raw URL id (legacy direct-URL binding) can't be
+	// summarized — surface the rebind guidance, never mint.
+	if resolved, msg := resolveInspectableResource("docs", []slackdata.PolicyEntry{{Alias: "docs", ResourceID: "https://legacy.example.com"}}, nil); resolved != nil || !strings.Contains(msg, "legacy direct URL binding") {
+		t.Fatalf("legacy binding: resolved=%v msg=%q", resolved, msg)
+	}
+	// A channel alias whose resource id isn't in the scanned set (stale scan) still
+	// resolves — with a nil Resource, so the card is description-less but the mint runs
+	// (the binding is in THIS channel's policy, so scope holds).
+	if resolved, msg := resolveInspectableResource("dash", []slackdata.PolicyEntry{{Alias: "dash", ResourceID: "r_unscanned"}}, nil); msg != "" || resolved == nil || resolved.Resource != nil || resolved.Via != "channel alias" || resolved.ResourceID != "r_unscanned" {
+		t.Fatalf("stale-scan alias: resolved=%+v msg=%q", resolved, msg)
+	}
+	// A token matching two resource aliases is ambiguous — refuse rather than guess.
+	dupes := []client.Resource{{ResourceID: "r_a", Alias: "shared"}, {ResourceID: "r_b", Alias: "shared"}}
+	if resolved, msg := resolveInspectableResource("shared", nil, dupes); resolved != nil || !strings.Contains(msg, "matches multiple resources") {
+		t.Fatalf("ambiguous alias: resolved=%v msg=%q", resolved, msg)
+	}
+}
+
 func TestAgentBackend_InspectToken_PDFReturnsProtectedResource(t *testing.T) {
 	names := defaultTestTableNames()
 	row := map[string]ddbtypes.AttributeValue{

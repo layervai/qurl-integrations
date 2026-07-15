@@ -248,7 +248,10 @@ func (b *agentBackend) fetchInspectedSnapshot(ctx context.Context, rawURL, qurlS
 		return nil, fmt.Errorf("build qURL fetch request: %w", err)
 	}
 	req.Header.Set("User-Agent", "qurl-slack-agent/inspect")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1")
+	// Advertise only what we actually summarize (HTML/text). JSON and other bodies fall
+	// through to the generic fallback, so asking for them would be dishonest — and this
+	// nudges a content-negotiating origin toward the html we can use.
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1")
 
 	resp, err := b.inspectedFetchClient(allowedHosts, requireHTTPS).Do(req)
 	if err != nil {
