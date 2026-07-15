@@ -2300,8 +2300,18 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("tail audit write did not start")
 	}
-	if got := len(h.sem); got != 0 {
-		t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", got)
+	// The tail audit is now blocked inside the h.Go goroutine and stays blocked
+	// until releaseAudit below. The pooled worker releases its h.sem slot in a
+	// DIFFERENT goroutine (runOnPool's deferred <-sem, after the worker closure
+	// returns), so ddb.started firing establishes no happens-before with the
+	// release — reading len(h.sem) here races that deferred <-sem and flakes
+	// under load. Instead, claim the slot: with cap(h.sem)==1 this send blocks
+	// until the worker frees the slot and can only time out if the slot stays
+	// pinned by the in-flight audit, which is the regression under test.
+	select {
+	case h.sem <- struct{}{}:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
 	h.Wait()
