@@ -524,7 +524,18 @@ func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error
 	if endpoint == "" {
 		return "", "", errors.New("QURL_ENDPOINT is required")
 	}
-	if parsed, parseErr := url.ParseRequestURI(endpoint); parseErr == nil && parsed.IsAbs() && parsed.Host != "" {
+	// These pre-checks add operator-specific messages. ValidateConnectorAPIURL
+	// remains the canonical security and endpoint-shape validator.
+	if parsed, parseErr := url.Parse(endpoint); parseErr == nil && parsed.IsAbs() && parsed.Host != "" {
+		if parsed.User != nil {
+			return "", "", errors.New("QURL_ENDPOINT must not include credentials")
+		}
+		if parsed.RawQuery != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a query")
+		}
+		if parsed.Fragment != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a fragment")
+		}
 		if strings.EqualFold(strings.Trim(parsed.Path, "/"), "v1") {
 			return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
 		}

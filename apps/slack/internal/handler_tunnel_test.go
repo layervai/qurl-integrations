@@ -4340,19 +4340,13 @@ func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *test
 
 	var apiKeyHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{
-				testKeyResourceID:   testTunnelResourceID,
-				testKeyType:         client.ResourceTypeTunnel,
-				testKeySlug:         testTunnelSlug,
-				testKeyStatus:       client.StatusActive,
-				"knock_resource_id": testTunnelKnockID,
-			},
-			"meta": map[string]string{"request_id": "req_test"},
-		}); err != nil {
-			t.Fatalf("encode qurl envelope: %v", err)
-		}
+		respondRawQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:   testTunnelResourceID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
+			"knock_resource_id": testTunnelKnockID,
+		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		apiKeyHits++
@@ -4556,6 +4550,13 @@ func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 		}
 		data = resource
 	}
+	respondRawQURLEnvelope(t, w, data)
+}
+
+// respondRawQURLEnvelope deliberately bypasses tunnel identity defaults for
+// contract-gap tests that need a routing field to remain absent.
+func respondRawQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
+	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"data": data,
