@@ -246,6 +246,13 @@ func adminGatedFor(kind agent.ActionKind) bool {
 // one-time access credential delivered ephemerally to the clicker, so only the asker
 // may approve+receive it. Named like adminGatedFor so the confirm authorization model
 // reads as one vocabulary; get is the only asker-only kind today.
+//
+// inspect is deliberately NOT asker-only even though it also mints: its result is a
+// PUBLIC channel summary, not a per-clicker credential, so there is no wrong-recipient
+// risk to guard against — and any channel member could self-serve the same summary by
+// proposing it themselves, so restricting to the asker would add friction without a
+// security benefit. The mint it triggers consumes quota like a get, but that is
+// human-paced and audited to the approver either way.
 func askerOnly(kind agent.ActionKind) bool {
 	return kind == agent.ActionGet
 }

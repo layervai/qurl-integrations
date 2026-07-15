@@ -313,6 +313,12 @@ func inspectAllowedRedirectHosts(qurlLink, qurlSite *url.URL) map[string]struct{
 	return allowed
 }
 
+// isInspectableQURLLinkHost pins the entry host to the shape qurl-service mints
+// access links on. This is a cross-repo contract: if the service ever mints links
+// on a different/subdomain host, inspect silently degrades to the generic
+// couldn't-read fallback until this is updated in lockstep.
+// TODO(upstream-contract): keep qurl.link / qurl.site host literals in lockstep with
+// qurl-service's minted-link host shape (see also handler_get.go's qurl.link pin).
 func isInspectableQURLLinkHost(hostname string) bool {
 	return hostname == "qurl.link"
 }
@@ -321,6 +327,9 @@ func isInspectableFetchScheme(scheme string) bool {
 	return scheme == resourceExposeSchemeHTTP || scheme == resourceExposeSchemeHTTPS
 }
 
+// isInspectableQURLSiteHost pins the redirect target to qurl-service's resolved-site
+// host shape. TODO(upstream-contract): keep in lockstep with qurl-service (see
+// isInspectableQURLLinkHost).
 func isInspectableQURLSiteHost(hostname string) bool {
 	return hostname == "qurl.site" || strings.HasSuffix(hostname, ".qurl.site")
 }
