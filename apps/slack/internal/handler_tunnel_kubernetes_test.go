@@ -21,7 +21,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		Environment:        tunnelEnvKubernetes,
 		ResourceID:         testTunnelResourceID,
 		ConnectorRoutingID: testTunnelRoutingID,
-		KnockResourceID:    "qurl-tunnel-server",
+		KnockResourceID:    testTunnelKnockID,
 		APIURL:             testTunnelAPIURL,
 	}
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
@@ -107,7 +107,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"value: '" + testTunnelSlug + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
-		"knock_resource_id: 'qurl-tunnel-server'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
 		"name: QURL_API_URL",
 		"name: QURL_BOOTSTRAP_URL",
 		"value: '" + testTunnelAPIURL + "'",

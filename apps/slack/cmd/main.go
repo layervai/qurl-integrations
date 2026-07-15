@@ -163,8 +163,9 @@ func run() error {
 	// Required env vars are explicit by design: a missing QURL_ENDPOINT
 	// previously fell back to the sandbox URL, which is the kind of silent
 	// misconfiguration that ships a prod deploy at sandbox.
-	qurlEndpoint := strings.TrimSpace(os.Getenv("QURL_ENDPOINT"))
-	connectorAPIURL, err := connectorAPIURLFromEndpoint(qurlEndpoint)
+	rawQURLEndpoint := os.Getenv("QURL_ENDPOINT")
+	qurlEndpoint := strings.TrimRight(strings.TrimSpace(rawQURLEndpoint), "/")
+	connectorAPIURL, err := connectorAPIURLFromEndpoint(rawQURLEndpoint)
 	if err != nil {
 		return err
 	}
@@ -524,8 +525,11 @@ func connectorAPIURLFromEndpoint(raw string) (string, error) {
 	if endpoint == "" {
 		return "", errors.New("QURL_ENDPOINT is required")
 	}
-	if parsed, err := url.ParseRequestURI(endpoint); err == nil && strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/v1") {
-		return "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+	if parsed, err := url.ParseRequestURI(endpoint); err == nil {
+		segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(segments) > 0 && strings.EqualFold(segments[len(segments)-1], "v1") {
+			return "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+		}
 	}
 	apiURL := endpoint + "/v1"
 	if err := internal.ValidateConnectorAPIURL(apiURL); err != nil {

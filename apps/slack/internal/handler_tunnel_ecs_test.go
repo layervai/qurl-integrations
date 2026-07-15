@@ -15,7 +15,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		Environment:        tunnelEnvECSFargate,
 		ResourceID:         testTunnelResourceID,
 		ConnectorRoutingID: testTunnelRoutingID,
-		KnockResourceID:    "qurl-tunnel-server",
+		KnockResourceID:    testTunnelKnockID,
 		APIURL:             testTunnelAPIURL,
 	}, testTunnelImageRef)
 
@@ -41,7 +41,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		testTunnelLocalPort9090Line,
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
-		"knock_resource_id: 'qurl-tunnel-server'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
 		`"name": "QURL_CONNECTOR_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
 		`"name": "QURL_API_URL"`,

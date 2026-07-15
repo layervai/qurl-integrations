@@ -148,8 +148,9 @@ type tunnelInstallArgs struct {
 	ConnectorRoutingID string
 	KnockResourceID    string
 	// APIURL is the canonical /v1 base. QURL_BOOTSTRAP_URL intentionally gets
-	// the same value for older production connector images, which append the
-	// legacy /agent/bootstrap path to this base; current images use QURL_API_URL.
+	// the same value only for older production connector images, which append
+	// the legacy /agent/bootstrap path; current images ignore that retired env
+	// var and use QURL_API_URL/QURL_REGISTRATION_URL.
 	APIURL string
 }
 
