@@ -278,16 +278,42 @@ func TestRenderTunnelConfigYAMLUsesRouteID(t *testing.T) {
 	}
 }
 
-func TestValidateTunnelConnectorContractRejectsMalformedRoutingID(t *testing.T) {
+func TestValidateTunnelConnectorContract(t *testing.T) {
 	t.Parallel()
-	err := validateTunnelConnectorContract(&tunnelInstallArgs{
+	valid := tunnelInstallArgs{
 		ResourceID:         testTunnelResourceID,
-		ConnectorRoutingID: "c-not-a-routing-id",
+		ConnectorRoutingID: testTunnelRoutingID,
 		KnockResourceID:    "qurl-tunnel-server",
 		APIURL:             testTunnelAPIURL,
-	})
-	if err == nil || !strings.Contains(err.Error(), "connector_routing_id is invalid") {
-		t.Fatalf("validateTunnelConnectorContract() err = %v, want invalid routing ID", err)
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*tunnelInstallArgs)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*tunnelInstallArgs) {}},
+		{name: "missing resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "" }, wantErr: "resource_id is missing"},
+		{name: "missing routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "" }, wantErr: "connector_routing_id is missing"},
+		{name: "malformed routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "c-not-a-routing-id" }, wantErr: "connector_routing_id is invalid"},
+		{name: "missing knock id", mutate: func(a *tunnelInstallArgs) { a.KnockResourceID = "" }, wantErr: "knock_resource_id is missing"},
+		{name: "missing api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "" }, wantErr: "QURL_API_URL is missing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			args := valid
+			tc.mutate(&args)
+			err := validateTunnelConnectorContract(&args)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateTunnelConnectorContract() err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("validateTunnelConnectorContract() err = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -2782,6 +2808,31 @@ func TestYAMLSingleQuotedRejectsControlsAndNewlines(t *testing.T) {
 	}
 }
 
+func TestRenderDockerComposeTunnelInstructionsShellQuotesAPIURL(t *testing.T) {
+	t.Parallel()
+	apiURL := "https://api.example.test/v1/$(touch should-not-run)"
+	quotedYAML, err := yamlSingleQuoted(apiURL)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted: %v", err)
+	}
+	got := mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
+		Slug:      testTunnelSlug,
+		LocalPort: defaultTunnelLocalPort,
+		APIURL:    apiURL,
+	}, testTunnelImageRef)
+	if !strings.Contains(got, "QURL_API_URL_YAML="+shellSingleQuote(quotedYAML)) {
+		t.Fatalf("Compose instructions did not shell-quote the YAML API URL scalar:\n%s", got)
+	}
+	for _, want := range []string{
+		"QURL_API_URL: ${QURL_API_URL_YAML}",
+		"QURL_BOOTSTRAP_URL: ${QURL_API_URL_YAML}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Compose instructions missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 	t.Parallel()
 	sh, err := exec.LookPath("sh")
@@ -4448,12 +4499,18 @@ func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	if resource, ok := data.(map[string]any); ok &&
 		resource[testKeyType] == client.ResourceTypeTunnel &&
 		resource[testKeyResourceID] != nil {
+		copied := make(map[string]any, len(resource)+2)
+		for key, value := range resource {
+			copied[key] = value
+		}
+		resource = copied
 		if _, exists := resource["connector_routing_id"]; !exists {
 			resource["connector_routing_id"] = testTunnelRoutingID
 		}
 		if _, exists := resource["knock_resource_id"]; !exists {
 			resource["knock_resource_id"] = "qurl-tunnel-server"
 		}
+		data = resource
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{

@@ -57,6 +57,8 @@ const (
 )
 
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+
+// TODO(upstream-contract): keep in lockstep with the qurl-service connector_routing_id format (layervai/qurl-service#1225).
 var connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
 
 // Docker does not publish a tight practical length limit for container names;
@@ -139,7 +141,10 @@ type tunnelInstallArgs struct {
 	ResourceID         string
 	ConnectorRoutingID string
 	KnockResourceID    string
-	APIURL             string
+	// APIURL is the canonical /v1 base. QURL_BOOTSTRAP_URL intentionally gets
+	// the same value for older production connector images, which append the
+	// legacy /agent/bootstrap path to this base; current images use QURL_API_URL.
+	APIURL string
 }
 
 type tunnelInstallRequest struct {
@@ -669,7 +674,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.KnockResourceID = strings.TrimSpace(resource.KnockResourceID)
 	resolvedArgs.APIURL = strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := validateTunnelConnectorContract(&resolvedArgs); err != nil {
-		log.Error("tunnel install: resource response missing connector contract", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+		log.Error("tunnel install: resource response missing connector contract", "error", err, "slug", args.Slug)
 		return nil, "qURL Connector setup could not obtain complete sandbox routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
@@ -1224,19 +1229,14 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 		if err := validateTunnelRouteIdentity(args); err != nil {
 			return "", err
 		}
-		resourceID, err := yamlSingleQuoted(args.ResourceID)
-		if err != nil {
-			return "", err
+		quotedIdentity := make([]string, 3)
+		for i, value := range []string{args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID} {
+			quotedIdentity[i], err = yamlSingleQuoted(value)
+			if err != nil {
+				return "", err
+			}
 		}
-		routingID, err := yamlSingleQuoted(args.ConnectorRoutingID)
-		if err != nil {
-			return "", err
-		}
-		knockID, err := yamlSingleQuoted(args.KnockResourceID)
-		if err != nil {
-			return "", err
-		}
-		identityYAML = fmt.Sprintf("\n    resource_id: %s\n    connector_routing_id: %s\n    knock_resource_id: %s", resourceID, routingID, knockID)
+		identityYAML = fmt.Sprintf("\n    resource_id: %s\n    connector_routing_id: %s\n    knock_resource_id: %s", quotedIdentity[0], quotedIdentity[1], quotedIdentity[2])
 	}
 	return fmt.Sprintf(`routes:
   - id: %s
