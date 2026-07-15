@@ -525,10 +525,13 @@ func connectorAPIURLFromEndpoint(raw string) (string, error) {
 	if endpoint == "" {
 		return "", errors.New("QURL_ENDPOINT is required")
 	}
-	if parsed, err := url.ParseRequestURI(endpoint); err == nil {
+	if parsed, err := url.ParseRequestURI(endpoint); err == nil && parsed.IsAbs() && parsed.Host != "" {
 		segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 		if len(segments) > 0 && strings.EqualFold(segments[len(segments)-1], "v1") {
 			return "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+		}
+		if parsed.Path != "" {
+			return "", errors.New("QURL_ENDPOINT must not include a path")
 		}
 	}
 	apiURL := endpoint + "/v1"

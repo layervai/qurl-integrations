@@ -344,6 +344,7 @@ func TestConnectorAPIURLFromEndpoint(t *testing.T) {
 		{name: "remote http", endpoint: "http://api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
 		{name: "versioned endpoint", endpoint: "https://api.qurl.invalid/v1", wantErr: "must omit the /v1 API suffix"},
 		{name: "case variant versioned endpoint", endpoint: "https://api.qurl.invalid/V1/", wantErr: "must omit the /v1 API suffix"},
+		{name: "endpoint with path", endpoint: "https://api.qurl.invalid/private", wantErr: "must not include a path"},
 		{name: "relative", endpoint: "api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
 	}
 	for _, tc := range cases {
