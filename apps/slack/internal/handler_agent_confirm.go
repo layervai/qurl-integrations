@@ -1048,18 +1048,19 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			ChannelID:    payload.Channel.ID,
 			UserID:       payload.User.ID,
 		}
-		summary, err := h.newAgentBackend(log).InspectToken(ctx, tc, pa.Token)
+		summary, summarized, err := h.newAgentBackend(log).InspectToken(ctx, tc, pa.Token)
 		if err != nil {
 			// Hard read failure (auth/store/scope): the detail is logged inside the
 			// backend; the public card stays a neutral failure with no token echo.
 			return newAttributedActionResult(false, agentConfirmInspectFailedReply, "Website summary could not be generated.")
 		}
-		// summary is already user-facing and mrkdwn-escaped. The audit line is
-		// outcome-NEUTRAL on purpose: the same non-error return covers a real summary,
-		// a protected-download report, and an "unresolvable token" note — the card
-		// carries the specific result, so the audit records only that a lookup ran
-		// (never a false "posted a summary" for the soft outcomes).
-		return newAttributedActionResult(true, summary, "Ran website summary lookup.")
+		// summary is user-facing and mrkdwn-escaped. The audit DISPLAY is outcome-neutral
+		// ("Ran ...lookup.") because the same non-error return covers a real summary, a
+		// protected-download report, and an unresolvable-token note — the card carries the
+		// specific result. Audit SUCCESS, though, tracks whether a summary actually landed
+		// (summarized): a soft no-match / protected / open-failure outcome records
+		// success=false per actionAuditResult's contract, not a false win.
+		return newAttributedActionResult(summarized, summary, "Ran website summary lookup.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {

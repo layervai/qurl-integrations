@@ -86,36 +86,44 @@ func (e *protectedInspectableContentError) Error() string {
 // read the model performs on its own. The fetched page content is escaped and
 // returned for DIRECT delivery to the channel: it never enters the model's context
 // (so there is no prompt-injection surface), and the qURL itself is never surfaced.
-func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, token string) (string, error) {
+//
+// Returns (card, summarized, err): card is the text to post; summarized is true only
+// when a real page summary was produced (false for a no-match note, a protected-
+// resource report, or a soft open/read failure), so the confirm path can record audit
+// success per actionAuditResult's contract. A non-nil err is a HARD read failure.
+func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, token string) (card string, summarized bool, err error) {
 	if b.store == nil {
-		return agentBackendUnconfigured, nil
+		return agentBackendUnconfigured, false, nil
 	}
 	token = strings.TrimPrefix(strings.TrimSpace(token), "$")
 	if token == "" {
-		return "Provide a $alias or $slug to inspect.", nil
+		return "Provide a $alias or $slug to inspect.", false, nil
 	}
 	c, nudge, err := b.authClientForTurn(ctx, "inspect token: client", tc)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if nudge != "" {
-		return nudge, nil
+		return nudge, false, nil
 	}
 	allowed, err := b.channelAllowed(ctx, tc)
 	if err != nil {
-		return b.fail("inspect token: channel scope", err)
+		s, ferr := b.fail("inspect token: channel scope", err)
+		return s, false, ferr
 	}
 	resources, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
-		return b.fail("inspect token: resources", err)
+		s, ferr := b.fail("inspect token: resources", err)
+		return s, false, ferr
 	}
 	entries, err := b.channelPolicy(ctx, tc)
 	if err != nil {
-		return b.fail("inspect token: aliases", err)
+		s, ferr := b.fail("inspect token: aliases", err)
+		return s, false, ferr
 	}
 	resolved, msg := resolveInspectableResource(token, entries, resources)
 	if msg != "" {
-		return msg, nil
+		return msg, false, nil
 	}
 
 	// Each confirmed summary mints a real one-time qURL, so it counts toward the
@@ -132,19 +140,22 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	})
 	if err != nil {
 		b.log.Error("agent inspect mint failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
-		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't open it for a summary right now.", escapeMrkdwnCode(token)), nil
+		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't open it for a summary right now.", escapeMrkdwnCode(token)), false, nil
 	}
 
 	snapshot, err := b.fetchInspectedSnapshot(ctx, out.QURLLink, out.QURLSite)
 	if err != nil {
 		var unsupported *protectedInspectableContentError
 		if errors.As(err, &unsupported) {
-			return formatProtectedInspectableResource(token, resolved, unsupported), nil
+			return formatProtectedInspectableResource(token, resolved, unsupported), false, nil
 		}
 		b.log.Error("agent inspect fetch failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
-		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't read its page content right now.", escapeMrkdwnCode(token)), nil
+		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't read its page content right now.", escapeMrkdwnCode(token)), false, nil
 	}
-	return formatInspectedSnapshot(token, resolved, snapshot), nil
+	// summarized=true ONLY here: a real page summary landed. Every other return above
+	// is a soft outcome (no-match, protected, or open/read failure) — false, so the
+	// confirm path can record audit success accurately (see the ActionInspect case).
+	return formatInspectedSnapshot(token, resolved, snapshot), true, nil
 }
 
 func resolveInspectableResource(token string, entries []slackdata.PolicyEntry, resources []client.Resource) (resolved *inspectedResource, userMsg string) {
@@ -318,7 +329,7 @@ func inspectAllowedRedirectHosts(qurlLink, qurlSite *url.URL) map[string]struct{
 // on a different/subdomain host, inspect silently degrades to the generic
 // couldn't-read fallback until this is updated in lockstep.
 // TODO(upstream-contract): keep qurl.link / qurl.site host literals in lockstep with
-// qurl-service's minted-link host shape (see also handler_get.go's qurl.link pin).
+// qurl-service's minted-link host shape (paired with isInspectableQURLSiteHost below).
 func isInspectableQURLLinkHost(hostname string) bool {
 	return hostname == "qurl.link"
 }

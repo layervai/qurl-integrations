@@ -361,7 +361,7 @@ func TestAgentBackend_InspectToken(t *testing.T) {
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestAgentBackend_InspectToken_EscapesUntrustedPageContent(t *testing.T) {
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestAgentBackend_InspectToken_StripsHTMLNoiseAndTruncatesSummaryFields(t *t
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestAgentBackend_InspectToken_RejectsAuthPage(t *testing.T) {
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestAgentBackend_InspectToken_JSONReturnsGenericFallback(t *testing.T) {
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -675,9 +675,12 @@ func TestAgentBackend_InspectToken_PDFReturnsProtectedResource(t *testing.T) {
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$runbook")
+	out, summarized, err := b.InspectToken(context.Background(), backendTC(), "$runbook")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
+	}
+	if summarized {
+		t.Fatal("a protected document must report summarized=false (no website summary landed)")
 	}
 	for _, want := range []string{"Protected resource for `$runbook`", "Operations runbook", "application/pdf", "no website summary is available"} {
 		if !strings.Contains(out, want) {
@@ -751,7 +754,7 @@ func TestAgentBackend_InspectToken_DownloadMimeReturnsProtectedResource(t *testi
 				log:                           slog.Default(),
 				allowInspectableLoopbackHosts: true,
 			}
-			out, err := b.InspectToken(context.Background(), backendTC(), "$download")
+			out, _, err := b.InspectToken(context.Background(), backendTC(), "$download")
 			if err != nil {
 				t.Fatalf("InspectToken: %v", err)
 			}
@@ -813,7 +816,7 @@ func TestAgentBackend_InspectToken_AllowsQURLLinkRedirectToQURLSite(t *testing.T
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -872,7 +875,7 @@ func TestAgentBackend_InspectToken_RejectsCrossHostRedirect(t *testing.T) {
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -928,9 +931,12 @@ func TestAgentBackend_InspectToken_AllowsProtectedAuthDocumentation(t *testing.T
 		log:                           slog.Default(),
 		allowInspectableLoopbackHosts: true,
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$login-guide")
+	out, summarized, err := b.InspectToken(context.Background(), backendTC(), "$login-guide")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
+	}
+	if !summarized {
+		t.Fatal("a real page summary must report summarized=true")
 	}
 	for _, want := range []string{"$login-guide", "SSO Login Guide", "How to configure single sign-on for the portal.", "Prerequisites"} {
 		if !strings.Contains(out, want) {
@@ -997,7 +1003,7 @@ func TestAgentBackend_InspectToken_RejectsUnexpectedInitialLinkHost(t *testing.T
 			}),
 		},
 	}
-	out, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
 	if err != nil {
 		t.Fatalf("InspectToken: %v", err)
 	}
@@ -1119,7 +1125,7 @@ func TestAgentBackend_NilStoreIsGraceful(t *testing.T) {
 		func() (string, error) { return b.ListResources(context.Background(), backendTC()) },
 		func() (string, error) { return b.ListAliases(context.Background(), backendTC()) },
 		func() (string, error) { return b.ResolveToken(context.Background(), backendTC(), "x") },
-		func() (string, error) { return b.InspectToken(context.Background(), backendTC(), "x") },
+		func() (string, error) { s, _, e := b.InspectToken(context.Background(), backendTC(), "x"); return s, e },
 	} {
 		out, err := fn()
 		if err != nil || out != agentBackendUnconfigured {
@@ -1140,8 +1146,11 @@ func TestAgentBackend_UnboundWorkspaceNudgesToSetup(t *testing.T) {
 		// ListResources needs the client only when the channel has an allowed set, so
 		// resolve a token (its slug branch always reaches the client) and read quota.
 		"ResolveToken": func() (string, error) { return b.ResolveToken(context.Background(), backendTC(), "staging") },
-		"InspectToken": func() (string, error) { return b.InspectToken(context.Background(), backendTC(), "staging") },
-		"Quota":        func() (string, error) { return b.Quota(context.Background(), backendTC()) },
+		"InspectToken": func() (string, error) {
+			s, _, e := b.InspectToken(context.Background(), backendTC(), "staging")
+			return s, e
+		},
+		"Quota": func() (string, error) { return b.Quota(context.Background(), backendTC()) },
 	} {
 		out, err := fn()
 		if err != nil {

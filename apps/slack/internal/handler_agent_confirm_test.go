@@ -386,9 +386,14 @@ func TestConfirm_InspectExecutesForNonAdminAndIsAudited(t *testing.T) {
 	}
 	// testAliasName does not resolve in this empty-policy channel — a soft (non-summary)
 	// outcome. The audit line must never falsely claim a summary was posted for it
-	// (regression guard for the outcome-neutral audit display).
+	// (regression guard for the outcome-neutral audit display)...
 	if strings.Contains(strings.ToLower(entry.Result), "posted") {
 		t.Fatalf("soft-outcome audit must not claim a summary was posted, got Result=%q", entry.Result)
+	}
+	// ...and audit SUCCESS must be false when no summary landed (summarized=false),
+	// per actionAuditResult's contract — not a false win.
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("soft-outcome audit success = %v, want false", entry.ResultSuccess)
 	}
 }
 
