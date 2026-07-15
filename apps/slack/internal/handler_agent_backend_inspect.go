@@ -75,6 +75,13 @@ func (e *protectedInspectableContentError) Error() string {
 	return strings.Join(parts, " ")
 }
 
+// failInspect logs an inspect read failure (via fail) and returns it in InspectToken's
+// (card, summarized, err) shape — a hard read failure is never a summary.
+func (b *agentBackend) failInspect(op string, cause error) (card string, summarized bool, err error) {
+	card, err = b.fail(op, cause)
+	return card, false, err
+}
+
 // InspectToken resolves a token to a channel-reachable resource, mints a
 // short-lived internal qURL, fetches the page behind it, and returns a compact,
 // mrkdwn-escaped summary (title, description, section headings) ready to post to
@@ -108,18 +115,15 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	}
 	allowed, err := b.channelAllowed(ctx, tc)
 	if err != nil {
-		s, ferr := b.fail("inspect token: channel scope", err)
-		return s, false, ferr
+		return b.failInspect("inspect token: channel scope", err)
 	}
 	resources, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
-		s, ferr := b.fail("inspect token: resources", err)
-		return s, false, ferr
+		return b.failInspect("inspect token: resources", err)
 	}
 	entries, err := b.channelPolicy(ctx, tc)
 	if err != nil {
-		s, ferr := b.fail("inspect token: aliases", err)
-		return s, false, ferr
+		return b.failInspect("inspect token: aliases", err)
 	}
 	resolved, msg := resolveInspectableResource(token, entries, resources)
 	if msg != "" {
@@ -152,9 +156,8 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 		b.log.Error("agent inspect fetch failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
 		return fmt.Sprintf("`$%s` resolves in this channel, but I couldn't read its page content right now.", escapeMrkdwnCode(token)), false, nil
 	}
-	// summarized=true ONLY here: a real page summary landed. Every other return above
-	// is a soft outcome (no-match, protected, or open/read failure) — false, so the
-	// confirm path can record audit success accurately (see the ActionInspect case).
+	// summarized=true ONLY here (a real summary landed); every other return above is a
+	// soft outcome — false. See the doc comment above for the full contract.
 	return formatInspectedSnapshot(token, resolved, snapshot), true, nil
 }
 
