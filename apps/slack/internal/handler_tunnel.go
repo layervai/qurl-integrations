@@ -1089,6 +1089,11 @@ type preparedTunnelInstallMessage struct {
 }
 
 func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (preparedTunnelInstallMessage, error) {
+	// Revalidate the complete server/local contract at the render boundary so
+	// alternate constructors cannot bypass the mutation-time checks.
+	if err := validateTunnelConnectorContract(args); err != nil {
+		return preparedTunnelInstallMessage{}, err
+	}
 	image := strings.TrimSpace(h.cfg.TunnelImage)
 	usingDefaultImage := image == ""
 	if image == "" {
@@ -1313,7 +1318,7 @@ func ValidateConnectorAPIURL(raw string) error {
 		return errConnectorAPIURLMissing
 	}
 	parsed, err := url.ParseRequestURI(trimmed)
-	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" {
 		return errConnectorAPIURLInvalid
 	}
 	if !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/v1") {
