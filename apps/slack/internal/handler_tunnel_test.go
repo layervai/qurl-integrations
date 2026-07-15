@@ -30,7 +30,9 @@ import (
 const (
 	testTunnelSlug         = "prod-dashboard"
 	testTunnelAliasDash    = "dash" // sample channel alias used across get/tunnel tests
-	testTunnelResourceID   = "r_prod_dash01"
+	testTunnelResourceID   = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+	testTunnelRoutingID    = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTunnelAPIURL       = "https://api.sandbox.example/v1"
 	testTunnelWizardCmd    = "protect-connector"                        // bare verb → guided modal
 	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug // typed: `protect-connector prod-dashboard`
 	testTunnelChannelID    = "C_test"
@@ -161,6 +163,7 @@ func testTunnelInstallArgs() *tunnelInstallArgs {
 		Alias:       testTunnelSlug,
 		LocalPort:   defaultTunnelLocalPort,
 		Environment: tunnelEnvDocker,
+		APIURL:      testTunnelAPIURL,
 	}
 }
 
@@ -272,6 +275,19 @@ func TestRenderTunnelConfigYAMLUsesRouteID(t *testing.T) {
 	}
 	if strings.Contains(got, "  - name:") {
 		t.Fatalf("config should not emit legacy route name:\n%s", got)
+	}
+}
+
+func TestValidateTunnelConnectorContractRejectsMalformedRoutingID(t *testing.T) {
+	t.Parallel()
+	err := validateTunnelConnectorContract(&tunnelInstallArgs{
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: "c-not-a-routing-id",
+		KnockResourceID:    "qurl-tunnel-server",
+		APIURL:             testTunnelAPIURL,
+	})
+	if err == nil || !strings.Contains(err.Error(), "connector_routing_id is invalid") {
+		t.Fatalf("validateTunnelConnectorContract() err = %v, want invalid routing ID", err)
 	}
 }
 
@@ -524,11 +540,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Fatalf("decode resource body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:   testTunnelResourceID,
-			testKeyType:         client.ResourceTypeTunnel,
-			testKeySlug:         testTunnelSlug,
-			testKeyStatus:       client.StatusActive,
-			"knock_resource_id": "qurl-tunnel-server",
+			testKeyResourceID:      testTunnelResourceID,
+			"connector_routing_id": testTunnelRoutingID,
+			testKeyType:            client.ResourceTypeTunnel,
+			testKeySlug:            testTunnelSlug,
+			testKeyStatus:          client.StatusActive,
+			"knock_resource_id":    "qurl-tunnel-server",
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -612,6 +629,11 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		testTunnelKeyPromptLine,
 		"cat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'",
 		"QURL_CONNECTOR_ID='" + testTunnelSlug + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"knock_resource_id: 'qurl-tunnel-server'",
+		"QURL_API_URL='" + testTunnelAPIURL + "'",
+		"QURL_BOOTSTRAP_URL='" + testTunnelAPIURL + "'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
@@ -628,7 +650,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -678,12 +700,13 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 		// find_or_create returns the EXISTING resource, carrying the admin's
 		// previously-set Display Name in description (not the install default).
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:   testTunnelResourceID,
-			testKeyType:         client.ResourceTypeTunnel,
-			testKeySlug:         testTunnelSlug,
-			testKeyStatus:       client.StatusActive,
-			testKeyDescription:  existingDisplayName,
-			"knock_resource_id": "qurl-tunnel-server",
+			testKeyResourceID:      testTunnelResourceID,
+			"connector_routing_id": testTunnelRoutingID,
+			testKeyType:            client.ResourceTypeTunnel,
+			testKeySlug:            testTunnelSlug,
+			testKeyStatus:          client.StatusActive,
+			testKeyDescription:     existingDisplayName,
+			"knock_resource_id":    "qurl-tunnel-server",
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -1469,7 +1492,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelResourceID, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -4214,7 +4237,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 					t.Fatalf("%s async reply missing %q:\n%s", tc.name, want, async)
 				}
 			}
-			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelResourceID) || strings.Contains(async, testTunnelAPIKey) {
+			if strings.Contains(async, testForbiddenResourceLabel) || strings.Contains(async, testTunnelAPIKey) {
 				t.Fatalf("%s async reply leaked resource details:\n%s", tc.name, async)
 			}
 		})
@@ -4250,6 +4273,44 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	}
 	if apiKeyHits != 0 {
 		t.Fatalf("api key route hit %d times; bootstrap key must not be minted when alias bind fails", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				testKeyResourceID:   testTunnelResourceID,
+				testKeyType:         client.ResourceTypeTunnel,
+				testKeySlug:         testTunnelSlug,
+				testKeyStatus:       client.StatusActive,
+				"knock_resource_id": "qurl-tunnel-server",
+			},
+			"meta": map[string]string{"request_id": "req_test"},
+		}); err != nil {
+			t.Fatalf("encode qurl envelope: %v", err)
+		}
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "complete sandbox routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+		t.Fatalf("async reply = %q, want incomplete connector contract refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; incomplete routing metadata must not consume a bootstrap key", apiKeyHits)
 	}
 }
 
@@ -4384,6 +4445,16 @@ func TestSlackCodeBlock(t *testing.T) {
 
 func respondQURLEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
+	if resource, ok := data.(map[string]any); ok &&
+		resource[testKeyType] == client.ResourceTypeTunnel &&
+		resource[testKeyResourceID] != nil {
+		if _, exists := resource["connector_routing_id"]; !exists {
+			resource["connector_routing_id"] = testTunnelRoutingID
+		}
+		if _, exists := resource["knock_resource_id"]; !exists {
+			resource["knock_resource_id"] = "qurl-tunnel-server"
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"data": data,

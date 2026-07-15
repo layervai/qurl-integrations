@@ -91,6 +91,7 @@ func newAdminTestHandler(t *testing.T, ts *adminTestServers) *Handler {
 	h := NewHandler(Config{
 		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
 		SlackSigningSecret: testSigningSecret,
+		ConnectorAPIURL:    testTunnelAPIURL,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(ts.customerServer.URL, apiKey, client.WithRetry(0))
 		},

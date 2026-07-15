@@ -338,6 +338,7 @@ func run() error {
 		AdminStore:                     adminStore,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		ConnectorAPIURL:                strings.TrimRight(strings.TrimSpace(qurlEndpoint), "/") + "/v1",
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,

@@ -138,15 +138,18 @@ at the OAuth-callback bind layer.
     `/qurl-admin protect-connector <id>` (or `$id`) for CLI-style admins.
   - **Backend work (both paths)** — use the workspace API key to
     find-or-create a qURL Connector resource scoped to the connected qURL
-    account, bind `$<id>` or the `alias:` override in the current Slack
-    channel, and mint a one-hour bootstrap API key. When `alias:` is omitted,
-    the ID doubles as the channel alias.
+    account, require its public `resource_id`, DNS-safe
+    `connector_routing_id`, and NHP `knock_resource_id`, bind `$<id>` or the
+    `alias:` override in the current Slack channel, and only then mint a
+    one-hour bootstrap API key. This ordering matters because successful NHP
+    registration consumes the one-shot key. When `alias:` is omitted, the ID
+    doubles as the channel alias.
   - **Idempotency** — retrying the install within the modal's 25-minute
     validity window reuses the same bootstrap-key idempotency bucket. Retrying
     after that window can mint a new key, so operators should run the newest
     Slack install block and discard older bootstrap-key messages.
-  - **Output** — hides the internal resource id and is tailored to the selected
-    environment:
+  - **Output** — pins the complete identity triple plus both `QURL_API_URL` and
+    legacy `QURL_BOOTSTRAP_URL`, and is tailored to the selected environment:
     - **Docker / Docker Compose** — guarded pasteable shell blocks that write
       `qurl-proxy.yaml`, create a bootstrap-key file, create/chown
       per-connector durable agent state, pass `QURL_API_KEY_FILE`, and pass
@@ -155,7 +158,9 @@ at the OAuth-callback bind layer.
       co-locate the sidecar with the target container, mount durable
       per-instance state at `/var/lib/layerv/agent`, mount or inject the
       bootstrap key through the runtime's secret mechanism, and remove the key
-      after the logs show a successful connection.
+      after the logs show a successful connection. ECS renders
+      `user: 65532:65532`; EFS access points for state/config must use the same
+      POSIX UID/GID as the distroless connector image.
   - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
     fallback because AWS injects task secrets as environment variables; Docker,
     Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.
@@ -700,7 +705,7 @@ that accidentally carried a numeric value.
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
 | `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
-| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
+| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Pin a release containing the split `resource_id` / `connector_routing_id` / `knock_resource_id` contract and registration-info HTTPS relay support (newer than v0.5.0), or the matching connector PR image while testing sandbox. Production must use a specific non-latest tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
 | `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |
 | `QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED` | No | Set `true` only if Slack bot-token rotation is enabled for the app. When true, `tokens_revoked` bot-token callbacks are acknowledged but not treated as uninstall teardowns; `app_uninstalled` still purges workspace data. Empty preserves the current Marketplace cleanup behavior. Malformed values fail startup because silently choosing either mode can suppress cleanup or make routine token rotation destructive. |

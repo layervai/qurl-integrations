@@ -1395,11 +1395,12 @@ func TestCreateResourceTunnelFindOrCreateSlug(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id":       "r_tunnel01",
-			"type":              ResourceTypeTunnel,
-			"slug":              testTunnelSlug,
-			"status":            StatusActive,
-			"knock_resource_id": "qurl-tunnel-server",
+			"resource_id":          "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA",
+			"connector_routing_id": "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"type":                 ResourceTypeTunnel,
+			"slug":                 testTunnelSlug,
+			"status":               StatusActive,
+			"knock_resource_id":    "qurl-tunnel-server",
 		})
 	}))
 	defer srv.Close()
@@ -1418,6 +1419,9 @@ func TestCreateResourceTunnelFindOrCreateSlug(t *testing.T) {
 	}
 	if got.KnockResourceID != "qurl-tunnel-server" {
 		t.Errorf("KnockResourceID = %q, want qurl-tunnel-server", got.KnockResourceID)
+	}
+	if got.ConnectorRoutingID != "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Errorf("ConnectorRoutingID = %q, want routing ID", got.ConnectorRoutingID)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(gotBody, &raw); err != nil {

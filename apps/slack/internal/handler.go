@@ -302,6 +302,10 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
+	// ConnectorAPIURL is the qurl-connector API base including /v1. Guided
+	// tunnel setup writes it into every rendered runtime definition so sandbox
+	// installs never silently fall back to production.
+	ConnectorAPIURL string
 
 	// BaseContext is the server-lifetime parent of every async work
 	// goroutine's context. SIGTERM cancels it, which propagates to
