@@ -1262,6 +1262,8 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 
 func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
 	if args == nil {
+		// There is no API URL to validate without parsed install arguments;
+		// preserve the more fundamental missing-input diagnostic.
 		return validateTunnelRouteIdentity(args)
 	}
 	// Deployment configuration is independent of the API response and gives
