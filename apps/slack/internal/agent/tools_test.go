@@ -230,7 +230,7 @@ func TestParseProposal_NumericPortSurvives(t *testing.T) {
 func TestToolSpecs_CoverEveryToolWithSchemas(t *testing.T) {
 	specs := toolSpecs()
 	want := []string{
-		toolListResources, toolListAliases, toolResolveToken, toolGetQuota,
+		toolListResources, toolListAliases, toolResolveToken, toolInspectToken, toolGetQuota,
 		toolProposeGet, toolProposeRevoke, toolProposeSetAlias, toolProposeUnsetAlias,
 		toolProposeProtectConnector, toolProposeProtectURL,
 	}

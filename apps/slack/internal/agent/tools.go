@@ -15,6 +15,7 @@ const (
 	toolListResources = "list_resources"
 	toolListAliases   = "list_aliases"
 	toolResolveToken  = "resolve_token"
+	toolInspectToken  = "inspect_token"
 	toolGetQuota      = "get_quota"
 
 	// proposeToolPrefix marks the mutation tools — calls with this prefix stop
@@ -64,6 +65,12 @@ func toolSpecs() []ToolSpec {
 			Name:        toolResolveToken,
 			Description: "Resolve a single $slug or $alias to its resource identity, scoped to this channel. Read-only: it does NOT mint a link or grant access. Use it to confirm a token the user named actually resolves before proposing an action on it.",
 			Schema:      map[string]any{fieldToken: stringProp("The $slug or $alias to resolve (with or without the leading $).")},
+			Required:    []string{fieldToken},
+		},
+		{
+			Name:        toolInspectToken,
+			Description: "Resolve a single $slug or $alias to its channel-reachable resource, mint a short-lived internal qURL, fetch the linked content, and return a compact page/content snapshot for summarization. Use this only when the user explicitly asks for page/site/content information such as a description, summary, overview, or what's on the resource. It never exposes the qURL link to the user.",
+			Schema:      map[string]any{fieldToken: stringProp("The $slug or $alias to inspect (with or without the leading $).")},
 			Required:    []string{fieldToken},
 		},
 		{
@@ -180,14 +187,29 @@ func coerceToString(v any) string {
 // adapt rather than aborting the turn.
 func (a *Agent) executeRead(ctx context.Context, tc *TurnContext, call ToolCall) (content string, isErr bool) {
 	var (
-		out string
-		err error
+		out              string
+		err              error
+		inspectMemoToken string
 	)
 	switch call.Name {
 	case toolListResources:
 		out, err = a.backend.ListResources(ctx, tc)
 	case toolListAliases:
 		out, err = a.backend.ListAliases(ctx, tc)
+	case toolInspectToken:
+		fields, derr := decodeFields(call.Input)
+		if derr != nil {
+			return "Invalid input for inspect_token.", true
+		}
+		token := normalizeToken(fields[fieldToken])
+		if token == "" {
+			return "inspect_token requires a non-empty token.", true
+		}
+		if memo, ok := a.inspectMemo[token]; ok {
+			return memo.Content, memo.IsError
+		}
+		inspectMemoToken = token
+		out, err = a.backend.InspectToken(ctx, tc, token)
 	case toolGetQuota:
 		out, err = a.backend.Quota(ctx, tc)
 	case toolResolveToken:
@@ -205,7 +227,14 @@ func (a *Agent) executeRead(ctx context.Context, tc *TurnContext, call ToolCall)
 	}
 	if err != nil {
 		// Keep the model's context clean: a stable, non-leaky message.
-		return "That lookup didn't succeed. Try a different approach or ask the user for clarification.", true
+		generic := "That lookup didn't succeed. Try a different approach or ask the user for clarification."
+		if inspectMemoToken != "" {
+			a.inspectMemo[inspectMemoToken] = ToolResult{Content: generic, IsError: true}
+		}
+		return generic, true
+	}
+	if inspectMemoToken != "" {
+		a.inspectMemo[inspectMemoToken] = ToolResult{Content: out}
 	}
 	return out, false
 }
