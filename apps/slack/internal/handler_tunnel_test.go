@@ -2300,17 +2300,22 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("tail audit write did not start")
 	}
-	// The tail audit is now blocked inside the h.Go goroutine and stays blocked
-	// until releaseAudit below. The pooled worker releases its h.sem slot in a
-	// DIFFERENT goroutine (runOnPool's deferred <-sem, after the worker closure
-	// returns), so ddb.started firing establishes no happens-before with the
-	// release — reading len(h.sem) here races that deferred <-sem and flakes
-	// under load. Instead, claim the slot: with cap(h.sem)==1 this send blocks
-	// until the worker frees the slot and can only time out if the slot stays
-	// pinned by the in-flight audit, which is the regression under test.
+	// The tail audit is parked in its h.Go goroutine until releaseAudit below.
+	// Don't sample len(h.sem): the pooled worker frees its slot in runOnPool's
+	// deferred <-sem — a different goroutine with no happens-before to ddb.started
+	// — so the read is nondeterministic and was the original flake. Claim the slot
+	// instead; the send blocks until the worker frees it. The claimed slot is
+	// intentionally left held afterward — no further pool work runs here.
+	if cap(h.sem) != 1 {
+		// A spare slot would let the claim succeed without the worker releasing.
+		t.Fatalf("test assumes cap(h.sem) == 1, got %d", cap(h.sem))
+	}
+	// Wait under agentConnectorAuditWriteTimeout (the audit's ctx bound): a regressed
+	// synchronous audit pins the worker in PutItem until that ctx fires, so the send
+	// must time out first to surface it rather than passing once the slot frees.
 	select {
 	case h.sem <- struct{}{}:
-	case <-time.After(2 * time.Second):
+	case <-time.After(agentConnectorAuditWriteTimeout / 2):
 		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
