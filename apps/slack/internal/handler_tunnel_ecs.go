@@ -9,8 +9,10 @@ import (
 )
 
 type ecsContainerDefinition struct {
-	Name             string              `json:"name"`
-	Image            string              `json:"image"`
+	Name  string `json:"name"`
+	Image string `json:"image"`
+	// User intentionally has no omitempty: every generated connector container
+	// must explicitly pin the audited nonroot runtime identity.
 	User             string              `json:"user"`
 	Essential        bool                `json:"essential"`
 	Environment      []ecsEnvironmentVar `json:"environment"`

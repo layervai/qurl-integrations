@@ -1237,6 +1237,8 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	// renderer runs, so a one-shot bootstrap key is never reused for resources.
 	identityYAML := ""
 	if args.ResourceID != "" || args.ConnectorRoutingID != "" || args.KnockResourceID != "" {
+		// Revalidate at the renderer boundary even though production validates
+		// before minting; renderers are also called directly by tests and tools.
 		if err := validateTunnelRouteIdentity(args); err != nil {
 			return "", err
 		}

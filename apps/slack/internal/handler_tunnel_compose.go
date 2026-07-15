@@ -66,6 +66,7 @@ QURL_COMPOSE_FILE="$PWD/qurl-connector-${QURL_CONNECTOR_ID}.compose.yaml"
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
+$SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"

@@ -164,8 +164,7 @@ func run() error {
 	// previously fell back to the sandbox URL, which is the kind of silent
 	// misconfiguration that ships a prod deploy at sandbox.
 	rawQURLEndpoint := os.Getenv("QURL_ENDPOINT")
-	qurlEndpoint := strings.TrimRight(strings.TrimSpace(rawQURLEndpoint), "/")
-	connectorAPIURL, err := connectorAPIURLFromEndpoint(rawQURLEndpoint)
+	qurlEndpoint, connectorAPIURL, err := connectorAPIURLFromEndpoint(rawQURLEndpoint)
 	if err != nil {
 		return err
 	}
@@ -520,25 +519,24 @@ func run() error {
 	return nil
 }
 
-func connectorAPIURLFromEndpoint(raw string) (string, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(raw), "/")
+func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
+	endpoint = strings.TrimRight(strings.TrimSpace(raw), "/")
 	if endpoint == "" {
-		return "", errors.New("QURL_ENDPOINT is required")
+		return "", "", errors.New("QURL_ENDPOINT is required")
 	}
 	if parsed, err := url.ParseRequestURI(endpoint); err == nil && parsed.IsAbs() && parsed.Host != "" {
-		segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
-		if len(segments) > 0 && strings.EqualFold(segments[len(segments)-1], "v1") {
-			return "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+		if strings.EqualFold(strings.Trim(parsed.Path, "/"), "v1") {
+			return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
 		}
 		if parsed.Path != "" {
-			return "", errors.New("QURL_ENDPOINT must not include a path")
+			return "", "", errors.New("QURL_ENDPOINT must not include a path")
 		}
 	}
-	apiURL := endpoint + "/v1"
+	apiURL = endpoint + "/v1"
 	if err := internal.ValidateConnectorAPIURL(apiURL); err != nil {
-		return "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", err)
+		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", err)
 	}
-	return apiURL, nil
+	return endpoint, apiURL, nil
 }
 
 func lameduckForSignal(sig os.Signal) time.Duration {
