@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/url"
 	"reflect"
 	"regexp"
 	"runtime/debug"
@@ -75,6 +76,11 @@ const agentTransientReply = "That took longer than I could handle just now — p
 // neutrally ("conversation mode is at its limit", not "you've reached…") so it
 // doesn't wrongly blame an innocent member when it's the per-workspace cap that hit.
 const agentRateLimitedReply = "Conversation mode is at its limit for now — give it a few minutes, or use a `/qurl` command in the meantime."
+
+// agentInvalidProtectURLReply rejects explicit non-HTTPS protection requests
+// before they reach the model. Keep the copy generic so an attacker-controlled
+// target is never reflected into the channel.
+const agentInvalidProtectURLReply = "I can only protect HTTPS URLs. Use a URL that starts with `https://`."
 
 // agentTurnRateWindow is the fixed window for the per-user / per-team turn counters.
 // The env limits are expressed per hour, so the window is one hour.
@@ -716,6 +722,20 @@ func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
 }
 
+// agentHasExplicitNonHTTPSProtectURL recognizes the direct conversation form
+// "Protect <target> ..." when the target declares a non-HTTPS URI scheme. It is
+// intentionally narrow: aliases, scheme-less targets, and explanatory prose
+// still go through the agent, while values such as javascript: and http: are
+// rejected deterministically before any LLM call.
+func agentHasExplicitNonHTTPSProtectURL(message string) bool {
+	fields := strings.Fields(message)
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "protect") {
+		return false
+	}
+	target, err := url.Parse(fields[1])
+	return err == nil && target.Scheme != "" && !strings.EqualFold(target.Scheme, resourceExposeSchemeHTTPS)
+}
+
 // agentEventPartition is the conversation/dedupe partition key. It deliberately
 // uses the same resolver as lifecycleWorkspaceIDs: org-level installs write those
 // rows under enterprise_id, workspace-level installs write under team_id, and the
@@ -821,6 +841,12 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
+	message := stripBotMention(env.Event.Text)
+	if agentHasExplicitNonHTTPSProtectURL(message) {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidProtectURLReply)
+		return
+	}
+
 	// Working-on-it ack: before the pane rollout flag flips, pane turns keep the
 	// reaction fallback plus best-effort native status; after it flips, pane turns use
 	// only Slack's native assistant status. Channel turns always use the eyes reaction.
@@ -868,7 +894,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
 	}
 	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
-	result, newHistory, err := a.Run(ctx, &tc, history, stripBotMention(env.Event.Text))
+	result, newHistory, err := a.Run(ctx, &tc, history, message)
 
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)
