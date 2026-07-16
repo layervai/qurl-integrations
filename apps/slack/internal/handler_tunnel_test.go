@@ -302,6 +302,7 @@ func TestValidateTunnelConnectorContract(t *testing.T) {
 	}{
 		{name: "valid", mutate: func(*tunnelInstallArgs) {}},
 		{name: "missing resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "" }, wantErr: "resource_id is missing"},
+		{name: "legacy internal resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "r_legacy" }, wantErr: "resource_id is a legacy internal label"},
 		{name: "malformed resource id", mutate: func(a *tunnelInstallArgs) { a.ResourceID = "public key with spaces" }, wantErr: "resource_id is invalid"},
 		{name: "missing routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "" }, wantErr: "connector_routing_id is missing"},
 		{name: "malformed routing id", mutate: func(a *tunnelInstallArgs) { a.ConnectorRoutingID = "c-not-a-routing-id" }, wantErr: "connector_routing_id is invalid"},
@@ -4358,6 +4359,37 @@ func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *test
 	}
 	if apiKeyHits != 0 {
 		t.Fatalf("api key route hit %d times; incomplete routing metadata must not consume a bootstrap key", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRefusesLegacyResourceIDBeforeMintingKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: "r_legacy-internal",
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "complete sandbox routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+		t.Fatalf("async reply = %q, want legacy resource ID refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; legacy resource ID must not consume a bootstrap key", apiKeyHits)
 	}
 }
 

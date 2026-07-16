@@ -170,9 +170,10 @@ at the OAuth-callback bind layer.
   - **Constraint** — do not share one agent state volume across concurrently
     running sidecars.
   - **Promotion gate** — deploy and verify qurl-service #1225 before promoting
-    this Slack build. The local character validator cannot distinguish the new
-    client-safe public-key `resource_id` from a legacy internal `r_` label; an
-    out-of-order deploy could render the legacy label into customer config.
+    this Slack build. As a fail-closed rollout guard, the Slack renderer rejects
+    a legacy internal `r_` resource label before minting a bootstrap key; do not
+    treat that guard as a substitute for verifying the complete producer
+    identity triple in sandbox.
   - **Endpoint migration** — before promotion, replace any `QURL_ENDPOINT` that
     includes `/v1`, another path, or remote plaintext `http://`. Startup now
     rejects those shapes; configure the HTTPS API origin only (for example,

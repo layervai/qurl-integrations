@@ -62,8 +62,8 @@ var (
 	errConnectorAPIURLInvalid = errors.New("QURL_API_URL is invalid")
 	tunnelSlugPattern         = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
 	// TODO(upstream-contract): keep the unpadded base64url public-key charset
-	// in lockstep with qurl-service#1206/#1225. This shape cannot distinguish
-	// a public key from a legacy r_ label, so producer-first rollout is required.
+	// in lockstep with qurl-service#1206/#1225. The validator below separately
+	// rejects the legacy r_ prefix during the producer-first rollout.
 	connectorResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 	// TODO(upstream-contract): keep the exact c- plus 52-character base32
 	// routing-label shape in lockstep with qurl-service#1225.
@@ -1295,6 +1295,13 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 	resourceID := strings.TrimSpace(args.ResourceID)
 	if resourceID == "" {
 		return errors.New("resource_id is missing")
+	}
+	// TODO(upstream-contract): qurl-service#1225 replaces legacy internal r_
+	// labels with client-safe P-256 public keys. Fail closed during the rollout
+	// so an old producer cannot render an internal routing label into customer
+	// connector config.
+	if strings.HasPrefix(resourceID, "r_") {
+		return errors.New("resource_id is a legacy internal label")
 	}
 	if !connectorResourceIDPattern.MatchString(resourceID) {
 		return errors.New("resource_id is invalid")
