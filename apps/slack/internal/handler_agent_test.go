@@ -52,13 +52,15 @@ func TestStripBotMention(t *testing.T) {
 
 func TestAgentHasExplicitNonHTTPSProtectURL(t *testing.T) {
 	cases := map[string]bool{
-		"Protect javascript:alert(1) as $bad.": true,
-		"protect http://example.com as $docs":  true,
-		"Protect https://example.com as $docs": false,
-		"Protect $docs as $shared":             false,
-		"Protect example.com:8080 as $local":   false,
-		"Protect javascript:alert(1)":          true,
-		"How do I protect javascript: URLs?":   false,
+		"Protect javascript:alert(1) as $bad.":  true,
+		"protect http://example.com as $docs":   true,
+		"Protect <http://example.com> as $docs": true,
+		"Protect https://example.com as $docs":  false,
+		"Protect $docs as $shared":              false,
+		"Protect example.com:8080 as $local":    false,
+		"Protect example.com:8080/path as $x":   false,
+		"Protect javascript:alert(1)":           true,
+		"How do I protect javascript: URLs?":    false,
 	}
 	for message, want := range cases {
 		if got := agentHasExplicitNonHTTPSProtectURL(message); got != want {

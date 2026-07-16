@@ -734,14 +734,19 @@ func agentHasExplicitNonHTTPSProtectURL(message string) bool {
 	if len(fields) < 2 || !strings.EqualFold(fields[0], "protect") {
 		return false
 	}
+	targetText := unwrapSlackURLArg(fields[1])
 	// url.Parse treats a scheme-less host:port as an opaque URI scheme. Leave a
 	// numeric port target to the normal agent path instead of misclassifying it.
-	if _, port, err := net.SplitHostPort(fields[1]); err == nil {
+	hostPort := targetText
+	if !strings.Contains(hostPort, "://") {
+		hostPort, _, _ = strings.Cut(hostPort, "/")
+	}
+	if _, port, err := net.SplitHostPort(hostPort); err == nil {
 		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
 			return false
 		}
 	}
-	target, err := url.Parse(fields[1])
+	target, err := url.Parse(targetText)
 	return err == nil && target.Scheme != "" && !strings.EqualFold(target.Scheme, resourceExposeSchemeHTTPS)
 }
 
@@ -835,6 +840,12 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
+	message := stripBotMention(env.Event.Text)
+	if agentHasExplicitNonHTTPSProtectURL(message) {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidProtectURLReply)
+		return
+	}
+
 	// Rate-limit AFTER dedupe (count unique messages, not redeliveries) and BEFORE
 	// the turn runs (the LLM is the cost we're capping). Confirm-clicks
 	// (processAgentConfirm) are deliberately NOT limited: they're consume-once and
@@ -847,12 +858,6 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// the spend whether or not it produced a usable answer.
 	if reply, limited := h.agentTurnLimited(ctx, log, env); limited {
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
-		return
-	}
-
-	message := stripBotMention(env.Event.Text)
-	if agentHasExplicitNonHTTPSProtectURL(message) {
-		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidProtectURLReply)
 		return
 	}
 
