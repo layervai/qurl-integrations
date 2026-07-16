@@ -65,8 +65,12 @@ var (
 	// in lockstep with qurl-service#1206/#1225. This shape cannot distinguish
 	// a public key from a legacy r_ label, so producer-first rollout is required.
 	connectorResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
-	connectorRoutingIDPattern  = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
-	connectorKnockIDPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	// TODO(upstream-contract): keep the exact c- plus 52-character base32
+	// routing-label shape in lockstep with qurl-service#1225.
+	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+	// TODO(upstream-contract): keep the NHP admission-target charset and length
+	// in lockstep with qurl-service's tunnel knock_resource_id contract.
+	connectorKnockIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 )
 
 // Docker does not publish a tight practical length limit for container names;
@@ -1315,6 +1319,9 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 // ValidateConnectorAPIURL validates the API base rendered into customer
 // connector manifests. It is exported so the Slack process can reject an
 // invalid QURL_ENDPOINT at startup, before an admin attempts an install.
+// cmd/main.connectorAPIURLFromEndpoint deliberately overlaps these checks on
+// the raw origin to provide field-specific operator messages; keep both sides
+// in sync until the typed-reason consolidation tracked by issue #967.
 func ValidateConnectorAPIURL(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
