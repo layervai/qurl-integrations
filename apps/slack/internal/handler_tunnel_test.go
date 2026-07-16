@@ -2295,13 +2295,31 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
+	// stepTimeout bounds each synchronization step below: comfortably above the
+	// goroutine-spawn / slot-release latency of a legitimate run on loaded CI, and —
+	// via the guard — under agentConnectorAuditWriteTimeout, so a regressed synchronous
+	// audit (which pins the worker in PutItem until that ctx fires) is still holding the
+	// slot when the claim times out instead of freeing first.
+	const stepTimeout = 2 * time.Second
+	if stepTimeout >= agentConnectorAuditWriteTimeout {
+		t.Fatalf("stepTimeout (%s) must stay under agentConnectorAuditWriteTimeout (%s)", stepTimeout, agentConnectorAuditWriteTimeout)
+	}
 	select {
 	case <-ddb.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(stepTimeout):
 		t.Fatal("tail audit write did not start")
 	}
-	if got := len(h.sem); got != 0 {
-		t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", got)
+	// Don't sample len(h.sem): the pooled worker frees its slot in runOnPool's deferred
+	// <-sem — a different goroutine with no happens-before to ddb.started, so the read is
+	// nondeterministic (the original flake). Claim the slot instead; with cap(h.sem)==1 the
+	// send blocks until the worker frees it. The slot is then left held — no more pool work.
+	if cap(h.sem) != 1 {
+		t.Fatalf("test assumes cap(h.sem) == 1, got %d", cap(h.sem))
+	}
+	select {
+	case h.sem <- struct{}{}:
+	case <-time.After(stepTimeout):
+		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
 	h.Wait()
