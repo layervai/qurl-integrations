@@ -35,6 +35,9 @@ CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
+# The generated config contains only client-safe public/routing metadata; 0644
+# lets the nonroot Connector (UID 65532) read the bind mount. Its bootstrap
+# credential stays separately protected in the 0600 api_key file below.
 $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"

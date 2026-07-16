@@ -23,6 +23,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		"WEB_CONTAINER='web.1_2-3'",
 		"WEB_CONTAINER may contain only letters, numbers, dots, underscores, and hyphens.",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"`,
+		"client-safe public/routing metadata",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
