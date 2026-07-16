@@ -1260,7 +1260,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 		}
 		quotedIdentity := make([]string, 3)
 		for i, value := range []string{args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID} {
-			quotedIdentity[i], err = yamlSingleQuoted(value)
+			quotedIdentity[i], err = yamlSingleQuoted(strings.TrimSpace(value))
 			if err != nil {
 				return "", err
 			}
