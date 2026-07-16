@@ -56,6 +56,8 @@ func TestAgentHasExplicitNonHTTPSProtectURL(t *testing.T) {
 		"protect http://example.com as $docs":  true,
 		"Protect https://example.com as $docs": false,
 		"Protect $docs as $shared":             false,
+		"Protect example.com:8080 as $local":   false,
+		"Protect javascript:alert(1)":          true,
 		"How do I protect javascript: URLs?":   false,
 	}
 	for message, want := range cases {

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/url"
 	"reflect"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -731,6 +733,13 @@ func agentHasExplicitNonHTTPSProtectURL(message string) bool {
 	fields := strings.Fields(message)
 	if len(fields) < 2 || !strings.EqualFold(fields[0], "protect") {
 		return false
+	}
+	// url.Parse treats a scheme-less host:port as an opaque URI scheme. Leave a
+	// numeric port target to the normal agent path instead of misclassifying it.
+	if _, port, err := net.SplitHostPort(fields[1]); err == nil {
+		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
+			return false
+		}
 	}
 	target, err := url.Parse(fields[1])
 	return err == nil && target.Scheme != "" && !strings.EqualFold(target.Scheme, resourceExposeSchemeHTTPS)
