@@ -173,6 +173,11 @@ at the OAuth-callback bind layer.
     this Slack build. The local character validator cannot distinguish the new
     client-safe public-key `resource_id` from a legacy internal `r_` label; an
     out-of-order deploy could render the legacy label into customer config.
+  - **Endpoint migration** — before promotion, replace any `QURL_ENDPOINT` that
+    includes `/v1`, another path, or remote plaintext `http://`. Startup now
+    rejects those shapes; configure the HTTPS API origin only (for example,
+    `https://api.sandbox.layerv.ai`). Plaintext remains limited to loopback
+    development endpoints.
   - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
     a bootstrap key, it retries the final text post once, revokes the key, and
     posts a discard notice when possible. Cleanup uses the handler's base
