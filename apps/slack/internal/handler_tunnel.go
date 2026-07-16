@@ -49,6 +49,7 @@ const (
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
+	connectorAPIVersionPath    = "/v1"
 	kubernetesNameMaxLen       = 63
 	// Hex chars appended to truncated Kubernetes object names. Twelve hex
 	// chars is 48 bits (2^48 ~= 3e14), keeping collision risk negligible for
@@ -1325,7 +1326,7 @@ func ValidateConnectorAPIURL(raw string) error {
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" {
 		return errConnectorAPIURLInvalid
 	}
-	if !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/v1") {
+	if strings.TrimRight(parsed.Path, "/") != connectorAPIVersionPath {
 		return errConnectorAPIURLInvalid
 	}
 	if parsed.Scheme == resourceExposeSchemeHTTPS {
