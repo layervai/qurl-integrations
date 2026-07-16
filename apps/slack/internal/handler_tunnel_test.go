@@ -287,6 +287,27 @@ func TestRenderTunnelConfigYAMLUsesRouteID(t *testing.T) {
 	}
 }
 
+func TestRenderTunnelConfigYAMLNormalizesPinnedIdentity(t *testing.T) {
+	args := testPinnedTunnelInstallArgs()
+	args.ResourceID = "  " + args.ResourceID + "  "
+	args.ConnectorRoutingID = "\t" + args.ConnectorRoutingID + "\n"
+	args.KnockResourceID = " " + args.KnockResourceID + " "
+
+	got, err := renderTunnelConfigYAML(args)
+	if err != nil {
+		t.Fatalf("renderTunnelConfigYAML: %v", err)
+	}
+	for _, want := range []struct{ field, value string }{
+		{"resource_id", testTunnelResourceID},
+		{"connector_routing_id", testTunnelRoutingID},
+		{"knock_resource_id", testTunnelKnockID},
+	} {
+		if !strings.Contains(got, want.field+": '"+want.value+"'") {
+			t.Fatalf("config did not normalize %s:\n%s", want.field, got)
+		}
+	}
+}
+
 func TestValidateTunnelConnectorContract(t *testing.T) {
 	t.Parallel()
 	valid := tunnelInstallArgs{
@@ -312,6 +333,7 @@ func TestValidateTunnelConnectorContract(t *testing.T) {
 		{name: "relative api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = connectorAPIVersionPath }, wantErr: "QURL_API_URL is invalid"},
 		{name: "remote http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://api.example.test/v1" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "nested api path", mutate: func(a *tunnelInstallArgs) { a.APIURL = "https://api.example.test/foo/v1" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "fragment", mutate: func(a *tunnelInstallArgs) { a.APIURL = "https://api.example.test/v1#fragment" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "invalid api url takes precedence over incomplete identity", mutate: func(a *tunnelInstallArgs) { a.APIURL = connectorAPIVersionPath; a.ConnectorRoutingID = "" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "loopback http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://127.0.0.1:8080/v1" }},
 		{name: "uppercase localhost http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://LOCALHOST:8080/v1" }},
