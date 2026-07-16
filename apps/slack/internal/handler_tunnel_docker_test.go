@@ -47,3 +47,17 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderDockerTunnelInstructionsShellQuotesAPIURL(t *testing.T) {
+	t.Parallel()
+	args := testPinnedTunnelInstallArgs()
+	args.APIURL = "https://api.$(touch-should-not-run).example.test/v1"
+
+	got := mustRenderDockerTunnelInstructions(t, args, testTunnelImageRef)
+	quoted := shellSingleQuote(args.APIURL)
+	for _, name := range []string{"QURL_API_URL", "QURL_BOOTSTRAP_URL"} {
+		if !strings.Contains(got, "-e "+name+"="+quoted) {
+			t.Fatalf("Docker instructions did not shell-quote %s:\n%s", name, got)
+		}
+	}
+}
