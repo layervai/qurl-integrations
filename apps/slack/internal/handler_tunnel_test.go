@@ -2299,8 +2299,7 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	// goroutine-spawn / slot-release latency of a legitimate run on loaded CI, and —
 	// via the guard — under agentConnectorAuditWriteTimeout, so a regressed synchronous
 	// audit (which pins the worker in PutItem until that ctx fires) is still holding the
-	// slot when the claim times out instead of freeing first. Fixed, not derived from the
-	// constant, so the CI headroom stays stable if that timeout is retuned.
+	// slot when the claim times out instead of freeing first.
 	const stepTimeout = 2 * time.Second
 	if stepTimeout >= agentConnectorAuditWriteTimeout {
 		t.Fatalf("stepTimeout (%s) must stay under agentConnectorAuditWriteTimeout (%s)", stepTimeout, agentConnectorAuditWriteTimeout)
