@@ -28,6 +28,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"WEB_SERVICE may contain only letters, numbers, underscores, and hyphens.",
 		"CONNECTOR_SERVICE='qurl-connector-" + testTunnelSlug + "'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"`,
+		"client-safe public/routing metadata",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
 		`QURL_COMPOSE_FILE="$PWD/qurl-connector-${QURL_CONNECTOR_ID}.compose.yaml"`,
 		testTunnelKeyPromptLine,
