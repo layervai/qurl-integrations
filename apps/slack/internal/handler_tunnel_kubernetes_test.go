@@ -146,6 +146,22 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 }
 
+func TestRenderKubernetesTunnelInstructionsYAMLQuotesAPIURL(t *testing.T) {
+	t.Parallel()
+	args := testPinnedTunnelInstallArgs()
+	args.Environment = tunnelEnvKubernetes
+	args.APIURL = "https://api.$(touch-should-not-run).example.test/v1"
+
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
+	quoted, err := yamlSingleQuoted(args.APIURL)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted: %v", err)
+	}
+	if count := strings.Count(got, "value: "+quoted); count != 2 {
+		t.Fatalf("Kubernetes instructions contain %d quoted API URL values, want 2:\n%s", count, got)
+	}
+}
+
 func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 	t.Parallel()
 	kubectl, err := exec.LookPath("kubectl")
