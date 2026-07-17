@@ -307,10 +307,11 @@ func TestAdminHelpReflectsExposeVerb(t *testing.T) {
 
 // --- button clicks (block_actions) ----------------------------------------
 
-// TestHandleExposeConnectorClick_OpensInstallModal fences that the "Protect qURL
-// Connector" button opens the existing connector installer modal (reused
-// wholesale — same callback_id its bare-command path uses).
-func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
+// TestHandleExposeConnectorClick_OpensSetupChooser fences that the "Protect
+// qURL Connector" button opens a connector-specific branch screen. The
+// existing-service branch still routes to the historical installer; S3 hosted
+// websites get their own follow-up form.
+func TestHandleExposeConnectorClick_OpensSetupChooser(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 	h := newAdminTestHandler(t, ts)
@@ -338,8 +339,22 @@ func TestHandleExposeConnectorClick_OpensInstallModal(t *testing.T) {
 	if err := json.Unmarshal(view, &modal); err != nil {
 		t.Fatalf("modal JSON: %v", err)
 	}
-	if modal[blockKitFieldCallbackID] != callbackIDTunnelInstall {
-		t.Errorf("callback_id = %v, want %s", modal[blockKitFieldCallbackID], callbackIDTunnelInstall)
+	if modal[blockKitFieldCallbackID] != callbackIDConnectorSetup {
+		t.Errorf("callback_id = %v, want %s", modal[blockKitFieldCallbackID], callbackIDConnectorSetup)
+	}
+	viewBody := string(view)
+	for _, want := range []string{
+		"Web app or HTTP API",
+		"App, dashboard, admin tool, or API reachable on an HTTP port.",
+		"S3 static website",
+		"Static-site files in an S3 bucket.",
+		"What type of resource are you protecting?",
+		"radio_buttons",
+		connectorSetupActionType,
+	} {
+		if !strings.Contains(viewBody, want) {
+			t.Errorf("connector setup chooser missing %q: %s", want, viewBody)
+		}
 	}
 }
 

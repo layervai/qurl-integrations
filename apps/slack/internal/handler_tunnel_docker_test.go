@@ -8,11 +8,15 @@ import (
 func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	t.Parallel()
 	got := mustRenderDockerTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvDocker,
-		WebRef:      "web.1_2-3",
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvDocker,
+		WebRef:             "web.1_2-3",
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}, testTunnelImageRef)
 
 	for _, want := range []string{
@@ -27,7 +31,10 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
+		"resource_id: '" + testTunnelResourceID + "'",
+		"LAYERV_KNOCK_RESOURCE_ID='" + testTunnelKnockID + "'",
 		`--network "container:${WEB_CONTAINER}"`,
+		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		"Re-running this install briefly restarts the qURL Connector container",
 		"restart the qURL Connector after replacing or recreating the web container",
 		testTunnelDockerLine,
@@ -51,8 +58,8 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 
 func TestRenderDockerTunnelInstructionsShellQuotesAPIURL(t *testing.T) {
 	t.Parallel()
-	args := testPinnedTunnelInstallArgs()
-	args.APIURL = "https://api.$(touch-should-not-run).example.test/v1"
+	args := testTunnelInstallArgs()
+	args.APIURL = testShellSignificantTunnelAPIURL
 
 	got := mustRenderDockerTunnelInstructions(t, args, testTunnelImageRef)
 	quoted := shellSingleQuote(args.APIURL)

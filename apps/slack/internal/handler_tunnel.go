@@ -686,11 +686,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
 	resolvedArgs := *args
-	resolvedArgs.ResourceID = strings.TrimSpace(resource.ResourceID)
-	resolvedArgs.ConnectorRoutingID = strings.TrimSpace(resource.ConnectorRoutingID)
-	resolvedArgs.KnockResourceID = strings.TrimSpace(resource.KnockResourceID)
-	resolvedArgs.APIURL = connectorAPIURL
-	if err := validateTunnelRouteIdentity(&resolvedArgs); err != nil {
+	if err := resolvedArgs.pinTunnelResource(resource, connectorAPIURL); err != nil {
 		log.Error("tunnel install: resource response missing connector contract", "error", err)
 		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}
@@ -1238,7 +1234,68 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 	}
 }
 
+func pinConnectorResource(resource *client.Resource) (resourceID, connectorRoutingID, knockResourceID string, err error) {
+	if resource == nil {
+		return "", "", "", errors.New("connector resource is missing")
+	}
+	resourceID = strings.TrimSpace(resource.ResourceID)
+	connectorRoutingID = strings.TrimSpace(resource.ConnectorRoutingID)
+	knockResourceID = strings.TrimSpace(resource.KnockResourceID)
+	if err := requirePinnedConnectorResource(resourceID, connectorRoutingID, knockResourceID); err != nil {
+		return "", "", "", err
+	}
+	return resourceID, connectorRoutingID, knockResourceID, nil
+}
+
+func requirePinnedConnectorResource(resourceID, connectorRoutingID, knockResourceID string) error {
+	resourceID = strings.TrimSpace(resourceID)
+	connectorRoutingID = strings.TrimSpace(connectorRoutingID)
+	knockResourceID = strings.TrimSpace(knockResourceID)
+	if resourceID == "" {
+		return errors.New("resource_id is missing")
+	}
+	// TODO(upstream-contract): qurl-service#1225 replaces legacy internal r_
+	// labels with client-safe P-256 public keys. Fail closed during the rollout
+	// so an old producer cannot render an internal routing label into customer
+	// connector config. The current SPKI encoding begins with MF, so this guard
+	// cannot reject a valid client-safe ID; revisit it if the ID format changes.
+	if strings.HasPrefix(resourceID, "r_") {
+		return errors.New("resource_id is a legacy internal label")
+	}
+	if !connectorResourceIDPattern.MatchString(resourceID) {
+		return errors.New("resource_id is invalid")
+	}
+	if connectorRoutingID == "" {
+		return errors.New("connector_routing_id is missing")
+	}
+	if !connectorRoutingIDPattern.MatchString(connectorRoutingID) {
+		return errors.New("connector_routing_id is invalid")
+	}
+	if knockResourceID == "" {
+		return errors.New("knock_resource_id is missing")
+	}
+	if !connectorKnockIDPattern.MatchString(knockResourceID) {
+		return errors.New("knock_resource_id is invalid")
+	}
+	return nil
+}
+
+func (args *tunnelInstallArgs) pinTunnelResource(resource *client.Resource, apiURL string) error {
+	resourceID, connectorRoutingID, knockResourceID, err := pinConnectorResource(resource)
+	if err != nil {
+		return err
+	}
+	args.ResourceID = resourceID
+	args.ConnectorRoutingID = connectorRoutingID
+	args.KnockResourceID = knockResourceID
+	args.APIURL = strings.TrimSpace(apiURL)
+	return validateTunnelRouteIdentity(args)
+}
+
 func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
+	if args == nil {
+		return "", errors.New("tunnel install args are missing")
+	}
 	quotedSlug, err := yamlSingleQuoted(args.Slug)
 	if err != nil {
 		return "", err
@@ -1288,36 +1345,7 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 	if args == nil {
 		return errors.New("tunnel install args are missing")
 	}
-	resourceID := strings.TrimSpace(args.ResourceID)
-	if resourceID == "" {
-		return errors.New("resource_id is missing")
-	}
-	// TODO(upstream-contract): qurl-service#1225 replaces legacy internal r_
-	// labels with client-safe P-256 public keys. Fail closed during the rollout
-	// so an old producer cannot render an internal routing label into customer
-	// connector config. The current SPKI encoding begins with MF, so this guard
-	// cannot reject a valid client-safe ID; revisit it if the ID format changes.
-	if strings.HasPrefix(resourceID, "r_") {
-		return errors.New("resource_id is a legacy internal label")
-	}
-	if !connectorResourceIDPattern.MatchString(resourceID) {
-		return errors.New("resource_id is invalid")
-	}
-	routingID := strings.TrimSpace(args.ConnectorRoutingID)
-	if routingID == "" {
-		return errors.New("connector_routing_id is missing")
-	}
-	if !connectorRoutingIDPattern.MatchString(routingID) {
-		return errors.New("connector_routing_id is invalid")
-	}
-	knockResourceID := strings.TrimSpace(args.KnockResourceID)
-	if knockResourceID == "" {
-		return errors.New("knock_resource_id is missing")
-	}
-	if !connectorKnockIDPattern.MatchString(knockResourceID) {
-		return errors.New("knock_resource_id is invalid")
-	}
-	return nil
+	return requirePinnedConnectorResource(args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID)
 }
 
 // ValidateConnectorAPIURL validates the API base rendered into customer

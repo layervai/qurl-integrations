@@ -31,20 +31,25 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	if err != nil {
 		return "", err
 	}
+	quotedKnock, err := yamlSingleQuoted(args.KnockResourceID)
+	if err != nil {
+		return "", err
+	}
 	// The Compose heredoc must remain expandable for its validated runtime
 	// variables. Assign the complete YAML scalar through a shell quote first;
 	// parameter expansion is not recursive, so URL shell metacharacters remain
 	// literal when the heredoc expands this variable.
 	quotedAPIURLShell := shellSingleQuote(quotedAPIURL)
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
-	// expand WEB_SERVICE, QURL_CONNECTOR_ID, AGENT_STATE_DIR, and SECRET_DIR
+	// expand WEB_SERVICE, QURL_CONNECTOR_ID, LAYERV_KNOCK_RESOURCE_ID_YAML,
+	// AGENT_STATE_DIR, and SECRET_DIR
 	// into the generated file. Trust assumptions: WEB_SERVICE comes from
 	// dockerComposeServicePattern plus the runtime case guard below; the slug
 	// matches tunnelSlugPattern; state/secret dirs derive only from that slug.
 	// Keep dockerComposeServicePattern narrow: it rejects shell metacharacters
 	// such as '$', backticks, quotes, slashes, and whitespace. QURL_API_URL_YAML
-	// is assigned through a shell quote and expanded once, so it does not share
-	// those identifier-only restrictions.
+	// and LAYERV_KNOCK_RESOURCE_ID_YAML are assigned through shell quotes and
+	// expanded once, so they do not share those identifier-only restrictions.
 	compose := fmt.Sprintf(`set -eu
 %s
 
@@ -56,6 +61,7 @@ WEB_SERVICE=%s
 %s
 
 QURL_CONNECTOR_ID=%s
+LAYERV_KNOCK_RESOURCE_ID_YAML=%s
 CONNECTOR_SERVICE=%s
 QURL_API_URL_YAML=%s
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
@@ -97,10 +103,11 @@ services:
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
       QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}
+      LAYERV_KNOCK_RESOURCE_ID: ${LAYERV_KNOCK_RESOURCE_ID_YAML}
       QURL_API_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedAPIURLShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), shellSingleQuote(quotedKnock), tunnelService, quotedAPIURLShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {

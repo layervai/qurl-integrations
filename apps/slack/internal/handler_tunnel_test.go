@@ -28,28 +28,30 @@ import (
 )
 
 const (
-	testTunnelSlug         = "prod-dashboard"
-	testTunnelAliasDash    = "dash" // sample channel alias used across get/tunnel tests
-	testTunnelResourceID   = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
-	testTunnelRoutingID    = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	testTunnelKnockID      = "qurl-tunnel-server"
-	testTunnelAPIURL       = "https://api.sandbox.example/v1"
-	testTunnelWizardCmd    = "protect-connector"                        // bare verb → guided modal
-	testTunnelInstallCmd   = testTunnelWizardCmd + " " + testTunnelSlug // typed: `protect-connector prod-dashboard`
-	testTunnelChannelID    = "C_test"
-	testTunnelImageRef     = "ghcr.io/layervai/qurl-connector:v-test"
-	testTunnelAPIKey       = "lv_live_test_bootstrap"
-	testTunnelAPIKeyID     = "key_tunnel_bootstrap"
-	testSlackResponseURL   = "https://hooks.slack.test/response"
-	testAgentAuditTable    = "agent_state"
-	testTunnelAgentReason  = "customer requested connector setup"
-	testTunnelDockerLine   = `CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"`
-	testTunnelModalKey     = "lv_live_modal_bootstrap"
-	testTunnelPipefailLine = "set -o pipefail"
-	testTunnelComposeWeb   = "web_1"
-	testTunnelDockerWeb    = "web_1-2"
-	testSlackTriggerID     = "trigger_test"
-	testEnterpriseID       = "E_GRID"
+	testTunnelSlug                   = "prod-dashboard"
+	testTunnelAliasDash              = "dash" // sample channel alias used across get/tunnel tests
+	testTunnelResourceID             = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA"
+	testTunnelRoutingID              = "c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTunnelKnockID                = "qurl-tunnel-server"
+	testTunnelAPIURL                 = "https://api.sandbox.example/v1"
+	testInvalidRemoteConnectorAPIURL = "http://api.example.test/v1"
+	testShellSignificantTunnelAPIURL = "https://api.$(touch-should-not-run).example.test/v1"
+	testTunnelWizardCmd              = "protect-connector"                        // bare verb → guided modal
+	testTunnelInstallCmd             = testTunnelWizardCmd + " " + testTunnelSlug // typed: `protect-connector prod-dashboard`
+	testTunnelChannelID              = "C_test"
+	testTunnelImageRef               = "ghcr.io/layervai/qurl-connector:v-test"
+	testTunnelAPIKey                 = "lv_live_test_bootstrap"
+	testTunnelAPIKeyID               = "key_tunnel_bootstrap"
+	testSlackResponseURL             = "https://hooks.slack.test/response"
+	testAgentAuditTable              = "agent_state"
+	testTunnelAgentReason            = "customer requested connector setup"
+	testTunnelDockerLine             = `CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"`
+	testTunnelModalKey               = "lv_live_modal_bootstrap"
+	testTunnelPipefailLine           = "set -o pipefail"
+	testTunnelComposeWeb             = "web_1"
+	testTunnelDockerWeb              = "web_1-2"
+	testSlackTriggerID               = "trigger_test"
+	testEnterpriseID                 = "E_GRID"
 )
 
 type failingAuthProvider struct{ err error }
@@ -160,20 +162,15 @@ func protectConnectorAgentMetadataFromToolCall(t *testing.T) *TunnelInstallAgent
 
 func testTunnelInstallArgs() *tunnelInstallArgs {
 	return &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   defaultTunnelLocalPort,
-		Environment: tunnelEnvDocker,
-		APIURL:      testTunnelAPIURL,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          defaultTunnelLocalPort,
+		Environment:        tunnelEnvDocker,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}
-}
-
-func testPinnedTunnelInstallArgs() *tunnelInstallArgs {
-	args := testTunnelInstallArgs()
-	args.ResourceID = testTunnelResourceID
-	args.ConnectorRoutingID = testTunnelRoutingID
-	args.KnockResourceID = testTunnelKnockID
-	return args
 }
 
 func testTunnelInstallAgentAudit() *tunnelInstallAgentAudit {
@@ -274,21 +271,42 @@ func mustRenderECSFargateTunnelInstructions(t *testing.T, args *tunnelInstallArg
 	return got
 }
 
-func TestRenderTunnelConfigYAMLUsesRouteID(t *testing.T) {
-	got, err := renderTunnelConfigYAML(&tunnelInstallArgs{Slug: testTunnelSlug, LocalPort: 9090})
+func TestRenderTunnelConfigYAMLUsesPinnedResourceID(t *testing.T) {
+	got, err := renderTunnelConfigYAML(&tunnelInstallArgs{
+		Slug:               testTunnelSlug,
+		LocalPort:          9090,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
+	})
 	if err != nil {
 		t.Fatalf("renderTunnelConfigYAML: %v", err)
 	}
 	if !strings.Contains(got, "  - id: '"+testTunnelSlug+"'") {
 		t.Fatalf("config missing route id:\n%s", got)
 	}
+	if !strings.Contains(got, "    resource_id: '"+testTunnelResourceID+"'") {
+		t.Fatalf("config missing pinned resource_id:\n%s", got)
+	}
+	if !strings.Contains(got, "    connector_routing_id: '"+testTunnelRoutingID+"'") ||
+		!strings.Contains(got, "    knock_resource_id: '"+testTunnelKnockID+"'") {
+		t.Fatalf("config missing complete routing identity:\n%s", got)
+	}
 	if strings.Contains(got, "  - name:") {
 		t.Fatalf("config should not emit legacy route name:\n%s", got)
 	}
 }
 
+func TestRenderTunnelConfigYAMLRejectsPartialPinnedIdentity(t *testing.T) {
+	_, err := renderTunnelConfigYAML(&tunnelInstallArgs{Slug: testTunnelSlug, LocalPort: 9090, ResourceID: testTunnelResourceID})
+	if err == nil || !strings.Contains(err.Error(), "connector_routing_id") {
+		t.Fatalf("renderTunnelConfigYAML err = %v, want partial identity rejection", err)
+	}
+}
+
 func TestRenderTunnelConfigYAMLNormalizesPinnedIdentity(t *testing.T) {
-	args := testPinnedTunnelInstallArgs()
+	args := testTunnelInstallArgs()
 	args.ResourceID = "  " + args.ResourceID + "  "
 	args.ConnectorRoutingID = "\t" + args.ConnectorRoutingID + "\n"
 	args.KnockResourceID = " " + args.KnockResourceID + " "
@@ -331,7 +349,7 @@ func TestValidateTunnelConnectorContract(t *testing.T) {
 		{name: "malformed knock id", mutate: func(a *tunnelInstallArgs) { a.KnockResourceID = "bad knock id" }, wantErr: "knock_resource_id is invalid"},
 		{name: "missing api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "" }, wantErr: "QURL_API_URL is missing"},
 		{name: "relative api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = connectorAPIVersionPath }, wantErr: "QURL_API_URL is invalid"},
-		{name: "remote http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = "http://api.example.test/v1" }, wantErr: "QURL_API_URL is invalid"},
+		{name: "remote http api url", mutate: func(a *tunnelInstallArgs) { a.APIURL = testInvalidRemoteConnectorAPIURL }, wantErr: "QURL_API_URL is invalid"},
 		{name: "nested api path", mutate: func(a *tunnelInstallArgs) { a.APIURL = "https://api.example.test/foo/v1" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "fragment", mutate: func(a *tunnelInstallArgs) { a.APIURL = "https://api.example.test/v1#fragment" }, wantErr: "QURL_API_URL is invalid"},
 		{name: "invalid api url takes precedence over incomplete identity", mutate: func(a *tunnelInstallArgs) { a.APIURL = connectorAPIVersionPath; a.ConnectorRoutingID = "" }, wantErr: "QURL_API_URL is invalid"},
@@ -606,12 +624,12 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Fatalf("decode resource body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:      testTunnelResourceID,
-			"connector_routing_id": testTunnelRoutingID,
-			testKeyType:            client.ResourceTypeTunnel,
-			testKeySlug:            testTunnelSlug,
-			testKeyStatus:          client.StatusActive,
-			"knock_resource_id":    testTunnelKnockID,
+			testKeyResourceID:         testTunnelResourceID,
+			testKeyConnectorRoutingID: testTunnelRoutingID,
+			testKeyType:               client.ResourceTypeTunnel,
+			testKeySlug:               testTunnelSlug,
+			testKeyStatus:             client.StatusActive,
+			testKeyKnockResourceID:    testTunnelKnockID,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -701,6 +719,9 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
+		"resource_id: '" + testTunnelResourceID + "'",
+		"LAYERV_KNOCK_RESOURCE_ID='" + testTunnelKnockID + "'",
+		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
 		`docker rm -f "$CONNECTOR_CONTAINER"`,
@@ -765,13 +786,13 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 		// find_or_create returns the EXISTING resource, carrying the admin's
 		// previously-set Display Name in description (not the install default).
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID:      testTunnelResourceID,
-			"connector_routing_id": testTunnelRoutingID,
-			testKeyType:            client.ResourceTypeTunnel,
-			testKeySlug:            testTunnelSlug,
-			testKeyStatus:          client.StatusActive,
-			testKeyDescription:     existingDisplayName,
-			"knock_resource_id":    testTunnelKnockID,
+			testKeyResourceID:         testTunnelResourceID,
+			testKeyConnectorRoutingID: testTunnelRoutingID,
+			testKeyType:               client.ResourceTypeTunnel,
+			testKeySlug:               testTunnelSlug,
+			testKeyStatus:             client.StatusActive,
+			testKeyDescription:        existingDisplayName,
+			testKeyKnockResourceID:    testTunnelKnockID,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -1445,10 +1466,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Fatalf("decode resource body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -1549,6 +1571,9 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"defaultMode: 0440",
 		"QURL_CONNECTOR_ID",
 		"value: '" + testTunnelSlug + "'",
+		"LAYERV_KNOCK_RESOURCE_ID",
+		"value: '" + testTunnelKnockID + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
 		testTunnelLocalPort9090Line,
 		testTunnelImageRef,
 		"/qurl get $team-dash",
@@ -1620,10 +1645,11 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyResourceID: testTunnelResourceID,
-					testKeyType:       client.ResourceTypeTunnel,
-					testKeySlug:       testTunnelSlug,
-					testKeyStatus:     client.StatusActive,
+					testKeyResourceID:   testTunnelResourceID,
+					"knock_resource_id": testTunnelKnockID,
+					testKeyType:         client.ResourceTypeTunnel,
+					testKeySlug:         testTunnelSlug,
+					testKeyStatus:       client.StatusActive,
 				})
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -1692,10 +1718,11 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyResourceID: testTunnelResourceID,
-					testKeyType:       client.ResourceTypeTunnel,
-					testKeySlug:       testTunnelSlug,
-					testKeyStatus:     client.StatusActive,
+					testKeyResourceID:   testTunnelResourceID,
+					"knock_resource_id": testTunnelKnockID,
+					testKeyType:         client.ResourceTypeTunnel,
+					testKeySlug:         testTunnelSlug,
+					testKeyStatus:       client.StatusActive,
 				})
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -1829,10 +1856,11 @@ func TestTunnelInstallModalRejectsUnexpectedAgentActionBeforeMintingKey(t *testi
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		resourceHits.Add(1)
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 
@@ -2321,10 +2349,11 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	now := fixedNow
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -2749,7 +2778,7 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 
 	h := NewHandler(Config{})
 	freezeTunnelBootstrapNow(t, h, now)
-	got, err := h.renderTunnelInstallMessage(testPinnedTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	got, err := h.renderTunnelInstallMessage(testTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err != nil {
 		t.Fatalf("renderTunnelInstallMessage: %v", err)
 	}
@@ -2780,7 +2809,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeBootstrapKey(t *testing.T) {
 	t.Parallel()
 	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
 
-	_, err := NewHandler(Config{}).renderTunnelInstallMessage(testPinnedTunnelInstallArgs(), &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	_, err := NewHandler(Config{}).renderTunnelInstallMessage(testTunnelInstallArgs(), &client.APIKey{APIKey: "lv_live_bad`key", ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "unsupported characters") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want unsupported-character rejection", err)
 	}
@@ -2790,7 +2819,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
 	t.Parallel()
 	expiresAt := time.Date(2026, 5, 27, 5, 30, 0, 0, time.UTC)
 
-	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(testPinnedTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
+	_, err := NewHandler(Config{TunnelImage: testTunnelImageRef + ";bad"}).renderTunnelInstallMessage(testTunnelInstallArgs(), &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err == nil || !strings.Contains(err.Error(), "tunnel image reference must use only") {
 		t.Fatalf("renderTunnelInstallMessage err = %v, want tunnel image rejection", err)
 	}
@@ -2804,7 +2833,7 @@ func TestRenderTunnelInstallMessageRejectsUnsafeTunnelImage(t *testing.T) {
 func TestRenderTunnelInstall_ShowsDisplayNameOnReinstall(t *testing.T) {
 	now := fixedNow
 	expiresAt := now.Add(time.Hour)
-	args := testPinnedTunnelInstallArgs()
+	args := testTunnelInstallArgs()
 	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
 	freezeTunnelBootstrapNow(t, h, now)
 	prepared, err := h.prepareTunnelInstallMessage(args)
@@ -2889,11 +2918,15 @@ func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 			name: "docker",
 			render: func(t *testing.T) string {
 				return mustRenderDockerTunnelInstructions(t, &tunnelInstallArgs{
-					Slug:        renderShellTestSlug,
-					Alias:       renderShellTestSlug,
-					LocalPort:   9090,
-					Environment: tunnelEnvDocker,
-					WebRef:      "web.1_2-3",
+					Slug:               renderShellTestSlug,
+					Alias:              renderShellTestSlug,
+					LocalPort:          9090,
+					Environment:        tunnelEnvDocker,
+					WebRef:             "web.1_2-3",
+					ResourceID:         testTunnelResourceID,
+					ConnectorRoutingID: testTunnelRoutingID,
+					KnockResourceID:    testTunnelKnockID,
+					APIURL:             testTunnelAPIURL,
 				}, testTunnelImageRef)
 			},
 		},
@@ -2901,11 +2934,15 @@ func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 			name: string(tunnelEnvCompose),
 			render: func(t *testing.T) string {
 				return mustRenderDockerComposeTunnelInstructions(t, &tunnelInstallArgs{
-					Slug:        renderShellTestSlug,
-					Alias:       renderShellTestSlug,
-					LocalPort:   9090,
-					Environment: tunnelEnvCompose,
-					WebRef:      "web_1-2",
+					Slug:               renderShellTestSlug,
+					Alias:              renderShellTestSlug,
+					LocalPort:          9090,
+					Environment:        tunnelEnvCompose,
+					WebRef:             "web_1-2",
+					ResourceID:         testTunnelResourceID,
+					ConnectorRoutingID: testTunnelRoutingID,
+					KnockResourceID:    testTunnelKnockID,
+					APIURL:             testTunnelAPIURL,
 				}, testTunnelImageRef)
 			},
 		},
@@ -2913,10 +2950,14 @@ func TestRenderedInstallShellBlocksParseAfterValidatedInputs(t *testing.T) {
 			name: "kubernetes",
 			render: func(t *testing.T) string {
 				return mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
-					Slug:        renderShellTestSlug,
-					Alias:       renderShellTestSlug,
-					LocalPort:   9090,
-					Environment: tunnelEnvKubernetes,
+					Slug:               renderShellTestSlug,
+					Alias:              renderShellTestSlug,
+					LocalPort:          9090,
+					Environment:        tunnelEnvKubernetes,
+					ResourceID:         testTunnelResourceID,
+					ConnectorRoutingID: testTunnelRoutingID,
+					KnockResourceID:    testTunnelKnockID,
+					APIURL:             testTunnelAPIURL,
 				}, testTunnelImageRef)
 			},
 		},
@@ -3011,10 +3052,11 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3040,6 +3082,72 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	}
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+}
+
+func TestTunnelInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID:         testTunnelResourceID,
+			testKeyConnectorRoutingID: "",
+			testKeyType:               client.ResourceTypeTunnel,
+			testKeySlug:               testTunnelSlug,
+			testKeyStatus:             client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+		t.Fatalf("async reply = %q, want incomplete-resource pre-mint refusal", async)
+	}
+	if apiKeyHits != 0 {
+		t.Fatalf("api key route hit %d times; bootstrap key must not be minted without pinned resource identity", apiKeyHits)
+	}
+}
+
+func TestTunnelInstallRejectsMissingResourceIDBeforeMintingBootstrapKey(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var apiKeyHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyType:   client.ResourceTypeTunnel,
+			testKeySlug:   testTunnelSlug,
+			testKeyStatus: client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		apiKeyHits++
+		t.Fatalf("api key should not be minted when qURL resource identity is incomplete")
+	})
+
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if apiKeyHits != 0 {
+		t.Fatalf("api key hits = %d, want 0", apiKeyHits)
+	}
+	if len(*dmPosts) != 0 {
+		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
+	}
+	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "routing metadata") {
+		t.Fatalf("async reply = %q, want incomplete resource placement error before key mint", async)
+	}
+	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, testTunnelSlug); err != nil || found {
+		t.Fatalf("alias lookup found=%v err=%v, want no alias bound before complete identity", found, err)
 	}
 }
 
@@ -3203,10 +3311,11 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3243,10 +3352,11 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3339,10 +3449,11 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3521,10 +3632,11 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3588,10 +3700,11 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3760,10 +3873,11 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3840,10 +3954,11 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3920,10 +4035,11 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	var revokeHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -3991,10 +4107,11 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 	var idempotencyKeys []string
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -4085,10 +4202,11 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	ts.seedAdmin(t)
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -4197,10 +4315,11 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 	var idempotencyKeys []string
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
@@ -4297,10 +4416,11 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			ts.seedAdmin(t)
 			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyResourceID: testTunnelResourceID,
-					testKeyType:       client.ResourceTypeTunnel,
-					testKeySlug:       testTunnelSlug,
-					testKeyStatus:     client.StatusActive,
+					testKeyResourceID:   testTunnelResourceID,
+					"knock_resource_id": testTunnelKnockID,
+					testKeyType:         client.ResourceTypeTunnel,
+					testKeySlug:         testTunnelSlug,
+					testKeyStatus:       client.StatusActive,
 				})
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -4344,10 +4464,11 @@ func TestTunnelInstallRefusesExistingDifferentAliasBeforeMintingKey(t *testing.T
 	var apiKeyHits int
 	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyResourceID: testTunnelResourceID,
-			testKeyType:       client.ResourceTypeTunnel,
-			testKeySlug:       testTunnelSlug,
-			testKeyStatus:     client.StatusActive,
+			testKeyResourceID:   testTunnelResourceID,
+			"knock_resource_id": testTunnelKnockID,
+			testKeyType:         client.ResourceTypeTunnel,
+			testKeySlug:         testTunnelSlug,
+			testKeyStatus:       client.StatusActive,
 		})
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
@@ -4453,7 +4574,7 @@ func TestTunnelInstallRefusesInvalidLocalEndpointBeforeMintingKey(t *testing.T) 
 	})
 
 	h := newAdminTestHandler(t, ts)
-	h.cfg.ConnectorAPIURL = "http://api.example.test/v1"
+	h.cfg.ConnectorAPIURL = testInvalidRemoteConnectorAPIURL
 	captureTunnelPostDMSuccess(h)
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
