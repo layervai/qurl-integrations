@@ -109,7 +109,6 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
 		"knock_resource_id: '" + testTunnelKnockID + "'",
 		"name: QURL_API_URL",
-		"name: QURL_BOOTSTRAP_URL",
 		"value: '" + testTunnelAPIURL + "'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
@@ -134,6 +133,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"runAsUser: 0",
 		"defaultMode: 0400",
 		"defaultMode: 0444",
+		"QURL_BOOTSTRAP_URL",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
@@ -157,8 +157,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLQuotesAPIURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("yamlSingleQuoted: %v", err)
 	}
-	if count := strings.Count(got, "value: "+quoted); count != 2 {
-		t.Fatalf("Kubernetes instructions contain %d quoted API URL values, want 2:\n%s", count, got)
+	if count := strings.Count(got, "value: "+quoted); count != 1 {
+		t.Fatalf("Kubernetes instructions contain %d quoted API URL values, want 1:\n%s", count, got)
 	}
 }
 
