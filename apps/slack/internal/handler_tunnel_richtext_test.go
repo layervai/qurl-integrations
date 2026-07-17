@@ -27,7 +27,7 @@ func renderInstallForEnv(t *testing.T, env tunnelInstallEnvironment) string {
 	expiresAt := now.Add(time.Hour)
 	h := NewHandler(Config{TunnelImage: testTunnelImageRef})
 	freezeTunnelBootstrapNow(t, h, now)
-	args := testPinnedTunnelInstallArgs()
+	args := testTunnelInstallArgs()
 	args.Environment = env
 	msg, err := h.renderTunnelInstallMessage(args, &client.APIKey{APIKey: testTunnelAPIKey, ExpiresAt: &expiresAt}, "qURL alias `$prod-dashboard` is ready in this channel.")
 	if err != nil {
