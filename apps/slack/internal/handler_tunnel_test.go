@@ -4392,7 +4392,7 @@ func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *test
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "complete sandbox routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
 		t.Fatalf("async reply = %q, want incomplete connector contract refusal", async)
 	}
 	if apiKeyHits != 0 {
@@ -4423,7 +4423,7 @@ func TestTunnelInstallRefusesLegacyResourceIDBeforeMintingKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "complete sandbox routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
 		t.Fatalf("async reply = %q, want legacy resource ID refusal", async)
 	}
 	if apiKeyHits != 0 {

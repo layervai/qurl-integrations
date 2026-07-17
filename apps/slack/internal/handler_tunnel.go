@@ -692,7 +692,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs.APIURL = connectorAPIURL
 	if err := validateTunnelRouteIdentity(&resolvedArgs); err != nil {
 		log.Error("tunnel install: resource response missing connector contract", "error", err)
-		return nil, "qURL Connector setup could not obtain complete sandbox routing metadata. No bootstrap key was minted. Please retry or contact support.", err
+		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
 	// Bind/verify the channel shortcut before minting the bootstrap key so an
