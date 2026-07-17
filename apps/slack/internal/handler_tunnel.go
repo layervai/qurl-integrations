@@ -1295,7 +1295,8 @@ func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
 	// TODO(upstream-contract): qurl-service#1225 replaces legacy internal r_
 	// labels with client-safe P-256 public keys. Fail closed during the rollout
 	// so an old producer cannot render an internal routing label into customer
-	// connector config.
+	// connector config. The current SPKI encoding begins with MF, so this guard
+	// cannot reject a valid client-safe ID; revisit it if the ID format changes.
 	if strings.HasPrefix(resourceID, "r_") {
 		return errors.New("resource_id is a legacy internal label")
 	}
