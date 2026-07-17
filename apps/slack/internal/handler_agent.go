@@ -38,6 +38,15 @@ const agentProposalPreviewPrefix = "I can set that up, but applying changes from
 // internals never reach the channel.
 const agentErrorReply = "Something went wrong handling that. Please try again, or use a `/qurl` command."
 
+// agentHelpReply is the deterministic usage response for a literal `help` turn.
+// Keep it independent of the LLM so Slack reviewers always get instructions,
+// even when the model or its downstream tools are unavailable.
+const agentHelpReply = "I can help with qURL operations in this Slack context:\n" +
+	"• List accessible resources and aliases\n" +
+	"• Check qURL usage or resolve a qURL token\n" +
+	"• Propose access, protection, alias, and revoke changes for human approval\n\n" +
+	"Try “What can I access here?” or “What’s our qURL usage?”"
+
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
 // route to how their messages are processed.
@@ -806,6 +815,12 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
+	message := stripBotMention(env.Event.Text)
+	if strings.EqualFold(message, "help") {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentHelpReply)
+		return
+	}
+
 	// Rate-limit AFTER dedupe (count unique messages, not redeliveries) and BEFORE
 	// the turn runs (the LLM is the cost we're capping). Confirm-clicks
 	// (processAgentConfirm) are deliberately NOT limited: they're consume-once and
@@ -868,7 +883,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
 	}
 	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
-	result, newHistory, err := a.Run(ctx, &tc, history, stripBotMention(env.Event.Text))
+	result, newHistory, err := a.Run(ctx, &tc, history, message)
 
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)

@@ -50,6 +50,43 @@ func TestStripBotMention(t *testing.T) {
 	}
 }
 
+func TestProcessAgentEvent_LiteralHelpBypassesLLM(t *testing.T) {
+	tests := []struct {
+		name string
+		env  *slackEventEnvelope
+	}{
+		{
+			name: "channel mention",
+			env:  env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> help"),
+		},
+		{
+			name: "agent chat is case insensitive",
+			env:  env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "  HELP  "),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			post, posts, mu := capturingPostMessage()
+			h := NewHandler(Config{
+				AgentLLM:            panicAgentLLM{},
+				AgentStore:          store,
+				PostMessage:         post,
+				AgentDefaultEnabled: true,
+			})
+
+			h.processAgentEvent(context.Background(), slog.Default(), tt.env)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(*posts) != 1 || (*posts)[0].text != agentHelpReply {
+				t.Fatalf("literal help should post one deterministic usage reply, got %+v", *posts)
+			}
+		})
+	}
+}
+
 func env(eventType, channelType, user, botID, subtype, text string) *slackEventEnvelope {
 	return &slackEventEnvelope{
 		Type: "event_callback", TeamID: "T1", EventID: "Ev1",
