@@ -93,7 +93,6 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		Environment: []ecsEnvironmentVar{
 			{Name: "QURL_CONNECTOR_ID", Value: args.Slug},
 			{Name: "QURL_API_URL", Value: args.APIURL},
-			{Name: "QURL_BOOTSTRAP_URL", Value: args.APIURL},
 		},
 		// TODO(qurl-connector-ecs-secret-file): prefer QURL_API_KEY_FILE once the
 		// ECS/Fargate guide uses a file-mounted secret runtime instead of native

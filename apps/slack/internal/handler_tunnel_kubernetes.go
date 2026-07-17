@@ -88,8 +88,6 @@ containers:
         value: %s
       - name: QURL_API_URL
         value: %s
-      - name: QURL_BOOTSTRAP_URL
-        value: %s
     volumeMounts:
       - name: qurl-agent-state
         mountPath: /var/lib/layerv/agent
@@ -110,7 +108,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, quotedImage, quotedSlug, quotedAPIURL, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
+      name: %s`, quotedImage, quotedSlug, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {

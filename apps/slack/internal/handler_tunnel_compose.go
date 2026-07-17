@@ -98,7 +98,6 @@ services:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
       QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}
       QURL_API_URL: ${QURL_API_URL_YAML}
-      QURL_BOOTSTRAP_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF
 
 docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedAPIURLShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)

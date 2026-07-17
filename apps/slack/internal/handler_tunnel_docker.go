@@ -59,8 +59,7 @@ docker run -d \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
   -e QURL_API_URL=%s \
-  -e QURL_BOOTSTRAP_URL=%s \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedAPIURL, quotedAPIURL, shellSingleQuote(image))
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedAPIURL, shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {

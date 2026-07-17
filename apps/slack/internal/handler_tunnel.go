@@ -153,14 +153,9 @@ type tunnelInstallArgs struct {
 	ResourceID         string
 	ConnectorRoutingID string
 	KnockResourceID    string
-	// APIURL is the canonical /v1 base. QURL_BOOTSTRAP_URL intentionally gets
-	// the same value only for older production connector images: their API
-	// client appends /agent/bootstrap to this base. Current images ignore that
-	// retired env var and use QURL_API_URL/QURL_REGISTRATION_URL. Verified at
-	// qurl-connector 760c1a9^: Bootstrap calls c.do("/agent/bootstrap") on the
-	// QURL_BOOTSTRAP_URL-derived client base.
-	// TODO(upstream-contract): remove the legacy renderers after
-	// layervai/qurl-integrations#964 closes the old-image support window.
+	// APIURL is the canonical /v1 base used for qURL resource CRUD. Native NHP
+	// enrollment and knocks use qurl-go's assigned-cell UDP lifecycle instead of
+	// a public HTTP registration or bootstrap endpoint.
 	APIURL string
 }
 

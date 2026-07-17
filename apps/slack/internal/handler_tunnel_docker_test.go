@@ -42,7 +42,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	if strings.Contains(got, "Replace `YOUR_WEB_CONTAINER_NAME`") {
 		t.Fatalf("Docker instructions still included placeholder warning:\n%s", got)
 	}
-	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv} {
+	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv, "QURL_BOOTSTRAP_URL"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -56,9 +56,12 @@ func TestRenderDockerTunnelInstructionsShellQuotesAPIURL(t *testing.T) {
 
 	got := mustRenderDockerTunnelInstructions(t, args, testTunnelImageRef)
 	quoted := shellSingleQuote(args.APIURL)
-	for _, name := range []string{"QURL_API_URL", "QURL_BOOTSTRAP_URL"} {
+	for _, name := range []string{"QURL_API_URL"} {
 		if !strings.Contains(got, "-e "+name+"="+quoted) {
 			t.Fatalf("Docker instructions did not shell-quote %s:\n%s", name, got)
 		}
+	}
+	if strings.Contains(got, "QURL_BOOTSTRAP_URL") {
+		t.Fatalf("Docker instructions rendered retired bootstrap URL:\n%s", got)
 	}
 }

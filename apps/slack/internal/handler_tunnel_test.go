@@ -699,7 +699,6 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
 		"knock_resource_id: '" + testTunnelKnockID + "'",
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
-		"QURL_BOOTSTRAP_URL='" + testTunnelAPIURL + "'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
@@ -2868,7 +2867,6 @@ func TestRenderDockerComposeTunnelInstructionsShellQuotesAPIURL(t *testing.T) {
 	}
 	for _, want := range []string{
 		"QURL_API_URL: ${QURL_API_URL_YAML}",
-		"QURL_BOOTSTRAP_URL: ${QURL_API_URL_YAML}",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Compose instructions missing %q:\n%s", want, got)

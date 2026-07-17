@@ -67,7 +67,7 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 			t.Fatalf("Docker Compose instructions used unscoped service %q:\n%s", forbidden, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testForbiddenBootstrapArgv, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker Compose instructions leaked %q:\n%s", forbidden, got)
 		}
