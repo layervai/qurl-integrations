@@ -1253,8 +1253,9 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 		if err := validateTunnelRouteIdentity(args); err != nil {
 			return "", err
 		}
-		quotedIdentity := make([]string, 3)
-		for i, value := range []string{args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID} {
+		identityValues := []string{args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID}
+		quotedIdentity := make([]string, len(identityValues))
+		for i, value := range identityValues {
 			quotedIdentity[i], err = yamlSingleQuoted(strings.TrimSpace(value))
 			if err != nil {
 				return "", err
