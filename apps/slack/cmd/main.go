@@ -550,8 +550,8 @@ func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error
 		}
 	}
 	apiURL = endpoint + "/v1"
-	if err := internal.ValidateConnectorAPIURL(apiURL); err != nil {
-		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", err)
+	if validateErr := internal.ValidateConnectorAPIURL(apiURL); validateErr != nil {
+		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", validateErr)
 	}
 	return endpoint, apiURL, nil
 }
