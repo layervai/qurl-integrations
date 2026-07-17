@@ -87,6 +87,33 @@ func TestProcessAgentEvent_LiteralHelpBypassesLLM(t *testing.T) {
 	}
 }
 
+func TestProcessAgentEvent_HelpPrefixUsesNormalAgentPath(t *testing.T) {
+	llm := &scriptedHandlerAgentLLM{responses: []agent.Response{{
+		Text:       testAgentStillWorksReply,
+		StopReason: testAgentStopEndTurn,
+	}}}
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            llm,
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> help me"))
+
+	if llm.calls != 1 {
+		t.Fatalf("non-literal help should reach the normal agent path once, got %d calls", llm.calls)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
+		t.Fatalf("non-literal help should return the agent result, got %+v", *posts)
+	}
+}
+
 func env(eventType, channelType, user, botID, subtype, text string) *slackEventEnvelope {
 	return &slackEventEnvelope{
 		Type: "event_callback", TeamID: "T1", EventID: "Ev1",

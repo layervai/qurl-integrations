@@ -45,7 +45,7 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 	"• List accessible resources and aliases\n" +
 	"• Check qURL usage or resolve a qURL token\n" +
 	"• Propose access, protection, alias, and revoke changes for human approval\n\n" +
-	"Try “What can I access here?” or “What’s our qURL usage?”"
+	"Try \"What can I access here?\" or \"What's our qURL usage?\""
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
