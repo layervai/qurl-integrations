@@ -105,6 +105,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"securityContext:",
 		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
+		"name: LAYERV_KNOCK_RESOURCE_ID",
+		"value: '" + testTunnelKnockID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
 		"knock_resource_id: '" + testTunnelKnockID + "'",
@@ -148,9 +150,9 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 
 func TestRenderKubernetesTunnelInstructionsYAMLQuotesAPIURL(t *testing.T) {
 	t.Parallel()
-	args := testPinnedTunnelInstallArgs()
+	args := testTunnelInstallArgs()
 	args.Environment = tunnelEnvKubernetes
-	args.APIURL = "https://api.$(touch-should-not-run).example.test/v1"
+	args.APIURL = testShellSignificantTunnelAPIURL
 
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 	quoted, err := yamlSingleQuoted(args.APIURL)
@@ -169,10 +171,14 @@ func TestRenderKubernetesPodSpecFragmentDryRunsWithKubectl(t *testing.T) {
 		t.Skip("kubectl not on PATH")
 	}
 	got := mustRenderKubernetesTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvKubernetes,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}, testTunnelImageRef)
 	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
 	pod := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: qurl-connector-render-test\nspec:\n" + indentLines(fragment, 2) + "\n"
@@ -197,10 +203,14 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 	slug := strings.Repeat("a", 42) + "-" + strings.Repeat("b", 21)
 	dns1123Label := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
 	args := &tunnelInstallArgs{
-		Slug:        slug,
-		Alias:       slug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:               slug,
+		Alias:              slug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvKubernetes,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}
 	names := kubernetesTunnelObjectNames(slug)
 	for label, name := range map[string]string{

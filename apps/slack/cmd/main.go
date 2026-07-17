@@ -39,6 +39,7 @@ const (
 	listenAddr                    = ":8080"
 	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
+	envQURLS3OriginImage          = "QURL_S3_ORIGIN_IMAGE"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
@@ -176,6 +177,10 @@ func run() error {
 	// Validate the customer-rendered connector image before infra clients so
 	// manifest mistakes fail with the image-specific startup error.
 	tunnelImage, err := readTunnelImageConfig()
+	if err != nil {
+		return err
+	}
+	s3OriginImage, err := readS3OriginImageConfig()
 	if err != nil {
 		return err
 	}
@@ -339,6 +344,7 @@ func run() error {
 		AdminStore:                     adminStore,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		S3OriginImage:                  s3OriginImage,
 		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
@@ -395,54 +401,8 @@ func run() error {
 	// Route the callback's fire-and-forget goroutines through handler.wg
 	// so they fall inside the same shutdown drain budget as the
 	// slash-command async workers.
-	var oauthAdminStore oauth.AdminStore
-	if adminStore != nil {
-		oauthAdminStore = internal.NewOAuthAdminStoreAdapter(adminStore)
-	}
-	oauthCfg, ok, err := buildOAuthConfig(shutdownSignals.ctx, ddbProvider, handler, oauthAdminStore)
-	if err != nil {
-		return fmt.Errorf("OAuth config: %w", err)
-	}
-	if ok {
-		oauth.RegisterRoutes(rootMux, oauthCfg)
-		slog.Info("registered /oauth/qurl/{start,callback} routes")
-		handler.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  oauthCfg.OAuthStateSecret,
-			SlackBaseURL: oauthCfg.SlackBaseURL,
-		})
-		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
-		// install, set-alias, admin add/remove/list/revoke). It must be
-		// registered in the Slack app config pointing at the same request
-		// URL as /qurl — or those verbs never arrive. Admin enforcement is
-		// in-code: every admin verb runs requireAdminSync against the qURL
-		// admin set (admin_slack_user_ids), so the AdminStore must be
-		// wired. The "admins only" restriction on the /qurl-admin
-		// registration is a cosmetic Slack-picker hint, NOT the
-		// enforcement boundary — Slack does not gate slash-command
-		// invocation on workspace-admin role. /qurl setup is NOT on
-		// /qurl-admin and is intentionally open to any workspace member so
-		// the first claimant of an unbound workspace can reach it
-		// (first-come-claims). Setup re-runs are still owner-only, enforced
-		// in code in handleSetup via AdminStore, with the OAuth-callback
-		// BindWorkspace check as the structural backstop. The remaining
-		// exposure is the first-install claim: restrict who can reach the
-		// command at install time (Slack app manifest / onboarding) if
-		// first-claim ownership matters for this deployment.
-		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims) so the first claimant can reach it — though setup re-runs are owner-only (enforced in code) — and an admin-only /qurl would lock out the first claimant of an unbound workspace")
-	}
-	// Else: buildOAuthConfig already logged the specific missing-var
-	// list; nothing more to say here.
-	slackInstallCfg, ok, err := buildSlackInstallConfig(ddbProvider)
-	if err != nil {
-		return fmt.Errorf("slack install config: %w", err)
-	}
-	if ok {
-		handler.SetSlackInstallURL(strings.TrimRight(slackInstallCfg.SlackBaseURL, "/") + slackinstall.InstallPath)
-		slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
-		if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
-			return fmt.Errorf("slack install routes: %w", err)
-		}
-		slog.Info("registered /oauth/slack/{install,callback} routes")
+	if err := registerOptionalSetupRoutes(shutdownSignals.ctx, rootMux, ddbProvider, handler, adminStore, invalidateWorkspaceSlackToken); err != nil {
+		return err
 	}
 
 	srv := &http.Server{
@@ -516,6 +476,60 @@ func run() error {
 		return fmt.Errorf("serve: %w", serveErr)
 	}
 	slog.Info("server stopped cleanly")
+	return nil
+}
+
+func registerOptionalSetupRoutes(ctx context.Context, rootMux *http.ServeMux, provider *auth.DDBProvider, handler *internal.Handler, adminStore *slackdata.Store, invalidateWorkspaceSlackToken func(string)) error {
+	var oauthAdminStore oauth.AdminStore
+	if adminStore != nil {
+		oauthAdminStore = internal.NewOAuthAdminStoreAdapter(adminStore)
+	}
+	oauthCfg, ok, err := buildOAuthConfig(ctx, provider, handler, oauthAdminStore)
+	if err != nil {
+		return fmt.Errorf("OAuth config: %w", err)
+	}
+	if ok {
+		oauth.RegisterRoutes(rootMux, oauthCfg)
+		slog.Info("registered /oauth/qurl/{start,callback} routes")
+		handler.SetOAuthSetup(oauth.SetupConfig{
+			StateSecret:  oauthCfg.OAuthStateSecret,
+			SlackBaseURL: oauthCfg.SlackBaseURL,
+		})
+		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
+		// install, set-alias, admin add/remove/list/revoke). It must be
+		// registered in the Slack app config pointing at the same request
+		// URL as /qurl — or those verbs never arrive. Admin enforcement is
+		// in-code: every admin verb runs requireAdminSync against the qURL
+		// admin set (admin_slack_user_ids), so the AdminStore must be
+		// wired. The "admins only" restriction on the /qurl-admin
+		// registration is a cosmetic Slack-picker hint, NOT the
+		// enforcement boundary — Slack does not gate slash-command
+		// invocation on workspace-admin role. /qurl setup is NOT on
+		// /qurl-admin and is intentionally open to any workspace member so
+		// the first claimant of an unbound workspace can reach it
+		// (first-come-claims). Setup re-runs are still owner-only, enforced
+		// in code in handleSetup via AdminStore, with the OAuth-callback
+		// BindWorkspace check as the structural backstop. The remaining
+		// exposure is the first-install claim: restrict who can reach the
+		// command at install time (Slack app manifest / onboarding) if
+		// first-claim ownership matters for this deployment.
+		slog.Info("CONFIGURATION REMINDER: register /qurl-admin in the Slack app config at the same request URL as /qurl (or admin verbs never arrive) and wire the AdminStore — admin enforcement is the in-code requireAdminSync gate, not the manifest 'admin-only' label, which Slack does not enforce for slash commands. Do NOT restrict /qurl to admins: /qurl setup is intentionally open (first-come-claims) so the first claimant can reach it — though setup re-runs are owner-only (enforced in code) — and an admin-only /qurl would lock out the first claimant of an unbound workspace")
+	}
+	// Else: buildOAuthConfig already logged the specific missing-var
+	// list; nothing more to say here.
+	slackInstallCfg, ok, err := buildSlackInstallConfig(provider)
+	if err != nil {
+		return fmt.Errorf("slack install config: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	handler.SetSlackInstallURL(strings.TrimRight(slackInstallCfg.SlackBaseURL, "/") + slackinstall.InstallPath)
+	slackInstallCfg.OnTokenStored = invalidateWorkspaceSlackToken
+	if err := slackinstall.RegisterRoutes(rootMux, &slackInstallCfg); err != nil {
+		return fmt.Errorf("slack install routes: %w", err)
+	}
+	slog.Info("registered /oauth/slack/{install,callback} routes")
 	return nil
 }
 
@@ -1224,42 +1238,7 @@ func readTunnelImageConfig() (string, error) {
 		// dev/sandbox env cannot break a correctly pinned production image.
 		// Keep startup errors explicit: they land in operator logs, and each
 		// branch carries the remediation so bad image config cannot be masked.
-		switch connectorimage.ClassifyPin(image) {
-		case connectorimage.Accepted:
-			return image, nil
-		case connectorimage.LatestDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrLatestDigest,
-			)
-		case connectorimage.UppercaseDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrDigestLowercase,
-			)
-		case connectorimage.MalformedReference:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrMalformedRef,
-			)
-		case connectorimage.AmbiguousReference:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrAmbiguousRef,
-			)
-		case connectorimage.MalformedDigest:
-			return "", fmt.Errorf(
-				"%s: %s",
-				envQURLConnectorImage, connectorImageErrMalformedDigest,
-			)
-		case connectorimage.Floating:
-			return "", fmt.Errorf(
-				"%s: %s; %s",
-				envQURLConnectorImage, connectorImageErrFloating, connectorImageFallbackHint,
-			)
-		}
-		// Future connectorimage.PinStatus values must fail closed.
-		return "", fmt.Errorf("%s could not validate image pinning", envQURLConnectorImage)
+		return readPinnedImageConfig(envQURLConnectorImage, image, connectorImageFallbackHint)
 	}
 
 	rawFallback := strings.TrimSpace(os.Getenv(envQURLConnectorImageFallback))
@@ -1272,6 +1251,67 @@ func readTunnelImageConfig() (string, error) {
 	default:
 		return "", fmt.Errorf("%s=%q is unsupported; set %s only for dev/sandbox, or set %s to a specific non-latest tag or digest", envQURLConnectorImageFallback, rawFallback, connectorImageFallbackOptIn, envQURLConnectorImage)
 	}
+}
+
+func readS3OriginImageConfig() (string, error) {
+	image := strings.TrimSpace(os.Getenv(envQURLS3OriginImage))
+	if image == "" {
+		return "", nil
+	}
+	if err := internal.ValidateTunnelImageRef(image); err != nil {
+		return "", fmt.Errorf("%s: %w", envQURLS3OriginImage, err)
+	}
+	pinned, err := readPinnedImageConfig(envQURLS3OriginImage, image, "")
+	if err != nil {
+		return "", err
+	}
+	// readPinnedImageConfig owns startup's detailed operator diagnostics;
+	// RequireS3OriginImageDigest deliberately classifies again because it is
+	// also the shared render-boundary guard and narrows accepted pins to sha256.
+	if err := internal.RequireS3OriginImageDigest(pinned); err != nil {
+		return "", fmt.Errorf("%s: %w", envQURLS3OriginImage, err)
+	}
+	return pinned, nil
+}
+
+func readPinnedImageConfig(envName, image, floatingHint string) (string, error) {
+	switch connectorimage.ClassifyPin(image) {
+	case connectorimage.Accepted:
+		return image, nil
+	case connectorimage.LatestDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrLatestDigest,
+		)
+	case connectorimage.UppercaseDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrDigestLowercase,
+		)
+	case connectorimage.MalformedReference:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrMalformedRef,
+		)
+	case connectorimage.AmbiguousReference:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrAmbiguousRef,
+		)
+	case connectorimage.MalformedDigest:
+		return "", fmt.Errorf(
+			"%s: %s",
+			envName, connectorImageErrMalformedDigest,
+		)
+	case connectorimage.Floating:
+		msg := connectorImageErrFloating
+		if floatingHint != "" {
+			msg += "; " + floatingHint
+		}
+		return "", fmt.Errorf("%s: %s", envName, msg)
+	}
+	// Future connectorimage.PinStatus values must fail closed.
+	return "", fmt.Errorf("%s could not validate image pinning", envName)
 }
 
 // readPoolSizeEnv parses a pool-size env var. Empty is "use default" silently;

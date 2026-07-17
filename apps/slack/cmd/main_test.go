@@ -314,6 +314,60 @@ func TestReadTunnelImageConfig(t *testing.T) {
 	}
 }
 
+func TestReadS3OriginImageConfig(t *testing.T) {
+	pinned := testConnectorImageRepo + "@sha256:" + strings.Repeat("b", 64)
+	cases := []struct {
+		name        string
+		image       string
+		wantImage   string
+		wantErrText string
+	}{
+		{
+			name: "unset uses code default",
+		},
+		{
+			name:      "digest-pinned override accepted",
+			image:     pinned,
+			wantImage: pinned,
+		},
+		{
+			name:        "unsafe characters rejected",
+			image:       testConnectorImageRepo + ":bad tag",
+			wantErrText: envQURLS3OriginImage + ":",
+		},
+		{
+			name:        "floating override rejected",
+			image:       testConnectorImageRepo,
+			wantErrText: connectorImageErrFloating,
+		},
+		{
+			name:        "tagged override requires digest",
+			image:       testConnectorImageRepo + ":main",
+			wantErrText: internal.S3OriginImageDigestRequired,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envQURLS3OriginImage, tc.image)
+
+			got, err := readS3OriginImageConfig()
+
+			if tc.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("readS3OriginImageConfig() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readS3OriginImageConfig() err = %v", err)
+			}
+			if got != tc.wantImage {
+				t.Fatalf("readS3OriginImageConfig() = %q, want %q", got, tc.wantImage)
+			}
+		})
+	}
+}
+
 func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 	// run() validates the customer-rendered connector image after only the
 	// prerequisite public endpoint/signing-secret checks and before infra or
