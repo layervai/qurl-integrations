@@ -816,6 +816,9 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	}
 
 	message := stripBotMention(env.Event.Text)
+	// Keep this literal-only: punctuation or extra words stay on the normal agent
+	// path. This deterministic usage turn is deduped above, but it consumes no LLM
+	// rate-limit slot and is not persisted in conversation history.
 	if strings.EqualFold(message, "help") {
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentHelpReply)
 		return
