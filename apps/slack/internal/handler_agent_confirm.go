@@ -199,7 +199,8 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 	// A proposal summary must NOT route here: it is LLM-distilled, so it stays escaped
 	// mrkdwn on the text seam (injection defense) — as does the blank-reply error fallback.
 	if result.Proposal == nil && strings.TrimSpace(result.Reply) != "" {
-		h.postAgentMarkdownReply(log, env, threadTS, hardenAgentMarkdown(result.Reply))
+		reply := hardenAgentMarkdown(result.Reply)
+		h.postAgentMarkdownReply(log, env, threadTS, agentLLMReplyWithDisclaimer(reply))
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
@@ -297,7 +298,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	reason := protectConnectorConfirmReason(prop)
 	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
 	// the card fallback below and agentReplyText).
-	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
+	preview := agentProposalPreview(summary)
 
 	id, err := newPendingActionID()
 	if err != nil {
