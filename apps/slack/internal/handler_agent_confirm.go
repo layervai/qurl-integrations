@@ -199,7 +199,8 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 	// A proposal summary must NOT route here: it is LLM-distilled, so it stays escaped
 	// mrkdwn on the text seam (injection defense) — as does the blank-reply error fallback.
 	if result.Proposal == nil && strings.TrimSpace(result.Reply) != "" {
-		h.postAgentMarkdownReply(log, env, threadTS, hardenAgentMarkdown(result.Reply))
+		reply := agentLLMReplyWithDisclaimer(result.Reply)
+		h.postAgentMarkdownReply(log, env, threadTS, hardenAgentMarkdown(reply))
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))

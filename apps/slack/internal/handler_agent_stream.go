@@ -220,6 +220,14 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 				}
 			}
 		}
+		// The stream itself owns an ordinary free-text reply, so append the same
+		// reviewer-facing LLM footer as the non-streaming post path before stopStream.
+		// Proposal narration is followed by a separately disclosed confirm card and
+		// must not be labeled as the final generated answer.
+		if result.Proposal == nil {
+			s.pending.WriteString(agentLLMReplyDisclaimer)
+			s.flush(ctx)
+		}
 	}
 	s.stop(ctx)
 	if s.broken {

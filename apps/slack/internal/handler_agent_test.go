@@ -595,7 +595,7 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.1" || got.text != testAgentReachStagingReply {
+	if got.channel != "C1" || got.threadTS != "100.1" || got.text != agentLLMReplyWithDisclaimer(testAgentReachStagingReply) {
 		t.Fatalf("reply = %+v", got)
 	}
 }
@@ -681,7 +681,7 @@ func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testi
 	if !got.markdown {
 		t.Fatalf("free-text answer should use the standard-Markdown seam, got %+v", got)
 	}
-	want := `I found Deploy room \<!channel> and \<@U12345678>`
+	want := agentLLMReplyWithDisclaimer(`I found Deploy room \<!channel> and \<@U12345678>`)
 	if got.text != want {
 		t.Fatalf("reply = %q, want escaped visible controls %q", got.text, want)
 	}
@@ -714,7 +714,7 @@ func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.0" || got.text != "still here" {
+	if got.channel != "C1" || got.threadTS != "100.0" || got.text != agentLLMReplyWithDisclaimer("still here") {
 		t.Fatalf("thread_broadcast follow-up reply = %+v", got)
 	}
 }
@@ -856,7 +856,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 		// not the generic error copy — see TestProcessAgentEvent_GenericErrorCopy
 		// for the live-ctx (capability) branch.
 		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentTransientReply},
-		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, testAgentReachStagingReply},
+		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, agentLLMReplyWithDisclaimer(testAgentReachStagingReply)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1347,7 +1347,8 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	if !(*posts)[0].markdown {
 		t.Errorf("free-text answer should post on the standard-Markdown seam, got mrkdwn: %+v", (*posts)[0])
 	}
-	if (*posts)[0].text != "Use **bold** and click (https://evil.example)" {
+	wantReply := agentLLMReplyWithDisclaimer("Use **bold** and click (https://evil.example)")
+	if (*posts)[0].text != wantReply {
 		t.Errorf("free-text answer body = %q, want masked link revealed", (*posts)[0].text)
 	}
 	// Proposal preview: escaped mrkdwn text seam, never standard Markdown
@@ -1372,7 +1373,7 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	want := `plain answer (https://evil.example) for \<@U12345678> \<!channel>`
+	want := agentLLMReplyWithDisclaimer(`plain answer (https://evil.example) for \<@U12345678> \<!channel>`)
 	if len(*posts) != 1 || (*posts)[0].text != want {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
