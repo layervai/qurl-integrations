@@ -364,6 +364,24 @@ func TestAgentStreamer_AppendFailureAtFinalize_FallsBackToPost(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_ReconcileFailureLeavesNoBufferedDisclaimer(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	streamed := strings.Repeat("x", agentStreamFlushBytes)
+	s.onDelta(streamed)
+	port.appendErr = errors.New("reconcile appendStream 500")
+
+	if s.finalizeReply(&agent.Result{Reply: "synthesized final reply"}) {
+		t.Fatal("a reconcile append failure must fall back to the posted reply")
+	}
+	if !s.broken || s.pending.Len() != 0 {
+		t.Fatalf("broken stream must keep pending empty, got broken=%v pending=%q", s.broken, s.pending.String())
+	}
+	if got := port.appended(); got != streamed {
+		t.Fatalf("delivered stream = %q, want no footer after reconcile failure", got)
+	}
+}
+
 func TestNewAgentReplyStreamer_ChannelMentionUsesRecipientTeam(t *testing.T) {
 	port := &recordingStreamPort{}
 	h := NewHandler(Config{AgentStream: port})
