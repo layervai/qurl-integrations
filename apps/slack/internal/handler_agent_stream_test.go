@@ -119,6 +119,19 @@ func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_WhitespaceOnlyReplyDoesNotAddDisclaimer(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("   ")
+
+	if !s.finalizeReply(&agent.Result{Reply: "   "}) {
+		t.Fatal("an opened healthy stream must remain the delivered reply")
+	}
+	if got := port.appended(); got != "   " {
+		t.Fatalf("whitespace-only stream = %q, want no standalone disclaimer", got)
+	}
+}
+
 func TestAgentStreamer_MaskedLinkSplitAcrossDeltas_RevealsDestination(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
