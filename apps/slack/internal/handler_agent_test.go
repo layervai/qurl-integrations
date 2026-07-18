@@ -1361,6 +1361,15 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	}
 }
 
+func TestAgentLLMReplyDisclaimer_IsMarkdownHardeningInvariant(t *testing.T) {
+	if got := hardenAgentMarkdown(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("one-shot hardener changed the trusted footer: %q", got)
+	}
+	if got := hardenAgentMarkdownForStreamReconcile(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("stream-reconcile hardener changed the trusted footer: %q", got)
+	}
+}
+
 func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 	// With the markdown seam unwired, the free-text answer still delivers — on the
 	// mrkdwn text seam (degraded rendering), not dropped. Masked links are still
