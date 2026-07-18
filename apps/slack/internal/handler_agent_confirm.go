@@ -298,7 +298,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	reason := protectConnectorConfirmReason(prop)
 	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
 	// the card fallback below and agentReplyText).
-	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
+	preview := agentProposalPreview(summary)
 
 	id, err := newPendingActionID()
 	if err != nil {

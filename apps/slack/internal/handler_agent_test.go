@@ -261,6 +261,9 @@ func TestAgentReplyText(t *testing.T) {
 	if !strings.Contains(prop, "isn't enabled yet") || !strings.Contains(prop, "Protect $x.") {
 		t.Errorf("proposal preview = %q", prop)
 	}
+	if !strings.HasSuffix(prop, agentLLMReplyDisclaimer) {
+		t.Errorf("LLM-distilled proposal preview must carry the disclaimer, got %q", prop)
+	}
 	// A proposal with a blank summary would render as a dangling bullet; it must
 	// fall back to the error reply like the blank-Reply case.
 	if got := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "  "}}); got != agentErrorReply {
@@ -1358,6 +1361,9 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	}
 	if !strings.HasPrefix((*posts)[1].text, agentProposalPreviewPrefix) {
 		t.Errorf("proposal preview = %q, want the preview prefix", (*posts)[1].text)
+	}
+	if !strings.HasSuffix((*posts)[1].text, agentLLMReplyDisclaimer) {
+		t.Errorf("proposal preview = %q, want the generated-content disclaimer", (*posts)[1].text)
 	}
 }
 
