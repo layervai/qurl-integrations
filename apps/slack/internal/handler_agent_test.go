@@ -1370,6 +1370,23 @@ func TestAgentLLMReplyDisclaimer_IsMarkdownHardeningInvariant(t *testing.T) {
 	}
 }
 
+func TestDeliverAgentResult_MalformedMarkdownCannotAbsorbDisclaimer(t *testing.T) {
+	textPost, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{PostMessage: textPost, PostMarkdownMessage: mdPost})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+	reply := "An unclosed `code span"
+
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: reply})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply))
+	if len(*posts) != 1 || (*posts)[0].text != want {
+		t.Fatalf("want malformed reply hardened before the intact footer, got %+v", *posts)
+	}
+}
+
 func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 	// With the markdown seam unwired, the free-text answer still delivers — on the
 	// mrkdwn text seam (degraded rendering), not dropped. Masked links are still
