@@ -31,7 +31,7 @@ const (
 	testAgentStillWorksReply   = "still works"
 	testAgentStopEndTurn       = "end_turn"
 	testAgentStopToolUse       = "tool_use"
-	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Start a new message with your qURL request as text, without the attachment; mention qURL again in a channel."
+	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Start a new text-only message with your qURL request. If you're in a channel, mention qURL again."
 )
 
 func TestStripBotMention(t *testing.T) {

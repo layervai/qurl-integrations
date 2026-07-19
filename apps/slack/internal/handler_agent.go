@@ -42,7 +42,7 @@ const agentErrorReply = "Something went wrong handling that. Please try again, o
 // agentUnsupportedMediaReply makes the text-only boundary explicit instead of
 // silently ignoring file-only messages or sending attachment captions to the LLM
 // without the attachment. Files include Slack-hosted images and canvases.
-const agentUnsupportedMediaReply = "I can't read attached files, images, or canvases yet. Start a new message with your qURL request as text, without the attachment; mention qURL again in a channel."
+const agentUnsupportedMediaReply = "I can't read attached files, images, or canvases yet. Start a new text-only message with your qURL request. If you're in a channel, mention qURL again."
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
