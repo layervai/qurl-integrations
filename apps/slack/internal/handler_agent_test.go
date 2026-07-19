@@ -31,6 +31,7 @@ const (
 	testAgentStillWorksReply   = "still works"
 	testAgentStopEndTurn       = "end_turn"
 	testAgentStopToolUse       = "tool_use"
+	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Please resend your qURL request as text without an attachment."
 )
 
 func TestStripBotMention(t *testing.T) {
@@ -742,6 +743,43 @@ func TestHandleEvent_DedupesRetries(t *testing.T) {
 func dmMessageBody(eventID string) string {
 	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
 		`"event":{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"100.2","text":"what can I reach?"}}`
+}
+
+func unsupportedMediaBody(eventID, event string) string {
+	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `","event":` + event + `}`
+}
+
+func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "file-only channel mention",
+			body: unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+		},
+		{
+			name: "captioned DM file",
+			body: unsupportedMediaBody("EvFileCaption", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			post, posts, mu := capturingPostMessage()
+			h := NewHandler(Config{AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
+			t.Cleanup(h.Wait)
+
+			h.handleEvent(httptest.NewRecorder(), []byte(tt.body))
+			h.Wait()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
+				t.Fatalf("unsupported media should post one deterministic reply without calling the LLM, got %+v", *posts)
+			}
+		})
+	}
 }
 
 func TestHandleEvent_AgentResolvesChannelNameSkippingDMs(t *testing.T) {

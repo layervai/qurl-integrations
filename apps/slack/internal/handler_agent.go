@@ -38,6 +38,11 @@ const agentProposalPreviewPrefix = "I can set that up, but applying changes from
 // internals never reach the channel.
 const agentErrorReply = "Something went wrong handling that. Please try again, or use a `/qurl` command."
 
+// agentUnsupportedMediaReply makes the text-only boundary explicit instead of
+// silently ignoring file-only messages or sending attachment captions to the LLM
+// without the attachment. Files include Slack-hosted images and canvases.
+const agentUnsupportedMediaReply = "I can't read attached files, images, or canvases yet. Please resend your qURL request as text without an attachment."
+
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
 // route to how their messages are processed.
@@ -163,6 +168,9 @@ type slackInnerEvent struct {
 	ChannelType string `json:"channel_type"`
 	TS          string `json:"ts"`
 	ThreadTS    string `json:"thread_ts"`
+	// Files only needs presence detection: qURL does not fetch or inspect file
+	// metadata while conversation mode remains text-only.
+	Files []json.RawMessage `json:"files,omitempty"`
 	// Tab is the App Home tab a user opened ("home" / "messages") on an
 	// app_home_opened event; empty on every other event type.
 	Tab string `json:"tab,omitempty"`
@@ -594,7 +602,9 @@ const agentDeliveryBudget = 15 * time.Second
 
 // shouldDispatchAgentEvent filters out everything that isn't a human asking the
 // agent something: non-mention/DM events, bot and system/edited messages (the
-// self-loop guard), authorless events, top-level channel messages, and empty text.
+// self-loop guard), authorless events, top-level channel messages, and events
+// with neither text nor an attached file. File-only deliberate messages are
+// admitted so processAgentEventWithAdmission can explain the text-only boundary.
 //
 // When channelFollowupsEnabled is true, a channel message that is a thread REPLY is
 // also admitted — so a follow-up in a thread the agent is already in continues the
@@ -636,7 +646,7 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	default:
 		return false
 	}
-	return strings.TrimSpace(stripBotMention(e.Text)) != ""
+	return len(e.Files) > 0 || strings.TrimSpace(stripBotMention(e.Text)) != ""
 }
 
 // isAgentChannelFollowup reports whether this event is a non-@mention reply in a
@@ -820,6 +830,14 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	}
 	if !first {
 		log.Info("agent: duplicate event ignored")
+		return
+	}
+
+	// qURL conversation mode is text-only. Reply deterministically after dedupe and
+	// before rate limiting, history, or the LLM so file-only turns are not silent and
+	// captioned files are never misrepresented as if the attachment was understood.
+	if len(env.Event.Files) > 0 {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentUnsupportedMediaReply)
 		return
 	}
 
