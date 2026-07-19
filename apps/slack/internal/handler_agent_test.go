@@ -751,16 +751,19 @@ func unsupportedMediaBody(eventID, event string) string {
 
 func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
+		name      string
+		body      string
+		threadKey string
 	}{
 		{
-			name: "file-only channel mention",
-			body: unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+			name:      "file-only channel mention",
+			body:      unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+			threadKey: "C1:400.1",
 		},
 		{
-			name: "captioned DM file",
-			body: unsupportedMediaBody("EvFileCaption", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			name:      "captioned DM file",
+			body:      unsupportedMediaBody("EvFileCaption", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			threadKey: "D1:400.2",
 		},
 	}
 	for _, tt := range tests {
@@ -777,6 +780,10 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			defer mu.Unlock()
 			if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
 				t.Fatalf("unsupported media should post one deterministic reply without calling the LLM, got %+v", *posts)
+			}
+			history, _, err := store.LoadConversation(context.Background(), "T1", tt.threadKey)
+			if err != nil || len(history) != 0 {
+				t.Fatalf("unsupported media should not write conversation history, history=%q err=%v", history, err)
 			}
 		})
 	}

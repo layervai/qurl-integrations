@@ -836,6 +836,8 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// qURL conversation mode is text-only. Reply deterministically after dedupe and
 	// before rate limiting, history, or the LLM so file-only turns are not silent and
 	// captioned files are never misrepresented as if the attachment was understood.
+	// This fixed reply intentionally sits outside the limiter because it incurs no
+	// model cost.
 	if len(env.Event.Files) > 0 {
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentUnsupportedMediaReply)
 		return
