@@ -807,6 +807,31 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
+	mem := newMemAgentDDB()
+	seedAgentThread(t, mem, "C1", "400.0")
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+		AgentChannelFollowups: true, AgentDefaultEnabled: true,
+	})
+	t.Cleanup(h.Wait)
+
+	// Slack can emit both app_mention and message/file_share events for one
+	// mentioned upload. Their shared message ts must collapse to one reply even
+	// when the thread already has history and both event shapes are admissible.
+	h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"400.0","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"400.0","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
+		t.Fatalf("overlapping mention/file_share events should post one media reply, got %+v", *posts)
+	}
+}
+
 func TestHandleEvent_AgentResolvesChannelNameSkippingDMs(t *testing.T) {
 	var mu sync.Mutex
 	var resolved []string
