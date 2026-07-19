@@ -94,6 +94,8 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
 		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
 		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
+		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true},
+		{"file_share dm without files ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, false},
 		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
 
 		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
@@ -105,6 +107,9 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"top-level channel file ignored", withFile(chReply("", "")), true, false},
 		{"channel thread reply empty text, followups on", chReply("   ", "100.0"), true, false},
 		{"channel thread file reply reaches continuity gate", withFile(chReply("", "100.0")), true, true},
+		{"file_share channel thread reaches continuity gate", withFile(chReplySubtype("", "100.0", slackMessageSubtypeFileShare)), true, true},
+		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
+		{"file_share channel message without files ignored", chReplySubtype("", "100.0", slackMessageSubtypeFileShare), true, false},
 		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), false, false},
 		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
@@ -775,7 +780,7 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 		},
 		{
 			name:      "captioned DM file",
-			body:      unsupportedMediaBody("EvFileCaption", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			body:      unsupportedMediaBody("EvFileCaption", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
 			threadKey: "D1:400.2",
 		},
 	}

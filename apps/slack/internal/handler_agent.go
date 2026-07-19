@@ -26,6 +26,7 @@ const (
 	slackChannelTypeGroup                       = "group"
 	slackChannelTypeIM                          = "im"
 	slackChannelTypeMPIM                        = "mpim"
+	slackMessageSubtypeFileShare                = "file_share"
 	slackMessageSubtypeThreadBroadcast          = "thread_broadcast"
 )
 
@@ -627,13 +628,15 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 		}
 	case slackEventTypeMessage:
 		if e.ChannelType == slackChannelTypeIM {
-			// DMs are deliberate only when they are ordinary human messages. A subtyped
-			// DM remains system/bot/edit-like noise from this surface's perspective.
-			if e.Subtype != "" {
+			// Slack delivers uploaded files as file_share messages. Admit that one
+			// human subtype only when its files array is present; other subtypes remain
+			// system/bot/edit-like noise from this surface's perspective.
+			if e.Subtype != "" && (e.Subtype != slackMessageSubtypeFileShare || len(e.Files) == 0) {
 				return false
 			}
 		} else {
-			if e.Subtype != "" && e.Subtype != slackMessageSubtypeThreadBroadcast {
+			if e.Subtype != "" && e.Subtype != slackMessageSubtypeThreadBroadcast &&
+				(e.Subtype != slackMessageSubtypeFileShare || len(e.Files) == 0) {
 				return false
 			}
 			// A channel message reaches the follow-up pipeline only when channel
