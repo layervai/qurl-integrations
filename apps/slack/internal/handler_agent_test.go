@@ -31,7 +31,7 @@ const (
 	testAgentStillWorksReply   = "still works"
 	testAgentStopEndTurn       = "end_turn"
 	testAgentStopToolUse       = "tool_use"
-	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Please resend your qURL request as text without an attachment."
+	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Start a new message with your qURL request as text, without the attachment; mention qURL again in a channel."
 )
 
 func TestStripBotMention(t *testing.T) {
@@ -74,6 +74,10 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.Subtype = subtype
 		return e
 	}
+	withFile := func(e *slackEventEnvelope) *slackEventEnvelope {
+		e.Event.Files = []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+		return e
+	}
 	tests := []struct {
 		name      string
 		env       *slackEventEnvelope
@@ -88,6 +92,8 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false, false},
 		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false, false},
 		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
+		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
+		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
 		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
 
 		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
@@ -96,7 +102,9 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"channel thread reply, followups on", chReply("hi", "100.0"), true, true},
 		{"top-level channel message, followups off", chReply("hi", ""), false, false},
 		{"top-level channel message, followups on", chReply("hi", ""), true, false},
+		{"top-level channel file ignored", withFile(chReply("", "")), true, false},
 		{"channel thread reply empty text, followups on", chReply("   ", "100.0"), true, false},
+		{"channel thread file reply reaches continuity gate", withFile(chReply("", "100.0")), true, true},
 		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), false, false},
 		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
@@ -155,6 +163,11 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 	}
 	if !gateDrop(reply("C9", "999.0"), part) {
 		t.Fatal("a reply in a thread the agent never joined must be dropped")
+	}
+	fileReply := reply("C9", "999.1")
+	fileReply.Event.Files = []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+	if !gateDrop(fileReply, part) {
+		t.Fatal("a file reply outside an agent thread must be dropped")
 	}
 	// Same thread_ts but a different channel is a different thread → dropped.
 	if !gateDrop(reply("C-other", "100.0"), part) {
