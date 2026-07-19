@@ -48,6 +48,38 @@
 const logger = require('./logger');
 const { QURL_WEBHOOK_EVENTS } = require('./constants');
 
+// Normalize a string env-var to a boolean using a small allowlist of
+// truthy literals. Used by both call paths (Lambda + bot) so the
+// kill-switch env var has consistent, intuition-matching semantics:
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=1     → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=true  → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=yes   → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=on    → true
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=0     → false (NOT "any non-empty string is truthy")
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=false → false
+//   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=      → false
+//   (unset)                                                  → false
+function isTruthyEnvFlag(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+// LOAD-BEARING shared constant — the orphan-sweep description-prefix
+// matcher derives this from the caller's `description`, so every
+// caller of ensureWebhookSubscription whose subs should be co-swept
+// MUST emit a description that starts with this prefix followed by
+// ` (`. Two callers today:
+//   - apps/discord/src/guild-webhook-link.js (imports this directly)
+//   - apps/discord/lambda/webhook-registrar/index.js (passes through
+//     a `description` from terraform — terraform must set a string
+//     that begins `<DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX> (...)`
+//     See infra-side `webhook_registrar_lambda.tf:webhook_registrar_description`.)
+// Don't edit this without coordinating both call sites + the infra
+// terraform string. Any drift silently disables the sweep for the
+// drifted source's orphans (deleteDescriptionPrefix mismatch).
+const DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX = 'Discord bot view counter';
+
 const QURL_ACCESSED = QURL_WEBHOOK_EVENTS.ACCESSED;
 const QURL_EXPIRED = QURL_WEBHOOK_EVENTS.EXPIRED;
 
@@ -147,6 +179,17 @@ function canonicalUrl(u) {
   } catch { return u; }
 }
 
+// Tri-state classifier output for the orphan filter. Defined above its
+// only consumer (findExistingSubscriptions) for reading order. Uniform
+// string values across all three results so a future `if (verdict)`
+// can't fall into a truthiness footgun — only strict `===` against
+// MATCH / NEAR_MISS_LIVENESS / NO_MATCH is valid.
+const ORPHAN_FILTER_RESULTS = Object.freeze({
+  MATCH: 'match',
+  NEAR_MISS_LIVENESS: 'near-miss-liveness',
+  NO_MATCH: 'no-match',
+});
+
 // Returns ALL subscriptions matching our URL (typically 0 or 1; >1
 // only after a cold-bootstrap race created duplicates — see the
 // dedupe path in ensureWebhookSubscription). Paginates so a caller
@@ -154,15 +197,28 @@ function canonicalUrl(u) {
 // requested explicitly; loop bounded at 50 iterations (5000 subs)
 // so a misbehaving cursor can't spin forever.
 //
+// Always returns `{ matches, orphans, nearMissCount }`. `orphans` is
+// the subset of the walk's rows that the `orphanFilter(s)` classifies
+// as a full match (URL-migration leftovers, see
+// buildUrlMigrationOrphanFilter). `nearMissCount` is the count of rows
+// that matched host+path+description but failed the liveness gate —
+// useful observability: if the sweep DELETEs nothing despite a known
+// rename, an operator can grep CloudWatch for the near-miss log to
+// distinguish "qurl-service schema drifted (field missing)" from
+// "everything looks alive."
+//
 // Two terminal states to distinguish:
 //   - natural exhaustion (cursor walk ends, no more pages) → returns
-//     [] (possibly with no matches), caller takes create-fresh path.
+//     {matches, orphans, nearMissCount}, possibly empty. Caller takes
+//     create-fresh on empty matches.
 //   - 50-page cap hit (cursor never ends) → THROWS, refuses to fall
 //     through to create-fresh which would silently compound
 //     duplicates on every restart.
-async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
+async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl, orphanFilter }) {
   const target = canonicalUrl(bridgeUrl);
   const matches = [];
+  const orphans = [];
+  let nearMissCount = 0;
   let cursor = '';
   for (let i = 0; i < 50; i++) {
     // Explicit limit=100 (vs relying on a server default that could
@@ -176,15 +232,31 @@ async function findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl }) {
     // a confusing way and silently treat them as subscription objects.
     const subs = Array.isArray(resp?.data) ? resp.data : [];
     for (const s of subs) {
-      if (canonicalUrl(s.url) === target) matches.push(s);
+      if (canonicalUrl(s.url) === target) {
+        matches.push(s);
+      } else if (orphanFilter) {
+        const verdict = orphanFilter(s);
+        if (verdict === ORPHAN_FILTER_RESULTS.MATCH) orphans.push(s);
+        else if (verdict === ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS) nearMissCount += 1;
+      }
     }
     const next = resp && resp.meta && resp.meta.next_cursor;
-    if (!next) return matches;
+    if (!next) return { matches, orphans, nearMissCount };
     cursor = next;
   }
   throw new Error('findExistingSubscriptions: pagination cap hit (50 pages, ~5000 subs); possible stuck cursor — refusing to fall through to create-fresh which would compound duplicates');
 }
 
+// Returns the outcome shape so a logging caller can distinguish
+// "we actually deleted this row" from "the row was already absent
+// (404)" without re-throwing on 404. The dedupe path doesn't care
+// about the distinction; the URL-migration orphan-sweep path does
+// (the runbook-grep contract on `URL-migration orphan deleted`
+// should be true to that, not silently covering already-absent rows).
+const DELETE_OUTCOMES = Object.freeze({
+  DELETED: 'deleted',
+  ALREADY_ABSENT: 'already-absent',
+});
 async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
   try {
     await callQurlService({
@@ -193,11 +265,370 @@ async function deleteSubscription({ apiEndpoint, apiKey, webhookId }) {
       apiEndpoint,
       apiKey,
     });
+    return DELETE_OUTCOMES.DELETED;
   } catch (err) {
     // 404 = another replica deleted it concurrently. Treat as
-    // success — the goal state ("this duplicate is gone") is met.
-    if (err.status !== 404) throw err;
+    // success — the goal state ("this duplicate is gone") is met —
+    // and signal the distinction so an observability caller can
+    // pick the right log message.
+    if (err.status === 404) return DELETE_OUTCOMES.ALREADY_ABSENT;
+    throw err;
   }
+}
+
+// Derive the stable description prefix from the bot's current description.
+// `description` shape today: `Discord bot view counter (region=..., env=...)`
+// (central registrar) or `Discord bot view counter (guild=..., ...)`
+// (per-guild link). Everything in parens varies with env/region/guild;
+// everything BEFORE the first ` (` is the stable identity of "subs this
+// bot creates". Extract that prefix so the URL-migration orphan sweep
+// only matches the bot's own historical subs, never a sibling service's.
+//
+// LOAD-BEARING CONSTRAINT (don't quietly break this):
+// description is set at CREATE time and NEVER reconciled (see the comment
+// above createSubscription). The orphan retains whatever description the
+// OLD deploy gave it. The sweep can only catch an orphan whose pre-`(`
+// portion is BYTE-IDENTICAL to the bot's current pre-`(` portion. The
+// motivating incident's orphan had description
+//   `Discord bot — view counter (sandbox, owner-scoped)`
+// (em-dash + different wording) while the current bot emits
+//   `Discord bot view counter (...)`
+// — those prefixes don't match, so that historical orphan is NOT swept
+// by this code. That's fine for the recurrence-prevention goal (any
+// future rename leaves an orphan whose description was minted by the
+// CURRENT shape), but it means: if you ever edit the pre-`(` portion
+// of the bot's description, every pre-edit orphan becomes permanently
+// uncatchable. Pair any such edit with a one-off cleanup pass.
+//
+// PARSING FRAGILITY: the prefix is derived by splitting on the FIRST
+// ` (`. If the stable segment ever grows its own parenthetical
+// (e.g. `Discord bot (beta) view counter (env=...)`), the derived
+// prefix silently shrinks to `Discord bot` and widens the match set
+// dramatically. Keep the stable segment paren-free; if you need to
+// embed parens, sharpen this parser at the same time.
+//
+// Falls back to the whole string if no ` (` present, so a caller passing
+// a description without parens still gets a sensible match (string-exact).
+function deriveDescriptionPrefix(description) {
+  if (typeof description !== 'string' || description.length === 0) return '';
+  const idx = description.indexOf(' (');
+  return idx === -1 ? description : description.slice(0, idx);
+}
+
+// Pull the HOSTNAME (NOT host — `hostname` excludes the port) from a URL
+// string. Returns null on parse failure so the caller can skip the row
+// defensively (same fallback shape as canonicalUrl). The WHATWG URL
+// parser lowercases `hostname` already, so no explicit fold needed.
+//
+// Hostname over host (port-insensitive): the orphan sweep classifies
+// "same host with different port" as same-host, NOT cross-host. A
+// hypothetical rename that only flips :8080 → :8443 (or implicit-443
+// vs explicit-:443) wouldn't sweep — which is correct, since a port
+// change at the same hostname doesn't break delivery routing (the new
+// port still resolves to the same ALB; no orphan accrues). The bot's
+// bridge URL today is unparametrized + port-less, so this is purely
+// defense-in-depth against a future port-bearing URL.
+function urlHost(u) {
+  try { return new URL(u).hostname; } catch { return null; }
+}
+
+// Pull the pathname from a URL string with trailing-slash normalization
+// (mirrors canonicalUrl semantics so `/webhooks/qurl` and `/webhooks/qurl/`
+// compare equal). Returns null on parse failure.
+//
+// Semantic divergence vs canonicalUrl: this drops the query string
+// (URL.pathname excludes it), whereas canonicalUrl preserves the query
+// as route-distinguishing. The orphan sweep deliberately ignores the
+// query — a rename should be cross-host on the same route, not gated on
+// query-string equality. The bot's bridge URL is unparametrized today
+// so the divergence is moot in practice; if a query string ever enters
+// the bridge URL, re-evaluate whether sweep needs to consider it.
+//
+// Same-host query-string variant: a sub at `<bridgeUrl>?x=1` is NEITHER
+// matched by `canonicalUrl` (query preserved → strict-eq miss) NOR
+// classified as orphan (same host → filter rejects). So it's neither
+// reused nor swept — it just sits there. Intentional: today the bot
+// only registers the unparametrized form, and a hypothetical `?x=1`
+// variant would belong to a different consumer (or an obsolete
+// experiment) we shouldn't touch. If the bridge URL ever gains a query
+// param, revisit the canonicalization too.
+function urlPathname(u) {
+  try {
+    const url = new URL(u);
+    let p = url.pathname;
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+  } catch { return null; }
+}
+
+// URL-migration orphan predicate.
+//
+// Symptom (sandbox, 2026-06): the bot's `base_url` was renamed from
+// `discord.layerv.xyz` → `discord.connector.layerv.xyz`. The registrar's
+// canonical-URL matcher correctly found ZERO subs at the new URL, so it
+// CREATED a fresh subscription. The OLD subscription stayed alive in
+// qurl-service — its secret unchanged, qurl-service kept trying to
+// deliver to the old host (which still resolved to the same ALB), every
+// delivery failed sig-verification at the bot (the bot now reads the
+// NEW sub's secret from SSM). Net: 1475 failed deliveries to a permanent
+// orphan + cluttered subscription list.
+//
+// Cleanup criteria (conservative — false-positive deletion of someone
+// else's sub is far worse than a missed orphan):
+//   1. URL pathname matches the bot's bridge URL pathname (same route)
+//   2. URL host DIFFERS from the bot's current bridge URL host
+//      (cross-host = candidate for rename)
+//   3. Description matches the bot's stable description prefix EXACTLY
+//      or with ' (' as the next character — i.e. the prefix is the full
+//      stable segment, not just an arbitrary character-prefix. Without
+//      the boundary, `Discord bot view counter` would over-match a
+//      hypothetical `Discord bot view counterX (...)` sibling.
+//      This is the safety net that keeps sibling-service subs (e.g.
+//      `qurl-s3-connector resource.closed subscription`) out of the
+//      deletion set even though they share owner_id with the bot under
+//      today's bot-API-key-shared model.
+//      Per-guild interaction: guild-webhook-link.js's ensureWebhookSubscription
+//      calls use the SAME `config.BASE_URL/webhooks/qurl` as the central
+//      registrar — they all converge on one owner-scoped subscription
+//      (qurl-service's owner-scoped semantics + this file's dedupe path
+//      ensure single-sub-per-owner-per-URL). So "per-guild subs" aren't
+//      a separate class of live row to protect; whatever description
+//      landed first sticks. After a rename, that one old-host sub IS
+//      the orphan this sweep targets — regardless of whether the first-
+//      to-register was the central Lambda or a guild link.
+//   4. Liveness gate: BOTH `last_delivery_success === false` AND
+//      `failure_count >= URL_MIGRATION_ORPHAN_MIN_FAILURES`. The
+//      compound check tolerates not just transient delivery failures
+//      but also short sustained outages (the floor is 30, not 3, so
+//      a peer needs ~minutes of consecutive failures before becoming
+//      sweep-eligible). Strictness on `=== false` (vs `!== true`): a
+//      brand-new sub with no deliveries yet typically reports
+//      null/undefined — treat that as "presumed alive, do not delete."
+//
+//      LOAD-BEARING ENVIRONMENT-ISOLATION ASSUMPTION:
+//      The description prefix is identical across environments
+//      (`Discord bot view counter`), so the ONLY structural separator
+//      between this sweep and another live environment's sub is the
+//      owner_id scope (subscriptions are listed via the API key's
+//      owner_id). If sandbox and prod (or any two envs) ever share
+//      ONE `QURL_API_KEY` — i.e. resolve to the same `owner_id` in
+//      qurl-service — then a sandbox boot during a prod outage
+//      (`last_delivery_success: false` + `failure_count` past 30)
+//      would DELETE prod's live subscription. Today's deployment
+//      uses per-env SSM `QURL_API_KEY` parameters (one per env), each
+//      backed by a distinct qurl-service API key tied to a distinct
+//      owner_id — confirmed via the infra terraform's per-env
+//      `apiKeySsmParamName` wiring + the API key creation procedure
+//      (each env's key is minted separately). The owner-isolation
+//      invariant is therefore established by configuration, not
+//      enforced in code here. Anything that lets two envs share an
+//      owner_id (key migration, accidental SSM cross-mount, a future
+//      "shared key for stage and prod" decision) MUST flip the
+//      kill-switch BEFORE landing, or the sweep must gain an explicit
+//      env-discriminator first (#827 covers the latter durable fix).
+//
+//      Limitations the gate does NOT cover (see #827 for the durable
+//      fix tracking issue):
+//        - Sustained-outage cannibalization: a sibling in a hard outage
+//          produces the same `last_delivery_success=false` + climbing
+//          `failure_count` signal as a true orphan. These signals
+//          fundamentally can't distinguish the two cases — the durable
+//          fix is a non-signal-based discriminator (host allowlist,
+//          explicit old-host marker, region-tagged description).
+//          Today's deployment is single-host so this is hypothetical.
+//        - First-boot-after-rename: the old sub's `last_delivery_success`
+//          may still be `true` (last delivery before the rename
+//          succeeded). It flips to false only after the first post-
+//          rename delivery fails sig verification. So the immediate
+//          first post-rename boot may not sweep — caught on a
+//          subsequent boot once a real delivery has been attempted.
+//          Acceptable because the hoisted sweep retries every boot.
+//
+//      TODO(upstream-contract): field names `last_delivery_success` and
+//      `failure_count` are pinned against qurl-service's webhook list
+//      response shape. If qurl-service drifts those names/types, the
+//      strict-equality check fails closed (no wrong deletions) but the
+//      feature silently becomes a no-op — surfaced via the near-miss
+//      observability log.
+//
+// Returned as a closure so it composes into `findExistingSubscriptions`
+// as the `orphanFilter` arg: one cursor walk produces both the matches
+// AND the orphan candidates, avoiding a second full-scan on every
+// create-fresh boot. Returns null when no safe prefix can be derived —
+// callers treat that as "skip the sweep".
+// MIN_FAILURES tunes the compound liveness gate's transient-blip
+// tolerance — a candidate sub with last_delivery_success=false AND
+// failure_count below this is treated as transient (NEAR_MISS), not
+// orphan-confirmed (MATCH). Sized at 30 (not 3) because:
+//   - The motivating orphan had 1475, comfortably above.
+//   - A sustained-but-recoverable peer outage (~minutes) would
+//     reach failure_count=3 trivially, so a small floor buys almost
+//     no protection against the active-active cannibalization
+//     scenario in #827. Raising to 30 means a peer would need to be
+//     down for ~10-30+ minutes (assuming roughly one delivery
+//     attempt per minute) before its sub becomes sweep-eligible,
+//     which is the kind of sustained outage where operator
+//     intervention is already in progress.
+//   - Cost is asymmetric: a true URL-migration orphan's failure_count
+//     climbs unbounded, so the higher floor just delays cleanup by a
+//     bounded amount, not prevents it. A false-positive deletion of a
+//     healthy peer is by contrast unrecoverable without re-creating.
+//
+// TODO(upstream-contract): the threshold value still assumes
+// qurl-service increments `failure_count` ONCE PER FAILED DELIVERY
+// (not per retry attempt within a delivery) and that delivery
+// attempts continue for dead hosts. If the increment semantics ever
+// change to count attempts, OR if qurl-service stops attempting
+// deliveries to dead hosts (signal stalls), the threshold's safety
+// margin changes. Pin against qurl-service's published counter
+// semantics when they exist; absent that, the assumption is
+// observational.
+const URL_MIGRATION_ORPHAN_MIN_FAILURES = 30;
+// ORPHAN_FILTER_RESULTS defined above findExistingSubscriptions (the
+// only consumer) so the tri-state predicate composes cleanly. The
+// observability rationale for the tri-state: "matched everything except
+// the liveness gate" is the case we WANT to surface in CloudWatch so an
+// operator can grep CloudWatch for "schema field is missing" (TODO
+// upstream-contract above) vs "field is present but says alive" without
+// staring at qurl-service directly.
+function buildUrlMigrationOrphanFilter({ bridgeUrl, descriptionPrefix }) {
+  if (!descriptionPrefix) return null;
+  const targetHost = urlHost(bridgeUrl);
+  const targetPath = urlPathname(bridgeUrl);
+  if (!targetHost || !targetPath) return null;
+  const prefixWithBoundary = `${descriptionPrefix} (`;
+  return function classifyOrphanCandidate(s) {
+    const subHost = urlHost(s.url);
+    const subPath = urlPathname(s.url);
+    if (subHost === null || subPath === null) return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    if (subPath !== targetPath) return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    if (subHost === targetHost) return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    const subDesc = typeof s.description === 'string' ? s.description : '';
+    if (subDesc !== descriptionPrefix && !subDesc.startsWith(prefixWithBoundary)) {
+      return ORPHAN_FILTER_RESULTS.NO_MATCH;
+    }
+    // From here on: host + path + description all match (a "candidate").
+    // Liveness gate decides match vs near-miss. Both checks below
+    // route an unparseable / missing field to NEAR_MISS_LIVENESS
+    // (not MATCH) — the row is held back from deletion (fail-closed)
+    // but is still counted toward `nearMissCount` so the schema-drift
+    // case surfaces in the observability log, rather than silently
+    // disappearing into NO_MATCH.
+    if (s.last_delivery_success !== false) return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
+    // Number.isFinite (not typeof === 'number') because NaN is
+    // typeof 'number' AND NaN < anything is false — a NaN failure_count
+    // would slip through `typeof` check then fail the `<` comparison and
+    // classify as MATCH (delete), contradicting the stated fail-closed
+    // invariant. isFinite rejects NaN, +/-Infinity, and non-numbers
+    // uniformly.
+    if (!Number.isFinite(s.failure_count) || s.failure_count < URL_MIGRATION_ORPHAN_MIN_FAILURES) {
+      return ORPHAN_FILTER_RESULTS.NEAR_MISS_LIVENESS;
+    }
+    return ORPHAN_FILTER_RESULTS.MATCH;
+  };
+}
+
+// Best-effort DELETE for each URL-migration orphan. A failure on one
+// orphan logs at error level and continues to the next + to the normal
+// create path. Blocking the create on a stale-orphan delete failure
+// would leave the bot UN-registered (no new sub) AND still-orphaned
+// (old sub undeleted) — strictly worse than the orphan-only state we
+// started in.
+//
+// Failure-class semantics:
+//   - 5xx + network errors: log at ERROR, retry on next invocation
+//     (transient; CloudWatch alarm pattern on the error line catches
+//     a sustained problem).
+//   - 4xx (other than 404): log at WARN once per (webhook_id, status)
+//     pair per process lifetime, then suppress further attempts'
+//     identical log lines. The bot path (`guild-webhook-link.js`)
+//     runs many times per day across N replicas; without this dedupe
+//     a permanently-undeletable orphan (e.g. 403 if the API key
+//     loses delete scope on that resource) would emit an error line
+//     every guild-link forever, drowning the signal. The DELETE
+//     itself is still attempted on every invocation (idempotent;
+//     the next boot's API key MAY have different scope, or the
+//     resource state MAY change) — only the log is suppressed.
+//   - 404: classified as `DELETE_OUTCOMES.ALREADY_ABSENT` upstream in
+//     `deleteSubscription`, surfaced as the "already absent" log line.
+//
+// Sequential DELETEs because orphan counts are typically 0-1; parallel
+// would buy nothing and hurt per-orphan log isolation.
+const persistentClientErrorSuppressionCache = new Set();
+// Same dedupe pattern for the near-miss observability log, keyed on
+// (bridgeUrl, count) so an INCREASE in near-misses re-fires the log
+// (something new became sweep-eligible) while a steady-state perpetual
+// near-miss (e.g. multi-region healthy sibling) emits the line ONCE
+// per process and stays quiet thereafter.
+const nearMissLogSuppressionCache = new Set();
+// 4xx other than 404 → "persistent client error" → suppress repeated
+// logs. 404 is success (DELETE_OUTCOMES.ALREADY_ABSENT, handled upstream).
+// 429 is rate-limiting — transient by nature, retrying with backoff is
+// the right behavior — route to the 5xx/transient branch (log every
+// time) so a sustained rate-limit doesn't silently mask itself after
+// the first log.
+function isPersistentClientError(status) {
+  if (typeof status !== 'number') return false;
+  if (status < 400 || status >= 500) return false;
+  if (status === 404 || status === 429) return false;
+  return true;
+}
+async function cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans }) {
+  for (const orphan of orphans) {
+    try {
+      const outcome = await deleteSubscription({ apiEndpoint, apiKey, webhookId: orphan.webhook_id });
+      // Distinguish "this code's DELETE landed" from "another invocation
+      // beat us to it (404)" so the runbook-grep on
+      // `URL-migration orphan deleted` stays accurate to who actually
+      // removed the row. Both are success states for cleanup; only
+      // the log line differs.
+      const msg = outcome === DELETE_OUTCOMES.ALREADY_ABSENT
+        ? 'URL-migration orphan already absent (concurrent cleanup)'
+        : 'URL-migration orphan deleted';
+      logger.info(msg, {
+        old_url: orphan.url,
+        webhook_id: orphan.webhook_id,
+        description: orphan.description,
+        failure_count: orphan.failure_count,
+        last_delivery_success: orphan.last_delivery_success,
+      });
+    } catch (err) {
+      // Persistent client error (4xx other than 404): log once per
+      // (webhook_id, status) per process to avoid drowning the signal
+      // on the bot path where the sweep runs many times/day. 5xx and
+      // network errors log every time (transient → repeating is the
+      // signal).
+      if (isPersistentClientError(err.status)) {
+        const cacheKey = `${orphan.webhook_id}:${err.status}`;
+        if (!persistentClientErrorSuppressionCache.has(cacheKey)) {
+          persistentClientErrorSuppressionCache.add(cacheKey);
+          logger.warn('URL-migration orphan delete failed with persistent 4xx (subsequent identical attempts suppressed this process)', {
+            old_url: orphan.url,
+            webhook_id: orphan.webhook_id,
+            error: err.message,
+            status: err.status,
+            op: err.op,
+          });
+        }
+      } else {
+        logger.error('URL-migration orphan delete failed (continuing — next invocation retries)', {
+          old_url: orphan.url,
+          webhook_id: orphan.webhook_id,
+          error: err.message,
+          status: err.status,
+          op: err.op,
+        });
+      }
+    }
+  }
+}
+
+// Test seam — the suppression caches are process-scoped (module-level
+// Sets), so unit tests that exercise the suppression across multiple
+// invocations need a way to reset between cases.
+function _resetUrlMigrationOrphanDeleteSuppressionCache() {
+  persistentClientErrorSuppressionCache.clear();
+  nearMissLogSuppressionCache.clear();
 }
 
 // Pick a deterministic survivor across replicas so two replicas racing
@@ -357,12 +788,16 @@ async function reconcileEvents({ apiEndpoint, apiKey, existing }) {
  * @param {string} opts.description    - human-readable; surfaces in qurl-service UI
  * @param {string} [opts.initialSecret] - the secret the caller already has in-memory (e.g. from SSM/env). When set to a non-placeholder value AND an existing subscription is found, the registrar SKIPS rotation — every replica reuses the same secret instead of rotating each other into uselessness.
  * @param {Function} [opts.persistSecret] - optional async(secret) → void callback for best-effort persistence
+ * @param {boolean} [opts.urlMigrationSweepEnabled=true] - hard guard for the cross-host orphan sweep. Default ON for today's single-host deployment. Set to `false` BEFORE any active-active multi-region rollout under a shared `QURL_API_KEY` — see #827. A false value disables both the orphan classification (no near-miss logging, no DELETE attempts) and short-circuits the whole sweep path; matches + dedupe still run normally.
  * @returns {Promise<{secret: string, webhookId: string, action: 'created' | 'rotated' | 'reused', ownerId: string}>}
  *   `ownerId` is the qurl-service auth0 owner the API key resolves to. Required
  *   by per-guild callers for receiver routing.
  */
 async function ensureWebhookSubscription(opts) {
-  const { apiEndpoint, apiKey, bridgeUrl, description, initialSecret, persistSecret } = opts;
+  const {
+    apiEndpoint, apiKey, bridgeUrl, description, initialSecret, persistSecret,
+    urlMigrationSweepEnabled = true,
+  } = opts;
   if (!apiEndpoint || !apiKey || !bridgeUrl) {
     throw new Error('ensureWebhookSubscription: apiEndpoint, apiKey, bridgeUrl all required');
   }
@@ -372,7 +807,66 @@ async function ensureWebhookSubscription(opts) {
   // deterministic survivor + deleting the rest. Both replicas independently
   // pick the same survivor (oldest by created_at) so concurrent dedupe
   // converges without coordination.
-  const matches = await findExistingSubscriptions({ apiEndpoint, apiKey, bridgeUrl });
+  //
+  // Co-collect URL-migration orphan candidates in the same cursor walk —
+  // subs at the same `/webhooks/qurl` path but a DIFFERENT host whose
+  // description starts with this bot's stable prefix. Picked up here so
+  // the create-fresh branch below doesn't pay a second full scan. See
+  // buildUrlMigrationOrphanFilter for the safety criteria.
+  // Hard guard: `urlMigrationSweepEnabled=false` collapses the filter
+  // to null so no row is classified as orphan or near-miss. The Lambda
+  // wrapper reads `QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP`
+  // to flip this without code changes — required defense-in-depth for
+  // the hypothetical active-active multi-region case (#827) where the
+  // sweep would cannibalize healthy peers.
+  const orphanFilter = urlMigrationSweepEnabled
+    ? buildUrlMigrationOrphanFilter({
+      bridgeUrl,
+      descriptionPrefix: deriveDescriptionPrefix(description),
+    })
+    : null;
+  const { matches, orphans, nearMissCount } = await findExistingSubscriptions({
+    apiEndpoint, apiKey, bridgeUrl, orphanFilter,
+  });
+
+  // Best-effort orphan cleanup runs BEFORE the find-or-create branching,
+  // not just before create. If the create-fresh branch ran on a previous
+  // boot and the orphan DELETE 5xx'd, that boot would create the new sub
+  // anyway — and on every subsequent boot the new sub is found at
+  // `bridgeUrl`, the existing/reuse branches return early, and the
+  // orphan-cleanup would never get another chance to retry. Hoisting
+  // here makes the retry-on-next-boot claim actually true: every boot
+  // collects orphans during the cursor walk and DELETEs whatever it
+  // finds, regardless of whether it then takes existing/reuse/rotate/create.
+  if (orphans.length > 0) {
+    await cleanupUrlMigrationOrphans({ apiEndpoint, apiKey, orphans });
+  }
+  // Observability: surface "matched host+path+description but failed
+  // the liveness gate" so an operator can distinguish qurl-service
+  // schema drift from a still-alive sibling without inspecting subs
+  // by hand. Deduped per-process by (bridgeUrl, nearMissCount) so a
+  // perpetual near-miss (e.g. a healthy cross-host sibling under a
+  // hypothetical shared-API-key multi-region rollout, #827) doesn't
+  // emit a log line on every guild-link event. The count is part of
+  // the dedupe key so an INCREASE in near-misses re-fires the log.
+  if (nearMissCount > 0) {
+    const nearMissCacheKey = `${bridgeUrl}:${nearMissCount}`;
+    if (!nearMissLogSuppressionCache.has(nearMissCacheKey)) {
+      nearMissLogSuppressionCache.add(nearMissCacheKey);
+      // orphan_delete_attempts (not _deletes): a 5xx'd DELETE still
+      // counts here, since the per-orphan INFO/ERROR lines are the
+      // authoritative success/failure record. Naming it _deletes would
+      // mislead an operator reading "orphan_delete_attempts: 2" when
+      // only one corresponding "URL-migration orphan deleted" line
+      // exists.
+      logger.info('URL-migration orphan sweep — liveness-gated near-misses', {
+        near_miss_count: nearMissCount,
+        orphan_delete_attempts: orphans.length,
+        url: bridgeUrl,
+      });
+    }
+  }
+
   const existing = pickSurvivor(matches);
   const wasDedupe = matches.length > 1 && existing != null;
   if (wasDedupe) {
@@ -469,6 +963,8 @@ async function ensureWebhookSubscription(opts) {
     }
     logger.info('qURL webhook subscription reconciled (existing found, bootstrap rotate)', { webhookId, url: bridgeUrl });
   } else {
+    // URL-migration orphan cleanup already ran above (pre-branch), so
+    // we can go straight to create here.
     const created = await createSubscription({ apiEndpoint, apiKey, bridgeUrl, description });
     webhookId = created.webhook_id;
     secret = created.secret;
@@ -523,6 +1019,9 @@ module.exports = {
   deleteSubscription,
   buildSsmPersistSecret,
   WEBHOOK_ACTIONS,
+  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
+  DELETE_OUTCOMES,
+  isTruthyEnvFlag,
   // Exposed for webhook-subscriptions.js so the registry's
   // discoverDefaultOwnerId tick goes through the same QurlServiceError /
   // op-tagged transport as the rest of the registrar surface — kept off
@@ -533,5 +1032,11 @@ module.exports = {
     pickSurvivor,
     redactSecret,
     QurlServiceError,
+    deriveDescriptionPrefix,
+    buildUrlMigrationOrphanFilter,
+    cleanupUrlMigrationOrphans,
+    ORPHAN_FILTER_RESULTS,
+    URL_MIGRATION_ORPHAN_MIN_FAILURES,
+    _resetUrlMigrationOrphanDeleteSuppressionCache,
   },
 };
