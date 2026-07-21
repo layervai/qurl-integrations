@@ -42,6 +42,7 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 		threadTS:        replyTS,
 		recipientTeamID: recipientTeamID,
 		userID:          env.Event.User,
+		feedbackEnabled: h.cfg.PostFeedback != nil,
 	}
 }
 
@@ -91,6 +92,7 @@ type agentReplyStreamer struct {
 	// lookup team above. They differ for Enterprise Grid/shared-channel mentions.
 	recipientTeamID string
 	userID          string
+	feedbackEnabled bool
 
 	pending  strings.Builder // coalescer: delta text not yet flushed
 	streamed strings.Builder // everything sent to the stream, to reconcile a synthetic reply
@@ -166,8 +168,8 @@ func (s *agentReplyStreamer) flush(ctx context.Context) {
 	s.streamed.WriteString(text) // record only what actually reached Slack, so streamed never lies
 }
 
-func (s *agentReplyStreamer) stop(ctx context.Context) {
-	if err := s.port.StopStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS); err != nil {
+func (s *agentReplyStreamer) stop(ctx context.Context, blocks []any) {
+	if err := s.port.StopStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS, blocks); err != nil {
 		s.log.Warn("agent: stopStream failed", "error", err)
 	}
 }
@@ -232,7 +234,11 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 			s.flush(ctx)
 		}
 	}
-	s.stop(ctx)
+	var blocks []any
+	if s.feedbackEnabled && !s.broken && result.Proposal == nil && strings.TrimSpace(s.streamed.String()) != "" {
+		blocks = []any{agentFeedbackBlock()}
+	}
+	s.stop(ctx, blocks)
 	if s.broken {
 		// A start/append failed somewhere above (including the tail or synthesized append): the
 		// caller posts the full reply so the user still gets the complete answer (a stray partial
@@ -259,6 +265,6 @@ func (s *agentReplyStreamer) finalizeError() (handled bool) {
 		s.pending.WriteString(tail)
 	}
 	s.flush(ctx) // deliver the partial tail (a no-op if the stream already broke)
-	s.stop(ctx)
+	s.stop(ctx, nil)
 	return !s.broken
 }

@@ -203,6 +203,10 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 		h.postAgentMarkdownReply(log, env, threadTS, agentLLMReplyWithDisclaimer(reply))
 		return
 	}
+	if result.Proposal != nil && strings.TrimSpace(result.Proposal.Summary) != "" {
+		h.postAgentGeneratedReply(log, env, threadTS, agentReplyText(result), h.cfg.PostMessage)
+		return
+	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
 }
 
@@ -303,7 +307,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	id, err := newPendingActionID()
 	if err != nil {
 		log.Error("agent confirm: id generation failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentGeneratedReply(log, env, threadTS, preview, h.cfg.PostMessage)
 		return
 	}
 	blob, err := json.Marshal(pendingAction{
@@ -320,7 +324,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	})
 	if err != nil {
 		log.Error("agent confirm: marshal pending action failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentGeneratedReply(log, env, threadTS, preview, h.cfg.PostMessage)
 		return
 	}
 
@@ -328,16 +332,20 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	defer cancel()
 	if err := h.cfg.AgentStore.PutPendingAction(ctx, env.TeamID, id, blob); err != nil {
 		log.Error("agent confirm: store pending action failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentGeneratedReply(log, env, threadTS, preview, h.cfg.PostMessage)
 		return
 	}
 	// Card text renders as plain_text (safe), but the fallback is the message's
 	// top-level text — mrkdwn by default — so LLM-distilled summary/reason must be
 	// escaped there too, or prompt-injected markup would surface in push previews
 	// and non-block clients.
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, reason, id), agentConfirmFallbackText(summary, reason)); err != nil {
+	blocks := buildAgentConfirmBlocks(summary, reason, id)
+	if h.cfg.PostFeedback != nil {
+		blocks = append(blocks, agentFeedbackBlock())
+	}
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, blocks, agentConfirmFallbackText(summary, reason)); err != nil {
 		log.Error("agent confirm: post card failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentGeneratedReply(log, env, threadTS, preview, h.cfg.PostMessage)
 		return
 	}
 }
