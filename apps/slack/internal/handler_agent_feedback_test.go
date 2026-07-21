@@ -41,6 +41,7 @@ func TestDeliverAgentResultGeneratedReplyIncludesFeedbackWhenWired(t *testing.T)
 		PostMessage:       textPost,
 		PostMessageBlocks: blocks.fn(),
 		PostFeedback:      func(context.Context, []byte) error { return nil },
+		OpenView:          func(context.Context, string, string, []byte) error { return nil },
 	})
 	t.Cleanup(h.Wait)
 
@@ -72,6 +73,7 @@ func TestPostAgentGeneratedReplyFallsBackWhenFeedbackBlocksFail(t *testing.T) {
 			return context.DeadlineExceeded
 		},
 		PostFeedback: func(context.Context, []byte) error { return nil },
+		OpenView:     func(context.Context, string, string, []byte) error { return nil },
 	})
 	env := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
 	h.postAgentGeneratedReply(slog.Default(), env, "100.1", "complete answer", textPost)
@@ -100,8 +102,8 @@ func TestAgentStreamerGeneratedReplyStopsWithFeedback(t *testing.T) {
 	}
 }
 
-func TestHandleAgentFeedbackClickRoutesFixedRating(t *testing.T) {
-	var posted []byte
+func TestHandleAgentHelpfulFeedbackOnlyAcknowledges(t *testing.T) {
+	var feedbackCalls, openViewCalls int
 	var response map[string]any
 	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&response); err != nil {
@@ -110,10 +112,16 @@ func TestHandleAgentFeedbackClickRoutesFixedRating(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(responseServer.Close)
-	h := NewHandler(Config{PostFeedback: func(_ context.Context, payload []byte) error {
-		posted = append([]byte(nil), payload...)
-		return nil
-	}})
+	h := NewHandler(Config{
+		PostFeedback: func(context.Context, []byte) error {
+			feedbackCalls++
+			return nil
+		},
+		OpenView: func(context.Context, string, string, []byte) error {
+			openViewCalls++
+			return nil
+		},
+	})
 	h.validateResponseURLFn = func(string) (*url.URL, error) { return url.Parse(responseServer.URL) }
 
 	payload := &interactionPayload{
@@ -125,7 +133,7 @@ func TestHandleAgentFeedbackClickRoutesFixedRating(t *testing.T) {
 		ResponseURL: testSlackResponseURL,
 		Actions: []interactionAction{{
 			ActionID: agentFeedbackActionID,
-			Value:    agentFeedbackNegativeValue,
+			Value:    agentFeedbackPositiveValue,
 		}},
 	}
 	w := httptest.NewRecorder()
@@ -135,14 +143,90 @@ func TestHandleAgentFeedbackClickRoutesFixedRating(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("ack code = %d, want 200", w.Code)
 	}
-	got := string(posted)
-	for _, want := range []string{"Secure Access Agent response needs improvement", "Agent message `1700.01` in channel `C1`.", "user_id `U2`", "team_id `T1`"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("feedback payload missing %q: %s", want, got)
-		}
+	if feedbackCalls != 0 || openViewCalls != 0 {
+		t.Fatalf("feedback calls=%d open view calls=%d, want 0/0", feedbackCalls, openViewCalls)
 	}
 	if text, _ := response[respFieldText].(string); !strings.Contains(text, "Thanks") {
 		t.Fatalf("response_url body = %+v, want acknowledgement", response)
+	}
+}
+
+func TestHandleAgentNotHelpfulFeedbackOpensExistingModal(t *testing.T) {
+	var feedbackCalls int
+	var gotTeamID, gotTriggerID string
+	var gotView []byte
+	h := NewHandler(Config{
+		PostFeedback: func(context.Context, []byte) error {
+			feedbackCalls++
+			return nil
+		},
+		OpenView: func(_ context.Context, teamID, triggerID string, view []byte) error {
+			gotTeamID = teamID
+			gotTriggerID = triggerID
+			gotView = append([]byte(nil), view...)
+			return nil
+		},
+	})
+	payload := &interactionPayload{
+		Type:        interactionTypeBlockActions,
+		Team:        interactionID{ID: "T1"},
+		Enterprise:  interactionID{ID: "E1"},
+		User:        interactionID{ID: "U2"},
+		TriggerID:   "trigger-feedback",
+		Channel:     interactionID{ID: "C1"},
+		ResponseURL: testSlackResponseURL,
+		Actions: []interactionAction{{
+			ActionID: agentFeedbackActionID,
+			Value:    agentFeedbackNegativeValue,
+		}},
+	}
+	w := httptest.NewRecorder()
+	h.handleBlockActions(w, payload)
+	h.Wait()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+	if feedbackCalls != 0 {
+		t.Fatalf("feedback webhook calls = %d, want 0 before modal submission", feedbackCalls)
+	}
+	if gotTeamID != "T1" || gotTriggerID != "trigger-feedback" {
+		t.Fatalf("views.open team=%q trigger=%q, want T1/trigger-feedback", gotTeamID, gotTriggerID)
+	}
+	var view struct {
+		CallbackID      string `json:"callback_id"`
+		PrivateMetadata string `json:"private_metadata"`
+	}
+	if err := json.Unmarshal(gotView, &view); err != nil {
+		t.Fatalf("decode feedback modal: %v", err)
+	}
+	if view.CallbackID != callbackIDFeedback {
+		t.Fatalf("callback_id = %q, want existing feedback callback %q", view.CallbackID, callbackIDFeedback)
+	}
+	var meta FeedbackModalMetadata
+	if err := json.Unmarshal([]byte(view.PrivateMetadata), &meta); err != nil {
+		t.Fatalf("decode feedback metadata: %v", err)
+	}
+	if meta.TeamID != "T1" || meta.UserID != "U2" || meta.ChannelID != "C1" || meta.EnterpriseID != "E1" || meta.ResponseURL != testSlackResponseURL {
+		t.Fatalf("feedback metadata = %+v, want clicked response context", meta)
+	}
+}
+
+func TestAgentFeedbackControlsRequireFeedbackModal(t *testing.T) {
+	textPost, posts, mu := capturingPostMessage()
+	blocks := &blocksRecorder{}
+	h := NewHandler(Config{
+		PostMessage:       textPost,
+		PostMessageBlocks: blocks.fn(),
+		PostFeedback:      func(context.Context, []byte) error { return nil },
+	})
+	env := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
+	h.deliverAgentResult(slog.Default(), env, "100.1", &agent.Result{Reply: "complete answer"})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || len(blocks.calls) != 0 {
+		t.Fatalf("text posts=%d block calls=%d, want 1/0 without OpenView", len(*posts), len(blocks.calls))
 	}
 }
 

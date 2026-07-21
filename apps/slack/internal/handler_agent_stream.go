@@ -42,7 +42,7 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 		threadTS:        replyTS,
 		recipientTeamID: recipientTeamID,
 		userID:          env.Event.User,
-		feedbackEnabled: h.cfg.PostFeedback != nil,
+		feedbackEnabled: h.agentFeedbackEnabled(),
 	}
 }
 

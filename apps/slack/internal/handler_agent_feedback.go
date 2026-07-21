@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -50,14 +49,14 @@ func agentGeneratedReplyBlocks(markdown string) []any {
 }
 
 func (h *Handler) agentFeedbackEnabled() bool {
-	return h.cfg.PostFeedback != nil && h.cfg.PostMessageBlocks != nil
+	return h.cfg.OpenView != nil && h.cfg.PostFeedback != nil
 }
 
 // postAgentGeneratedReply preserves the existing text/Markdown delivery seam
 // when feedback is not wired. When it is wired, it posts the answer and native
 // feedback buttons atomically so no generated response can lose its affordance.
 func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvelope, threadTS, text string, fallback PostMessageFunc) {
-	if !h.agentFeedbackEnabled() {
+	if !h.agentFeedbackEnabled() || h.cfg.PostMessageBlocks == nil {
 		h.deliverAgentText(log, env, threadTS, text, fallback)
 		return
 	}
@@ -69,35 +68,41 @@ func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvel
 	}
 }
 
-func agentFeedbackSummary(value string) (string, bool) {
-	switch strings.TrimSpace(value) {
-	case agentFeedbackPositiveValue:
-		return "Helpful Secure Access Agent response", true
-	case agentFeedbackNegativeValue:
-		return "Secure Access Agent response needs improvement", true
-	default:
-		return "", false
-	}
-}
-
-// handleAgentFeedbackClick promptly acknowledges a signed Slack block action,
-// then reuses the existing operator feedback webhook asynchronously. The
-// submission contains only the fixed rating plus Slack-issued message metadata.
+// handleAgentFeedbackClick keeps positive feedback lightweight and makes
+// negative feedback actionable. Helpful clicks receive only an ephemeral
+// acknowledgement; not-helpful clicks reuse the existing `/qurl feedback`
+// modal, whose eventual submission follows the existing webhook path.
 func (h *Handler) handleAgentFeedbackClick(w http.ResponseWriter, payload *interactionPayload, action interactionAction) {
-	summary, ok := agentFeedbackSummary(action.Value)
-	if !ok {
+	switch strings.TrimSpace(action.Value) {
+	case agentFeedbackPositiveValue:
+		respondJSON(w, http.StatusOK, map[string]any{})
+		h.Go(func() {
+			_ = h.postResponse(slog.Default(), payload.ResponseURL, ":white_check_mark: Thanks — your feedback helps improve the Secure Access Agent.")
+		})
+		return
+	case agentFeedbackNegativeValue:
+		// Continue below and open the reusable feedback modal.
+	default:
 		slog.Warn("agent feedback: unknown rating", "team_id", payload.Team.ID)
 		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	if h.cfg.PostFeedback == nil {
+
+	if !h.agentFeedbackEnabled() {
+		respondJSON(w, http.StatusOK, map[string]any{})
 		h.Go(func() {
 			_ = h.postResponse(slog.Default(), payload.ResponseURL, ":warning: Feedback isn't enabled on this qURL Slack deployment yet.")
 		})
-		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-
+	triggerID := strings.TrimSpace(payload.TriggerID)
+	if triggerID == "" {
+		respondJSON(w, http.StatusOK, map[string]any{})
+		h.Go(func() {
+			_ = h.postResponse(slog.Default(), payload.ResponseURL, ":warning: Slack couldn't open the feedback form. Try `/qurl feedback` instead.")
+		})
+		return
+	}
 	meta := FeedbackModalMetadata{
 		TeamID:       payload.Team.ID,
 		UserID:       payload.User.ID,
@@ -105,23 +110,24 @@ func (h *Handler) handleAgentFeedbackClick(w http.ResponseWriter, payload *inter
 		EnterpriseID: payload.Enterprise.ID,
 		ResponseURL:  payload.ResponseURL,
 	}
-	details := fmt.Sprintf("Agent message `%s` in channel `%s`.", escapeMrkdwnCode(payload.Container.MessageTS), escapeMrkdwnCode(payload.Channel.ID))
-	log := slog.With("surface", "agent_feedback", "team_id", meta.TeamID, "user_id", meta.UserID, "rating", action.Value)
-	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
-		body, err := FeedbackMessage(&meta, feedbackTypeOther, summary, details)
-		if err != nil {
-			log.Error("agent feedback message render failed", "error", err)
-			_ = h.postResponse(log, meta.ResponseURL, ":warning: Couldn't send your feedback. Try `/qurl feedback` instead.")
-			return
-		}
-		if err := h.cfg.PostFeedback(ctx, body); err != nil {
-			log.Error("agent feedback webhook post failed", "error", err)
-			_ = h.postResponse(log, meta.ResponseURL, ":warning: Couldn't send your feedback right now. Try `/qurl feedback` in a moment.")
-			return
-		}
-		_ = h.postResponse(log, meta.ResponseURL, ":white_check_mark: Thanks — your feedback helps improve the Secure Access Agent.")
-	}) {
-		h.Go(func() { _ = h.postResponse(log, payload.ResponseURL, modalBusyMsg) })
+	view, err := FeedbackModal(&meta)
+	if err != nil {
+		slog.Error("agent feedback modal render failed", "error", err, "team_id", meta.TeamID)
+		respondJSON(w, http.StatusOK, map[string]any{})
+		h.Go(func() {
+			_ = h.postResponse(slog.Default(), payload.ResponseURL, ":warning: Couldn't open the feedback form. Try `/qurl feedback` instead.")
+		})
+		return
 	}
+	log := slog.With("surface", "agent_feedback", "team_id", meta.TeamID, "user_id", meta.UserID)
+	ctx, cancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
+	defer cancel()
+	err = h.openViewWithGridFallback(ctx, log, meta.TeamID, meta.EnterpriseID, triggerID, view)
 	respondJSON(w, http.StatusOK, map[string]any{})
+	if err != nil {
+		log.Error("agent feedback views.open failed", "error", err)
+		h.Go(func() {
+			_ = h.postResponse(log, payload.ResponseURL, ":warning: Couldn't open the feedback form. Try `/qurl feedback` instead.")
+		})
+	}
 }

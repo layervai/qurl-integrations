@@ -340,7 +340,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	// escaped there too, or prompt-injected markup would surface in push previews
 	// and non-block clients.
 	blocks := buildAgentConfirmBlocks(summary, reason, id)
-	if h.cfg.PostFeedback != nil {
+	if h.agentFeedbackEnabled() {
 		blocks = append(blocks, agentFeedbackBlock())
 	}
 	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, blocks, agentConfirmFallbackText(summary, reason)); err != nil {
