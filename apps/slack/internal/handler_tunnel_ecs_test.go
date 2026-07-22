@@ -9,10 +9,14 @@ import (
 func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	t.Parallel()
 	got := mustRenderECSFargateTunnelInstructions(t, &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvECSFargate,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvECSFargate,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}, testTunnelImageRef)
 
 	for _, want := range []string{
@@ -23,6 +27,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		ecsFargateRegionPlaceholderNote,
 		"AWS appends a random suffix",
 		"127.0.0.1:9090",
+		"POSIX UID/GID `65532:65532`",
 		"AWS Secrets Manager",
 		"Store the bootstrap key from the separate DM",
 		"install-instructions message intentionally does not contain the key",
@@ -34,8 +39,16 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point",
 		"mounted into the task as the `qurl-config` volume",
 		testTunnelLocalPort9090Line,
+		"resource_id: '" + testTunnelResourceID + "'",
+		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
 		`"name": "QURL_CONNECTOR_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
+		`"name": "LAYERV_KNOCK_RESOURCE_ID"`,
+		`"value": "` + testTunnelKnockID + `"`,
+		`"name": "QURL_API_URL"`,
+		`"value": "` + testTunnelAPIURL + `"`,
+		`"user": "65532:65532"`,
 		testTunnelECSAPIKeyNameLine,
 		`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
 		`"sourceVolume": "qurl-agent-state"`,
@@ -45,7 +58,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelResourceID, testTunnelAPIKey, "QURL_CONNECTOR_SLUG"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -58,10 +71,14 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	}
 
 	containerJSON, err := renderECSSidecarContainerJSON(&tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvECSFargate,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvECSFargate,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}, testTunnelImageRef)
 	if err != nil {
 		t.Fatalf("renderECSSidecarContainerJSON: %v", err)
@@ -73,10 +90,23 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if container.Essential {
 		t.Fatal("ECS sidecar Essential = true, want false so the tunnel does not take down the app task")
 	}
+	if container.User != ecsConnectorUser {
+		t.Fatalf("ECS sidecar User = %q, want connector image UID/GID", container.User)
+	}
+	if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != "ALL" {
+		t.Fatalf("ECS sidecar capability drop = %v, want [ALL]", got)
+	}
 	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
 		t.Fatalf("ECS sidecar = %+v, want image and bootstrap secret wiring", container)
 	}
 	if container.Secrets[0].ValueFrom != "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_"+testTunnelSlug {
 		t.Fatalf("ECS secret ValueFrom = %q, want unmistakable replacement placeholder", container.Secrets[0].ValueFrom)
+	}
+	env := map[string]string{}
+	for _, e := range container.Environment {
+		env[e.Name] = e.Value
+	}
+	if env["LAYERV_KNOCK_RESOURCE_ID"] != testTunnelKnockID {
+		t.Fatalf("ECS environment LAYERV_KNOCK_RESOURCE_ID = %q, want %q", env["LAYERV_KNOCK_RESOURCE_ID"], testTunnelKnockID)
 	}
 }

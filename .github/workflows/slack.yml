@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Stacked Slack PRs must run the same gates before their base reaches main.
+    branches: ["**"]
 
 permissions:
   contents: read

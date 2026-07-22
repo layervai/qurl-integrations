@@ -302,6 +302,10 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
+	// ConnectorAPIURL is the qurl-connector API base including /v1. Guided
+	// tunnel setup writes it into every rendered runtime definition so sandbox
+	// installs never silently fall back to production.
+	ConnectorAPIURL string
 
 	// BaseContext is the server-lifetime parent of every async work
 	// goroutine's context. SIGTERM cancels it, which propagates to
@@ -380,6 +384,12 @@ type Config struct {
 	// that construct Config directly must pass a pinned image unless they
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
+
+	// S3OriginImage is the private S3 website origin image shown by the
+	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's
+	// digest-pinned default; production can set QURL_S3_ORIGIN_IMAGE to a
+	// tested digest when rotating the origin independently from the Slack app.
+	S3OriginImage string
 
 	// PostFeedback delivers a `/qurl feedback` submission to the internal
 	// feedback Slack channel. Nil disables `/qurl feedback`: the command
@@ -2340,7 +2350,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 	appendSectionHeader := func(title string) {
 		lines = append(lines, "", title)
 	}
-	// Protect resources: stand up new access in this channel (a connector tunnel
+	// Protect resources: stand up new access in this channel (a qURL Connector
 	// or an existing URL resource). Gates on aliasStore + AdminStore, the same
 	// pair the install/protect verbs need; the guided-vs-typed split nests under
 	// OpenView, the condition the guided modals themselves require.
@@ -2348,9 +2358,9 @@ func (h *Handler) adminHelpMessage(command string) string {
 		appendSectionHeader("*Protect resources*")
 		if h.cfg.OpenView != nil {
 			lines = append(lines,
-				"• `/qurl-admin protect` — Guided chooser: protect a connector service or an existing URL resource (recommended)",
-				"• `/qurl-admin protect-connector` — Guided connector setup (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin protect` — Guided chooser for qURL Connector setup or existing URL resources (recommended)",
+				"• `/qurl-admin protect-connector` — Guided connector setup for web apps and HTTP APIs (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup for web apps and HTTP APIs; creates a bootstrap key and binds `$<id>` in this channel",
 				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",

@@ -65,6 +65,7 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 	h := NewHandler(Config{
 		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
 		SlackSigningSecret: testSigningSecret,
+		ConnectorAPIURL:    qurlServer.URL + "/v1",
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlServer.URL, apiKey)
 		},
