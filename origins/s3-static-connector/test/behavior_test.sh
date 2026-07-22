@@ -38,11 +38,23 @@ set -e
 if [ "${SKIP_BUILD:-false}" = "true" ]; then
   echo "==> using existing $IMG ($PLATFORM)"
   # Digest references are remote release contracts and may be exercised for
-  # more than one architecture in the same Docker daemon. Pull the requested
-  # platform explicitly each time. CI-built local tags are already loaded and
-  # must not be resolved against a registry.
+  # more than one architecture in the same Docker daemon. Docker cannot bind
+  # one digest reference to two platform-specific image IDs, so load each
+  # requested platform through a uniquely tagged, otherwise-empty derivative.
+  # CI-built local tags are already loaded and must not be resolved against a
+  # registry.
   case "$IMG" in
-    *@sha256:*) docker pull --platform "$PLATFORM" "$IMG" >/dev/null ;;
+    *@sha256:*)
+      source_image="$IMG"
+      digest="${IMG##*@sha256:}"
+      platform_tag="s3-static-connector-contract:${digest:0:12}-${PLATFORM//\//-}"
+      docker build --pull --platform "$PLATFORM" --build-arg SOURCE_IMAGE="$source_image" \
+        -t "$platform_tag" -f - "$DIR" >/dev/null <<'EOF'
+ARG SOURCE_IMAGE=scratch
+FROM ${SOURCE_IMAGE}
+EOF
+      IMG="$platform_tag"
+      ;;
   esac
 else
   echo "==> building $IMG ($PLATFORM)"
