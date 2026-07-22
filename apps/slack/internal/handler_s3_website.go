@@ -637,7 +637,9 @@ func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key
 	b.WriteString(escapeMrkdwnCode(args.Region))
 	b.WriteString("`.\n\n")
 	b.WriteString(p.instructions)
-	b.WriteString("\n\nTreat the separate bootstrap-key DM as secret until the qURL Connector connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the agent identity used on future restarts.\n\n")
+	b.WriteString("\n\nTreat the separate bootstrap-key DM as secret until the qURL Connector connects. ")
+	b.WriteString(tunnelBootstrapRetirementNote(args.Environment))
+	b.WriteString(" Keep the qURL agent-state directory, volume, or PVC; it stores the agent identity used on future restarts.\n\n")
 	b.WriteString("Then users can run `/qurl get $")
 	b.WriteString(args.Alias)
 	b.WriteString("`.")
@@ -729,6 +731,7 @@ ORIGIN_CONTAINER="qurl-s3-origin-${QURL_CONNECTOR_ID}"
 CONNECTOR_CONTAINER="qurl-connector-${QURL_CONNECTOR_ID}"
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
+AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
 CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
 
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
@@ -738,6 +741,7 @@ $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
+$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"
 %s
 %s
 
@@ -766,15 +770,20 @@ docker run -d \
   --user 65532:65532 \
   --network "container:${ORIGIN_CONTAINER}" \
   --restart=on-failure:5 \
+  --read-only \
+  --tmpfs /tmp:rw,size=64m \
   --cap-drop=ALL \
   --security-opt=no-new-privileges:true \
+  --pids-limit=512 \
   -v "$AGENT_STATE_DIR:/var/lib/layerv/agent" \
+  -v "$AUDIT_DIR:/var/log/layerv/qurl-connector" \
   -v "$SECRET_DIR:$SECRET_DIR:ro" \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
+  -e QURL_AUDIT_FILE=%s \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
   -e QURL_API_URL=%s \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(connectorAuditFilePath), shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
@@ -821,6 +830,7 @@ QURL_API_URL_YAML=%s
 ORIGIN_SERVICE_NAME=%s
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
+AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
 CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
 QURL_COMPOSE_FILE="$PWD/qurl-s3-website-${QURL_CONNECTOR_ID}.compose.yaml"
 
@@ -831,6 +841,7 @@ $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
+$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"
 %s
 %s
 
@@ -854,6 +865,10 @@ services:
     image: %s
     user: "65532:65532"
     restart: on-failure:5
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=64m
+    pids_limit: 512
     cap_drop:
       - ALL
     security_opt:
@@ -864,12 +879,14 @@ services:
         condition: service_started
     volumes:
       - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
+      - ${AUDIT_DIR}:/var/log/layerv/qurl-connector
       # Compose uses one stable in-container secret path; the Docker renderer
       # instead preserves its connector-specific host path inside the container.
       - ${SECRET_DIR}:/run/secrets/qurl-connector:ro
       - ./qurl-proxy-${QURL_CONNECTOR_ID}.yaml:/work/qurl-proxy.yaml:ro
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
+      QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log
       QURL_CONNECTOR_ID: %s
       QURL_API_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF
@@ -909,7 +926,8 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"Both containers are essential, so a failure of either one restarts the whole task.",
 		"The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening.",
 		"The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
-		"Configure the qurl-agent-state and qurl-config EFS access points with POSIX UID/GID `65532:65532`, matching the qURL Connector image user.",
+		"Configure the qurl-agent-state, qurl-audit, and qurl-config EFS access points with POSIX UID/GID `65532:65532`, matching the qURL Connector image user; use root-directory modes 0700, 0750, and 0755 respectively, and make qurl-proxy.yaml mode 0644.",
+		"The qurl-audit volume preserves rotated audit records while the Connector uses a read-only root filesystem.",
 		"Both generated containers drop every Linux capability.",
 	}, " ")
 	return intro + "\n\n" +
@@ -919,7 +937,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
 		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
-		"5. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, delete the bootstrap secret.", nil
+		"5. Add durable EFS-backed volumes named qurl-agent-state, qurl-audit, and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, register and deploy a warm-start task revision with the QURL_API_KEY entry removed from `secrets`; verify the replacement task connects from qurl-agent-state, then delete the bootstrap secret. Deleting it first prevents replacement tasks from starting.", nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -942,19 +960,22 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 			LinuxParameters:  hardenedECSLinuxParameters(),
 		},
 		{
-			Name:      connectorContainerName,
-			Image:     connectorImage,
-			User:      ecsConnectorUser,
-			Essential: true,
+			Name:                   connectorContainerName,
+			Image:                  connectorImage,
+			User:                   ecsConnectorUser,
+			Essential:              true,
+			ReadonlyRootFilesystem: true,
 			Environment: []ecsEnvironmentVar{
 				{Name: ecsConnectorIDEnv, Value: args.Slug},
 				{Name: "QURL_API_URL", Value: args.APIURL},
+				{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
 			},
 			Secrets: []ecsSecret{
 				{Name: tunnelEnvAPIKey, ValueFrom: "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug},
 			},
 			MountPoints: []ecsMountPoint{
 				{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},
+				{SourceVolume: "qurl-audit", ContainerPath: connectorAuditDir},
 				{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
 			},
 			LogConfiguration: awslogsConfiguration(s3WebsiteECSLogGroup, "qurl"),
@@ -970,17 +991,17 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 func renderKubernetesS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
 	names := kubernetesTunnelObjectNames(args.Slug)
 	quoted, err := yamlSingleQuotedValues(
-		names.configMap, names.agentPVC, names.secret, connectorImage, originImage,
+		names.configMap, names.agentPVC, names.auditPVC, names.secret, connectorImage, originImage,
 		args.Slug, args.APIURL, args.Bucket, args.Region,
 		args.Prefix, args.IndexDocument,
 	)
 	if err != nil {
 		return "", err
 	}
-	quotedConfigMap, quotedAgentPVC, quotedSecret := quoted[0], quoted[1], quoted[2]
-	quotedConnectorImage, quotedOriginImage, quotedSlug := quoted[3], quoted[4], quoted[5]
-	quotedAPIURL, quotedBucket, quotedRegion := quoted[6], quoted[7], quoted[8]
-	quotedPrefix, quotedIndex := quoted[9], quoted[10]
+	quotedConfigMap, quotedAgentPVC, quotedAuditPVC, quotedSecret := quoted[0], quoted[1], quoted[2], quoted[3]
+	quotedConnectorImage, quotedOriginImage, quotedSlug := quoted[4], quoted[5], quoted[6]
+	quotedAPIURL, quotedBucket, quotedRegion := quoted[7], quoted[8], quoted[9]
+	quotedPrefix, quotedIndex := quoted[10], quoted[11]
 	configYAML, err := renderS3WebsiteConnectorConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -1010,13 +1031,19 @@ spec:
   resources:
     requests:
       storage: 1Gi
-QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyToCommandShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), quotedConfigMap, indentLines(configYAML, 4), quotedAgentPVC)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: %s
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyToCommandShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), quotedConfigMap, indentLines(configYAML, 4), quotedAgentPVC, quotedAuditPVC)
 
-	patch := fmt.Sprintf(`securityContext:
-  fsGroup: 65532
-  fsGroupChangePolicy: OnRootMismatch
-containers:
-  - name: %s
+	originContainer := fmt.Sprintf(`  - name: %s
     image: %s
     securityContext:
       runAsUser: 65532
@@ -1037,47 +1064,17 @@ containers:
       - name: INDEX_DOCUMENT
         value: %s
       - name: CACHE_CONNECTOR_ID
-        value: %s
-  - name: %s
-    image: %s
-    securityContext:
-      runAsUser: 65532
-      runAsGroup: 65532
-      runAsNonRoot: true
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
-      seccompProfile:
-        type: RuntimeDefault
-    env:
-      - name: QURL_API_KEY_FILE
-        value: /run/secrets/qurl-connector/api_key
-      - name: QURL_CONNECTOR_ID
-        value: %s
-      - name: QURL_API_URL
-        value: %s
-    volumeMounts:
-      - name: qurl-agent-state
-        mountPath: /var/lib/layerv/agent
-      - name: qurl-bootstrap
-        mountPath: /run/secrets/qurl-connector
-        readOnly: true
-      - name: qurl-proxy
-        mountPath: /work/qurl-proxy.yaml
-        subPath: qurl-proxy.yaml
-        readOnly: true
-volumes:
-  - name: qurl-agent-state
-    persistentVolumeClaim:
-      claimName: %s
-  - name: qurl-bootstrap
-    secret:
-      secretName: %s
-      # fsGroup 65532 grants group-read access to the nonroot sidecars.
-      defaultMode: 0440
-  - name: qurl-proxy
-    configMap:
-      name: %s`, s3WebsiteOriginContainerName, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, connectorContainerName, quotedConnectorImage, quotedSlug, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
+        value: %s`, s3WebsiteOriginContainerName, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug)
+	patch := renderKubernetesConnectorPodSpec(&kubernetesConnectorPodSpecArgs{
+		precedingContainers: originContainer,
+		imageYAML:           quotedConnectorImage,
+		slugYAML:            quotedSlug,
+		apiURLYAML:          quotedAPIURL,
+		agentPVCYAML:        quotedAgentPVC,
+		auditPVCYAML:        quotedAuditPVC,
+		secretYAML:          quotedSecret,
+		configMapYAML:       quotedConfigMap,
+	})
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {
@@ -1090,8 +1087,10 @@ volumes:
 	intro := strings.Join([]string{
 		"Run this once in the target namespace, then deploy the S3 origin and qURL Connector containers in the same pod so `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "` reaches the private S3 origin.",
 		"The pod identity or node role needs s3:GetObject on the objects and s3:ListBucket on the bucket.",
+		"The Connector uses separate state and audit PVCs. qurl-go rejects group-writable identity state, so do not add pod-level `fsGroup`; the permissions init container enforces owner-only state modes before each start.",
+		"Your admission policy must permit the two root init containers: volume permissions uses CHOWN, DAC_OVERRIDE, and FOWNER, while the one-time bootstrap copy uses CHOWN only. The long-running Connector remains nonroot, read-only-root, seccomp-confined, and capability-free.",
 		"The bootstrap key is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.",
-		"Delete the bootstrap Secret after the qURL Connector logs show it connected.",
+		"After the pod connects, create and roll out a warm-start workload revision that removes `qurl-bootstrap-copy`, both bootstrap volumes and their mounts, and `QURL_API_KEY_FILE`. Verify the replacement pod connects from its persisted state, then delete the bootstrap Secret; deleting it first prevents a replacement pod from starting.",
 	}, "\n")
-	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAdd both containers under the same pod's `containers:` list, append the volumes under `volumes:`, and merge the `fsGroup` fields into the pod-level `securityContext:`. Do not duplicate existing YAML keys.\n\n" + patchBlock, nil
+	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend both generated init containers under your existing `initContainers:` list, add both runtime containers under `containers:`, and append the volumes under `volumes:`. Do not add pod-level `fsGroup` and do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }

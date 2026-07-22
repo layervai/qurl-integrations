@@ -53,6 +53,7 @@ const (
 	testTunnelDockerWeb              = "web_1-2"
 	testSlackTriggerID               = "trigger_test"
 	testEnterpriseID                 = "E_GRID"
+	testCapabilityAll                = "ALL"
 )
 
 type failingAuthProvider struct{ err error }
@@ -172,6 +173,15 @@ func testTunnelInstallArgs() *tunnelInstallArgs {
 		KnockResourceID:    testTunnelKnockID,
 		APIURL:             testTunnelAPIURL,
 	}
+}
+
+func ecsMountPointPresent(mounts []ecsMountPoint, source, path string, readOnly bool) bool {
+	for _, mount := range mounts {
+		if mount.SourceVolume == source && mount.ContainerPath == path && mount.ReadOnly == readOnly {
+			return true
+		}
+	}
+	return false
 }
 
 func testTunnelInstallAgentAudit() *tunnelInstallAgentAudit {
@@ -1608,17 +1618,21 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"name: 'qurl-proxy-" + testTunnelSlug + "'",
 		"kind: PersistentVolumeClaim",
 		"Pod spec additions:",
-		"Append the `qurl-connector` container under your existing `containers:` list",
-		"fsGroup: 65532",
-		"fsGroupChangePolicy: OnRootMismatch",
+		"Append both generated init containers under your existing `initContainers:` list",
+		"initContainers:",
+		"name: qurl-volume-permissions",
+		connectorVolumePermissionsImage,
+		"runAsUser: 0",
 		"securityContext:",
 		"runAsUser: 65532",
 		"runAsNonRoot: true",
+		"readOnlyRootFilesystem: true",
 		"drop: [\"ALL\"]",
 		"type: RuntimeDefault",
 		"claimName: 'qurl-agent-" + testTunnelSlug + "'",
+		"claimName: 'qurl-audit-" + testTunnelSlug + "'",
 		"secretName: 'qurl-connector-" + testTunnelSlug + "'",
-		"defaultMode: 0440",
+		"defaultMode: 0400",
 		"QURL_CONNECTOR_ID",
 		"value: '" + testTunnelSlug + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
@@ -1630,7 +1644,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug, "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "fsGroup:", "fsGroupChangePolicy:", testForbiddenConnectorSlug, "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -4448,6 +4462,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"Target environment: AWS ECS/Fargate.",
 				ecsFargateChecklistText,
 				testTunnelECSAPIKeyNameLine,
+				"Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager bootstrap secret.",
 			},
 		},
 		{
@@ -4457,7 +4472,8 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"Target environment: Kubernetes.",
 				"kubectl apply -f -",
 				"Pod spec additions:",
-				"Do not duplicate existing YAML keys.",
+				"do not duplicate existing YAML keys.",
+				"Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes bootstrap Secret.",
 			},
 		},
 	}

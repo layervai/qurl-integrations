@@ -13,14 +13,15 @@ type ecsContainerDefinition struct {
 	Image string `json:"image"`
 	// User intentionally has no omitempty: every generated connector container
 	// must explicitly pin the audited nonroot runtime identity.
-	User             string                   `json:"user"`
-	Essential        bool                     `json:"essential"`
-	Environment      []ecsEnvironmentVar      `json:"environment"`
-	Secrets          []ecsSecret              `json:"secrets"`
-	MountPoints      []ecsMountPoint          `json:"mountPoints"`
-	LogConfiguration ecsLogConfiguration      `json:"logConfiguration"`
-	LinuxParameters  ecsLinuxParameters       `json:"linuxParameters"`
-	DependsOn        []ecsContainerDependency `json:"dependsOn,omitempty"`
+	User                   string                   `json:"user"`
+	Essential              bool                     `json:"essential"`
+	ReadonlyRootFilesystem bool                     `json:"readonlyRootFilesystem"`
+	Environment            []ecsEnvironmentVar      `json:"environment"`
+	Secrets                []ecsSecret              `json:"secrets"`
+	MountPoints            []ecsMountPoint          `json:"mountPoints"`
+	LogConfiguration       ecsLogConfiguration      `json:"logConfiguration"`
+	LinuxParameters        ecsLinuxParameters       `json:"linuxParameters"`
+	DependsOn              []ecsContainerDependency `json:"dependsOn,omitempty"`
 }
 
 type ecsLinuxParameters struct {
@@ -92,7 +93,8 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		"Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager; AWS appends a random suffix to secret ARNs.",
 		ecsFargateRegionPlaceholderNote,
 		"Fargate's awsvpc network mode shares one task ENI across containers, so no explicit network_mode is needed; `127.0.0.1:" + strconv.Itoa(args.LocalPort) + "` reaches the target container.",
-		"Configure both EFS access points with POSIX UID/GID `" + ecsConnectorUser + "`, matching the connector image's nonroot user.",
+		"Configure the qurl-agent-state, qurl-audit, and qurl-config EFS access points with POSIX UID/GID `" + ecsConnectorUser + "`, matching the connector image's nonroot user; use root-directory modes 0700, 0750, and 0755 respectively, and make qurl-proxy.yaml mode 0644.",
+		"The qurl-audit volume preserves rotated audit records while the Connector uses a read-only root filesystem.",
 		"The generated sidecar drops every Linux capability.",
 	}, " ")
 	return intro + "\n\n" +
@@ -101,18 +103,20 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 		configBlock + "\n\n" +
 		"3. Add this non-essential sidecar container to the same task definition as the target container. ECS injects this bootstrap secret as `QURL_API_KEY`, which is an environment variable; file-mounted secret runtimes should use `QURL_API_KEY_FILE` instead:\n\n" +
 		containerBlock + "\n\n" +
-		"4. Add durable EFS-backed volumes named qurl-agent-state and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the qURL Connector connected, delete the bootstrap secret. For future bootstrap rotation, prefer a file-mounted secret runtime so new bootstrap keys are not revealed through task environment variables.", nil
+		"4. Add durable EFS-backed volumes named qurl-agent-state, qurl-audit, and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the task logs show the qURL Connector connected, register and deploy a warm-start task revision with the QURL_API_KEY entry removed from `secrets`; verify the replacement task connects from qurl-agent-state, then delete the bootstrap secret. Deleting it first prevents replacement tasks from starting. For future bootstrap rotation, prefer a file-mounted secret runtime so new bootstrap keys are not revealed through task environment variables.", nil
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
 	container := ecsContainerDefinition{
-		Name:      connectorContainerName,
-		Image:     image,
-		User:      ecsConnectorUser,
-		Essential: false,
+		Name:                   connectorContainerName,
+		Image:                  image,
+		User:                   ecsConnectorUser,
+		Essential:              false,
+		ReadonlyRootFilesystem: true,
 		Environment: []ecsEnvironmentVar{
 			{Name: ecsConnectorIDEnv, Value: args.Slug},
 			{Name: "QURL_API_URL", Value: args.APIURL},
+			{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
 		},
 		// TODO(qurl-connector-ecs-secret-file): prefer QURL_API_KEY_FILE once the
 		// ECS/Fargate guide uses a file-mounted secret runtime instead of native
@@ -122,6 +126,7 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		},
 		MountPoints: []ecsMountPoint{
 			{SourceVolume: "qurl-agent-state", ContainerPath: "/var/lib/layerv/agent"},
+			{SourceVolume: "qurl-audit", ContainerPath: connectorAuditDir},
 			{SourceVolume: "qurl-config", ContainerPath: "/work", ReadOnly: true},
 		},
 		LogConfiguration: awslogsConfiguration("/ecs/qurl-connector", "qurl"),

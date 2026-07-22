@@ -155,15 +155,26 @@ at the OAuth-callback bind layer.
     `LAYERV_KNOCK_RESOURCE_ID` override:
     - **Docker / Docker Compose** — guarded pasteable shell blocks that write
       `qurl-proxy.yaml`, create a bootstrap-key file, create/chown
-      per-connector durable agent state, pass `QURL_API_KEY_FILE`, and pass
-      `QURL_CONNECTOR_ID=<id>` to the client.
+      per-connector durable agent state and audit directories, pass
+      `QURL_API_KEY_FILE`, `QURL_AUDIT_FILE`, and `QURL_CONNECTOR_ID=<id>`,
+      and run the Connector with a read-only root filesystem, bounded `/tmp`,
+      all capabilities dropped, no-new-privileges, and a 512-process limit.
     - **ECS/Fargate / Kubernetes** — the same contract as deployment snippets:
       co-locate the sidecar with the target container, mount durable
-      per-instance state at `/var/lib/layerv/agent`, mount or inject the
-      bootstrap key through the runtime's secret mechanism, and remove the key
-      after the logs show a successful connection. ECS renders
-      `user: 65532:65532`; EFS access points for state/config must use the same
-      POSIX UID/GID as the distroless connector image.
+      per-instance state at `/var/lib/layerv/agent`, persist audit records
+      separately under `/var/log/layerv`, and run the Connector with a
+      read-only root filesystem. ECS renders `user: 65532:65532`; its state,
+      audit, and config EFS access points use POSIX UID/GID `65532:65532` with
+      root modes 0700, 0750, and 0755 respectively. Kubernetes prepares exact
+      state/audit ownership with a digest-pinned init image; do not replace it
+      with pod-level `fsGroup`, because qurl-go rejects group-writable identity
+      state.
+  - **Warm-start transition** — after first registration, remove the bootstrap
+    reference from the workload definition and prove a replacement task/pod
+    starts from durable agent state before deleting the platform secret.
+    Deleting an ECS Secrets Manager secret or Kubernetes Secret while the
+    active workload definition still references it prevents replacement
+    workloads from starting.
   - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
     fallback because AWS injects task secrets as environment variables; Docker,
     Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.

@@ -28,6 +28,11 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		"AWS appends a random suffix",
 		"127.0.0.1:9090",
 		"POSIX UID/GID `65532:65532`",
+		"qurl-audit",
+		"read-only root filesystem",
+		"root-directory modes 0700, 0750, and 0755",
+		"warm-start task revision",
+		"Deleting it first prevents replacement tasks from starting",
 		"AWS Secrets Manager",
 		"Store the bootstrap key from the separate DM",
 		"install-instructions message intentionally does not contain the key",
@@ -50,6 +55,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		`REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_` + testTunnelSlug,
 		`"sourceVolume": "qurl-agent-state"`,
 		`"sourceVolume": "qurl-config"`,
+		`"sourceVolume": "qurl-audit"`,
+		`"readonlyRootFilesystem": true`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
@@ -90,7 +97,10 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	if container.User != ecsConnectorUser {
 		t.Fatalf("ECS sidecar User = %q, want connector image UID/GID", container.User)
 	}
-	if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != "ALL" {
+	if !container.ReadonlyRootFilesystem {
+		t.Fatal("ECS sidecar ReadonlyRootFilesystem = false, want true")
+	}
+	if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != testCapabilityAll {
 		t.Fatalf("ECS sidecar capability drop = %v, want [ALL]", got)
 	}
 	if len(container.Secrets) != 1 || container.Image != testTunnelImageRef || container.Secrets[0].Name != tunnelEnvAPIKey {
@@ -102,6 +112,12 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	env := map[string]string{}
 	for _, e := range container.Environment {
 		env[e.Name] = e.Value
+	}
+	if got := env[connectorAuditFileEnv]; got != connectorAuditFilePath {
+		t.Fatalf("ECS %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
+	}
+	if !ecsMountPointPresent(container.MountPoints, "qurl-audit", connectorAuditDir, false) {
+		t.Fatalf("ECS mountPoints = %+v, want writable qurl-audit mount", container.MountPoints)
 	}
 	if _, ok := env["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("ECS environment rendered the advanced knock-resource override")
