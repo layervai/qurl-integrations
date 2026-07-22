@@ -17,6 +17,8 @@ output="$(printf '%s\n' \
   '    type: http' \
   '    local_ip: 127.0.0.1' \
   '    local_port: 8080' \
+  '    resource_id: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA' \
+  '    connector_routing_id: c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   | docker run --rm -i --platform "$PLATFORM" \
       --entrypoint /usr/local/bin/qurl-connector \
       -e LAYERV_AGENT_STATE_DIR=/tmp/agent \
