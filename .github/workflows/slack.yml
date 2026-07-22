@@ -39,6 +39,7 @@ jobs:
             slack:
               # Source of truth for Slack-impacting paths on PR and main push events.
               - 'apps/slack/**'
+              - 'origins/s3-static-connector/**'
               - 'shared/**'
               - 'go.mod'
               - 'go.sum'
@@ -123,7 +124,7 @@ jobs:
     # GitHub Actions cache export is part of the job. Keep the timeout above
     # the observed build+cache path so successful image builds do not get
     # canceled during cache upload.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -132,6 +133,35 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Resolve Slack-pinned S3 origin image
+        id: s3-origin
+        shell: bash
+        run: |
+          pins="$(sed -nE 's/^[[:space:]]*defaultS3StaticConnectorImage[[:space:]]*=[[:space:]]*"([^"]+)"$/\1/p' apps/slack/internal/handler_s3_website.go)"
+          count="$(printf '%s\n' "$pins" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly one defaultS3StaticConnectorImage, found $count"
+            exit 1
+          fi
+          echo "image=$pins" >> "$GITHUB_OUTPUT"
+
+      - name: Verify production Connector v0.5 S3 route
+        run: bash origins/s3-static-connector/test/qurl_connector_v05_contract.sh
+
+      - name: Verify Slack-pinned S3 origin (linux/amd64)
+        env:
+          S3_ORIGIN_IMAGE: ${{ steps.s3-origin.outputs.image }}
+        run: |
+          SKIP_BUILD=true PLATFORM=linux/amd64 IMG="$S3_ORIGIN_IMAGE" \
+            bash origins/s3-static-connector/test/behavior_test.sh
+
+      - name: Verify Slack-pinned S3 origin (linux/arm64)
+        env:
+          S3_ORIGIN_IMAGE: ${{ steps.s3-origin.outputs.image }}
+        run: |
+          SKIP_BUILD=true PLATFORM=linux/arm64 IMG="$S3_ORIGIN_IMAGE" \
+            bash origins/s3-static-connector/test/behavior_test.sh
 
       - name: Build slack bot image (linux/arm64)
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0

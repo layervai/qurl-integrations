@@ -20,6 +20,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"gopkg.in/yaml.v3"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -289,12 +290,62 @@ func TestRenderTunnelConfigYAMLUsesPinnedResourceID(t *testing.T) {
 	if !strings.Contains(got, "    resource_id: '"+testTunnelResourceID+"'") {
 		t.Fatalf("config missing pinned resource_id:\n%s", got)
 	}
-	if !strings.Contains(got, "    connector_routing_id: '"+testTunnelRoutingID+"'") ||
-		!strings.Contains(got, "    knock_resource_id: '"+testTunnelKnockID+"'") {
-		t.Fatalf("config missing complete routing identity:\n%s", got)
+	if !strings.Contains(got, "    connector_routing_id: '"+testTunnelRoutingID+"'") {
+		t.Fatalf("config missing persisted routing identity:\n%s", got)
+	}
+	if strings.Contains(got, "knock_resource_id") {
+		t.Fatalf("config rendered runtime-only knock_resource_id:\n%s", got)
 	}
 	if strings.Contains(got, "  - name:") {
 		t.Fatalf("config should not emit legacy route name:\n%s", got)
+	}
+}
+
+func TestRenderedConnectorConfigsMatchV06StrictSchema(t *testing.T) {
+	// TODO(upstream-contract): mirrors qurl-connector pkg/config.Config and
+	// pkg/config.Route at the native-UDP v0.6 boundary. Its loader enables
+	// yaml.Decoder.KnownFields, and knock_resource_id is runtime-only state
+	// rehydrated from the authenticated Connector resource response.
+	type routeContract struct {
+		ID                 string `yaml:"id"`
+		Type               string `yaml:"type"`
+		LocalIP            string `yaml:"local_ip"`
+		LocalPort          int    `yaml:"local_port"`
+		ResourceID         string `yaml:"resource_id"`
+		ConnectorRoutingID string `yaml:"connector_routing_id"`
+	}
+	type configContract struct {
+		Routes []routeContract `yaml:"routes"`
+	}
+
+	tunnelConfig, err := renderTunnelConfigYAML(testTunnelInstallArgs())
+	if err != nil {
+		t.Fatalf("renderTunnelConfigYAML: %v", err)
+	}
+	s3Config, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvDocker))
+	if err != nil {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
+	}
+
+	for name, rendered := range map[string]string{
+		"existing service": tunnelConfig,
+		"S3 website":       s3Config,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var parsed configContract
+			decoder := yaml.NewDecoder(strings.NewReader(rendered))
+			decoder.KnownFields(true)
+			if err := decoder.Decode(&parsed); err != nil {
+				t.Fatalf("native-UDP Connector strict decode failed: %v\n%s", err, rendered)
+			}
+			if len(parsed.Routes) != 1 {
+				t.Fatalf("routes = %+v, want exactly one", parsed.Routes)
+			}
+			route := parsed.Routes[0]
+			if route.ID != testTunnelSlug || route.Type != "http" || route.LocalIP != "127.0.0.1" || route.LocalPort == 0 || route.ResourceID != testTunnelResourceID || route.ConnectorRoutingID != testTunnelRoutingID {
+				t.Fatalf("route = %+v, want complete persisted native-UDP route", route)
+			}
+		})
 	}
 }
 
@@ -318,11 +369,13 @@ func TestRenderTunnelConfigYAMLNormalizesPinnedIdentity(t *testing.T) {
 	for _, want := range []struct{ field, value string }{
 		{"resource_id", testTunnelResourceID},
 		{"connector_routing_id", testTunnelRoutingID},
-		{"knock_resource_id", testTunnelKnockID},
 	} {
 		if !strings.Contains(got, want.field+": '"+want.value+"'") {
 			t.Fatalf("config did not normalize %s:\n%s", want.field, got)
 		}
+	}
+	if strings.Contains(got, "knock_resource_id") {
+		t.Fatalf("config rendered runtime-only knock_resource_id:\n%s", got)
 	}
 }
 
@@ -715,13 +768,10 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		"QURL_CONNECTOR_ID='" + testTunnelSlug + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
-		"knock_resource_id: '" + testTunnelKnockID + "'",
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
 		testTunnelKeyInstallLine,
 		testTunnelLocalPort9090Line,
 		"resource_id: '" + testTunnelResourceID + "'",
-		"LAYERV_KNOCK_RESOURCE_ID='" + testTunnelKnockID + "'",
-		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		"WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'",
 		testTunnelDockerLine,
 		`docker rm -f "$CONNECTOR_CONTAINER"`,
@@ -736,7 +786,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelAPIKey, "expires at", "`qurl-proxy.yaml`", testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "<web-container>", testForbiddenConnectorSlug, "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1571,8 +1621,6 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		"defaultMode: 0440",
 		"QURL_CONNECTOR_ID",
 		"value: '" + testTunnelSlug + "'",
-		"LAYERV_KNOCK_RESOURCE_ID",
-		"value: '" + testTunnelKnockID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
 		testTunnelLocalPort9090Line,
 		testTunnelImageRef,
@@ -1582,7 +1630,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug} {
+	for _, forbidden := range []string{testForbiddenResourceLabel, testTunnelModalKey, testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, "connect.layerv", "proxy.layerv", "frps-", "initContainers:", "runAsUser: 0", testForbiddenConnectorSlug, "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -2798,10 +2846,13 @@ func TestRenderTunnelInstallMessageWarnsOnDefaultImage(t *testing.T) {
 	if strings.Contains(got, testForbiddenResourceLabel) {
 		t.Fatalf("rendered install message leaked retired resource label:\n%s", got)
 	}
-	for _, identity := range []string{testTunnelResourceID, testTunnelRoutingID, testTunnelKnockID} {
+	for _, identity := range []string{testTunnelResourceID, testTunnelRoutingID} {
 		if !strings.Contains(got, identity) {
 			t.Fatalf("rendered install message missing pinned identity %q:\n%s", identity, got)
 		}
+	}
+	if strings.Contains(got, testTunnelKnockID) {
+		t.Fatalf("rendered install message persisted runtime-only knock identity:\n%s", got)
 	}
 }
 

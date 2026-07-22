@@ -148,8 +148,11 @@ at the OAuth-callback bind layer.
     validity window reuses the same bootstrap-key idempotency bucket. Retrying
     after that window can mint a new key, so operators should run the newest
     Slack install block and discard older bootstrap-key messages.
-  - **Output** — pins the complete identity triple plus `QURL_API_URL`, and is
-    tailored to the selected environment:
+  - **Output** — persists `resource_id` and `connector_routing_id` plus
+    `QURL_API_URL`, and is tailored to the selected environment. The Connector
+    rehydrates `knock_resource_id` from the authenticated resource response on
+    every start; the installer does not set the advanced
+    `LAYERV_KNOCK_RESOURCE_ID` override:
     - **Docker / Docker Compose** — guarded pasteable shell blocks that write
       `qurl-proxy.yaml`, create a bootstrap-key file, create/chown
       per-connector durable agent state, pass `QURL_API_KEY_FILE`, and pass
@@ -717,7 +720,7 @@ that accidentally carried a numeric value.
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
 | `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
-| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Pin an immutable release containing the split `resource_id` / `connector_routing_id` / `knock_resource_id` contract and the native qurl-go UDP lifecycle tracked by qurl-connector #421. Public HTTPS registration/knock bridge images are unsupported. Production must use a specific non-latest tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. |
+| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Pin an immutable release containing the server-issued `resource_id` / `connector_routing_id` / `knock_resource_id` runtime contract and the native qurl-go UDP lifecycle tracked by qurl-connector #421. The rendered YAML persists only `resource_id` and `connector_routing_id`; the Connector rehydrates `knock_resource_id` at runtime. Public HTTPS registration/knock bridge images are unsupported. Production must use a specific non-latest tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
 | `QURL_S3_ORIGIN_IMAGE` | No | Optional S3 website origin image rendered by the guided `/qurl-admin protect` → **Protect qURL Connector** → **S3 static website** flow. Unlike `QURL_CONNECTOR_IMAGE`, an override must use a lowercase SHA-256 digest (tags are rejected), for example `ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:<digest>`. Empty uses the tested digest-pinned default. |
 | `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |

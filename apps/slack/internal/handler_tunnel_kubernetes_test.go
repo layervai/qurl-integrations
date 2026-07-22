@@ -105,11 +105,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"securityContext:",
 		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
-		"name: LAYERV_KNOCK_RESOURCE_ID",
-		"value: '" + testTunnelKnockID + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
-		"knock_resource_id: '" + testTunnelKnockID + "'",
 		"name: QURL_API_URL",
 		"value: '" + testTunnelAPIURL + "'",
 		"runAsUser: 65532",
@@ -136,6 +133,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"defaultMode: 0400",
 		"defaultMode: 0444",
 		"QURL_BOOTSTRAP_URL",
+		"knock_resource_id",
+		"LAYERV_KNOCK_RESOURCE_ID",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)

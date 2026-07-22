@@ -41,11 +41,8 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 		testTunnelLocalPort9090Line,
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
-		"knock_resource_id: '" + testTunnelKnockID + "'",
 		`"name": "QURL_CONNECTOR_ID"`,
 		`"value": "` + testTunnelSlug + `"`,
-		`"name": "LAYERV_KNOCK_RESOURCE_ID"`,
-		`"value": "` + testTunnelKnockID + `"`,
 		`"name": "QURL_API_URL"`,
 		`"value": "` + testTunnelAPIURL + `"`,
 		`"user": "65532:65532"`,
@@ -58,7 +55,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 			t.Fatalf("ECS instructions missing %q:\n%s", want, got)
 		}
 	}
-	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL"} {
+	for _, forbidden := range []string{testForbiddenSlackYAMLFence, testForbiddenSlackShellFence, testForbiddenResourceLabel, testTunnelAPIKey, "QURL_CONNECTOR_SLUG", "QURL_BOOTSTRAP_URL", "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("ECS instructions leaked %q:\n%s", forbidden, got)
 		}
@@ -106,7 +103,7 @@ func TestRenderECSFargateTunnelInstructions(t *testing.T) {
 	for _, e := range container.Environment {
 		env[e.Name] = e.Value
 	}
-	if env["LAYERV_KNOCK_RESOURCE_ID"] != testTunnelKnockID {
-		t.Fatalf("ECS environment LAYERV_KNOCK_RESOURCE_ID = %q, want %q", env["LAYERV_KNOCK_RESOURCE_ID"], testTunnelKnockID)
+	if _, ok := env["LAYERV_KNOCK_RESOURCE_ID"]; ok {
+		t.Fatal("ECS environment rendered the advanced knock-resource override")
 	}
 }

@@ -32,9 +32,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 		testTunnelKeyPromptLine,
 		testTunnelKeyInstallLine,
 		"resource_id: '" + testTunnelResourceID + "'",
-		"LAYERV_KNOCK_RESOURCE_ID='" + testTunnelKnockID + "'",
 		`--network "container:${WEB_CONTAINER}"`,
-		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		"Re-running this install briefly restarts the qURL Connector container",
 		"restart the qURL Connector after replacing or recreating the web container",
 		testTunnelDockerLine,
@@ -49,7 +47,7 @@ func TestRenderDockerTunnelInstructionsUsesWebRef(t *testing.T) {
 	if strings.Contains(got, "Replace `YOUR_WEB_CONTAINER_NAME`") {
 		t.Fatalf("Docker instructions still included placeholder warning:\n%s", got)
 	}
-	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv, "QURL_BOOTSTRAP_URL"} {
+	for _, forbidden := range []string{testTunnelAPIKey, testForbiddenBootstrapArgv, "QURL_BOOTSTRAP_URL", "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Docker instructions leaked %q:\n%s", forbidden, got)
 		}

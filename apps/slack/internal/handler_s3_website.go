@@ -20,7 +20,7 @@ import (
 const (
 	// TODO(upstream-contract): keep this digest in lockstep with the
 	// origins/s3-static-connector image promoted for Slack S3 website installs.
-	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:d51131d192f297e0edaf1ae0f07694c8700f412235a3538be82c091ad4432916"
+	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:402983490c2551dcbb7c51a1ecdaebe826320dce0720c050dfbd21f0f101f31f"
 	defaultS3WebsiteDescription   = "Slack qURL Connector install for S3 website"
 	defaultS3WebsiteIndexDocument = "index.html"
 	// TODO(upstream-contract): keep in lockstep with
@@ -654,7 +654,7 @@ func renderS3WebsiteConnectorConfigYAML(args *s3WebsiteInstallArgs) (string, err
 	if err := args.requirePinnedConnectorResource(); err != nil {
 		return "", err
 	}
-	quoted, err := yamlSingleQuotedValues(args.Slug, args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID)
+	quoted, err := yamlSingleQuotedValues(args.Slug, args.ResourceID, args.ConnectorRoutingID)
 	if err != nil {
 		return "", err
 	}
@@ -664,8 +664,7 @@ func renderS3WebsiteConnectorConfigYAML(args *s3WebsiteInstallArgs) (string, err
     local_ip: 127.0.0.1
     local_port: %d
     resource_id: %s
-    connector_routing_id: %s
-    knock_resource_id: %s`, quoted[0], s3WebsiteOriginPort, quoted[1], quoted[2], quoted[3]), nil
+    connector_routing_id: %s`, quoted[0], s3WebsiteOriginPort, quoted[1], quoted[2]), nil
 }
 
 func yamlSingleQuotedValues(values ...string) ([]string, error) {
@@ -713,7 +712,6 @@ func renderDockerS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImag
 %s
 
 QURL_CONNECTOR_ID=%s
-LAYERV_KNOCK_RESOURCE_ID=%s
 S3_BUCKET=%s
 AWS_REGION=%s
 S3_PREFIX=%s
@@ -766,9 +764,8 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  -e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID" \
   -e QURL_API_URL=%s \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.KnockResourceID), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
@@ -786,7 +783,7 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 	originServiceName := "qurl-s3-origin-" + args.Slug
 	connectorServiceName := "qurl-connector-" + args.Slug
 	quoted, err := yamlSingleQuotedValues(
-		connectorImage, originImage, args.Slug, args.APIURL, args.KnockResourceID,
+		connectorImage, originImage, args.Slug, args.APIURL,
 		args.Bucket, args.Region, args.Prefix, args.IndexDocument,
 		originServiceName, connectorServiceName,
 	)
@@ -794,16 +791,16 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 		return "", err
 	}
 	quotedConnectorImage, quotedOriginImage, quotedSlug := quoted[0], quoted[1], quoted[2]
-	quotedAPIURL, quotedKnock, quotedBucket := quoted[3], quoted[4], quoted[5]
-	quotedRegion, quotedPrefix, quotedIndex := quoted[6], quoted[7], quoted[8]
-	quotedOriginService, quotedConnectorService := quoted[9], quoted[10]
+	quotedAPIURL, quotedBucket, quotedRegion := quoted[3], quoted[4], quoted[5]
+	quotedPrefix, quotedIndex := quoted[6], quoted[7]
+	quotedOriginService, quotedConnectorService := quoted[8], quoted[9]
 	// The Compose heredoc is intentionally unquoted so the target host expands
-	// ${AGENT_STATE_DIR}, ${SECRET_DIR}, ${QURL_CONNECTOR_ID}, and
-	// ${LAYERV_KNOCK_RESOURCE_ID_YAML}. Interpolated S3 fields reach this template
-	// only after strict modal validation, and image refs remain safe only while
+	// ${AGENT_STATE_DIR}, ${SECRET_DIR}, and ${QURL_CONNECTOR_ID}. Interpolated
+	// S3 fields reach this template only after strict modal validation, and image
+	// refs remain safe only while
 	// ValidateTunnelImageRef excludes shell metacharacters such as $, backticks,
-	// backslashes, and whitespace. The API URL, API-sourced knock id, and raw
-	// origin service name are assigned through shell-quoted variables first so
+	// backslashes, and whitespace. The API URL and raw origin service name are
+	// assigned through shell-quoted variables first so
 	// heredoc expansion is not recursive.
 	compose := fmt.Sprintf(`set -eu
 %s
@@ -811,7 +808,6 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 %s
 
 QURL_CONNECTOR_ID=%s
-LAYERV_KNOCK_RESOURCE_ID_YAML=%s
 QURL_API_URL_YAML=%s
 ORIGIN_SERVICE_NAME=%s
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
@@ -866,11 +862,10 @@ services:
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
       QURL_CONNECTOR_ID: %s
-      LAYERV_KNOCK_RESOURCE_ID: ${LAYERV_KNOCK_RESOURCE_ID_YAML}
       QURL_API_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedKnock), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService, quotedSlug)
+docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService, quotedSlug)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
@@ -944,7 +939,6 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 			Essential: true,
 			Environment: []ecsEnvironmentVar{
 				{Name: ecsConnectorIDEnv, Value: args.Slug},
-				{Name: "LAYERV_KNOCK_RESOURCE_ID", Value: args.KnockResourceID},
 				{Name: "QURL_API_URL", Value: args.APIURL},
 			},
 			Secrets: []ecsSecret{
@@ -968,7 +962,7 @@ func renderKubernetesS3WebsiteInstructions(args *s3WebsiteInstallArgs, connector
 	names := kubernetesTunnelObjectNames(args.Slug)
 	quoted, err := yamlSingleQuotedValues(
 		names.configMap, names.agentPVC, names.secret, connectorImage, originImage,
-		args.Slug, args.APIURL, args.KnockResourceID, args.Bucket, args.Region,
+		args.Slug, args.APIURL, args.Bucket, args.Region,
 		args.Prefix, args.IndexDocument,
 	)
 	if err != nil {
@@ -976,8 +970,8 @@ func renderKubernetesS3WebsiteInstructions(args *s3WebsiteInstallArgs, connector
 	}
 	quotedConfigMap, quotedAgentPVC, quotedSecret := quoted[0], quoted[1], quoted[2]
 	quotedConnectorImage, quotedOriginImage, quotedSlug := quoted[3], quoted[4], quoted[5]
-	quotedAPIURL, quotedKnock, quotedBucket := quoted[6], quoted[7], quoted[8]
-	quotedRegion, quotedPrefix, quotedIndex := quoted[9], quoted[10], quoted[11]
+	quotedAPIURL, quotedBucket, quotedRegion := quoted[6], quoted[7], quoted[8]
+	quotedPrefix, quotedIndex := quoted[9], quoted[10]
 	configYAML, err := renderS3WebsiteConnectorConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -1051,8 +1045,6 @@ containers:
         value: /run/secrets/qurl-connector/api_key
       - name: QURL_CONNECTOR_ID
         value: %s
-      - name: LAYERV_KNOCK_RESOURCE_ID
-        value: %s
       - name: QURL_API_URL
         value: %s
     volumeMounts:
@@ -1076,7 +1068,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, s3WebsiteOriginContainerName, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, connectorContainerName, quotedConnectorImage, quotedSlug, quotedKnock, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
+      name: %s`, s3WebsiteOriginContainerName, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, connectorContainerName, quotedConnectorImage, quotedSlug, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {

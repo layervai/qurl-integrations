@@ -26,10 +26,6 @@ func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, image string) (
 	if err != nil {
 		return "", err
 	}
-	quotedKnockResourceID, err := yamlSingleQuoted(args.KnockResourceID)
-	if err != nil {
-		return "", err
-	}
 	quotedSecret, err := yamlSingleQuoted(names.secret)
 	if err != nil {
 		return "", err
@@ -90,8 +86,6 @@ containers:
         value: /run/secrets/qurl-connector/api_key
       - name: QURL_CONNECTOR_ID
         value: %s
-      - name: LAYERV_KNOCK_RESOURCE_ID
-        value: %s
       - name: QURL_API_URL
         value: %s
     volumeMounts:
@@ -114,7 +108,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, quotedImage, quotedSlug, quotedKnockResourceID, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
+      name: %s`, quotedImage, quotedSlug, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {

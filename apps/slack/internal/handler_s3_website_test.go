@@ -457,9 +457,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 		"AWS_REGION='" + testS3WebsiteRegion + "'",
 		"S3_PREFIX='" + testS3WebsitePrefix + "'",
 		"INDEX_DOCUMENT='" + testS3WebsiteIndex + "'",
-		"LAYERV_KNOCK_RESOURCE_ID='" + testS3WebsiteKnockResource + "'",
 		"resource_id: '" + testTunnelResourceID + "'",
-		`-e LAYERV_KNOCK_RESOURCE_ID="$LAYERV_KNOCK_RESOURCE_ID"`,
 		`--network "container:${ORIGIN_CONTAINER}"`,
 		"/qurl get $team-dash",
 	} {
@@ -467,7 +465,7 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 			t.Errorf("async reply missing %q:\n%s", want, async)
 		}
 	}
-	for _, forbidden := range []string{testTunnelModalKey, testForbiddenSlackShellFence, testForbiddenSlackYAMLFence, "find_or_create", "YOUR_WEB_CONTAINER_NAME", "tunnel"} {
+	for _, forbidden := range []string{testTunnelModalKey, testForbiddenSlackShellFence, testForbiddenSlackYAMLFence, "find_or_create", "YOUR_WEB_CONTAINER_NAME", "tunnel", "knock_resource_id", "LAYERV_KNOCK_RESOURCE_ID"} {
 		if strings.Contains(async, forbidden) {
 			t.Errorf("async reply leaked %q:\n%s", forbidden, async)
 		}
@@ -1256,11 +1254,13 @@ func TestRenderS3WebsiteConnectorConfigYAMLPinsResourceIdentity(t *testing.T) {
 		"local_port: 8080",
 		"resource_id: '" + testTunnelResourceID + "'",
 		"connector_routing_id: '" + testTunnelRoutingID + "'",
-		"knock_resource_id: '" + testS3WebsiteKnockResource + "'",
 	} {
 		if !strings.Contains(configYAML, want) {
 			t.Fatalf("config missing %q:\n%s", want, configYAML)
 		}
+	}
+	if strings.Contains(configYAML, "knock_resource_id") {
+		t.Fatalf("config rendered runtime-only knock_resource_id:\n%s", configYAML)
 	}
 	missingResource := *testS3WebsiteArgs(tunnelEnvDocker)
 	missingResource.ResourceID = ""
@@ -1395,8 +1395,8 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if got := connector.Environment[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector QURL_CONNECTOR_ID = %q, want %q", got, testTunnelSlug)
 	}
-	if got := connector.Environment["LAYERV_KNOCK_RESOURCE_ID"]; got != "${LAYERV_KNOCK_RESOURCE_ID_YAML}" {
-		t.Fatalf("connector LAYERV_KNOCK_RESOURCE_ID = %q, want shell variable placeholder", got)
+	if _, ok := connector.Environment["LAYERV_KNOCK_RESOURCE_ID"]; ok {
+		t.Fatal("Compose connector rendered the advanced knock-resource override")
 	}
 	for _, name := range []string{"QURL_API_URL"} {
 		if got := connector.Environment[name]; got != "${QURL_API_URL_YAML}" {
@@ -1405,13 +1405,6 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	}
 	if _, ok := connector.Environment["QURL_BOOTSTRAP_URL"]; ok {
 		t.Fatal("Compose connector rendered retired bootstrap URL")
-	}
-	quotedKnock, err := yamlSingleQuoted(testS3WebsiteKnockResource)
-	if err != nil {
-		t.Fatalf("yamlSingleQuoted knock resource: %v", err)
-	}
-	if !strings.Contains(got, "LAYERV_KNOCK_RESOURCE_ID_YAML="+shellSingleQuote(quotedKnock)) {
-		t.Fatalf("Compose instructions missing shell- and YAML-quoted knock_resource_id assignment:\n%s", got)
 	}
 	if !strings.Contains(got, "ORIGIN_SERVICE_NAME='qurl-s3-origin-"+testTunnelSlug+"'") {
 		t.Fatalf("Compose instructions missing shell-quoted origin service assignment:\n%s", got)
@@ -1532,8 +1525,8 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 		connector.DependsOn[0].Condition != "START" {
 		t.Fatalf("connector dependsOn = %+v, want START dependency on %s", connector.DependsOn, s3WebsiteOriginContainerName)
 	}
-	if got := connectorEnv["LAYERV_KNOCK_RESOURCE_ID"]; got != testS3WebsiteKnockResource {
-		t.Fatalf("connector LAYERV_KNOCK_RESOURCE_ID = %q, want %q", got, testS3WebsiteKnockResource)
+	if _, ok := connectorEnv["LAYERV_KNOCK_RESOURCE_ID"]; ok {
+		t.Fatal("ECS connector rendered the advanced knock-resource override")
 	}
 	for _, name := range []string{"QURL_API_URL"} {
 		if got := connectorEnv[name]; got != testTunnelAPIURL {
@@ -1645,6 +1638,9 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	}
 	if _, ok := connectorEnv["QURL_BOOTSTRAP_URL"]; ok {
 		t.Fatal("Kubernetes connector rendered retired bootstrap URL")
+	}
+	if _, ok := connectorEnv["LAYERV_KNOCK_RESOURCE_ID"]; ok {
+		t.Fatal("Kubernetes connector rendered the advanced knock-resource override")
 	}
 	assertNoS3SecretLeaks(t, got)
 }
