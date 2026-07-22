@@ -40,8 +40,9 @@ pin, runs this image's complete behavior suite on both `linux/amd64` and
 `linux/arm64`, and verifies the numeric user, exposed port, and loopback listen
 default before accepting a Slack or origin change. The same gate boots the
 immutable production `v0.5.0` Connector image with a canonical S3-origin route
-and requires it to pass strict config loading before reaching its expected
-first-bootstrap credential boundary.
+and requires strict config loading to return the exact loopback route. This is
+an origin compatibility check only; the Slack-generated identity-pinned schema
+continues to require v0.6 or later.
 
 The image packages two pinned processes:
 
