@@ -50,7 +50,16 @@ const (
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
 	connectorAPIVersionPath    = "/v1"
-	kubernetesNameMaxLen       = 63
+	connectorAuditDir          = "/var/log/layerv/qurl-connector"
+	connectorAuditFilePath     = connectorAuditDir + "/audit.log"
+	connectorAuditFileEnv      = "QURL_AUDIT_FILE"
+	connectorPIDsLimit         = 512
+	connectorTmpfsCompose      = "/tmp:rw,size=64m"
+	// Pinned multi-arch Docker Official Image used only to prepare exact PVC
+	// ownership and modes before the nonroot Connector starts. qurl-go rejects
+	// group-writable identity state, so pod-level fsGroup is not safe here.
+	connectorVolumePermissionsImage = "docker.io/library/busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+	kubernetesNameMaxLen            = 63
 	// Hex chars appended to truncated Kubernetes object names. Twelve hex
 	// chars is 48 bits (2^48 ~= 3e14), keeping collision risk negligible for
 	// expected workspace slug volume.
@@ -664,7 +673,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	connectorAPIURL := strings.TrimSpace(h.cfg.ConnectorAPIURL)
 	if err := ValidateConnectorAPIURL(connectorAPIURL); err != nil {
 		log.Error("tunnel install: local connector API URL configuration invalid", "error", err)
-		return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
+		return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No enrollment token was minted. Contact the operator.", err
 	}
 
 	// The description doubles as the tunnel's user-facing Display Name
@@ -688,7 +697,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	resolvedArgs := *args
 	if err := resolvedArgs.pinTunnelResource(resource, connectorAPIURL); err != nil {
 		log.Error("tunnel install: resource response missing connector contract", "error", err)
-		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No bootstrap key was minted. Please retry or contact support.", err
+		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No enrollment token was minted. Please retry or contact support.", err
 	}
 
 	// Bind/verify the channel shortcut before minting the enrollment token so an
@@ -1155,11 +1164,25 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	b.WriteString(p.environmentLabel)
 	b.WriteString(".\n\n")
 	b.WriteString(p.instructions)
-	b.WriteString("\n\nTreat the separate enrollment-token DM as secret until the sidecar connects. After the first successful start, remove the mounted enrollment token from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
+	b.WriteString("\n\nTreat the separate enrollment-token DM as secret until the sidecar connects. ")
+	b.WriteString(tunnelBootstrapRetirementNote(args.Environment))
+	b.WriteString(" Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
 	b.WriteString("Then users can run `/qurl get $")
 	b.WriteString(args.Alias)
 	b.WriteString("`.")
 	return b.String(), nil
+}
+
+func tunnelBootstrapRetirementNote(environment tunnelInstallEnvironment) string {
+	switch environment {
+	case tunnelEnvECSFargate:
+		return "Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager bootstrap secret."
+	case tunnelEnvKubernetes:
+		return "Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes bootstrap Secret."
+	case tunnelEnvDocker, tunnelEnvCompose:
+	default:
+	}
+	return "After the first successful start, remove the mounted enrollment token from the runtime."
 }
 
 func renderTunnelBootstrapSecretMessage(args *tunnelInstallArgs, key *client.APIKey, now time.Time) (string, error) {
@@ -1302,7 +1325,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 	}
 	// Empty metadata is retained only for parser/renderer unit tests. Production
 	// buildTunnelInstall validates the full producer triple before this renderer
-	// runs, so a one-shot bootstrap key is never reused for resources. Only the
+	// runs, so a one-shot enrollment token is never reused for resources. Only the
 	// two persisted route identities belong in YAML; qurl-connector rehydrates
 	// knock_resource_id from the authenticated resource response on every start.
 	identityYAML := ""

@@ -32,6 +32,8 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"WEB_SERVICE may contain only letters, numbers, underscores, and hyphens.",
 		"CONNECTOR_SERVICE='qurl-connector-" + testTunnelSlug + "'",
 		`CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"`,
+		`AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"`,
+		`$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"`,
 		"client-safe public/routing metadata",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
 		`QURL_COMPOSE_FILE="$PWD/qurl-connector-${QURL_CONNECTOR_ID}.compose.yaml"`,
@@ -40,6 +42,13 @@ func TestRenderDockerComposeTunnelInstructionsUsesWebService(t *testing.T) {
 		"qurl-connector-" + testTunnelSlug + ".compose.yaml",
 		"'qurl-connector-" + testTunnelSlug + "':",
 		`network_mode: "service:${WEB_SERVICE}"`,
+		`user: "65532:65532"`,
+		"read_only: true",
+		"- /tmp:rw,size=64m",
+		"pids_limit: 512",
+		"- ALL",
+		"- 'no-new-privileges:true'",
+		"QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log",
 		"do not hand-edit the generated fragment",
 		"bring the qURL Connector service up again too",
 		"depends_on:",
@@ -106,6 +115,13 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 	var parsed struct {
 		Services map[string]struct {
 			Image       string            `yaml:"image"`
+			User        string            `yaml:"user"`
+			ReadOnly    bool              `yaml:"read_only"`
+			Tmpfs       []string          `yaml:"tmpfs"`
+			PidsLimit   int               `yaml:"pids_limit"`
+			CapDrop     []string          `yaml:"cap_drop"`
+			SecurityOpt []string          `yaml:"security_opt"`
+			Volumes     []string          `yaml:"volumes"`
 			Environment map[string]string `yaml:"environment"`
 		} `yaml:"services"`
 	}
@@ -115,6 +131,18 @@ func TestRenderDockerComposeTunnelInstructionsEmitsParseableComposeFragment(t *t
 	service := parsed.Services["qurl-connector-"+testTunnelSlug]
 	if service.Image != testTunnelImageRef {
 		t.Fatalf("Compose service image = %q, want %q", service.Image, testTunnelImageRef)
+	}
+	if service.User != ecsConnectorUser || !service.ReadOnly || service.PidsLimit != connectorPIDsLimit {
+		t.Fatalf("Compose hardening = user %q read_only %v pids_limit %d", service.User, service.ReadOnly, service.PidsLimit)
+	}
+	if len(service.Tmpfs) != 1 || service.Tmpfs[0] != connectorTmpfsCompose {
+		t.Fatalf("Compose tmpfs = %v, want [%s]", service.Tmpfs, connectorTmpfsCompose)
+	}
+	if len(service.CapDrop) != 1 || service.CapDrop[0] != testCapabilityAll || len(service.SecurityOpt) != 1 || service.SecurityOpt[0] != "no-new-privileges:true" {
+		t.Fatalf("Compose capability/security options = %v / %v", service.CapDrop, service.SecurityOpt)
+	}
+	if got := service.Environment[connectorAuditFileEnv]; got != connectorAuditFilePath {
+		t.Fatalf("Compose %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
 	}
 	if _, ok := service.Environment["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("Compose service rendered the advanced knock-resource override")

@@ -60,6 +60,7 @@ CONNECTOR_SERVICE=%s
 QURL_API_URL_YAML=%s
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
+AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
 CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
 QURL_COMPOSE_FILE="$PWD/qurl-connector-${QURL_CONNECTOR_ID}.compose.yaml"
 
@@ -73,6 +74,7 @@ $SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
+$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"
 %s
 %s
 
@@ -85,17 +87,28 @@ cat > "$QURL_COMPOSE_FILE" <<QURL_COMPOSE_YAML_EOF
 services:
   %s:
     image: %s
+    user: "65532:65532"
     restart: on-failure:5
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=64m
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - 'no-new-privileges:true'
     network_mode: "service:${WEB_SERVICE}"
     depends_on:
       ${WEB_SERVICE}:
         condition: service_started
     volumes:
       - ${AGENT_STATE_DIR}:/var/lib/layerv/agent
+      - ${AUDIT_DIR}:/var/log/layerv/qurl-connector
       - ${SECRET_DIR}:/run/secrets/qurl-connector:ro
       - ./qurl-proxy-${QURL_CONNECTOR_ID}.yaml:/work/qurl-proxy.yaml:ro
     environment:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
+      QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log
       QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}
       QURL_API_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF

@@ -1300,6 +1300,13 @@ func TestRenderDockerS3WebsiteInstructionsMentionsOriginAutoRestart(t *testing.T
 		"recreate or restart the qURL Connector container",
 		"QURL_API_URL='" + testTunnelAPIURL + "'",
 		`$SUDO chmod 0644 "$CONFIG_FILE"`,
+		`AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"`,
+		`$SUDO install -d -m 0700 -o 65532 -g 65532 "$AUDIT_DIR"`,
+		"--read-only",
+		"--tmpfs /tmp:rw,size=64m",
+		"--pids-limit=512",
+		`-v "$AUDIT_DIR:/var/log/layerv/qurl-connector"`,
+		"-e QURL_AUDIT_FILE='/var/log/layerv/qurl-connector/audit.log'",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Docker instructions missing %q:\n%s", want, got)
@@ -1355,6 +1362,9 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 			Volumes     []string          `yaml:"volumes"`
 			CapDrop     []string          `yaml:"cap_drop"`
 			SecurityOpt []string          `yaml:"security_opt"`
+			ReadOnly    bool              `yaml:"read_only"`
+			Tmpfs       []string          `yaml:"tmpfs"`
+			PidsLimit   int               `yaml:"pids_limit"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal([]byte(body), &parsed); err != nil {
@@ -1388,6 +1398,12 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	if origin.Restart != "on-failure:5" || connector.Restart != "on-failure:5" {
 		t.Fatalf("Compose restart policies = origin %q connector %q, want on-failure:5", origin.Restart, connector.Restart)
 	}
+	if origin.ReadOnly || connector.ReadOnly != true || connector.PidsLimit != connectorPIDsLimit {
+		t.Fatalf("Compose rootfs/pids = origin read_only %v connector read_only %v pids %d", origin.ReadOnly, connector.ReadOnly, connector.PidsLimit)
+	}
+	if len(connector.Tmpfs) != 1 || connector.Tmpfs[0] != connectorTmpfsCompose {
+		t.Fatalf("Compose connector tmpfs = %v, want [%s]", connector.Tmpfs, connectorTmpfsCompose)
+	}
 	for name, service := range map[string]struct {
 		CapDrop     []string
 		SecurityOpt []string
@@ -1395,7 +1411,7 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 		"origin":    {CapDrop: origin.CapDrop, SecurityOpt: origin.SecurityOpt},
 		"connector": {CapDrop: connector.CapDrop, SecurityOpt: connector.SecurityOpt},
 	} {
-		if !slices.Equal(service.CapDrop, []string{"ALL"}) {
+		if !slices.Equal(service.CapDrop, []string{testCapabilityAll}) {
 			t.Fatalf("%s cap_drop = %v, want [ALL]", name, service.CapDrop)
 		}
 		if !slices.Equal(service.SecurityOpt, []string{"no-new-privileges:true"}) {
@@ -1404,6 +1420,9 @@ func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testin
 	}
 	if got := connector.Environment[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector QURL_CONNECTOR_ID = %q, want %q", got, testTunnelSlug)
+	}
+	if got := connector.Environment[connectorAuditFileEnv]; got != connectorAuditFilePath {
+		t.Fatalf("connector %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
 	}
 	if _, ok := connector.Environment["LAYERV_KNOCK_RESOURCE_ID"]; ok {
 		t.Fatal("Compose connector rendered the advanced knock-resource override")
@@ -1472,6 +1491,14 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	}
 	if !strings.Contains(instructions, "Do not share qurl-agent-state across concurrently running sidecars") {
 		t.Fatalf("ECS instructions missing qurl-agent-state sharing warning:\n%s", instructions)
+	}
+	if !strings.Contains(instructions, "qurl-audit") || !strings.Contains(instructions, "read-only root filesystem") {
+		t.Fatalf("ECS instructions missing durable audit/read-only-root guidance:\n%s", instructions)
+	}
+	for _, want := range []string{"root-directory modes 0700, 0750, and 0755", "warm-start task revision", "Deleting it first prevents replacement tasks from starting"} {
+		if !strings.Contains(instructions, want) {
+			t.Fatalf("ECS instructions missing %q:\n%s", want, instructions)
+		}
 	}
 	if !strings.Contains(instructions, "replace each `"+ecsLogRegionPlaceholder+"` with the ECS task region") {
 		t.Fatalf("ECS instructions missing awslogs task-region placeholder guidance:\n%s", instructions)
@@ -1549,8 +1576,17 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	if origin.User != ecsConnectorUser || connector.User != ecsConnectorUser {
 		t.Fatalf("ECS users = origin %q connector %q, want 65532:65532", origin.User, connector.User)
 	}
+	if origin.ReadonlyRootFilesystem || !connector.ReadonlyRootFilesystem {
+		t.Fatalf("ECS readonlyRootFilesystem = origin %v connector %v, want false/true", origin.ReadonlyRootFilesystem, connector.ReadonlyRootFilesystem)
+	}
+	if got := connectorEnv[connectorAuditFileEnv]; got != connectorAuditFilePath {
+		t.Fatalf("connector %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
+	}
+	if !ecsMountPointPresent(connector.MountPoints, "qurl-audit", connectorAuditDir, false) {
+		t.Fatalf("connector mountPoints = %+v, want writable qurl-audit mount", connector.MountPoints)
+	}
 	for _, container := range []ecsContainerDefinition{origin, connector} {
-		if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != "ALL" {
+		if got := container.LinuxParameters.Capabilities.Drop; len(got) != 1 || got[0] != testCapabilityAll {
 			t.Fatalf("ECS container %s capability drop = %v, want [ALL]", container.Name, got)
 		}
 	}
@@ -1564,8 +1600,8 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	}
 	objects := extractS3TestBlock(t, got, "kubectl apply -f - <<'QURL_K8S_YAML_EOF'\n", "\nQURL_K8S_YAML_EOF")
 	docs := strings.Split(objects, "\n---\n")
-	if len(docs) != 2 {
-		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + PVC:\n%s", len(docs), objects)
+	if len(docs) != 3 {
+		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + state PVC + audit PVC:\n%s", len(docs), objects)
 	}
 	var configMap struct {
 		Data map[string]string `yaml:"data"`
@@ -1592,7 +1628,11 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	patch := extractS3TestBlock(t, got[patchStart:], "```\n", "\n```")
 	var podSpec struct {
 		SecurityContext map[string]any `yaml:"securityContext"`
-		Containers      []struct {
+		InitContainers  []struct {
+			Name  string `yaml:"name"`
+			Image string `yaml:"image"`
+		} `yaml:"initContainers"`
+		Containers []struct {
 			Name            string              `yaml:"name"`
 			Image           string              `yaml:"image"`
 			SecurityContext map[string]any      `yaml:"securityContext"`
@@ -1608,8 +1648,11 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	if err := yaml.Unmarshal([]byte(patch), &podSpec); err != nil {
 		t.Fatalf("Pod spec fragment YAML did not parse: %v\n%s", err, patch)
 	}
-	if podSpec.SecurityContext["fsGroup"] == nil || len(podSpec.Containers) != 2 || len(podSpec.Volumes) != 3 {
-		t.Fatalf("pod spec = %+v, want fsGroup, two containers, and three volumes", podSpec)
+	if len(podSpec.SecurityContext) != 0 || len(podSpec.InitContainers) != 2 || len(podSpec.Containers) != 2 || len(podSpec.Volumes) != 6 {
+		t.Fatalf("pod spec = %+v, want permissions/copy init containers, two runtime containers, and six volumes without pod fsGroup", podSpec)
+	}
+	if podSpec.InitContainers[0].Image != connectorVolumePermissionsImage {
+		t.Fatalf("permissions image = %q, want %q", podSpec.InitContainers[0].Image, connectorVolumePermissionsImage)
 	}
 	origin, connector := podSpec.Containers[0], podSpec.Containers[1]
 	if origin.Name != testS3OriginContainer || origin.Image != defaultS3StaticConnectorImage {
@@ -1638,8 +1681,22 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 	if connector.SecurityContext["runAsNonRoot"] != true || connector.SecurityContext["allowPrivilegeEscalation"] != false {
 		t.Fatalf("connector securityContext = %+v, want non-root/no-privilege-escalation", connector.SecurityContext)
 	}
+	if connector.SecurityContext["readOnlyRootFilesystem"] != true {
+		t.Fatalf("connector securityContext = %+v, want readOnlyRootFilesystem", connector.SecurityContext)
+	}
 	if got := connectorEnv[ecsConnectorIDEnv]; got != testTunnelSlug {
 		t.Fatalf("connector %s = %q, want %q", ecsConnectorIDEnv, got, testTunnelSlug)
+	}
+	if got := connectorEnv[connectorAuditFileEnv]; got != connectorAuditFilePath {
+		t.Fatalf("connector %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
+	}
+	if !strings.Contains(got, "qurl-go rejects group-writable identity state") || strings.Contains(got, "fsGroup:") {
+		t.Fatalf("Kubernetes instructions did not replace pod fsGroup with exact mode preparation:\n%s", got)
+	}
+	for _, want := range []string{"qurl-bootstrap-copy", "warm-start workload revision", "deleting it first prevents a replacement pod from starting"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
+		}
 	}
 	for _, name := range []string{"QURL_API_URL"} {
 		if got := connectorEnv[name]; got != testTunnelAPIURL {

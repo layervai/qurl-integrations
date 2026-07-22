@@ -47,8 +47,8 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		t.Fatalf("Kubernetes instructions missing heredoc terminator:\n%s", got)
 	}
 	docs := strings.Split(got[bodyStart:bodyStart+bodyEnd], "\n---\n")
-	if len(docs) != 2 {
-		t.Fatalf("Kubernetes bootstrap docs = %d, want 2: %#v", len(docs), docs)
+	if len(docs) != 3 {
+		t.Fatalf("Kubernetes bootstrap docs = %d, want ConfigMap + state PVC + audit PVC: %#v", len(docs), docs)
 	}
 	for i, doc := range docs {
 		var parsed map[string]any
@@ -85,23 +85,41 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 	}
 	var podSpecFragment struct {
 		SecurityContext map[string]any `yaml:"securityContext"`
-		Containers      []struct {
-			Name            string         `yaml:"name"`
-			SecurityContext map[string]any `yaml:"securityContext"`
+		InitContainers  []struct {
+			Name  string `yaml:"name"`
+			Image string `yaml:"image"`
+		} `yaml:"initContainers"`
+		Containers []struct {
+			Name            string              `yaml:"name"`
+			SecurityContext map[string]any      `yaml:"securityContext"`
+			Env             []ecsEnvironmentVar `yaml:"env"`
 		} `yaml:"containers"`
+		Volumes []map[string]any `yaml:"volumes"`
 	}
 	if err := yaml.Unmarshal([]byte(got[patchCodeStart:patchCodeStart+patchCodeEnd]), &podSpecFragment); err != nil {
 		t.Fatalf("PodSpec fragment YAML did not parse: %v", err)
 	}
-	if podSpecFragment.SecurityContext["fsGroup"] == nil || len(podSpecFragment.Containers) != 1 || podSpecFragment.Containers[0].Name != "qurl-connector" {
-		t.Fatalf("PodSpec fragment = %+v, want fsGroup and qurl-connector container", podSpecFragment)
+	if len(podSpecFragment.SecurityContext) != 0 || len(podSpecFragment.InitContainers) != 2 || len(podSpecFragment.Containers) != 1 || len(podSpecFragment.Volumes) != 6 || podSpecFragment.Containers[0].Name != "qurl-connector" {
+		t.Fatalf("PodSpec fragment = %+v, want permissions/copy init containers, one qurl-connector container, and six volumes without pod fsGroup", podSpecFragment)
+	}
+	if podSpecFragment.InitContainers[0].Image != connectorVolumePermissionsImage {
+		t.Fatalf("permissions image = %q, want %q", podSpecFragment.InitContainers[0].Image, connectorVolumePermissionsImage)
+	}
+	if podSpecFragment.Containers[0].SecurityContext["readOnlyRootFilesystem"] != true {
+		t.Fatalf("Connector securityContext = %+v, want readOnlyRootFilesystem", podSpecFragment.Containers[0].SecurityContext)
+	}
+	if got := ecsEnvMap(podSpecFragment.Containers[0].Env)[connectorAuditFileEnv]; got != connectorAuditFilePath {
+		t.Fatalf("Kubernetes %s = %q, want %q", connectorAuditFileEnv, got, connectorAuditFilePath)
 	}
 	for _, want := range []string{
-		"sidecar/securityContext/volumes block",
-		"Pod Security Admission `restricted`",
-		"fsGroup: 65532",
-		"fsGroupChangePolicy: OnRootMismatch",
-		"WARNING: pod-level fsGroup applies to every volume in this pod",
+		"init-container/sidecar/volumes block",
+		"initContainers:",
+		"name: qurl-volume-permissions",
+		"name: qurl-bootstrap-copy",
+		connectorVolumePermissionsImage,
+		"runAsUser: 0",
+		"qurl-go rejects group-writable identity state",
+		"admission policy must permit the two root init containers",
 		"securityContext:",
 		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
@@ -113,25 +131,36 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"runAsGroup: 65532",
 		"runAsNonRoot: true",
 		"allowPrivilegeEscalation: false",
+		"readOnlyRootFilesystem: true",
 		"drop: [\"ALL\"]",
 		"type: RuntimeDefault",
-		"defaultMode: 0440",
-		"pre-provision qURL agent-state ownership separately",
-		"including existing app volumes",
+		"name: QURL_AUDIT_FILE",
+		"value: /var/log/layerv/qurl-connector/audit.log",
+		"name: qurl-tmp",
+		"mountPath: /tmp",
+		"name: qurl-audit",
+		"mountPath: /var/log/layerv",
+		"defaultMode: 0400",
+		"cp /bootstrap-source/api_key /bootstrap/api_key",
+		"chmod 0400 /bootstrap/api_key",
+		"chown 65532:65532 /bootstrap/api_key",
+		"chown 65532:65532 /tmp-runtime",
+		"chmod 0700 /tmp-runtime",
+		"separate state and audit PVCs",
 		"local shell into `kubectl`",
 		"shared, recorded",
 		"command-traced terminal session",
 		"generated Secret manifest",
+		"warm-start workload revision",
+		"deleting it first prevents a replacement pod from starting",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("Kubernetes instructions missing %q:\n%s", want, got)
 		}
 	}
 	for _, forbidden := range []string{
-		"initContainers:",
-		"runAsUser: 0",
-		"defaultMode: 0400",
-		"defaultMode: 0444",
+		"fsGroup:",
+		"fsGroupChangePolicy:",
 		"QURL_BOOTSTRAP_URL",
 		"knock_resource_id",
 		"LAYERV_KNOCK_RESOURCE_ID",
@@ -216,6 +245,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		"secret":     names.secret,
 		"config_map": names.configMap,
 		"agent_pvc":  names.agentPVC,
+		"audit_pvc":  names.auditPVC,
 	} {
 		if len(name) > kubernetesNameMaxLen {
 			t.Fatalf("%s name length = %d for %q, want <= %d", label, len(name), name, kubernetesNameMaxLen)
@@ -237,6 +267,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		"name: '" + names.configMap + "'",
 		"name: '" + names.agentPVC + "'",
 		"claimName: '" + names.agentPVC + "'",
+		"claimName: '" + names.auditPVC + "'",
 		"secretName: '" + names.secret + "'",
 	} {
 		if !strings.Contains(got, want) {
@@ -247,6 +278,7 @@ func TestKubernetesTunnelObjectNamesShortenLongSlug(t *testing.T) {
 		"qurl-connector-" + slug,
 		"qurl-proxy-" + slug,
 		"qurl-agent-" + slug,
+		"qurl-audit-" + slug,
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions contain overlong name %q:\n%s", forbidden, got)
