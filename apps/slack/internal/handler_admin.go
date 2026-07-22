@@ -11,14 +11,16 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
-// handleAdmin parses a flat bot-admin membership verb (`add`/`remove`/
-// `admins`) via the shared parser and dispatches to the action-specific
-// handler. Each is sync — one DDB GetItem/UpdateItem — so the full gate +
-// body + reply chain fits inside Slack's 3s slash-command ack window without
-// the async runAsync hop. (Resource `revoke` is multi-hop and lives in its
-// own async handleRevoke; it does not route here.)
+// handleAdmin parses a flat bot-admin membership/ownership verb (`add`,
+// `remove`, `admins`, `transfer-ownership`) via the shared parser and
+// dispatches to the action-specific handler. Each is sync — one DDB
+// GetItem/UpdateItem — so the full gate + body + reply chain fits inside
+// Slack's 3s slash-command ack window without the async runAsync hop.
+// (Resource `revoke` is multi-hop and lives in its own async handleRevoke; it
+// does not route here.)
 //
 // Parse runs first, then requireAdminStoreSync gates the rest. So on a
 // sandbox deploy without the QURL_*_TABLE env vars: malformed verb text
@@ -40,14 +42,15 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		return
 	}
 	// No `cmd.Subcommand != SubcmdAdmin` guard: this entry point is only
-	// reached from the add/remove/admins dispatch arm in dispatchAdminCommand,
-	// and Parse maps those to SubcmdAdmin + an AdminAction. If the parser ever
-	// drifts and emits a different subcommand here, cmd.AdminAction lands empty
-	// and the switch's `default:` arm renders the same "unknown" copy a guard
-	// would have. TrimSpace mirrors handleSlashCommand's other entry points — a
-	// whitespace-only team_id or user_id otherwise sneaks past
-	// requireAdminSync's `== ""` check.
+	// reached from the add/remove/admins/transfer-ownership dispatch arm in
+	// dispatchAdminCommand, and Parse maps those to SubcmdAdmin + an
+	// AdminAction. If the parser ever drifts and emits a different subcommand
+	// here, cmd.AdminAction lands empty and the switch's `default:` arm renders
+	// the same "unknown" copy a guard would have. TrimSpace mirrors
+	// handleSlashCommand's other entry points — a whitespace-only team_id or
+	// user_id otherwise sneaks past requireAdminSync's `== ""` check.
 	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	enterpriseID := strings.TrimSpace(values.Get(fieldEnterpriseID))
 	userID := strings.TrimSpace(values.Get(fieldUserID))
 	// Every recognized verb needs AdminStore. Short-circuit once here
 	// instead of repeating the guard in each switch arm.
@@ -61,15 +64,49 @@ func (h *Handler) handleAdmin(w http.ResponseWriter, values url.Values) {
 		h.handleAdminRemove(w, teamID, userID, cmd)
 	case AdminList:
 		h.handleAdminList(w, teamID, userID)
+	case AdminTransferOwnership:
+		h.handleAdminTransferOwnership(w, teamID, enterpriseID, userID, cmd)
 	default:
-		// Unreachable in practice — Parse only produces AdminAdd/AdminRemove/
-		// AdminList on the verbs routed here. Kept for refactor safety. The
-		// reply intentionally OMITS cmd.AdminAction; a future parser drift
-		// could land an arbitrary string here, and echoing it back risks
-		// confusing copy on already-confused input.
+		// Unreachable in practice — Parse only produces the AdminAction values
+		// switched above on verbs routed here. Kept for refactor safety. The
+		// reply intentionally OMITS cmd.AdminAction; a future parser drift could
+		// land an arbitrary string here, and echoing it back risks confusing copy
+		// on already-confused input.
 		slog.Warn("admin dispatcher: unknown action reached default arm — parser drift?", "team_id", teamID, "user_id", userID, "action", string(cmd.AdminAction))
 		respondSlack(w, "Unknown admin command. Try `/qurl-admin help`.")
 	}
+}
+
+// requireTransferOwnerSync is a preflight for precise Slack replies; TransferOwnership's
+// conditional UpdateItem remains the authoritative race guard.
+func (h *Handler) requireTransferOwnerSync(ctx context.Context, w http.ResponseWriter, teamID, userID string) bool {
+	if teamID == "" || userID == "" {
+		respondSlack(w, ":warning: missing team_id or user_id in slash command payload")
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, adminGateBudget)
+	defer cancel()
+	_, ownerID, err := h.cfg.AdminStore.CheckAdmin(ctx, teamID, userID)
+	if err != nil {
+		slog.Error("owner check failed", "error", err, "team_id", teamID, "user_id", userID, "action", string(AdminTransferOwnership))
+		respondSlack(w, ":warning: failed to verify owner status (upstream error; see logs).")
+		return false
+	}
+	if ownerID == "" {
+		respondSlack(w, workspaceUnboundReply)
+		return false
+	}
+	if !slackdata.LooksLikeSlackUserID(ownerID) {
+		slog.Warn("owner command denied: legacy shape-bad owner_id requires setup refresh", "team_id", teamID, "user_id", userID, "action", string(AdminTransferOwnership), "legacy_owner_prefix", slackdata.LegacyOwnerPrefix(ownerID), "owner_id_len", len(ownerID))
+		respondSlack(w, ":warning: qURL is connected with a legacy workspace ownership record. Run `/qurl setup <email>` to refresh it, then retry `/qurl-admin transfer-ownership @user`.")
+		return false
+	}
+	if ownerID != userID {
+		slog.Warn("owner command denied", "team_id", teamID, "user_id", userID, "action", string(AdminTransferOwnership))
+		respondSlack(w, ":warning: this command is owner-only")
+		return false
+	}
+	return true
 }
 
 // requireAdminStoreSync renders the "admin features not configured"
@@ -108,8 +145,9 @@ const workspaceUnboundReply = "Workspace isn't bound — run `/qurl setup <email
 const adminGateBudget = 800 * time.Millisecond
 
 // adminSyncVerbBudget bounds the verb-body work for the sync admin
-// membership verbs (add / remove / admins) so the full gate + body +
-// encode chain fits inside Slack's 3s slash-command ack window.
+// membership/ownership verbs (add / remove / admins / transfer-ownership) so
+// the full gate + body + encode chain fits inside Slack's 3s slash-command ack
+// window.
 // Without this, asyncWorkTimeout (25s) would silently let the verb
 // body wedge past 3s and the user would see no reply at all (Slack
 // drops slash-command responses that miss the ack). (Resource `revoke`
@@ -121,6 +159,21 @@ const adminGateBudget = 800 * time.Millisecond
 // UpdateItem, well under 100ms warm) but the headroom is the point:
 // missing Slack's ack costs the user any visible reply at all.
 const adminSyncVerbBudget = 1200 * time.Millisecond
+
+// adminTargetLookupBudget bounds transfer-ownership's Slack users.info phase.
+const adminTargetLookupBudget = 600 * time.Millisecond
+
+// adminTransferSyncBudget is the whole sync budget for transfer-ownership's
+// owner gate + Slack target lookup + DDB mutation. transfer-ownership is the
+// only sync admin verb with all three hops before the slash-command reply. Keep
+// this budget narrow so the phase ceilings stay below Slack's 3s ack window:
+// each phase still has its own narrower timeout, but the shared parent stops
+// their ceilings from adding up past the reply budget. If the parent deadline
+// fires after DynamoDB applies but before the SDK sees the response, a retry can
+// correctly fail the owner_id condition with owner-only copy; if that appears in
+// telemetry, move this verb to an async response_url flow instead of widening
+// the sync path.
+const adminTransferSyncBudget = 2400 * time.Millisecond
 
 // requireAdminSync centralizes the admin-only gate for sync handlers.
 // Returns true when the caller may proceed; false when the request
@@ -341,7 +394,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	// omits the internal table name; the slog.Error below carries
 	// it for on-call triage.
 	ownerCopy := "(unknown — the qURL setup record is missing; contact support)"
-	if looksLikeSlackUserID(ownerID) {
+	if slackdata.LooksLikeSlackUserID(ownerID) {
 		ownerCopy = fmt.Sprintf("<@%s>", ownerID)
 	} else {
 		slog.Error("admin list: workspace_mappings row missing or shape-bad owner_id (storage corruption)", "team_id", teamID, "user_id", callerUserID, "owner_id_len", len(ownerID))
@@ -361,7 +414,7 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 		// shape-bad) the equality comparison would still fire and
 		// silently drop the entry under the wrong reason. Keep this
 		// ordering load-bearing.
-		if !looksLikeSlackUserID(a) {
+		if !slackdata.LooksLikeSlackUserID(a) {
 			continue
 		}
 		if a == ownerID {
@@ -386,23 +439,73 @@ func (h *Handler) handleAdminList(w http.ResponseWriter, teamID, callerUserID st
 	respondSlack(w, body)
 }
 
-// looksLikeSlackUserID reports whether s matches Slack's documented
-// user-ID grammar — `U…` (workspace) or `W…` (Enterprise Grid)
-// prefix followed by 8-63 uppercase-alphanumeric chars (9-64 chars
-// total). The bounds match the parser-side userMentionPattern
-// (`[UW][A-Z0-9]{8,63}`) so a value rejected at parse time is also
-// rejected here. Used as a defensive guard on values read from DDB
-// before interpolating into Slack mrkdwn `<@%s>` mentions: the
-// parser already constrains values written through admin add/remove,
-// but owner_id is written by BindWorkspace from the OAuth callback
-// (a different code path), and admin_slack_user_ids could in
-// principle be hand-mutated. Cheap insurance against a malformed
-// value breaking out of the mention surface.
-//
-// Thin wrapper over slackdata.LooksLikeSlackUserID — the store layer
-// owns the shape check because BindWorkspace also depends on it (to
-// detect a legacy Auth0-sub owner_id for self-heal). Keeping one
-// implementation stops the two from drifting.
-func looksLikeSlackUserID(s string) bool {
-	return slackdata.LooksLikeSlackUserID(s)
+func (h *Handler) handleAdminTransferOwnership(w http.ResponseWriter, teamID, enterpriseID, callerUserID string, cmd *Command) {
+	transferCtx, transferCancel := context.WithTimeout(h.baseCtx, adminTransferSyncBudget)
+	defer transferCancel()
+	if !h.requireTransferOwnerSync(transferCtx, w, teamID, callerUserID) {
+		return
+	}
+	target := cmd.UserID
+	if target == callerUserID {
+		respondSlack(w, "You're already the workspace owner — nothing to do.")
+		return
+	}
+	// Parse normally guarantees this shape for mention arguments; keep this
+	// guard as a second fence in case a future parser path sets cmd.UserID
+	// directly.
+	if !slackdata.LooksLikeSlackUserID(target) {
+		respondSlack(w, ":warning: invalid @user mention")
+		return
+	}
+	if h.cfg.SlackUserLookup == nil {
+		slog.Error("transfer ownership: Slack user lookup is not configured", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		respondSlack(w, ":warning: couldn't verify that target Slack user. Contact your Slack admin.")
+		return
+	}
+	lookupCtx, lookupCancel := context.WithTimeout(transferCtx, adminTargetLookupBudget)
+	targetOK, lookupErr := h.cfg.SlackUserLookup(lookupCtx, teamID, enterpriseID, target)
+	lookupCancel()
+	if lookupErr != nil {
+		if errors.Is(lookupErr, ErrSlackMissingScope) {
+			respondSlack(w, ":warning: couldn't verify that target Slack user. Reinstall the Slack app to grant `users:read` (or update legacy `SLACK_BOT_TOKEN`), then retry.")
+			return
+		}
+		if errors.Is(lookupErr, auth.ErrSlackBotTokenNotConfigured) {
+			respondSlack(w, ":warning: couldn't verify that target Slack user. Reinstall the Slack app (or configure legacy `SLACK_BOT_TOKEN`), then retry.")
+			return
+		}
+		slog.Error("transfer ownership: target user lookup failed", "error", lookupErr, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		respondSlack(w, ":warning: couldn't verify that target Slack user. Retry in a moment.")
+		return
+	}
+	if !targetOK {
+		slog.Warn("transfer ownership: target user lookup rejected target", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		respondSlack(w, fmt.Sprintf(":warning: couldn't verify <@%s> as an active Slack user visible to this app.", target))
+		return
+	}
+	ctx, cancel := context.WithTimeout(transferCtx, adminSyncVerbBudget)
+	defer cancel()
+	if err := h.cfg.AdminStore.TransferOwnership(ctx, teamID, callerUserID, target); err != nil {
+		var se *slackdata.Error
+		if errors.As(err, &se) {
+			switch {
+			case se.StatusCode == http.StatusConflict && se.Code == slackdata.ErrCodeOwnerTransferNotOwner:
+				respondSlack(w, ":warning: this command is owner-only (run `/qurl-admin admins` to confirm the current owner before retrying).")
+				return
+			case se.StatusCode == http.StatusNotFound && se.Code == slackdata.ErrCodeWorkspaceNotBound:
+				respondSlack(w, workspaceUnboundReply)
+				return
+			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			slog.Error("transfer ownership deadline reached after mutation attempt", "error", err, "context_error", ctxErr, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+			respondSlack(w, ":warning: couldn't confirm whether ownership transfer completed before the deadline. Run `/qurl-admin admins` to confirm the current owner before retrying.")
+			return
+		}
+		slog.Error("transfer ownership failed", "error", err, "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+		respondSlack(w, ":warning: failed to transfer ownership (upstream error; run `/qurl-admin admins` to confirm current owner before retrying).")
+		return
+	}
+	slog.Info("admin transfer ownership succeeded", "team_id", teamID, "user_id", callerUserID, "target_user_id", target)
+	respondSlack(w, fmt.Sprintf("Transferred qURL workspace ownership to <@%s>. They can now run `/qurl setup`; the qURL account/key will not change until they do.", target))
 }

@@ -24,7 +24,7 @@ import (
 )
 
 // Slack-shaped test user IDs — kept in real Slack-ID shape (U-prefix
-// + uppercase-alphanumeric, matching `looksLikeSlackUserID`) so these
+// + uppercase-alphanumeric, matching `LooksLikeSlackUserID`) so these
 // fixtures mirror production owner_id/admin values rather than ad-hoc
 // strings. These tests assert at the store boundary (BindWorkspace
 // classification), not the handler renderer, but matching the
@@ -599,6 +599,121 @@ func TestCheckAdmin_OwnerIsAdminOffOwnerID(t *testing.T) {
 		}
 		if isAdmin {
 			t.Errorf("isAdmin = true for non-owner, non-admin caller, want false (over-grant)")
+		}
+	})
+}
+
+func TestTransferOwnership_HappyPathWritesAtomicOwnerSet(t *testing.T) {
+	var got *dynamodb.UpdateItemInput
+	store := newStore(&stubDDB{
+		updateItemFn: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			got = in
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	})
+	if err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID); err != nil {
+		t.Fatalf("TransferOwnership: %v", err)
+	}
+	if got == nil {
+		t.Fatal("UpdateItem was not called")
+	}
+	if table := aws.ToString(got.TableName); table != "ws" {
+		t.Errorf("TableName = %q, want ws", table)
+	}
+	if exp := aws.ToString(got.UpdateExpression); exp != "SET owner_id = :new_owner, updated_at = :now ADD admin_slack_user_ids :owner_set" {
+		t.Errorf("UpdateExpression = %q", exp)
+	}
+	if cond := aws.ToString(got.ConditionExpression); cond != "attribute_exists(slack_team_id) AND owner_id = :current_owner" {
+		t.Errorf("ConditionExpression = %q", cond)
+	}
+	if team, _ := got.Key[attrSlackTeamID].(*ddbtypes.AttributeValueMemberS); team == nil || team.Value != "T1" {
+		t.Errorf("Key[%s] = %#v, want T1", attrSlackTeamID, got.Key[attrSlackTeamID])
+	}
+	if current, _ := got.ExpressionAttributeValues[":current_owner"].(*ddbtypes.AttributeValueMemberS); current == nil || current.Value != testOwnerSlackID {
+		t.Errorf(":current_owner = %#v, want %s", got.ExpressionAttributeValues[":current_owner"], testOwnerSlackID)
+	}
+	if newOwner, _ := got.ExpressionAttributeValues[":new_owner"].(*ddbtypes.AttributeValueMemberS); newOwner == nil || newOwner.Value != testOtherSlackID {
+		t.Errorf(":new_owner = %#v, want %s", got.ExpressionAttributeValues[":new_owner"], testOtherSlackID)
+	}
+	ownerSet, _ := got.ExpressionAttributeValues[":owner_set"].(*ddbtypes.AttributeValueMemberSS)
+	if ownerSet == nil || !reflect.DeepEqual(ownerSet.Value, []string{testOwnerSlackID, testOtherSlackID}) {
+		t.Errorf(":owner_set = %#v, want current + new owner", got.ExpressionAttributeValues[":owner_set"])
+	}
+}
+
+func TestTransferOwnership_DisambiguatesConditionalFailure(t *testing.T) {
+	conditionalFailed := func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("raced")}
+	}
+
+	t.Run("current owner changed after gate", func(t *testing.T) {
+		var disambigConsistent bool
+		store := newStore(&stubDDB{
+			updateItemFn: conditionalFailed,
+			getItemFn: func(in *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				disambigConsistent = aws.ToBool(in.ConsistentRead)
+				return &dynamodb.GetItemOutput{Item: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID: stringAttr("T1"),
+					attrOwnerID:     stringAttr(testCallerSlackID),
+				}}, nil
+			},
+		})
+		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.StatusCode != http.StatusConflict {
+			t.Errorf("StatusCode = %d, want 409", ae.StatusCode)
+		}
+		if ae.Code != ErrCodeOwnerTransferNotOwner {
+			t.Errorf("Code = %q, want %q", ae.Code, ErrCodeOwnerTransferNotOwner)
+		}
+		if !disambigConsistent {
+			t.Errorf("disambig GetItem ConsistentRead = false, want true")
+		}
+	})
+
+	t.Run("workspace disappeared after gate", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			updateItemFn: conditionalFailed,
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return &dynamodb.GetItemOutput{}, nil
+			},
+		})
+		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.StatusCode != http.StatusNotFound {
+			t.Errorf("StatusCode = %d, want 404", ae.StatusCode)
+		}
+		if ae.Code != ErrCodeWorkspaceNotBound {
+			t.Errorf("Code = %q, want %q", ae.Code, ErrCodeWorkspaceNotBound)
+		}
+	})
+
+	t.Run("disambiguation read fails", func(t *testing.T) {
+		store := newStore(&stubDDB{
+			updateItemFn: conditionalFailed,
+			getItemFn: func(_ *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+				return nil, errors.New("transport blip")
+			},
+		})
+		err := store.TransferOwnership(context.Background(), "T1", testOwnerSlackID, testOtherSlackID)
+		var ae *Error
+		if !errors.As(err, &ae) {
+			t.Fatalf("got %v, want *Error", err)
+		}
+		if ae.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("StatusCode = %d, want 503", ae.StatusCode)
+		}
+		if ae.Code != "ddb_error" {
+			t.Errorf("Code = %q, want ddb_error", ae.Code)
+		}
+		if ae.Title != "TransferOwnership.disambiguate" {
+			t.Errorf("Title = %q, want TransferOwnership.disambiguate", ae.Title)
 		}
 	})
 }

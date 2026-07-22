@@ -85,6 +85,15 @@ func NewSlackRateLimitError(retryAfter string) error {
 // OpenViewFunc posts a Slack modal through `views.open`.
 type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
 
+// SlackUserLookupFunc reports whether userID is an active Slack user visible to
+// the app token used for the team. Used by ownership transfer so a manually
+// pasted `<@U...>` shape cannot move owner_id to a malformed, deleted, bot, or
+// invisible account. The enterpriseID parameter is reserved for future
+// Enterprise Grid support; the production users.info adapter intentionally does
+// not fall back to an org token because that proves org visibility, not
+// workspace membership (qurl-integrations#877).
+type SlackUserLookupFunc func(ctx context.Context, teamID, enterpriseID, userID string) (bool, error)
+
 // PostFeedbackFunc delivers a `/qurl feedback` submission to the internal
 // feedback Slack channel by POSTing a Block Kit payload to a Slack incoming
 // webhook. The bytes are the full webhook request body (built by
@@ -340,6 +349,12 @@ type Config struct {
 	// sandbox / no-DDB tests. Production wires one in cmd/main.go
 	// from the QURL_*_TABLE env vars (see slackdata.NewStore).
 	AdminStore *slackdata.Store
+
+	// SlackUserLookup verifies an ownership-transfer target against Slack's
+	// users.info API before owner_id is rewritten. Nil keeps transfer
+	// fail-closed with a "not configured" reply; production wires it in
+	// cmd/main.go.
+	SlackUserLookup SlackUserLookupFunc
 
 	// OpenView posts a `views.open` Slack web API call to display a
 	// modal in response to a slash command. The token owner parameter is
@@ -1169,25 +1184,29 @@ const (
 	adminVerbProtectURL       = "protect-url"
 	// adminVerbAgent is `/qurl-admin agent on|off` — the per-workspace
 	// conversation-mode toggle (bare `agent` shows the current state).
-	adminVerbAgent = "agent"
+	adminVerbAgent             = "agent"
+	adminVerbAdd               = "add"
+	adminVerbRemove            = "remove"
+	adminVerbAdmins            = "admins"
+	adminVerbTransferOwnership = "transfer-ownership"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
 // classify the wrong-surface case. `set-alias`/`unset-alias` carry both
 // spellings because slashVerb accepts the dash-free historical form too.
-// `add`/`remove`/`admins`/`revoke` are the flat membership + revoke verbs;
+// `add`/`remove`/`admins`/`transfer-ownership`/`revoke` are the flat admin verbs;
 // `admin` is retained only so the deprecated `admin <verb>` prefix still
 // classifies here (it gets a redirect in dispatchAdminCommand). `setup` is
 // deliberately NOT here — it lives on `/qurl` (see handleSetup) so the first
 // claimant of an unbound workspace can reach it.
 //
-// Adding an admin verb touches three places that must stay in sync: this
-// list (wrong-surface classification), a dispatch case in
+// Adding an admin verb touches four places that must stay in sync: this
+// list (wrong-surface classification), Parse, a dispatch case in
 // dispatchAdminCommand, and — if it's user-facing — adminHelpMessage.
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", adminVerbAdd, adminVerbRemove, adminVerbAdmins, adminVerbTransferOwnership, string(SubcmdRevoke)}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -1440,12 +1459,13 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 
 // dispatchAdminCommand routes the admin-facing `/qurl-admin` verbs:
 // tunnel install, set-alias, unset-alias, set-display-name,
-// unset-display-name, the flat membership verbs add/remove/admins, revoke,
+// unset-display-name, the flat membership/ownership verbs
+// add/remove/admins/transfer-ownership, revoke,
 // and help. User verbs typed on `/qurl-admin` — including `setup`, which is a
 // `/qurl` verb (first-come-claims; see handleSetup) — get a redirect to
 // `/qurl` so a user who fat-fingers the command gets a direct correction.
 //
-// The membership verbs are flat (`/qurl-admin add @user`, not `admin add`):
+// The membership/ownership verbs are flat (`/qurl-admin add @user`, not `admin add`):
 // the whole command is already admin-scoped, so the `admin` sub-word was
 // redundant. Listing admins is `admins` (a plural noun) rather than `list` so
 // it doesn't collide with `/qurl list` (which lists resources). The legacy
@@ -1473,9 +1493,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// per-link kill. Runs async (multi-hop resolve+delete); see
 		// handleRevoke.
 		h.handleRevoke(w, values)
-	case slashSubcommand(text, "add"), slashSubcommand(text, "remove"), slashSubcommand(text, "admins"):
-		// Flat bot-admin membership verbs. handleAdmin parses the flat form
-		// (Parse maps add/remove/admins → SubcmdAdmin + AdminAction) and gates
+	case slashSubcommand(text, adminVerbAdd), slashSubcommand(text, adminVerbRemove), slashSubcommand(text, adminVerbAdmins), slashSubcommand(text, adminVerbTransferOwnership):
+		// Flat bot-admin membership/ownership verbs. handleAdmin parses the flat form
+		// (Parse maps add/remove/admins/transfer-ownership → SubcmdAdmin + AdminAction) and gates
 		// each in its own handler (requireAdminSync). Bare `add`/`remove`
 		// surface ErrMissingUserMention; `admins` takes no args.
 		h.handleAdmin(w, values)
@@ -1483,7 +1503,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// Deprecated `admin <verb>` prefix — the word is redundant on an
 		// already-admin command. Redirect to the flat verbs rather than
 		// silently accepting it, so muscle-memory users learn the new grammar.
-		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
+		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s transfer-ownership @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
 	// protect-connector / protect-url precede the bare `protect` chooser. slashVerb
 	// matches an exact token or a `verb ` (space) prefix, so `protect` can't
 	// shadow the hyphenated verbs regardless of order; the adjacency is for
@@ -1723,10 +1743,10 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			// into a `<@%s>` mention. BindWorkspace writes owner_id
 			// from the OAuth callback (a different code path than the
 			// parser), and a pre-pivot row holds an Auth0 sub, not a
-			// Slack ID. Mirrors the looksLikeSlackUserID guard in
-			// handleAdminList so a malformed value can't break out of
+			// Slack ID. Use slackdata.LooksLikeSlackUserID, the same
+			// shape guard as admin renders, so a malformed value can't break out of
 			// the mention surface.
-			if looksLikeSlackUserID(ownerID) {
+			if slackdata.LooksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
 				respondSlack(w, fmt.Sprintf("`/qurl setup <email>` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
 				return
@@ -2156,7 +2176,7 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		// from this recoverable local disconnect; log it for operator cleanup.
 		if ownerID == "" {
 			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
-		} else if !looksLikeSlackUserID(ownerID) {
+		} else if !slackdata.LooksLikeSlackUserID(ownerID) {
 			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
 		}
 		return true
@@ -2412,6 +2432,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl-admin add @user` — Promote a Slack user to admin",
 			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
+			"• `/qurl-admin transfer-ownership @user` — Owner-only: hand off who may reconnect qURL for this workspace",
 			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
 		)
 		appendSectionHeader("*Conversation mode*")

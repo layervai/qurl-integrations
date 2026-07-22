@@ -129,6 +129,21 @@ at the OAuth-callback bind layer.
   Enterprise Grid org-level installs are also supported: the enterprise-scoped
   bot token is stored under the Slack `enterprise_id`, while qURL API keys and
   admin state remain scoped to each invoking workspace's `team_id`.
+- **Owner handoff:** `/qurl-admin transfer-ownership @user` is owner-only
+  and rewrites only `workspace_mappings.owner_id`, adding the new owner to
+  `admin_slack_user_ids` if needed. The previous owner remains an admin until
+  someone removes them with `/qurl-admin remove @user`. The transfer does
+  **not** mutate qurl-service `workspace_keys` or the current `auth0_subject`;
+  the credential remains on the existing qURL account until the new owner runs
+  `/qurl setup`, where the normal rotate/repoint flow either refreshes on the
+  same account or routes a cross-account move to operator assistance. Existing
+  Slack installs must re-run the Slack install flow before this command can
+  verify targets, because ownership transfer requires the `users:read` bot
+  scope on a workspace-level bot token. The command intentionally does not fall
+  back to an Enterprise Grid org-level token: Slack `users.info` has no
+  workspace selector, so the org token would prove org visibility rather than
+  membership in the invoking workspace. qurl-integrations#877 tracks safe
+  Grid support for ownership transfer.
 - **Connector onboarding:** `/qurl-admin protect-connector` provisions a qURL
   Connector sidecar.
   - **Entry points** — a guided modal (opens with the bot token for the
@@ -676,8 +691,8 @@ that accidentally carried a numeric value.
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
-| `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
+| `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Must include `users:read` if ownership transfer should work before Slack install OAuth captures a per-workspace token. Production multi-customer installs should not depend on this fallback. |
 | `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
 | `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
 | `SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES` | Validation | Set to `true` to acknowledge that live renderer validation posts persistent evidence messages. Can also be set with `--ack-persistent-messages`. |
@@ -729,7 +744,10 @@ production manifest is intentionally managed outside this public repository.
 
 The `Slack install` group is required for low-friction customer onboarding.
 Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
-fallback, but customers cannot self-install the Secure Access Agent.
+fallback, but customers cannot self-install the Secure Access Agent. That
+fallback token must include `users:read` for `/qurl-admin transfer-ownership`
+to verify target users; Enterprise Grid org-level fallback tokens are
+intentionally not used for ownership transfer.
 
 The `OAuth` group is required only to serve the
 `/oauth/qurl/{start,callback}` surface. Without it the Secure Access Agent still serves
@@ -744,10 +762,17 @@ For customer Slack installs, configure the Slack app with:
 - Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: `commands,chat:write,im:write` plus any extra scopes from
+- Bot scopes: `commands,chat:write,im:write,users:read` plus any extra scopes from
   `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
   `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
-  `dm:true` and qURL Connector bootstrap-key delivery)
+  `dm:true` and qURL Connector bootstrap-key delivery; `users:read` lets
+  `/qurl-admin transfer-ownership` verify the target user before owner_id changes)
+  - Existing installs created before `users:read` was required must re-run this
+    Slack install flow before `/qurl-admin transfer-ownership` can verify a
+    target user.
+  - Enterprise Grid org-level tokens are not enough for ownership transfer until
+    qurl-integrations#877 adds workspace-member verification or an in-product
+    recovery path.
   - Conversation-mode installs should include `reactions:write` so the agent can
     add and clear the working-on-it reaction on admitted channel turns and DM
     turns that still use the reaction fallback before assistant-pane status is
