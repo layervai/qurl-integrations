@@ -22,9 +22,9 @@ jobs:
           fetch-depth: 1
 
       - name: Run Claude Code Review
-        # v1.0.180 fails closed when the SDK reports subtype success with
+        # v1.0.172 fails closed when the SDK reports subtype success with
         # is_error:true, so provider failures cannot masquerade as reviews.
-        uses: anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180
+        uses: anthropics/claude-code-action@a08f8913d58013599003b37d3a9174d27e99ac90 # v1.0.172
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
