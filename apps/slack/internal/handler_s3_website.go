@@ -127,7 +127,7 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 	}
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
-		log.Warn("connector setup modal expired", "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
+		log.Warn("connector setup modal expired", "created_at_unix", sanitizeS3WebsiteLogValue(strconv.FormatInt(meta.CreatedAtUnix, 10)), "modal_age_ms", sanitizeS3WebsiteLogValue(strconv.FormatInt(modalAge.Milliseconds(), 10)))
 		respondConnectorInstallModalError(w, "This modal expired. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
@@ -189,7 +189,7 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
-		log.Warn("S3 website install modal expired", "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
+		log.Warn("S3 website install modal expired", "created_at_unix", sanitizeS3WebsiteLogValue(strconv.FormatInt(meta.CreatedAtUnix, 10)), "modal_age_ms", sanitizeS3WebsiteLogValue(strconv.FormatInt(modalAge.Milliseconds(), 10)))
 		respondS3WebsiteInstallModalError(w, "This modal expired. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
