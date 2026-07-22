@@ -100,6 +100,16 @@ func TestValidS3WebsiteBucketName(t *testing.T) {
 	}
 }
 
+func TestSanitizeS3WebsiteLogValueEscapesLineBreaks(t *testing.T) {
+	got := sanitizeS3WebsiteLogValue("team\r\nforged\nentry\rtail")
+	if want := `team\r\nforged\nentry\rtail`; got != want {
+		t.Fatalf("sanitizeS3WebsiteLogValue() = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("sanitizeS3WebsiteLogValue() retained a line break: %q", got)
+	}
+}
+
 func TestConnectorSetupSubmissionRoutesExistingServiceAndS3Website(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
