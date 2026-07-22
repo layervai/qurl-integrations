@@ -15,10 +15,14 @@ import (
 func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) {
 	t.Parallel()
 	args := &tunnelInstallArgs{
-		Slug:        testTunnelSlug,
-		Alias:       testTunnelSlug,
-		LocalPort:   9090,
-		Environment: tunnelEnvKubernetes,
+		Slug:               testTunnelSlug,
+		Alias:              testTunnelSlug,
+		LocalPort:          9090,
+		Environment:        tunnelEnvKubernetes,
+		ResourceID:         testTunnelResourceID,
+		ConnectorRoutingID: testTunnelRoutingID,
+		KnockResourceID:    testTunnelKnockID,
+		APIURL:             testTunnelAPIURL,
 	}
 	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
 
@@ -101,6 +105,11 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"securityContext:",
 		"name: qurl-connector",
 		"value: '" + testTunnelSlug + "'",
+		"resource_id: '" + testTunnelResourceID + "'",
+		"connector_routing_id: '" + testTunnelRoutingID + "'",
+		"knock_resource_id: '" + testTunnelKnockID + "'",
+		"name: QURL_API_URL",
+		"value: '" + testTunnelAPIURL + "'",
 		"runAsUser: 65532",
 		"runAsGroup: 65532",
 		"runAsNonRoot: true",
@@ -124,6 +133,7 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		"runAsUser: 0",
 		"defaultMode: 0400",
 		"defaultMode: 0444",
+		"QURL_BOOTSTRAP_URL",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions included pod-level or unreadable secret setting %q:\n%s", forbidden, got)
@@ -133,6 +143,22 @@ func TestRenderKubernetesTunnelInstructionsYAMLAndSecurityContext(t *testing.T) 
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("Kubernetes instructions leaked %q:\n%s", forbidden, got)
 		}
+	}
+}
+
+func TestRenderKubernetesTunnelInstructionsYAMLQuotesAPIURL(t *testing.T) {
+	t.Parallel()
+	args := testPinnedTunnelInstallArgs()
+	args.Environment = tunnelEnvKubernetes
+	args.APIURL = "https://api.$(touch-should-not-run).example.test/v1"
+
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
+	quoted, err := yamlSingleQuoted(args.APIURL)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted: %v", err)
+	}
+	if count := strings.Count(got, "value: "+quoted); count != 1 {
+		t.Fatalf("Kubernetes instructions contain %d quoted API URL values, want 1:\n%s", count, got)
 	}
 }
 

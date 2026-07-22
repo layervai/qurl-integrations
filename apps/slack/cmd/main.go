@@ -163,9 +163,10 @@ func run() error {
 	// Required env vars are explicit by design: a missing QURL_ENDPOINT
 	// previously fell back to the sandbox URL, which is the kind of silent
 	// misconfiguration that ships a prod deploy at sandbox.
-	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
-	if qurlEndpoint == "" {
-		return errors.New("QURL_ENDPOINT is required")
+	rawQURLEndpoint := os.Getenv("QURL_ENDPOINT")
+	qurlEndpoint, connectorAPIURL, err := connectorAPIURLFromEndpoint(rawQURLEndpoint)
+	if err != nil {
+		return err
 	}
 
 	slackSigningSecret := os.Getenv("SLACK_SIGNING_SECRET")
@@ -338,6 +339,7 @@ func run() error {
 		AdminStore:                     adminStore,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
@@ -515,6 +517,43 @@ func run() error {
 	}
 	slog.Info("server stopped cleanly")
 	return nil
+}
+
+func connectorAPIURLFromEndpoint(raw string) (endpoint, apiURL string, err error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", errors.New("QURL_ENDPOINT is required")
+	}
+	endpoint = strings.TrimRight(trimmed, "/")
+	if endpoint == "" {
+		return "", "", errors.New("QURL_ENDPOINT must be an absolute URL origin")
+	}
+	// These pre-checks add operator-specific messages. ValidateConnectorAPIURL
+	// remains the canonical security and endpoint-shape validator.
+	if parsed, parseErr := url.Parse(endpoint); parseErr == nil && parsed.IsAbs() && parsed.Host != "" {
+		if parsed.User != nil {
+			return "", "", errors.New("QURL_ENDPOINT must not include credentials")
+		}
+		if parsed.RawQuery != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a query")
+		}
+		if parsed.Fragment != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a fragment")
+		}
+		// Give the common already-versioned value a migration-specific error;
+		// every other non-empty path is rejected by the general shape check.
+		if strings.EqualFold(strings.Trim(parsed.Path, "/"), "v1") {
+			return "", "", errors.New("QURL_ENDPOINT must omit the /v1 API suffix")
+		}
+		if parsed.Path != "" {
+			return "", "", errors.New("QURL_ENDPOINT must not include a path")
+		}
+	}
+	apiURL = endpoint + "/v1"
+	if validateErr := internal.ValidateConnectorAPIURL(apiURL); validateErr != nil {
+		return "", "", fmt.Errorf("QURL_ENDPOINT is invalid: %w", validateErr)
+	}
+	return endpoint, apiURL, nil
 }
 
 func lameduckForSignal(sig os.Signal) time.Duration {

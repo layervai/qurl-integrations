@@ -13,6 +13,7 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 	if err != nil {
 		return "", err
 	}
+	quotedAPIURL := shellSingleQuote(args.APIURL)
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -34,6 +35,10 @@ CONFIG_FILE="$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml"
 cat > "$CONFIG_FILE" <<'QURL_PROXY_YAML_EOF'
 %s
 QURL_PROXY_YAML_EOF
+# The generated config contains only client-safe public/routing metadata; 0644
+# lets the nonroot Connector (UID 65532) read the bind mount. Its bootstrap
+# credential stays separately protected in the 0600 api_key file below.
+$SUDO chmod 0644 "$CONFIG_FILE"
 
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$SECRET_DIR"
 $SUDO install -d -m 0700 -o 65532 -g 65532 "$AGENT_STATE_DIR"
@@ -53,7 +58,8 @@ docker run -d \
   -v "$CONFIG_FILE:/work/qurl-proxy.yaml:ro" \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(image))
+  -e QURL_API_URL=%s \
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedAPIURL, shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {

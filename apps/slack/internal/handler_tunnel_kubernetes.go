@@ -30,6 +30,10 @@ func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, image string) (
 	if err != nil {
 		return "", err
 	}
+	quotedAPIURL, err := yamlSingleQuoted(args.APIURL)
+	if err != nil {
+		return "", err
+	}
 	configYAML, err := renderTunnelConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -82,6 +86,8 @@ containers:
         value: /run/secrets/qurl-connector/api_key
       - name: QURL_CONNECTOR_ID
         value: %s
+      - name: QURL_API_URL
+        value: %s
     volumeMounts:
       - name: qurl-agent-state
         mountPath: /var/lib/layerv/agent
@@ -102,7 +108,7 @@ volumes:
       defaultMode: 0440
   - name: qurl-proxy
     configMap:
-      name: %s`, quotedImage, quotedSlug, quotedAgentPVC, quotedSecret, quotedConfigMap)
+      name: %s`, quotedImage, quotedSlug, quotedAPIURL, quotedAgentPVC, quotedSecret, quotedConfigMap)
 
 	objectsBlock, err := slackCodeBlock(objects)
 	if err != nil {
