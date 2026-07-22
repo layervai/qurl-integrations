@@ -597,14 +597,9 @@ type interactionPayload struct {
 	// (button click) payloads. Channel is the conversation the button was
 	// clicked in (the mint authorizes against it); ResponseURL is where
 	// the minted link is delivered; Actions carries the clicked element(s).
-	Channel     interactionID        `json:"channel"`
-	Container   interactionContainer `json:"container"`
-	ResponseURL string               `json:"response_url"`
-	Actions     []interactionAction  `json:"actions"`
-}
-
-type interactionContainer struct {
-	MessageTS string `json:"message_ts"`
+	Channel     interactionID       `json:"channel"`
+	ResponseURL string              `json:"response_url"`
+	Actions     []interactionAction `json:"actions"`
 }
 
 func (p *interactionPayload) asViewSubmission() ViewSubmission {
