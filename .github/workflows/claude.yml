@@ -33,9 +33,7 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        # v1.0.172 fails closed when the SDK reports subtype success with
-        # is_error:true, including /review and /simplify invocations.
-        uses: anthropics/claude-code-action@a08f8913d58013599003b37d3a9174d27e99ac90 # v1.0.172
+        uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1.0.153
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: '--model claude-opus-4-8'
