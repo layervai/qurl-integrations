@@ -45,7 +45,7 @@ jobs:
         run: bash test/render_test.sh
 
       - name: Shell lint
-        run: shellcheck -S warning render.sh cachectl.sh entrypoint.sh test/render_test.sh test/cachectl_test.sh test/behavior_test.sh
+        run: shellcheck -S warning render.sh cachectl.sh entrypoint.sh test/render_test.sh test/cachectl_test.sh test/behavior_test.sh test/qurl_connector_v05_contract.sh
 
       - name: Cache-control contract
         run: bash test/cachectl_test.sh

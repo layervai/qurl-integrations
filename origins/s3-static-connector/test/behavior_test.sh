@@ -37,9 +37,38 @@ origin_base_url() {
 set -e
 if [ "${SKIP_BUILD:-false}" = "true" ]; then
   echo "==> using existing $IMG ($PLATFORM)"
+  # Digest references are remote release contracts and may be exercised for
+  # more than one architecture in the same Docker daemon. Pull the requested
+  # platform explicitly each time. CI-built local tags are already loaded and
+  # must not be resolved against a registry.
+  case "$IMG" in
+    *@sha256:*) docker pull --platform "$PLATFORM" "$IMG" >/dev/null ;;
+  esac
 else
   echo "==> building $IMG ($PLATFORM)"
   docker build --platform "$PLATFORM" -t "$IMG" "$DIR"
+fi
+
+# Slack's Docker, Compose, ECS, and Kubernetes renderers deliberately share a
+# network namespace and numeric nonroot identity between the Connector and this
+# origin. Fail before behavior testing if a base-image change silently breaks
+# either part of that deployment contract. Keep the remediation text explicit:
+# this check also runs against the exact digest pinned by the Slack renderer.
+image_config="$(docker image inspect --format '{{json .Config}}' "$IMG")"
+runtime_contract_fail() {
+  printf 'FAIL runtime image contract for %s (%s): %s\n' "$IMG" "$PLATFORM" "$1" >&2
+  printf 'Update defaultS3StaticConnectorImage and its generated deployment renderers only after testing a compatible digest.\n' >&2
+  exit 1
+}
+
+if ! jq -e '.User == "65532:65532"' >/dev/null <<<"$image_config"; then
+  runtime_contract_fail "expected Config.User=65532:65532"
+fi
+if ! jq -e '.ExposedPorts | has("8080/tcp")' >/dev/null <<<"$image_config"; then
+  runtime_contract_fail "expected Config.ExposedPorts to contain 8080/tcp"
+fi
+if ! jq -e '[.Env[] | select(. == "LISTEN_ADDR=127.0.0.1:8080")] | length == 1' >/dev/null <<<"$image_config"; then
+  runtime_contract_fail "expected exactly one LISTEN_ADDR=127.0.0.1:8080 default"
 fi
 
 # The live stub path below renders plaintext S3 so it can run locally without
@@ -56,7 +85,7 @@ docker run -d --name "$STUB" --network "$NET" \
   -v "$DIR/test/stub-s3/stub.py:/stub.py:ro" \
   "$STUB_IMG" python /stub.py >/dev/null
 
-docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
+docker run -d --platform "$PLATFORM" --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
   -e S3_BUCKET=example-bucket -e AWS_REGION=us-east-1 \
   -e LISTEN_ADDR=0.0.0.0:8080 -e ALLOW_NON_LOOPBACK_LISTEN=true \
   -e ALLOW_PLAINTEXT_S3=true \

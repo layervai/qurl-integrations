@@ -112,7 +112,6 @@ func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (strin
 		Essential: false,
 		Environment: []ecsEnvironmentVar{
 			{Name: ecsConnectorIDEnv, Value: args.Slug},
-			{Name: "LAYERV_KNOCK_RESOURCE_ID", Value: args.KnockResourceID},
 			{Name: "QURL_API_URL", Value: args.APIURL},
 		},
 		// TODO(qurl-connector-ecs-secret-file): prefer QURL_API_KEY_FILE once the

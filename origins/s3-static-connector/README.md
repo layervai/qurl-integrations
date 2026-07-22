@@ -18,6 +18,31 @@ runs the behavior contract against that exact candidate digest for both
 `:main` and `:<git-sha>`. Deployments should pin the resolved image digest
 once the published image has soaked in the target environment.
 
+## qURL Connector compatibility
+
+The origin's Connector-facing contract is intentionally small and versioned
+independently from Connector enrollment: plain HTTP on
+`127.0.0.1:8080`, with both containers running as UID/GID `65532`. That keeps
+the origin compatible across the Connector lifecycle cutover.
+
+| Connector release | Status | Configuration contract |
+| --- | --- | --- |
+| `v0.5.x` (current production) | Compatible | Keep the v0.5 route schema and HTTP bootstrap lifecycle. Point the route at `local_ip: 127.0.0.1` and `local_port: 8080`; existing deployments do not need an origin change. |
+| `v0.6.x` (native UDP) | Compatible, pending the Connector release gate | Slack validates the complete server-issued `resource_id`, `connector_routing_id`, and `knock_resource_id` tuple before minting a bootstrap key. It persists the first two route identities, lets the Connector rehydrate the knock target from the authenticated resource response, and omits the retired public HTTP bootstrap URL. |
+
+The v0.5 parser rejects unknown YAML fields, so the two route schemas must not
+be combined into one superset file. The Slack installer intentionally targets
+v0.6 and later; it fails closed when the API does not return the complete
+native-UDP identity tuple. Current v0.5 deployments keep their existing config.
+
+Slack pins the origin by multi-architecture digest. Its CI extracts that exact
+pin, runs this image's complete behavior suite on both `linux/amd64` and
+`linux/arm64`, and verifies the numeric user, exposed port, and loopback listen
+default before accepting a Slack or origin change. The same gate boots the
+immutable production `v0.5.0` Connector image with a canonical S3-origin route
+and requires it to pass strict config loading before reaching its expected
+first-bootstrap credential boundary.
+
 The image packages two pinned processes:
 
 - **nginx** owns the website surface — clean URLs, the security header set,

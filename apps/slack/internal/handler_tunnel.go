@@ -1301,8 +1301,10 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 		return "", err
 	}
 	// Empty metadata is retained only for parser/renderer unit tests. Production
-	// buildTunnelInstall validates and populates the full triple before this
-	// renderer runs, so a one-shot bootstrap key is never reused for resources.
+	// buildTunnelInstall validates the full producer triple before this renderer
+	// runs, so a one-shot bootstrap key is never reused for resources. Only the
+	// two persisted route identities belong in YAML; qurl-connector rehydrates
+	// knock_resource_id from the authenticated resource response on every start.
 	identityYAML := ""
 	if args.ResourceID != "" || args.ConnectorRoutingID != "" || args.KnockResourceID != "" {
 		// Revalidate at the renderer boundary even though production validates
@@ -1310,7 +1312,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 		if err := validateTunnelRouteIdentity(args); err != nil {
 			return "", err
 		}
-		identityValues := []string{args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID}
+		identityValues := []string{args.ResourceID, args.ConnectorRoutingID}
 		quotedIdentity := make([]string, len(identityValues))
 		for i, value := range identityValues {
 			quotedIdentity[i], err = yamlSingleQuoted(strings.TrimSpace(value))
@@ -1318,7 +1320,7 @@ func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
 				return "", err
 			}
 		}
-		identityYAML = fmt.Sprintf("\n    resource_id: %s\n    connector_routing_id: %s\n    knock_resource_id: %s", quotedIdentity[0], quotedIdentity[1], quotedIdentity[2])
+		identityYAML = fmt.Sprintf("\n    resource_id: %s\n    connector_routing_id: %s", quotedIdentity[0], quotedIdentity[1])
 	}
 	return fmt.Sprintf(`routes:
   - id: %s
