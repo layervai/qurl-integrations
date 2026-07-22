@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -23,19 +25,33 @@ import (
 // doesn't hit the real internet trying to prime example.auth0.com's JWKS.
 type noopVerifier struct{}
 
-func (noopVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
-	return "", errors.New("noopVerifier: unused in env-var tests")
+func (noopVerifier) VerifySetupClaims(_ context.Context, _, _ string) (oauth.IDTokenClaims, error) {
+	return oauth.IDTokenClaims{}, errors.New("noopVerifier: unused in env-var tests")
 }
 
-func (noopVerifier) VerifySub(_ context.Context, _ string) (string, error) {
-	return "", errors.New("noopVerifier: unused in env-var tests")
+type noopDDBClient struct{}
+
+func (noopDDBClient) GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return &dynamodb.GetItemOutput{}, nil
+}
+
+func (noopDDBClient) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+func (noopDDBClient) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	return &dynamodb.UpdateItemOutput{}, nil
+}
+
+func (noopDDBClient) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	return &dynamodb.DeleteItemOutput{}, nil
 }
 
 // newFakeProvider builds the minimum-viable DDBProvider buildOAuthConfig
 // will accept. The test only inspects the (cfg, ok) return — no DDB or
 // KMS calls are made through the returned provider.
 func newFakeProvider() *auth.DDBProvider {
-	return &auth.DDBProvider{}
+	return &auth.DDBProvider{Client: noopDDBClient{}, TableName: "workspace-state-test"}
 }
 
 const (
@@ -984,14 +1000,9 @@ func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
 	})
 }
 
-// TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired fences the
-// mismatched-degradation guard: when the JWKS prime fails AND AdminStore
-// is wired, every callback would reject the install (no sub → no
-// OwnerID → no bind → 500). Catching that at boot beats catching it
-// after the first user hits /qurl setup. The sandbox path (no
-// AdminStore) is the inverse — falls through to a warn + nil
-// verifier so the API-key surface keeps working.
-func TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired(t *testing.T) {
+// TestBuildOAuthConfigFailsFastOnJWKS fences the nonce-verification invariant:
+// every enabled OAuth deployment needs a verifier, regardless of AdminStore.
+func TestBuildOAuthConfigFailsFastOnJWKS(t *testing.T) {
 	prev := newJWKSVerifier
 	newJWKSVerifier = func(_ context.Context, _, _ string) (oauth.IDTokenVerifier, error) {
 		return nil, errors.New("simulated JWKS prime failure")
@@ -1000,28 +1011,27 @@ func TestBuildOAuthConfigFailsFastOnJWKSWhenAdminStoreWired(t *testing.T) {
 
 	applyEnv(t, validEnv())
 
-	t.Run("admin store wired — must fail-fast", func(t *testing.T) {
-		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, &fakeAdminStore{})
+	for _, adminStore := range []oauth.AdminStore{nil, &fakeAdminStore{}} {
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, adminStore)
 		if ok {
-			t.Error("expected ok=false when JWKS prime fails with AdminStore wired (every callback would 500)")
+			t.Error("expected ok=false when JWKS prime fails")
 		}
 		if err == nil || !strings.Contains(err.Error(), "JWKS") {
 			t.Errorf("expected fail-fast error mentioning JWKS, got %v", err)
 		}
-	})
+	}
+}
 
-	t.Run("admin store nil — must warn-and-continue", func(t *testing.T) {
-		cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil, nil)
-		if err != nil {
-			t.Fatalf("expected nil err on sandbox path, got %v", err)
-		}
-		if !ok {
-			t.Fatal("expected ok=true on sandbox path (no AdminStore → bind is skipped, verifier is best-effort)")
-		}
-		if cfg.IDTokenVerifier != nil {
-			t.Error("expected verifier=nil when prime failed; callback gates on this to skip claim extraction")
-		}
-	})
+func TestBuildOAuthConfigFailsFastOnInvalidStateStore(t *testing.T) {
+	stubJWKSVerifier(t)
+	applyEnv(t, validEnv())
+	_, ok, err := buildOAuthConfig(context.Background(), &auth.DDBProvider{}, nil, nil)
+	if ok {
+		t.Fatal("expected ok=false for invalid OAuth state store wiring")
+	}
+	if err == nil || !strings.Contains(err.Error(), "state store") {
+		t.Fatalf("expected state-store initialization error, got %v", err)
+	}
 }
 
 // fakeAdminStore is the cmd-side stand-in for oauth.AdminStore in

@@ -2,7 +2,13 @@ package oauth
 
 import (
 	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +24,35 @@ const (
 	testStateUserID          = "U_ADMIN1"
 	testNormalizedSetupEmail = "admin+setup@example.com"
 )
+
+func mintLegacyStateForTest(t *testing.T, secret []byte, payloadParts ...string) string {
+	t.Helper()
+	signed := signedPayload(payloadParts...)
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(signed)
+	sig := hex.EncodeToString(mac.Sum(nil))
+	raw := append(append([]byte{}, signed...), stateSeparatorB)
+	raw = append(raw, sig...)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func assertStateHasNonce(t *testing.T, nonce string) {
+	t.Helper()
+	if nonce == "" {
+		t.Fatal("state nonce must be present")
+	}
+}
+
+func assertStateHasNonceAndVerifier(t *testing.T, nonce, codeVerifier string) {
+	t.Helper()
+	assertStateHasNonce(t, nonce)
+	if codeVerifier == "" {
+		t.Fatal("state PKCE code verifier must be present")
+	}
+	if !validPKCEVerifier(codeVerifier) {
+		t.Fatalf("state PKCE code verifier is invalid: %q", codeVerifier)
+	}
+}
 
 func TestMintAndVerifyStateRoundTrip(t *testing.T) {
 	now := time.Unix(1700000000, 0)
@@ -40,6 +75,10 @@ func TestMintAndVerifyStateRoundTrip(t *testing.T) {
 	}
 	if got.Mode != SetupModeReuse {
 		t.Errorf("legacy state mode: got %q want reuse", got.Mode)
+	}
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
 	}
 }
 
@@ -65,6 +104,10 @@ func TestMintAndVerifyStateWithEmailRoundTrip(t *testing.T) {
 	if got.Mode != SetupModeReuse {
 		t.Errorf("email state mode: got %q want reuse", got.Mode)
 	}
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
 }
 
 func TestMintAndVerifyStateWithEmailRotateModeRoundTrip(t *testing.T) {
@@ -89,6 +132,10 @@ func TestMintAndVerifyStateWithEmailRotateModeRoundTrip(t *testing.T) {
 	if got.Mode != SetupModeRotate {
 		t.Errorf("mode round-trip: got %q want rotate", got.Mode)
 	}
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
 }
 
 func TestMintAndVerifyStateWithEmailRepointModeRoundTrip(t *testing.T) {
@@ -106,6 +153,81 @@ func TestMintAndVerifyStateWithEmailRepointModeRoundTrip(t *testing.T) {
 	}
 	if got.Mode != SetupModeRepoint {
 		t.Errorf("mode round-trip: got %q want repoint", got.Mode)
+	}
+	assertStateHasNonce(t, got.Nonce)
+	if got.CodeVerifier != "" {
+		t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+	}
+}
+
+func TestVerifyStateAcceptsLegacyFormats(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	cases := []struct {
+		name    string
+		payload []string
+		email   string
+		mode    SetupMode
+	}{
+		{
+			name:    "legacy",
+			payload: []string{testStateTeamID, testStateUserID, "legacy-nonce", strconv.FormatInt(now.Unix(), 10)},
+			mode:    SetupModeReuse,
+		},
+		{
+			name:    "email",
+			payload: []string{testStateTeamID, testStateUserID, "legacy-nonce", strconv.FormatInt(now.Unix(), 10), testNormalizedSetupEmail},
+			email:   testNormalizedSetupEmail,
+			mode:    SetupModeReuse,
+		},
+		{
+			name:    "email-mode",
+			payload: []string{testStateTeamID, testStateUserID, "legacy-nonce", strconv.FormatInt(now.Unix(), 10), testNormalizedSetupEmail, string(SetupModeRotate)},
+			email:   testNormalizedSetupEmail,
+			mode:    SetupModeRotate,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tok := mintLegacyStateForTest(t, testSecret, tc.payload...)
+			got, err := VerifyState(testSecret, tok, now.Add(30*time.Second))
+			if err != nil {
+				t.Fatalf("VerifyState: %v", err)
+			}
+			if got.Email != tc.email {
+				t.Errorf("email: got %q want %q", got.Email, tc.email)
+			}
+			if got.Mode != tc.mode {
+				t.Errorf("mode: got %q want %q", got.Mode, tc.mode)
+			}
+			if got.Nonce != "legacy-nonce" {
+				t.Errorf("nonce: got %q want legacy-nonce", got.Nonce)
+			}
+			if got.CodeVerifier != "" {
+				t.Errorf("legacy state verifier: got %q want empty", got.CodeVerifier)
+			}
+		})
+	}
+}
+
+func TestOpaqueStateHandleClassificationDoesNotMatchLegacyState(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	store := newMemoryStateStore()
+	handle, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, testNormalizedSetupEmail, SetupModeReuse, now)
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	if !isOpaqueStateHandle(handle) {
+		t.Fatalf("opaque handle not recognized: %q", handle)
+	}
+	legacy, err := MintState(testSecret, testStateTeamID, testStateUserID, now)
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	if isOpaqueStateHandle(legacy) {
+		t.Fatalf("legacy signed state misclassified as opaque handle: %q", legacy)
+	}
+	if isOpaqueStateHandle(strings.Repeat("!", stateHandleEncodedLen)) {
+		t.Fatal("malformed base64url input classified as opaque handle")
 	}
 }
 
@@ -139,7 +261,7 @@ func TestVerifyStateRejectsExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintState: %v", err)
 	}
-	if _, err := VerifyState(testSecret, tok, now.Add(10*time.Minute)); !errors.Is(err, errStateExpired) {
+	if _, err := VerifyState(testSecret, tok, now.Add(stateMaxAge+time.Second)); !errors.Is(err, errStateExpired) {
 		t.Fatalf("want errStateExpired, got %v", err)
 	}
 }

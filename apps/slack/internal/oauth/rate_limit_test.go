@@ -308,10 +308,17 @@ func TestNormalizeOAuthIPEdgeCases(t *testing.T) {
 	}
 }
 
+func newRateLimitedRouteConfig() Config {
+	cfg := newStartCfg()
+	cfg.StateStore = newMemoryStateStore()
+	cfg.IDTokenVerifier = noopIDTokenVerifier{}
+	return cfg
+}
+
 func TestRegisterRoutesRateLimitsStartAndCallback(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	limiter := newOAuthRateLimiter(func() time.Time { return now })
-	cfg := newStartCfg()
+	cfg := newRateLimitedRouteConfig()
 	mux := http.NewServeMux()
 	registerRoutes(mux, cfg, limiter)
 
@@ -354,7 +361,7 @@ func TestRegisterRoutesRateLimitsStartAndCallback(t *testing.T) {
 func TestRegisterRoutesGroupsIPv6SourcesBy64(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	limiter := newOAuthRateLimiter(func() time.Time { return now })
-	cfg := newStartCfg()
+	cfg := newRateLimitedRouteConfig()
 	mux := http.NewServeMux()
 	registerRoutes(mux, cfg, limiter)
 
@@ -383,7 +390,7 @@ func TestRegisterRoutesGroupsIPv6SourcesBy64(t *testing.T) {
 func TestRegisterRoutesSharesRateLimitBucketAcrossStartAndCallback(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	limiter := newOAuthRateLimiter(func() time.Time { return now })
-	cfg := newStartCfg()
+	cfg := newRateLimitedRouteConfig()
 	mux := http.NewServeMux()
 	registerRoutes(mux, cfg, limiter)
 

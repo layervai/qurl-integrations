@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -78,6 +79,22 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("state") != state {
 		t.Errorf("state: got %q want %q (must pass through the signed state)", q.Get("state"), state)
 	}
+	verified, err := VerifyState(cfg.OAuthStateSecret, state, cfg.Now())
+	if err != nil {
+		t.Fatalf("VerifyState: %v", err)
+	}
+	if q.Get("nonce") != verified.Nonce {
+		t.Errorf("nonce: got %q want signed state nonce %q", q.Get("nonce"), verified.Nonce)
+	}
+	if q.Get("code_challenge") != "" {
+		t.Errorf("legacy state must not add a PKCE challenge, got %q", q.Get("code_challenge"))
+	}
+	if q.Get("code_challenge_method") != "" {
+		t.Errorf("legacy state must not add a PKCE challenge method, got %q", q.Get("code_challenge_method"))
+	}
+	if q.Get("code_verifier") != "" {
+		t.Errorf("code_verifier must not be sent to /authorize, got %q", q.Get("code_verifier"))
+	}
 
 	// Cookie set with the same state, HttpOnly + Lax.
 	var stateCookie *http.Cookie
@@ -104,6 +121,55 @@ func TestStartHappyPath(t *testing.T) {
 	}
 	if stateCookie.Path != "/oauth/qurl" {
 		t.Errorf("cookie path: got %q want %q (tightened from /oauth)", stateCookie.Path, "/oauth/qurl")
+	}
+}
+
+func TestStartUsesStoredOpaqueState(t *testing.T) {
+	cfg := newStartCfg()
+	store := newMemoryStateStore()
+	cfg.StateStore = store
+	state, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "Admin@Example.COM", SetupModeReuse, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+	}
+	h := Start(cfg)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	store.mu.Lock()
+	startHadDeadline := store.startHadDeadline
+	store.mu.Unlock()
+	if !startHadDeadline {
+		t.Fatal("StartState must receive an explicit deadline")
+	}
+	loc := rec.Header().Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	q := u.Query()
+	if q.Get("state") != state {
+		t.Errorf("state: got %q want opaque handle %q", q.Get("state"), state)
+	}
+	verified, err := store.StartState(context.Background(), state, cfg.Now())
+	if err != nil {
+		t.Fatalf("StartState after handler: %v", err)
+	}
+	if q.Get("nonce") != verified.Nonce {
+		t.Errorf("nonce: got %q want stored nonce %q", q.Get("nonce"), verified.Nonce)
+	}
+	if q.Get("code_challenge") != pkceCodeChallenge(verified.CodeVerifier) {
+		t.Errorf("code_challenge: got %q want S256 challenge from stored verifier", q.Get("code_challenge"))
+	}
+	if q.Get("login_hint") != "admin@example.com" {
+		t.Errorf("login_hint: got %q want normalized setup email", q.Get("login_hint"))
+	}
+	if strings.Contains(state, "admin@example.com") || strings.Contains(state, verified.CodeVerifier) {
+		t.Fatalf("front-channel state leaked payload: state=%q verifier=%q", state, verified.CodeVerifier)
 	}
 }
 
@@ -258,7 +324,7 @@ func TestStartRejectsExpiredState(t *testing.T) {
 	cfg := newStartCfg()
 	old := cfg.Now()
 	state, _ := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, old)
-	cfg.Now = func() time.Time { return old.Add(10 * time.Minute) }
+	cfg.Now = func() time.Time { return old.Add(stateMaxAge + time.Second) }
 	h := Start(cfg)
 	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()
@@ -308,4 +374,21 @@ func TestStartRefusesWithShortSecret(t *testing.T) {
 		t.Errorf("got %d want 503", rec.Code)
 	}
 	assertOAuthErrorPage(t, rec, "qURL setup is unavailable")
+}
+
+func TestStartDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T) {
+	cfg := newStartCfg()
+	state, err := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
+	cfg.StateStore = &unavailableStateStore{err: errors.New("ddb throttled")}
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d want 503 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertOAuthErrorPage(t, rec, "qURL setup is temporarily unavailable")
 }

@@ -141,6 +141,25 @@ func requireCacheValidationProjection(t *testing.T, in *dynamodb.GetItemInput) {
 	}
 }
 
+func requireDurableWorkspaceWriteOmitsReservedTTL(t *testing.T, in *dynamodb.UpdateItemInput) {
+	t.Helper()
+	const reservedOAuthStateTTLAttr = "ttl"
+	if in == nil {
+		t.Fatal("expected workspace credential UpdateItem")
+	}
+	if strings.Contains(aws.ToString(in.UpdateExpression), reservedOAuthStateTTLAttr) {
+		t.Fatalf("durable workspace write must not touch reserved OAuth-state TTL: %q", aws.ToString(in.UpdateExpression))
+	}
+	for placeholder, attr := range in.ExpressionAttributeNames {
+		if attr == reservedOAuthStateTTLAttr {
+			t.Fatalf("durable workspace write aliases reserved OAuth-state TTL as %q", placeholder)
+		}
+	}
+	if _, ok := in.ExpressionAttributeValues[":ttl"]; ok {
+		t.Fatal("durable workspace write binds reserved OAuth-state :ttl value")
+	}
+}
+
 func cachedAPIKeyResult(apiKey string) ttlcache.Result[cachedAPIKey] {
 	return ttlcache.Result[cachedAPIKey]{
 		Value: cachedAPIKey{
@@ -1780,6 +1799,7 @@ func TestDDBProviderSetAPIKeyWithMetadataUpdatesKeyAndPreservesSlackAttrs(t *tes
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
 	}
+	requireDurableWorkspaceWriteOmitsReservedTTL(t, ddb.updateInput)
 	if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
 		t.Errorf("team_id wrong: %v", ddb.updateInput.Key[attrTeamID])
 	}
@@ -1850,6 +1870,7 @@ func TestDDBProviderSetAPIKeyWithMetadata(t *testing.T) {
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
 	}
+	requireDurableWorkspaceWriteOmitsReservedTTL(t, ddb.updateInput)
 	values := ddb.updateInput.ExpressionAttributeValues
 	if v, ok := values[":key_id"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != keyID {
 		t.Errorf("qurl_api_key_id wrong: %v", values[":key_id"])
@@ -2018,6 +2039,7 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
 	}
+	requireDurableWorkspaceWriteOmitsReservedTTL(t, ddb.updateInput)
 	values := ddb.updateInput.ExpressionAttributeValues
 	if v, ok := values[":token"].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != testSlackBotToken {
 		t.Errorf("slack token wrong: %v", values[":token"])

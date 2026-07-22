@@ -405,8 +405,8 @@ func run() error {
 		oauth.RegisterRoutes(rootMux, oauthCfg)
 		slog.Info("registered /oauth/qurl/{start,callback} routes")
 		handler.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
+			StateStore:   oauthCfg.StateStore,
 		})
 		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
 		// install, set-alias, admin add/remove/list/revoke). It must be
@@ -892,11 +892,16 @@ var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than re
 // configured still serves the existing Slack surface. Returns
 // (_, false, err) when a required env var is set but malformed
 // (short secret, non-HTTPS SlackBaseURL) — the caller fails-fast.
+// run() initializes the workspace DDB provider unconditionally before this
+// function, so no supported deployment can enable OAuth without usable DDB.
 //
 // Required env vars:
 //
 //	AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE
 //	SLACK_BASE_URL, OAUTH_STATE_SECRET, QURL_ENDPOINT
+//
+// TODO(#864): remove OAUTH_STATE_SECRET from this required set and oauth.Config
+// after the signed-state deploy-overlap parser is retired.
 //
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
@@ -977,18 +982,17 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if err != nil {
 		return oauth.Config{}, false, err
 	}
+	stateStore, err := oauth.NewDDBStateStore(provider)
+	if err != nil {
+		return oauth.Config{}, false, fmt.Errorf("OAuth state store init failed: %w", err)
+	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch
 	// (bounded inside NewJWKSVerifier). The callback uses the verifier
 	// to extract the id_token `sub` claim, which becomes the
 	// workspace_mappings OwnerID at BindWorkspace time. Without a
-	// usable verifier, every callback in production would refuse the
-	// install (no OwnerID → no bind → 500). Fail-fast at boot when
-	// adminStore is wired so the operator sees the configuration error
-	// immediately instead of after the first user tries /qurl setup.
-	// On sandbox / no-DDB deploys (adminStore==nil) the bind is
-	// skipped anyway, so the verifier is downgraded to "email line
-	// missing on the success page" — non-fatal, log and continue.
+	// usable verifier, nonce binding cannot be enforced and every callback must
+	// fail closed. Surface that at boot instead of after the first setup attempt.
 	issuer := "https://" + domain + "/"
 	// id_tokens carry the application's client_id as their `aud`
 	// claim, distinct from AUTH0_AUDIENCE (the API resource server
@@ -996,11 +1000,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// clientID here matches what Auth0 actually stamps into id_tokens.
 	verifier, err := newJWKSVerifier(ctx, issuer, clientID)
 	if err != nil {
-		if adminStore != nil {
-			return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed and AdminStore is wired — every callback would refuse the install: %w", err)
-		}
-		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task (AdminStore=nil so bind is skipped anyway)", "error", err)
-		verifier = nil
+		return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed — OAuth nonce verification is unavailable: %w", err)
 	}
 
 	return oauth.Config{
@@ -1013,6 +1013,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		SetupBindingReplayWindowHours: setupBindingReplayWindowHours,
 		APIKeyMintReplayWindowHours:   apiKeyMintReplayWindowHours,
 		OAuthStateSecret:              []byte(stateSecret),
+		StateStore:                    stateStore,
 		Provider:                      provider,
 		IDTokenVerifier:               verifier,
 		Minter:                        &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},

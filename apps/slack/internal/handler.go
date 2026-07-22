@@ -28,6 +28,11 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
+	// setupStateMintBudget combines with adminGateBudget on /qurl setup's
+	// synchronous path. 800ms + 1.5s leaves at least 700ms of Slack's 3s ack
+	// window for parsing, response encoding, and network overhead. The OAuth
+	// package retains its own broader 2s store ceiling for non-handler callers.
+	setupStateMintBudget = 1500 * time.Millisecond
 	// qurlContactURL is where users are pointed when a deployment can't serve a
 	// command itself (a feature isn't configured on this deployment). Replaces
 	// the dead-end "Contact the operator." tail so the user has a real next step.
@@ -337,7 +342,7 @@ type Config struct {
 	// AdminStore is the DDB-direct facade for workspace_mappings +
 	// channel_policies. When nil, the admin verbs short-circuit to a
 	// graceful "admin features are not configured" reply — fine for
-	// sandbox / no-DDB tests. Production wires one in cmd/main.go
+	// admin-storage-disabled tests. Production wires one in cmd/main.go
 	// from the QURL_*_TABLE env vars (see slackdata.NewStore).
 	AdminStore *slackdata.Store
 
@@ -816,7 +821,7 @@ func (h *Handler) SetAliasStore(store AliasStore) {
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
 // /qurl setup slash command. Must be called exactly once, before
-// srv.Serve. Empty/short secret or empty base URL is a no-op
+// srv.Serve. An empty base URL or nil state store is a no-op
 // (/qurl setup will reply that OAuth is not configured). A second call
 // panics — the field is read without synchronization on the request
 // hot path, and the only safe write window is before any goroutine can
@@ -825,18 +830,9 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	if h.oauthSetup != nil {
 		panic("SetOAuthSetup called twice — must be called once before Serve")
 	}
-	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
+	if cfg.SlackBaseURL == "" || cfg.StateStore == nil {
 		return
 	}
-	if len(cfg.StateSecret) < oauth.StateMinSecret {
-		// Fail-fast at startup: MintState would reject this later, but
-		// the operator-facing failure is more discoverable here.
-		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
-	}
-	// Defensive copy: the field is read on the request hot path without
-	// a lock. A caller mutating the original byte slice would silently
-	// poison every subsequent MintState call.
-	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
 }
 
@@ -1650,7 +1646,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // non-owners don't get a setup URL minted in their name at all (cleaner
 // audit, no half-completed OAuth flows).
 //
-// AdminStore=nil (sandbox / no-DDB) permits first-time setup but rejects
+// AdminStore=nil (admin storage disabled) permits first-time setup but rejects
 // explicit rotation because rotation must prove the caller is the workspace
 // owner before revoking a stored key. That is a separate short-circuit from
 // the oauthSetup==nil check below, which is the branch that returns "qURL
@@ -1672,7 +1668,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		return
 	}
 	// Owner gate. AdminStore==nil only reaches here for first-time/reuse setup
-	// (sandbox/no-DDB); explicit rotation/repoint was rejected above because it
+	// (admin storage disabled); explicit rotation/repoint was rejected above because it
 	// cannot skip the owner check. Otherwise check whether the workspace has an owner
 	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
@@ -1752,9 +1748,9 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// request shield: the owner gate above still runs first so refused setup
 	// attempts do not consume quota. That means repeat non-owner attempts can
 	// still spend the owner-gate read; avoiding that would need a separate
-	// request shield above this gate. The quota is consumed before MintState so
-	// repeated local mint failures still get throttled instead of retrying
-	// without bound.
+	// request shield above this gate. The quota is consumed before state storage
+	// so repeated local failures still get throttled instead of retrying without
+	// bound.
 	now := h.now()
 	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
 		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
@@ -1765,9 +1761,11 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
 		return
 	}
-	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, now)
+	mintCtx, mintCancel := context.WithTimeout(h.baseCtx, setupStateMintBudget)
+	defer mintCancel()
+	state, err := oauth.MintStoredStateWithEmailMode(mintCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
-		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
+		slog.Error("/qurl setup: mint OAuth state failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}
@@ -2231,7 +2229,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	// setup is a user verb (first-come-claims), so it leads the user
 	// surface. The owner semantics only exist when AdminStore is wired; on
-	// the sandbox/no-DDB path the owner gate in handleSetup is skipped and
+	// the admin-storage-disabled path the owner gate in handleSetup is skipped and
 	// the OAuth callback still owns key reuse/replacement. Append the owner
 	// parenthetical only there so the help text matches the deployment's
 	// actual behavior.
@@ -2286,7 +2284,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	if h.cfg.PostFeedback != nil {
 		// feedback needs no AdminStore/setup — only the PostFeedback seam —
-		// so it gates on that alone and shows even on no-DDB deploys.
+		// so it gates on that alone and shows even when admin storage is disabled.
 		lines = append(lines,
 			"• `/qurl feedback` — Send a bug report or feature request to the qURL team",
 		)
