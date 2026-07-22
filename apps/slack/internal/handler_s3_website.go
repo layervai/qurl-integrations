@@ -103,16 +103,16 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 	setupType := strings.TrimSpace(interactionStateText(payload.View.State.Values, connectorSetupBlockType, connectorSetupActionType))
 	log := slog.With(
 		"command", "connector_setup_modal",
-		"team_id", payload.Team.ID,
-		"user_id", payload.User.ID,
-		"view_id", payload.View.ID,
+		"team_id", sanitizeS3WebsiteLogValue(payload.Team.ID),
+		"user_id", sanitizeS3WebsiteLogValue(payload.User.ID),
+		"view_id", sanitizeS3WebsiteLogValue(payload.View.ID),
 	)
 	if setupType != connectorSetupExistingService && setupType != connectorSetupS3Website {
 		log.Warn("connector setup modal rejected unknown setup type")
 		respondViewErrors(w, map[string]string{connectorSetupBlockType: "Choose one of the listed qURL Connector setup types."})
 		return
 	}
-	log = log.With("setup_type", setupType)
+	log = log.With("setup_type", sanitizeS3WebsiteLogValue(setupType))
 
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
@@ -132,12 +132,12 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 		return
 	}
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
-		log.Warn("connector setup modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID)
+		log.Warn("connector setup modal team mismatch", "payload_team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "metadata_team_id", sanitizeS3WebsiteLogValue(meta.TeamID))
 		respondConnectorInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
-		log.Warn("connector setup modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID)
+		log.Warn("connector setup modal user mismatch", "payload_user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "metadata_user_id", sanitizeS3WebsiteLogValue(meta.UserID))
 		respondConnectorInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect and choose qURL Connector again to start a new setup.")
 		return
 	}
@@ -170,21 +170,21 @@ func (h *Handler) handleConnectorSetupSubmission(w http.ResponseWriter, payload 
 func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payload *ViewSubmission) {
 	var meta TunnelInstallModalMetadata
 	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &meta); err != nil {
-		slog.Warn("S3 website install modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		slog.Warn("S3 website install modal metadata parse failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "view_id", sanitizeS3WebsiteLogValue(payload.View.ID))
 		respondS3WebsiteInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
-		slog.Warn("S3 website install modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
+		slog.Warn("S3 website install modal metadata incomplete", "team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "view_id", sanitizeS3WebsiteLogValue(payload.View.ID))
 		respondS3WebsiteInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	log := slog.With(
 		"command", "s3_website_install_modal",
-		"team_id", meta.TeamID,
-		"channel_id", meta.ChannelID,
-		"user_id", meta.UserID,
-		"view_id", payload.View.ID,
+		"team_id", sanitizeS3WebsiteLogValue(meta.TeamID),
+		"channel_id", sanitizeS3WebsiteLogValue(meta.ChannelID),
+		"user_id", sanitizeS3WebsiteLogValue(meta.UserID),
+		"view_id", sanitizeS3WebsiteLogValue(payload.View.ID),
 	)
 
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
@@ -194,12 +194,12 @@ func (h *Handler) handleS3WebsiteInstallSubmission(w http.ResponseWriter, payloa
 		return
 	}
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
-		log.Warn("S3 website install modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID)
+		log.Warn("S3 website install modal team mismatch", "payload_team_id", sanitizeS3WebsiteLogValue(payload.Team.ID), "metadata_team_id", sanitizeS3WebsiteLogValue(meta.TeamID))
 		respondS3WebsiteInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect and choose qURL Connector again.")
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
-		log.Warn("S3 website install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID)
+		log.Warn("S3 website install modal user mismatch", "payload_user_id", sanitizeS3WebsiteLogValue(payload.User.ID), "metadata_user_id", sanitizeS3WebsiteLogValue(meta.UserID))
 		respondS3WebsiteInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect and choose qURL Connector again to start a new setup.")
 		return
 	}
@@ -352,6 +352,15 @@ func normalizeS3WebsitePrefix(raw string) (prefix, reason string) {
 	return prefix, ""
 }
 
+// sanitizeS3WebsiteLogValue preserves diagnostic context while preventing a
+// Slack- or API-controlled value from forging a second plain-text log entry.
+// Production uses the shared JSON slog handler, which also escapes control
+// bytes; this remains a defense-in-depth boundary if the handler changes.
+func sanitizeS3WebsiteLogValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", `\r`)
+	return strings.ReplaceAll(value, "\n", `\n`)
+}
+
 func respondS3WebsiteInstallModalError(w http.ResponseWriter, message string) {
 	view, err := S3WebsiteInstallErrorModal(message)
 	if err != nil {
@@ -383,7 +392,7 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 	}
 	args := req.args
 	if h.cfg.PostDM == nil {
-		log.Error("S3 website install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
+		log.Error("S3 website install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", sanitizeS3WebsiteLogValue(args.Slug))
 		_ = h.postResponse(log, req.responseURL, "S3 website qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect` again.")
 		return
 	}
@@ -394,9 +403,9 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 	}
 	panicCleanup = build
 
-	log.Info("S3 website qURL Connector setup succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
+	log.Info("S3 website qURL Connector setup succeeded", "slug", sanitizeS3WebsiteLogValue(args.Slug), "shortcut", sanitizeS3WebsiteLogValue(args.Alias), "environment", sanitizeS3WebsiteLogValue(string(args.Environment)), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID))
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
-		log.Error("S3 website install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID)
+		log.Error("S3 website install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID))
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_dm_delivery_failed")
 		panicCleanup = nil
 		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
@@ -413,21 +422,21 @@ func (h *Handler) processS3WebsiteInstall(ctx context.Context, log *slog.Logger,
 	case tunnelInstallInstructionsDeliverySucceeded, tunnelInstallInstructionsDeliveryDegraded:
 		panicCleanup = nil
 	case tunnelInstallInstructionsDeliveryFailed:
-		log.Error("S3 website install: Slack follow-up delivery failed after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID)
+		log.Error("S3 website install: Slack follow-up delivery failed after bootstrap key mint; revoking key", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID))
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_response_url_delivery_failed")
 		panicCleanup = nil
 		if err := h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The S3 website qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect` again."); err != nil {
-			log.Error("S3 website install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "s3_website_bootstrap_discard_dm_delivery_failed")
+			log.Error("S3 website install: Slack discard DM delivery failed after bootstrap key revoke", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID), "event", "s3_website_bootstrap_discard_dm_delivery_failed")
 		}
 		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the S3 website qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect` again.") {
-			log.Error("S3 website install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "s3_website_bootstrap_discard_notice_delivery_failed")
+			log.Error("S3 website install: Slack discard notice delivery failed after bootstrap key revoke", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID), "event", "s3_website_bootstrap_discard_notice_delivery_failed")
 		}
 	default:
-		log.Error("S3 website install: unknown Slack follow-up delivery state after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID)
+		log.Error("S3 website install: unknown Slack follow-up delivery state after bootstrap key mint; revoking key", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID))
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "s3_website_unknown_response_url_delivery_state")
 		panicCleanup = nil
 		if !h.postResponse(log, req.responseURL, "Slack returned an unexpected delivery state for the S3 website qURL Connector install instructions, so the bootstrap key was revoked. If an install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect` again.") {
-			log.Error("S3 website install: unknown delivery-state discard notice failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "s3_website_unknown_delivery_discard_notice_failed")
+			log.Error("S3 website install: unknown delivery-state discard notice failed after bootstrap key revoke", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(build.resource.ResourceID), "key_id", sanitizeS3WebsiteLogValue(build.key.KeyID), "event", "s3_website_unknown_delivery_discard_notice_failed")
 		}
 	}
 }
@@ -462,7 +471,7 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
-		log.Error("S3 website install: failed to get API key", "error", err)
+		log.Error("S3 website install: failed to get API key", "error", sanitizeS3WebsiteLogValue(err.Error()))
 		return nil, authErrorMessage(err), err
 	}
 
@@ -473,31 +482,31 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		Description:  defaultS3WebsiteDescription,
 	})
 	if err != nil {
-		log.Error("S3 website install: create/find resource failed", "error", err, "slug", args.Slug)
+		log.Error("S3 website install: create/find resource failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug))
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
 	resolvedArgs := *args
 	if err := resolvedArgs.pinConnectorResource(resource, h.cfg.ConnectorAPIURL); err != nil {
 		if errors.Is(err, errConnectorAPIURLMissing) || errors.Is(err, errConnectorAPIURLInvalid) {
-			log.Error("S3 website install: local connector API URL configuration invalid", "error", err, "slug", args.Slug)
+			log.Error("S3 website install: local connector API URL configuration invalid", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug))
 			return nil, "S3 website qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
 		}
 		resourceIDPresent := resource != nil && strings.TrimSpace(resource.ResourceID) != ""
 		connectorRoutingIDPresent := resource != nil && strings.TrimSpace(resource.ConnectorRoutingID) != ""
 		knockResourceIDPresent := resource != nil && strings.TrimSpace(resource.KnockResourceID) != ""
-		log.Error("S3 website install: qURL API response missing pinned connector identity", "error", err, "slug", args.Slug, "resource_id_present", resourceIDPresent, "connector_routing_id_present", connectorRoutingIDPresent, "knock_resource_id_present", knockResourceIDPresent)
+		log.Error("S3 website install: qURL API response missing pinned connector identity", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id_present", resourceIDPresent, "connector_routing_id_present", connectorRoutingIDPresent, "knock_resource_id_present", knockResourceIDPresent)
 		return nil, "qURL Connector setup could not receive the complete routing details needed for a one-time bootstrap key. No bootstrap key was minted. Please retry after the qURL API returns resource_id, connector_routing_id, and knock_resource_id for connector resources.", fmt.Errorf("qURL Connector resource identity incomplete: %w", err)
 	}
 
 	aliasStatus, err := h.ensureTunnelAlias(ctx, teamID, channelID, args.Alias, resolvedArgs.ResourceID)
 	if err != nil {
-		log.Error("S3 website install: channel shortcut bind failed", "error", err, "shortcut", args.Alias, "resource_id", resolvedArgs.ResourceID)
+		log.Error("S3 website install: channel shortcut bind failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "shortcut", sanitizeS3WebsiteLogValue(args.Alias), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))
 		return nil, aliasStatus, err
 	}
 
 	preparedMessage, err := h.prepareS3WebsiteInstallMessage(&resolvedArgs)
 	if err != nil {
-		log.Error("S3 website install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resolvedArgs.ResourceID)
+		log.Error("S3 website install: render preflight failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))
 		return nil, "S3 website qURL Connector setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.", err
 	}
 
@@ -510,30 +519,30 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
 	if err != nil {
-		log.Error("S3 website install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resolvedArgs.ResourceID)
+		log.Error("S3 website install: bootstrap key mint failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))
 		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"), err
 	}
 	mintedKey = key
 	if key.APIKey == "" {
-		log.Error("S3 website install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resolvedArgs.ResourceID, "key_id", key.KeyID)
+		log.Error("S3 website install: create api key response missing plaintext", "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_missing_plaintext")
 		return nil, "The qURL API did not return a bootstrap key. Please retry or contact support.", errMissingBootstrapPlaintext
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
-		log.Error("S3 website install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resolvedArgs.ResourceID, "key_id", key.KeyID)
+		log.Error("S3 website install: create api key response was not shell-renderable", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_shell_validation_failed")
 		return nil, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.", err
 	}
 
 	msg, err := preparedMessage.render(&resolvedArgs, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
-		log.Error("S3 website install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resolvedArgs.ResourceID, "key_id", key.KeyID)
+		log.Error("S3 website install: render failed after bootstrap key mint", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_message_render_failed")
 		return nil, "S3 website qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
 	secretMsg, err := renderTunnelBootstrapSecretMessage(&tunnelInstallArgs{Slug: args.Slug}, key, h.now())
 	if err != nil {
-		log.Error("S3 website install: secret message render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resolvedArgs.ResourceID, "key_id", key.KeyID)
+		log.Error("S3 website install: secret message render failed after bootstrap key mint", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID), "key_id", sanitizeS3WebsiteLogValue(key.KeyID))
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "s3_website_secret_message_render_failed")
 		return nil, "S3 website qURL Connector setup could not render the bootstrap-key DM. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
