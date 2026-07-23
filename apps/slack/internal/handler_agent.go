@@ -101,6 +101,10 @@ const agentRateLimitedReply = "Conversation mode is at its limit for now — giv
 // target is never reflected into the channel.
 const agentInvalidProtectURLReply = "I can only protect HTTPS URLs. Use a URL that starts with `https://`."
 
+// agentInvalidAliasReply rejects invalid aliases without reflecting the
+// attacker-controlled token into the channel.
+const agentInvalidAliasReply = "That alias isn't valid. Use lowercase letters, numbers, and dashes only."
+
 // agentTurnRateWindow is the fixed window for the per-user / per-team turn counters.
 // The env limits are expressed per hour, so the window is one hour.
 const agentTurnRateWindow = time.Hour
@@ -767,6 +771,21 @@ func agentHasExplicitNonHTTPSProtectURL(message string) bool {
 	return err == nil && target.Scheme != "" && !strings.EqualFold(target.Scheme, resourceExposeSchemeHTTPS)
 }
 
+// agentHasExplicitInvalidSetAlias recognizes the direct conversation form
+// "Set alias <alias> ..." and applies the existing alias grammar before any LLM
+// call. It is intentionally narrow so questions about alias syntax and other
+// explanatory prose still follow the normal agent path.
+func agentHasExplicitInvalidSetAlias(message string) bool {
+	fields := strings.Fields(message)
+	if len(fields) < 3 ||
+		!strings.EqualFold(fields[0], "set") ||
+		!strings.EqualFold(fields[1], "alias") {
+		return false
+	}
+	_, err := parseAliasToken(fields[2])
+	return err != nil
+}
+
 // agentEventPartition is the conversation/dedupe partition key. It deliberately
 // uses the same resolver as lifecycleWorkspaceIDs: org-level installs write those
 // rows under enterprise_id, workspace-level installs write under team_id, and the
@@ -860,6 +879,10 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	message := stripBotMention(env.Event.Text)
 	if agentHasExplicitNonHTTPSProtectURL(message) {
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidProtectURLReply)
+		return
+	}
+	if agentHasExplicitInvalidSetAlias(message) {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidAliasReply)
 		return
 	}
 
