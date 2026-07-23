@@ -280,6 +280,9 @@ func TestAgentReplyText(t *testing.T) {
 	if !strings.Contains(prop, "isn't enabled yet") || !strings.Contains(prop, "Protect $x.") {
 		t.Errorf("proposal preview = %q", prop)
 	}
+	if !strings.HasSuffix(prop, agentLLMReplyDisclaimer) {
+		t.Errorf("LLM-distilled proposal preview must carry the disclaimer, got %q", prop)
+	}
 	// A proposal with a blank summary would render as a dangling bullet; it must
 	// fall back to the error reply like the blank-Reply case.
 	if got := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "  "}}); got != agentErrorReply {
@@ -614,7 +617,7 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.1" || got.text != testAgentReachStagingReply {
+	if got.channel != "C1" || got.threadTS != "100.1" || got.text != agentLLMReplyWithDisclaimer(testAgentReachStagingReply) {
 		t.Fatalf("reply = %+v", got)
 	}
 }
@@ -700,7 +703,7 @@ func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testi
 	if !got.markdown {
 		t.Fatalf("free-text answer should use the standard-Markdown seam, got %+v", got)
 	}
-	want := `I found Deploy room \<!channel> and \<@U12345678>`
+	want := agentLLMReplyWithDisclaimer(`I found Deploy room \<!channel> and \<@U12345678>`)
 	if got.text != want {
 		t.Fatalf("reply = %q, want escaped visible controls %q", got.text, want)
 	}
@@ -733,7 +736,7 @@ func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.0" || got.text != "still here" {
+	if got.channel != "C1" || got.threadTS != "100.0" || got.text != agentLLMReplyWithDisclaimer("still here") {
 		t.Fatalf("thread_broadcast follow-up reply = %+v", got)
 	}
 }
@@ -875,7 +878,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 		// not the generic error copy — see TestProcessAgentEvent_GenericErrorCopy
 		// for the live-ctx (capability) branch.
 		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentTransientReply},
-		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, testAgentReachStagingReply},
+		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, agentLLMReplyWithDisclaimer(testAgentReachStagingReply)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1409,7 +1412,8 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	if !(*posts)[0].markdown {
 		t.Errorf("free-text answer should post on the standard-Markdown seam, got mrkdwn: %+v", (*posts)[0])
 	}
-	if (*posts)[0].text != "Use **bold** and click (https://evil.example)" {
+	wantReply := agentLLMReplyWithDisclaimer("Use **bold** and click (https://evil.example)")
+	if (*posts)[0].text != wantReply {
 		t.Errorf("free-text answer body = %q, want masked link revealed", (*posts)[0].text)
 	}
 	// Proposal preview: escaped mrkdwn text seam, never standard Markdown
@@ -1419,6 +1423,35 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	}
 	if !strings.HasPrefix((*posts)[1].text, agentProposalPreviewPrefix) {
 		t.Errorf("proposal preview = %q, want the preview prefix", (*posts)[1].text)
+	}
+	if !strings.HasSuffix((*posts)[1].text, agentLLMReplyDisclaimer) {
+		t.Errorf("proposal preview = %q, want the generated-content disclaimer", (*posts)[1].text)
+	}
+}
+
+func TestAgentLLMReplyDisclaimer_IsMarkdownHardeningInvariant(t *testing.T) {
+	if got := hardenAgentMarkdown(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("one-shot hardener changed the trusted footer: %q", got)
+	}
+	if got := hardenAgentMarkdownForStreamReconcile(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("stream-reconcile hardener changed the trusted footer: %q", got)
+	}
+}
+
+func TestDeliverAgentResult_MalformedMarkdownCannotAbsorbDisclaimer(t *testing.T) {
+	textPost, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{PostMessage: textPost, PostMarkdownMessage: mdPost})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+	reply := "An unclosed `code span"
+
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: reply})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply))
+	if len(*posts) != 1 || (*posts)[0].text != want {
+		t.Fatalf("want malformed reply hardened before the intact footer, got %+v", *posts)
 	}
 }
 
@@ -1434,7 +1467,7 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	want := `plain answer (https://evil.example) for \<@U12345678> \<!channel>`
+	want := agentLLMReplyWithDisclaimer(`plain answer (https://evil.example) for \<@U12345678> \<!channel>`)
 	if len(*posts) != 1 || (*posts)[0].text != want {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}
