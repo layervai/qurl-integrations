@@ -52,6 +52,10 @@ func agentGeneratedReplyBlocks(markdown string) []any {
 	}
 }
 
+func agentProposalMarkdownPreview(summary string) string {
+	return agentProposalPreviewPrefix + agentLLMReplyWithDisclaimer(hardenAgentMarkdown(summary))
+}
+
 func (h *Handler) agentFeedbackEnabled() bool {
 	return h.cfg.OpenView != nil && h.cfg.PostFeedback != nil
 }
@@ -69,6 +73,23 @@ func (h *Handler) postAgentGeneratedReply(log *slog.Logger, env *slackEventEnvel
 	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(text), strings.TrimSpace(text)); err != nil {
 		log.Warn("agent: post generated reply with feedback failed; falling back to text", "error", err)
 		h.deliverAgentText(log, env, threadTS, text, fallback)
+	}
+}
+
+// postAgentProposalPreview keeps each renderer on its own escaping regime:
+// standard Markdown for the visible block and escaped mrkdwn for notification,
+// older-client, and block-delivery fallbacks.
+func (h *Handler) postAgentProposalPreview(log *slog.Logger, env *slackEventEnvelope, threadTS, summary string) {
+	fallbackText := agentProposalPreview(summary)
+	if !h.agentFeedbackEnabled() || h.cfg.PostMessageBlocks == nil {
+		h.deliverAgentText(log, env, threadTS, fallbackText, h.cfg.PostMessage)
+		return
+	}
+	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
+	defer cancel()
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, agentGeneratedReplyBlocks(agentProposalMarkdownPreview(summary)), fallbackText); err != nil {
+		log.Warn("agent: post proposal preview with feedback failed; falling back to text", "error", err)
+		h.deliverAgentText(log, env, threadTS, fallbackText, h.cfg.PostMessage)
 	}
 }
 

@@ -70,7 +70,7 @@ func TestDeliverAgentResultGeneratedReplyIncludesFeedbackWhenWired(t *testing.T)
 	}
 }
 
-func TestDeliverAgentProposalPreviewIncludesFeedbackWithoutReencoding(t *testing.T) {
+func TestDeliverAgentProposalPreviewUsesRendererSpecificEncoding(t *testing.T) {
 	textPost, posts, mu := capturingPostMessage()
 	blocks := &blocksRecorder{}
 	h := NewHandler(Config{
@@ -82,7 +82,8 @@ func TestDeliverAgentProposalPreviewIncludesFeedbackWithoutReencoding(t *testing
 	t.Cleanup(h.Wait)
 
 	env := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
-	result := &agent.Result{Proposal: &agent.Proposal{Summary: "Expose <private> **now**"}}
+	const summary = "Expose <private> **now** and [masked](https://example.com)"
+	result := &agent.Result{Proposal: &agent.Proposal{Summary: summary}}
 	h.deliverAgentResult(slog.Default(), env, "100.1", result)
 
 	mu.Lock()
@@ -91,8 +92,11 @@ func TestDeliverAgentProposalPreviewIncludesFeedbackWithoutReencoding(t *testing
 		t.Fatalf("text posts=%d block calls=%d, want 0/1", len(*posts), len(blocks.calls))
 	}
 	markdownBlock := blocks.calls[0].blocks[0].(map[string]any)
-	if got, want := markdownBlock["text"], agentReplyText(result); got != want {
-		t.Fatalf("proposal preview text = %q, want existing escaped preview %q", got, want)
+	if got, want := markdownBlock["text"], agentProposalMarkdownPreview(summary); got != want {
+		t.Fatalf("proposal preview text = %q, want Markdown-safe preview %q", got, want)
+	}
+	if got, want := blocks.calls[0].fallback, agentProposalPreview(summary); got != want {
+		t.Fatalf("proposal fallback = %q, want mrkdwn-safe preview %q", got, want)
 	}
 }
 
@@ -113,6 +117,27 @@ func TestPostAgentGeneratedReplyFallsBackWhenFeedbackBlocksFail(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != "complete answer" {
 		t.Fatalf("fallback posts = %+v, want complete answer", *posts)
+	}
+}
+
+func TestPostAgentProposalPreviewFallsBackToMrkdwnWhenBlocksFail(t *testing.T) {
+	textPost, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		PostMessage: textPost,
+		PostMessageBlocks: func(context.Context, string, string, string, string, []any, string) error {
+			return context.DeadlineExceeded
+		},
+		PostFeedback: func(context.Context, []byte) error { return nil },
+		OpenView:     func(context.Context, string, string, []byte) error { return nil },
+	})
+	env := env(slackEventTypeAppMention, slackChannelTypeChannel, "U2", "", "", "")
+	const summary = "Expose <private> **now**"
+	h.postAgentProposalPreview(slog.Default(), env, "100.1", summary)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentProposalPreview(summary) {
+		t.Fatalf("fallback posts = %+v, want mrkdwn-safe proposal preview", *posts)
 	}
 }
 
