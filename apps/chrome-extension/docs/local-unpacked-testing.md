@@ -106,7 +106,7 @@ Expected behavior:
 If automatic insertion fails:
 
 - The popup displays an insertion failure message
-- The **Copy inserted content** button remains available
+- The **Copy the qURL link** button remains available when an accessible `https` link exists
 - You can click the copy button and paste the generated content into the Gmail draft manually
 
 If a file upload fails:
