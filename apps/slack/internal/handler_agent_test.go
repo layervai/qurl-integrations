@@ -73,8 +73,9 @@ func TestAgentHasExplicitInvalidSetAlias(t *testing.T) {
 	cases := map[string]bool{
 		"Set alias $Prod_Admin!!! to $staging-api.": true,
 		"set alias $prod_admin to $staging-api":     true,
-		"Set alias prod-admin to $staging-api":      true,
 		"Set alias $prod-admin to $staging-api":     false,
+		"Set alias for $prod-admin to staging":      false,
+		"Set alias prod-admin to $staging-api":      false,
 		"How do I set alias $Bad_ID?":               false,
 	}
 	for message, want := range cases {

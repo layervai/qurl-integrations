@@ -779,7 +779,8 @@ func agentHasExplicitInvalidSetAlias(message string) bool {
 	fields := strings.Fields(message)
 	if len(fields) < 3 ||
 		!strings.EqualFold(fields[0], "set") ||
-		!strings.EqualFold(fields[1], "alias") {
+		!strings.EqualFold(fields[1], "alias") ||
+		!strings.HasPrefix(fields[2], "$") {
 		return false
 	}
 	_, err := parseAliasToken(fields[2])
