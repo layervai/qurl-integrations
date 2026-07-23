@@ -636,7 +636,7 @@ type AgentStreamStart struct {
 type AgentStreamPort interface {
 	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
-	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
+	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string, blocks []any) error
 }
 
 // ResolveChannelNameFunc resolves a channel id to its human name via

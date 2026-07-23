@@ -865,11 +865,12 @@ func (p *slackAgentStreamPort) AppendStream(ctx context.Context, teamID, enterpr
 	return p.appnd.post(ctx, teamID, enterpriseID, body)
 }
 
-func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error {
+func (p *slackAgentStreamPort) StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string, blocks []any) error {
 	body, err := json.Marshal(struct {
 		Channel string `json:"channel"`
 		TS      string `json:"ts"`
-	}{Channel: channelID, TS: streamTS})
+		Blocks  []any  `json:"blocks,omitempty"`
+	}{Channel: channelID, TS: streamTS, Blocks: blocks})
 	if err != nil {
 		return fmt.Errorf("chat.stopStream request marshal: %w", err)
 	}

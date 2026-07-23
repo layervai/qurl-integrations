@@ -1247,7 +1247,7 @@ func (h *Handler) postAgentMarkdownReply(log *slog.Logger, env *slackEventEnvelo
 	if post == nil {
 		post = h.cfg.PostMessage
 	}
-	h.deliverAgentText(log, env, threadTS, markdown, post)
+	h.postAgentGeneratedReply(log, env, threadTS, markdown, post)
 }
 
 // deliverAgentText posts text to the thread via the given seam. It derives its own

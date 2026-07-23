@@ -92,6 +92,10 @@ func logInteractionReceived(payload *interactionPayload) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
+	if act, ok := findActionByID(payload.Actions, agentFeedbackActionID); ok {
+		h.handleAgentFeedbackClick(w, payload, act)
+		return
+	}
 	// Conversation-mode confirm card (distinct action_ids, so order is immaterial
 	// — a click yields exactly one matching action_id).
 	if act, ok := findActionByID(payload.Actions, agentConfirmApproveActionID); ok {

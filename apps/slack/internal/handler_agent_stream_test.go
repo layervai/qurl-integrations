@@ -38,6 +38,7 @@ type recordingStreamPort struct {
 	starts     []AgentStreamStart
 	appends    []string
 	stops      int
+	stopBlocks []any
 }
 
 func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamStart) (string, error) {
@@ -59,8 +60,9 @@ func (r *recordingStreamPort) AppendStream(_ context.Context, _, _, _, _, markdo
 	return nil
 }
 
-func (r *recordingStreamPort) StopStream(context.Context, string, string, string, string) error {
+func (r *recordingStreamPort) StopStream(_ context.Context, _, _, _, _ string, blocks []any) error {
 	r.stops++
+	r.stopBlocks = blocks
 	return nil
 }
 
