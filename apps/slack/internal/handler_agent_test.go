@@ -31,6 +31,7 @@ const (
 	testAgentStillWorksReply   = "still works"
 	testAgentStopEndTurn       = "end_turn"
 	testAgentStopToolUse       = "tool_use"
+	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Start a new text-only message with your qURL request. If you're in a channel, mention qURL again."
 )
 
 func TestStripBotMention(t *testing.T) {
@@ -73,6 +74,10 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.Subtype = subtype
 		return e
 	}
+	withFile := func(e *slackEventEnvelope) *slackEventEnvelope {
+		e.Event.Files = []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+		return e
+	}
 	tests := []struct {
 		name      string
 		env       *slackEventEnvelope
@@ -87,6 +92,10 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false, false},
 		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false, false},
 		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
+		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
+		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
+		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true},
+		{"file_share dm without files ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, false},
 		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
 
 		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
@@ -95,7 +104,12 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"channel thread reply, followups on", chReply("hi", "100.0"), true, true},
 		{"top-level channel message, followups off", chReply("hi", ""), false, false},
 		{"top-level channel message, followups on", chReply("hi", ""), true, false},
+		{"top-level channel file ignored", withFile(chReply("", "")), true, false},
 		{"channel thread reply empty text, followups on", chReply("   ", "100.0"), true, false},
+		{"channel thread file reply reaches continuity gate", withFile(chReply("", "100.0")), true, true},
+		{"file_share channel thread reaches continuity gate", withFile(chReplySubtype("", "100.0", slackMessageSubtypeFileShare)), true, true},
+		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
+		{"file_share channel message without files ignored", chReplySubtype("", "100.0", slackMessageSubtypeFileShare), true, false},
 		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), false, false},
 		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
@@ -154,6 +168,11 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 	}
 	if !gateDrop(reply("C9", "999.0"), part) {
 		t.Fatal("a reply in a thread the agent never joined must be dropped")
+	}
+	fileReply := reply("C9", "999.1")
+	fileReply.Event.Files = []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+	if !gateDrop(fileReply, part) {
+		t.Fatal("a file reply outside an agent thread must be dropped")
 	}
 	// Same thread_ts but a different channel is a different thread → dropped.
 	if !gateDrop(reply("C-other", "100.0"), part) {
@@ -742,6 +761,75 @@ func TestHandleEvent_DedupesRetries(t *testing.T) {
 func dmMessageBody(eventID string) string {
 	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
 		`"event":{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"100.2","text":"what can I reach?"}}`
+}
+
+func unsupportedMediaBody(eventID, event string) string {
+	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `","event":` + event + `}`
+}
+
+func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		threadKey string
+	}{
+		{
+			name:      "file-only channel mention",
+			body:      unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+			threadKey: "C1:400.1",
+		},
+		{
+			name:      "captioned DM file",
+			body:      unsupportedMediaBody("EvFileCaption", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			threadKey: "D1:400.2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			post, posts, mu := capturingPostMessage()
+			h := NewHandler(Config{AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
+			t.Cleanup(h.Wait)
+
+			h.handleEvent(httptest.NewRecorder(), []byte(tt.body))
+			h.Wait()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
+				t.Fatalf("unsupported media should post one deterministic reply without calling the LLM, got %+v", *posts)
+			}
+			history, _, err := store.LoadConversation(context.Background(), "T1", tt.threadKey)
+			if err != nil || len(history) != 0 {
+				t.Fatalf("unsupported media should not write conversation history, history=%q err=%v", history, err)
+			}
+		})
+	}
+}
+
+func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
+	mem := newMemAgentDDB()
+	seedAgentThread(t, mem, "C1", "400.0")
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+		AgentChannelFollowups: true, AgentDefaultEnabled: true,
+	})
+	t.Cleanup(h.Wait)
+
+	// Slack can emit both app_mention and message/file_share events for one
+	// mentioned upload. Their shared message ts must collapse to one reply even
+	// when the thread already has history and both event shapes are admissible.
+	h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"400.0","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"400.0","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
+		t.Fatalf("overlapping mention/file_share events should post one media reply, got %+v", *posts)
+	}
 }
 
 func TestHandleEvent_AgentResolvesChannelNameSkippingDMs(t *testing.T) {
