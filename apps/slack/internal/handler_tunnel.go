@@ -49,14 +49,38 @@ const (
 	tunnelScopeAgent           = "qurl:agent"
 	tunnelScopeWrite           = "qurl:write"
 	tunnelEnvAPIKey            = "QURL_API_KEY"
-	kubernetesNameMaxLen       = 63
+	connectorAPIVersionPath    = "/v1"
+	connectorAuditDir          = "/var/log/layerv/qurl-connector"
+	connectorAuditFilePath     = connectorAuditDir + "/audit.log"
+	connectorAuditFileEnv      = "QURL_AUDIT_FILE"
+	connectorPIDsLimit         = 512
+	connectorTmpfsCompose      = "/tmp:rw,size=64m"
+	// Pinned multi-arch Docker Official Image used only to prepare exact PVC
+	// ownership and modes before the nonroot Connector starts. qurl-go rejects
+	// group-writable identity state, so pod-level fsGroup is not safe here.
+	connectorVolumePermissionsImage = "docker.io/library/busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+	kubernetesNameMaxLen            = 63
 	// Hex chars appended to truncated Kubernetes object names. Twelve hex
 	// chars is 48 bits (2^48 ~= 3e14), keeping collision risk negligible for
 	// expected workspace slug volume.
 	kubernetesNameHashHexLen = 12
 )
 
-var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+var (
+	errConnectorAPIURLMissing = errors.New("QURL_API_URL is missing")
+	errConnectorAPIURLInvalid = errors.New("QURL_API_URL is invalid")
+	tunnelSlugPattern         = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
+	// TODO(upstream-contract): keep the unpadded base64url public-key charset
+	// in lockstep with qurl-service#1206/#1225. The validator below separately
+	// rejects the legacy r_ prefix during the producer-first rollout.
+	connectorResourceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+	// TODO(upstream-contract): keep the exact c- plus 52-character base32
+	// routing-label shape in lockstep with qurl-service#1225.
+	connectorRoutingIDPattern = regexp.MustCompile(`^c-[a-z2-7]{52}$`)
+	// TODO(upstream-contract): keep the NHP admission-target charset and length
+	// in lockstep with qurl-service's tunnel knock_resource_id contract.
+	connectorKnockIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+)
 
 // Docker does not publish a tight practical length limit for container names;
 // keep Slack input bounded so an accidental paste cannot dominate the rendered
@@ -133,6 +157,15 @@ type tunnelInstallArgs struct {
 	// WebRefKind is parse-time grammar metadata for cross-field validation.
 	// Renderers intentionally consume only WebRef after validation succeeds.
 	WebRefKind tunnelInstallWebRefKind
+	// Server-issued connector contract. These fields are populated only after
+	// CreateResource succeeds; parsers never accept them from Slack input.
+	ResourceID         string
+	ConnectorRoutingID string
+	KnockResourceID    string
+	// APIURL is the canonical /v1 base used for qURL resource CRUD. Native NHP
+	// enrollment and knocks use qurl-go's assigned-cell UDP lifecycle instead of
+	// a public HTTP registration or bootstrap endpoint.
+	APIURL string
 }
 
 type tunnelInstallRequest struct {
@@ -637,6 +670,11 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: failed to get API key", "error", err)
 		return nil, authErrorMessage(err), err
 	}
+	connectorAPIURL := strings.TrimSpace(h.cfg.ConnectorAPIURL)
+	if err := ValidateConnectorAPIURL(connectorAPIURL); err != nil {
+		log.Error("tunnel install: local connector API URL configuration invalid", "error", err)
+		return nil, "qURL Connector setup is unavailable because this Slack deployment has an invalid QURL_ENDPOINT. No bootstrap key was minted. Contact the operator.", err
+	}
 
 	// The description doubles as the tunnel's user-facing Display Name
 	// (see handleSetDisplayName — there's no separate field). Install
@@ -656,6 +694,11 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		log.Error("tunnel install: create/find resource failed", "error", err, "slug", args.Slug)
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
+	resolvedArgs := *args
+	if err := resolvedArgs.pinTunnelResource(resource, connectorAPIURL); err != nil {
+		log.Error("tunnel install: resource response missing connector contract", "error", err)
+		return nil, "qURL Connector setup could not obtain complete Connector routing metadata. No bootstrap key was minted. Please retry or contact support.", err
+	}
 
 	// Bind/verify the channel shortcut before minting the bootstrap key so an
 	// alias conflict fails without creating a secret. After the resource exists,
@@ -668,7 +711,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, aliasStatus, err
 	}
 
-	preparedMessage, err := h.prepareTunnelInstallMessage(args)
+	preparedMessage, err := h.prepareTunnelInstallMessage(&resolvedArgs)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
 		return nil, "qURL Connector setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.", err
@@ -698,13 +741,13 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.", err
 	}
 
-	msg, err := preparedMessage.render(args, key, aliasStatus, resource.Description, h.now())
+	msg, err := preparedMessage.render(&resolvedArgs, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
 		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
 		return nil, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
 	}
-	secretMsg, err := renderTunnelBootstrapSecretMessage(args, key, h.now())
+	secretMsg, err := renderTunnelBootstrapSecretMessage(&resolvedArgs, key, h.now())
 	if err != nil {
 		log.Error("tunnel install: secret message render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "secret_message_render_failed")
@@ -1053,6 +1096,11 @@ type preparedTunnelInstallMessage struct {
 }
 
 func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (preparedTunnelInstallMessage, error) {
+	// Revalidate the complete server/local contract at the render boundary so
+	// alternate constructors cannot bypass the mutation-time checks.
+	if err := validateTunnelConnectorContract(args); err != nil {
+		return preparedTunnelInstallMessage{}, err
+	}
 	image := strings.TrimSpace(h.cfg.TunnelImage)
 	usingDefaultImage := image == ""
 	if image == "" {
@@ -1116,11 +1164,25 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	b.WriteString(p.environmentLabel)
 	b.WriteString(".\n\n")
 	b.WriteString(p.instructions)
-	b.WriteString("\n\nTreat the separate bootstrap-key DM as secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
+	b.WriteString("\n\nTreat the separate bootstrap-key DM as secret until the sidecar connects. ")
+	b.WriteString(tunnelBootstrapRetirementNote(args.Environment))
+	b.WriteString(" Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
 	b.WriteString("Then users can run `/qurl get $")
 	b.WriteString(args.Alias)
 	b.WriteString("`.")
 	return b.String(), nil
+}
+
+func tunnelBootstrapRetirementNote(environment tunnelInstallEnvironment) string {
+	switch environment {
+	case tunnelEnvECSFargate:
+		return "Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager bootstrap secret."
+	case tunnelEnvKubernetes:
+		return "Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes bootstrap Secret."
+	case tunnelEnvDocker, tunnelEnvCompose:
+	default:
+	}
+	return "After the first successful start, remove the mounted bootstrap key from the runtime."
 }
 
 func renderTunnelBootstrapSecretMessage(args *tunnelInstallArgs, key *client.APIKey, now time.Time) (string, error) {
@@ -1195,18 +1257,152 @@ func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image
 	}
 }
 
+func pinConnectorResource(resource *client.Resource) (resourceID, connectorRoutingID, knockResourceID string, err error) {
+	if resource == nil {
+		return "", "", "", errors.New("connector resource is missing")
+	}
+	resourceID = strings.TrimSpace(resource.ResourceID)
+	connectorRoutingID = strings.TrimSpace(resource.ConnectorRoutingID)
+	knockResourceID = strings.TrimSpace(resource.KnockResourceID)
+	if err := requirePinnedConnectorResource(resourceID, connectorRoutingID, knockResourceID); err != nil {
+		return "", "", "", err
+	}
+	return resourceID, connectorRoutingID, knockResourceID, nil
+}
+
+func requirePinnedConnectorResource(resourceID, connectorRoutingID, knockResourceID string) error {
+	resourceID = strings.TrimSpace(resourceID)
+	connectorRoutingID = strings.TrimSpace(connectorRoutingID)
+	knockResourceID = strings.TrimSpace(knockResourceID)
+	if resourceID == "" {
+		return errors.New("resource_id is missing")
+	}
+	// TODO(upstream-contract): qurl-service#1225 replaces legacy internal r_
+	// labels with client-safe P-256 public keys. Fail closed during the rollout
+	// so an old producer cannot render an internal routing label into customer
+	// connector config. The current SPKI encoding begins with MF, so this guard
+	// cannot reject a valid client-safe ID; revisit it if the ID format changes.
+	if strings.HasPrefix(resourceID, "r_") {
+		return errors.New("resource_id is a legacy internal label")
+	}
+	if !connectorResourceIDPattern.MatchString(resourceID) {
+		return errors.New("resource_id is invalid")
+	}
+	if connectorRoutingID == "" {
+		return errors.New("connector_routing_id is missing")
+	}
+	if !connectorRoutingIDPattern.MatchString(connectorRoutingID) {
+		return errors.New("connector_routing_id is invalid")
+	}
+	if knockResourceID == "" {
+		return errors.New("knock_resource_id is missing")
+	}
+	if !connectorKnockIDPattern.MatchString(knockResourceID) {
+		return errors.New("knock_resource_id is invalid")
+	}
+	return nil
+}
+
+func (args *tunnelInstallArgs) pinTunnelResource(resource *client.Resource, apiURL string) error {
+	resourceID, connectorRoutingID, knockResourceID, err := pinConnectorResource(resource)
+	if err != nil {
+		return err
+	}
+	args.ResourceID = resourceID
+	args.ConnectorRoutingID = connectorRoutingID
+	args.KnockResourceID = knockResourceID
+	args.APIURL = strings.TrimSpace(apiURL)
+	return validateTunnelRouteIdentity(args)
+}
+
 func renderTunnelConfigYAML(args *tunnelInstallArgs) (string, error) {
+	if args == nil {
+		return "", errors.New("tunnel install args are missing")
+	}
 	quotedSlug, err := yamlSingleQuoted(args.Slug)
 	if err != nil {
 		return "", err
 	}
-	// The client calls this route token `id`; the Admin API stores and returns
-	// the same verbatim value as the resource slug.
+	// Empty metadata is retained only for parser/renderer unit tests. Production
+	// buildTunnelInstall validates the full producer triple before this renderer
+	// runs, so a one-shot bootstrap key is never reused for resources. Only the
+	// two persisted route identities belong in YAML; qurl-connector rehydrates
+	// knock_resource_id from the authenticated resource response on every start.
+	identityYAML := ""
+	if args.ResourceID != "" || args.ConnectorRoutingID != "" || args.KnockResourceID != "" {
+		// Revalidate at the renderer boundary even though production validates
+		// before minting; renderers are also called directly by tests and tools.
+		if err := validateTunnelRouteIdentity(args); err != nil {
+			return "", err
+		}
+		identityValues := []string{args.ResourceID, args.ConnectorRoutingID}
+		quotedIdentity := make([]string, len(identityValues))
+		for i, value := range identityValues {
+			quotedIdentity[i], err = yamlSingleQuoted(strings.TrimSpace(value))
+			if err != nil {
+				return "", err
+			}
+		}
+		identityYAML = fmt.Sprintf("\n    resource_id: %s\n    connector_routing_id: %s", quotedIdentity[0], quotedIdentity[1])
+	}
 	return fmt.Sprintf(`routes:
   - id: %s
     type: http
     local_ip: 127.0.0.1
-    local_port: %d`, quotedSlug, args.LocalPort), nil
+    local_port: %d%s`, quotedSlug, args.LocalPort, identityYAML), nil
+}
+
+func validateTunnelConnectorContract(args *tunnelInstallArgs) error {
+	if args == nil {
+		// There is no API URL to validate without parsed install arguments;
+		// preserve the more fundamental missing-input diagnostic.
+		return validateTunnelRouteIdentity(args)
+	}
+	// Deployment configuration is independent of the API response and gives
+	// the operator the more actionable error when both contracts are invalid.
+	if err := ValidateConnectorAPIURL(args.APIURL); err != nil {
+		return err
+	}
+	return validateTunnelRouteIdentity(args)
+}
+
+func validateTunnelRouteIdentity(args *tunnelInstallArgs) error {
+	if args == nil {
+		return errors.New("tunnel install args are missing")
+	}
+	return requirePinnedConnectorResource(args.ResourceID, args.ConnectorRoutingID, args.KnockResourceID)
+}
+
+// ValidateConnectorAPIURL validates the API base rendered into customer
+// connector manifests. It is exported so the Slack process can reject an
+// invalid QURL_ENDPOINT at startup, before an admin attempts an install.
+// cmd/main.connectorAPIURLFromEndpoint deliberately overlaps these checks on
+// the raw origin to provide field-specific operator messages; keep both sides
+// in sync until the typed-reason consolidation tracked by issue #967.
+func ValidateConnectorAPIURL(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return errConnectorAPIURLMissing
+	}
+	parsed, err := url.ParseRequestURI(trimmed)
+	// ParseRequestURI retains a literal #fragment in Path; the /v1 suffix
+	// requirement below therefore rejects it even though Fragment stays empty.
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" {
+		return errConnectorAPIURLInvalid
+	}
+	if strings.TrimRight(parsed.Path, "/") != connectorAPIVersionPath {
+		return errConnectorAPIURLInvalid
+	}
+	if parsed.Scheme == resourceExposeSchemeHTTPS {
+		return nil
+	}
+	if parsed.Scheme != resourceExposeSchemeHTTP {
+		return errConnectorAPIURLInvalid
+	}
+	if !isLoopbackHostname(strings.ToLower(parsed.Hostname())) {
+		return errConnectorAPIURLInvalid
+	}
+	return nil
 }
 
 func renderPortablePipefailShell() string {

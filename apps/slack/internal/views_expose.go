@@ -54,12 +54,12 @@ const (
 const exposeOpenFailedMessage = "Couldn't open the dialog. Run `/qurl-admin protect` and tap the button again."
 
 // exposeChooserBlocks builds the two-button picker posted by `/qurl-admin
-// protect`: "Protect qURL Connector" opens the guided connector installer and
+// protect`: "Protect qURL Connector" opens the connector setup chooser and
 // "Protect URL" opens the URL-resource picker. The target channel is shown so
-// the admin confirms where access lands (both modals act on it).
+// the admin confirms where access lands (both modal paths act on it).
 func exposeChooserBlocks(channelID string) []any {
 	return []any{
-		sectionBlock("*Protect something in this channel*\n*qURL Connector:* Generate install instructions and a bootstrap key for a private service.\n*URL:* Choose an existing URL resource and bind a channel alias."),
+		sectionBlock("*Protect something in this channel*\n*qURL Connector:* Generate install instructions and a bootstrap key for a web app, HTTP API, or S3 static website.\n*URL:* Choose an existing URL resource and bind a channel alias."),
 		contextBlock("Target channel: " + slackChannelMention(channelID)),
 		actionsBlock(
 			buttonElement("Protect qURL Connector", exposeConnectorActionID, exposeConnectorValue),

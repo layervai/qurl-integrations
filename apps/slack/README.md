@@ -72,9 +72,9 @@ command variants below it are for power users and scripting.
 
 | Command | What it does |
 |---------|--------------|
-| `/qurl-admin protect` | Guided picker — choose **qURL Connector** or **URL**, then fill in a short form. The recommended starting point. |
-| `/qurl-admin protect-connector` | Guided setup for a qURL Connector; opens a form and returns copy-paste deploy steps. |
-| `/qurl-admin protect-connector <id> [env:…] [port:8080] [alias:$alias]` | Typed connector setup for power users. |
+| `/qurl-admin protect` | Guided picker — choose **qURL Connector** or **URL**; qURL Connector setup then asks whether you're protecting an existing service or S3 hosted website. The recommended starting point. |
+| `/qurl-admin protect-connector` | Guided setup for an existing-service qURL Connector; opens a form and returns copy-paste deploy steps. |
+| `/qurl-admin protect-connector <id> [env:…] [port:8080] [alias:$alias]` | Typed existing-service connector setup for power users. |
 | `/qurl-admin protect-url` | Guided setup to protect an existing URL resource. |
 | `/qurl-admin protect-url $<alias> [as:$channel-alias]` | Typed: protect a URL resource that **already has an alias** in this channel. |
 | `/qurl-admin protect-url url:<target-url> as:$channel-alias` | Typed: protect a URL that **has no alias yet** by its target URL. |
@@ -106,20 +106,31 @@ command variants below it are for power users and scripting.
 ## Protecting a resource
 
 `/qurl-admin protect` is the guided entry point. It asks whether you're
-exposing a **qURL Connector** or an existing **URL**, then walks you through a
-short form. Both make the resource available **in the current channel** — to
-reach more channels, use the **Edit** button on the resource's `/qurl list`
-row and pick additional channels.
+exposing a **qURL Connector** or an existing **URL**. The qURL Connector path
+then asks whether you're protecting an existing service or an S3 hosted
+website. Both make the resource available **in the current channel** — to reach
+more channels, use the **Edit** button on the resource's `/qurl list` row and
+pick additional channels.
 
-**qURL Connector** — for a service that runs in your own environment. The
-guided form asks for the connector ID, an optional channel alias, the local
-port, and where you'll run it (Docker, Docker Compose, ECS/Fargate, or
-Kubernetes). qURL replies with copy-paste deploy steps tailored to that
-choice, plus a short-lived bootstrap key. Remove the bootstrap key from your
-environment once the connector logs show it has connected. If you run the
-paste block from a non-interactive shell, set `QURL_BOOTSTRAP_KEY` from your
-secret manager instead of typing it at the prompt. If you generate setup more
-than once, use the newest Slack message and discard older install blocks.
+**qURL Connector for an existing service** — for a service that already runs in
+your own environment. The guided form asks for the connector ID, an optional
+channel alias, the local port, and where you'll run it (Docker, Docker Compose,
+ECS/Fargate, or Kubernetes). qURL replies with copy-paste deploy steps tailored
+to that choice, plus a short-lived bootstrap key.
+
+**qURL Connector for an S3 hosted website** — for a private S3 static website.
+The guided form asks for the connector ID, optional channel alias, target
+environment, bucket, region, optional prefix, and index document. qURL replies
+with deploy steps for both the qURL Connector and the private S3 origin
+container, plus a short-lived bootstrap key. The origin currently requires a
+non-dotted, DNS-compatible bucket name; the form rejects dotted buckets before
+generating deployment instructions.
+
+Remove the bootstrap key from your environment once the connector logs show it
+has connected. If you run the paste block from a non-interactive shell, set
+`QURL_BOOTSTRAP_KEY` from your secret manager instead of typing it at the
+prompt. If you generate setup more than once, use the newest Slack message and
+discard older install blocks.
 
 **URL resource** — for an existing web URL. Point an alias at it and it's
 immediately available for `/qurl get` in the channel.

@@ -658,6 +658,10 @@ type Resource struct {
 	// KnockResourceID is the client-safe NHP resource_id the tunnel sidecar
 	// knocks before dialing FRP. It is surfaced on tunnel resource creates.
 	KnockResourceID string `json:"knock_resource_id,omitempty"`
+	// ConnectorRoutingID is the opaque DNS-safe FRP routing label. It is
+	// distinct from the public-key ResourceID and must be passed to connectors
+	// verbatim rather than derived client-side.
+	ConnectorRoutingID string `json:"connector_routing_id,omitempty"`
 }
 
 // CreateResourceInput is the input for `POST /v1/resources`. Idempotent on
