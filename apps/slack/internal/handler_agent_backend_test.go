@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +27,7 @@ const (
 	testAgentCreatedURLResourceID = "r_agent_url"
 	testAgentGetResourceID        = "r_2"
 	testAgentGetQURLLink          = "https://qurl.link/agent-confirm-get"
+	testDashboardQURLsPath        = "/v1/resources/r_dashboard/qurls"
 )
 
 // qurlBackendServer is an httptest qURL API returning canned resources + quota.
@@ -314,6 +317,764 @@ func TestAgentBackend_ResolveToken(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_InspectToken(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Team Dashboard</title><meta name="description" content="Operational dashboards and release status."></head><body><main><h1>Dashboard</h1><p>Shows incidents, deploy health, and release readiness.</p></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	for _, want := range []string{"$dashboard", "Team Dashboard", "Operational dashboards and release status.", "Dashboard"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inspect output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "Shows incidents, deploy health, and release readiness.") {
+		t.Fatalf("inspect output must not expose document body text: %q", out)
+	}
+	if strings.Contains(out, page.URL) || strings.Contains(out, "r_dashboard") {
+		t.Fatalf("inspect output leaked a qurl link or resource id: %q", out)
+	}
+}
+
+func TestAgentBackend_InspectToken_EscapesUntrustedPageContent(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	// Hostile page: title/description/heading carry mrkdwn control chars and Slack
+	// broadcast mentions. The summary posts straight to the channel, so these MUST be
+	// escaped — otherwise a page could spoof the card or @-broadcast the channel.
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Pwn &lt;!channel&gt; *bold*</title><meta name="description" content="click &lt;https://evil.example|here&gt;"></head><body><main><h1>&lt;!here&gt; run this</h1></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	// Raw mrkdwn / broadcast controls from the page must NOT survive into the card.
+	for _, banned := range []string{"<!channel>", "<!here>", "<https://evil.example|here>", "*bold*"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unescaped untrusted content %q leaked into the card: %q", banned, out)
+		}
+	}
+	// ...they should appear in their escaped form instead.
+	if !strings.Contains(out, "&lt;!channel&gt;") {
+		t.Fatalf("expected the hostile title to be mrkdwn-escaped, got %q", out)
+	}
+}
+
+func TestAgentBackend_InspectToken_StripsHTMLNoiseAndTruncatesSummaryFields(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	const injectedTitle = "Injected Script Title"
+	const injectedHeading = "Injected Script Heading"
+	realTitle := "Team Dashboard " + strings.Repeat("alpha ", 40)
+	realMeta := "Operational dashboards and release status. " + strings.Repeat("beta ", 60)
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><script>document.write("<title>` + injectedTitle + `</title><h1>` + injectedHeading + `</h1>")</script><title>` + realTitle + `</title><meta name="description" content="` + realMeta + `"></head><body><main><h1>Dashboard</h1></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	wantTitle := truncateRunes(normalizeInspectedText(realTitle), agentInspectTitleMaxRunes)
+	wantMeta := truncateRunes(normalizeInspectedText(realMeta), agentInspectMetaMaxRunes)
+	for _, want := range []string{wantTitle, wantMeta, "Dashboard"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inspect output missing %q: %q", want, out)
+		}
+	}
+	for _, unwanted := range []string{injectedTitle, injectedHeading, realTitle, realMeta} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("inspect output leaked unbounded or noisy HTML content %q: %q", unwanted, out)
+		}
+	}
+}
+
+func TestAgentBackend_InspectToken_RejectsAuthPage(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Sign in</title></head><body><form><input type="email" name="email"><input type="password" name="password"></form></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	if !strings.Contains(out, "couldn't read its page content right now") {
+		t.Fatalf("inspect auth-page fallback = %q", out)
+	}
+}
+
+func TestAgentBackend_InspectToken_JSONReturnsGenericFallback(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"title":"Dashboard API","status":"ok"}`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	if !strings.Contains(out, "couldn't read its page content right now") {
+		t.Fatalf("inspect JSON fallback = %q", out)
+	}
+	if strings.Contains(out, "Protected resource for `$dashboard`") {
+		t.Fatalf("inspect JSON output must not be treated as a protected resource: %q", out)
+	}
+}
+
+func TestInspectAllowedEntryHost_RejectsLoopbackWithoutOverride(t *testing.T) {
+	qurlLink, err := url.Parse("http://127.0.0.1:8080/inspect")
+	if err != nil {
+		t.Fatalf("parse qurl link: %v", err)
+	}
+	qurlSite, err := url.Parse("http://127.0.0.1:9090/site")
+	if err != nil {
+		t.Fatalf("parse qurl site: %v", err)
+	}
+	if err := inspectAllowedEntryHost(qurlLink, qurlSite, false); err == nil {
+		t.Fatal("inspectAllowedEntryHost allowed loopback without test override")
+	}
+}
+
+func TestInspectAllowedEntryHost_RequiresHTTPSInProduction(t *testing.T) {
+	mustURL := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		return u
+	}
+	// https qurl.link -> *.qurl.site is the expected production entry.
+	if err := inspectAllowedEntryHost(mustURL("https://qurl.link/abc"), mustURL("https://tunnel.qurl.site/"), false); err != nil {
+		t.Fatalf("https qurl.link -> qurl.site entry must be allowed: %v", err)
+	}
+	// A downgraded/MITM'd plaintext qurl.link must be rejected in production (the http
+	// allowance is scoped to the loopback test override only).
+	if err := inspectAllowedEntryHost(mustURL("http://qurl.link/abc"), mustURL("http://tunnel.qurl.site/"), false); err == nil {
+		t.Fatal("plaintext http qurl.link entry must be rejected without the loopback override")
+	}
+}
+
+func TestResolveInspectableResource_Branches(t *testing.T) {
+	// A channel alias bound to a raw URL id (legacy direct-URL binding) can't be
+	// summarized — surface the rebind guidance, never mint.
+	if resolved, msg := resolveInspectableResource("docs", []slackdata.PolicyEntry{{Alias: "docs", ResourceID: "https://legacy.example.com"}}, nil); resolved != nil || !strings.Contains(msg, "legacy direct URL binding") {
+		t.Fatalf("legacy binding: resolved=%v msg=%q", resolved, msg)
+	}
+	// A channel alias whose resource id isn't in the scanned set (stale scan) still
+	// resolves — with a nil Resource, so the card is description-less but the mint runs
+	// (the binding is in THIS channel's policy, so scope holds).
+	if resolved, msg := resolveInspectableResource("dash", []slackdata.PolicyEntry{{Alias: "dash", ResourceID: "r_unscanned"}}, nil); msg != "" || resolved == nil || resolved.Resource != nil || resolved.Via != "channel alias" || resolved.ResourceID != "r_unscanned" {
+		t.Fatalf("stale-scan alias: resolved=%+v msg=%q", resolved, msg)
+	}
+	// A token matching two resource aliases is ambiguous — refuse rather than guess.
+	dupes := []client.Resource{{ResourceID: "r_a", Alias: "shared"}, {ResourceID: "r_b", Alias: "shared"}}
+	if resolved, msg := resolveInspectableResource("shared", nil, dupes); resolved != nil || !strings.Contains(msg, "matches multiple resources") {
+		t.Fatalf("ambiguous alias: resolved=%v msg=%q", resolved, msg)
+	}
+}
+
+func TestInspectRedirectPolicy_RequiresHTTPSInProduction(t *testing.T) {
+	allowed := map[string]struct{}{"tunnel.qurl.site": {}}
+	policy := inspectRedirectPolicy(allowed, true) // requireHTTPS (production)
+	req := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		return &http.Request{URL: u}
+	}
+	via := []*http.Request{req("https://qurl.link/abc")}
+	// An https hop to an allowed host is fine.
+	if err := policy(req("https://tunnel.qurl.site/"), via); err != nil {
+		t.Fatalf("https redirect to an allowed host must pass: %v", err)
+	}
+	// A plaintext http hop to that same allowed host must be rejected in production —
+	// symmetric with the entry-host https requirement.
+	if err := policy(req("http://tunnel.qurl.site/"), via); err == nil {
+		t.Fatal("plaintext http redirect hop must be rejected when requireHTTPS is set")
+	}
+}
+
+func TestAgentBackend_InspectToken_PDFReturnsProtectedResource(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"runbook": &ddbtypes.AttributeValueMemberS{Value: "r_runbook"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_runbook"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", `attachment; filename="runbook.pdf"`)
+		_, _ = w.Write([]byte("%PDF-1.4 fake pdf body"))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_runbook","type":"url","description":"Operations runbook"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_runbook/qurls":
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_runbook",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, summarized, err := b.InspectToken(context.Background(), backendTC(), "$runbook")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	if summarized {
+		t.Fatal("a protected document must report summarized=false (no website summary landed)")
+	}
+	for _, want := range []string{"Protected resource for `$runbook`", "Operations runbook", "application/pdf", "no website summary is available"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("pdf inspect output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "couldn't read its page content right now") {
+		t.Fatalf("pdf inspect output should identify a protected resource instead of generic fallback: %q", out)
+	}
+}
+
+func TestAgentBackend_InspectToken_DownloadMimeReturnsProtectedResource(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		want        string
+	}{
+		{
+			name:        "docx",
+			contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			want:        "wordprocessingml.document",
+		},
+		{
+			name:        "zip",
+			contentType: "application/zip",
+			want:        "application/zip",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			names := defaultTestTableNames()
+			row := map[string]ddbtypes.AttributeValue{
+				"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+				"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+				"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+					"download": &ddbtypes.AttributeValueMemberS{Value: "r_download"},
+				}},
+				"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_download"}},
+			}
+			store := &slackdata.Store{
+				Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+				WorkspaceMappingsName: names.workspace,
+				ChannelPoliciesName:   names.channelPolicy,
+				Now:                   func() time.Time { return fixedNow },
+			}
+			page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write([]byte("download body"))
+			}))
+			t.Cleanup(page.Close)
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+					_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_download","type":"url","description":"Download resource"}]}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_download/qurls":
+					respondQURLEnvelope(t, w, map[string]any{
+						testKeyResourceID: "r_download",
+						"qurl_link":       page.URL,
+						"qurl_site":       page.URL,
+					})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(api.Close)
+
+			b := &agentBackend{
+				authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+				store:                         store,
+				log:                           slog.Default(),
+				allowInspectableLoopbackHosts: true,
+			}
+			out, _, err := b.InspectToken(context.Background(), backendTC(), "$download")
+			if err != nil {
+				t.Fatalf("InspectToken: %v", err)
+			}
+			if !strings.Contains(out, "Protected resource for `$download`") || !strings.Contains(out, tc.want) {
+				t.Fatalf("inspect download output missing protected-resource signal: %q", out)
+			}
+			if strings.Contains(out, "couldn't read its page content right now") {
+				t.Fatalf("inspect download output fell back to generic failure: %q", out)
+			}
+		})
+	}
+}
+
+func TestAgentBackend_InspectToken_AllowsQURLLinkRedirectToQURLSite(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Team Dashboard</title><meta name="description" content="Operational dashboards and release status."></head><body><main><h1>Dashboard</h1></main></body></html>`))
+	}))
+	t.Cleanup(site.Close)
+	link := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, site.URL, http.StatusFound)
+	}))
+	t.Cleanup(link.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       link.URL,
+				"qurl_site":       site.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	for _, want := range []string{"$dashboard", "Team Dashboard", "Operational dashboards and release status."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("redirected inspect output missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestAgentBackend_InspectToken_RejectsCrossHostRedirect(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Secret</title></head><body><p>Cross-host content</p></body></html>`))
+	}))
+	t.Cleanup(target.Close)
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	if !strings.Contains(out, "couldn't read its page content right now") {
+		t.Fatalf("inspect cross-host redirect fallback = %q", out)
+	}
+	if strings.Contains(out, "Cross-host content") {
+		t.Fatalf("inspect output must not follow cross-host redirects: %q", out)
+	}
+}
+
+func TestAgentBackend_InspectToken_AllowsProtectedAuthDocumentation(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"login-guide": &ddbtypes.AttributeValueMemberS{Value: "r_login_guide"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_login_guide"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>SSO Login Guide</title><meta name="description" content="How to configure single sign-on for the portal."></head><body><main><h1>SSO Login Guide</h1><h2>Prerequisites</h2><p>This guide explains login prerequisites, redirect URLs, and troubleshooting steps.</p></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_login_guide","type":"url","description":"Protected login guide"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources/r_login_guide/qurls":
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_login_guide",
+				"qurl_link":       page.URL,
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+	}
+	out, summarized, err := b.InspectToken(context.Background(), backendTC(), "$login-guide")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	if !summarized {
+		t.Fatal("a real page summary must report summarized=true")
+	}
+	for _, want := range []string{"$login-guide", "SSO Login Guide", "How to configure single sign-on for the portal.", "Prerequisites"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inspect output missing %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "This guide explains login prerequisites, redirect URLs, and troubleshooting steps.") {
+		t.Fatalf("inspect output must not expose protected document body text: %q", out)
+	}
+}
+
+func TestAgentBackend_InspectToken_RejectsUnexpectedInitialLinkHost(t *testing.T) {
+	names := defaultTestTableNames()
+	row := map[string]ddbtypes.AttributeValue{
+		"slack_team_id":    &ddbtypes.AttributeValueMemberS{Value: "T1"},
+		"slack_channel_id": &ddbtypes.AttributeValueMemberS{Value: "C1"},
+		"alias_bindings": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{
+			"dashboard": &ddbtypes.AttributeValueMemberS{Value: "r_dashboard"},
+		}},
+		"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_dashboard"}},
+	}
+	store := &slackdata.Store{
+		Client:                newFakeDDB(t, names, map[string][]map[string]ddbtypes.AttributeValue{names.channelPolicy: {row}}),
+		WorkspaceMappingsName: names.workspace,
+		ChannelPoliciesName:   names.channelPolicy,
+		Now:                   func() time.Time { return fixedNow },
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Team Dashboard</title></head><body><main><h1>Dashboard</h1></main></body></html>`))
+	}))
+	t.Cleanup(page.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_dashboard","type":"url","description":"Production dashboard"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == testDashboardQURLsPath:
+			respondQURLEnvelope(t, w, map[string]any{
+				testKeyResourceID: "r_dashboard",
+				"qurl_link":       "https://evil.example/summary",
+				"qurl_site":       page.URL,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	var fetched atomic.Bool
+	b := &agentBackend{
+		authClient:                    func(context.Context, string) (*client.Client, error) { return client.New(api.URL, "k"), nil },
+		store:                         store,
+		log:                           slog.Default(),
+		allowInspectableLoopbackHosts: true,
+		fetchClient: &http.Client{
+			Transport: testRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				fetched.Store(true)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`<!doctype html><html><head><title>evil</title></head><body>evil</body></html>`)),
+				}, nil
+			}),
+		},
+	}
+	out, _, err := b.InspectToken(context.Background(), backendTC(), "$dashboard")
+	if err != nil {
+		t.Fatalf("InspectToken: %v", err)
+	}
+	if fetched.Load() {
+		t.Fatalf("inspect should not fetch an unexpected initial qurl_link host")
+	}
+	if !strings.Contains(out, "couldn't read its page content right now") {
+		t.Fatalf("inspect unexpected-host fallback = %q", out)
+	}
+}
+
 func TestAgentBackend_Quota(t *testing.T) {
 	b, _ := newBackendUnderTest(t, true)
 	out, err := b.Quota(context.Background(), backendTC())
@@ -424,6 +1185,7 @@ func TestAgentBackend_NilStoreIsGraceful(t *testing.T) {
 		func() (string, error) { return b.ListResources(context.Background(), backendTC()) },
 		func() (string, error) { return b.ListAliases(context.Background(), backendTC()) },
 		func() (string, error) { return b.ResolveToken(context.Background(), backendTC(), "x") },
+		func() (string, error) { s, _, e := b.InspectToken(context.Background(), backendTC(), "x"); return s, e },
 	} {
 		out, err := fn()
 		if err != nil || out != agentBackendUnconfigured {
@@ -444,7 +1206,11 @@ func TestAgentBackend_UnboundWorkspaceNudgesToSetup(t *testing.T) {
 		// ListResources needs the client only when the channel has an allowed set, so
 		// resolve a token (its slug branch always reaches the client) and read quota.
 		"ResolveToken": func() (string, error) { return b.ResolveToken(context.Background(), backendTC(), "staging") },
-		"Quota":        func() (string, error) { return b.Quota(context.Background(), backendTC()) },
+		"InspectToken": func() (string, error) {
+			s, _, e := b.InspectToken(context.Background(), backendTC(), "staging")
+			return s, e
+		},
+		"Quota": func() (string, error) { return b.Quota(context.Background(), backendTC()) },
 	} {
 		out, err := fn()
 		if err != nil {

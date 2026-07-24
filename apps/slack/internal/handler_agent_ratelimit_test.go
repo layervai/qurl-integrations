@@ -93,7 +93,8 @@ func TestAgentTurnLimit_PerUser(t *testing.T) {
 	if len(*posts) != 3 {
 		t.Fatalf("expected 3 replies, got %d: %+v", len(*posts), *posts)
 	}
-	if (*posts)[0].text != rateLimitTurnReply || (*posts)[1].text != rateLimitTurnReply {
+	wantReply := agentLLMReplyWithDisclaimer(rateLimitTurnReply)
+	if (*posts)[0].text != wantReply || (*posts)[1].text != wantReply {
 		t.Fatalf("first two turns (within cap) should run, got %+v", *posts)
 	}
 	if (*posts)[2].text != agentRateLimitedReply {
@@ -134,7 +135,7 @@ func TestAgentTurnLimit_FailsOpenOnCounterError(t *testing.T) {
 	fireTurn(t, h, rateLimitEventBody("EvFO", "U2", "500.1"))
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != rateLimitTurnReply {
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(rateLimitTurnReply) {
 		t.Fatalf("a counter error must fail OPEN (turn runs), got %+v", *posts)
 	}
 }

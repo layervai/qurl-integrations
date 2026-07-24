@@ -220,6 +220,17 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 				}
 			}
 		}
+		// The stream itself owns an ordinary free-text reply, so append the same
+		// reviewer-facing LLM footer as the non-streaming post path before stopStream.
+		// Proposal narration is followed by a separately disclosed confirm card and
+		// must not be labeled as the final generated answer.
+		// Key the guard off bytes that actually reached Slack: result.Reply can be
+		// synthesized or trimmed, while streamed is the delivery source of truth.
+		// Re-check broken because the reconcile flush above can fail inside this block.
+		if !s.broken && result.Proposal == nil && strings.TrimSpace(s.streamed.String()) != "" {
+			s.pending.WriteString(agentLLMReplyDisclaimer)
+			s.flush(ctx)
+		}
 	}
 	s.stop(ctx)
 	if s.broken {

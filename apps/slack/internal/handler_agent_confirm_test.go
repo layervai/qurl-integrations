@@ -26,6 +26,7 @@ import (
 func TestAdminGatedFor(t *testing.T) {
 	gated := map[agent.ActionKind]bool{
 		agent.ActionGet:              false,
+		agent.ActionInspect:          false,
 		agent.ActionRevoke:           true,
 		agent.ActionSetAlias:         true,
 		agent.ActionUnsetAlias:       true,
@@ -358,6 +359,41 @@ func TestConfirm_AdminApproveExecutesAndReplaces(t *testing.T) {
 	}
 	if !hc.claimed(id) {
 		t.Fatal("an executed approve must have claimed the pending action")
+	}
+}
+
+func TestConfirm_InspectExecutesForNonAdminAndIsAudited(t *testing.T) {
+	// inspect is NOT admin-gated (a channel member may summarize a resource they can
+	// already reach — it reveals strictly less than the link a get hands out) and NOT
+	// asker-only (the summary is public, not a credential). So a non-admin, non-asker
+	// clicker reaches execute: the fetch/mint runs only after this human Confirm, never
+	// on the model's say-so, and it isn't behind the admin wall the destructive verbs use.
+	hc := newConfirmHarness(t, "Uadmin") // Uadmin is the only admin; the clicker is neither admin nor asker
+	id := hc.seedPending(t, &pendingAction{Action: agent.ActionInspect, Token: testAliasName, Reason: "onboarding", Asker: testAskerUserID, ChannelID: "C1", ThreadTS: testConfirmThreadTS})
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "C1", "Uother", hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+
+	if !hc.claimed(id) {
+		t.Fatal("a non-admin must be able to approve+execute inspect (it is not admin-gated)")
+	}
+	if ro, _ := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second)); !ro {
+		t.Fatal("an executed inspect must replace the card (terminal), not deny ephemerally")
+	}
+	// The click is recorded as an inspect against the token, keyed to the approver.
+	entry := requireSingleAuditEntry(t, hc, "Uother")
+	if entry.Action != string(agent.ActionInspect) || entry.Target != testAliasName {
+		t.Fatalf("audit entry = %+v, want action=inspect target=%s", entry, testAliasName)
+	}
+	// testAliasName does not resolve in this empty-policy channel — a soft (non-summary)
+	// outcome. The audit line must never falsely claim a summary was posted for it
+	// (regression guard for the outcome-neutral audit display)...
+	if strings.Contains(strings.ToLower(entry.Result), "posted") {
+		t.Fatalf("soft-outcome audit must not claim a summary was posted, got Result=%q", entry.Result)
+	}
+	// ...and audit SUCCESS must be false when no summary landed (summarized=false),
+	// per actionAuditResult's contract — not a false win.
+	if entry.ResultSuccess == nil || *entry.ResultSuccess {
+		t.Fatalf("soft-outcome audit success = %v, want false", entry.ResultSuccess)
 	}
 }
 

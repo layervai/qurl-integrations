@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -70,6 +71,15 @@ type agentBackend struct {
 	policyOnce    sync.Once
 	policyEntries []slackdata.PolicyEntry
 	policyErr     error
+
+	// fetchClient opens the short-lived qURL minted by inspect_token. Tests may
+	// replace it; production falls back to a small timeout client.
+	fetchClient *http.Client
+
+	// allowInspectableLoopbackHosts relaxes inspect_token's entry-host policy for
+	// tests that use local httptest servers. Production must leave this false so
+	// inspect_token only enters qurl.link -> *.qurl.site.
+	allowInspectableLoopbackHosts bool
 }
 
 // newAgentBackend builds the backend from the handler's authenticated-client
