@@ -401,31 +401,45 @@ func (h *Handler) clearAgentAck(log *slog.Logger, env *slackEventEnvelope, add a
 // to. Set SYNCHRONOUSLY on the live turn ctx before the LLM call so it's visible while
 // the turn runs, under its own agentAckTimeout cap. The old #693 additive pre-LLM
 // concern no longer stacks with reaction add (now async); setStatus remains the one
-// synchronous working-on-it seam here. There is NO deferred clear: Slack auto-clears
-// the status when the agent posts its reply (every turn exit posts one), and a
-// 2-minute server-side timeout backstops the no-reply case. The auto-clear only fires
-// when the reply lands on the SAME thread the status was set on, so the thread_ts here
-// MUST equal the reply's — both derive from agentEventRootTS(&env.Event); keep them
-// coupled.
+// synchronous working-on-it seam here. Slack normally auto-clears the status when the
+// agent posts its reply, but native streamed replies can leave it behind, so every
+// successful set registers an explicit deferred clear. Both calls MUST use the reply
+// thread — all three derive from agentEventRootTS(&env.Event); keep them coupled.
 //
 // Post-enablement exclusive mode treats a pane setStatus failure as evidence the
 // native status path is broken (scope, rate limit, malformed thread, etc.), so it logs
 // at Warn while keeping the turn best-effort. Pre-enable additive mode still logs at
 // Debug because setStatus may fail on every ordinary DM until the pane is live and the
 // reaction remains the working cue.
-func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
+func (h *Handler) setAgentThinkingStatus(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) bool {
 	if h.cfg.AssistantThreads == nil || env.Event.ChannelType != slackChannelTypeIM {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, h.effectiveAgentAckTimeout())
 	defer cancel()
 	if err := h.cfg.AssistantThreads.SetStatus(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, agentEventRootTS(&env.Event), agentThinkingStatus); err != nil {
 		if !h.cfg.AgentSurfaceExclusiveAcks {
 			log.Debug("agent: set assistant pane status failed (best-effort)", "error", err)
-			return
+			return false
 		}
 		log.Warn("agent: set assistant pane status failed in exclusive mode", "error", err)
-		return
+		return false
+	}
+	return true
+}
+
+// clearAgentThinkingStatus explicitly clears a pane status on every turn exit. The
+// cleanup is best-effort and uses a fresh bounded context because the turn context may
+// already be spent by the time this deferred call runs.
+func (h *Handler) clearAgentThinkingStatus(log *slog.Logger, env *slackEventEnvelope) {
+	ctx, cancel := h.agentAckContext()
+	defer cancel()
+	if err := h.cfg.AssistantThreads.SetStatus(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, agentEventRootTS(&env.Event), ""); err != nil {
+		if h.baseCtx != nil && h.baseCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			log.Debug("agent: assistant pane status clear canceled during shutdown", "error", err)
+			return
+		}
+		log.Warn("agent: clear assistant pane status failed (best-effort)", "error", err)
 	}
 }
 
@@ -846,7 +860,9 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// completion handle before removing so the remove can't race ahead.
 	add := h.startAgentReactionAck(log, env)
 	defer h.clearAgentAck(log, env, add)
-	h.setAgentThinkingStatus(ctx, log, env)
+	if h.setAgentThinkingStatus(ctx, log, env) {
+		defer h.clearAgentThinkingStatus(log, env)
+	}
 
 	threadKey := agentEventThreadKey(env)
 	history, version, ok := h.resolveTurnHistory(ctx, log, env, partition, threadKey, pre)
