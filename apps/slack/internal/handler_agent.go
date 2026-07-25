@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
+	"net/url"
 	"reflect"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +95,15 @@ const agentTransientReply = "That took longer than I could handle just now — p
 // neutrally ("conversation mode is at its limit", not "you've reached…") so it
 // doesn't wrongly blame an innocent member when it's the per-workspace cap that hit.
 const agentRateLimitedReply = "Conversation mode is at its limit for now — give it a few minutes, or use a `/qurl` command in the meantime."
+
+// agentInvalidProtectURLReply rejects explicit non-HTTPS protection requests
+// before they reach the model. Keep the copy generic so an attacker-controlled
+// target is never reflected into the channel.
+const agentInvalidProtectURLReply = "I can only protect HTTPS URLs. Use a URL that starts with `https://`."
+
+// agentInvalidAliasReply rejects invalid aliases without reflecting the
+// attacker-controlled token into the channel.
+const agentInvalidAliasReply = "That alias isn't valid. Use lowercase letters, numbers, and dashes only."
 
 // agentTurnRateWindow is the fixed window for the per-user / per-team turn counters.
 // The env limits are expressed per hour, so the window is one hour.
@@ -733,6 +745,48 @@ func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
 }
 
+// agentHasExplicitNonHTTPSProtectURL recognizes the direct conversation form
+// "Protect <target> ..." when the target declares a non-HTTPS URI scheme. It is
+// intentionally narrow: aliases, scheme-less targets, and explanatory prose
+// still go through the agent, while values such as javascript: and http: are
+// rejected deterministically before any LLM call.
+func agentHasExplicitNonHTTPSProtectURL(message string) bool {
+	fields := strings.Fields(message)
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "protect") {
+		return false
+	}
+	targetText := unwrapSlackURLArg(fields[1])
+	// url.Parse treats a scheme-less host:port as an opaque URI scheme. Leave a
+	// numeric port target to the normal agent path instead of misclassifying it.
+	hostPort := targetText
+	if !strings.Contains(hostPort, "://") {
+		hostPort, _, _ = strings.Cut(hostPort, "/")
+	}
+	if _, port, err := net.SplitHostPort(hostPort); err == nil {
+		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
+			return false
+		}
+	}
+	target, err := url.Parse(targetText)
+	return err == nil && target.Scheme != "" && !strings.EqualFold(target.Scheme, resourceExposeSchemeHTTPS)
+}
+
+// agentHasExplicitInvalidSetAlias recognizes the direct conversation form
+// "Set alias <alias> ..." and applies the existing alias grammar before any LLM
+// call. It is intentionally narrow so questions about alias syntax and other
+// explanatory prose still follow the normal agent path.
+func agentHasExplicitInvalidSetAlias(message string) bool {
+	fields := strings.Fields(message)
+	if len(fields) < 3 ||
+		!strings.EqualFold(fields[0], "set") ||
+		!strings.EqualFold(fields[1], "alias") ||
+		!strings.HasPrefix(fields[2], "$") {
+		return false
+	}
+	_, err := parseAliasToken(fields[2])
+	return err != nil
+}
+
 // agentEventPartition is the conversation/dedupe partition key. It deliberately
 // uses the same resolver as lifecycleWorkspaceIDs: org-level installs write those
 // rows under enterprise_id, workspace-level installs write under team_id, and the
@@ -823,6 +877,16 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
+	message := stripBotMention(env.Event.Text)
+	if agentHasExplicitNonHTTPSProtectURL(message) {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidProtectURLReply)
+		return
+	}
+	if agentHasExplicitInvalidSetAlias(message) {
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentInvalidAliasReply)
+		return
+	}
+
 	// Rate-limit AFTER dedupe (count unique messages, not redeliveries) and BEFORE
 	// the turn runs (the LLM is the cost we're capping). Confirm-clicks
 	// (processAgentConfirm) are deliberately NOT limited: they're consume-once and
@@ -885,7 +949,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
 	}
 	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
-	result, newHistory, err := a.Run(ctx, &tc, history, stripBotMention(env.Event.Text))
+	result, newHistory, err := a.Run(ctx, &tc, history, message)
 
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)
