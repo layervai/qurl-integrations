@@ -28,9 +28,8 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
-	// qurlContactURL is where users are pointed when a deployment can't serve a
-	// command itself (a feature isn't configured on this deployment). Replaces
-	// the dead-end "Contact the operator." tail so the user has a real next step.
+	// qurlContactURL is the public support path used by proactive help surfaces
+	// and by deployment-specific error fallbacks that need a real next step.
 	qurlContactURL = "https://layerv.ai/contact"
 )
 
