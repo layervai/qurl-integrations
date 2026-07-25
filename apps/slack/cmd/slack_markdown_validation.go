@@ -275,7 +275,7 @@ func runSlackMarkdownRendererValidation(ctx context.Context, input *slackMarkdow
 		cfg.now = time.Now
 	}
 	if cfg.httpClient == nil {
-		cfg.httpClient = defaultSlackPostMessageClient()
+		cfg.httpClient = defaultSlackWebAPIClient()
 	}
 	if cfg.timeout <= 0 {
 		cfg.timeout = defaultSlackMarkdownValidationTimeout
