@@ -598,14 +598,14 @@ func streamSlackMarkdownValidationCaseWithPort(ctx context.Context, cfg *slackMa
 		recordSlackValidationAttemptError(&attempt, err)
 		result.Attempts = append(result.Attempts, attempt)
 		stopAttempt := slackMarkdownValidationAttempt{Method: slackMarkdownValidationMethodStopStream, RequestShape: slackMarkdownValidationShapeStreamStop}
-		stopErr := port.StopStream(ctx, cfg.teamID, cfg.enterpriseID, cfg.assistantChannelID, streamTS)
+		stopErr := port.StopStream(ctx, cfg.teamID, cfg.enterpriseID, cfg.assistantChannelID, streamTS, nil)
 		stopAttempt.OK = stopErr == nil
 		recordSlackValidationAttemptError(&stopAttempt, stopErr)
 		result.Attempts = append(result.Attempts, stopAttempt)
 		return result, fmt.Errorf("%s append stream: %w", tc.id, err)
 	}
 	result.Attempts = append(result.Attempts, slackMarkdownValidationAttempt{Method: slackMarkdownValidationMethodAppendStream, RequestShape: slackMarkdownValidationShapeMarkdownText, OK: true})
-	if err := port.StopStream(ctx, cfg.teamID, cfg.enterpriseID, cfg.assistantChannelID, streamTS); err != nil {
+	if err := port.StopStream(ctx, cfg.teamID, cfg.enterpriseID, cfg.assistantChannelID, streamTS, nil); err != nil {
 		attempt := slackMarkdownValidationAttempt{Method: slackMarkdownValidationMethodStopStream, RequestShape: slackMarkdownValidationShapeStreamStop, OK: false}
 		recordSlackValidationAttemptError(&attempt, err)
 		result.Attempts = append(result.Attempts, attempt)
