@@ -114,6 +114,41 @@ func TestProcessAgentEvent_HelpPrefixUsesNormalAgentPath(t *testing.T) {
 	}
 }
 
+func TestAgentHasExplicitNonHTTPSProtectURL(t *testing.T) {
+	cases := map[string]bool{
+		"Protect javascript:alert(1) as $bad.":  true,
+		"protect http://example.com as $docs":   true,
+		"Protect <http://example.com> as $docs": true,
+		"Protect https://example.com as $docs":  false,
+		"Protect $docs as $shared":              false,
+		"Protect example.com:8080 as $local":    false,
+		"Protect example.com:8080/path as $x":   false,
+		"Protect javascript:alert(1)":           true,
+		"How do I protect javascript: URLs?":    false,
+	}
+	for message, want := range cases {
+		if got := agentHasExplicitNonHTTPSProtectURL(message); got != want {
+			t.Errorf("agentHasExplicitNonHTTPSProtectURL(%q) = %v, want %v", message, got, want)
+		}
+	}
+}
+
+func TestAgentHasExplicitInvalidSetAlias(t *testing.T) {
+	cases := map[string]bool{
+		"Set alias $Prod_Admin!!! to $staging-api.": true,
+		"set alias $prod_admin to $staging-api":     true,
+		"Set alias $prod-admin to $staging-api":     false,
+		"Set alias for $prod-admin to staging":      false,
+		"Set alias prod-admin to $staging-api":      false,
+		"How do I set alias $Bad_ID?":               false,
+	}
+	for message, want := range cases {
+		if got := agentHasExplicitInvalidSetAlias(message); got != want {
+			t.Errorf("agentHasExplicitInvalidSetAlias(%q) = %v, want %v", message, got, want)
+		}
+	}
+}
+
 func env(eventType, channelType, user, botID, subtype, text string) *slackEventEnvelope {
 	return &slackEventEnvelope{
 		Type: "event_callback", TeamID: "T1", EventID: "Ev1",
@@ -324,6 +359,9 @@ func TestAgentReplyText(t *testing.T) {
 	prop := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "Protect $x."}})
 	if !strings.Contains(prop, "isn't enabled yet") || !strings.Contains(prop, "Protect $x.") {
 		t.Errorf("proposal preview = %q", prop)
+	}
+	if !strings.HasSuffix(prop, agentLLMReplyDisclaimer) {
+		t.Errorf("LLM-distilled proposal preview must carry the disclaimer, got %q", prop)
 	}
 	// A proposal with a blank summary would render as a dangling bullet; it must
 	// fall back to the error reply like the blank-Reply case.
@@ -659,7 +697,7 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.1" || got.text != testAgentReachStagingReply {
+	if got.channel != "C1" || got.threadTS != "100.1" || got.text != agentLLMReplyWithDisclaimer(testAgentReachStagingReply) {
 		t.Fatalf("reply = %+v", got)
 	}
 }
@@ -745,7 +783,7 @@ func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testi
 	if !got.markdown {
 		t.Fatalf("free-text answer should use the standard-Markdown seam, got %+v", got)
 	}
-	want := `I found Deploy room \<!channel> and \<@U12345678>`
+	want := agentLLMReplyWithDisclaimer(`I found Deploy room \<!channel> and \<@U12345678>`)
 	if got.text != want {
 		t.Fatalf("reply = %q, want escaped visible controls %q", got.text, want)
 	}
@@ -778,7 +816,7 @@ func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.0" || got.text != "still here" {
+	if got.channel != "C1" || got.threadTS != "100.0" || got.text != agentLLMReplyWithDisclaimer("still here") {
 		t.Fatalf("thread_broadcast follow-up reply = %+v", got)
 	}
 }
@@ -920,7 +958,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 		// not the generic error copy — see TestProcessAgentEvent_GenericErrorCopy
 		// for the live-ctx (capability) branch.
 		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentTransientReply},
-		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, testAgentReachStagingReply},
+		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, agentLLMReplyWithDisclaimer(testAgentReachStagingReply)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -972,6 +1010,92 @@ func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("in-budget failure should post the generic error reply, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_RejectsExplicitNonHTTPSProtectURLBeforeLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            panicAgentLLM{},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Protect javascript:alert(1) as $bad."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentInvalidProtectURLReply {
+		t.Fatalf("invalid URL should be rejected once before the LLM runs, got %+v", *posts)
+	}
+	if strings.Contains((*posts)[0].text, "javascript:") {
+		t.Fatalf("invalid URL reply must not echo the attacker-controlled target: %q", (*posts)[0].text)
+	}
+}
+
+func TestProcessAgentEvent_AllowsHTTPSProtectURLThroughToLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: testAgentStillWorksReply},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Protect https://example.com as $docs."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("HTTPS protect request should follow the normal agent path, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_RejectsExplicitInvalidAliasBeforeLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            panicAgentLLM{},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Set alias $Prod_Admin!!! to $staging-api."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentInvalidAliasReply {
+		t.Fatalf("invalid alias should be rejected once before the LLM runs, got %+v", *posts)
+	}
+	if strings.Contains((*posts)[0].text, "Prod_Admin") {
+		t.Fatalf("invalid alias reply must not echo the attacker-controlled alias: %q", (*posts)[0].text)
+	}
+}
+
+func TestProcessAgentEvent_AllowsValidAliasThroughToLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: testAgentStillWorksReply},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Set alias $prod-admin to $staging-api."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("valid alias request should follow the normal agent path, got %+v", *posts)
 	}
 }
 
@@ -1411,7 +1535,8 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	if !(*posts)[0].markdown {
 		t.Errorf("free-text answer should post on the standard-Markdown seam, got mrkdwn: %+v", (*posts)[0])
 	}
-	if (*posts)[0].text != "Use **bold** and click (https://evil.example)" {
+	wantReply := agentLLMReplyWithDisclaimer("Use **bold** and click (https://evil.example)")
+	if (*posts)[0].text != wantReply {
 		t.Errorf("free-text answer body = %q, want masked link revealed", (*posts)[0].text)
 	}
 	// Proposal preview: escaped mrkdwn text seam, never standard Markdown
@@ -1421,6 +1546,35 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	}
 	if !strings.HasPrefix((*posts)[1].text, agentProposalPreviewPrefix) {
 		t.Errorf("proposal preview = %q, want the preview prefix", (*posts)[1].text)
+	}
+	if !strings.HasSuffix((*posts)[1].text, agentLLMReplyDisclaimer) {
+		t.Errorf("proposal preview = %q, want the generated-content disclaimer", (*posts)[1].text)
+	}
+}
+
+func TestAgentLLMReplyDisclaimer_IsMarkdownHardeningInvariant(t *testing.T) {
+	if got := hardenAgentMarkdown(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("one-shot hardener changed the trusted footer: %q", got)
+	}
+	if got := hardenAgentMarkdownForStreamReconcile(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("stream-reconcile hardener changed the trusted footer: %q", got)
+	}
+}
+
+func TestDeliverAgentResult_MalformedMarkdownCannotAbsorbDisclaimer(t *testing.T) {
+	textPost, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{PostMessage: textPost, PostMarkdownMessage: mdPost})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+	reply := "An unclosed `code span"
+
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: reply})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply))
+	if len(*posts) != 1 || (*posts)[0].text != want {
+		t.Fatalf("want malformed reply hardened before the intact footer, got %+v", *posts)
 	}
 }
 
@@ -1436,7 +1590,7 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	want := `plain answer (https://evil.example) for \<@U12345678> \<!channel>`
+	want := agentLLMReplyWithDisclaimer(`plain answer (https://evil.example) for \<@U12345678> \<!channel>`)
 	if len(*posts) != 1 || (*posts)[0].text != want {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}

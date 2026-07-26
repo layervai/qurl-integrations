@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
 // Test-local string constants — keeps the test file free of magic
@@ -26,6 +29,7 @@ const (
 	testTargetMention = "<@UTARGET01>"
 	testOtherAdminID  = "UOTHER001"
 	testAdminListCmd  = "admins"
+	testSlackBaseURL  = "https://slack-bot.example"
 )
 
 // --- Add ---
@@ -310,6 +314,389 @@ func TestHandleAdminRemove_NonAdminCaller(t *testing.T) {
 	_, reply := inv.invokeAdmin("remove "+testTargetMention, testAdminTeamID, testAdminUserID)
 	if !strings.Contains(reply, "admin-only") {
 		t.Errorf("reply missing admin-only fence: %q", reply)
+	}
+}
+
+// --- Transfer ownership ---
+
+func TestHandleAdminTransferOwnership_OwnerSuccessMovesSetupGate(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, teamID, enterpriseID, userID string) (bool, error) {
+		if teamID != testAdminTeamID || enterpriseID != "" || userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup got teamID=%q enterpriseID=%q userID=%q", teamID, enterpriseID, userID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Transferred qURL workspace ownership to <@"+testTargetUserID+">") {
+		t.Fatalf("reply missing transfer success: %q", reply)
+	}
+	if !strings.Contains(reply, "They can now run `/qurl setup`") {
+		t.Fatalf("reply missing setup handoff: %q", reply)
+	}
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testTargetUserID) {
+		t.Fatal("TransferOwnership did not add the new owner to admin_slack_user_ids")
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after transfer: %v", err)
+	}
+	if ownerID != testTargetUserID {
+		t.Fatalf("owner_id after transfer = %q, want %q", ownerID, testTargetUserID)
+	}
+
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: []byte("0123456789abcdef0123456789abcdef"), SlackBaseURL: testSlackBaseURL})
+	oldOwner := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testAdminOwnerID)
+	if text := oldOwner[respFieldText]; !strings.Contains(text, "can only be re-run") || !strings.Contains(text, "<@"+testTargetUserID+">") {
+		t.Fatalf("old owner setup reply missing new-owner gate: %q", text)
+	}
+	newOwner := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testTargetUserID)
+	if text := newOwner[respFieldText]; !strings.Contains(text, "Continue setup") || !strings.Contains(text, "state=") {
+		t.Fatalf("new owner setup reply did not mint setup state: %q", text)
+	}
+}
+
+func TestHandleAdminTransferOwnership_EnterpriseIDPassedToLookup(t *testing.T) {
+	const enterpriseID = "EGRID001"
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, teamID, gotEnterpriseID, userID string) (bool, error) {
+		if teamID != testAdminTeamID || gotEnterpriseID != enterpriseID || userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup got teamID=%q enterpriseID=%q userID=%q", teamID, gotEnterpriseID, userID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+	inv.enterpriseID = enterpriseID
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Transferred qURL workspace ownership") {
+		t.Fatalf("reply missing transfer success: %q", reply)
+	}
+}
+
+func TestHandleAdminTransferOwnership_RacedOwnerChangeReturnsOwnerOnly(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.ddb.SetUpdateItemErr(ts.tableNames.workspace, &ddbtypes.ConditionalCheckFailedException{Message: stringPtr("owner changed after gate")})
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "owner-only") || !strings.Contains(reply, "/qurl-admin admins") {
+		t.Fatalf("reply missing raced-owner surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after raced owner transfer: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after raced owner transfer = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_OwnerOffAdminSetKeepsOldOwnerAdmin(t *testing.T) {
+	ts := newAdminTestServers(t)
+	// Legacy/self-healed rows can grant the owner admin rights through owner_id
+	// even when admin_slack_user_ids no longer contains them.
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testOtherAdminID, testWorkspaceConfiguredAt)
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return true, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Transferred qURL workspace ownership") {
+		t.Fatalf("reply missing transfer success: %q", reply)
+	}
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testAdminOwnerID) {
+		t.Fatal("TransferOwnership did not preserve the old owner in admin_slack_user_ids")
+	}
+	if !ts.ddb.workspaceMappingHasAdmin(t, testAdminTeamID, testTargetUserID) {
+		t.Fatal("TransferOwnership did not add the new owner to admin_slack_user_ids")
+	}
+}
+
+func TestHandleAdminTransferOwnership_SelfTransferNoops(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "self-transfer should bail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(context.Context, string, string, string) (bool, error) {
+		t.Fatal("SlackUserLookup should not run for self-transfer")
+		return false, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership <@"+testAdminOwnerID+">", testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "You're already the workspace owner") {
+		t.Fatalf("reply missing self-transfer surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after self-transfer: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after self-transfer = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_LookupUnconfiguredRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "nil SlackUserLookup should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = nil
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Contact your Slack admin") {
+		t.Fatalf("reply missing nil-lookup surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after nil lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after nil lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_NonOwnerAdminRefused(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.failOnAdminMutation(t, "non-owner admin should be gated before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminUserID)
+	if !strings.Contains(reply, "owner-only") {
+		t.Fatalf("reply missing owner-only fence: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after refused transfer: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after refused transfer = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_WorkspaceNotBound(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.failOnAdminMutation(t, "unbound workspace should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Workspace isn't bound") || !strings.Contains(reply, "/qurl setup") {
+		t.Fatalf("reply missing workspace-not-bound setup hint: %q", reply)
+	}
+}
+
+func TestHandleAdminTransferOwnership_LegacyOwnerIDRequiresSetupRefresh(t *testing.T) {
+	const legacyOwnerID = "auth0|legacy-owner"
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, legacyOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "legacy owner_id should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(context.Context, string, string, string) (bool, error) {
+		t.Fatal("SlackUserLookup should not run for legacy owner_id")
+		return false, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "legacy workspace ownership record") || !strings.Contains(reply, "/qurl setup") {
+		t.Fatalf("reply missing legacy-owner setup hint: %q", reply)
+	}
+	if strings.Contains(reply, legacyOwnerID) || strings.Contains(reply, "owner-only") {
+		t.Fatalf("reply leaked legacy owner or used generic owner-only copy: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after legacy owner_id: %v", err)
+	}
+	if ownerID != legacyOwnerID {
+		t.Fatalf("owner_id changed after legacy owner_id refusal = %q, want %q", ownerID, legacyOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_BadTargetRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "bad target should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership someone", testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "invalid @user mention") {
+		t.Fatalf("reply missing bad-target parser surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after bad target: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after bad target = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_UnknownTargetRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "unknown target should fail before TransferOwnership")
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, nil
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "couldn't verify <@"+testTargetUserID+"> as an active Slack user visible to this app") {
+		t.Fatalf("reply missing unknown-target surface: %q", reply)
+	}
+	if logs := logBuf.String(); !strings.Contains(logs, "target user lookup rejected target") || !strings.Contains(logs, testTargetUserID) {
+		t.Fatalf("rejected target log missing detail: %q", logs)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after unknown target: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after unknown target = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_LookupTransientErrorRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "transient target lookup error should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, errors.New("slack temporary failure")
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Retry in a moment") {
+		t.Fatalf("reply missing transient lookup surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after transient target lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after transient target lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_MissingUsersReadScopeRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "missing users:read should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, ErrSlackMissingScope
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Reinstall the Slack app") || !strings.Contains(reply, "users:read") {
+		t.Fatalf("reply missing reinstall/users:read surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after missing-scope target lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after missing-scope target lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestHandleAdminTransferOwnership_MissingSlackBotTokenRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	ts.failOnAdminMutation(t, "missing Slack bot token should fail before TransferOwnership")
+
+	h := newAdminTestHandler(t, ts)
+	h.cfg.SlackUserLookup = func(_ context.Context, _, _, userID string) (bool, error) {
+		if userID != testTargetUserID {
+			t.Fatalf("SlackUserLookup userID = %q, want %q", userID, testTargetUserID)
+		}
+		return false, auth.ErrSlackBotTokenNotConfigured
+	}
+	inv := newAdminSlashInvoker(t, h)
+
+	_, reply := inv.invokeAdmin("transfer-ownership "+testTargetMention, testAdminTeamID, testAdminOwnerID)
+	if !strings.Contains(reply, "Reinstall the Slack app") || strings.Contains(reply, "Retry in a moment") {
+		t.Fatalf("reply missing reinstall/not-transient surface: %q", reply)
+	}
+	ownerID, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	if err != nil {
+		t.Fatalf("ListAdmins after missing-token target lookup: %v", err)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after missing-token target lookup = %q, want %q", ownerID, testAdminOwnerID)
+	}
+}
+
+func TestTransferOwnership_BadTargetShapeRejected(t *testing.T) {
+	ts := newAdminTestServers(t)
+	ts.seedWorkspace(t, testAdminTeamID, testAdminOwnerID, testAdminOwnerID, testWorkspaceConfiguredAt)
+	store := newStoreFromFake(t, ts.ddb, ts.tableNames, nil)
+
+	err := store.TransferOwnership(context.Background(), testAdminTeamID, testAdminOwnerID, "not-a-slack-user")
+	if err == nil {
+		t.Fatal("TransferOwnership accepted a shape-bad target")
+	}
+	ownerID, _, listErr := store.ListAdmins(context.Background(), testAdminTeamID)
+	if listErr != nil {
+		t.Fatalf("ListAdmins after bad target: %v", listErr)
+	}
+	if ownerID != testAdminOwnerID {
+		t.Fatalf("owner_id changed after store bad target = %q, want %q", ownerID, testAdminOwnerID)
 	}
 }
 
@@ -636,7 +1023,7 @@ func TestHandleAdmin_LegacyAdminPrefixRedirects(t *testing.T) {
 			t.Errorf("%q: reply missing the prefix-deprecation redirect: %q", text, reply)
 		}
 		// The redirect names the flat verbs so the user learns the new grammar.
-		for _, want := range []string{"add @user", "remove @user", "admins", "revoke $<id>"} {
+		for _, want := range []string{adminVerbAdd + " @user", adminVerbRemove + " @user", adminVerbTransferOwnership + " @user", testAdminListCmd, string(SubcmdRevoke) + " $<id>"} {
 			if !strings.Contains(reply, want) {
 				t.Errorf("%q: redirect missing flat verb %q: %q", text, want, reply)
 			}
@@ -654,9 +1041,11 @@ func TestHandleAdmin_AdminStoreUnconfigured(t *testing.T) {
 	// admin dispatch hits the nil-guard.
 
 	inv := newAdminSlashInvoker(t, h)
-	_, reply := inv.invokeAdmin(testAdminListCmd, testAdminTeamID, testAdminUserID)
-	if !strings.Contains(reply, "not configured") {
-		t.Errorf("reply missing not-configured surface: %q", reply)
+	for _, text := range []string{testAdminListCmd, "transfer-ownership " + testTargetMention} {
+		_, reply := inv.invokeAdmin(text, testAdminTeamID, testAdminUserID)
+		if !strings.Contains(reply, "not configured") {
+			t.Errorf("%q: reply missing not-configured surface: %q", text, reply)
+		}
 	}
 }
 
@@ -718,6 +1107,7 @@ func TestAdminHelpReflectsFlatVerbs(t *testing.T) {
 	for _, want := range []string{
 		"/qurl-admin add @user",
 		"/qurl-admin remove @user",
+		"/qurl-admin transfer-ownership @user",
 		"/qurl-admin admins",
 		"/qurl-admin revoke $<id>",
 		"/qurl-admin set-display-name $<id>",
@@ -820,15 +1210,12 @@ func TestHandleSlashCommand_AdminOvermatchRejected(t *testing.T) {
 	}
 }
 
-// TestLooksLikeSlackUserID_MatchesUserMentionPattern pins the bounds
-// contract between the handler-side `looksLikeSlackUserID` defensive
-// guard and the parser-side `userMentionPattern`. Both gates have to
-// agree: a value rejected by the parser (write path) must also be
-// rejected by the handler (read path), otherwise an admin write
-// stops at parse time but the corresponding render breaks out of
-// the mention surface. Drift in either direction is silent without
-// this fence.
-func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
+// TestSlackDataUserIDShape_MatchesUserMentionPattern pins the bounds
+// contract between the store-owned Slack-ID shape check and the parser-side
+// userMentionPattern. Both gates have to agree: a value rejected by the parser
+// (write path) must also be rejected before read-side mrkdwn mention rendering.
+// Drift in either direction is silent without this fence.
+func TestSlackDataUserIDShape_MatchesUserMentionPattern(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -847,10 +1234,10 @@ func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handlerOK := looksLikeSlackUserID(tc.id)
+			storeOK := slackdata.LooksLikeSlackUserID(tc.id)
 			parserOK := userMentionPattern.MatchString("<@" + tc.id + ">")
-			if handlerOK != parserOK {
-				t.Errorf("drift on %q: looksLikeSlackUserID=%v, userMentionPattern=%v", tc.id, handlerOK, parserOK)
+			if storeOK != parserOK {
+				t.Errorf("drift on %q: LooksLikeSlackUserID=%v, userMentionPattern=%v", tc.id, storeOK, parserOK)
 			}
 		})
 	}
@@ -868,7 +1255,7 @@ func TestLooksLikeSlackUserID_MatchesUserMentionPattern(t *testing.T) {
 func TestHandleSetup_OwnerGate(t *testing.T) {
 	const (
 		// Use the test-suite constants from admin_test_helpers_test.go.
-		owner    = testAdminOwnerID // UOWNER001 (matches looksLikeSlackUserID).
+		owner    = testAdminOwnerID // UOWNER001 (matches slackdata.LooksLikeSlackUserID).
 		stranger = "USTRANGER000"   // Different Slack user — non-owner caller.
 		team     = testAdminTeamID  // T_team
 	)
