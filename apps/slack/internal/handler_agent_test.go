@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -1139,6 +1140,23 @@ func TestLoadAgentThreadHistory_DropsIncompleteTail(t *testing.T) {
 	}
 }
 
+func TestLoadAgentThreadHistory_BlockOnlyOwnReplyMarksThreadJoined(t *testing.T) {
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{{AppID: "A1", TS: "100.1"}}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "current")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = "100.2"
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined || len(history) != 0 {
+		t.Fatalf("block-only qURL reply: history=%#v joined=%v err=%v", history, joined, err)
+	}
+}
+
 func TestAgentHistoryOldestTS(t *testing.T) {
 	if got := agentHistoryOldestTS("1800.123456"); got != "0.000000" {
 		t.Fatalf("oldest = %q, want 0.000000", got)
@@ -1146,8 +1164,11 @@ func TestAgentHistoryOldestTS(t *testing.T) {
 	if got := agentHistoryOldestTS("3600.123456"); got != "1800.000000" {
 		t.Fatalf("oldest = %q, want 1800.000000", got)
 	}
-	if got := agentHistoryOldestTS("invalid"); got != "" {
-		t.Fatalf("invalid oldest = %q, want empty", got)
+	before := time.Now().Add(-agentHistoryWindow).Unix()
+	got, err := strconv.ParseInt(strings.TrimSuffix(agentHistoryOldestTS("invalid"), ".000000"), 10, 64)
+	after := time.Now().Add(-agentHistoryWindow).Unix()
+	if err != nil || got < before || got > after {
+		t.Fatalf("invalid oldest = %d err=%v, want current time minus window in [%d,%d]", got, err, before, after)
 	}
 }
 

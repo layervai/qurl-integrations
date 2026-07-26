@@ -293,6 +293,8 @@ const (
 	// Slack recommends no more than 200 messages per conversations.replies
 	// page for Marketplace apps. The page cap bounds one agent turn even if a
 	// pathological thread has far more recent traffic than the model can use.
+	// Hitting the cap fails closed instead of silently giving the model partial,
+	// stale context.
 	agentThreadHistoryPageLimit = 200
 	maxAgentThreadHistoryPages  = 5
 	// A 200-message history response can legitimately exceed the shared 64 KiB

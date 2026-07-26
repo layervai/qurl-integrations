@@ -785,16 +785,20 @@ func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnv
 		if msg.TS == env.Event.TS {
 			continue
 		}
+		_, ownUser := botUsers[msg.UserID]
+		ownReply := (msg.AppID != "" && msg.AppID == env.APIAppID) ||
+			(msg.BotID != "" && ownUser)
+		if ownReply {
+			// A block-only qURL response still proves this is an agent thread
+			// even when Slack supplies no top-level text to rebuild as context.
+			joined = true
+		}
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			continue
 		}
-		_, ownUser := botUsers[msg.UserID]
-		ownReply := msg.AppID != "" && msg.AppID == env.APIAppID ||
-			msg.BotID != "" && ownUser
 		switch {
 		case ownReply:
-			joined = true
 			visible = appendVisibleAgentMessage(visible, "assistant", text)
 			lastAssistant = len(visible) - 1
 		case msg.BotID == "" && msg.UserID != "":
@@ -819,6 +823,9 @@ func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnv
 
 func appendVisibleAgentMessage(history []agent.Message, role, text string) []agent.Message {
 	if n := len(history); n > 0 && history[n-1].Role == role {
+		// Slack threads can contain adjacent messages from different people.
+		// Agent context is intentionally role-based and does not retain user
+		// attribution, so adjacent human messages become one user turn.
 		history[n-1].Text += "\n" + text
 		return history
 	}
@@ -832,7 +839,9 @@ func agentHistoryOldestTS(currentTS string) string {
 	}
 	unixSeconds, err := strconv.ParseInt(seconds, 10, 64)
 	if err != nil {
-		return ""
+		// Signed Slack events carry valid timestamps. Preserve the time-bound
+		// invariant if a malformed value still reaches this seam.
+		unixSeconds = time.Now().Unix()
 	}
 	oldest := unixSeconds - int64(agentHistoryWindow/time.Second)
 	if oldest < 0 {
