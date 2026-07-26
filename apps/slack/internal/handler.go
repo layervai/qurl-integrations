@@ -412,9 +412,17 @@ type Config struct {
 	// factory. Nil disables conversation mode.
 	AgentLLM agent.LLM
 
-	// AgentStore persists per-thread conversation history and Slack event-id
-	// dedupe. Nil disables conversation mode.
+	// AgentStore persists metadata-only conversation state: Slack event dedupe,
+	// pending confirmations, pane context, rate counters, and audit entries. Slack
+	// message content is reconstructed from Slack in real time instead of stored.
+	// Nil disables conversation mode.
 	AgentStore *slackdata.AgentStore
+
+	// AgentThreadHistory reads the current Slack thread via conversations.replies.
+	// Nil keeps direct turns single-turn and channel follow-ups fail-closed, which is
+	// useful in tests; production wires this so conversation continuity remains
+	// zero-copy.
+	AgentThreadHistory AgentThreadHistoryFunc
 
 	// PostMessage posts a chat.postMessage reply (threaded on threadTS) using
 	// the per-workspace bot token, the same token seam as OpenView/PostDM.
@@ -673,6 +681,22 @@ type ConversationInfo struct {
 // resolution). It returns an error on a missing scope, unknown conversation, or
 // transport/decode failure; callers choose whether that is best-effort or fail-closed.
 type ResolveConversationInfoFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (ConversationInfo, error)
+
+// AgentThreadMessage is the narrow Slack message slice needed to rebuild model
+// context in memory. AppID and UserID identify this app's own replies; BotID lets
+// the handler reject messages from other bots.
+type AgentThreadMessage struct {
+	AppID  string
+	BotID  string
+	UserID string
+	Text   string
+	TS     string
+}
+
+// AgentThreadHistoryFunc retrieves a thread from Slack in real time. oldestTS
+// bounds the request to the same recent-context window the agent previously used;
+// implementations must return messages oldest-first.
+type AgentThreadHistoryFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]AgentThreadMessage, error)
 
 // ChannelMembershipFunc reports whether userID is a member of channelID via
 // conversations.members on the per-workspace bot token (enterpriseID for Grid token

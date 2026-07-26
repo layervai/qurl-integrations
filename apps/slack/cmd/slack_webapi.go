@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	neturl "net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -268,6 +269,7 @@ const (
 const slackConversationsInfoURL = "https://slack.com/api/conversations.info"
 const slackConversationsMembersURL = "https://slack.com/api/conversations.members"
 const slackConversationsOpenURL = "https://slack.com/api/conversations.open"
+const slackConversationsRepliesURL = "https://slack.com/api/conversations.replies"
 const slackUsersInfoURL = "https://slack.com/api/users.info"
 
 const (
@@ -288,17 +290,30 @@ const (
 )
 
 const (
+	// Slack recommends no more than 200 messages per conversations.replies
+	// page for Marketplace apps. The page cap bounds one agent turn even if a
+	// pathological thread has far more recent traffic than the model can use.
+	agentThreadHistoryPageLimit = 200
+	maxAgentThreadHistoryPages  = 5
+	// A 200-message history response can legitimately exceed the shared 64 KiB
+	// write-response bound. Keep reads finite while leaving room for Slack's
+	// per-message text limits and response metadata.
+	slackAgentThreadHistoryResponseBodyLimit = 512 * 1024
+)
+
+const (
 	slackAssistantSetTitleURL            = "https://slack.com/api/assistant.threads.setTitle"
 	slackAssistantSetSuggestedPromptsURL = "https://slack.com/api/assistant.threads.setSuggestedPrompts"
 	slackAssistantSetStatusURL           = "https://slack.com/api/assistant.threads.setStatus"
 )
 
 // slackWebAPITimeout bounds each request made by the shared Slack Web API
-// client (chat.postMessage, users.info, reactions, assistant threads, etc.).
+// client (chat.postMessage, conversations.replies, users.info, reactions,
+// assistant threads, etc.).
 // For conversation-mode posts this 4s client timeout is the BINDING deadline:
 // the delivery worker's agentDeliveryBudget (15s, handler_agent.go) is a looser
-// OUTER envelope spanning the transcript save plus the post, so the 4s timeout
-// fires first on a stuck request. Unlike views.open there is no short trigger
+// OUTER envelope around the post, so the 4s timeout fires first on a stuck
+// request. Unlike views.open there is no short trigger
 // window to race, so 4s leaves comfortable headroom for one round-trip while
 // still freeing the worker well inside its budget. The Grid fallback does NOT
 // add a second round-trip: it retries only on ErrSlackBotTokenNotConfigured,
@@ -969,6 +984,141 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 		}
 		return get(ctx, enterpriseID, channelID)
 	}
+}
+
+// newSlackAgentThreadHistoryFuncWithTokenLookup builds the zero-copy
+// conversations.replies seam used to reconstruct recent agent context directly
+// from Slack. It uses the same workspace-token and Enterprise Grid fallback as
+// the other read seams and returns messages oldest-first.
+func newSlackAgentThreadHistoryFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, conversationsRepliesURL string, httpClient *http.Client) internal.AgentThreadHistoryFunc {
+	if httpClient == nil {
+		httpClient = defaultSlackWebAPIClient()
+	}
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		userAgent = defaultSlackAPIUserAgent
+	}
+	read := func(ctx context.Context, ownerID, channelID, threadTS, oldestTS string) ([]internal.AgentThreadMessage, error) {
+		token, err := lookup(ctx, ownerID)
+		if err != nil {
+			return nil, fmt.Errorf("conversations.replies token lookup: %w", err)
+		}
+		if token = strings.TrimSpace(token); token == "" {
+			return nil, errors.New("conversations.replies token lookup: empty token")
+		}
+		return fetchSlackAgentThreadHistory(ctx, httpClient, conversationsRepliesURL, userAgent, token, channelID, threadTS, oldestTS)
+	}
+	return func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]internal.AgentThreadMessage, error) {
+		messages, err := read(ctx, teamID, channelID, threadTS, oldestTS)
+		if err == nil || !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
+			return messages, err
+		}
+		if enterpriseID == "" || enterpriseID == teamID {
+			return messages, err
+		}
+		return read(ctx, enterpriseID, channelID, threadTS, oldestTS)
+	}
+}
+
+func fetchSlackAgentThreadHistory(ctx context.Context, httpClient *http.Client, endpoint, userAgent, token, channelID, threadTS, oldestTS string) ([]internal.AgentThreadMessage, error) {
+	var messages []internal.AgentThreadMessage
+	cursor := ""
+	for range maxAgentThreadHistoryPages {
+		page, err := fetchSlackAgentThreadHistoryPage(ctx, httpClient, endpoint, userAgent, token, channelID, threadTS, oldestTS, cursor)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, page.messages...)
+		cursor = page.nextCursor
+		if cursor == "" {
+			return messages, nil
+		}
+	}
+	return nil, fmt.Errorf("conversations.replies exceeded %d pages", maxAgentThreadHistoryPages)
+}
+
+type slackAgentThreadHistoryPage struct {
+	messages   []internal.AgentThreadMessage
+	nextCursor string
+}
+
+func fetchSlackAgentThreadHistoryPage(ctx context.Context, httpClient *http.Client, endpoint, userAgent, token, channelID, threadTS, oldestTS, cursor string) (slackAgentThreadHistoryPage, error) {
+	requestURL, err := neturl.Parse(endpoint)
+	if err != nil {
+		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies URL parse: %w", err)
+	}
+	query := requestURL.Query()
+	query.Set("channel", channelID)
+	query.Set("ts", threadTS)
+	query.Set("limit", strconv.Itoa(agentThreadHistoryPageLimit))
+	if oldestTS != "" {
+		query.Set("oldest", oldestTS)
+	}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	requestURL.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), http.NoBody)
+	if err != nil {
+		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies request build: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies request: %w", err)
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, slackAgentThreadHistoryResponseBodyLimit+1))
+	if len(raw) > slackAgentThreadHistoryResponseBodyLimit {
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies response read: %w", readErr)
+	}
+	if len(raw) > slackAgentThreadHistoryResponseBodyLimit {
+		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies response exceeded %d bytes", slackAgentThreadHistoryResponseBodyLimit)
+	}
+	if err := slackWebAPIResponseStatusError("conversations.replies", resp.StatusCode, resp.Header, raw); err != nil {
+		return slackAgentThreadHistoryPage{}, err
+	}
+
+	var out struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Messages []struct {
+			AppID  string `json:"app_id"`
+			BotID  string `json:"bot_id"`
+			UserID string `json:"user"`
+			Text   string `json:"text"`
+			TS     string `json:"ts"`
+		} `json:"messages"`
+		ResponseMetadata struct {
+			NextCursor string `json:"next_cursor"`
+		} `json:"response_metadata"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies response JSON: %w", err)
+	}
+	if err := slackWebAPIResponseFieldsError("conversations.replies", nil, resp.Header, out.OK, out.Error); err != nil {
+		return slackAgentThreadHistoryPage{}, err
+	}
+
+	page := slackAgentThreadHistoryPage{
+		messages:   make([]internal.AgentThreadMessage, 0, len(out.Messages)),
+		nextCursor: strings.TrimSpace(out.ResponseMetadata.NextCursor),
+	}
+	for _, message := range out.Messages {
+		page.messages = append(page.messages, internal.AgentThreadMessage{
+			AppID:  message.AppID,
+			BotID:  message.BotID,
+			UserID: message.UserID,
+			Text:   message.Text,
+			TS:     message.TS,
+		})
+	}
+	return page, nil
 }
 
 type slackUserInfo struct {

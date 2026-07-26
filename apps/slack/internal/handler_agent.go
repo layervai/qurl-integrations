@@ -2,12 +2,10 @@ package internal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
 	"net/url"
-	"reflect"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -15,7 +13,6 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
 // Slack Events API event types this handler reacts to.
@@ -166,6 +163,7 @@ type slackEventEnvelope struct {
 type slackEventAuthorization struct {
 	EnterpriseID        string `json:"enterprise_id,omitempty"`
 	TeamID              string `json:"team_id,omitempty"`
+	UserID              string `json:"user_id,omitempty"`
 	IsEnterpriseInstall bool   `json:"is_enterprise_install,omitempty"`
 }
 
@@ -611,17 +609,16 @@ func (h *Handler) runAgentFollowupPipeline(log *slog.Logger, env *slackEventEnve
 // iteration cap and (later) per-user rate limiting bound how long a slot is held.
 const agentTurnTimeout = 90 * time.Second
 
-// agentFollowupGateTimeout bounds the pre-turn DDB reads for a channel follow-up
+// agentFollowupGateTimeout bounds the pre-turn Slack read for a channel follow-up
 // admission decision. A slow gate fails closed silently because the message may be
 // unrelated channel chatter; admitted turns get the larger agentTurnTimeout budget.
 const agentFollowupGateTimeout = 5 * time.Second
 
-// agentDeliveryBudget bounds each post-turn delivery step — the transcript save
-// and the reply post each derive their own context with this budget off
-// h.baseCtx, never the turn ctx. By delivery time the turn ctx may be spent or
-// canceled (the turn hit agentTurnTimeout), and a SaveConversation / PostMessage
-// on a dead ctx fails instantly — yet the dedupe write is already committed and
-// Slack won't retry, so the user would get silence. Deriving off baseCtx (like
+// agentDeliveryBudget bounds each post-turn delivery step. The reply post derives
+// its context with this budget off h.baseCtx, never the turn ctx. By delivery
+// time the turn ctx may be spent or canceled (the turn hit agentTurnTimeout), and
+// a PostMessage on a dead ctx fails instantly — yet the dedupe write is already
+// committed and Slack won't retry, so the user would get silence. Deriving off baseCtx (like
 // callerIsAdmin) lets delivery outlive the turn deadline; bounding it (not
 // baseCtx directly) keeps a wedged Slack/DDB call from pinning an async-pool slot
 // and lets SIGTERM still drain in-flight delivery.
@@ -683,17 +680,21 @@ func isAgentChannelFollowup(e *slackInnerEvent) bool {
 	return e.Type == slackEventTypeMessage && e.ChannelType != slackChannelTypeIM && e.ThreadTS != ""
 }
 
-// loadedHistory carries a thread's transcript plus its store version from the channel-
-// follow-up gate to the turn, so the accepted-follow-up path reads DynamoDB once (the
-// gate's read is reused as the turn's load) instead of twice. A nil *loadedHistory means
-// "not preloaded" — the @mention/DM path skips the gate and loads at the turn. Reusing the
-// gate's read snapshots version slightly earlier (before dedupe/ack), so the read→save
-// window is marginally wider on this path; a concurrent save is then no worse than a
-// version conflict, which saveAgentHistory already resolves by reload-and-merge.
+// loadedHistory carries a thread's zero-copy Slack transcript from the channel-
+// follow-up gate to the turn, so the accepted path calls conversations.replies once.
+// A nil value means the direct @mention/DM path has not loaded Slack history yet.
 type loadedHistory struct {
 	history []agent.Message
-	version int64
 }
+
+// agentHistoryWindow preserves the previous 30-minute conversation-continuity
+// window without persisting Slack content. Each turn pulls that window directly
+// from Slack and keeps only the most recent completed exchanges in memory.
+const agentHistoryWindow = 30 * time.Minute
+
+// maxAgentHistoryMessages bounds model context reconstructed from Slack. At two
+// visible messages per ordinary exchange, 40 keeps roughly the last 20 exchanges.
+const maxAgentHistoryMessages = 40
 
 // admitAgentChannelFollowup performs the short pre-turn checks for a channel follow-up:
 // workspace toggle plus "is this already an agent thread?" transcript lookup. Accepted
@@ -710,49 +711,134 @@ func (h *Handler) admitAgentChannelFollowup(ctx context.Context, log *slog.Logge
 	return !dropped, pre
 }
 
-// agentChannelFollowupDropped reports whether this event is a channel thread reply
-// the agent should NOT answer: a reply with no readable transcript for the thread — one
-// it never joined, or joined but whose blob is empty or undecodable (loadAgentHistory
-// reports a corrupt blob as no history, deliberately, so it also fail-closed-drops here),
-// or one whose lookup errored. It returns dropped=false for non-follow-ups — @mentions
-// and DMs are always deliberate addresses. Called before dedupe/ack so a reply that isn't
-// ours consumes no dedupe marker and gets no 👀, and (when the lookup fails) we stay
-// SILENT rather than posting an error into what may be unrelated channel chatter. On an
-// ADMITTED follow-up it returns the loaded transcript so the turn reuses it instead of
-// re-reading — one DynamoDB read per accepted follow-up, not two. The firehose admission
-// load this read sits on is isolated to the short gate pool in runAgentFollowupPipeline.
-func (h *Handler) agentChannelFollowupDropped(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) (dropped bool, pre *loadedHistory) {
+// agentChannelFollowupDropped reports whether this event is a channel-thread reply
+// the agent should not answer. It pulls the live Slack thread and admits the reply
+// only when that thread already contains this app's own response. Called before
+// dedupe/ack so unrelated channel chatter stays silent and consumes no marker.
+func (h *Handler) agentChannelFollowupDropped(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, _ string) (dropped bool, pre *loadedHistory) {
 	if !isAgentChannelFollowup(&env.Event) {
 		return false, nil
 	}
-	history, version, err := h.loadAgentHistory(ctx, log, partition, agentEventThreadKey(env))
+	history, joined, err := h.loadAgentThreadHistory(ctx, env)
 	if err != nil {
 		log.Error("agent: thread-continuity lookup failed; dropping channel reply", "error", err)
 		return true, nil
 	}
-	if len(history) == 0 {
+	if !joined {
 		log.Debug("agent: channel reply outside an agent thread; ignoring")
 		return true, nil
 	}
-	return false, &loadedHistory{history: history, version: version}
+	return false, &loadedHistory{history: history}
 }
 
-// resolveTurnHistory returns the transcript for this turn: the follow-up gate's preloaded
-// read on an accepted follow-up (pre != nil — one DynamoDB read, not two), else a fresh
-// load for the @mention/DM path. On a load error it posts the generic reply — the dedupe
-// marker is already committed, so Slack won't retry and we own the reply rather than
-// leaving the @-mention silently unanswered (already logged in loadAgentHistory) — and
-// returns ok=false so the caller stops.
-func (h *Handler) resolveTurnHistory(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition, threadKey string, pre *loadedHistory) (history []agent.Message, version int64, ok bool) {
+// resolveTurnHistory returns live Slack context for this turn. A direct turn with
+// no configured history seam safely starts single-turn; production always wires
+// the seam. On a Slack read error, the already-deduped deliberate request gets a
+// generic reply rather than silence.
+func (h *Handler) resolveTurnHistory(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, pre *loadedHistory) (history []agent.Message, ok bool) {
 	if pre != nil {
-		return pre.history, pre.version, true
+		return pre.history, true
 	}
-	history, version, err := h.loadAgentHistory(ctx, log, partition, threadKey)
+	if h.cfg.AgentThreadHistory == nil {
+		return nil, true
+	}
+	history, _, err := h.loadAgentThreadHistory(ctx, env)
 	if err != nil {
+		log.Error("agent: live thread history lookup failed", "error", err)
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentErrorReply)
-		return nil, 0, false
+		return nil, false
 	}
-	return history, version, true
+	return history, true
+}
+
+// loadAgentThreadHistory reconstructs completed user/agent exchanges directly
+// from Slack. It never writes message content to LayerV storage. Messages from
+// other apps are excluded, the current inbound turn is excluded (Agent.Run adds
+// it), and any incomplete tail after the last qURL response is dropped so the
+// model always receives completed prior exchanges.
+func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnvelope) (history []agent.Message, joined bool, err error) {
+	if h.cfg.AgentThreadHistory == nil {
+		return nil, false, nil
+	}
+	raw, err := h.cfg.AgentThreadHistory(
+		ctx,
+		env.TeamID,
+		env.EnterpriseID,
+		env.Event.Channel,
+		agentEventRootTS(&env.Event),
+		agentHistoryOldestTS(env.Event.TS),
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	botUsers := make(map[string]struct{}, len(env.Authorizations))
+	for _, authz := range env.Authorizations {
+		if authz.UserID != "" {
+			botUsers[authz.UserID] = struct{}{}
+		}
+	}
+
+	visible := make([]agent.Message, 0, len(raw))
+	lastAssistant := -1
+	for _, msg := range raw {
+		if msg.TS == env.Event.TS {
+			continue
+		}
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			continue
+		}
+		_, ownUser := botUsers[msg.UserID]
+		ownReply := msg.AppID != "" && msg.AppID == env.APIAppID ||
+			msg.BotID != "" && ownUser
+		switch {
+		case ownReply:
+			joined = true
+			visible = appendVisibleAgentMessage(visible, "assistant", text)
+			lastAssistant = len(visible) - 1
+		case msg.BotID == "" && msg.UserID != "":
+			text = stripBotMention(text)
+			if text != "" {
+				visible = appendVisibleAgentMessage(visible, "user", text)
+			}
+		}
+	}
+	if lastAssistant < 0 {
+		return nil, joined, nil
+	}
+	visible = visible[:lastAssistant+1]
+	if len(visible) > maxAgentHistoryMessages {
+		visible = visible[len(visible)-maxAgentHistoryMessages:]
+	}
+	for len(visible) > 0 && visible[0].Role != "user" {
+		visible = visible[1:]
+	}
+	return visible, joined, nil
+}
+
+func appendVisibleAgentMessage(history []agent.Message, role, text string) []agent.Message {
+	if n := len(history); n > 0 && history[n-1].Role == role {
+		history[n-1].Text += "\n" + text
+		return history
+	}
+	return append(history, agent.Message{Role: role, Text: text})
+}
+
+func agentHistoryOldestTS(currentTS string) string {
+	seconds, _, ok := strings.Cut(currentTS, ".")
+	if !ok {
+		seconds = currentTS
+	}
+	unixSeconds, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil {
+		return ""
+	}
+	oldest := unixSeconds - int64(agentHistoryWindow/time.Second)
+	if oldest < 0 {
+		oldest = 0
+	}
+	return strconv.FormatInt(oldest, 10) + ".000000"
 }
 
 // botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
@@ -856,7 +942,8 @@ func agentEventDedupeKey(env *slackEventEnvelope) string {
 }
 
 // processAgentEvent runs one deliberate @mention/DM conversation turn on the async
-// pool: workspace gate, dedupe, load history, run the agent, persist, and post the reply.
+// pool: workspace gate, dedupe, reconstruct live Slack history, run the agent,
+// and post the reply.
 func (h *Handler) processAgentEvent(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) {
 	h.processAgentEventWithAdmission(ctx, log, env, "", nil, false)
 }
@@ -944,8 +1031,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		defer h.clearAgentThinkingStatus(log, env)
 	}
 
-	threadKey := agentEventThreadKey(env)
-	history, version, ok := h.resolveTurnHistory(ctx, log, env, partition, threadKey, pre)
+	history, ok := h.resolveTurnHistory(ctx, log, env, pre)
 	if !ok {
 		return
 	}
@@ -981,7 +1067,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
 	}
 	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
-	result, newHistory, err := a.Run(ctx, &tc, history, message)
+	result, _, err := a.Run(ctx, &tc, history, message)
 
 	if err != nil {
 		log.Error("agent: turn failed", "error", err)
@@ -1012,28 +1098,6 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		"cache_creation_tokens", result.Usage.CacheCreationInputTokens,
 	)
 
-	// Save before posting: the transcript must be durably consistent before the
-	// user can fire a follow-up turn against it. The post is the slower,
-	// user-visible step, so this trades a little reply latency for that ordering.
-	//
-	// a.Run returns the loaded `history` as an exact prefix of newHistory (it
-	// copies history, then appends this turn's messages — pinned by
-	// agent.TestRun_AppendsToPriorHistoryWithoutMutatingInput). So this turn's
-	// delta is the suffix; saveAgentHistory re-applies just it onto the winner's
-	// transcript if a concurrent turn won the save race. Verify that invariant at
-	// runtime (not just len(newHistory) >= len(history)): if a.Run ever stops being
-	// pure-append, leave delta nil so a conflict DROPS this turn rather than
-	// grafting a wrong suffix onto the winner — the silent corruption #666 exists to
-	// prevent. The first save still persists newHistory normally; only the
-	// conflict-merge is skipped.
-	var delta []agent.Message
-	if agentRunPreservedPrefix(history, newHistory) {
-		delta = newHistory[len(history):]
-	} else {
-		log.Error("agent: a.Run did not return loaded history as an exact prefix; conflict-merge disabled for this turn")
-	}
-	h.saveAgentHistory(log, partition, threadKey, newHistory, delta, version)
-
 	// A live stream delivers the reply itself (finalizeReply flushes + stops it), so the
 	// caller skips the post — the no-double-post invariant. It returns false when no stream
 	// opened (no deltas), when the stream broke mid-flight (the caller posts the full reply
@@ -1045,121 +1109,6 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// Deliver: an interactive confirm card for an executable proposal once the
 	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
 	h.deliverAgentResult(log, env, replyTS, &result)
-}
-
-// loadAgentHistory reads and decodes a thread's transcript. A decode error is
-// treated as an empty thread (start fresh) rather than a hard failure; the
-// loaded version is preserved either way so the next SaveConversation still
-// passes the optimistic-concurrency check (and a corrupt blob gets overwritten).
-func (h *Handler) loadAgentHistory(ctx context.Context, log *slog.Logger, partition, threadKey string) ([]agent.Message, int64, error) {
-	blob, version, err := h.cfg.AgentStore.LoadConversation(ctx, partition, threadKey)
-	if err != nil {
-		log.Error("agent: load conversation failed", "error", err)
-		return nil, 0, err
-	}
-	if len(blob) == 0 {
-		return nil, version, nil
-	}
-	var history []agent.Message
-	if err := json.Unmarshal(blob, &history); err != nil {
-		log.Warn("agent: corrupt conversation history; starting fresh", "error", err)
-		return nil, version, nil
-	}
-	return history, version, nil
-}
-
-// maxPersistedMessages bounds the transcript persisted per thread so a long
-// thread can't grow the DynamoDB item toward the 400KB limit (at which point the
-// save fails and the thread loses continuity). At ~2 messages per plain Q&A turn
-// and ~4 per tool-using turn, 40 messages is roughly the last 10–20 turns —
-// ample given the per-turn work cap; older turns are trimmed.
-const maxPersistedMessages = 40
-
-// maxPersistedBytes caps the serialized transcript well under DynamoDB's 400KB
-// item limit. The message-count cap alone doesn't bound bytes — a single large
-// tool_result could still bloat the item — so we also drop oldest turns until
-// the blob fits. (Read-only tool output is compact today; this matters more once
-// mutation tool_results land.)
-const maxPersistedBytes = 350 * 1024
-
-// agentRunPreservedPrefix reports whether newHistory begins with loaded
-// element-for-element — the exact-prefix invariant a.Run guarantees (it copies
-// loaded, then appends this turn's messages) and that the conflict-merge delta
-// (newHistory[len(loaded):]) depends on. The call site verifies this at runtime,
-// not just len(newHistory) >= len(loaded): a future a.Run that rewrote or
-// reordered earlier turns while netting longer (e.g. history compaction) would
-// pass a length check yet make the suffix a WRONG delta — grafting it onto a
-// concurrent winner's transcript is the silent corruption #666 prevents. Cheap:
-// runs once per turn (post-LLM), at most maxPersistedMessages comparisons.
-func agentRunPreservedPrefix(loaded, newHistory []agent.Message) bool {
-	if len(newHistory) < len(loaded) {
-		return false
-	}
-	for i := range loaded {
-		if !reflect.DeepEqual(loaded[i], newHistory[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// saveAgentHistory persists the updated transcript under optimistic concurrency,
-// trimmed to a bounded length and byte size. If a concurrent turn on the same
-// thread won the version race (ErrConversationConflict), it reloads the winner's
-// transcript, re-applies just this turn's delta on top, and retries exactly once,
-// so a parallel turn no longer silently drops this turn's reply from the thread.
-//
-// delta is this turn's appended suffix (the messages a.Run added on top of the
-// transcript loaded at turn start — computed at the call site). It always begins
-// with the user message a.Run prepends, the same clean boundary as any cross-turn
-// append, so grafting it onto the winner's (turn-end) transcript is well-formed by
-// the same construction that makes sequential turns well-formed. The grafted reply
-// was computed against the pre-conflict context, so it may be slightly stale
-// relative to the winner's turn — structurally valid, semantically best-effort,
-// and strictly better than dropping the turn.
-//
-// Persistence runs on its own context off h.baseCtx (see agentDeliveryBudget), not
-// the possibly-spent turn ctx. One reload+retry, not a loop: under sustained
-// contention the user can re-ask; an unbounded race would pin the worker.
-func (h *Handler) saveAgentHistory(log *slog.Logger, partition, threadKey string, updated, delta []agent.Message, version int64) {
-	ctx, cancel := context.WithTimeout(h.baseCtx, agentDeliveryBudget)
-	defer cancel()
-
-	if err := h.persistBoundedHistory(ctx, log, partition, threadKey, updated, version); !errors.Is(err, slackdata.ErrConversationConflict) {
-		return // saved, or a non-retryable failure already logged
-	}
-	// A concurrent turn advanced the stored version. Merge this turn's delta onto
-	// the winner's transcript so neither turn is lost, then retry exactly once.
-	if len(delta) == 0 {
-		// Nothing to re-apply: the turn appended nothing on top of the base, or the
-		// a.Run prefix invariant was violated (guarded at the call site). Drop,
-		// matching pre-merge behavior.
-		log.Info("agent: conversation version conflict; concurrent turn won, no delta to merge")
-		return
-	}
-	if len(delta[0].ToolResults) > 0 {
-		// Defense-in-depth for the merge seam: a.Run always begins this turn's delta
-		// with the user message it prepends (a clean turn boundary), never a
-		// tool_results message. If that ever stops holding (e.g. a.Run starts
-		// compacting history), grafting a delta that opens with tool_results onto the
-		// winner's transcript would leave an orphaned tool_result at the seam — drop
-		// rather than persist a malformed transcript that would poison every future
-		// turn on this thread. trimAgentHistory can't be relied on to repair this: a
-		// short merged transcript is never trimmed.
-		log.Warn("agent: conversation version conflict; delta head is a tool_results message, dropping turn")
-		return
-	}
-	reloaded, reVersion, ok := h.reloadForMerge(ctx, log, partition, threadKey)
-	if !ok {
-		log.Info("agent: conversation version conflict; reload for merge failed, dropping turn")
-		return
-	}
-	merged := make([]agent.Message, 0, len(reloaded)+len(delta))
-	merged = append(merged, reloaded...)
-	merged = append(merged, delta...)
-	if err := h.persistBoundedHistory(ctx, log, partition, threadKey, merged, reVersion); errors.Is(err, slackdata.ErrConversationConflict) {
-		log.Info("agent: conversation version conflict persisted again after one retry; dropping turn")
-	}
 }
 
 func (h *Handler) prepareAgentEventAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string, pre *loadedHistory, preadmitted bool) (string, *loadedHistory, bool) {
@@ -1186,102 +1135,6 @@ func (h *Handler) prepareAgentEventAdmission(ctx context.Context, log *slog.Logg
 		return partition, nil, false
 	}
 	return partition, loaded, true
-}
-
-// persistBoundedHistory trims history to the message-count and byte caps, marshals
-// it, and writes it at expectedVersion under optimistic concurrency. It returns
-// ErrConversationConflict (for the caller's retry decision) on a version clash; a
-// marshal failure or a non-conflict save error is logged here and returns nil —
-// nothing the caller can usefully retry.
-func (h *Handler) persistBoundedHistory(ctx context.Context, log *slog.Logger, partition, threadKey string, history []agent.Message, expectedVersion int64) error {
-	trimmed := trimAgentHistory(history, maxPersistedMessages)
-	blob, err := json.Marshal(trimmed)
-	if err != nil {
-		log.Error("agent: marshal conversation failed", "error", err)
-		return nil
-	}
-	// Byte guard: drop oldest turns (one per pass — trimAgentHistory cuts at a
-	// turn boundary) until the blob fits or only the latest turn remains. Break
-	// when a pass makes no progress: trimAgentHistory cuts only at a user-turn
-	// start, so a single turn whose own tool_result blows past the cap has no
-	// boundary below it and returns unchanged — without this guard the loop would
-	// spin forever (a tight CPU loop no context can interrupt). In that case we
-	// save oversized and let DDB reject + log rather than hang the worker.
-	for len(blob) > maxPersistedBytes && len(trimmed) > 1 {
-		next := trimAgentHistory(trimmed, len(trimmed)-1)
-		if len(next) == len(trimmed) {
-			break
-		}
-		trimmed = next
-		if blob, err = json.Marshal(trimmed); err != nil {
-			log.Error("agent: marshal conversation failed", "error", err)
-			return nil
-		}
-	}
-	switch err := h.cfg.AgentStore.SaveConversation(ctx, partition, threadKey, blob, expectedVersion); {
-	case errors.Is(err, slackdata.ErrConversationConflict):
-		return err
-	case err != nil:
-		log.Error("agent: save conversation failed", "error", err)
-		return nil
-	}
-	return nil
-}
-
-// reloadForMerge re-reads a thread's transcript for the conflict-retry merge.
-// Unlike loadAgentHistory (which treats a corrupt blob as an empty thread to be
-// overwritten), a hard load error OR a decode failure here returns ok=false: the
-// retry must not graft this turn's delta onto a garbage base, and overwriting the
-// winner's blob with only this turn's delta would lose the winner's turn. Both
-// cases drop, preserving whatever the winner stored. (The decode branch is nearly
-// unreachable — the winner wrote that blob with the same marshal path — so the
-// hard-load-error branch is the realistic one.)
-func (h *Handler) reloadForMerge(ctx context.Context, log *slog.Logger, partition, threadKey string) ([]agent.Message, int64, bool) {
-	blob, version, err := h.cfg.AgentStore.LoadConversation(ctx, partition, threadKey)
-	if err != nil {
-		log.Error("agent: reload conversation for merge failed", "error", err)
-		return nil, 0, false
-	}
-	if len(blob) == 0 {
-		return nil, version, true
-	}
-	var history []agent.Message
-	if err := json.Unmarshal(blob, &history); err != nil {
-		log.Warn("agent: reload conversation for merge: corrupt blob, dropping turn", "error", err)
-		return nil, 0, false
-	}
-	return history, version, true
-}
-
-// trimAgentHistory bounds the transcript to roughly the most recent maxMessages,
-// cutting only at the start of a user turn (a user message carrying text). That
-// guarantees the kept slice never begins with an orphaned tool_result or an
-// assistant tool_use whose result was trimmed away — both of which the model API
-// rejects. If the trim window holds no clean boundary (an unusually long single
-// turn), it falls back to the last turn start anywhere so the result is still
-// bounded; only a transcript with no user-text turn at all is returned as-is.
-func trimAgentHistory(msgs []agent.Message, maxMessages int) []agent.Message {
-	if len(msgs) <= maxMessages {
-		return msgs
-	}
-	for i := len(msgs) - maxMessages; i < len(msgs); i++ {
-		if isUserTurnStart(&msgs[i]) {
-			return msgs[i:]
-		}
-	}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if isUserTurnStart(&msgs[i]) {
-			return msgs[i:]
-		}
-	}
-	return msgs
-}
-
-// isUserTurnStart reports whether m begins a user turn — a user message with
-// text, as opposed to a user message carrying tool_results. "user" is the agent
-// package's wire role value.
-func isUserTurnStart(m *agent.Message) bool {
-	return m.Role == "user" && strings.TrimSpace(m.Text) != ""
 }
 
 // callerIsAdmin resolves the caller's admin status off the base context (a

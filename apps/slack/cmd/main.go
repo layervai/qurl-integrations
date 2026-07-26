@@ -246,6 +246,9 @@ func run() error {
 	// conversations.info metadata seam for surface-specific confirm decisions (notably
 	// refusing group-DM get links before minting until mpim delivery is proven safe).
 	agentResolveConversationInfo := newSlackResolveConversationInfoFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// conversations.replies seam for zero-copy agent continuity. Recent thread
+	// context is read from Slack for each turn and is never stored by LayerV.
+	agentThreadHistory := newSlackAgentThreadHistoryFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsRepliesURL, nil)
 	// Channel-name projection so the agent's system prompt can render "#general
 	// (C123)". Shares the same conversations.info closure as the confirm surface
 	// classifier; degrades to the bare channel id until the relevant
@@ -353,6 +356,7 @@ func run() error {
 		},
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
+		AgentThreadHistory:          agentThreadHistory,
 		PostDM:                      postDM,
 		PostMessage:                 postMessage,
 		PostEphemeral:               postEphemeral,
