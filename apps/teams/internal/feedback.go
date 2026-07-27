@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,14 +70,14 @@ func (p *WebhookFeedbackPoster) httpClient() *http.Client {
 func ValidateFeedbackWebhookURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", fmt.Errorf("feedback webhook url is empty")
+		return "", errors.New("feedback webhook url is empty")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("parse feedback webhook url: %w", err)
 	}
 	if !strings.EqualFold(u.Scheme, "https") || strings.TrimSpace(u.Host) == "" {
-		return "", fmt.Errorf("feedback webhook must be https")
+		return "", errors.New("feedback webhook must be https")
 	}
 	return u.Host, nil
 }

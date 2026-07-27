@@ -378,7 +378,7 @@ func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg *Config, accessTo
 	return false
 }
 
-func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg *Config, tenantID string) (keyPrefix string, reused bool, ok bool) {
+func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg *Config, tenantID string) (keyPrefix string, reused, ok bool) {
 	readCtx, cancel := context.WithTimeout(context.Background(), existingKeyTimeout)
 	defer cancel()
 	apiKey, err := cfg.Provider.APIKey(readCtx, teamsWorkspaceID(tenantID))

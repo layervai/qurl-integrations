@@ -218,7 +218,7 @@ func (c *ConnectorClient) appToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("decode bot token response: %w", err)
 	}
 	if out.AccessToken == "" || out.ExpiresIn <= 0 {
-		return "", fmt.Errorf("bot token response missing access token or expiry")
+		return "", errors.New("bot token response missing access token or expiry")
 	}
 	c.mu.Lock()
 	c.accessToken = out.AccessToken

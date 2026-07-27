@@ -136,12 +136,12 @@ func replayWindowHoursOrDefault(configuredHours, defaultHours int) int {
 }
 
 // RegisterRoutes installs the Teams OAuth start and callback handlers.
-func RegisterRoutes(mux *http.ServeMux, cfg Config) {
+func RegisterRoutes(mux *http.ServeMux, cfg *Config) {
 	if err := cfg.Validate(); err != nil {
 		panic("oauth.RegisterRoutes: " + err.Error())
 	}
 	mux.Handle(StartPath, http.TimeoutHandler(Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
-	mux.Handle(callbackPath, http.TimeoutHandler(Callback(&cfg), oauthHandlerTimeout, "oauth/callback timed out"))
+	mux.Handle(callbackPath, http.TimeoutHandler(Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
 }
 
 // Validate checks Config for internally inconsistent wiring.
@@ -158,7 +158,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-func authorizeURL(cfg Config, state string, verified VerifiedState) string {
+func authorizeURL(cfg *Config, state string, verified VerifiedState) string {
 	u := url.URL{
 		Scheme: "https",
 		Host:   cfg.Auth0Domain,

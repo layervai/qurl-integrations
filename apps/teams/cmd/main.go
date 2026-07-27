@@ -136,7 +136,7 @@ func run() error {
 	health := newHealthHandler()
 	mux.Handle("/health", health)
 	if oauthEnabled {
-		oauth.RegisterRoutes(mux, oauthCfg)
+		oauth.RegisterRoutes(mux, &oauthCfg)
 	} else {
 		slog.Warn("Teams OAuth routes not registered because required env vars are missing")
 	}

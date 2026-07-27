@@ -31,7 +31,7 @@ func TestStartHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintState: %v", err)
 	}
-	h := Start(cfg)
+	h := Start(&cfg)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, StartPath+"?state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -81,7 +81,7 @@ func TestStartEmailSetupUsesLoginHintAndOptionalConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintStateWithEmail: %v", err)
 	}
-	h := Start(cfg)
+	h := Start(&cfg)
 	req := httptest.NewRequest(http.MethodGet, StartPath+"?state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -97,7 +97,7 @@ func TestStartEmailSetupUsesLoginHintAndOptionalConnection(t *testing.T) {
 	}
 
 	cfg.Auth0EmailConnection = "Username-Password-Authentication"
-	h = Start(cfg)
+	h = Start(&cfg)
 	rec = httptest.NewRecorder()
 	h(rec, req)
 	u, err = url.Parse(rec.Header().Get("Location"))
@@ -123,7 +123,7 @@ func TestStartRejectsBadRequests(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			Start(cfg)(rec, httptest.NewRequest(tc.method, tc.target, http.NoBody))
+			Start(&cfg)(rec, httptest.NewRequest(tc.method, tc.target, http.NoBody))
 			assertOAuthErrorPage(t, rec, tc.heading)
 		})
 	}
@@ -133,7 +133,7 @@ func TestStartRejectsBadRequests(t *testing.T) {
 	}
 	tampered := state[:len(state)-1] + "A"
 	rec := httptest.NewRecorder()
-	Start(cfg)(rec, httptest.NewRequest(http.MethodGet, StartPath+"?state="+url.QueryEscape(tampered), http.NoBody))
+	Start(&cfg)(rec, httptest.NewRequest(http.MethodGet, StartPath+"?state="+url.QueryEscape(tampered), http.NoBody))
 	assertOAuthErrorPage(t, rec, "Setup link is invalid or expired")
 }
 
@@ -141,7 +141,7 @@ func TestStartRejectsShortSecret(t *testing.T) {
 	cfg := newStartCfg()
 	cfg.OAuthStateSecret = []byte("short")
 	rec := httptest.NewRecorder()
-	Start(cfg)(rec, httptest.NewRequest(http.MethodGet, StartPath+"?state=anything", http.NoBody))
+	Start(&cfg)(rec, httptest.NewRequest(http.MethodGet, StartPath+"?state=anything", http.NoBody))
 	assertOAuthErrorPage(t, rec, "qURL setup is unavailable")
 }
 
@@ -175,7 +175,7 @@ func TestOAuthHelperFunctions(t *testing.T) {
 
 func TestAuthorizeURLAndAPIKeyScopesAgree(t *testing.T) {
 	cfg := newStartCfg()
-	authURL := authorizeURL(cfg, "state", VerifiedState{Email: testAdminEmail})
+	authURL := authorizeURL(&cfg, "state", VerifiedState{Email: testAdminEmail})
 	u, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatalf("parse authorize URL: %v", err)
