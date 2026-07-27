@@ -141,6 +141,7 @@ func run() error {
 		slog.Warn("Teams OAuth routes not registered because required env vars are missing")
 	}
 
+	skipBotAuth := readBoolEnv(envTeamsSkipBotAuth)
 	handler := teamsbot.NewHandler(&teamsbot.HandlerConfig{
 		BaseContext:  handlerCtx,
 		QURLEndpoint: qurlEndpoint,
@@ -154,7 +155,7 @@ func run() error {
 		Setup:       setupCfg,
 		Feedback:    feedback,
 		TunnelImage: tunnelImage,
-		SkipBotAuth: readBoolEnv(envTeamsSkipBotAuth),
+		SkipBotAuth: skipBotAuth,
 		UserAgent:   userAgent,
 	})
 	mux.Handle("/teams/messages", handler)
@@ -195,8 +196,11 @@ func run() error {
 		}
 	}()
 
+	if skipBotAuth {
+		slog.Warn("BOT FRAMEWORK AUTH DISABLED — dev/test only; do not use in production")
+	}
 	//nolint:gosec // Startup logging here reports only fixed process configuration, not request-derived input.
-	slog.Info("teams bot listening", "addr", listenAddr, "oauth_enabled", oauthEnabled)
+	slog.Info("teams bot listening", "addr", listenAddr, "oauth_enabled", oauthEnabled, "skip_bot_auth", skipBotAuth)
 	serveErr := server.Serve(ln)
 
 	runShutdown(0)

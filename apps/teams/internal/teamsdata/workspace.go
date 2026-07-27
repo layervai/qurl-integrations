@@ -245,20 +245,29 @@ func (s *Store) SavePersonalConversationRef(ctx context.Context, tenantID, actor
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SavePersonalConversationRef: marshal personal reference failed", Detail: err.Error()}
 	}
 	now := s.nowOrDefault().UTC()
+	// Use if_not_exists to initialize the personal_conversation_refs map on first
+	// write. DynamoDB does not auto-create intermediate map attributes, so without
+	// this the first SavePersonalConversationRef call for a tenant would fail with
+	// "The document path provided in the update expression is invalid for update".
 	_, err = s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTenantID: stringAttr(tenantID),
 		},
-		UpdateExpression:    aws.String("SET " + attrPersonalConversationRefs + ".#actor = :ref, " + attrUpdatedAt + " = :now, " + attrUpdatedAtNano + " = :now_nano"),
+		UpdateExpression: aws.String(
+			"SET " + attrPersonalConversationRefs + " = if_not_exists(" + attrPersonalConversationRefs + ", :empty_map), " +
+				attrPersonalConversationRefs + ".#actor = :ref, " +
+				attrUpdatedAt + " = :now, " +
+				attrUpdatedAtNano + " = :now_nano"),
 		ConditionExpression: aws.String("attribute_exists(" + attrTenantID + ")"),
 		ExpressionAttributeNames: map[string]string{
 			"#actor": actorID,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":ref":      stringAttr(string(raw)),
-			":now":      stringAttr(now.Format(time.RFC3339)),
-			":now_nano": unixNanoAttr(now),
+			":empty_map": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{}},
+			":ref":       stringAttr(string(raw)),
+			":now":       stringAttr(now.Format(time.RFC3339)),
+			":now_nano":  unixNanoAttr(now),
 		},
 	})
 	if err != nil {

@@ -95,18 +95,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid activity payload", http.StatusBadRequest)
 			return
 		}
-		if h.cfg.TokenAuth != nil {
-			if err := h.cfg.TokenAuth.Validate(r.Context(), token, activity.ServiceURL); err != nil {
-				serviceURL := strings.TrimSpace(activity.ServiceURL)
-				reason := classifyTokenValidationError(err)
-				//nolint:gosec // Structured fields are reduced to constant classifications and length/presence metadata rather than raw request input.
-				slog.Warn("teams auth validation failed",
-					"reason", reason,
-					"service_url_present", serviceURL != "",
-					"service_url_len", len(serviceURL))
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if h.cfg.TokenAuth == nil {
+			// Fail closed: if bot auth is enabled but no validator is configured,
+			// reject all requests rather than silently accepting unvalidated tokens.
+			slog.Error("teams bot auth enabled but TokenAuth is nil — rejecting request")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if err := h.cfg.TokenAuth.Validate(r.Context(), token, activity.ServiceURL); err != nil {
+			serviceURL := strings.TrimSpace(activity.ServiceURL)
+			reason := classifyTokenValidationError(err)
+			//nolint:gosec // Structured fields are reduced to constant classifications and length/presence metadata rather than raw request input.
+			slog.Warn("teams auth validation failed",
+				"reason", reason,
+				"service_url_present", serviceURL != "",
+				"service_url_len", len(serviceURL))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		h.handleActivity(w, r.WithContext(r.Context()), &activity)
 		return
@@ -920,18 +925,19 @@ func parseTunnelArgs(args []string) (*TunnelInstallArgs, error) {
 		Port:        defaultTunnelPort,
 	}
 	for _, tok := range args[1:] {
+		lowerTok := strings.ToLower(tok)
 		switch {
-		case strings.HasPrefix(strings.ToLower(tok), "alias:"):
-			out.Alias, err = parseAliasToken(strings.TrimPrefix(tok, "alias:"))
-		case strings.HasPrefix(strings.ToLower(tok), "env:"):
-			out.Environment, err = normalizeTunnelEnvironment(strings.TrimPrefix(tok, "env:"))
-		case strings.HasPrefix(strings.ToLower(tok), "port:"):
-			out.Port, err = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(tok, "port:")))
+		case strings.HasPrefix(lowerTok, "alias:"):
+			out.Alias, err = parseAliasToken(tok[len("alias:"):])
+		case strings.HasPrefix(lowerTok, "env:"):
+			out.Environment, err = normalizeTunnelEnvironment(tok[len("env:"):])
+		case strings.HasPrefix(lowerTok, "port:"):
+			out.Port, err = strconv.Atoi(strings.TrimSpace(tok[len("port:"):]))
 			if err == nil && (out.Port <= 0 || out.Port > 65535) {
 				err = errors.New("port must be a TCP port from 1 to 65535")
 			}
-		case strings.HasPrefix(strings.ToLower(tok), "service:"):
-			out.Service = strings.TrimSpace(strings.TrimPrefix(tok, "service:"))
+		case strings.HasPrefix(lowerTok, "service:"):
+			out.Service = strings.TrimSpace(tok[len("service:"):])
 		default:
 			err = fmt.Errorf("unexpected connector option %q", tok)
 		}
