@@ -64,6 +64,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.Body != nil {
+		defer func() { _ = r.Body.Close() }()
+	}
 	if !h.cfg.SkipBotAuth {
 		token, err := bearerToken(r.Header.Get("Authorization"))
 		if err != nil {
@@ -86,7 +89,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.cfg.TokenAuth != nil {
 			if err := h.cfg.TokenAuth.Validate(r.Context(), token, activity.ServiceURL); err != nil {
-				slog.Warn("teams auth validation failed", "error", err)
+				slog.Warn("teams auth validation failed",
+					"reason", classifyTokenValidationError(err),
+					"service_url_present", strings.TrimSpace(activity.ServiceURL) != "",
+					"service_url_len", len(strings.TrimSpace(activity.ServiceURL)))
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -94,7 +100,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleActivity(w, r.WithContext(r.Context()), &activity)
 		return
 	}
-	defer r.Body.Close()
 	var activity Activity
 	if err := json.NewDecoder(io.LimitReader(r.Body, teamsBodyLimit)).Decode(&activity); err != nil {
 		http.Error(w, "invalid activity payload", http.StatusBadRequest)
@@ -149,7 +154,11 @@ func (h *Handler) processMessage(ctx context.Context, activity *Activity) error 
 	}
 	replyText, err := h.execute(ctx, activity, scope, cmd)
 	if err != nil {
-		slog.Warn("teams command failed", "error", err, "verb", cmd.Verb, "tenant_id", scope.TenantID)
+		slog.Warn("teams command failed",
+			"error_class", classifyTeamsCommandError(err),
+			"verb", safeTeamsVerb(cmd.Verb),
+			"tenant_id_present", strings.TrimSpace(scope.TenantID) != "",
+			"tenant_id_len", len(strings.TrimSpace(scope.TenantID)))
 		return h.reply(ctx, activity, teamsUserMessageForError(err))
 	}
 	if strings.TrimSpace(replyText) == "" {
@@ -400,58 +409,13 @@ func (h *Handler) handleProtectURL(ctx context.Context, qc *client.Client, scope
 	if len(args) == 0 {
 		return "Usage:\n- `protect-url url:https://internal.example.com as:$docs`\n- `protect-url $resource-id as:$docs`\n- `protect-url $docs`", nil
 	}
-	var (
-		resource *client.Resource
-		err      error
-		alias    string
-	)
-	for _, tok := range args[1:] {
-		if strings.HasPrefix(strings.ToLower(tok), "as:") {
-			alias, err = parseAliasToken(strings.TrimSpace(strings.TrimPrefix(tok, "as:")))
-			if err != nil {
-				return "", err
-			}
-		} else {
-			return "", fmt.Errorf("unexpected argument %q", tok)
-		}
+	alias, err := parseProtectURLAliasArgs(args[1:])
+	if err != nil {
+		return "", err
 	}
-	first := args[0]
-	switch {
-	case strings.HasPrefix(strings.ToLower(first), "url:"):
-		targetURL := strings.TrimSpace(first[len("url:"):])
-		if targetURL == "" {
-			return "", errors.New("protect-url requires a non-empty url: value")
-		}
-		if alias == "" {
-			return "", errors.New("protect-url url:<target> requires `as:$alias` in Teams")
-		}
-		resource, err = qc.CreateResource(ctx, &client.CreateResourceInput{
-			TargetURL:    targetURL,
-			Type:         client.ResourceTypeURL,
-			FindOrCreate: true,
-		})
-		if err != nil {
-			return "", mapClientError("protect url resource", err)
-		}
-	default:
-		token, err := parseLookupToken(first)
-		if err != nil {
-			return "", err
-		}
-		resource, err = h.resolveTenantResource(ctx, qc, token)
-		if err != nil {
-			return "", err
-		}
-		if alias == "" {
-			switch {
-			case resource.Alias != "":
-				alias = resource.Alias
-			case resource.Slug != "":
-				alias = resource.Slug
-			default:
-				return "", errors.New("protect-url needs `as:$alias` when the resource has no reusable alias")
-			}
-		}
+	resource, alias, err := h.resolveProtectURLResource(ctx, qc, args[0], alias)
+	if err != nil {
+		return "", err
 	}
 	if resource.Type != "" && resource.Type != client.ResourceTypeURL {
 		return "", errors.New("protect-url only works with URL resources")
@@ -465,6 +429,82 @@ func (h *Handler) handleProtectURL(ctx context.Context, qc *client.Client, scope
 		}
 	}
 	return fmt.Sprintf("URL resource `$%s` is now available in this channel as `$%s`.", resource.ResourceID, alias), nil
+}
+
+func parseProtectURLAliasArgs(args []string) (string, error) {
+	var alias string
+	for _, tok := range args {
+		tok = strings.TrimSpace(tok)
+		if len(tok) < len("as:") || !strings.EqualFold(tok[:len("as:")], "as:") {
+			return "", fmt.Errorf("unexpected argument %q", tok)
+		}
+		if alias != "" {
+			return "", fmt.Errorf("unexpected argument %q", tok)
+		}
+		parsedAlias, err := parseAliasToken(strings.TrimSpace(tok[len("as:"):]))
+		if err != nil {
+			return "", err
+		}
+		alias = parsedAlias
+	}
+	return alias, nil
+}
+
+func (h *Handler) resolveProtectURLResource(ctx context.Context, qc *client.Client, firstArg, alias string) (*client.Resource, string, error) {
+	if strings.HasPrefix(strings.ToLower(firstArg), "url:") {
+		return createProtectURLResource(ctx, qc, firstArg, alias)
+	}
+	return h.resolveExistingProtectURLResource(ctx, qc, firstArg, alias)
+}
+
+func createProtectURLResource(ctx context.Context, qc *client.Client, firstArg, alias string) (*client.Resource, string, error) {
+	targetURL := strings.TrimSpace(firstArg[len("url:"):])
+	if targetURL == "" {
+		return nil, "", errors.New("protect-url requires a non-empty url: value")
+	}
+	if alias == "" {
+		return nil, "", errors.New("protect-url url:<target> requires `as:$alias` in Teams")
+	}
+	resource, err := qc.CreateResource(ctx, &client.CreateResourceInput{
+		TargetURL:    targetURL,
+		Type:         client.ResourceTypeURL,
+		FindOrCreate: true,
+	})
+	if err != nil {
+		return nil, "", mapClientError("protect url resource", err)
+	}
+	return resource, alias, nil
+}
+
+func (h *Handler) resolveExistingProtectURLResource(ctx context.Context, qc *client.Client, firstArg, alias string) (*client.Resource, string, error) {
+	token, err := parseLookupToken(firstArg)
+	if err != nil {
+		return nil, "", err
+	}
+	resource, err := h.resolveTenantResource(ctx, qc, token)
+	if err != nil {
+		return nil, "", err
+	}
+	if alias == "" {
+		alias, err = defaultProtectURLAlias(resource)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return resource, alias, nil
+}
+
+func defaultProtectURLAlias(resource *client.Resource) (string, error) {
+	switch {
+	case resource == nil:
+		return "", errors.New("protect-url requires a valid URL resource")
+	case resource.Alias != "":
+		return resource.Alias, nil
+	case resource.Slug != "":
+		return resource.Slug, nil
+	default:
+		return "", errors.New("protect-url needs `as:$alias` when the resource has no reusable alias")
+	}
 }
 
 func (h *Handler) handleProtectConnector(ctx context.Context, qc *client.Client, scope scopeInfo, activity *Activity, args []string) (string, error) {
@@ -1111,4 +1151,73 @@ func teamsUserAgent(userAgent string) string {
 		return "qurl-teams/unknown"
 	}
 	return userAgent
+}
+
+func classifyTokenValidationError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "missing bearer token"):
+		return "missing_token"
+	case strings.Contains(msg, "serviceUrl claim mismatch"):
+		return "service_url_mismatch"
+	case strings.Contains(msg, "metadata"):
+		return "metadata_fetch"
+	case strings.Contains(msg, "jwks"):
+		return "jwks"
+	case strings.Contains(msg, "verify bot connector token"):
+		return "token_verify"
+	default:
+		return "other"
+	}
+}
+
+func classifyTeamsCommandError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	var userErr *userError
+	if errors.As(err, &userErr) {
+		return "user"
+	}
+	var systemErr *systemError
+	if errors.As(err, &systemErr) {
+		return "system"
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) {
+		return "client_api"
+	}
+	var storeErr *teamsdata.Error
+	if errors.As(err, &storeErr) {
+		return "teams_store"
+	}
+	return "other"
+}
+
+func safeTeamsVerb(verb string) string {
+	switch verb {
+	case verbHelp,
+		verbSetup,
+		verbGet,
+		verbList,
+		verbAliases,
+		verbProtectURL,
+		verbProtectConnector,
+		verbSetAlias,
+		verbUnsetAlias,
+		verbSetDisplayName,
+		verbUnsetDisplayName,
+		verbAdd,
+		verbRemove,
+		verbAdmins,
+		verbRevoke,
+		verbUninstall,
+		verbFeedback:
+		return verb
+	default:
+		return "unknown"
+	}
 }

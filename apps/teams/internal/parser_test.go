@@ -2,6 +2,8 @@ package internal
 
 import "testing"
 
+const testScopeLabelChannel = "channel"
+
 func TestNormalizeActivityTextReplacesMentionsAndStripsBotMention(t *testing.T) {
 	a := &Activity{
 		Text:      `<at>qurl</at> get $docs dm:true reason:"prod access" <div>ignored</div>`,
@@ -106,7 +108,7 @@ func TestDeriveScope(t *testing.T) {
 	}
 
 	channel := deriveScope(&Activity{
-		Conversation: ConversationAccount{ID: "conv-2", ConversationType: "channel"},
+		Conversation: ConversationAccount{ID: "conv-2", ConversationType: testScopeLabelChannel},
 		ChannelData: ChannelData{
 			Tenant: struct {
 				ID string `json:"id,omitempty"`
@@ -116,7 +118,7 @@ func TestDeriveScope(t *testing.T) {
 			}{ID: "channel-2"},
 		},
 	})
-	if !channel.Channel || channel.ScopeID != "channel-2" || channel.TenantID != "tenant-2" || channel.ScopeLabel != "channel" {
+	if !channel.Channel || channel.ScopeID != "channel-2" || channel.TenantID != "tenant-2" || channel.ScopeLabel != testScopeLabelChannel {
 		t.Fatalf("unexpected channel scope: %+v", channel)
 	}
 

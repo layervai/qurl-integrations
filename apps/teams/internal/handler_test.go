@@ -20,11 +20,17 @@ import (
 
 type ctxKey string
 
+const (
+	testResourcesPath       = "/v1/resources"
+	testWorkspaceTableName  = "workspaces"
+	testConversationChannel = "channel"
+)
+
 func TestHandleGetDMChecksPersonalConversationBeforeMint(t *testing.T) {
 	var createCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"data": []map[string]any{{
 					"resource_id": "r_live",
@@ -59,7 +65,7 @@ func TestHandleGetDMChecksPersonalConversationBeforeMint(t *testing.T) {
 						"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r_live"}},
 					},
 				}, nil
-			case "workspaces":
+			case testWorkspaceTableName:
 				return &dynamodb.GetItemOutput{}, nil
 			default:
 				t.Fatalf("unexpected table: %s", aws.ToString(params.TableName))
@@ -99,7 +105,7 @@ func TestHandleGetSetsAccessLimitsAndScopedIdempotencyKey(t *testing.T) {
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
+		case r.Method == http.MethodGet && r.URL.Path == testResourcesPath:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"data": []map[string]any{{
 					"resource_id": "r:live",
@@ -137,7 +143,7 @@ func TestHandleGetSetsAccessLimitsAndScopedIdempotencyKey(t *testing.T) {
 						"allowed_resource_ids": &ddbtypes.AttributeValueMemberSS{Value: []string{"r:live"}},
 					},
 				}, nil
-			case "workspaces":
+			case testWorkspaceTableName:
 				return &dynamodb.GetItemOutput{}, nil
 			default:
 				t.Fatalf("unexpected table: %s", aws.ToString(params.TableName))
@@ -188,7 +194,7 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 	var gotIdempotencyKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resources":
+		case r.Method == http.MethodPost && r.URL.Path == testResourcesPath:
 			writeJSON(t, w, http.StatusCreated, map[string]any{
 				"data": map[string]any{
 					"resource_id": "r_connector",
@@ -224,7 +230,7 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 	store := newTestTeamsStore(&stubDDBClient{
 		getItemFunc: func(_ context.Context, params *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 			switch aws.ToString(params.TableName) {
-			case "workspaces":
+			case testWorkspaceTableName:
 				if strings.Contains(aws.ToString(params.ProjectionExpression), "personal_conversation_refs") {
 					return &dynamodb.GetItemOutput{
 						Item: map[string]ddbtypes.AttributeValue{
@@ -297,7 +303,7 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 
 func TestListAllResourcesExcludesRevoked(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/resources" {
+		if r.Method != http.MethodGet || r.URL.Path != testResourcesPath {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		writeJSON(t, w, http.StatusOK, map[string]any{
@@ -395,7 +401,7 @@ func TestProcessMessageWithoutAdminStoreFailsClosed(t *testing.T) {
 		From: ChannelAccount{ID: "user-1"},
 		Conversation: ConversationAccount{
 			ID:               "conv-1",
-			ConversationType: "channel",
+			ConversationType: testConversationChannel,
 			TenantID:         "tenant-1",
 		},
 	}
@@ -431,7 +437,7 @@ func TestHandleActivityAcknowledgesMessageBeforeReplyCompletes(t *testing.T) {
 		From: ChannelAccount{ID: "user-1"},
 		Conversation: ConversationAccount{
 			ID:               "conv-1",
-			ConversationType: "channel",
+			ConversationType: testConversationChannel,
 			TenantID:         "tenant-1",
 		},
 	}
@@ -545,7 +551,7 @@ func (s *stubDDBClient) Query(ctx context.Context, params *dynamodb.QueryInput, 
 func newTestTeamsStore(client teamsdata.DynamoDBClient) *teamsdata.Store {
 	return &teamsdata.Store{
 		Client:                client,
-		WorkspaceMappingsName: "workspaces",
+		WorkspaceMappingsName: testWorkspaceTableName,
 		ChannelPoliciesName:   "policies",
 		Now: func() time.Time {
 			return time.Unix(1_700_000_000, 0).UTC()

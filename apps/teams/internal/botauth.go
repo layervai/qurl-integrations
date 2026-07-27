@@ -140,7 +140,7 @@ func (v *IncomingTokenValidator) fetchMetadata(ctx context.Context) (*botOpenIDM
 	if err != nil {
 		return nil, fmt.Errorf("fetch bot connector metadata: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("bot connector metadata returned %d", resp.StatusCode)
 	}

@@ -289,7 +289,12 @@ func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, tenan
 	switch mode {
 	case SetupModeRotate, SetupModeRepoint:
 		return replaceWorkspaceAPIKey(w, cfg, accessToken, tenantID, userID, qurlAccountID, mode)
+	case SetupModeReuse:
 	default:
+		renderOAuthErrorPage(w, http.StatusBadRequest, "Unsupported qURL setup mode",
+			"qURL could not determine how this Teams setup request should handle the stored workspace key.",
+			"Return to Teams and run `setup <email>` again.")
+		return "", false
 	}
 	keyPrefix, reused, ok := reuseStoredWorkspaceKey(w, cfg, tenantID)
 	if !ok {

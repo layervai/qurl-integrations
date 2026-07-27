@@ -16,6 +16,11 @@ import (
 const (
 	botTokenEndpoint = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
 	botTokenScope    = "https://api.botframework.com/.default"
+
+	teamsConnectorHostPublic = "smba.trafficmanager.net"
+	teamsConnectorHostGCC    = "smba.infra.gcc.teams.microsoft.com"
+	teamsConnectorHostGCCH   = "smba.infra.gov.teams.microsoft.us"
+	teamsConnectorHostDoD    = "smba.infra.dod.teams.microsoft.us"
 )
 
 type MessagePoster interface {
@@ -96,7 +101,7 @@ func (c *ConnectorClient) postActivity(ctx context.Context, serviceURL, conversa
 	if err != nil {
 		return fmt.Errorf("post connector activity: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4097))
 		return fmt.Errorf("post connector activity returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
@@ -105,19 +110,63 @@ func (c *ConnectorClient) postActivity(ctx context.Context, serviceURL, conversa
 }
 
 func connectorActivityURL(serviceURL, conversationID string) (string, error) {
-	serviceURL = strings.TrimRight(strings.TrimSpace(serviceURL), "/")
+	base, err := validateConnectorServiceURL(serviceURL)
+	if err != nil {
+		return "", err
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return "", fmt.Errorf("conversationID is required")
+	}
+	return strings.TrimRight(base.String(), "/") + "/v3/conversations/" + url.PathEscape(conversationID) + "/activities", nil
+}
+
+func validateConnectorServiceURL(serviceURL string) (*url.URL, error) {
+	serviceURL = strings.TrimSpace(serviceURL)
 	if serviceURL == "" {
-		return "", fmt.Errorf("serviceURL is required")
+		return nil, fmt.Errorf("serviceURL is required")
 	}
 	base, err := url.Parse(serviceURL)
 	if err != nil {
-		return "", fmt.Errorf("parse serviceURL: %w", err)
+		return nil, fmt.Errorf("parse serviceURL: %w", err)
 	}
-	ref, err := url.Parse("/v3/conversations/" + url.PathEscape(conversationID) + "/activities")
+	if !strings.EqualFold(base.Scheme, "https") {
+		return nil, fmt.Errorf("serviceURL scheme %q is not https", base.Scheme)
+	}
+	if base.User != nil {
+		return nil, fmt.Errorf("serviceURL contains userinfo")
+	}
+	if base.Port() != "" {
+		return nil, fmt.Errorf("serviceURL host %q must not include an explicit port", base.Host)
+	}
+	if base.RawQuery != "" || base.Fragment != "" {
+		return nil, fmt.Errorf("serviceURL must not include query or fragment")
+	}
+	host, err := trustedTeamsConnectorHost(base.Hostname())
 	if err != nil {
-		return "", fmt.Errorf("compose connector path: %w", err)
+		return nil, err
 	}
-	return base.ResolveReference(ref).String(), nil
+	return &url.URL{
+		Scheme:  "https",
+		Host:    host,
+		Path:    base.Path,
+		RawPath: base.RawPath,
+	}, nil
+}
+
+func trustedTeamsConnectorHost(hostname string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(hostname)) {
+	case teamsConnectorHostPublic:
+		return teamsConnectorHostPublic, nil
+	case teamsConnectorHostGCC:
+		return teamsConnectorHostGCC, nil
+	case teamsConnectorHostGCCH:
+		return teamsConnectorHostGCCH, nil
+	case teamsConnectorHostDoD:
+		return teamsConnectorHostDoD, nil
+	default:
+		return "", fmt.Errorf("serviceURL host %q is not an allowed Microsoft Teams connector host", hostname)
+	}
 }
 
 func (c *ConnectorClient) appToken(ctx context.Context) (string, error) {
@@ -144,7 +193,7 @@ func (c *ConnectorClient) appToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("request bot token: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4097))
 		return "", fmt.Errorf("bot token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))

@@ -63,7 +63,8 @@ func normalizeActivityText(a *Activity) string {
 	text := a.Text
 	mentionPlaceholders := map[string]string{}
 	mentionIndex := 0
-	for _, entity := range a.Entities {
+	for i := range a.Entities {
+		entity := &a.Entities[i]
 		if !strings.EqualFold(strings.TrimSpace(entity.Type), "mention") || strings.TrimSpace(entity.Text) == "" {
 			continue
 		}
@@ -92,8 +93,11 @@ func normalizeActivityText(a *Activity) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-func isBotMention(a *Activity, entity Entity) bool {
+func isBotMention(a *Activity, entity *Entity) bool {
 	if a == nil {
+		return false
+	}
+	if entity == nil {
 		return false
 	}
 	mentionedID := strings.TrimSpace(entity.Mentioned.ID)
