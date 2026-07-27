@@ -12,6 +12,7 @@ on:
   workflow_run:
     workflows:
       - "slack: Build and Test"
+      - "teams: Build and Test"
       - "discord: Build and Test"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
@@ -75,6 +76,9 @@ jobs:
           case "$WORKFLOW_NAME" in
             "slack: Build and Test")
               impact="Slack bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Slack bot image until a hotfix lands."
+              ;;
+            "teams: Build and Test")
+              impact="Teams bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Teams bot image until a hotfix lands."
               ;;
             "discord: Build and Test")
               impact="Discord bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."

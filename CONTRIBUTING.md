@@ -26,7 +26,10 @@ apps/
     cmd/main.go   # Lambda entry point
     internal/     # App-private code — put your logic here
     README.md
-  teams/          # Microsoft Teams (planned)
+  teams/          # Microsoft Teams integration
+    cmd/main.go   # HTTP entry point
+    internal/     # App-private code — put your logic here
+    README.md
   discord/        # Discord bot (planned)
   cli/            # CLI tool
 origins/
@@ -56,7 +59,8 @@ git checkout -b feat/slack-thread-replies
 
 # 3. Write code, then verify
 make check                    # Full CI parity: fmt + vet + lint + test
-make build-slack              # Verify Lambda binary compiles (adjust for your app)
+make build-slack              # Verify the Slack bot binary compiles
+make build-teams              # Verify the Teams bot binary compiles
 
 # 4. Push and open a PR
 git push -u origin feat/slack-thread-replies

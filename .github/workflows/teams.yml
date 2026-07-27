@@ -1,0 +1,238 @@
+name: "teams: Build and Test"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  changes:
+    name: teams / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      teams: ${{ steps.filter.outputs.teams }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            teams:
+              # Source of truth for Teams-impacting paths on PR and main push events.
+              - 'apps/teams/**'
+              - 'shared/**'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci.yml'
+              - '.github/workflows/teams.yml'
+
+  lint:
+    name: teams / lint
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.teams == 'true'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify golangci-lint config
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1 config verify
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.10.1
+          verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
+          args: --timeout=5m
+
+  test:
+    name: teams / test
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.teams == 'true'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests with coverage
+        run: |
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
+            ./apps/teams/... ./shared/...
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          if [ "$(echo "$COVERAGE < 40" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below 40% threshold"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./apps/teams/... ./shared/...
+
+  vulnerability-scan:
+    name: teams / govulncheck
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.teams == 'true'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run govulncheck
+        run: go tool govulncheck ./...
+
+  docker-check:
+    name: teams / docker
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.teams == 'true'
+    # arm64 Go builds under QEMU routinely take several minutes, and Buildx's
+    # GitHub Actions cache export is part of the job. Keep the timeout above
+    # the observed build+cache path so successful image builds do not get
+    # canceled during cache upload.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build teams bot image (linux/arm64)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: apps/teams/Dockerfile
+          platforms: linux/arm64
+          push: false
+          cache-from: type=gha,scope=teams-docker
+          cache-to: type=gha,mode=max,scope=teams-docker
+          build-args: |
+            VERSION=${{ github.sha }}
+
+  required:
+    name: teams / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every Teams quality gate must be listed here; teams / required only
+    # validates jobs in this needs set. display_names below is annotation-only.
+    needs: [changes, lint, test, vulnerability-scan, docker-check]
+    if: always()
+    steps:
+      - name: Verify Teams CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEAMS_CHANGED: ${{ needs.changes.outputs.teams }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::teams / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$TEAMS_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No Teams-impacting changes detected; Teams CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::teams / detect changes emitted unexpected teams output: ${TEAMS_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              lint)
+                echo "teams / lint"
+                ;;
+              test)
+                echo "teams / test"
+                ;;
+              vulnerability-scan)
+                echo "teams / govulncheck"
+                ;;
+              docker-check)
+                echo "teams / docker"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a Teams quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Teams-impacting changes require every quality gate listed
+              # in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"
+
+  trigger-deploy:
+    needs: [changes, required]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.teams == 'true'
+    # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
+    # isn't read by any step, so deny everything.
+    permissions: {}
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@1536c698add5777aa08c781bc674d1eba469b32d # v0.9.0
+    with:
+      target_repo: qurl-integrations-infra
+      # An off-allowlist value hard-fails in the reusable; an allowlisted
+      # value that misses the receiver silently no-ops (HTTP 204 from the
+      # dispatch API but no workflow fires).
+      event_type: teams-bot-deploy
+      client_payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
+    # Explicit `secrets:` map (not `inherit`) keeps the reusable's surface
+    # to the two named App secrets even as more secrets get added here.
+    secrets:
+      app_id: ${{ secrets.DEPLOY_DISPATCHER_APP_ID }}
+      app_private_key: ${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}
