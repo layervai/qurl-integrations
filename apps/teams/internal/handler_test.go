@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
 	"github.com/layervai/qurl-integrations/apps/teams/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/teams/internal/teamsdata"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -25,6 +26,8 @@ const (
 	testWorkspaceTableName  = "workspaces"
 	testConversationChannel = "channel"
 )
+
+var errUnexpectedTestStoreCall = errors.New("unexpected test store call")
 
 func TestHandleGetDMChecksPersonalConversationBeforeMint(t *testing.T) {
 	var createCalls int
@@ -69,7 +72,7 @@ func TestHandleGetDMChecksPersonalConversationBeforeMint(t *testing.T) {
 				return &dynamodb.GetItemOutput{}, nil
 			default:
 				t.Fatalf("unexpected table: %s", aws.ToString(params.TableName))
-				return nil, nil
+				return nil, errUnexpectedTestStoreCall
 			}
 		},
 	})
@@ -147,7 +150,7 @@ func TestHandleGetSetsAccessLimitsAndScopedIdempotencyKey(t *testing.T) {
 				return &dynamodb.GetItemOutput{}, nil
 			default:
 				t.Fatalf("unexpected table: %s", aws.ToString(params.TableName))
-				return nil, nil
+				return nil, errUnexpectedTestStoreCall
 			}
 		},
 	})
@@ -249,7 +252,7 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 				}, nil
 			default:
 				t.Fatalf("unexpected table: %s", aws.ToString(params.TableName))
-				return nil, nil
+				return nil, errUnexpectedTestStoreCall
 			}
 		},
 		updateItemFunc: func(_ context.Context, params *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
@@ -263,7 +266,7 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 				return &dynamodb.UpdateItemOutput{}, nil
 			default:
 				t.Fatalf("unexpected update expression: %s", expr)
-				return nil, nil
+				return nil, errUnexpectedTestStoreCall
 			}
 		},
 	})
@@ -441,7 +444,7 @@ func TestHandleActivityAcknowledgesMessageBeforeReplyCompletes(t *testing.T) {
 			TenantID:         "tenant-1",
 		},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/teams/messages", nil)
+	req := httptest.NewRequest(http.MethodPost, "/teams/messages", http.NoBody)
 	rec := httptest.NewRecorder()
 
 	go func() {
@@ -548,9 +551,9 @@ func (s *stubDDBClient) Query(ctx context.Context, params *dynamodb.QueryInput, 
 	return &dynamodb.QueryOutput{}, nil
 }
 
-func newTestTeamsStore(client teamsdata.DynamoDBClient) *teamsdata.Store {
+func newTestTeamsStore(ddbClient teamsdata.DynamoDBClient) *teamsdata.Store {
 	return &teamsdata.Store{
-		Client:                client,
+		Client:                ddbClient,
 		WorkspaceMappingsName: testWorkspaceTableName,
 		ChannelPoliciesName:   "policies",
 		Now: func() time.Time {

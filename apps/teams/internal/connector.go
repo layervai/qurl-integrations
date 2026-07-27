@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,11 +24,13 @@ const (
 	teamsConnectorHostDoD    = "smba.infra.dod.teams.microsoft.us"
 )
 
+// MessagePoster posts replies or direct messages back into Teams.
 type MessagePoster interface {
 	Reply(ctx context.Context, in *Activity, text string) error
 	SendText(ctx context.Context, serviceURL, conversationID string, text string) error
 }
 
+// ConnectorClient posts replies and direct messages through the Teams connector API.
 type ConnectorClient struct {
 	AppID       string
 	AppPassword string
@@ -51,9 +54,10 @@ type botTokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 }
 
+// Reply posts a reply to the incoming Teams activity.
 func (c *ConnectorClient) Reply(ctx context.Context, in *Activity, text string) error {
 	if in == nil {
-		return fmt.Errorf("reply activity is nil")
+		return errors.New("reply activity is nil")
 	}
 	body := postActivity{
 		Type:       "message",
@@ -65,6 +69,7 @@ func (c *ConnectorClient) Reply(ctx context.Context, in *Activity, text string) 
 	return c.postActivity(ctx, strings.TrimSpace(in.ServiceURL), strings.TrimSpace(in.Conversation.ID), body)
 }
 
+// SendText posts a text message to a Teams conversation.
 func (c *ConnectorClient) SendText(ctx context.Context, serviceURL, conversationID string, text string) error {
 	body := postActivity{
 		Type:       "message",
@@ -76,7 +81,7 @@ func (c *ConnectorClient) SendText(ctx context.Context, serviceURL, conversation
 
 func (c *ConnectorClient) postActivity(ctx context.Context, serviceURL, conversationID string, body postActivity) error {
 	if strings.TrimSpace(serviceURL) == "" || strings.TrimSpace(conversationID) == "" {
-		return fmt.Errorf("serviceURL and conversationID are required")
+		return errors.New("serviceURL and conversationID are required")
 	}
 	token, err := c.appToken(ctx)
 	if err != nil {
@@ -116,9 +121,17 @@ func connectorActivityURL(serviceURL, conversationID string) (string, error) {
 	}
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
-		return "", fmt.Errorf("conversationID is required")
+		return "", errors.New("conversationID is required")
 	}
-	return strings.TrimRight(base.String(), "/") + "/v3/conversations/" + url.PathEscape(conversationID) + "/activities", nil
+	return strings.TrimRight(base.String(), "/") + "/v3/conversations/" + escapeConnectorPathSegment(conversationID) + "/activities", nil
+}
+
+func escapeConnectorPathSegment(segment string) string {
+	escaped := url.PathEscape(segment)
+	// Bot Framework conversation IDs are opaque single-segment identifiers and
+	// frequently contain ":" separators. Encode them so intermediaries cannot
+	// reinterpret the reserved delimiter while preserving the trusted base path.
+	return strings.ReplaceAll(escaped, ":", "%3A")
 }
 
 func validateConnectorServiceURL(serviceURL string) (*url.URL, error) {

@@ -21,6 +21,7 @@ const (
 var tunnelSlugPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
 var tunnelServicePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
+// TunnelInstallArgs describes the connector bootstrap instructions to render.
 type TunnelInstallArgs struct {
 	Slug          string
 	Alias         string
@@ -32,7 +33,10 @@ type TunnelInstallArgs struct {
 	BootstrapNote string
 }
 
-func renderTunnelInstallMessage(args TunnelInstallArgs) (string, error) {
+func renderTunnelInstallMessage(args *TunnelInstallArgs) (string, error) {
+	if args == nil {
+		return "", errors.New("tunnel install args are required")
+	}
 	if err := validateTunnelSlug(args.Slug); err != nil {
 		return "", err
 	}
@@ -102,6 +106,7 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+// ValidateTunnelImageRef validates the optional connector image reference.
 func ValidateTunnelImageRef(image string) error {
 	if image == "" {
 		return nil

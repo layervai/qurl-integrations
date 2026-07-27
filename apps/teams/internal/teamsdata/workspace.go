@@ -23,6 +23,7 @@ const (
 	attrUpdatedAtNano            = "updated_at_unix_nano"
 )
 
+// Teams workspace/admin error codes returned by the DynamoDB-backed store.
 const (
 	ErrCodeWorkspaceAlreadyBoundToCaller = "workspace_already_bound_to_caller"
 	ErrCodeWorkspaceAlreadyBound         = "workspace_already_bound"
@@ -32,17 +33,20 @@ const (
 	ErrCodeCannotRemoveOwner             = "cannot_remove_owner"
 )
 
+// WorkspaceMapping records the Teams tenant owner bound to qURL.
 type WorkspaceMapping struct {
 	TenantID  string
 	OwnerID   string
 	CreatedAt time.Time
 }
 
+// PersonalConversationRef identifies a user's personal Teams chat with the bot.
 type PersonalConversationRef struct {
 	ServiceURL     string `json:"service_url"`
 	ConversationID string `json:"conversation_id"`
 }
 
+// CheckAdmin reports whether the actor is the owner or an admin for the tenant.
 func (s *Store) CheckAdmin(ctx context.Context, tenantID, actorID string) (bool, string, error) {
 	if tenantID == "" || actorID == "" {
 		return false, "", &Error{StatusCode: http.StatusBadRequest, Title: "CheckAdmin: tenant_id and actor_id are required"}
@@ -71,6 +75,7 @@ func (s *Store) CheckAdmin(ctx context.Context, tenantID, actorID string) (bool,
 	return false, ownerID, nil
 }
 
+// BindWorkspace creates the initial owner binding for a Teams tenant.
 func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error {
 	if m == nil || m.TenantID == "" || m.OwnerID == "" || seedAdmin == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "BindWorkspace: tenant_id, owner_id, and seed_admin are required"}
@@ -123,6 +128,7 @@ func (s *Store) BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmi
 	}
 }
 
+// AddAdmin grants tenant admin access to the target Teams actor.
 func (s *Store) AddAdmin(ctx context.Context, tenantID, actorID string) error {
 	if tenantID == "" || actorID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "AddAdmin: tenant_id and actor_id are required"}
@@ -156,6 +162,7 @@ func (s *Store) AddAdmin(ctx context.Context, tenantID, actorID string) error {
 	return &Error{StatusCode: http.StatusNotFound, Code: ErrCodeWorkspaceNotBound, Title: "AddAdmin: workspace is not bound"}
 }
 
+// RemoveAdmin revokes tenant admin access from the target Teams actor.
 func (s *Store) RemoveAdmin(ctx context.Context, tenantID, actorID string) error {
 	if tenantID == "" || actorID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "RemoveAdmin: tenant_id and actor_id are required"}
@@ -201,6 +208,7 @@ func (s *Store) RemoveAdmin(ctx context.Context, tenantID, actorID string) error
 	return ddbToError("RemoveAdmin", err)
 }
 
+// ListAdmins returns the tenant owner and additional admin IDs.
 func (s *Store) ListAdmins(ctx context.Context, tenantID string) (ownerID string, adminIDs []string, err error) {
 	if tenantID == "" {
 		return "", nil, &Error{StatusCode: http.StatusBadRequest, Title: "ListAdmins: tenant_id is required"}
@@ -227,6 +235,7 @@ func (s *Store) ListAdmins(ctx context.Context, tenantID string) (ownerID string
 	return ownerID, adminIDs, nil
 }
 
+// SavePersonalConversationRef stores the user's personal bot chat reference.
 func (s *Store) SavePersonalConversationRef(ctx context.Context, tenantID, actorID string, ref *PersonalConversationRef) error {
 	if tenantID == "" || actorID == "" || ref == nil || ref.ServiceURL == "" || ref.ConversationID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SavePersonalConversationRef: tenant_id, actor_id, and personal reference are required"}
@@ -258,9 +267,10 @@ func (s *Store) SavePersonalConversationRef(ctx context.Context, tenantID, actor
 	return nil
 }
 
-func (s *Store) PersonalConversationRef(ctx context.Context, tenantID, actorID string) (*PersonalConversationRef, error) {
+// PersonalConversationRef loads the stored personal bot chat reference, if present.
+func (s *Store) PersonalConversationRef(ctx context.Context, tenantID, actorID string) (*PersonalConversationRef, bool, error) {
 	if tenantID == "" || actorID == "" {
-		return nil, &Error{StatusCode: http.StatusBadRequest, Title: "PersonalConversationRef: tenant_id and actor_id are required"}
+		return nil, false, &Error{StatusCode: http.StatusBadRequest, Title: "PersonalConversationRef: tenant_id and actor_id are required"}
 	}
 	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
@@ -273,22 +283,23 @@ func (s *Store) PersonalConversationRef(ctx context.Context, tenantID, actorID s
 		},
 	})
 	if err != nil {
-		return nil, ddbToError("PersonalConversationRef", err)
+		return nil, false, ddbToError("PersonalConversationRef", err)
 	}
 	raw := readStringMap(out.Item, attrPersonalConversationRefs)[actorID]
 	if raw == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	var ref PersonalConversationRef
 	if err := json.Unmarshal([]byte(raw), &ref); err != nil {
-		return nil, ddbToError("PersonalConversationRef", err)
+		return nil, false, ddbToError("PersonalConversationRef", err)
 	}
 	if ref.ServiceURL == "" || ref.ConversationID == "" {
-		return nil, nil
+		return nil, false, nil
 	}
-	return &ref, nil
+	return &ref, true, nil
 }
 
+// DeleteWorkspace removes the Teams tenant binding row.
 func (s *Store) DeleteWorkspace(ctx context.Context, tenantID string) error {
 	if tenantID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "DeleteWorkspace: tenant_id is required"}

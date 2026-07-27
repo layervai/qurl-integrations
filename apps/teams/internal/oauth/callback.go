@@ -124,6 +124,7 @@ type auth0TokenResponse struct {
 	IDToken     string `json:"id_token"`
 }
 
+// Callback completes Teams setup after the Auth0 redirect returns with a code.
 func Callback(cfg Config) http.HandlerFunc {
 	now := cfg.now()
 	httpClient := cfg.HTTPClient
@@ -136,7 +137,7 @@ func Callback(cfg Config) http.HandlerFunc {
 		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		verified, code, ok := validateCallbackRequest(w, r, cfg, now)
+		verified, code, ok := validateCallbackRequest(w, r, &cfg, now)
 		if !ok {
 			return
 		}
@@ -148,11 +149,11 @@ func Callback(cfg Config) http.HandlerFunc {
 				"Return to Teams and run `setup <email>` again in a few minutes.")
 			return
 		}
-		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
+		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), &cfg, idToken)
 		if !checkSetupEmailMatches(w, verified, qurlEmail) {
 			return
 		}
-		if !checkBindAllowed(w, cfg, verified, qurlSub) {
+		if !checkBindAllowed(w, &cfg, verified, qurlSub) {
 			return
 		}
 		keyPrefix, ok := ensureWorkspaceAPIKey(w, cfg, accessToken, verified.TeamID, verified.UserID, qurlSub, verified.Mode)
@@ -177,7 +178,7 @@ func checkSetupEmailMatches(w http.ResponseWriter, verified VerifiedState, qurlE
 	return true
 }
 
-func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config, now func() time.Time) (verified VerifiedState, code string, ok bool) {
+func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg *Config, now func() time.Time) (verified VerifiedState, code string, ok bool) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		renderOAuthErrorPage(w, http.StatusMethodNotAllowed, "Use the Teams setup link",
@@ -227,7 +228,7 @@ func validateCallbackRequest(w http.ResponseWriter, r *http.Request, cfg Config,
 	return v, code, true
 }
 
-func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email, sub string) {
+func verifyIDTokenClaims(ctx context.Context, cfg *Config, idToken string) (email, sub string) {
 	if idToken == "" || cfg.IDTokenVerifier == nil {
 		return "", ""
 	}
@@ -244,7 +245,7 @@ func verifyIDTokenClaims(ctx context.Context, cfg Config, idToken string) (email
 	return email, sub
 }
 
-func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState, qurlSub string) bool {
+func checkBindAllowed(w http.ResponseWriter, cfg *Config, verified VerifiedState, qurlSub string) bool {
 	if cfg.AdminStore == nil {
 		return true
 	}
@@ -266,7 +267,7 @@ func checkBindAllowed(w http.ResponseWriter, cfg Config, verified VerifiedState,
 	return handleBindError(w, cfg, err, verified.TeamID)
 }
 
-func handleBindError(w http.ResponseWriter, cfg Config, bindErr error, tenantID string) bool {
+func handleBindError(w http.ResponseWriter, cfg *Config, bindErr error, tenantID string) bool {
 	var code BindConflictCode
 	if cfg.BindClassifyError != nil {
 		code = cfg.BindClassifyError(bindErr)

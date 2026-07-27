@@ -13,6 +13,7 @@ type oauthAdminStoreAdapter struct {
 	store *teamsdata.Store
 }
 
+// NewOAuthAdminStore adapts the Teams store to the OAuth admin-store interface.
 func NewOAuthAdminStore(store *teamsdata.Store) oauth.AdminStore {
 	if store == nil {
 		return nil
@@ -28,6 +29,7 @@ func (a *oauthAdminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.Wor
 	}, seedAdmin)
 }
 
+// ClassifyOAuthBindError maps Teams storage conflicts into OAuth bind conflicts.
 func ClassifyOAuthBindError(err error) oauth.BindConflictCode {
 	var terr *teamsdata.Error
 	if !errors.As(err, &terr) || terr.StatusCode != http.StatusConflict {

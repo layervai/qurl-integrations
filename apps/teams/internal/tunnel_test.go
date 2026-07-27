@@ -26,7 +26,7 @@ func TestParseTunnelArgsRejectsInvalidSlugEnvAndService(t *testing.T) {
 }
 
 func TestRenderTunnelInstallMessageRejectsUnknownEnvironment(t *testing.T) {
-	_, err := renderTunnelInstallMessage(TunnelInstallArgs{
+	_, err := renderTunnelInstallMessage(&TunnelInstallArgs{
 		Slug:         "prod-dashboard",
 		Alias:        "prod-dashboard",
 		Environment:  "nomad",
@@ -38,7 +38,7 @@ func TestRenderTunnelInstallMessageRejectsUnknownEnvironment(t *testing.T) {
 }
 
 func TestRenderTunnelInstallMessageComposeIncludesService(t *testing.T) {
-	msg, err := renderTunnelInstallMessage(TunnelInstallArgs{
+	msg, err := renderTunnelInstallMessage(&TunnelInstallArgs{
 		Slug:         "prod-dashboard",
 		Alias:        "dash",
 		Environment:  tunnelEnvCompose,
@@ -54,7 +54,7 @@ func TestRenderTunnelInstallMessageComposeIncludesService(t *testing.T) {
 }
 
 func TestRenderTunnelInstallMessageKubernetesUsesBootstrapSecret(t *testing.T) {
-	msg, err := renderTunnelInstallMessage(TunnelInstallArgs{
+	msg, err := renderTunnelInstallMessage(&TunnelInstallArgs{
 		Slug:         "prod-dashboard",
 		Alias:        "dash",
 		Environment:  tunnelEnvKubernetes,

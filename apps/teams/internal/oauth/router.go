@@ -3,7 +3,6 @@ package oauth
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
+// OAuth route paths and handler defaults for the Teams setup flow.
 const (
 	StartPath           = "/oauth/qurl/start"
 	callbackPath        = "/oauth/qurl/callback"
@@ -29,11 +29,13 @@ func callbackURL(baseURL string) string {
 	return strings.TrimRight(baseURL, "/") + callbackPath
 }
 
+// SetupConfig contains the Teams-side configuration for minting setup links.
 type SetupConfig struct {
 	StateSecret  []byte
 	TeamsBaseURL string
 }
 
+// SetupURL returns the Teams setup entrypoint URL for the supplied signed state.
 func (s SetupConfig) SetupURL(state string) string {
 	u, err := url.JoinPath(s.TeamsBaseURL, StartPath)
 	if err != nil {
@@ -42,6 +44,7 @@ func (s SetupConfig) SetupURL(state string) string {
 	return u + "?state=" + url.QueryEscape(state)
 }
 
+// WorkspaceAPIKeyMint describes a provisioned qURL workspace API key.
 type WorkspaceAPIKeyMint struct {
 	APIKey        string
 	KeyID         string
@@ -49,6 +52,7 @@ type WorkspaceAPIKeyMint struct {
 	BindingBacked bool
 }
 
+// QURLAPIKeyMinter provisions, validates, and revokes workspace-scoped qURL API keys.
 type QURLAPIKeyMinter interface {
 	ValidateAPIKey(ctx context.Context, apiKey string) error
 	MintWorkspaceAPIKey(ctx context.Context, accessToken, tenantID string) (WorkspaceAPIKeyMint, error)
@@ -57,28 +61,34 @@ type QURLAPIKeyMinter interface {
 	APIKeyRevoked(ctx context.Context, accessToken, keyID string) (bool, error)
 }
 
+// IDTokenVerifier verifies Auth0 id_tokens and extracts stable caller identity claims.
 type IDTokenVerifier interface {
 	VerifyEmail(ctx context.Context, idToken string) (email string, err error)
 	VerifySub(ctx context.Context, idToken string) (sub string, err error)
 }
 
+// WorkspaceMapping records the Teams tenant owner bound during setup.
 type WorkspaceMapping struct {
 	TenantID  string
 	OwnerID   string
 	CreatedAt time.Time
 }
 
+// AdminStore persists the owner binding created during Teams setup.
 type AdminStore interface {
 	BindWorkspace(ctx context.Context, m *WorkspaceMapping, seedAdmin string) error
 }
 
+// BindConflictCode classifies owner-binding conflicts during Teams setup.
 type BindConflictCode string
 
+// BindConflictCode values returned by the Teams OAuth bind flow.
 const (
 	BindConflictAlreadyBoundToCaller BindConflictCode = "workspace_already_bound_to_caller"
 	BindConflictAlreadyBound         BindConflictCode = "workspace_already_bound"
 )
 
+// WorkspaceStore reads and writes the Teams tenant's stored qURL API key state.
 type WorkspaceStore interface {
 	APIKey(ctx context.Context, workspaceID string) (string, error)
 	APIKeyID(ctx context.Context, workspaceID string) (keyID string, err error)
@@ -89,6 +99,7 @@ type WorkspaceStore interface {
 
 var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 
+// Config wires the Teams OAuth handlers to Auth0, qurl-service, and local storage.
 type Config struct {
 	Auth0Domain                   string
 	Auth0ClientID                 string
@@ -108,7 +119,7 @@ type Config struct {
 	Now                           func() time.Time
 }
 
-func (c Config) now() func() time.Time {
+func (c *Config) now() func() time.Time {
 	if c.Now != nil {
 		return c.Now
 	}
@@ -122,6 +133,7 @@ func replayWindowHoursOrDefault(configuredHours, defaultHours int) int {
 	return defaultHours
 }
 
+// RegisterRoutes installs the Teams OAuth start and callback handlers.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
 	if err := cfg.Validate(); err != nil {
 		panic("oauth.RegisterRoutes: " + err.Error())
@@ -130,6 +142,7 @@ func RegisterRoutes(mux *http.ServeMux, cfg Config) {
 	mux.Handle(callbackPath, http.TimeoutHandler(Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
 }
 
+// Validate checks Config for internally inconsistent wiring.
 func (c Config) Validate() error {
 	if c.AdminStore != nil && c.BindClassifyError == nil {
 		return errors.New("AdminStore wired without BindClassifyError")
@@ -169,8 +182,4 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 
 func teamsWorkspaceID(tenantID string) string {
 	return "teams:" + strings.TrimSpace(tenantID)
-}
-
-func logOAuthWarn(msg string, args ...any) {
-	slog.Warn(msg, args...)
 }

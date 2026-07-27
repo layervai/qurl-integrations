@@ -41,14 +41,17 @@ var (
 	flagPattern         = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
 )
 
+// SetupMode selects how Teams setup should handle an existing workspace key.
 type SetupMode string
 
 const (
+	// SetupMode values accepted by the Teams setup command.
 	SetupModeReuse   SetupMode = "reuse"
 	SetupModeRotate  SetupMode = "rotate"
 	SetupModeRepoint SetupMode = "repoint"
 )
 
+// Command is the parsed Teams bot command.
 type Command struct {
 	Raw            string
 	Verb           string
@@ -64,6 +67,7 @@ type Command struct {
 	Args           []string
 }
 
+// ParseCommand parses Teams bot text into a structured command.
 func ParseCommand(text string) (*Command, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {

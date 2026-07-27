@@ -20,9 +20,13 @@ const (
 	attrAllowedResourceIDs = "allowed_resource_ids"
 )
 
+// ErrAliasAlreadyBound reports that a channel alias already exists.
 var ErrAliasAlreadyBound = errors.New("alias already bound in this scope")
+
+// ErrAliasNotFound reports that a channel alias does not exist.
 var ErrAliasNotFound = errors.New("alias not bound in this scope")
 
+// PolicyEntry describes a single alias binding in a Teams scope.
 type PolicyEntry struct {
 	ScopeID    string    `json:"scope_id"`
 	Alias      string    `json:"alias"`
@@ -30,6 +34,7 @@ type PolicyEntry struct {
 	CreatedAt  time.Time `json:"created_at,omitempty"`
 }
 
+// AllowedResourceIDsForScope returns the resource IDs currently reachable in a Teams scope.
 func (s *Store) AllowedResourceIDsForScope(ctx context.Context, tenantID, scopeID string) (map[string]struct{}, error) {
 	if tenantID == "" || scopeID == "" {
 		return nil, &Error{StatusCode: http.StatusBadRequest, Title: "AllowedResourceIDsForScope: tenant_id and scope_id are required"}
@@ -56,6 +61,7 @@ func (s *Store) AllowedResourceIDsForScope(ctx context.Context, tenantID, scopeI
 	return outSet, nil
 }
 
+// ResolvePolicy reports whether a resource is currently exposed to a Teams scope.
 func (s *Store) ResolvePolicy(ctx context.Context, tenantID, scopeID, resourceID string) (bool, error) {
 	allowed, err := s.AllowedResourceIDsForScope(ctx, tenantID, scopeID)
 	if err != nil {
@@ -65,6 +71,7 @@ func (s *Store) ResolvePolicy(ctx context.Context, tenantID, scopeID, resourceID
 	return ok, nil
 }
 
+// LookupScopeAlias resolves a channel alias to a resource ID.
 func (s *Store) LookupScopeAlias(ctx context.Context, tenantID, scopeID, aliasName string) (string, bool, error) {
 	if tenantID == "" || scopeID == "" || aliasName == "" {
 		return "", false, &Error{StatusCode: http.StatusBadRequest, Title: "LookupScopeAlias: tenant_id, scope_id, and alias_name are required"}
@@ -87,6 +94,7 @@ func (s *Store) LookupScopeAlias(ctx context.Context, tenantID, scopeID, aliasNa
 	return rid, rid != "", nil
 }
 
+// GetScopePolicy lists alias bindings for a Teams scope.
 func (s *Store) GetScopePolicy(ctx context.Context, tenantID, scopeID string) ([]PolicyEntry, error) {
 	if tenantID == "" || scopeID == "" {
 		return nil, &Error{StatusCode: http.StatusBadRequest, Title: "GetScopePolicy: tenant_id and scope_id are required"}
@@ -115,6 +123,7 @@ func (s *Store) GetScopePolicy(ctx context.Context, tenantID, scopeID string) ([
 	return entries, nil
 }
 
+// BindScopeAlias binds an alias to a resource within a Teams scope.
 func (s *Store) BindScopeAlias(ctx context.Context, tenantID, scopeID, aliasName, resourceID string) error {
 	if tenantID == "" || scopeID == "" || aliasName == "" || resourceID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "BindScopeAlias: tenant_id, scope_id, alias_name, and resource_id are required"}
@@ -148,6 +157,7 @@ func (s *Store) BindScopeAlias(ctx context.Context, tenantID, scopeID, aliasName
 	return ddbToError("BindScopeAlias", err)
 }
 
+// UnbindScopeAlias removes an alias from a Teams scope.
 func (s *Store) UnbindScopeAlias(ctx context.Context, tenantID, scopeID, aliasName string) error {
 	if tenantID == "" || scopeID == "" || aliasName == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "UnbindScopeAlias: tenant_id, scope_id, and alias_name are required"}
@@ -179,10 +189,12 @@ func (s *Store) UnbindScopeAlias(ctx context.Context, tenantID, scopeID, aliasNa
 	return ddbToError("UnbindScopeAlias", err)
 }
 
+// ExposeResourceToScope adds a resource to the scope's allowed set.
 func (s *Store) ExposeResourceToScope(ctx context.Context, tenantID, scopeID, resourceID string) error {
 	return s.updateScopeResourceSet(ctx, "ADD", tenantID, scopeID, resourceID)
 }
 
+// RevokeResourceFromScope removes a resource from the scope's allowed set.
 func (s *Store) RevokeResourceFromScope(ctx context.Context, tenantID, scopeID, resourceID string) error {
 	return s.updateScopeResourceSet(ctx, "DELETE", tenantID, scopeID, resourceID)
 }
@@ -212,6 +224,7 @@ func (s *Store) updateScopeResourceSet(ctx context.Context, op, tenantID, scopeI
 	return nil
 }
 
+// ScopesForResource lists channel scopes that currently expose the resource.
 func (s *Store) ScopesForResource(ctx context.Context, tenantID, resourceID string) ([]string, error) {
 	if tenantID == "" || resourceID == "" {
 		return nil, &Error{StatusCode: http.StatusBadRequest, Title: "ScopesForResource: tenant_id and resource_id are required"}
@@ -248,6 +261,7 @@ func (s *Store) ScopesForResource(ctx context.Context, tenantID, resourceID stri
 	return scopes, nil
 }
 
+// PurgeResourceFromScope removes a resource and any matching aliases from a scope.
 func (s *Store) PurgeResourceFromScope(ctx context.Context, tenantID, scopeID, resourceID string) ([]string, error) {
 	if tenantID == "" || scopeID == "" || resourceID == "" {
 		return nil, &Error{StatusCode: http.StatusBadRequest, Title: "PurgeResourceFromScope: tenant_id, scope_id, and resource_id are required"}
@@ -263,7 +277,7 @@ func (s *Store) PurgeResourceFromScope(ctx context.Context, tenantID, scopeID, r
 		return nil, ddbToError("PurgeResourceFromScope", err)
 	}
 	if len(out.Item) == 0 {
-		return nil, nil
+		return []string{}, nil
 	}
 	aliases := make([]string, 0)
 	for alias, rid := range readStringMap(out.Item, attrAliasBindings) {
@@ -304,6 +318,7 @@ func (s *Store) PurgeResourceFromScope(ctx context.Context, tenantID, scopeID, r
 	return aliases, nil
 }
 
+// PurgeTenantScopePolicies deletes every channel policy row for the tenant.
 func (s *Store) PurgeTenantScopePolicies(ctx context.Context, tenantID string) error {
 	if tenantID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTenantScopePolicies: tenant_id is required"}

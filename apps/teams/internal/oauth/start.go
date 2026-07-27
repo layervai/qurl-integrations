@@ -6,6 +6,7 @@ import (
 	"net/http"
 )
 
+// Start validates the setup link and redirects the browser into Auth0.
 func Start(cfg Config) http.HandlerFunc {
 	now := cfg.now()
 	return func(w http.ResponseWriter, r *http.Request) {

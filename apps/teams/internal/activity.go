@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// Activity is the Bot Framework activity payload delivered by Teams.
 type Activity struct {
 	Type         string              `json:"type"`
 	ID           string              `json:"id,omitempty"`
@@ -22,12 +23,14 @@ type Activity struct {
 	ChannelData  ChannelData         `json:"channelData,omitempty"`
 }
 
+// ChannelAccount identifies a Teams user or bot account.
 type ChannelAccount struct {
 	ID          string `json:"id,omitempty"`
 	Name        string `json:"name,omitempty"`
 	AadObjectID string `json:"aadObjectId,omitempty"`
 }
 
+// ConversationAccount describes the Teams conversation carrying the activity.
 type ConversationAccount struct {
 	ID               string `json:"id,omitempty"`
 	Name             string `json:"name,omitempty"`
@@ -36,12 +39,14 @@ type ConversationAccount struct {
 	IsGroup          bool   `json:"isGroup,omitempty"`
 }
 
+// Entity carries rich Teams activity entities such as mentions.
 type Entity struct {
 	Type      string         `json:"type,omitempty"`
 	Text      string         `json:"text,omitempty"`
 	Mentioned ChannelAccount `json:"mentioned,omitempty"`
 }
 
+// ChannelData contains Teams tenant, team, and channel identifiers.
 type ChannelData struct {
 	Tenant struct {
 		ID string `json:"id,omitempty"`

@@ -12,16 +12,19 @@ import (
 	"time"
 )
 
+// FeedbackPoster delivers user feedback to an operator-controlled destination.
 type FeedbackPoster interface {
 	Post(ctx context.Context, submitter, tenantID, message string) error
 }
 
+// WebhookFeedbackPoster forwards Teams feedback into a configured webhook.
 type WebhookFeedbackPoster struct {
 	URL        string
 	UserAgent  string
 	HTTPClient *http.Client
 }
 
+// Post sends a feedback message to the configured webhook endpoint.
 func (p *WebhookFeedbackPoster) Post(ctx context.Context, submitter, tenantID, message string) error {
 	text := "New qURL Teams feedback"
 	if tenantID != "" {
@@ -47,7 +50,7 @@ func (p *WebhookFeedbackPoster) Post(ctx context.Context, submitter, tenantID, m
 	if err != nil {
 		return fmt.Errorf("post feedback webhook: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4097))
 		return fmt.Errorf("feedback webhook returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
@@ -62,6 +65,7 @@ func (p *WebhookFeedbackPoster) httpClient() *http.Client {
 	return &http.Client{Timeout: 5 * time.Second}
 }
 
+// ValidateFeedbackWebhookURL validates the configured HTTPS feedback webhook URL.
 func ValidateFeedbackWebhookURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

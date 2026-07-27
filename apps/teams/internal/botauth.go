@@ -22,10 +22,12 @@ const (
 	botJWKSRefreshInterval  = 15 * time.Minute
 )
 
+// TokenValidator validates the incoming Teams bearer token for a request.
 type TokenValidator interface {
 	Validate(ctx context.Context, bearerToken, serviceURL string) error
 }
 
+// IncomingTokenValidator validates Bot Framework bearer tokens for Teams requests.
 type IncomingTokenValidator struct {
 	AppID       string
 	MetadataURL string
@@ -43,6 +45,7 @@ type botOpenIDMetadata struct {
 	JWKSURI string `json:"jwks_uri"`
 }
 
+// NewIncomingTokenValidator builds the default Teams incoming token validator.
 func NewIncomingTokenValidator(ctx context.Context, appID string) *IncomingTokenValidator {
 	if ctx == nil {
 		ctx = context.Background()
@@ -55,6 +58,7 @@ func NewIncomingTokenValidator(ctx context.Context, appID string) *IncomingToken
 	}
 }
 
+// Validate checks the bearer token against Bot Framework metadata and JWKS.
 func (v *IncomingTokenValidator) Validate(ctx context.Context, bearerToken, serviceURL string) error {
 	if strings.TrimSpace(v.AppID) == "" {
 		return errors.New("incoming token validator app id is required")

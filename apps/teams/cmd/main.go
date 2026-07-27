@@ -195,6 +195,7 @@ func run() error {
 		}
 	}()
 
+	//nolint:gosec // Startup logging here reports only fixed process configuration, not request-derived input.
 	slog.Info("teams bot listening", "addr", listenAddr, "oauth_enabled", oauthEnabled)
 	serveErr := server.Serve(ln)
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,11 +14,13 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// Teams storage environment variables.
 const (
 	EnvWorkspaceMappingsTable = "QURL_TEAMS_WORKSPACE_MAPPINGS_TABLE"
 	EnvChannelPoliciesTable   = "QURL_TEAMS_CHANNEL_POLICIES_TABLE"
 )
 
+// DynamoDBClient is the subset of DynamoDB APIs used by the Teams store.
 type DynamoDBClient interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
@@ -26,6 +29,7 @@ type DynamoDBClient interface {
 	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 }
 
+// Store persists Teams tenant bindings and channel policies in DynamoDB.
 type Store struct {
 	Client                DynamoDBClient
 	WorkspaceMappingsName string
@@ -33,6 +37,7 @@ type Store struct {
 	Now                   func() time.Time
 }
 
+// StoreOption configures Store construction.
 type StoreOption func(*storeOptions)
 
 type storeOptions struct {
@@ -42,10 +47,12 @@ type storeOptions struct {
 	awsConfigFns          []func(*awsconfig.LoadOptions) error
 }
 
+// WithDynamoDBClient injects a prebuilt DynamoDB client.
 func WithDynamoDBClient(c DynamoDBClient) StoreOption {
 	return func(o *storeOptions) { o.ddbClient = c }
 }
 
+// WithTableNames overrides the default table names from environment variables.
 func WithTableNames(workspaceMappings, channelPolicies string) StoreOption {
 	return func(o *storeOptions) {
 		o.workspaceMappingsName = workspaceMappings
@@ -53,6 +60,7 @@ func WithTableNames(workspaceMappings, channelPolicies string) StoreOption {
 	}
 }
 
+// NewStore constructs the Teams DynamoDB-backed store.
 func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	o := &storeOptions{}
 	for _, fn := range opts {
@@ -85,6 +93,7 @@ func NewStore(ctx context.Context, opts ...StoreOption) (*Store, error) {
 	}, nil
 }
 
+// Error is the typed Teams storage error returned to handlers.
 type Error struct {
 	StatusCode int
 	Code       string
@@ -114,12 +123,8 @@ func stringAttr(value string) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberS{Value: value}
 }
 
-func boolAttr(value bool) ddbtypes.AttributeValue {
-	return &ddbtypes.AttributeValueMemberBOOL{Value: value}
-}
-
 func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
-	return &ddbtypes.AttributeValueMemberN{Value: fmt.Sprintf("%d", t.UnixNano())}
+	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UnixNano(), 10)}
 }
 
 func readString(item map[string]ddbtypes.AttributeValue, key string) string {

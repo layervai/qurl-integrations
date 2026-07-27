@@ -31,6 +31,7 @@ const teamsGetResourceLinkExpiry = "1m"
 const teamsGetResourceSessionDuration = "1h"
 const teamsGetResourceMaxSessions = 1
 
+// HandlerConfig wires the Teams bot handler to qURL, auth, and storage dependencies.
 type HandlerConfig struct {
 	BaseContext  context.Context
 	QURLEndpoint string
@@ -45,12 +46,14 @@ type HandlerConfig struct {
 	UserAgent    string
 }
 
+// Handler serves the Teams bot message endpoint.
 type Handler struct {
 	cfg           HandlerConfig
 	wg            sync.WaitGroup
 	activeWorkers atomic.Int64
 }
 
+// NewHandler constructs the Teams message handler.
 func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.BaseContext == nil {
 		cfg.BaseContext = context.Background()
@@ -58,6 +61,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	return &Handler{cfg: cfg}
 }
 
+// ServeHTTP handles incoming Teams Bot Framework activities.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -89,10 +93,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.cfg.TokenAuth != nil {
 			if err := h.cfg.TokenAuth.Validate(r.Context(), token, activity.ServiceURL); err != nil {
+				serviceURL := strings.TrimSpace(activity.ServiceURL)
+				reason := classifyTokenValidationError(err)
+				//nolint:gosec // Structured fields are reduced to constant classifications and length/presence metadata rather than raw request input.
 				slog.Warn("teams auth validation failed",
-					"reason", classifyTokenValidationError(err),
-					"service_url_present", strings.TrimSpace(activity.ServiceURL) != "",
-					"service_url_len", len(strings.TrimSpace(activity.ServiceURL)))
+					"reason", reason,
+					"service_url_present", serviceURL != "",
+					"service_url_len", len(serviceURL))
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -179,16 +186,31 @@ func (h *Handler) execute(ctx context.Context, activity *Activity, scope scopeIn
 	if h.cfg.AdminStore == nil {
 		return "", &userError{msg: "Teams admin features are not configured on this deployment."}
 	}
+	if reply, handled, err := h.executeTenantAdminCommand(ctx, activity, scope, cmd); handled {
+		return reply, err
+	}
+	return h.executeChannelCommand(ctx, activity, scope, cmd)
+}
+
+func (h *Handler) executeTenantAdminCommand(ctx context.Context, activity *Activity, scope scopeInfo, cmd *Command) (string, bool, error) {
 	switch cmd.Verb {
 	case verbAdmins:
-		return h.handleAdmins(ctx, scope)
+		reply, err := h.handleAdmins(ctx, scope)
+		return reply, true, err
 	case verbAdd:
-		return h.handleAddAdmin(ctx, scope, activity.From.ID, cmd.UserID)
+		reply, err := h.handleAddAdmin(ctx, scope, activity.From.ID, cmd.UserID)
+		return reply, true, err
 	case verbRemove:
-		return h.handleRemoveAdmin(ctx, scope, activity.From.ID, cmd.UserID)
+		reply, err := h.handleRemoveAdmin(ctx, scope, activity.From.ID, cmd.UserID)
+		return reply, true, err
 	case verbUninstall:
-		return h.handleUninstall(ctx, scope, activity.From.ID)
+		reply, err := h.handleUninstall(ctx, scope, activity.From.ID)
+		return reply, true, err
 	}
+	return "", false, nil
+}
+
+func (h *Handler) executeChannelCommand(ctx context.Context, activity *Activity, scope scopeInfo, cmd *Command) (string, error) {
 	if !scope.Channel {
 		return "", errors.New("this command must be run in a Teams channel. Personal chat is only used for setup confirmation and private delivery.")
 	}
@@ -346,7 +368,8 @@ func (h *Handler) handleList(ctx context.Context, qc *client.Client, scope scope
 	}
 	lines := []string{"Protected resources in this channel:"}
 	count := 0
-	for _, resource := range resources {
+	for i := range resources {
+		resource := &resources[i]
 		if _, ok := allowed[resource.ResourceID]; !ok {
 			continue
 		}
@@ -369,11 +392,12 @@ func (h *Handler) handleGet(ctx context.Context, qc *client.Client, scope scopeI
 		if h.cfg.Messages == nil {
 			return "", &userError{msg: "Private delivery is not available on this deployment."}
 		}
-		ref, err = h.cfg.AdminStore.PersonalConversationRef(ctx, scope.TenantID, strings.TrimSpace(activity.From.ID))
+		var found bool
+		ref, found, err = h.cfg.AdminStore.PersonalConversationRef(ctx, scope.TenantID, strings.TrimSpace(activity.From.ID))
 		if err != nil {
 			return "", err
 		}
-		if ref == nil {
+		if !found {
 			return "", &userError{msg: "Private delivery isn't ready for this Teams user yet. Open a personal chat with the bot once, then retry `get ... dm:true`."}
 		}
 	}
@@ -521,11 +545,11 @@ func (h *Handler) handleProtectConnector(ctx context.Context, qc *client.Client,
 	if h.cfg.Messages == nil {
 		return "", &userError{msg: "Private delivery is not available on this deployment."}
 	}
-	ref, err := h.cfg.AdminStore.PersonalConversationRef(ctx, scope.TenantID, strings.TrimSpace(activity.From.ID))
+	ref, found, err := h.cfg.AdminStore.PersonalConversationRef(ctx, scope.TenantID, strings.TrimSpace(activity.From.ID))
 	if err != nil {
 		return "", err
 	}
-	if ref == nil {
+	if !found {
 		return "", &userError{msg: "protect-connector needs personal Teams chat delivery for the bootstrap key. Message the bot once in personal chat, then retry in the channel."}
 	}
 	resource, err := qc.CreateResource(ctx, &client.CreateResourceInput{
@@ -553,7 +577,7 @@ func (h *Handler) handleProtectConnector(ctx context.Context, qc *client.Client,
 	if err != nil {
 		return "", mapClientError("create bootstrap key", err)
 	}
-	message, err := renderTunnelInstallMessage(TunnelInstallArgs{
+	message, err := renderTunnelInstallMessage(&TunnelInstallArgs{
 		Slug:         parsed.Slug,
 		Alias:        parsed.Alias,
 		Environment:  parsed.Environment,
@@ -721,8 +745,9 @@ func (h *Handler) resolveScopedResource(ctx context.Context, qc *client.Client, 
 	if err != nil {
 		return nil, err
 	}
-	var matches []client.Resource
-	for _, resource := range resources {
+	var matches []*client.Resource
+	for i := range resources {
+		resource := &resources[i]
 		if _, ok := allowed[resource.ResourceID]; !ok {
 			continue
 		}
@@ -734,7 +759,7 @@ func (h *Handler) resolveScopedResource(ctx context.Context, qc *client.Client, 
 	case 0:
 		return nil, fmt.Errorf("no resource named `%s` is available in this channel", token)
 	case 1:
-		return &matches[0], nil
+		return matches[0], nil
 	default:
 		return nil, fmt.Errorf("`%s` matches multiple allowed resources in this channel; use the resource id shown by `list`", token)
 	}
@@ -745,8 +770,9 @@ func (h *Handler) resolveTenantResource(ctx context.Context, qc *client.Client, 
 	if err != nil {
 		return nil, err
 	}
-	var matches []client.Resource
-	for _, resource := range resources {
+	var matches []*client.Resource
+	for i := range resources {
+		resource := &resources[i]
 		if resourceMatchesToken(resource, token) {
 			matches = append(matches, resource)
 		}
@@ -755,7 +781,7 @@ func (h *Handler) resolveTenantResource(ctx context.Context, qc *client.Client, 
 	case 0:
 		return nil, fmt.Errorf("no resource named `%s` was found for this tenant", token)
 	case 1:
-		return &matches[0], nil
+		return matches[0], nil
 	default:
 		return nil, fmt.Errorf("`%s` matches multiple tenant resources; use the exact resource id", token)
 	}
@@ -766,9 +792,9 @@ func (h *Handler) resolveResourceByID(ctx context.Context, qc *client.Client, re
 	if err != nil {
 		return nil, err
 	}
-	for _, resource := range resources {
-		if resource.ResourceID == resourceID {
-			return &resource, nil
+	for i := range resources {
+		if resources[i].ResourceID == resourceID {
+			return &resources[i], nil
 		}
 	}
 	return nil, fmt.Errorf("resource `%s` was not found", resourceID)
@@ -781,7 +807,10 @@ func (h *Handler) upsertScopeAlias(ctx context.Context, tenantID, scopeID, alias
 	return h.cfg.AdminStore.BindScopeAlias(ctx, tenantID, scopeID, alias, resourceID)
 }
 
-func resourceMatchesToken(resource client.Resource, token string) bool {
+func resourceMatchesToken(resource *client.Resource, token string) bool {
+	if resource == nil {
+		return false
+	}
 	token = strings.TrimSpace(token)
 	return resource.ResourceID == token || resource.Slug == token || resource.Alias == token
 }
@@ -812,7 +841,10 @@ func listAllResources(ctx context.Context, qc *client.Client) ([]client.Resource
 	}
 }
 
-func formatResourceSummary(resource client.Resource, aliases []string) string {
+func formatResourceSummary(resource *client.Resource, aliases []string) string {
+	if resource == nil {
+		return ""
+	}
 	name := resource.Description
 	if name == "" {
 		switch {
@@ -936,6 +968,7 @@ func (h *Handler) asyncDone() {
 	h.activeWorkers.Add(-1)
 }
 
+// WaitTimeout waits for async workers to drain until the timeout expires.
 func (h *Handler) WaitTimeout(d time.Duration) bool {
 	if d <= 0 {
 		return h.activeWorkers.Load() == 0
