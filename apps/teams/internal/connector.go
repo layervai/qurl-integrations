@@ -102,7 +102,8 @@ func (c *ConnectorClient) postActivity(ctx context.Context, serviceURL, conversa
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	//nolint:gosec // G107: The serviceURL host is validated against a strict allowlist in validateConnectorServiceURL (trustedTeamsConnectorHost) before this request. CodeQL cannot trace through the host validation.
+	// The serviceURL host is validated against a strict allowlist in
+	// validateConnectorServiceURL (trustedTeamsConnectorHost) before this request.
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("post connector activity: %w", err)
