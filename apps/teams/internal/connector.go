@@ -27,7 +27,7 @@ const (
 // MessagePoster posts replies or direct messages back into Teams.
 type MessagePoster interface {
 	Reply(ctx context.Context, in *Activity, text string) error
-	SendText(ctx context.Context, serviceURL, conversationID string, text string) error
+	SendText(ctx context.Context, serviceURL, conversationID, text string) error
 }
 
 // ConnectorClient posts replies and direct messages through the Teams connector API.
@@ -70,7 +70,7 @@ func (c *ConnectorClient) Reply(ctx context.Context, in *Activity, text string) 
 }
 
 // SendText posts a text message to a Teams conversation.
-func (c *ConnectorClient) SendText(ctx context.Context, serviceURL, conversationID string, text string) error {
+func (c *ConnectorClient) SendText(ctx context.Context, serviceURL, conversationID, text string) error {
 	body := postActivity{
 		Type:       "message",
 		Text:       text,
@@ -137,7 +137,7 @@ func escapeConnectorPathSegment(segment string) string {
 func validateConnectorServiceURL(serviceURL string) (*url.URL, error) {
 	serviceURL = strings.TrimSpace(serviceURL)
 	if serviceURL == "" {
-		return nil, fmt.Errorf("serviceURL is required")
+		return nil, errors.New("serviceURL is required")
 	}
 	base, err := url.Parse(serviceURL)
 	if err != nil {
@@ -147,13 +147,13 @@ func validateConnectorServiceURL(serviceURL string) (*url.URL, error) {
 		return nil, fmt.Errorf("serviceURL scheme %q is not https", base.Scheme)
 	}
 	if base.User != nil {
-		return nil, fmt.Errorf("serviceURL contains userinfo")
+		return nil, errors.New("serviceURL contains userinfo")
 	}
 	if base.Port() != "" {
 		return nil, fmt.Errorf("serviceURL host %q must not include an explicit port", base.Host)
 	}
 	if base.RawQuery != "" || base.Fragment != "" {
-		return nil, fmt.Errorf("serviceURL must not include query or fragment")
+		return nil, errors.New("serviceURL must not include query or fragment")
 	}
 	host, err := trustedTeamsConnectorHost(base.Hostname())
 	if err != nil {

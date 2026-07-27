@@ -19,18 +19,20 @@ import (
 )
 
 const (
-	drainCap                             = 32 << 10
-	auth0TokenTimeout                    = 15 * time.Second
-	revokeTimeout                        = 15 * time.Second
-	persistTimeout                       = 15 * time.Second
-	bindTimeout                          = 15 * time.Second
-	mintTimeout                          = 15 * time.Second
-	existingKeyTimeout                   = 5 * time.Second
-	revokedKeyScanTimeout                = 20 * time.Second
-	auth0TokenBodyLimit                  = 8 << 10
+	drainCap              = 32 << 10
+	auth0TokenTimeout     = 15 * time.Second
+	revokeTimeout         = 15 * time.Second
+	persistTimeout        = 15 * time.Second
+	bindTimeout           = 15 * time.Second
+	mintTimeout           = 15 * time.Second
+	existingKeyTimeout    = 5 * time.Second
+	revokedKeyScanTimeout = 20 * time.Second
+	auth0TokenBodyLimit   = 8 << 10
+	// DefaultSetupBindingReplayWindowHours is the default replay window for setup binding attempts.
 	DefaultSetupBindingReplayWindowHours = 24
-	DefaultAPIKeyMintReplayWindowHours   = 24
-	keyPrefixLength                      = len("lv_live_abcd")
+	// DefaultAPIKeyMintReplayWindowHours is the default replay window for API key mint attempts.
+	DefaultAPIKeyMintReplayWindowHours = 24
+	keyPrefixLength                    = len("lv_live_abcd")
 )
 
 const oauthPageCSS = `
@@ -125,7 +127,10 @@ type auth0TokenResponse struct {
 }
 
 // Callback completes Teams setup after the Auth0 redirect returns with a code.
-func Callback(cfg Config) http.HandlerFunc {
+func Callback(cfg *Config) http.HandlerFunc {
+	if cfg == nil {
+		cfg = &Config{}
+	}
 	now := cfg.now()
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -137,7 +142,7 @@ func Callback(cfg Config) http.HandlerFunc {
 		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		verified, code, ok := validateCallbackRequest(w, r, &cfg, now)
+		verified, code, ok := validateCallbackRequest(w, r, cfg, now)
 		if !ok {
 			return
 		}
@@ -149,11 +154,11 @@ func Callback(cfg Config) http.HandlerFunc {
 				"Return to Teams and run `setup <email>` again in a few minutes.")
 			return
 		}
-		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), &cfg, idToken)
+		qurlEmail, qurlSub := verifyIDTokenClaims(r.Context(), cfg, idToken)
 		if !checkSetupEmailMatches(w, verified, qurlEmail) {
 			return
 		}
-		if !checkBindAllowed(w, &cfg, verified, qurlSub) {
+		if !checkBindAllowed(w, cfg, verified, qurlSub) {
 			return
 		}
 		keyPrefix, ok := ensureWorkspaceAPIKey(w, cfg, accessToken, verified.TeamID, verified.UserID, qurlSub, verified.Mode)
@@ -286,7 +291,7 @@ func handleBindError(w http.ResponseWriter, cfg *Config, bindErr error, tenantID
 	}
 }
 
-func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, tenantID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
+func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg *Config, accessToken, tenantID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
 	switch mode {
 	case SetupModeRotate, SetupModeRepoint:
 		return replaceWorkspaceAPIKey(w, cfg, accessToken, tenantID, userID, qurlAccountID, mode)
@@ -307,7 +312,7 @@ func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, tenan
 	return mintAndPersist(w, cfg, accessToken, tenantID, userID, qurlAccountID)
 }
 
-func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, tenantID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
+func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg *Config, accessToken, tenantID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
 	readCtx, cancel := context.WithTimeout(context.Background(), existingKeyTimeout)
 	defer cancel()
 	keyID, storedAccountID, err := cfg.Provider.APIKeyIdentity(readCtx, teamsWorkspaceID(tenantID))
@@ -348,7 +353,7 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, tena
 	return mintReplacementAndPersist(w, cfg, accessToken, tenantID, keyID, userID, qurlAccountID)
 }
 
-func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg Config, accessToken, keyID string, revokeErr error) bool {
+func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg *Config, accessToken, keyID string, revokeErr error) bool {
 	if errors.Is(revokeErr, ErrAPIKeyNotFound) {
 		statusCtx, cancel := context.WithTimeout(context.Background(), revokedKeyScanTimeout)
 		defer cancel()
@@ -373,7 +378,7 @@ func confirmStoredKeyAlreadyRevoked(w http.ResponseWriter, cfg Config, accessTok
 	return false
 }
 
-func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg Config, tenantID string) (keyPrefix string, reused bool, ok bool) {
+func reuseStoredWorkspaceKey(w http.ResponseWriter, cfg *Config, tenantID string) (keyPrefix string, reused bool, ok bool) {
 	readCtx, cancel := context.WithTimeout(context.Background(), existingKeyTimeout)
 	defer cancel()
 	apiKey, err := cfg.Provider.APIKey(readCtx, teamsWorkspaceID(tenantID))
@@ -422,7 +427,7 @@ func storedAPIKeyPrefix(apiKey string) string {
 	return apiKey[:keyPrefixLength]
 }
 
-func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, tenantID, userID, qurlAccountID string) (string, bool) {
+func mintAndPersist(w http.ResponseWriter, cfg *Config, accessToken, tenantID, userID, qurlAccountID string) (string, bool) {
 	mintCtx, cancel := context.WithTimeout(context.Background(), mintTimeout)
 	defer cancel()
 	minted, err := cfg.Minter.MintWorkspaceAPIKey(mintCtx, accessToken, tenantID)
@@ -459,7 +464,7 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, tenantID, us
 	return minted.KeyPrefix, true
 }
 
-func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, tenantID, oldKeyID, userID, qurlAccountID string) (string, bool) {
+func mintReplacementAndPersist(w http.ResponseWriter, cfg *Config, accessToken, tenantID, oldKeyID, userID, qurlAccountID string) (string, bool) {
 	mintCtx, cancel := context.WithTimeout(context.Background(), mintTimeout)
 	defer cancel()
 	minted, err := cfg.Minter.MintWorkspaceReplacementAPIKey(mintCtx, accessToken, tenantID, oldKeyID)
@@ -547,7 +552,7 @@ func truncateForLog(s string, limit int) string {
 	return s[:cut] + "…[truncated]"
 }
 
-func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config, code string) (accessToken, idToken string, err error) {
+func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg *Config, code string) (accessToken, idToken string, err error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)

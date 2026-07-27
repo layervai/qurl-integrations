@@ -469,8 +469,7 @@ func retryAPIKeyCacheValidationLoop(ctx context.Context, workspaceID string, rec
 	// caller has not yet validated the currently local cache token.
 	if *rechecks >= apiKeyValidationRecheckLimit {
 		slog.WarnContext(ctx, "DDBProvider.APIKey cache validation did not converge",
-			slog.Bool("workspace_id_present", strings.TrimSpace(workspaceID) != ""),
-			slog.Int("workspace_id_len", len(strings.TrimSpace(workspaceID))),
+			slog.String("workspace_id", workspaceID),
 			slog.Int("rechecks", *rechecks),
 			slog.Int("limit", apiKeyValidationRecheckLimit),
 		)
@@ -941,10 +940,8 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 	if out != nil {
 		if _, rotated := out.Attributes[attrQURLAPIKey]; rotated {
 			slog.Warn(operation+" overwrote existing workspace API key",
-				"workspace_id_present", strings.TrimSpace(workspaceID) != "",
-				"workspace_id_len", len(strings.TrimSpace(workspaceID)),
-				"configured_by_present", strings.TrimSpace(configuredBy) != "",
-				"configured_by_len", len(strings.TrimSpace(configuredBy)))
+				"workspace_id", workspaceID,
+				"configured_by", configuredBy)
 		}
 	}
 	p.seedAPIKeyCache(workspaceID, apiKey, newAPIKeyCacheToken(ct, wrapped), now)

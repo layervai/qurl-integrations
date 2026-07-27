@@ -47,7 +47,7 @@ type PersonalConversationRef struct {
 }
 
 // CheckAdmin reports whether the actor is the owner or an admin for the tenant.
-func (s *Store) CheckAdmin(ctx context.Context, tenantID, actorID string) (bool, string, error) {
+func (s *Store) CheckAdmin(ctx context.Context, tenantID, actorID string) (isAdmin bool, ownerID string, err error) {
 	if tenantID == "" || actorID == "" {
 		return false, "", &Error{StatusCode: http.StatusBadRequest, Title: "CheckAdmin: tenant_id and actor_id are required"}
 	}
@@ -63,7 +63,7 @@ func (s *Store) CheckAdmin(ctx context.Context, tenantID, actorID string) (bool,
 	if len(out.Item) == 0 {
 		return false, "", nil
 	}
-	ownerID := readString(out.Item, attrOwnerID)
+	ownerID = readString(out.Item, attrOwnerID)
 	if ownerID == actorID {
 		return true, ownerID, nil
 	}

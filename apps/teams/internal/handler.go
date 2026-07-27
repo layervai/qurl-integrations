@@ -54,11 +54,15 @@ type Handler struct {
 }
 
 // NewHandler constructs the Teams message handler.
-func NewHandler(cfg HandlerConfig) *Handler {
-	if cfg.BaseContext == nil {
-		cfg.BaseContext = context.Background()
+func NewHandler(cfg *HandlerConfig) *Handler {
+	if cfg == nil {
+		cfg = &HandlerConfig{}
 	}
-	return &Handler{cfg: cfg}
+	nextCfg := *cfg
+	if nextCfg.BaseContext == nil {
+		nextCfg.BaseContext = context.Background()
+	}
+	return &Handler{cfg: nextCfg}
 }
 
 // ServeHTTP handles incoming Teams Bot Framework activities.
@@ -192,19 +196,19 @@ func (h *Handler) execute(ctx context.Context, activity *Activity, scope scopeIn
 	return h.executeChannelCommand(ctx, activity, scope, cmd)
 }
 
-func (h *Handler) executeTenantAdminCommand(ctx context.Context, activity *Activity, scope scopeInfo, cmd *Command) (string, bool, error) {
+func (h *Handler) executeTenantAdminCommand(ctx context.Context, activity *Activity, scope scopeInfo, cmd *Command) (reply string, handled bool, err error) {
 	switch cmd.Verb {
 	case verbAdmins:
-		reply, err := h.handleAdmins(ctx, scope)
+		reply, err = h.handleAdmins(ctx, scope)
 		return reply, true, err
 	case verbAdd:
-		reply, err := h.handleAddAdmin(ctx, scope, activity.From.ID, cmd.UserID)
+		reply, err = h.handleAddAdmin(ctx, scope, activity.From.ID, cmd.UserID)
 		return reply, true, err
 	case verbRemove:
-		reply, err := h.handleRemoveAdmin(ctx, scope, activity.From.ID, cmd.UserID)
+		reply, err = h.handleRemoveAdmin(ctx, scope, activity.From.ID, cmd.UserID)
 		return reply, true, err
 	case verbUninstall:
-		reply, err := h.handleUninstall(ctx, scope, activity.From.ID)
+		reply, err = h.handleUninstall(ctx, scope, activity.From.ID)
 		return reply, true, err
 	}
 	return "", false, nil
@@ -212,7 +216,7 @@ func (h *Handler) executeTenantAdminCommand(ctx context.Context, activity *Activ
 
 func (h *Handler) executeChannelCommand(ctx context.Context, activity *Activity, scope scopeInfo, cmd *Command) (string, error) {
 	if !scope.Channel {
-		return "", errors.New("this command must be run in a Teams channel. Personal chat is only used for setup confirmation and private delivery.")
+		return "", &userError{msg: "This command must be run in a Teams channel. Personal chat is only used for setup confirmation and private delivery."}
 	}
 	qc, err := h.qurlClient(ctx, scope.TenantID)
 	if err != nil {

@@ -141,7 +141,7 @@ func run() error {
 		slog.Warn("Teams OAuth routes not registered because required env vars are missing")
 	}
 
-	handler := teamsbot.NewHandler(teamsbot.HandlerConfig{
+	handler := teamsbot.NewHandler(&teamsbot.HandlerConfig{
 		BaseContext:  handlerCtx,
 		QURLEndpoint: qurlEndpoint,
 		AuthProvider: ddbProvider,

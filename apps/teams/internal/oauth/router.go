@@ -84,8 +84,10 @@ type BindConflictCode string
 
 // BindConflictCode values returned by the Teams OAuth bind flow.
 const (
+	// BindConflictAlreadyBoundToCaller reports that the caller already owns the tenant binding.
 	BindConflictAlreadyBoundToCaller BindConflictCode = "workspace_already_bound_to_caller"
-	BindConflictAlreadyBound         BindConflictCode = "workspace_already_bound"
+	// BindConflictAlreadyBound reports that a different caller already owns the tenant binding.
+	BindConflictAlreadyBound BindConflictCode = "workspace_already_bound"
 )
 
 // WorkspaceStore reads and writes the Teams tenant's stored qURL API key state.
@@ -139,11 +141,11 @@ func RegisterRoutes(mux *http.ServeMux, cfg Config) {
 		panic("oauth.RegisterRoutes: " + err.Error())
 	}
 	mux.Handle(StartPath, http.TimeoutHandler(Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
-	mux.Handle(callbackPath, http.TimeoutHandler(Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
+	mux.Handle(callbackPath, http.TimeoutHandler(Callback(&cfg), oauthHandlerTimeout, "oauth/callback timed out"))
 }
 
 // Validate checks Config for internally inconsistent wiring.
-func (c Config) Validate() error {
+func (c *Config) Validate() error {
 	if c.AdminStore != nil && c.BindClassifyError == nil {
 		return errors.New("AdminStore wired without BindClassifyError")
 	}

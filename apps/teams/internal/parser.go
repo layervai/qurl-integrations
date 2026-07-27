@@ -45,9 +45,11 @@ var (
 type SetupMode string
 
 const (
-	// SetupMode values accepted by the Teams setup command.
-	SetupModeReuse   SetupMode = "reuse"
-	SetupModeRotate  SetupMode = "rotate"
+	// SetupModeReuse keeps using the existing workspace key when it is still valid.
+	SetupModeReuse SetupMode = "reuse"
+	// SetupModeRotate replaces the current workspace key under the same qURL account.
+	SetupModeRotate SetupMode = "rotate"
+	// SetupModeRepoint attempts to move the workspace key to the signed-in qURL account.
 	SetupModeRepoint SetupMode = "repoint"
 )
 

@@ -77,7 +77,7 @@ func TestHandleGetDMChecksPersonalConversationBeforeMint(t *testing.T) {
 		},
 	})
 
-	h := NewHandler(HandlerConfig{
+	h := NewHandler(&HandlerConfig{
 		AdminStore: store,
 		Messages:   &stubMessagePoster{},
 	})
@@ -155,7 +155,7 @@ func TestHandleGetSetsAccessLimitsAndScopedIdempotencyKey(t *testing.T) {
 		},
 	})
 
-	h := NewHandler(HandlerConfig{
+	h := NewHandler(&HandlerConfig{
 		AdminStore: store,
 		Messages:   &stubMessagePoster{},
 	})
@@ -276,7 +276,7 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 			return errors.New("dm delivery failed")
 		},
 	}
-	h := NewHandler(HandlerConfig{
+	h := NewHandler(&HandlerConfig{
 		AdminStore: store,
 		Messages:   messages,
 	})
@@ -338,7 +338,7 @@ func TestListAllResourcesExcludesRevoked(t *testing.T) {
 
 func TestProcessMessageSanitizesFeedbackFailure(t *testing.T) {
 	messages := &stubMessagePoster{}
-	h := NewHandler(HandlerConfig{
+	h := NewHandler(&HandlerConfig{
 		Messages: messages,
 		Feedback: stubFeedbackPoster{err: errors.New("feedback webhook returned 500: internal endpoint failed")},
 	})
@@ -372,7 +372,7 @@ func TestHandleSetupRotateUsesRequestContext(t *testing.T) {
 			return &dynamodb.GetItemOutput{}, nil
 		},
 	})
-	h := NewHandler(HandlerConfig{
+	h := NewHandler(&HandlerConfig{
 		AdminStore: store,
 		Setup: oauth.SetupConfig{
 			StateSecret:  []byte(strings.Repeat("x", oauth.StateMinSecret)),
@@ -398,7 +398,7 @@ func TestHandleSetupRotateUsesRequestContext(t *testing.T) {
 
 func TestProcessMessageWithoutAdminStoreFailsClosed(t *testing.T) {
 	messages := &stubMessagePoster{}
-	h := NewHandler(HandlerConfig{Messages: messages})
+	h := NewHandler(&HandlerConfig{Messages: messages})
 	activity := &Activity{
 		Text: "list",
 		From: ChannelAccount{ID: "user-1"},
@@ -433,7 +433,7 @@ func TestHandleActivityAcknowledgesMessageBeforeReplyCompletes(t *testing.T) {
 			return nil
 		},
 	}
-	h := NewHandler(HandlerConfig{Messages: messages})
+	h := NewHandler(&HandlerConfig{Messages: messages})
 	activity := &Activity{
 		Type: "message",
 		Text: "help",

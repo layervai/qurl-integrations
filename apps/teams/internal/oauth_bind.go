@@ -21,6 +21,7 @@ func NewOAuthAdminStore(store *teamsdata.Store) oauth.AdminStore {
 	return &oauthAdminStoreAdapter{store: store}
 }
 
+// BindWorkspace stores the Teams tenant owner binding created during OAuth setup.
 func (a *oauthAdminStoreAdapter) BindWorkspace(ctx context.Context, m *oauth.WorkspaceMapping, seedAdmin string) error {
 	return a.store.BindWorkspace(ctx, &teamsdata.WorkspaceMapping{
 		TenantID:  m.TenantID,

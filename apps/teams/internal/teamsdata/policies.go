@@ -72,7 +72,7 @@ func (s *Store) ResolvePolicy(ctx context.Context, tenantID, scopeID, resourceID
 }
 
 // LookupScopeAlias resolves a channel alias to a resource ID.
-func (s *Store) LookupScopeAlias(ctx context.Context, tenantID, scopeID, aliasName string) (string, bool, error) {
+func (s *Store) LookupScopeAlias(ctx context.Context, tenantID, scopeID, aliasName string) (resourceID string, found bool, err error) {
 	if tenantID == "" || scopeID == "" || aliasName == "" {
 		return "", false, &Error{StatusCode: http.StatusBadRequest, Title: "LookupScopeAlias: tenant_id, scope_id, and alias_name are required"}
 	}
@@ -90,8 +90,8 @@ func (s *Store) LookupScopeAlias(ctx context.Context, tenantID, scopeID, aliasNa
 	if err != nil {
 		return "", false, ddbToError("LookupScopeAlias", err)
 	}
-	rid := readStringMap(out.Item, attrAliasBindings)[aliasName]
-	return rid, rid != "", nil
+	resourceID = readStringMap(out.Item, attrAliasBindings)[aliasName]
+	return resourceID, resourceID != "", nil
 }
 
 // GetScopePolicy lists alias bindings for a Teams scope.
