@@ -207,6 +207,7 @@ func run() error {
 	}
 	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
 	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
+	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil)
 	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
 
 	postFeedback := buildPostFeedback(userAgent)
@@ -336,6 +337,7 @@ func run() error {
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
 		MaxConcurrentFollowupGateAsync: maxConcurrentFollowupGateAsync,
 		AdminStore:                     adminStore,
+		SlackUserLookup:                slackUserLookup,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
 		PostFeedback:                   postFeedback,

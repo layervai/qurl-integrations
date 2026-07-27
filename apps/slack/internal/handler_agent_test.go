@@ -50,6 +50,41 @@ func TestStripBotMention(t *testing.T) {
 	}
 }
 
+func TestAgentHasExplicitNonHTTPSProtectURL(t *testing.T) {
+	cases := map[string]bool{
+		"Protect javascript:alert(1) as $bad.":  true,
+		"protect http://example.com as $docs":   true,
+		"Protect <http://example.com> as $docs": true,
+		"Protect https://example.com as $docs":  false,
+		"Protect $docs as $shared":              false,
+		"Protect example.com:8080 as $local":    false,
+		"Protect example.com:8080/path as $x":   false,
+		"Protect javascript:alert(1)":           true,
+		"How do I protect javascript: URLs?":    false,
+	}
+	for message, want := range cases {
+		if got := agentHasExplicitNonHTTPSProtectURL(message); got != want {
+			t.Errorf("agentHasExplicitNonHTTPSProtectURL(%q) = %v, want %v", message, got, want)
+		}
+	}
+}
+
+func TestAgentHasExplicitInvalidSetAlias(t *testing.T) {
+	cases := map[string]bool{
+		"Set alias $Prod_Admin!!! to $staging-api.": true,
+		"set alias $prod_admin to $staging-api":     true,
+		"Set alias $prod-admin to $staging-api":     false,
+		"Set alias for $prod-admin to staging":      false,
+		"Set alias prod-admin to $staging-api":      false,
+		"How do I set alias $Bad_ID?":               false,
+	}
+	for message, want := range cases {
+		if got := agentHasExplicitInvalidSetAlias(message); got != want {
+			t.Errorf("agentHasExplicitInvalidSetAlias(%q) = %v, want %v", message, got, want)
+		}
+	}
+}
+
 func env(eventType, channelType, user, botID, subtype, text string) *slackEventEnvelope {
 	return &slackEventEnvelope{
 		Type: "event_callback", TeamID: "T1", EventID: "Ev1",
@@ -911,6 +946,92 @@ func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("in-budget failure should post the generic error reply, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_RejectsExplicitNonHTTPSProtectURLBeforeLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            panicAgentLLM{},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Protect javascript:alert(1) as $bad."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentInvalidProtectURLReply {
+		t.Fatalf("invalid URL should be rejected once before the LLM runs, got %+v", *posts)
+	}
+	if strings.Contains((*posts)[0].text, "javascript:") {
+		t.Fatalf("invalid URL reply must not echo the attacker-controlled target: %q", (*posts)[0].text)
+	}
+}
+
+func TestProcessAgentEvent_AllowsHTTPSProtectURLThroughToLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: testAgentStillWorksReply},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Protect https://example.com as $docs."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("HTTPS protect request should follow the normal agent path, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_RejectsExplicitInvalidAliasBeforeLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            panicAgentLLM{},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Set alias $Prod_Admin!!! to $staging-api."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentInvalidAliasReply {
+		t.Fatalf("invalid alias should be rejected once before the LLM runs, got %+v", *posts)
+	}
+	if strings.Contains((*posts)[0].text, "Prod_Admin") {
+		t.Fatalf("invalid alias reply must not echo the attacker-controlled alias: %q", (*posts)[0].text)
+	}
+}
+
+func TestProcessAgentEvent_AllowsValidAliasThroughToLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: testAgentStillWorksReply},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Set alias $prod-admin to $staging-api."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("valid alias request should follow the normal agent path, got %+v", *posts)
 	}
 }
 

@@ -196,11 +196,16 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 	}
 	// The agent's own answer posts as standard Markdown rendered by Slack, with
 	// masked links neutralized before either the channel or pane surface sees them.
-	// A proposal summary must NOT route here: it is LLM-distilled, so it stays escaped
-	// mrkdwn on the text seam (injection defense) — as does the blank-reply error fallback.
+	// A proposal summary must NOT route here: it is LLM-distilled, so each output
+	// renderer receives its own hardened representation (see
+	// postAgentProposalPreview). The blank-reply error fallback stays fixed text.
 	if result.Proposal == nil && strings.TrimSpace(result.Reply) != "" {
 		reply := hardenAgentMarkdown(result.Reply)
 		h.postAgentMarkdownReply(log, env, threadTS, agentLLMReplyWithDisclaimer(reply))
+		return
+	}
+	if result.Proposal != nil && strings.TrimSpace(result.Proposal.Summary) != "" {
+		h.postAgentProposalPreview(log, env, threadTS, result.Proposal.Summary)
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
@@ -296,14 +301,11 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		return
 	}
 	reason := protectConnectorConfirmReason(prop)
-	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
-	// the card fallback below and agentReplyText).
-	preview := agentProposalPreview(summary)
 
 	id, err := newPendingActionID()
 	if err != nil {
 		log.Error("agent confirm: id generation failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 	blob, err := json.Marshal(pendingAction{
@@ -320,7 +322,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	})
 	if err != nil {
 		log.Error("agent confirm: marshal pending action failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 
@@ -328,16 +330,20 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	defer cancel()
 	if err := h.cfg.AgentStore.PutPendingAction(ctx, env.TeamID, id, blob); err != nil {
 		log.Error("agent confirm: store pending action failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 	// Card text renders as plain_text (safe), but the fallback is the message's
 	// top-level text — mrkdwn by default — so LLM-distilled summary/reason must be
 	// escaped there too, or prompt-injected markup would surface in push previews
 	// and non-block clients.
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, reason, id), agentConfirmFallbackText(summary, reason)); err != nil {
+	blocks := buildAgentConfirmBlocks(summary, reason, id)
+	if h.agentFeedbackEnabled() {
+		blocks = append(blocks, agentFeedbackBlock())
+	}
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, blocks, agentConfirmFallbackText(summary, reason)); err != nil {
 		log.Error("agent confirm: post card failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 }
