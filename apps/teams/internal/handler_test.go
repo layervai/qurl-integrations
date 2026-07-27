@@ -378,6 +378,7 @@ func TestHandleSetupRotateUsesRequestContext(t *testing.T) {
 			StateSecret:  []byte(strings.Repeat("x", oauth.StateMinSecret)),
 			TeamsBaseURL: "https://teams.example.test",
 		},
+		OAuthEnabled: true,
 	})
 	ctx := context.WithValue(context.Background(), key, "present")
 
