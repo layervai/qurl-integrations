@@ -145,7 +145,8 @@ func (h *Handler) processMessageAsync(activity *Activity) {
 			}
 		}()
 		if err := h.processMessage(ctx, activity); err != nil {
-			slog.Error("teams message processing failed", "error", err)
+			//nolint:gosec // Structured fields are reduced to constant classifications rather than raw request input.
+			slog.Error("teams message processing failed", "error_class", classifyTeamsCommandError(err))
 		}
 	}()
 }
