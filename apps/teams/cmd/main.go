@@ -151,12 +151,13 @@ func run() error {
 			AppID:       appID,
 			AppPassword: appPassword,
 		},
-		TokenAuth:   teamsbot.NewIncomingTokenValidator(handlerCtx, appID),
-		Setup:       setupCfg,
-		Feedback:    feedback,
-		TunnelImage: tunnelImage,
-		SkipBotAuth: skipBotAuth,
-		UserAgent:   userAgent,
+		TokenAuth:    teamsbot.NewIncomingTokenValidator(handlerCtx, appID),
+		Setup:        setupCfg,
+		Feedback:     feedback,
+		TunnelImage:  tunnelImage,
+		SkipBotAuth:  skipBotAuth,
+		UserAgent:    userAgent,
+		OAuthEnabled: oauthEnabled,
 	})
 	mux.Handle("/teams/messages", handler)
 

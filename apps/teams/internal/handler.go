@@ -44,6 +44,11 @@ type HandlerConfig struct {
 	TunnelImage  string
 	SkipBotAuth  bool
 	UserAgent    string
+	// OAuthEnabled indicates whether the OAuth routes are registered. When false,
+	// the setup command returns an error instead of handing out a link to routes
+	// that would 404. This prevents UX confusion when only partial OAuth config
+	// (e.g. StateSecret + TeamsBaseURL) is present but Auth0 vars are missing.
+	OAuthEnabled bool
 }
 
 // Handler serves the Teams bot message endpoint.
@@ -124,6 +129,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handleActivity(w, r, &activity)
 }
 
+// handleActivity dispatches the activity to the appropriate handler.
+//
+// Note on retry deduplication: We return 202 Accepted immediately and spawn a
+// goroutine per delivery. qURL create/mint calls are idempotency-keyed off
+// activity.ID (see getQURLIdempotencyKey), but non-qURL side effects like
+// add/remove admin, ExposeResourceToScope, and personal-chat DM sends would
+// run twice if Bot Framework re-delivers the same activity. This is low
+// probability given the fast 202 response, but operators should be aware.
 func (h *Handler) handleActivity(w http.ResponseWriter, r *http.Request, activity *Activity) {
 	switch strings.ToLower(strings.TrimSpace(activity.Type)) {
 	case "message":
@@ -255,6 +268,12 @@ func (h *Handler) executeChannelCommand(ctx context.Context, activity *Activity,
 }
 
 func (h *Handler) handleSetup(ctx context.Context, scope scopeInfo, activity *Activity, cmd *Command) (string, error) {
+	// Check OAuthEnabled first: even if StateSecret and TeamsBaseURL are set,
+	// the OAuth routes won't be registered without all Auth0 vars + QURL_ENDPOINT.
+	// Returning an error here prevents handing out a link that would 404.
+	if !h.cfg.OAuthEnabled {
+		return "", &userError{msg: "Setup is not configured on this deployment."}
+	}
 	if len(h.cfg.Setup.StateSecret) < oauth.StateMinSecret || strings.TrimSpace(h.cfg.Setup.TeamsBaseURL) == "" {
 		return "", &userError{msg: "Setup is not configured on this deployment."}
 	}
@@ -392,6 +411,13 @@ func (h *Handler) handleList(ctx context.Context, qc *client.Client, scope scope
 	return strings.Join(lines, "\n"), nil
 }
 
+// handleGet mints a one-time qURL for the requested resource.
+//
+// Note on dm:true revoke asymmetry: Unlike protect-connector which revokes its
+// bootstrap key on DM delivery failure, handleGet does not revoke the minted
+// qURL if the personal DM send fails. The 1-minute expiry (teamsGetResourceLinkExpiry)
+// makes this benign in practice, but the asymmetry exists because bootstrap keys
+// are longer-lived and more sensitive than one-time access links.
 func (h *Handler) handleGet(ctx context.Context, qc *client.Client, scope scopeInfo, activity *Activity, cmd *Command) (string, error) {
 	resource, err := h.resolveScopedResource(ctx, qc, scope.TenantID, scope.ScopeID, cmd.Resource)
 	if err != nil {

@@ -154,6 +154,12 @@ func parseSetup(cmd *Command) (*Command, error) {
 	return cmd, nil
 }
 
+// knownGetFlags are the flag keys accepted by the get command.
+var knownGetFlags = map[string]bool{
+	"dm":     true,
+	"reason": true,
+}
+
 func parseGet(cmd *Command) (*Command, error) {
 	if len(cmd.Args) == 0 {
 		return nil, fmt.Errorf("%w: resource token", errMissingArgument)
@@ -167,6 +173,9 @@ func parseGet(cmd *Command) (*Command, error) {
 		key, value, ok := parseFlag(tok)
 		if !ok {
 			return nil, fmt.Errorf("%w: %q", errUnexpectedArg, tok)
+		}
+		if !knownGetFlags[key] {
+			return nil, fmt.Errorf("%w: unknown flag %q", errUnexpectedArg, key)
 		}
 		cmd.Flags[key] = value
 	}
