@@ -51,9 +51,9 @@ Complete this preflight before giving Slack the reviewer instructions.
 7. Confirm the privacy policy, support page, AI disclosure, and paid Slack
    plan disclosure match the live Marketplace listing.
 
-If the production manifest does not enable the reviewer-facing AI surface,
-omit no AI steps. Fix or apply the manifest first so the instructions match
-the submitted app.
+If the production manifest does not enable the reviewer-facing AI surface, do
+not remove any AI steps. Fix or apply the manifest first so the instructions
+match the submitted app.
 
 ## Reviewer journey
 
