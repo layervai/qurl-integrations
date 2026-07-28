@@ -1180,6 +1180,44 @@ func TestAgentBackend_StalePolicyScanMemoized(t *testing.T) {
 	}
 }
 
+func TestAgentBackend_ScanCountsDistinctResourcesNotHits(t *testing.T) {
+	// Cursor pagination can return the same resource on two pages when the
+	// workspace list shifts mid-scan. Counting hits rather than distinct ids would
+	// satisfy the early-stop one page too soon: the scan would drop a reachable
+	// resource and, worse, report the short list as COMPLETE.
+	b, _ := newBackendUnderTest(t, false) // allowed = {r_1, r_2}
+	var gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch gets.Add(1) {
+		case 1:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"}],"meta":{"has_more":true,"next_cursor":"c2"}}`))
+		case 2:
+			// r_1 again — the shifted duplicate.
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"}],"meta":{"has_more":true,"next_cursor":"c3"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_2","slug":"staging","type":"tunnel"}]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	out, err := b.ListResources(context.Background(), backendTC())
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if !strings.Contains(out, "$oncall") || !strings.Contains(out, "$staging") {
+		t.Fatalf("a duplicate on page 2 must not end the scan before r_2 is found: %q", out)
+	}
+	if strings.Count(out, "$oncall") != 1 {
+		t.Fatalf("the duplicated resource must be listed once: %q", out)
+	}
+	if strings.Contains(out, channelResourcesIncompleteNote) {
+		t.Fatalf("this scan completed; it must not be reported as partial: %q", out)
+	}
+}
+
 func TestAgentBackend_ScanStopsWhenTheTurnCannotFundAnotherPage(t *testing.T) {
 	// The workspace scan is the read that could outlast the whole conversation
 	// turn: twenty sequential pages against a client whose own HTTP timeout is a

@@ -263,6 +263,12 @@ const channelResourcesPageBudget = 5 * time.Second
 // list_resources is called (it bounds the repeat, not the single-scan cost).
 func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) (resources []client.Resource, partial bool, err error) {
 	found := make([]client.Resource, 0, len(allowed))
+	// Track DISTINCT reachable ids, not the number of hits. Cursor pagination can
+	// legitimately return the same resource on two pages when the workspace list
+	// shifts mid-scan, and counting hits would then satisfy the early-stop before
+	// every allowed id was accounted for — dropping a reachable resource AND, worse
+	// under the partial contract below, reporting the short list as complete.
+	seen := make(map[string]struct{}, len(allowed))
 	cursor := ""
 	for page := 0; page < channelResourcesMaxPages; page++ {
 		// Don't start a page the turn cannot afford to finish: returning what we
@@ -286,11 +292,17 @@ func collectChannelResources(ctx context.Context, c *client.Client, allowed map[
 			return nil, false, err
 		}
 		for i := range out.Resources {
-			if _, ok := allowed[out.Resources[i].ResourceID]; ok {
-				found = append(found, out.Resources[i])
+			rid := out.Resources[i].ResourceID
+			if _, ok := allowed[rid]; !ok {
+				continue
 			}
+			if _, dup := seen[rid]; dup {
+				continue
+			}
+			seen[rid] = struct{}{}
+			found = append(found, out.Resources[i])
 		}
-		if len(found) >= len(allowed) || !out.HasMore || out.NextCursor == "" {
+		if len(seen) >= len(allowed) || !out.HasMore || out.NextCursor == "" {
 			return found, false, nil
 		}
 		cursor = out.NextCursor
