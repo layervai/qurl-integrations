@@ -463,6 +463,18 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 // path, and a turn short on budget should hand the user a plain answer (and, when
 // an action is warranted, a description of it) rather than a confirm card built
 // from a truncated picture. The user can re-ask; nothing was executed either way.
+//
+// It is also the one round NOT capped by maxRoundBudget, and deliberately so.
+// finalAnswerReserve is a floor under this call, not a ceiling on it: capping the
+// last chance to say anything would only make the turn likelier to end in the
+// generic transient reply, which is the outcome this whole path exists to avoid.
+// It stays bounded by the turn deadline, so it cannot outlive the turn.
+//
+// A streamed turn may have already emitted deltas from the round that ran long
+// (see [WithStreamSink] — deltas are never rolled back), so the sink can observe
+// a truncated fragment followed by this complete answer. The Slack layer
+// reconciles against [Result] rather than the concatenated deltas for exactly
+// this reason. Pinned by TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer.
 func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpec, msgs []Message, usage Usage, why Cutoff) (Result, []Message, error) {
 	resp, err := a.roundTrip(ctx, &Request{
 		SystemStable:  systemPreamble,

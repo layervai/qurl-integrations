@@ -247,12 +247,19 @@ const channelResourcesPageBudget = 5 * time.Second
 // only the first page would silently drop channel-reachable resources that sort
 // past it in a workspace with more than one page of resources.
 //
-// It returns partial=true when the scan stopped before accounting for the whole
-// allowed set — page cap reached, or the remaining turn budget could not fund
-// another page. That flag is load-bearing, not cosmetic: silently returning a
-// short list would make the agent report "nothing here matches" for a resource
-// that does exist, which is a worse failure than being slow. The caller passes
-// the caveat through to the model so the answer stays honest about its scope.
+// The second return is partial: true when the scan stopped before accounting for
+// the whole allowed set — page cap reached, or a page ran out of time. That flag
+// is load-bearing, not cosmetic: silently returning a short list would make the
+// agent report "nothing here matches" for a resource that does exist, which is a
+// worse failure than being slow. The caller passes the caveat through to the
+// model so the answer stays honest about its scope.
+//
+// Every page is ATTEMPTED while any budget remains, rather than pre-emptively
+// skipped when the remaining budget looks too small for a full page. Not trying
+// costs exactly what trying and failing costs — the pages already collected are
+// kept either way — so refusing to start would only ever downgrade a workspace
+// whose pages actually answer in a few hundred milliseconds. Correctness comes
+// from the per-page deadline plus the partial flag, not from predicting latency.
 //
 // The len(found) >= len(allowed) early-stop can't fire if a channel_policies row
 // references a resource id that no longer exists workspace-side (a stale policy):
@@ -261,7 +268,7 @@ const channelResourcesPageBudget = 5 * time.Second
 // cost twenty sequential round-trips. channelResources memoizes the result per
 // turn, so that worst case is paid at most once per turn however many times
 // list_resources is called (it bounds the repeat, not the single-scan cost).
-func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) (resources []client.Resource, partial bool, err error) {
+func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, bool, error) {
 	found := make([]client.Resource, 0, len(allowed))
 	// Track DISTINCT reachable ids, not the number of hits. Cursor pagination can
 	// legitimately return the same resource on two pages when the workspace list
@@ -271,12 +278,8 @@ func collectChannelResources(ctx context.Context, c *client.Client, allowed map[
 	seen := make(map[string]struct{}, len(allowed))
 	cursor := ""
 	for page := 0; page < channelResourcesMaxPages; page++ {
-		// Don't start a page the turn cannot afford to finish: returning what we
-		// already found, flagged partial, beats spending the caller's remaining
-		// budget on a read that will be canceled mid-flight anyway.
-		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < channelResourcesPageBudget {
-			return found, true, nil
-		}
+		// WithTimeout takes the EARLIER of the page budget and whatever the read
+		// context has left, so a page never outlives the read that asked for it.
 		pageCtx, cancel := context.WithTimeout(ctx, channelResourcesPageBudget)
 		out, err := c.ListResources(pageCtx, client.ListResourcesInput{Limit: listResourcesPageLimit, Cursor: cursor})
 		// Read the page context's own outcome before canceling it, so a fired
@@ -285,8 +288,11 @@ func collectChannelResources(ctx context.Context, c *client.Client, allowed map[
 		pageRanLong := errors.Is(pageCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		if err != nil {
-			if pageRanLong && ctx.Err() == nil {
-				// Only this page's budget was spent — keep the earlier pages.
+			// Out of time, whether this page's own budget or the read's — either way
+			// the pages already collected are still good, and partial says so. Only a
+			// real API failure (or a canceled turn, which latches Canceled rather than
+			// DeadlineExceeded) discards the scan.
+			if pageRanLong {
 				return found, true, nil
 			}
 			return nil, false, err

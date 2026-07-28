@@ -1226,10 +1226,10 @@ func TestAgentBackend_ScanStopsWhenTheTurnCannotFundAnotherPage(t *testing.T) {
 	// list as complete would make the agent deny a resource that exists.
 	b, _ := newBackendUnderTest(t, false) // allowed = {r_1, r_2}
 	var gets atomic.Int32
+	const pageLatency = 400 * time.Millisecond
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		gets.Add(1)
-		// Burn enough of the turn that the next page no longer fits.
-		time.Sleep(120 * time.Millisecond)
+		time.Sleep(pageLatency)
 		w.Header().Set("Content-Type", "application/json")
 		// Only r_1 is reachable here, so the early-stop can't fire and the scan
 		// would otherwise keep paging to the cap.
@@ -1239,55 +1239,86 @@ func TestAgentBackend_ScanStopsWhenTheTurnCannotFundAnotherPage(t *testing.T) {
 	c := client.New(srv.URL, "k")
 	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
 
-	// Room for exactly one page: after it, less than a page budget remains.
-	ctx, cancel := context.WithTimeout(context.Background(), channelResourcesPageBudget+50*time.Millisecond)
+	// Room for one page and change: page 1 lands, page 2 is cut off mid-flight.
+	ctx, cancel := context.WithTimeout(context.Background(), pageLatency+pageLatency/2)
 	defer cancel()
 
 	out, err := b.ListResources(ctx, backendTC())
 	if err != nil {
 		t.Fatalf("a scan that ran out of budget must degrade, not fail: %v", err)
 	}
-	if g := gets.Load(); g != 1 {
-		t.Fatalf("scan fetched %d pages, want 1 before the budget stopped it", g)
+	if g := gets.Load(); g != 2 {
+		t.Fatalf("scan fetched %d pages, want 2 (the second cut off mid-flight)", g)
 	}
 	if !strings.Contains(out, "$oncall") {
-		t.Fatalf("what the scan did find must survive: %q", out)
+		t.Fatalf("what the scan did find must survive the cut-off page: %q", out)
 	}
 	if !strings.Contains(out, channelResourcesIncompleteNote) {
 		t.Fatalf("an incomplete scan must disclose that it is incomplete: %q", out)
-	}
-	if ctx.Err() != nil {
-		t.Fatal("the scan spent the caller's whole budget instead of yielding early")
 	}
 }
 
 func TestAgentBackend_ScanWithNoBudgetNeverClaimsNothingIsProtected(t *testing.T) {
 	// The one answer this tool must never give from an unfinished read: "nothing is
-	// protected in this channel". With no budget for even the first page, the
-	// reachable set is unknown — say that, don't assert emptiness.
+	// protected in this channel". When not even the first page lands, the reachable
+	// set is unknown — say that, don't assert emptiness. The page is still
+	// ATTEMPTED: a fast workspace must not be downgraded by arithmetic alone.
 	b, _ := newBackendUnderTest(t, false) // allowed = {r_1, r_2}
 	var gets atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		gets.Add(1)
+		time.Sleep(400 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[]}`))
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"}]}`))
 	}))
 	t.Cleanup(srv.Close)
 	c := client.New(srv.URL, "k")
 	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
 
-	ctx, cancel := context.WithTimeout(context.Background(), channelResourcesPageBudget/2)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
 	out, err := b.ListResources(ctx, backendTC())
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}
-	if g := gets.Load(); g != 0 {
-		t.Fatalf("started %d pages it could not finish, want 0", g)
+	if g := gets.Load(); g != 1 {
+		t.Fatalf("the first page must be attempted whatever the budget looks like, got %d", g)
 	}
 	if out != channelResourcesIncompleteEmpty {
 		t.Fatalf("an unfinished scan must not read as an empty channel, got %q", out)
+	}
+}
+
+func TestAgentBackend_ScanCompletesOnAFastWorkspaceWithLittleBudget(t *testing.T) {
+	// The regression behind removing the pre-emptive page gate: a workspace whose
+	// pages answer in milliseconds must return a COMPLETE list even when the
+	// remaining read budget is far below a full page budget. Refusing to start
+	// would have downgraded this to "the scan did not finish" on arithmetic alone,
+	// and channelResources memoizes that for the rest of the turn.
+	b, _ := newBackendUnderTest(t, false) // allowed = {r_1, r_2}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"resource_id":"r_1","alias":"oncall","type":"url"},{"resource_id":"r_2","slug":"staging","type":"tunnel"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.New(srv.URL, "k")
+	b.authClient = func(context.Context, string) (*client.Client, error) { return c, nil }
+
+	// An order of magnitude under channelResourcesPageBudget, but plenty for a
+	// local page.
+	ctx, cancel := context.WithTimeout(context.Background(), channelResourcesPageBudget/10)
+	defer cancel()
+
+	out, err := b.ListResources(ctx, backendTC())
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if !strings.Contains(out, "$oncall") || !strings.Contains(out, "$staging") {
+		t.Fatalf("a fast scan must return the complete list: %q", out)
+	}
+	if strings.Contains(out, channelResourcesIncompleteNote) {
+		t.Fatalf("a scan that completed must not be reported as partial: %q", out)
 	}
 }
 

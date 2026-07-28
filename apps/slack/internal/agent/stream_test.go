@@ -13,8 +13,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // streamingFakeLLM implements both LLM and streamingLLM. It replays one response per
@@ -312,5 +314,66 @@ func TestRun_StreamingLLM_NoSink_UsesComplete(t *testing.T) {
 	}
 	if res.Reply != "hello" {
 		t.Fatalf("Result.Reply = %q, want %q", res.Reply, "hello")
+	}
+}
+
+// streamingSlowThenAnswerLLM streams a partial fragment and then blocks until the
+// round's own ration expires, before answering the final round normally — the
+// shape that produces a truncated delta followed by a complete answer.
+type streamingSlowThenAnswerLLM struct {
+	partial string
+	final   Response
+	calls   int
+}
+
+func (s *streamingSlowThenAnswerLLM) Complete(ctx context.Context, req *Request) (Response, error) {
+	return s.StreamComplete(ctx, req, nil)
+}
+
+func (s *streamingSlowThenAnswerLLM) StreamComplete(ctx context.Context, _ *Request, onText func(string)) (Response, error) {
+	s.calls++
+	if s.calls == 1 {
+		if onText != nil {
+			onText(s.partial)
+		}
+		<-ctx.Done()
+		return Response{}, ctx.Err()
+	}
+	if onText != nil {
+		onText(s.final.Text)
+	}
+	return s.final, nil
+}
+
+// A gathering round that streams text and THEN outruns its ration leaves the
+// fragment with the caller — deltas are never rolled back (see WithStreamSink) —
+// and the reserved final answer streams on top of it. Run still returns the
+// complete answer, which is what the Slack layer reconciles the message against;
+// it must not assume the delivered text equals the concatenated deltas.
+func TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer(t *testing.T) {
+	llm := &streamingSlowThenAnswerLLM{
+		partial: "Let me check the res",
+		final:   textResp("I couldn't finish checking $docs in this channel."),
+	}
+	var deltas []string
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(func(d string) {
+		deltas = append(deltas, d)
+	})).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run must degrade to an answer, not fail: %v", err)
+	}
+	if res.Reply != llm.final.Text {
+		t.Fatalf("Result.Reply = %q, want the final answer", res.Reply)
+	}
+	if res.Cutoff != CutoffBudget {
+		t.Fatalf("Cutoff = %q, want %q", res.Cutoff, CutoffBudget)
+	}
+	want := []string{"Let me check the res", llm.final.Text}
+	if !reflect.DeepEqual(deltas, want) {
+		t.Fatalf("sink saw %q, want the truncated fragment followed by the final answer", deltas)
 	}
 }
