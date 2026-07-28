@@ -1099,8 +1099,13 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// Token usage per turn (summed across the agent's round-trips). The cache
 	// counters are the operator hook for confirming whether prompt caching is
 	// paying off once conversation mode is live (see the agent package).
+	// cutoff is empty on a turn that converged on its own, and names the ration that
+	// ran out otherwise ("budget" / "iterations"). It is the operator signal for
+	// agent latency regressions: a rising cutoff rate means turns are being answered
+	// from a partial picture, which no other field here would reveal.
 	log.Info("agent: turn complete",
 		"proposed", result.Proposal != nil,
+		"cutoff", string(result.Cutoff),
 		"input_tokens", result.Usage.InputTokens,
 		"output_tokens", result.Usage.OutputTokens,
 		"cache_read_tokens", result.Usage.CacheReadInputTokens,

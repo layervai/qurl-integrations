@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Conversation roles. Kept as constants so the loop and the SDK translation
@@ -36,10 +37,56 @@ const (
 // loops without converging, not a normal exit.
 const defaultMaxIterations = 6
 
-// iterationCapMessage is returned as the reply when the loop hits
-// [defaultMaxIterations] without the model answering or proposing — a graceful
-// "ask me again" rather than a silent stall.
+// iterationCapMessage is the last-resort reply for a round that produced no text
+// at all — mid-loop, or on the final round — a graceful "ask me again" rather
+// than a silent stall or an empty Slack message.
 const iterationCapMessage = "I wasn't able to work that out — could you rephrase, or use a `/qurl` command directly?"
+
+// The turn budget is rationed, not merely bounded. The caller gives [Run] one
+// deadline for the whole turn (agentTurnTimeout in the Slack layer); without
+// rationing, any single step can consume all of it and the turn ends with every
+// completed round-trip thrown away and a generic "that took too long" reply. The
+// three budgets below make that outcome unreachable: whatever the turn managed to
+// learn, it still gets to say.
+const (
+	// finalAnswerReserve is the tail of the turn budget [Run] refuses to spend on
+	// gathering. When less than this remains, the loop stops calling tools and
+	// spends the reserve on one final, tool-free round-trip instead — so a turn
+	// that runs long degrades into a real answer built from what it already read,
+	// not into a timeout.
+	finalAnswerReserve = 20 * time.Second
+
+	// maxRoundBudget caps ONE model round-trip. The turn deadline alone is not a
+	// sufficient bound: the Anthropic SDK retries an overloaded/rate-limited
+	// upstream with backoff INSIDE a single Complete call, so one round can
+	// silently absorb the whole turn. Capping it keeps a retry tail from starving
+	// the rounds that would have converged.
+	maxRoundBudget = 30 * time.Second
+
+	// maxToolCallBudget caps ONE read tool call. Reads are backend lookups that
+	// should answer in single-digit seconds; a slow or paginating one must not be
+	// able to spend the turn. On expiry the model receives an ordinary error
+	// tool_result and can narrate around it — the same shape as any backend
+	// failure, so no new failure mode reaches the user.
+	maxToolCallBudget = 15 * time.Second
+)
+
+// Cutoff records why a turn had to answer from what it already had instead of
+// continuing to gather information. Empty ([CutoffNone]) is the normal path. The
+// Slack layer logs it, so a rise in either non-empty value is the signal that
+// agent latency is regressing — the observability this turn budget previously
+// lacked entirely.
+type Cutoff string
+
+// Recognized cutoff reasons.
+const (
+	// CutoffNone means the turn converged on its own.
+	CutoffNone Cutoff = ""
+	// CutoffBudget means the turn deadline forced the final answer.
+	CutoffBudget Cutoff = "budget"
+	// CutoffIterations means [Agent.maxIterations] forced the final answer.
+	CutoffIterations Cutoff = "iterations"
+)
 
 // proposalAckResult is the synthetic tool_result recorded for a propose_* tool
 // call when the loop stops to await confirmation. It keeps the persisted
@@ -137,6 +184,13 @@ type Request struct {
 	SystemPerTurn string
 	Tools         []ToolSpec
 	Messages      []Message
+	// TextOnly forbids tool calls for this round-trip: the model must answer in
+	// text. Tools stays POPULATED regardless — the Messages API requires tool
+	// definitions whenever the transcript already contains tool_use/tool_result
+	// blocks, which it does by the time [Run] needs this. Set only on the final
+	// round (see [Agent.finalAnswer]); it strictly REMOVES capability, so it can
+	// never widen what a degraded turn is able to do.
+	TextOnly bool
 }
 
 // Usage is the model's token accounting for a request, including the cache
@@ -225,6 +279,10 @@ type Result struct {
 	Reply    string
 	Proposal *Proposal
 	Usage    Usage
+	// Cutoff is empty on a turn that converged, and names the ration that forced
+	// the final answer otherwise. Operator signal only — it does not change how
+	// the caller delivers the result.
+	Cutoff Cutoff
 }
 
 // Agent runs the conversation loop over an [LLM] and a [Backend].
@@ -318,8 +376,24 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 
 	var usage Usage
 	for range a.maxIterations {
-		resp, err := a.roundTrip(ctx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
+		// Ration before spending: once the turn is inside finalAnswerReserve, another
+		// gathering round could only end in a discarded turn, so answer now instead.
+		spendable, ok := roundBudget(ctx)
+		if !ok {
+			return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffBudget)
+		}
+		roundCtx, cancelRound := context.WithTimeout(ctx, spendable)
+		resp, err := a.roundTrip(roundCtx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
+		// Read the sub-context's own outcome BEFORE canceling it: a fired deadline
+		// latches DeadlineExceeded, so the later cancel can't mask it.
+		roundRanLong := errors.Is(roundCtx.Err(), context.DeadlineExceeded)
+		cancelRound()
 		if err != nil {
+			if roundRanLong && ctx.Err() == nil {
+				// Only this round's ration was spent; the turn is still live and the
+				// reserve is intact. Answer from what we have rather than failing.
+				return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffBudget)
+			}
 			// Path-neutral: roundTrip fans out to Complete or StreamComplete, so don't
 			// hardcode "complete" (the streaming error already says "messages stream").
 			return Result{Usage: usage}, msgs, fmt.Errorf("agent: llm round-trip: %w", err)
@@ -364,14 +438,85 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 				msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
 				return Result{Proposal: prop, Usage: usage}, msgs, nil
 			default:
-				content, isErr := a.executeRead(ctx, tc, call)
+				content, isErr := a.executeBoundedRead(ctx, tc, call)
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: content, IsError: isErr})
 			}
 		}
 		msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
 	}
 
-	return Result{Reply: iterationCapMessage, Usage: usage}, msgs, nil
+	// Out of iterations, not out of time — so there is budget to say something
+	// real. Same finalization as the budget path: what the turn learned is worth
+	// more than a canned "I wasn't able to work that out".
+	return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffIterations)
+}
+
+// finalAnswer spends the reserved tail of the turn on one tool-free round-trip so
+// the turn always ends in the model's own words. why records which ration ran out.
+//
+// The round is TextOnly, so a degraded turn cannot emit a Proposal. That is
+// deliberate and fail-safe: the confirmation boundary lives entirely in the click
+// path, and a turn short on budget should hand the user a plain answer (and, when
+// an action is warranted, a description of it) rather than a confirm card built
+// from a truncated picture. The user can re-ask; nothing was executed either way.
+func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpec, msgs []Message, usage Usage, why Cutoff) (Result, []Message, error) {
+	resp, err := a.roundTrip(ctx, &Request{
+		SystemStable:  systemPreamble,
+		SystemPerTurn: perTurn + finalAnswerDirective,
+		Tools:         tools,
+		Messages:      msgs,
+		TextOnly:      true,
+	})
+	if err != nil {
+		return Result{Usage: usage, Cutoff: why}, msgs, fmt.Errorf("agent: llm final round-trip: %w", err)
+	}
+	usage.add(resp.Usage)
+	// Record text only. TextOnly forbids tool calls, but appending one anyway (from
+	// a future model or transport that ignored it) would leave a tool_use with no
+	// matching tool_result and poison every later turn in the thread.
+	msgs = append(msgs, Message{Role: roleAssistant, Text: resp.Text})
+	reply := resp.Text
+	if strings.TrimSpace(reply) == "" {
+		reply = iterationCapMessage
+	}
+	return Result{Reply: reply, Usage: usage, Cutoff: why}, msgs, nil
+}
+
+// roundBudget returns how long one gathering round-trip may run. ok is false when
+// what remains of the turn is spoken for by [finalAnswerReserve] — the caller must
+// finalize instead of gathering. A context with no deadline (unit tests, and any
+// caller that opts out of a turn budget) is not rationed, only capped.
+func roundBudget(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return maxRoundBudget, true
+	}
+	spendable := time.Until(deadline) - finalAnswerReserve
+	if spendable <= 0 {
+		return 0, false
+	}
+	return min(spendable, maxRoundBudget), true
+}
+
+// executeBoundedRead runs one read tool under its own sub-budget, so no single
+// backend read can consume the gathering budget the way an unbounded paginating
+// scan could. An expired sub-budget surfaces as an ordinary error tool_result.
+func (a *Agent) executeBoundedRead(ctx context.Context, tc *TurnContext, call ToolCall) (string, bool) {
+	readCtx, cancel := context.WithTimeout(ctx, toolCallBudget(ctx))
+	defer cancel()
+	return a.executeRead(readCtx, tc, call)
+}
+
+// toolCallBudget bounds one read tool call: never more than maxToolCallBudget, and
+// never into [finalAnswerReserve]. A non-positive result (the round-trip itself ran
+// into the reserve) yields an already-expired context, so the read fails fast and
+// the next loop iteration finalizes — the intended degradation, not a stall.
+func toolCallBudget(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return maxToolCallBudget
+	}
+	return min(time.Until(deadline)-finalAnswerReserve, maxToolCallBudget)
 }
 
 // roundTrip runs one model round-trip, routing to the streaming path when a per-turn
