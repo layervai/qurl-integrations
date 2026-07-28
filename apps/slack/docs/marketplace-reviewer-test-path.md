@@ -2,7 +2,7 @@
 
 Use this runbook as the source for the reviewer instructions in the Slack App
 Dashboard. It keeps the install, onboarding, user, admin, and Secure Access
-Agent journeys reproducible without exposing an internal LayerV resource.
+Agent journeys reproducible without exposing an internal LayerV qURL™ resource.
 
 Do not submit the app while any owner field below is blank or while the seeded
 resource reaches a production system.
@@ -18,7 +18,7 @@ tokens, or reviewer personal data to this repository.
 - Reviewer qURL account email:
 - Workspace owner/admin Slack user:
 - Review channel:
-- Seeded resource ID or alias:
+- Seeded resource bare ID or alias (without `$`):
 - Seeded resource description:
 - Safe demo destination:
 - Support contact:
@@ -44,8 +44,8 @@ Complete this preflight before giving Slack the reviewer instructions.
    `/qurl setup <email>`.
 3. Connect the reviewer workspace to the dedicated qURL account.
 4. Add the reviewer and owner/admin to the review channel.
-5. Protect the safe demo destination in that channel and record its `$id` or
-   `$alias` above.
+5. Protect the safe demo destination in that channel. Record its bare ID or
+   alias above without the leading `$`.
 6. Confirm `/qurl help`, `/qurl-admin help`, App Home, private delivery, and
    the selected Agent or Assistant surface work in the production app.
 7. Confirm the privacy policy, support page, AI disclosure, and paid Slack
@@ -85,7 +85,7 @@ link.
 
 1. Run `/qurl list`.
 2. Locate the seeded demo resource.
-3. Run `/qurl get $<seeded-id-or-alias> dm:true reason:"Slack Marketplace review"`.
+3. Run `/qurl get $<seeded-bare-id-or-alias> dm:true reason:"Slack Marketplace review"`.
 4. Open the private message from qURL, but do not share its one-time link.
 
 Expected result: only review-channel resources are listed, the access link is
