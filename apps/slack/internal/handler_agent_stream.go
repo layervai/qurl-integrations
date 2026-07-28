@@ -177,8 +177,8 @@ func (s *agentReplyStreamer) stop(ctx context.Context, blocks []any) {
 // deliveryCtx derives the bounded context the finalize steps run on. It hangs off baseCtx,
 // NOT the turn ctx, because by finalize time the turn ctx may be spent (agentTurnTimeout
 // elapsed) or canceled (SIGTERM) — a stopStream on a dead ctx fails instantly and leaves the
-// stream unfinished. Mirrors saveAgentHistory / postAgentReply, which deliver off
-// h.baseCtx with the same agentDeliveryBudget.
+// stream unfinished. Mirrors postAgentReply, which delivers off h.baseCtx with
+// the same agentDeliveryBudget.
 func (s *agentReplyStreamer) deliveryCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(s.baseCtx, agentDeliveryBudget)
 }

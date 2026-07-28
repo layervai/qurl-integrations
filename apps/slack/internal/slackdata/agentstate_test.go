@@ -72,26 +72,9 @@ func (f *agentFakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ .
 	return &dynamodb.PutItemOutput{}, nil
 }
 
-// evalCond models the two condition shapes AgentStore emits.
-func (f *agentFakeDDB) evalCond(cond string, existing map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue) bool {
-	notExists := !present
-	if !strings.Contains(cond, " OR ") {
-		// Single-term existence guard used by MarkEventSeen.
-		return notExists
-	}
-	// attribute_not_exists(pk) OR conv_version = :ev
-	if notExists {
-		return true
-	}
-	want, ok := vals[":ev"].(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return false
-	}
-	cur, ok := existing[attrAgentVersion].(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return false
-	}
-	return cur.Value == want.Value
+// evalCond models the create-if-absent conditions AgentStore emits.
+func (f *agentFakeDDB) evalCond(_ string, _ map[string]ddbtypes.AttributeValue, present bool, _ map[string]ddbtypes.AttributeValue) bool {
+	return !present
 }
 
 func (f *agentFakeDDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
@@ -195,7 +178,7 @@ func TestNewAgentStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAgentStore: %v", err)
 	}
-	if s.ConversationTTL != defaultConversationTTL || s.DedupeTTL != defaultDedupeTTL {
+	if s.ContextTTL != defaultContextTTL || s.DedupeTTL != defaultDedupeTTL {
 		t.Error("defaults not applied")
 	}
 }
@@ -226,70 +209,6 @@ func TestMarkEventSeen_Validation(t *testing.T) {
 	}
 	if _, err := s.MarkEventSeen(context.Background(), "T1", ""); err == nil {
 		t.Error("expected validation error for empty event id")
-	}
-}
-
-func TestConversation_RoundTripAndVersioning(t *testing.T) {
-	fake := newAgentFakeDDB()
-	s := newTestAgentStore(fake)
-	ctx := context.Background()
-	const part, thread = "T1", "C1:1700.0001"
-
-	// Empty thread.
-	blob, ver, err := s.LoadConversation(ctx, part, thread)
-	if err != nil || blob != nil || ver != 0 {
-		t.Fatalf("empty load: blob=%q ver=%d err=%v", blob, ver, err)
-	}
-
-	// First save (expectedVersion 0 → stored version 1).
-	if err := s.SaveConversation(ctx, part, thread, []byte(`[{"role":"user"}]`), 0); err != nil {
-		t.Fatalf("first save: %v", err)
-	}
-	blob, ver, err = s.LoadConversation(ctx, part, thread)
-	if err != nil || ver != 1 || string(blob) != `[{"role":"user"}]` {
-		t.Fatalf("after first save: blob=%q ver=%d err=%v", blob, ver, err)
-	}
-
-	// Second save with the matching version succeeds and bumps to 2.
-	if err := s.SaveConversation(ctx, part, thread, []byte(`[{"role":"user"},{"role":"assistant"}]`), 1); err != nil {
-		t.Fatalf("second save: %v", err)
-	}
-	_, ver, _ = s.LoadConversation(ctx, part, thread)
-	if ver != 2 {
-		t.Fatalf("version should be 2, got %d", ver)
-	}
-
-	// A stale writer (expectedVersion 1 again) must conflict, not clobber.
-	err = s.SaveConversation(ctx, part, thread, []byte(`[{"role":"stale"}]`), 1)
-	if !errors.Is(err, ErrConversationConflict) {
-		t.Fatalf("expected ErrConversationConflict, got %v", err)
-	}
-	// The clobber didn't land.
-	blob, _, _ = s.LoadConversation(ctx, part, thread)
-	if strings.Contains(string(blob), "stale") {
-		t.Fatalf("stale write clobbered the conversation: %s", blob)
-	}
-}
-
-func TestConversation_Validation(t *testing.T) {
-	s := newTestAgentStore(newAgentFakeDDB())
-	if _, _, err := s.LoadConversation(context.Background(), "", "t"); err == nil {
-		t.Error("expected validation error")
-	}
-	if err := s.SaveConversation(context.Background(), "p", "", nil, 0); err == nil {
-		t.Error("expected validation error")
-	}
-}
-
-func TestConversation_TTLRefreshedOnSave(t *testing.T) {
-	fake := newAgentFakeDDB()
-	s := newTestAgentStore(fake)
-	if err := s.SaveConversation(context.Background(), "T1", "C1:1", []byte("x"), 0); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	// now=1_700_000_000, conversation TTL default 30m → 1_700_001_800.
-	if got := fake.lastPutAt[convSKPrefix+"C1:1"]; got != "1700001800" {
-		t.Fatalf("conversation ttl = %q, want 1700001800", got)
 	}
 }
 
@@ -338,7 +257,7 @@ func TestGetThreadContext_ReadTimeExpiry(t *testing.T) {
 	// (the reaper lags) reads as gone and the turn falls back to the DM.
 	fake := newAgentFakeDDB()
 	now := time.Unix(1_700_000_000, 0)
-	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, ConversationTTL: 30 * time.Minute}
+	s := &AgentStore{Client: fake, TableName: "agent_state", Now: func() time.Time { return now }, ContextTTL: 30 * time.Minute}
 	ctx := context.Background()
 
 	if err := s.PutThreadContext(ctx, "T1", "D1:100.1", "C9"); err != nil {
@@ -475,8 +394,12 @@ func TestPurgeWorkspaceAgentState(t *testing.T) {
 	s := newTestAgentStore(fake)
 	ctx := context.Background()
 
-	if err := s.SaveConversation(ctx, "T1", "C1:1", []byte(`[{"role":"user"}]`), 0); err != nil {
-		t.Fatalf("SaveConversation: %v", err)
+	// Legacy deployments stored transcript rows. The zero-copy runtime no longer
+	// creates them, but workspace purge must still delete any residue.
+	fake.items["T1|conv#C1:1"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:  stringAttr("T1"),
+		attrAgentSK:  stringAttr("conv#C1:1"),
+		attrAgentTTL: numberAttr(1700001800),
 	}
 	if _, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil {
 		t.Fatalf("MarkEventSeen: %v", err)
@@ -499,8 +422,10 @@ func TestPurgeWorkspaceAgentState(t *testing.T) {
 		attrTurnCount: numberAttr(1),
 		attrAgentTTL:  numberAttr(1700003600),
 	}
-	if err := s.SaveConversation(ctx, "T2", "C2:1", []byte(`[{"role":"user"}]`), 0); err != nil {
-		t.Fatalf("SaveConversation T2: %v", err)
+	fake.items["T2|conv#C2:1"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK:  stringAttr("T2"),
+		attrAgentSK:  stringAttr("conv#C2:1"),
+		attrAgentTTL: numberAttr(1700001800),
 	}
 
 	if err := s.PurgeWorkspaceAgentState(ctx, "T1"); err != nil {
@@ -514,7 +439,7 @@ func TestPurgeWorkspaceAgentState(t *testing.T) {
 			t.Fatalf("T1 agent-state row survived purge: %s", key)
 		}
 	}
-	if _, ok := fake.items["T2|"+convSKPrefix+"C2:1"]; !ok {
+	if _, ok := fake.items["T2|conv#C2:1"]; !ok {
 		t.Fatal("purge removed another workspace's agent-state row")
 	}
 
@@ -547,8 +472,9 @@ func TestPurgeWorkspaceAgentState_ValidationAndErrors(t *testing.T) {
 	t.Run("delete error", func(t *testing.T) {
 		fake := newAgentFakeDDB()
 		s := newTestAgentStore(fake)
-		if err := s.SaveConversation(context.Background(), "T1", "C1:1", []byte("x"), 0); err != nil {
-			t.Fatalf("SaveConversation: %v", err)
+		fake.items["T1|conv#C1:1"] = map[string]ddbtypes.AttributeValue{
+			attrAgentPK: stringAttr("T1"),
+			attrAgentSK: stringAttr("conv#C1:1"),
 		}
 		fake.deleteErr = errors.New("ddb delete down")
 		err := s.PurgeWorkspaceAgentState(context.Background(), "T1")
@@ -556,7 +482,7 @@ func TestPurgeWorkspaceAgentState_ValidationAndErrors(t *testing.T) {
 		if !errors.As(err, &ae) || ae.StatusCode != http.StatusServiceUnavailable {
 			t.Fatalf("err = %v, want 503 *Error", err)
 		}
-		if _, ok := fake.items["T1|"+convSKPrefix+"C1:1"]; !ok {
+		if _, ok := fake.items["T1|conv#C1:1"]; !ok {
 			t.Fatal("delete-error path should not remove the row in the fake")
 		}
 	})
