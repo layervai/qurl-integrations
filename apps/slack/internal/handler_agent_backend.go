@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
@@ -58,9 +59,10 @@ type agentBackend struct {
 	// failed scan is cached too: a transient error on the first call fails
 	// list_resources for the rest of the turn rather than re-hammering a failing
 	// API mid-scan — intentional, fail-fast.
-	resourcesOnce sync.Once
-	resources     []client.Resource
-	resourcesErr  error
+	resourcesOnce    sync.Once
+	resources        []client.Resource
+	resourcesPartial bool
+	resourcesErr     error
 
 	// Per-turn memo of the channel's alias bindings (GetChannelPolicy), shared by
 	// list_aliases and list_resources. list_resources joins it (rid -> $channelAlias) to
@@ -107,11 +109,11 @@ func (b *agentBackend) channelAllowed(ctx context.Context, tc *agent.TurnContext
 // only on the first call; subsequent calls return the cached scan, so
 // list_resources costs one workspace scan per turn no matter how many times the
 // model calls it.
-func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, bool, error) {
 	b.resourcesOnce.Do(func() {
-		b.resources, b.resourcesErr = collectChannelResources(ctx, c, allowed)
+		b.resources, b.resourcesPartial, b.resourcesErr = collectChannelResources(ctx, c, allowed)
 	})
-	return b.resources, b.resourcesErr
+	return b.resources, b.resourcesPartial, b.resourcesErr
 }
 
 // channelPolicy returns the channel's alias bindings, fetched once and memoized for the
@@ -177,11 +179,16 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 	if nudge != "" {
 		return nudge, nil
 	}
-	resources, err := b.channelResources(ctx, c, allowed)
+	resources, partial, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
 		return b.fail("list resources", err)
 	}
 	if len(resources) == 0 {
+		if partial {
+			// Never let an incomplete scan read as "nothing is protected here" — that
+			// is the one wrong answer this tool must not give.
+			return channelResourcesIncompleteEmpty, nil
+		}
 		return "No resources are protected in this channel yet.", nil
 	}
 	// Channel alias bindings name resources that carry no intrinsic alias/slug (e.g.
@@ -205,13 +212,34 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 		lines = append(lines, formatResourceLine(&resources[i], channelAlias[resources[i].ResourceID]))
 	}
 	sort.Strings(lines)
-	return "Resources reachable in this channel:\n" + strings.Join(lines, "\n"), nil
+	out := "Resources reachable in this channel:\n" + strings.Join(lines, "\n")
+	if partial {
+		out += channelResourcesIncompleteNote
+	}
+	return out, nil
 }
+
+// channelResourcesIncompleteNote / channelResourcesIncompleteEmpty are the
+// tool_result text for a scan that did not complete (see collectChannelResources).
+// Both are plain statements of fact for the model to relay, not instructions —
+// tool output is untrusted by contract, and these read the same way as any other
+// content. They exist so a partial scan can never be reported as a complete one.
+const (
+	channelResourcesIncompleteNote  = "\n(This scan did not finish, so the list above may be missing resources reachable in this channel.)"
+	channelResourcesIncompleteEmpty = "The resource scan for this channel did not finish, so I can't confirm what's reachable here right now."
+)
 
 // channelResourcesMaxPages bounds the pagination loop. At listResourcesPageLimit
 // per page this scans up to 2,000 workspace resources for the channel's
 // reachable set — far above any real workspace, while keeping the loop bounded.
 const channelResourcesMaxPages = 20
+
+// channelResourcesPageBudget bounds ONE page of the workspace scan. The shared
+// qURL client's 30s HTTP timeout is a batch-job budget: a single slow page could
+// outlast the whole conversation turn, and twenty of them dwarf it. On an
+// interactive surface the useful bound is per page, small, and enforced by
+// context so the scan yields what it has instead of being killed wholesale.
+const channelResourcesPageBudget = 5 * time.Second
 
 // collectChannelResources pages through the workspace resource list and keeps
 // only those in the channel's allowed set, stopping early once every allowed
@@ -219,20 +247,43 @@ const channelResourcesMaxPages = 20
 // only the first page would silently drop channel-reachable resources that sort
 // past it in a workspace with more than one page of resources.
 //
+// It returns partial=true when the scan stopped before accounting for the whole
+// allowed set — page cap reached, or the remaining turn budget could not fund
+// another page. That flag is load-bearing, not cosmetic: silently returning a
+// short list would make the agent report "nothing here matches" for a resource
+// that does exist, which is a worse failure than being slow. The caller passes
+// the caveat through to the model so the answer stays honest about its scope.
+//
 // The len(found) >= len(allowed) early-stop can't fire if a channel_policies row
 // references a resource id that no longer exists workspace-side (a stale policy):
-// found never reaches len(allowed), so the loop runs the full
-// channelResourcesMaxPages. Correct, just worst-case more reads until the stale
-// row is cleaned up. channelResources memoizes this per turn, so that worst-case
-// scan is paid at most once per turn however many times list_resources is called
-// (it bounds the repeat, not the single-scan cost).
-func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+// found never reaches len(allowed), so the scan runs until the page cap or the
+// budget stops it — now bounded in wall-clock either way, where it previously
+// cost twenty sequential round-trips. channelResources memoizes the result per
+// turn, so that worst case is paid at most once per turn however many times
+// list_resources is called (it bounds the repeat, not the single-scan cost).
+func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) (resources []client.Resource, partial bool, err error) {
 	found := make([]client.Resource, 0, len(allowed))
 	cursor := ""
 	for page := 0; page < channelResourcesMaxPages; page++ {
-		out, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesPageLimit, Cursor: cursor})
+		// Don't start a page the turn cannot afford to finish: returning what we
+		// already found, flagged partial, beats spending the caller's remaining
+		// budget on a read that will be canceled mid-flight anyway.
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < channelResourcesPageBudget {
+			return found, true, nil
+		}
+		pageCtx, cancel := context.WithTimeout(ctx, channelResourcesPageBudget)
+		out, err := c.ListResources(pageCtx, client.ListResourcesInput{Limit: listResourcesPageLimit, Cursor: cursor})
+		// Read the page context's own outcome before canceling it, so a fired
+		// deadline is distinguishable from our cancel regardless of how the client
+		// wraps the error.
+		pageRanLong := errors.Is(pageCtx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err != nil {
-			return nil, err
+			if pageRanLong && ctx.Err() == nil {
+				// Only this page's budget was spent — keep the earlier pages.
+				return found, true, nil
+			}
+			return nil, false, err
 		}
 		for i := range out.Resources {
 			if _, ok := allowed[out.Resources[i].ResourceID]; ok {
@@ -240,11 +291,11 @@ func collectChannelResources(ctx context.Context, c *client.Client, allowed map[
 			}
 		}
 		if len(found) >= len(allowed) || !out.HasMore || out.NextCursor == "" {
-			break
+			return found, false, nil
 		}
 		cursor = out.NextCursor
 	}
-	return found, nil
+	return found, true, nil
 }
 
 // ListAliases lists the channel-scoped aliases visible to the caller.

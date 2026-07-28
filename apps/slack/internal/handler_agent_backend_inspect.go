@@ -117,7 +117,7 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	if err != nil {
 		return b.failInspect("inspect token: channel scope", err)
 	}
-	resources, err := b.channelResources(ctx, c, allowed)
+	resources, partial, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
 		return b.failInspect("inspect token: resources", err)
 	}
@@ -127,6 +127,14 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	}
 	resolved, msg := resolveInspectableResource(token, entries, resources)
 	if msg != "" {
+		if partial && resolved == nil {
+			// Slug and resource-alias matching read from the scanned set, so an
+			// unfinished scan cannot support "doesn't resolve to anything reachable
+			// here" — that would be a definitive claim from an incomplete read. Say
+			// what we actually know instead. (A channel-alias hit resolves from
+			// channel_policies, which the scan doesn't gate, so it is unaffected.)
+			return channelResourcesIncompleteEmpty, false, nil
+		}
 		return msg, false, nil
 	}
 
