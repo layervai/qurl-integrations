@@ -333,7 +333,8 @@ func (s *streamingSlowThenAnswerLLM) Complete(ctx context.Context, req *Request)
 func (s *streamingSlowThenAnswerLLM) StreamComplete(ctx context.Context, _ *Request, onText func(string)) (Response, error) {
 	s.calls++
 	if s.calls == 1 {
-		if onText != nil {
+		// Mirror the real StreamComplete, which forwards only non-empty deltas.
+		if onText != nil && s.partial != "" {
 			onText(s.partial)
 		}
 		<-ctx.Done()
@@ -347,9 +348,12 @@ func (s *streamingSlowThenAnswerLLM) StreamComplete(ctx context.Context, _ *Requ
 
 // A gathering round that streams text and THEN outruns its ration leaves the
 // fragment with the caller — deltas are never rolled back (see WithStreamSink) —
-// and the reserved final answer streams on top of it. Run still returns the
-// complete answer, which is what the Slack layer reconciles the message against;
-// it must not assume the delivered text equals the concatenated deltas.
+// and the reserved final answer streams on top of it. Run reports that with
+// Result.DiscardedStreamText so the delivery layer knows the deltas are NOT a
+// prefix of Reply and must fall back to posting Reply as its own message rather
+// than appending onto the fragment (which on an append-only transport would run
+// the two together). The consuming side is pinned by
+// TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply.
 func TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer(t *testing.T) {
 	llm := &streamingSlowThenAnswerLLM{
 		partial: "Let me check the res",
@@ -372,8 +376,39 @@ func TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer(t *testing.T) {
 	if res.Cutoff != CutoffBudget {
 		t.Fatalf("Cutoff = %q, want %q", res.Cutoff, CutoffBudget)
 	}
+	if !res.DiscardedStreamText {
+		t.Fatal("the abandoned round streamed text, so the caller must be told not to append onto it")
+	}
 	want := []string{"Let me check the res", llm.final.Text}
 	if !reflect.DeepEqual(deltas, want) {
 		t.Fatalf("sink saw %q, want the truncated fragment followed by the final answer", deltas)
+	}
+}
+
+// The same budget fallback, but the abandoned round streamed NOTHING — the common
+// shape, since the system prompt tells the model to lead with the answer rather
+// than preamble. Nothing was discarded, so the delivery layer keeps its normal
+// reconcile and the user sees one clean streamed message.
+func TestRun_SilentAbandonedRoundDoesNotDiscardStreamText(t *testing.T) {
+	llm := &streamingSlowThenAnswerLLM{
+		partial: "", // the round emits no deltas before it outruns its ration
+		final:   textResp("Nothing in this channel matches $docs."),
+	}
+	var deltas []string
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(func(d string) {
+		deltas = append(deltas, d)
+	})).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.DiscardedStreamText {
+		t.Fatal("no text was streamed before the round was abandoned; nothing was discarded")
+	}
+	if !reflect.DeepEqual(deltas, []string{llm.final.Text}) {
+		t.Fatalf("sink saw %q, want only the final answer", deltas)
 	}
 }

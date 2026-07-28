@@ -575,3 +575,32 @@ func TestProcessAgentEvent_ChannelMentionStreamingPartialErrorNoDoublePost(t *te
 		t.Fatalf("healthy partial stream owns the error outcome; got posted fallback %+v", *posts)
 	}
 }
+
+// A turn cut short after streaming narration from a round it then abandoned must
+// NOT reconcile by appending: the stream is append-only, so the abandoned fragment
+// and the real answer would run together into one garbled message. finalizeReply
+// takes the broken-stream fallback so the caller posts the complete answer as its
+// own message. Pairs with agent.TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer,
+// which pins the producing side.
+func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	// Long enough to pass agentStreamFlushBytes, so the fragment has really reached
+	// Slack and cannot be retracted — the case the fallback exists for.
+	const abandoned = "Let me look that up for you across this channel's res"
+	s.onDelta(abandoned)
+
+	const reply = "I couldn't finish checking $docs in this channel."
+	if s.finalizeReply(&agent.Result{Reply: reply, Cutoff: agent.CutoffBudget, DiscardedStreamText: true}) {
+		t.Fatal("a turn that discarded streamed text must not claim the stream delivered the reply")
+	}
+	if port.stops != 1 {
+		t.Fatalf("the partial stream must still be stopped, got stop=%d", port.stops)
+	}
+	if got := port.appended(); strings.Contains(got, reply) {
+		t.Fatalf("the final answer must not be appended onto the abandoned fragment, got %q", got)
+	}
+	if got := port.appended(); got != abandoned {
+		t.Fatalf("only the already-delivered fragment should have reached Slack, got %q", got)
+	}
+}

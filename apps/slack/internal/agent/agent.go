@@ -287,6 +287,15 @@ type Result struct {
 	// the final answer otherwise. Operator signal only — it does not change how
 	// the caller delivers the result.
 	Cutoff Cutoff
+	// DiscardedStreamText reports that a stream sink received text from a round the
+	// turn then ABANDONED, so the deltas already delivered are not a prefix of
+	// Reply — Reply comes from a later, independent round.
+	//
+	// A streaming caller MUST NOT reconcile by appending Reply in that case: on an
+	// append-only transport the two run together into one garbled message
+	// ("Let me check the res" + the real answer). Deliver Reply as its own message
+	// instead, the same fallback a broken stream takes.
+	DiscardedStreamText bool
 }
 
 // Agent runs the conversation loop over an [LLM] and a [Backend].
@@ -302,6 +311,11 @@ type Agent struct {
 	// deltas as they stream. Per-turn: the handler constructs a fresh Agent for each
 	// turn, so the sink never outlives the turn it serves.
 	streamSink func(delta string)
+	// deltas counts what has been handed to streamSink this turn, so [Run] can tell
+	// whether a round it abandons had already leaked text to the caller. Written
+	// only from the sink, which [WithStreamSink] defines as in-order on the single
+	// loop goroutine — no synchronization needed, and none would help.
+	deltas int
 }
 
 // Option configures an [Agent].
@@ -352,6 +366,20 @@ func New(llm LLM, backend Backend, opts ...Option) *Agent {
 	for _, opt := range opts {
 		opt(a)
 	}
+	if sink := a.streamSink; sink != nil {
+		// Count what reaches the caller so an abandoned round can be reported as
+		// [Result.DiscardedStreamText]. Wrapped here, after options, so every path
+		// through roundTrip is counted and no caller can bypass it.
+		a.streamSink = func(delta string) {
+			// Only non-empty text counts as having reached the caller — an empty delta
+			// changes nothing the user can see, and [WithStreamSink] defines the sink
+			// as receiving non-empty deltas anyway. Forwarding is untouched.
+			if delta != "" {
+				a.deltas++
+			}
+			sink(delta)
+		}
+	}
 	return a
 }
 
@@ -384,9 +412,10 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 		// gathering round could only end in a discarded turn, so answer now instead.
 		spendable, ok := roundBudget(ctx)
 		if !ok {
-			return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffBudget)
+			return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffBudget, false)
 		}
 		roundCtx, cancelRound := context.WithTimeout(ctx, spendable)
+		deltasBefore := a.deltas
 		resp, err := a.roundTrip(roundCtx, &Request{SystemStable: systemPreamble, SystemPerTurn: perTurn, Tools: tools, Messages: msgs})
 		// Read the sub-context's own outcome BEFORE canceling it: a fired deadline
 		// latches DeadlineExceeded, so the later cancel can't mask it.
@@ -396,7 +425,14 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 			if roundRanLong && ctx.Err() == nil {
 				// Only this round's ration was spent; the turn is still live and the
 				// reserve is intact. Answer from what we have rather than failing.
-				return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffBudget)
+				//
+				// Deliberately no retry, even with turn budget to spare. A round that
+				// outran maxRoundBudget already absorbed the SDK's own retries, so it is
+				// evidence the upstream is struggling; spending the rest of the budget
+				// re-asking trades a likely answer now for a less likely answer later,
+				// and would leave only the bare reserve if it failed again. The cutoff
+				// log field is the instrument for whether this fires more than expected.
+				return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffBudget, a.deltas > deltasBefore)
 			}
 			// Path-neutral: roundTrip fans out to Complete or StreamComplete, so don't
 			// hardcode "complete" (the streaming error already says "messages stream").
@@ -452,7 +488,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	// Out of iterations, not out of time — so there is budget to say something
 	// real. Same finalization as the budget path: what the turn learned is worth
 	// more than a canned "I wasn't able to work that out".
-	return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffIterations)
+	return a.finalAnswer(ctx, perTurn, tools, msgs, usage, CutoffIterations, false)
 }
 
 // finalAnswer spends the reserved tail of the turn on one tool-free round-trip so
@@ -470,12 +506,12 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 // generic transient reply, which is the outcome this whole path exists to avoid.
 // It stays bounded by the turn deadline, so it cannot outlive the turn.
 //
-// A streamed turn may have already emitted deltas from the round that ran long
-// (see [WithStreamSink] — deltas are never rolled back), so the sink can observe
-// a truncated fragment followed by this complete answer. The Slack layer
-// reconciles against [Result] rather than the concatenated deltas for exactly
-// this reason. Pinned by TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer.
-func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpec, msgs []Message, usage Usage, why Cutoff) (Result, []Message, error) {
+// discardedStream reports that the abandoned round had already streamed text to
+// the sink (see [WithStreamSink] — deltas are never rolled back). It surfaces as
+// [Result.DiscardedStreamText] so a streaming caller knows the deltas it delivered
+// are NOT a prefix of Reply and must not append to them. Pinned by
+// TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer.
+func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpec, msgs []Message, usage Usage, why Cutoff, discardedStream bool) (Result, []Message, error) {
 	resp, err := a.roundTrip(ctx, &Request{
 		SystemStable:  systemPreamble,
 		SystemPerTurn: perTurn + finalAnswerDirective,
@@ -484,7 +520,7 @@ func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpe
 		TextOnly:      true,
 	})
 	if err != nil {
-		return Result{Usage: usage, Cutoff: why}, msgs, fmt.Errorf("agent: llm final round-trip: %w", err)
+		return Result{Usage: usage, Cutoff: why, DiscardedStreamText: discardedStream}, msgs, fmt.Errorf("agent: llm final round-trip: %w", err)
 	}
 	usage.add(resp.Usage)
 	// Record text only. TextOnly forbids tool calls, but appending one anyway (from
@@ -495,7 +531,7 @@ func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpe
 	if strings.TrimSpace(reply) == "" {
 		reply = iterationCapMessage
 	}
-	return Result{Reply: reply, Usage: usage, Cutoff: why}, msgs, nil
+	return Result{Reply: reply, Usage: usage, Cutoff: why, DiscardedStreamText: discardedStream}, msgs, nil
 }
 
 // roundBudget returns how long one gathering round-trip may run. ok is false when
