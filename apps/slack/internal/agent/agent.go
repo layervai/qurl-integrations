@@ -53,22 +53,26 @@ const (
 	// gathering. When less than this remains, the loop stops calling tools and
 	// spends the reserve on one final, tool-free round-trip instead — so a turn
 	// that runs long degrades into a real answer built from what it already read,
-	// not into a timeout.
-	finalAnswerReserve = 20 * time.Second
+	// not into a timeout. Sized at roughly twice a p95 round-trip (2048 max
+	// output tokens, thinking disabled), which leaves room for one SDK retry.
+	finalAnswerReserve = 15 * time.Second
 
 	// maxRoundBudget caps ONE model round-trip. The turn deadline alone is not a
 	// sufficient bound: the Anthropic SDK retries an overloaded/rate-limited
 	// upstream with backoff INSIDE a single Complete call, so one round can
 	// silently absorb the whole turn. Capping it keeps a retry tail from starving
-	// the rounds that would have converged.
-	maxRoundBudget = 30 * time.Second
+	// the rounds that would have converged — at this size a pathological round
+	// costs under half the gathering budget, not all of it.
+	maxRoundBudget = 20 * time.Second
 
 	// maxToolCallBudget caps ONE read tool call. Reads are backend lookups that
 	// should answer in single-digit seconds; a slow or paginating one must not be
 	// able to spend the turn. On expiry the model receives an ordinary error
 	// tool_result and can narrate around it — the same shape as any backend
-	// failure, so no new failure mode reaches the user.
-	maxToolCallBudget = 15 * time.Second
+	// failure, so no new failure mode reaches the user. It also composes with the
+	// scan's own per-page budget: a fast workspace scan completes every page well
+	// inside this, and a slow one yields partial results rather than being killed.
+	maxToolCallBudget = 10 * time.Second
 )
 
 // Cutoff records why a turn had to answer from what it already had instead of

@@ -606,8 +606,20 @@ func (h *Handler) runAgentFollowupPipeline(log *slog.Logger, env *slackEventEnve
 // defaultMaxIterations Anthropic round-trips plus channel-scoped reads, so it
 // needs more than the 25s slash-command budget — 25s could cancel a legitimate
 // multi-tool-call turn mid-flight and surface a spurious error to the user. The
-// iteration cap and (later) per-user rate limiting bound how long a slot is held.
-const agentTurnTimeout = 90 * time.Second
+// iteration cap and per-user rate limiting bound how long a slot is held.
+//
+// It was 90s while overrunning the budget meant losing the turn: the only way to
+// protect a slow-but-legitimate turn was to wait longer. The agent package now
+// RATIONS this deadline (see agent.finalAnswerReserve) and finalizes into a real
+// answer instead of failing, which inverts the tradeoff — a longer budget no
+// longer buys safety, it only buys a longer wait before the same graceful answer.
+//
+// So size it for the user instead. At the reserve's 15s tail, a turn finalizes by
+// 60s and delivers a few seconds after, leaving ample margin inside the 90s window
+// the misuse suite scores a reply against (and well inside what a member in a
+// Slack thread will tolerate). Gathering still gets 45s — six round-trips at
+// typical latency — so the set of turns that converge on their own is unchanged.
+const agentTurnTimeout = 60 * time.Second
 
 // agentFollowupGateTimeout bounds the pre-turn Slack read for a channel follow-up
 // admission decision. A slow gate fails closed silently because the message may be
