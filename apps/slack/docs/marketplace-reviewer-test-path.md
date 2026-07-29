@@ -115,11 +115,16 @@ no change, and any approved demo action records an audit event.
 2. Run the same command as a non-admin reviewer.
 3. Send one unsupported file or image to the Agent or Assistant surface.
 4. Use the Agent feedback controls or run `/qurl feedback`.
-5. Ask the owner to remove the app, then reinstall it and repeat `/qurl help`.
+5. Ask the owner to remove the app, then reinstall it. The same owner must
+   complete the remaining steps to preserve workspace ownership.
+6. Run `/qurl help` to confirm that Slack restored slash-command registration.
+7. Run `/qurl setup <reviewer-email>` and complete passwordless sign-in again.
+8. Run `/qurl list` and confirm the seeded demo resource is listed.
 
 Expected result: admin authorization is enforced, unsupported media receives a
-clear limitation, feedback has a safe route, and reinstall returns to a usable
-state.
+clear limitation, feedback has a safe route, and reinstall requires an explicit
+reconnect before connected commands return to a usable state. A successful
+`/qurl help` response alone is not reconnect evidence.
 
 ## Evidence to retain
 
@@ -129,6 +134,7 @@ Keep reviewer evidence outside this repository:
 - OAuth consent and install-success captures;
 - command, App Home, AI disclosure, proposal, reject, private-delivery, and
   unsupported-media captures;
+- the post-reinstall setup and `/qurl list` capture;
 - the production app version or commit used for the test;
 - the audit record for the approved demo action, if approval was exercised;
   and
