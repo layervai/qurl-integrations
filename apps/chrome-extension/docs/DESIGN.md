@@ -64,7 +64,7 @@ apps/chrome-extension/
 ├── lib/
 │   ├── qurl-api.js           # qURL upload API client
 │   └── qurl-compose-format.js # Shared formatter for HTML/plain-text link output
-├── icons/                    # SVG source + generated PNG icons
+├── icons/                    # Shared logo source + generated PNG icons
 ├── _locales/
 │   └── en/
 │       └── messages.json     # i18n message strings
@@ -75,7 +75,7 @@ apps/chrome-extension/
 └── scripts/
     ├── build-release.js      # Rebuild release/ directory
     ├── bump-version.js       # Sync version across package files
-    ├── generate-icons.js     # SVG → PNG icon generator
+    ├── generate-icons.js     # logo.png → extension PNG icon generator
     ├── package-all.sh        # One-command rebuild + packaging flow
     └── package-release.js    # ZIP packaging for Chrome Web Store
 ```
@@ -118,7 +118,7 @@ The popup is the user-facing interface. State: `selectedFiles[]`.
 2. User clicks "Upload to qURL" → for each file: read as `ArrayBuffer`, call `uploadFile()`, push result → `insertIntoGmailDraft(results)`.
 3. `insertIntoGmailDraft()` sends successful results to the background relay.
 4. `showResults()` renders success rows, upload failures, and Gmail insertion failures.
-5. If Gmail insertion fails, the popup enables a manual **Copy inserted content** fallback using HTML and plain-text clipboard payloads.
+5. If Gmail insertion fails, the popup enables a manual **Copy the qURL link** fallback using HTML and plain-text clipboard payloads when an accessible `https` link is available.
 
 **Key decisions:**
 - Files are read as `ArrayBuffer` (not base64) — efficient for large files.
@@ -285,15 +285,15 @@ Not supported:
 
 ## Extension Icons
 
-Icons are SVG source files (`icons/icon{16,48,128}.svg`) converted to PNG via `sharp`. The PNG files are what Chrome displays in the toolbar and extension list.
+Icons are generated from the shared raster source `icons/logo.png` via `sharp`. The PNG files are what Chrome displays in the toolbar and extension list.
 
-To regenerate after editing SVG sources:
+To regenerate after updating the shared logo source:
 ```bash
 npm install
 npm run icons
 ```
 
-The SVG source files are the canonical versions. Never edit PNG files directly — they will be overwritten.
+`icons/logo.png` is the canonical source. Never edit `icon16.png`, `icon48.png`, or `icon128.png` directly — they will be overwritten.
 
 ---
 

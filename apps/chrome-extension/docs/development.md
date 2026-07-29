@@ -44,8 +44,7 @@ exact steps and `.env.example` for the template.
 
 ## Icons
 
-Regenerate the PNG icons from the SVG sources in `icons/` (the SVGs are
-canonical — see [DESIGN.md](./DESIGN.md#extension-icons)):
+Regenerate the PNG icons from the shared `icons/logo.png` source:
 
 ```bash
 npm run icons

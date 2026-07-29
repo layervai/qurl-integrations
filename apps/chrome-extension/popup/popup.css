@@ -79,6 +79,13 @@ body {
   justify-content: center;
 }
 
+.logo-icon img {
+  display: block;
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
 .header-text {
   display: flex;
   flex-direction: column;
