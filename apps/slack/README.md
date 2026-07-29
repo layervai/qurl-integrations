@@ -22,6 +22,11 @@ longer than it needs to.
 Run `/qurl help` (or `/qurl-admin help`) any time for the exact commands your
 workspace's Secure Access Agent supports.
 
+Marketplace submission owners should fill and exercise the
+[Slack Marketplace reviewer test path](docs/marketplace-reviewer-test-path.md)
+before giving Slack reviewer instructions. Keep credentials and reviewer
+personal data out of the repository.
+
 ## Concepts
 
 - **Resource** — something you can mint links for. Two kinds: a **qURL

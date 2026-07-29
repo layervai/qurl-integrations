@@ -37,7 +37,9 @@ func newStatusHandler(t *testing.T, seam AssistantThreadsPort, rec ReactionPort,
 	return h, posts, mu
 }
 
-var wantDMSurfaceAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "D1", timestamp: "100.2", name: agentAckReaction}
+const agentStatusTestDMTimestamp = "100.2"
+
+var wantDMSurfaceAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "D1", timestamp: agentStatusTestDMTimestamp, name: agentAckReaction}
 
 func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	fake := &fakeAssistantThreads{}
@@ -53,7 +55,7 @@ func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 		t.Fatalf("a pane (im) turn must set then clear its status, got %d calls", len(statuses))
 	}
 	st := statuses[0]
-	if st.channelID != "D1" || st.threadTS != "100.2" || st.status != agentThinkingStatus {
+	if st.channelID != "D1" || st.threadTS != agentStatusTestDMTimestamp || st.status != agentThinkingStatus {
 		t.Fatalf("status = %+v, want channel D1 / thread 100.2 / %q", st, agentThinkingStatus)
 	}
 	if cleared := statuses[1]; cleared.channelID != st.channelID || cleared.threadTS != st.threadTS || cleared.status != "" {

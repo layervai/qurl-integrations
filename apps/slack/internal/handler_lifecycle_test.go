@@ -109,9 +109,6 @@ func newLifecycleTestHandlerForWorkspace(t *testing.T, workspaceID string) (*Han
 
 func seedLifecycleAgentState(t *testing.T, store *slackdata.AgentStore, partition string) {
 	t.Helper()
-	if err := store.SaveConversation(context.Background(), partition, "C_agent:1", []byte(`[{"role":"user","content":"hi"}]`), 0); err != nil {
-		t.Fatalf("seed agent conversation: %v", err)
-	}
 	if err := store.PutPendingAction(context.Background(), partition, "pending_agent", []byte(`{"action":"get"}`)); err != nil {
 		t.Fatalf("seed agent pending action: %v", err)
 	}
@@ -119,13 +116,6 @@ func seedLifecycleAgentState(t *testing.T, store *slackdata.AgentStore, partitio
 
 func assertLifecycleAgentStatePurged(t *testing.T, store *slackdata.AgentStore, partition string) {
 	t.Helper()
-	blob, _, err := store.LoadConversation(context.Background(), partition, "C_agent:1")
-	if err != nil {
-		t.Fatalf("LoadConversation after purge: %v", err)
-	}
-	if blob != nil {
-		t.Fatalf("LoadConversation after purge = %q, want nil", blob)
-	}
 	if payload, found, err := store.LoadPendingAction(context.Background(), partition, "pending_agent"); err != nil || found || payload != nil {
 		t.Fatalf("LoadPendingAction after purge: payload=%q found=%v err=%v, want absent", payload, found, err)
 	}
@@ -133,12 +123,8 @@ func assertLifecycleAgentStatePurged(t *testing.T, store *slackdata.AgentStore, 
 
 func assertLifecycleAgentStatePresent(t *testing.T, store *slackdata.AgentStore, partition string) {
 	t.Helper()
-	blob, _, err := store.LoadConversation(context.Background(), partition, "C_agent:1")
-	if err != nil {
-		t.Fatalf("LoadConversation after other-partition purge: %v", err)
-	}
-	if blob == nil {
-		t.Fatalf("agent conversation for partition %q was unexpectedly purged", partition)
+	if payload, found, err := store.LoadPendingAction(context.Background(), partition, "pending_agent"); err != nil || !found || payload == nil {
+		t.Fatalf("agent metadata for partition %q was unexpectedly purged: payload=%q found=%v err=%v", partition, payload, found, err)
 	}
 }
 
