@@ -92,6 +92,8 @@ const {
 const {
   ensureWebhookSubscription,
   buildSsmPersistSecret,
+  DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX,
+  isTruthyEnvFlag,
 } = require('../../src/qurl-webhook-registrar');
 
 // SSM client at module scope — Lambda reuses the same execution
@@ -172,6 +174,21 @@ function validateAndNormalizeInput(event) {
       limit: DESCRIPTION_WARN_LEN,
     }));
   }
+  // Stable-prefix invariant: the URL-migration orphan sweep matches
+  // on the byte-identical pre-`(` segment of the description (see
+  // qurl-webhook-registrar.js::deriveDescriptionPrefix). If the
+  // terraform-set `description` ever drifts to NOT start with this
+  // prefix, every future rename leaves an uncatchable orphan — fail
+  // fast at the boundary so the next deploy surfaces the drift
+  // instead of silently disabling the sweep.
+  const expectedPrefix = `${DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX} (`;
+  if (event.description !== DISCORD_BOT_VIEW_COUNTER_DESCRIPTION_PREFIX
+      && !event.description.startsWith(expectedPrefix)) {
+    throw new Error(
+      `webhook-registrar: description must start with "${expectedPrefix}" (orphan-sweep matcher invariant); `
+      + `got: ${event.description.slice(0, 80)}`,
+    );
+  }
   const normalized = { ...event, bridgeUrl: event.bridgeUrl.replace(/\/$/, '') };
   return normalized;
 }
@@ -225,12 +242,30 @@ exports.handler = async (event, context) => {
   // never reaches the bot and the receiver 503s every webhook. Fail
   // the Lambda loudly → Terraform apply fails → operator notices
   // instead of half-registered state shipping silently.
+  // URL-migration orphan sweep hard guard. Default ON for today's
+  // single-host deploy; flip to OFF before any active-active multi-
+  // region rollout under a shared `QURL_API_KEY` (#827). Env-var
+  // override (no code change required at flip time):
+  //   QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=1   (or true/yes/on)
+  // Only those truthy literals disable; `=0`, `=false`, `=no`, `=off`,
+  // and empty / unset leave the sweep ENABLED. Without this
+  // normalization, an operator typing the intuitive `=0` would
+  // accidentally DISABLE the sweep (any non-empty string is truthy
+  // in JS) — the failure mode is benign (no deletions) but surprising.
+  const urlMigrationSweepEnabled = !isTruthyEnvFlag(process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP);
+  if (!urlMigrationSweepEnabled) {
+    console.warn(JSON.stringify({
+      msg: 'webhook-registrar: URL-migration orphan sweep DISABLED via env override',
+    }));
+  }
+
   const result = await ensureWebhookSubscription({
     apiEndpoint: input.apiEndpoint,
     apiKey,
     bridgeUrl: input.bridgeUrl,
     description: input.description,
     initialSecret,
+    urlMigrationSweepEnabled,
     // persistSecret intentionally omitted — handled below with strict
     // throw-on-failure semantics.
   });
