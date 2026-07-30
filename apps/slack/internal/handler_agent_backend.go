@@ -116,6 +116,15 @@ func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, a
 	return b.resources, b.resourcesPartial, b.resourcesErr
 }
 
+// resourceScanPartial reports whether this turn's workspace scan stopped short of
+// the channel's whole allowed set (see collectChannelResources). False when no
+// scan ran. Read by the turn-complete log AFTER Agent.Run returns; the memo is
+// written on the same goroutine that executes the read tools, so no
+// synchronization is needed here.
+func (b *agentBackend) resourceScanPartial() bool {
+	return b.resourcesPartial
+}
+
 // channelPolicy returns the channel's alias bindings, fetched once and memoized for the
 // turn (mirrors channelAllowed). Shared by list_aliases (the binding list) and
 // list_resources (the rid -> $channelAlias label join).

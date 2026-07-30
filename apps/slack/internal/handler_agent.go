@@ -1087,7 +1087,10 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	if streamer != nil {
 		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
 	}
-	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
+	// Keep the backend reference: its per-turn scan memo carries whether the
+	// workspace scan completed, which the turn-complete log reports below.
+	backend := h.newAgentBackend(log)
+	a := agent.New(h.cfg.AgentLLM, backend, streamOpts...)
 	result, _, err := a.Run(ctx, &tc, history, message)
 
 	if err != nil {
@@ -1115,9 +1118,18 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// ran out otherwise ("budget" / "iterations"). It is the operator signal for
 	// agent latency regressions: a rising cutoff rate means turns are being answered
 	// from a partial picture, which no other field here would reveal.
+	//
+	// resources_partial is the same signal one layer down, and needs its own field
+	// because a partial scan does NOT raise cutoff — the turn converges normally,
+	// just over an incomplete resource list. The per-page and per-read budgets are
+	// far tighter than the qURL client's own 30s timeout, so a slow-but-working
+	// backend now yields partial answers where it used to yield complete ones. That
+	// is the intended trade, but without this field it would degrade answer quality
+	// silently, which is the blind spot cutoff exists to close.
 	log.Info("agent: turn complete",
 		"proposed", result.Proposal != nil,
 		"cutoff", string(result.Cutoff),
+		"resources_partial", backend.resourceScanPartial(),
 		"input_tokens", result.Usage.InputTokens,
 		"output_tokens", result.Usage.OutputTokens,
 		"cache_read_tokens", result.Usage.CacheReadInputTokens,
