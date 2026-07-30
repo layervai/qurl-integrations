@@ -1,0 +1,34 @@
+# Lint and test the repo's shell scripts and release configuration.
+# Cheap and unfiltered so the installer's tag-selection policy and the
+# release-please config/manifest pairing can never drift without a PR check
+# noticing (both previously merged with zero mechanical verification).
+name: Scripts
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: scripts-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: Lint and test scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: Test install.sh
+        run: scripts/test-install.sh
+
+      - name: Check release-please config/manifest sync
+        run: scripts/check-release-please-sync.sh

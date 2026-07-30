@@ -458,6 +458,31 @@ func TestSlackPostMessageBlocksFuncPostsBlocksAndFallback(t *testing.T) {
 	}
 }
 
+func TestSlackAgentStreamStopPostsFeedbackBlocks(t *testing.T) {
+	t.Parallel()
+	var gotBody struct {
+		Channel string           `json:"channel"`
+		TS      string           `json:"ts"`
+		Blocks  []map[string]any `json:"blocks"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode stop body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	port := newSlackAgentStreamPortWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.URL, srv.URL, srv.Client())
+	blocks := []any{map[string]any{"type": "context_actions"}}
+	if err := port.StopStream(context.Background(), "T1", "", "C1", "1700.01", blocks); err != nil {
+		t.Fatalf("stop stream: %v", err)
+	}
+	if gotBody.Channel != "C1" || gotBody.TS != "1700.01" || len(gotBody.Blocks) != 1 || gotBody.Blocks[0]["type"] != "context_actions" {
+		t.Fatalf("stop body = %+v, want channel/ts/feedback block", gotBody)
+	}
+}
+
 func TestSlackPostMessageBlocksFuncGridFallback(t *testing.T) {
 	t.Parallel()
 	var owners []string

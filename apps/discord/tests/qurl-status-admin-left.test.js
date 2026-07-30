@@ -12,7 +12,7 @@
 // "Unknown Member" error code (10007) so transient errors don't
 // mis-flag a present admin as gone.
 
-process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
+// OAUTH_STATE_SECRET is pinned globally in tests/setup-env.js.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 process.env.GUILD_ID = '123456789012345678';
 

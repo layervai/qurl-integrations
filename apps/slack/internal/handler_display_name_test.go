@@ -23,9 +23,9 @@ const (
 
 	// Channel-alias resolution fixtures: an admin targets a connector by a
 	// channel `$alias` whose name differs from the connector's own slug.
-	testDisplayNameAlias     = "dashboard"         // the channel alias the admin types
-	testDisplayNameSlug      = "stats-connector"   // the connector's real (different) slug
-	testDisplayNameTunnelRID = "r_stats_connector" // its resource id
+	testDisplayNameAlias     = "dashboard"          // the channel alias the admin types
+	testDisplayNameSlug      = "stats-connector"    // the connector's real (different) slug
+	testDisplayNameTunnelRID = testPublicResourceID // its public resource id
 	testDisplayNameNewName   = "Stats Dashboard"
 )
 

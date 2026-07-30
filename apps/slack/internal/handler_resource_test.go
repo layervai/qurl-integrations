@@ -13,7 +13,7 @@ import (
 const (
 	testResourceExposeAlias        = "docs"
 	testResourceExposeChannelAlias = "handbook"
-	testResourceExposeID           = "r_url_docs"
+	testResourceExposeID           = testPublicResourceID
 	testResourceExposeExistingID   = "r_existing"
 	testResourceExposeURL          = "https://docs.example.com/handbook"
 )

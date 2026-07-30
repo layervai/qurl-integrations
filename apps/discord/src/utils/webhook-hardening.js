@@ -72,6 +72,11 @@ function createBadSigLimiter({
 // the request header (any vendor-specific prefix like `sha256=` must be
 // stripped first). Returns false on any error so callers can branch on
 // a single bool.
+//
+// Also the constant-time compare primitive for the OAuth state signers
+// (utils/oauth-state.js) — contract changes here (the falsy-input
+// guard, the case-sensitive ASCII-hex compare) are observable there
+// too, not only in the webhook receivers.
 function verifyHmacSha256(rawBody, secret, expectedHex) {
   if (!rawBody || !secret || !expectedHex) return false;
   const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');

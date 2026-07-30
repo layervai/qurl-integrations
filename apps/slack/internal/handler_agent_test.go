@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +47,105 @@ func TestStripBotMention(t *testing.T) {
 	for in, want := range cases {
 		if got := stripBotMention(in); got != want {
 			t.Errorf("stripBotMention(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProcessAgentEvent_LiteralHelpBypassesLLM(t *testing.T) {
+	tests := []struct {
+		name string
+		env  *slackEventEnvelope
+	}{
+		{
+			name: "channel mention",
+			env:  env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> help"),
+		},
+		{
+			name: "agent chat is case insensitive",
+			env:  env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "  HELP  "),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			post, posts, mu := capturingPostMessage()
+			h := NewHandler(Config{
+				AgentLLM:            panicAgentLLM{},
+				AgentStore:          store,
+				PostMessage:         post,
+				AgentDefaultEnabled: true,
+			})
+
+			h.processAgentEvent(context.Background(), slog.Default(), tt.env)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(*posts) != 1 || (*posts)[0].text != agentHelpReply {
+				t.Fatalf("literal help should post one deterministic usage reply, got %+v", *posts)
+			}
+		})
+	}
+}
+
+func TestProcessAgentEvent_HelpPrefixUsesNormalAgentPath(t *testing.T) {
+	llm := &scriptedHandlerAgentLLM{responses: []agent.Response{{
+		Text:       testAgentStillWorksReply,
+		StopReason: testAgentStopEndTurn,
+	}}}
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            llm,
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> help me"))
+
+	if llm.calls != 1 {
+		t.Fatalf("non-literal help should reach the normal agent path once, got %d calls", llm.calls)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("non-literal help should return the agent result, got %+v", *posts)
+	}
+}
+
+func TestAgentHasExplicitNonHTTPSProtectURL(t *testing.T) {
+	cases := map[string]bool{
+		"Protect javascript:alert(1) as $bad.":  true,
+		"protect http://example.com as $docs":   true,
+		"Protect <http://example.com> as $docs": true,
+		"Protect https://example.com as $docs":  false,
+		"Protect $docs as $shared":              false,
+		"Protect example.com:8080 as $local":    false,
+		"Protect example.com:8080/path as $x":   false,
+		"Protect javascript:alert(1)":           true,
+		"How do I protect javascript: URLs?":    false,
+	}
+	for message, want := range cases {
+		if got := agentHasExplicitNonHTTPSProtectURL(message); got != want {
+			t.Errorf("agentHasExplicitNonHTTPSProtectURL(%q) = %v, want %v", message, got, want)
+		}
+	}
+}
+
+func TestAgentHasExplicitInvalidSetAlias(t *testing.T) {
+	cases := map[string]bool{
+		"Set alias $Prod_Admin!!! to $staging-api.": true,
+		"set alias $prod_admin to $staging-api":     true,
+		"Set alias $prod-admin to $staging-api":     false,
+		"Set alias for $prod-admin to staging":      false,
+		"Set alias prod-admin to $staging-api":      false,
+		"How do I set alias $Bad_ID?":               false,
+	}
+	for message, want := range cases {
+		if got := agentHasExplicitInvalidSetAlias(message); got != want {
+			t.Errorf("agentHasExplicitInvalidSetAlias(%q) = %v, want %v", message, got, want)
 		}
 	}
 }
@@ -91,16 +191,16 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 
 		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
 		// top-level channel message is never admitted (no un-addressed chatter).
-		{"channel thread reply, followups off", chReply("hi", "100.0"), false, false},
-		{"channel thread reply, followups on", chReply("hi", "100.0"), true, true},
+		{"channel thread reply, followups off", chReply("hi", agentPoolTestThreadTS), false, false},
+		{"channel thread reply, followups on", chReply("hi", agentPoolTestThreadTS), true, true},
 		{"top-level channel message, followups off", chReply("hi", ""), false, false},
 		{"top-level channel message, followups on", chReply("hi", ""), true, false},
-		{"channel thread reply empty text, followups on", chReply("   ", "100.0"), true, false},
-		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), false, false},
-		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", "100.0", slackMessageSubtypeThreadBroadcast), true, true},
+		{"channel thread reply empty text, followups on", chReply("   ", agentPoolTestThreadTS), true, false},
+		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), false, false},
+		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
 		{"thread_broadcast dm ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeThreadBroadcast, "hi"), true, false},
-		{"other channel thread subtype ignored", chReplySubtype("hi", "100.0", "message_changed"), true, false},
+		{"other channel thread subtype ignored", chReplySubtype("hi", agentPoolTestThreadTS, "message_changed"), true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -112,83 +212,65 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 }
 
 func TestAgentChannelFollowupDropped(t *testing.T) {
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := &Handler{cfg: Config{AgentStore: store}}
+	var historyErr error
+	h := &Handler{cfg: Config{
+		AgentThreadHistory: func(_ context.Context, _, _, channelID, threadTS, _ string) ([]AgentThreadMessage, error) {
+			if historyErr != nil {
+				return nil, historyErr
+			}
+			if channelID == "C9" && threadTS == agentPoolTestThreadTS {
+				return []AgentThreadMessage{
+					{UserID: "U1", Text: "question", TS: agentPoolTestThreadTS},
+					{AppID: "A1", Text: "answer", TS: "100.1"},
+				}, nil
+			}
+			return nil, nil
+		},
+	}}
 	ctx, log := context.Background(), slog.Default()
 
 	reply := func(channel, threadTS string) *slackEventEnvelope {
 		e := env(slackEventTypeMessage, "channel", "U2", "", "", "follow-up")
+		e.APIAppID = "A1"
 		e.Event.Channel = channel
 		e.Event.ThreadTS = threadTS
+		e.Event.TS = "100.2"
 		return e
 	}
-
-	// Seed a transcript for a thread the agent already joined.
-	joined := reply("C9", "100.0")
-	part := agentEventPartition(joined)
-	blob, err := json.Marshal([]agent.Message{{}})
-	if err != nil {
-		t.Fatalf("marshal seed: %v", err)
-	}
-	if err := store.SaveConversation(ctx, part, agentEventThreadKey(joined), blob, 0); err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
-
-	// gateDrop runs the gate and returns just the drop decision, for the cases that only
-	// care whether the reply is admitted or dropped (not the reused transcript).
-	gateDrop := func(e *slackEventEnvelope, partition string) bool {
-		dropped, _ := h.agentChannelFollowupDropped(ctx, log, e, partition)
+	gateDrop := func(e *slackEventEnvelope) bool {
+		dropped, _ := h.agentChannelFollowupDropped(ctx, log, e, agentEventPartition(e))
 		return dropped
 	}
 
-	// A reply in the joined thread continues it AND hands back the loaded transcript, so
-	// the turn reuses it instead of reading DynamoDB a second time (the #712 double-read fix).
-	switch dropped, pre := h.agentChannelFollowupDropped(ctx, log, joined, part); {
+	joined := reply("C9", agentPoolTestThreadTS)
+	switch dropped, pre := h.agentChannelFollowupDropped(ctx, log, joined, agentEventPartition(joined)); {
 	case dropped:
-		t.Fatal("a reply in a thread the agent joined must NOT be dropped")
+		t.Fatal("a reply in a thread the agent joined must not be dropped")
 	case pre == nil:
-		t.Fatal("an admitted follow-up must return the preloaded transcript for reuse")
-	case len(pre.history) != 1:
-		t.Fatalf("preloaded history = %d msgs, want 1 (the seeded transcript)", len(pre.history))
+		t.Fatal("an admitted follow-up must return the live transcript for reuse")
+	case len(pre.history) != 2:
+		t.Fatalf("preloaded history = %#v, want one completed exchange", pre.history)
 	}
-	if !gateDrop(reply("C9", "999.0"), part) {
+	if !gateDrop(reply("C9", "999.0")) {
 		t.Fatal("a reply in a thread the agent never joined must be dropped")
 	}
-	// Same thread_ts but a different channel is a different thread → dropped.
-	if !gateDrop(reply("C-other", "100.0"), part) {
+	if !gateDrop(reply("C-other", agentPoolTestThreadTS)) {
 		t.Fatal("a reply in another channel's thread must be dropped")
 	}
 
-	// Non-follow-ups are never dropped here — @mentions and DMs are deliberate
-	// addresses handled without the history gate (and get no preloaded transcript).
 	mention := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
 	if dropped, pre := h.agentChannelFollowupDropped(ctx, log, mention, agentEventPartition(mention)); dropped || pre != nil {
-		t.Fatal("an @mention is not a channel follow-up; must not be dropped or preloaded")
+		t.Fatal("an @mention is not a channel follow-up")
 	}
 	dm := env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi")
 	if dropped, pre := h.agentChannelFollowupDropped(ctx, log, dm, agentEventPartition(dm)); dropped || pre != nil {
-		t.Fatal("a DM is not a channel follow-up; must not be dropped or preloaded")
+		t.Fatal("a DM is not a channel follow-up")
 	}
 
-	// A joined thread whose stored transcript is corrupt/undecodable reads back as no
-	// history (loadAgentHistory starts fresh on a decode error), so the follow-up
-	// fail-closed drops — "no DECODABLE transcript", not merely "never joined".
-	corrupt := reply("C-corrupt", "300.0")
-	if err := store.SaveConversation(ctx, part, agentEventThreadKey(corrupt), []byte("not valid json"), 0); err != nil {
-		t.Fatalf("seed corrupt: %v", err)
+	historyErr = errors.New("Slack read down")
+	if !gateDrop(joined) {
+		t.Fatal("a follow-up whose live history lookup errors must be dropped")
 	}
-	if !gateDrop(corrupt, part) {
-		t.Fatal("a follow-up whose transcript can't be decoded must be dropped (fail closed)")
-	}
-
-	// Fail closed: when the transcript lookup itself errors we can't confirm the thread
-	// is the agent's, so the reply is dropped (and stays silent) rather than answered.
-	fake.getErr = errors.New("ddb read down")
-	if !gateDrop(joined, part) {
-		t.Fatal("a follow-up whose transcript lookup errors must be dropped (fail closed)")
-	}
-	fake.getErr = nil
 }
 
 func TestAgentEventKeys(t *testing.T) {
@@ -260,6 +342,9 @@ func TestAgentReplyText(t *testing.T) {
 	prop := agentReplyText(&agent.Result{Proposal: &agent.Proposal{Summary: "Protect $x."}})
 	if !strings.Contains(prop, "isn't enabled yet") || !strings.Contains(prop, "Protect $x.") {
 		t.Errorf("proposal preview = %q", prop)
+	}
+	if !strings.HasSuffix(prop, agentLLMReplyDisclaimer) {
+		t.Errorf("LLM-distilled proposal preview must carry the disclaimer, got %q", prop)
 	}
 	// A proposal with a blank summary would render as a dangling bullet; it must
 	// fall back to the error reply like the blank-Reply case.
@@ -335,23 +420,14 @@ func (panicAgentLLM) Complete(context.Context, *agent.Request) (agent.Response, 
 }
 
 // memAgentDDB is a minimal in-memory DynamoDBClient for AgentStore: GetItem,
-// conditional PutItem (attribute_not_exists / version match), Query, UpdateItem,
-// and unconditional DeleteItem for purge tests.
+// create-if-absent PutItem, Query, UpdateItem, and unconditional DeleteItem.
 type memAgentDDB struct {
 	mu        sync.Mutex
 	items     map[string]map[string]ddbtypes.AttributeValue
-	getErr    error // when set, GetItem (conversation load) fails
+	getErr    error // when set, GetItem fails
 	updateErr error // when set, UpdateItem (turn-rate counter) fails
 	getCalls  int
-	// putCalls counts PutItem calls (conversation saves) so a test can assert the
-	// conflict-retry path attempts exactly one extra write, never a loop.
-	putCalls int
-	putErr   error // when set, PutItem fails
-	// forceConflicts makes the next N PutItems return a version conflict
-	// regardless of the stored version — the only way to deterministically force a
-	// SECOND conflict (a passive CAS fake can't, since no writer slips in between a
-	// synchronous reload and retry).
-	forceConflicts int
+	putErr    error // when set, PutItem fails
 }
 
 func newMemAgentDDB() *memAgentDDB {
@@ -377,53 +453,19 @@ func (f *memAgentDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ..
 	return &dynamodb.GetItemOutput{}, nil
 }
 
-func (f *memAgentDDB) getItemCalls() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.getCalls
-}
-
 func (f *memAgentDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.putCalls++
 	if f.putErr != nil {
 		return nil, f.putErr
 	}
-	if f.forceConflicts > 0 {
-		f.forceConflicts--
-		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("forced conflict")}
-	}
 	k := memKey(in.Item)
-	existing, present := f.items[k]
-	if cond := aws.ToString(in.ConditionExpression); cond != "" && !memEvalSaveCond(cond, existing, present, in.ExpressionAttributeValues) {
+	_, present := f.items[k]
+	if cond := aws.ToString(in.ConditionExpression); cond != "" && present {
 		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
 	}
 	f.items[k] = in.Item
 	return &dynamodb.PutItemOutput{}, nil
-}
-
-// memEvalSaveCond models the two PutItem condition shapes AgentStore emits:
-// `attribute_not_exists(pk)` (single-term create guard, MarkEventSeen/pending) and
-// `attribute_not_exists(pk) OR conv_version = :ev` (SaveConversation's optimistic
-// concurrency). Mirrors agentFakeDDB.evalCond in the slackdata package so the
-// version race can be driven faithfully at the handler level.
-func memEvalSaveCond(cond string, existing map[string]ddbtypes.AttributeValue, present bool, vals map[string]ddbtypes.AttributeValue) bool {
-	if !present {
-		return true // attribute_not_exists(pk) holds
-	}
-	if !strings.Contains(cond, " OR ") {
-		return false // single-term create guard, row already present
-	}
-	want, ok := vals[":ev"].(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return false
-	}
-	cur, ok := existing["conv_version"].(*ddbtypes.AttributeValueMemberN)
-	if !ok {
-		return false
-	}
-	return cur.Value == want.Value
 }
 
 // UpdateItem fakes only the one shape BumpTurnCount emits — "ADD turn_count :one SET
@@ -574,7 +616,7 @@ func appMentionBody(eventID string) string {
 }
 
 func threadBroadcastBody(eventID, ts, threadTS string) string {
-	return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+	return `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"` + eventID + `",` +
 		`"event":{"type":"message","subtype":"` + slackMessageSubtypeThreadBroadcast + `",` +
 		`"channel_type":"channel","user":"U2","channel":"C1","ts":"` + ts + `",` +
 		`"thread_ts":"` + threadTS + `","text":"more please"}}`
@@ -595,7 +637,7 @@ func TestHandleEvent_AgentReplies(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.1" || got.text != testAgentReachStagingReply {
+	if got.channel != "C1" || got.threadTS != "100.1" || got.text != agentLLMReplyWithDisclaimer(testAgentReachStagingReply) {
 		t.Fatalf("reply = %+v", got)
 	}
 }
@@ -681,7 +723,7 @@ func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testi
 	if !got.markdown {
 		t.Fatalf("free-text answer should use the standard-Markdown seam, got %+v", got)
 	}
-	want := `I found Deploy room \<!channel> and \<@U12345678>`
+	want := agentLLMReplyWithDisclaimer(`I found Deploy room \<!channel> and \<@U12345678>`)
 	if got.text != want {
 		t.Fatalf("reply = %q, want escaped visible controls %q", got.text, want)
 	}
@@ -689,7 +731,6 @@ func TestHandleEvent_AgentEchoedResourceDescriptionEscapesSlackControls(t *testi
 
 func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
 	mem := newMemAgentDDB()
-	seedAgentThread(t, mem, "C1", "100.0")
 	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{
@@ -698,11 +739,17 @@ func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
 		PostMessage:           post,
 		AgentChannelFollowups: true,
 		AgentDefaultEnabled:   true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "question", TS: agentPoolTestThreadTS},
+				{AppID: "A1", Text: "answer", TS: "100.1"},
+			}, nil
+		},
 	})
 	t.Cleanup(h.Wait)
 
 	w := httptest.NewRecorder()
-	h.handleEvent(w, []byte(threadBroadcastBody("EvBroadcast", "101.0", "100.0")))
+	h.handleEvent(w, []byte(threadBroadcastBody("EvBroadcast", "101.0", agentPoolTestThreadTS)))
 	if w.Code != 200 {
 		t.Fatalf("ack code = %d", w.Code)
 	}
@@ -714,7 +761,7 @@ func TestHandleEvent_AgentRepliesToThreadBroadcastFollowup(t *testing.T) {
 		t.Fatalf("expected exactly one reply, got %d", len(*posts))
 	}
 	got := (*posts)[0]
-	if got.channel != "C1" || got.threadTS != "100.0" || got.text != "still here" {
+	if got.channel != "C1" || got.threadTS != agentPoolTestThreadTS || got.text != agentLLMReplyWithDisclaimer("still here") {
 		t.Fatalf("thread_broadcast follow-up reply = %+v", got)
 	}
 }
@@ -820,14 +867,20 @@ func TestHandleEvent_DedupeKeyedOnMessageIdentity(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
-	// LoadConversation fails after the dedupe marker is committed: the user must
-	// get an error reply, not silence (Slack won't retry — we acked 200).
-	fake := newMemAgentDDB()
-	fake.getErr = errors.New("ddb read down") // GetItem (load) fails; PutItem (dedupe) still succeeds
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
+func TestHandleEvent_HistoryFailurePostsError(t *testing.T) {
+	// conversations.replies fails after the dedupe marker is committed: the user
+	// must get an error reply, not silence (Slack won't retry — we acked 200).
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
-	h := NewHandler(Config{AgentLLM: fakeAgentLLM{reply: "unused"}, AgentStore: store, PostMessage: post, AgentDefaultEnabled: true})
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: "unused"},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return nil, errors.New("Slack read down")
+		},
+	})
 	t.Cleanup(h.Wait)
 	h.handleEvent(httptest.NewRecorder(), []byte(appMentionBody("EvLF")))
 	h.Wait()
@@ -835,7 +888,7 @@ func TestHandleEvent_LoadFailurePostsError(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
-		t.Fatalf("load failure should post one error reply, got %+v", *posts)
+		t.Fatalf("history failure should post one error reply, got %+v", *posts)
 	}
 }
 
@@ -856,7 +909,7 @@ func TestProcessAgentEvent_DeliversOnSpentTurnCtx(t *testing.T) {
 		// not the generic error copy — see TestProcessAgentEvent_GenericErrorCopy
 		// for the live-ctx (capability) branch.
 		{"turn failed", fakeAgentLLM{err: errors.New("turn deadline exceeded")}, agentTransientReply},
-		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, testAgentReachStagingReply},
+		{"turn succeeded", fakeAgentLLM{reply: testAgentReachStagingReply}, agentLLMReplyWithDisclaimer(testAgentReachStagingReply)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -911,6 +964,92 @@ func TestProcessAgentEvent_GenericErrorCopy(t *testing.T) {
 	}
 }
 
+func TestProcessAgentEvent_RejectsExplicitNonHTTPSProtectURLBeforeLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            panicAgentLLM{},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Protect javascript:alert(1) as $bad."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentInvalidProtectURLReply {
+		t.Fatalf("invalid URL should be rejected once before the LLM runs, got %+v", *posts)
+	}
+	if strings.Contains((*posts)[0].text, "javascript:") {
+		t.Fatalf("invalid URL reply must not echo the attacker-controlled target: %q", (*posts)[0].text)
+	}
+}
+
+func TestProcessAgentEvent_AllowsHTTPSProtectURLThroughToLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: testAgentStillWorksReply},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Protect https://example.com as $docs."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("HTTPS protect request should follow the normal agent path, got %+v", *posts)
+	}
+}
+
+func TestProcessAgentEvent_RejectsExplicitInvalidAliasBeforeLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            panicAgentLLM{},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Set alias $Prod_Admin!!! to $staging-api."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentInvalidAliasReply {
+		t.Fatalf("invalid alias should be rejected once before the LLM runs, got %+v", *posts)
+	}
+	if strings.Contains((*posts)[0].text, "Prod_Admin") {
+		t.Fatalf("invalid alias reply must not echo the attacker-controlled alias: %q", (*posts)[0].text)
+	}
+}
+
+func TestProcessAgentEvent_AllowsValidAliasThroughToLLM(t *testing.T) {
+	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: testAgentStillWorksReply},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+	})
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> Set alias $prod-admin to $staging-api."))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("valid alias request should follow the normal agent path, got %+v", *posts)
+	}
+}
+
 func TestProcessAgentEvent_PanicPostsError(t *testing.T) {
 	// A panic mid-turn — after dedupe is committed and 200 already acked, so Slack
 	// won't retry — must not vanish: the safety-net recover posts the error reply
@@ -936,373 +1075,123 @@ func TestProcessAgentEvent_PanicPostsError(t *testing.T) {
 	}
 }
 
-func TestSaveAgentHistory_ByteGuard(t *testing.T) {
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-
-	// 12 turns of ~50KB each (~600KB) — well past maxPersistedBytes (350KB) even
-	// though it's under the 40-message count cap.
-	big := strings.Repeat("x", 50*1024)
-	history := make([]agent.Message, 0, 24)
-	for i := range 12 {
-		history = append(history,
-			agent.Message{Role: "user", Text: fmt.Sprintf("q%d", i)},
-			agent.Message{Role: "assistant", Text: big},
-		)
-	}
-	h.saveAgentHistory(slog.Default(), "T1", "C1:1", history, nil, 0)
-
-	item, ok := fake.items["T1|conv#C1:1"]
-	if !ok {
-		t.Fatalf("conversation not persisted")
-	}
-	stored := item["messages"].(*ddbtypes.AttributeValueMemberS).Value
-	if stored == "" {
-		t.Fatalf("expected the latest turn to be kept")
-	}
-	if len(stored) > maxPersistedBytes {
-		t.Fatalf("persisted blob %d bytes exceeds the %d byte cap", len(stored), maxPersistedBytes)
-	}
-}
-
-func TestSaveAgentHistory_SingleOversizedTurnDoesNotHang(t *testing.T) {
-	// A single turn whose own content exceeds the byte cap has no turn boundary
-	// to trim below, so the byte-guard loop must break (not spin forever) and
-	// save oversized. Without the no-progress break this test would hang.
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-
-	history := []agent.Message{
-		{Role: "user", Text: "do it"},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "t1", Name: "list_resources"}}},
-		{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "t1", Content: strings.Repeat("y", 400*1024)}}},
-		{Role: "assistant", Text: "done"},
-	}
-	done := make(chan struct{})
-	go func() {
-		h.saveAgentHistory(slog.Default(), "T1", "C1:9", history, nil, 0)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("saveAgentHistory hung on a single oversized turn (byte-guard loop did not terminate)")
-	}
-}
-
-// assertTranscriptWellFormed checks the agent-API invariants that trimAgentHistory
-// + agent.Run maintain and that the #666 conflict-merge must not break: (i) the
-// transcript does not begin with an orphaned tool_results message, and (ii) every
-// assistant tool_use is answered by the immediately following user message,
-// covering exactly those tool-use IDs. It deliberately does NOT assert role
-// alternation: a turn ending in a proposal or the iteration cap ends with a
-// user{ToolResults} message and the next turn opens with user{Text}, so user→user
-// adjacency is normal and API-valid.
-func assertTranscriptWellFormed(t *testing.T, msgs []agent.Message) {
-	t.Helper()
-	if len(msgs) == 0 {
-		return
-	}
-	if len(msgs[0].ToolResults) > 0 {
-		t.Fatalf("transcript head is an orphaned tool_results message: %+v", msgs[0])
-	}
-	for i := range msgs {
-		if len(msgs[i].ToolCalls) == 0 {
-			continue
-		}
-		if i+1 >= len(msgs) {
-			t.Fatalf("assistant tool_use at msg %d has no following tool_results", i)
-		}
-		want := make(map[string]bool, len(msgs[i].ToolCalls))
-		for _, call := range msgs[i].ToolCalls {
-			want[call.ID] = true
-		}
-		got := make(map[string]bool, len(msgs[i+1].ToolResults))
-		for _, tr := range msgs[i+1].ToolResults {
-			got[tr.ToolUseID] = true
-		}
-		for id := range want {
-			if !got[id] {
-				t.Fatalf("tool_use %q (msg %d) has no matching tool_result in msg %d", id, i, i+1)
+func TestLoadAgentThreadHistory_ReconstructsOnlyCompletedQURLExchanges(t *testing.T) {
+	h := NewHandler(Config{
+		AgentThreadHistory: func(_ context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]AgentThreadMessage, error) {
+			if teamID != "T1" || enterpriseID != "" || channelID != "C1" || threadTS != agentPoolTestThreadTS || oldestTS != "70.000000" {
+				t.Fatalf("history request = team %q enterprise %q channel %q thread %q oldest %q", teamID, enterpriseID, channelID, threadTS, oldestTS)
 			}
-		}
-		for id := range got {
-			if !want[id] {
-				t.Fatalf("tool_result %q (msg %d) has no matching tool_use in msg %d", id, i+1, i)
-			}
-		}
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "<@U12345678> first question", TS: agentPoolTestThreadTS},
+				{AppID: "A1", BotID: "B1", UserID: "UQURL", Text: "first answer", TS: "100.1"},
+				{BotID: "BOTHER", UserID: "UOTHER", Text: "other bot", TS: "100.2"},
+				{UserID: "U1", Text: "follow-up", TS: "100.3"},
+				{AppID: "A1", BotID: "B1", UserID: "UQURL", Text: "second answer", TS: "100.4"},
+				{UserID: "U1", Text: "current inbound turn", TS: "1870.5"},
+			}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "current inbound turn")
+	e.APIAppID = "A1"
+	e.Authorizations = []slackEventAuthorization{{UserID: "UQURL"}}
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = "1870.5"
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if !joined {
+		t.Fatal("qURL app response should mark the thread joined")
+	}
+	want := []agent.Message{
+		{Role: "user", Text: "first question"},
+		{Role: "assistant", Text: "first answer"},
+		{Role: "user", Text: "follow-up"},
+		{Role: "assistant", Text: "second answer"},
+	}
+	if !reflect.DeepEqual(history, want) {
+		t.Fatalf("history = %#v, want %#v", history, want)
 	}
 }
 
-func TestSaveAgentHistory_ConflictMergesAndRetries(t *testing.T) {
-	// A concurrent turn won the version race. saveAgentHistory must reload the
-	// winner's transcript, graft this turn's delta on top, and retry once — losing
-	// neither turn and keeping the merged transcript well-formed. This is the
-	// guard-#5 proof: the merge seam joins the winner's tool-using turn (ending in
-	// a tool_results message) to this turn's tool-using turn.
+func TestLoadAgentThreadHistory_DropsIncompleteTail(t *testing.T) {
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "first", TS: agentPoolTestThreadTS},
+				{AppID: "A1", Text: "answer", TS: "100.1"},
+				{UserID: "U1", Text: "unanswered", TS: "100.2"},
+			}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "current")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = "100.3"
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined {
+		t.Fatalf("load history: joined=%v err=%v", joined, err)
+	}
+	want := []agent.Message{{Role: "user", Text: "first"}, {Role: "assistant", Text: "answer"}}
+	if !reflect.DeepEqual(history, want) {
+		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+func TestLoadAgentThreadHistory_BlockOnlyOwnReplyMarksThreadJoined(t *testing.T) {
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{{AppID: "A1", TS: "100.1"}}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "current")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = "100.2"
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined || len(history) != 0 {
+		t.Fatalf("block-only qURL reply: history=%#v joined=%v err=%v", history, joined, err)
+	}
+}
+
+func TestAgentHistoryOldestTS(t *testing.T) {
+	if got := agentHistoryOldestTS("1800.123456"); got != "0.000000" {
+		t.Fatalf("oldest = %q, want 0.000000", got)
+	}
+	if got := agentHistoryOldestTS("3600.123456"); got != "1800.000000" {
+		t.Fatalf("oldest = %q, want 1800.000000", got)
+	}
+	before := time.Now().Add(-agentHistoryWindow).Unix()
+	got, err := strconv.ParseInt(strings.TrimSuffix(agentHistoryOldestTS("invalid"), ".000000"), 10, 64)
+	after := time.Now().Add(-agentHistoryWindow).Unix()
+	if err != nil || got < before || got > after {
+		t.Fatalf("invalid oldest = %d err=%v, want current time minus window in [%d,%d]", got, err, before, after)
+	}
+}
+
+func TestProcessAgentEvent_DoesNotPersistSlackTranscript(t *testing.T) {
 	fake := newMemAgentDDB()
 	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-	ctx := context.Background()
-	const part, thread = "T1", "C1:1"
+	post, _, _ := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: "done"},
+		AgentStore:          store,
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return nil, nil
+		},
+	})
 
-	mustMarshal := func(m []agent.Message) []byte {
-		b, err := json.Marshal(m)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		return b
-	}
-	// Base transcript both racing turns loaded (stored at conv_version 1).
-	base := []agent.Message{
-		{Role: "user", Text: "hi"},
-		{Role: "assistant", Text: "hello"},
-	}
-	if err := store.SaveConversation(ctx, part, thread, mustMarshal(base), 0); err != nil {
-		t.Fatalf("seed base: %v", err)
-	}
-	// The winner: base + a proposal turn ending in a tool_results message (the
-	// proposal path), so the merge seam follows tool_results with this turn's
-	// leading user message — the user→user adjacency the checker must allow.
-	winnerDelta := []agent.Message{
-		{Role: "user", Text: "revoke staging"},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "p1", Name: "propose_revoke"}}},
-		{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "p1", Content: "proposed"}}},
-	}
-	winnerFull := append(append([]agent.Message{}, base...), winnerDelta...)
-	if err := store.SaveConversation(ctx, part, thread, mustMarshal(winnerFull), 1); err != nil {
-		t.Fatalf("seed winner: %v", err)
-	}
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"))
 
-	// This turn loaded base at conv_version 1 and produced its own tool-using turn.
-	myDelta := []agent.Message{
-		{Role: "user", Text: "what can I reach"},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "t2", Name: "list_resources"}}},
-		{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "t2", Content: "r_1"}}},
-		{Role: "assistant", Text: "You can reach r_1"},
-	}
-	myFull := append(append([]agent.Message{}, base...), myDelta...)
-
-	fake.putCalls = 0 // ignore the two seeding writes
-	h.saveAgentHistory(slog.Default(), part, thread, myFull, myDelta, 1)
-
-	// Exactly one extra write: the conflicting save + one merged retry.
-	if fake.putCalls != 2 {
-		t.Fatalf("expected 2 writes (conflict + one retry), got %d", fake.putCalls)
-	}
-	storedBlob, _, err := store.LoadConversation(ctx, part, thread)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	var merged []agent.Message
-	if err := json.Unmarshal(storedBlob, &merged); err != nil {
-		t.Fatalf("unmarshal merged: %v", err)
-	}
-	assertTranscriptWellFormed(t, merged)
-
-	// The stored transcript is the winner's full transcript with this turn's delta
-	// appended in order — neither turn lost, the winner's turn kept in place.
-	if len(merged) != len(winnerFull)+len(myDelta) {
-		t.Fatalf("merged length %d, want %d (winner + delta)", len(merged), len(winnerFull)+len(myDelta))
-	}
-	if merged[len(base)].Text != "revoke staging" {
-		t.Fatalf("winner's turn not preserved at the seam: %+v", merged[len(base)])
-	}
-	if merged[len(winnerFull)].Text != "what can I reach" {
-		t.Fatalf("this turn's delta not grafted after the winner: %+v", merged[len(winnerFull)])
-	}
-	if last := merged[len(merged)-1]; last.Text != "You can reach r_1" {
-		t.Fatalf("this turn's reply not preserved: %+v", last)
-	}
-}
-
-func TestSaveAgentHistory_ReloadFailureDropsTurn(t *testing.T) {
-	// On conflict, if reloading the winner's transcript fails hard, drop the turn —
-	// never graft this turn's delta onto a garbage base, never clobber the winner.
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-	ctx := context.Background()
-	const part, thread = "T1", "C1:1"
-
-	winner := []agent.Message{{Role: "user", Text: "winner"}, {Role: "assistant", Text: "won"}}
-	wb, err := json.Marshal(winner)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if err := store.SaveConversation(ctx, part, thread, wb, 0); err != nil { // stores conv_version 1
-		t.Fatalf("seed winner: %v", err)
-	}
-	fake.getErr = errors.New("ddb unavailable") // the reload (GetItem) now fails
-	fake.putCalls = 0
-
-	myDelta := []agent.Message{{Role: "user", Text: "mine"}, {Role: "assistant", Text: "reply"}}
-	h.saveAgentHistory(slog.Default(), part, thread, myDelta, myDelta, 0) // version 0 conflicts with stored 1
-
-	if fake.putCalls != 1 {
-		t.Fatalf("expected exactly 1 write (the conflicting save, no merged retry), got %d", fake.putCalls)
-	}
-	fake.getErr = nil
-	storedBlob, _, err := store.LoadConversation(ctx, part, thread)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if !bytes.Equal(storedBlob, wb) {
-		t.Fatalf("winner's transcript was clobbered: %s", storedBlob)
-	}
-}
-
-func TestSaveAgentHistory_CorruptReloadDropsTurn(t *testing.T) {
-	// On conflict, if the winner's stored blob can't be decoded, drop the turn
-	// rather than graft onto a garbage base or overwrite the (maybe-recoverable)
-	// winner blob with only this turn's delta.
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-	ctx := context.Background()
-	const part, thread = "T1", "C1:1"
-
-	if err := store.SaveConversation(ctx, part, thread, []byte("{not json"), 0); err != nil { // corrupt winner at conv_version 1
-		t.Fatalf("seed corrupt: %v", err)
-	}
-	fake.putCalls = 0
-
-	myDelta := []agent.Message{{Role: "user", Text: "mine"}, {Role: "assistant", Text: "reply"}}
-	h.saveAgentHistory(slog.Default(), part, thread, myDelta, myDelta, 0) // conflicts with stored 1
-
-	if fake.putCalls != 1 {
-		t.Fatalf("expected exactly 1 write (no merged retry on corrupt reload), got %d", fake.putCalls)
-	}
-	storedBlob, _, err := store.LoadConversation(ctx, part, thread)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if string(storedBlob) != "{not json" {
-		t.Fatalf("corrupt winner blob was overwritten: %s", storedBlob)
-	}
-}
-
-func TestSaveAgentHistory_RetriesAtMostOnce(t *testing.T) {
-	// If the merged retry ALSO loses a version race, drop the turn after one retry.
-	// The save path never loops — an unbounded race would pin the worker.
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-	const part, thread = "T1", "C1:1"
-
-	fake.forceConflicts = 2 // the first save AND the merged retry both conflict
-	myDelta := []agent.Message{{Role: "user", Text: "mine"}, {Role: "assistant", Text: "reply"}}
-	h.saveAgentHistory(slog.Default(), part, thread, myDelta, myDelta, 0)
-
-	if fake.putCalls != 2 {
-		t.Fatalf("expected exactly 2 writes (initial + one retry, then stop), got %d", fake.putCalls)
-	}
-}
-
-func TestSaveAgentHistory_MalformedDeltaHeadDropsTurn(t *testing.T) {
-	// Defense-in-depth: if this turn's delta opens with a tool_results message
-	// (a.Run never produces that today, but would if it ever stopped being
-	// pure-append), the conflict-merge must drop rather than graft an orphaned
-	// tool_result onto the winner's transcript — no reload, no merged retry.
-	fake := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: fake, TableName: "agent_state"}
-	h := NewHandler(Config{AgentStore: store})
-	ctx := context.Background()
-	const part, thread = "T1", "C1:1"
-
-	winner := []agent.Message{{Role: "user", Text: "winner"}, {Role: "assistant", Text: "won"}}
-	wb, err := json.Marshal(winner)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if err := store.SaveConversation(ctx, part, thread, wb, 0); err != nil { // stores conv_version 1
-		t.Fatalf("seed winner: %v", err)
-	}
-	fake.putCalls = 0
-
-	badDelta := []agent.Message{{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "x", Content: "orphan"}}}}
-	h.saveAgentHistory(slog.Default(), part, thread, badDelta, badDelta, 0) // conflicts with stored 1
-
-	if fake.putCalls != 1 {
-		t.Fatalf("expected exactly 1 write (the conflicting save, no merged retry), got %d", fake.putCalls)
-	}
-	storedBlob, _, err := store.LoadConversation(ctx, part, thread)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if !bytes.Equal(storedBlob, wb) {
-		t.Fatalf("winner's transcript was clobbered by a malformed delta: %s", storedBlob)
-	}
-}
-
-func TestAgentRunPreservedPrefix(t *testing.T) {
-	base := []agent.Message{
-		{Role: "user", Text: "q1"},
-		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "t1", Name: "list_resources"}}},
-		{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: "t1", Content: "r"}}},
-	}
-	appended := append(append([]agent.Message{}, base...),
-		agent.Message{Role: "user", Text: "q2"},
-		agent.Message{Role: "assistant", Text: "a2"},
-	)
-	if !agentRunPreservedPrefix(base, appended) {
-		t.Fatal("pure-append should preserve the prefix")
-	}
-	if !agentRunPreservedPrefix(nil, appended) {
-		t.Fatal("empty loaded history is always a prefix")
-	}
-	if agentRunPreservedPrefix(base, base[:2]) {
-		t.Fatal("a shorter transcript can't contain loaded as a prefix")
-	}
-	// Same length-or-longer, but a prefix element rewritten (a hypothetical
-	// compaction). The length check alone would pass; the exact-prefix check must
-	// not — this is the silent-corruption case the runtime guard exists to catch.
-	rewritten := append([]agent.Message{}, appended...)
-	rewritten[1] = agent.Message{Role: "assistant", Text: "compacted"}
-	if agentRunPreservedPrefix(base, rewritten) {
-		t.Fatal("a rewritten prefix element must fail the exact-prefix check")
-	}
-}
-
-func TestTrimAgentHistory(t *testing.T) {
-	// Short history is untouched.
-	short := []agent.Message{{Role: "user", Text: "hi"}, {Role: "assistant", Text: "yo"}}
-	if got := trimAgentHistory(short, 40); len(got) != 2 {
-		t.Fatalf("short history should be unchanged, got %d", len(got))
-	}
-
-	// 15 four-message turns (user text, assistant tool_use, user tool_result,
-	// assistant text) = 60 messages.
-	long := make([]agent.Message, 0, 60)
-	for i := range 15 {
-		long = append(long,
-			agent.Message{Role: "user", Text: fmt.Sprintf("q%d", i)},
-			agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: fmt.Sprintf("t%d", i), Name: "list_resources"}}},
-			agent.Message{Role: "user", ToolResults: []agent.ToolResult{{ToolUseID: fmt.Sprintf("t%d", i), Content: "x"}}},
-			agent.Message{Role: "assistant", Text: fmt.Sprintf("a%d", i)},
-		)
-	}
-	got := trimAgentHistory(long, 40)
-	if len(got) > 40 {
-		t.Fatalf("history not bounded: %d", len(got))
-	}
-	if !isUserTurnStart(&got[0]) {
-		t.Fatalf("trimmed history must start at a user turn, got %+v", got[0])
-	}
-	// Well-formed: every kept tool_use has its tool_result and vice versa.
-	results := map[string]bool{}
-	for _, m := range got {
-		for _, tr := range m.ToolResults {
-			results[tr.ToolUseID] = true
-		}
-	}
-	for _, m := range got {
-		for _, c := range m.ToolCalls {
-			if !results[c.ID] {
-				t.Fatalf("tool_use %s lost its result after trim", c.ID)
-			}
+	for key, item := range fake.items {
+		if strings.Contains(key, "|conv#") {
+			t.Fatalf("agent turn persisted Slack transcript at %q: %#v", key, item)
 		}
 	}
 }
@@ -1347,7 +1236,8 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	if !(*posts)[0].markdown {
 		t.Errorf("free-text answer should post on the standard-Markdown seam, got mrkdwn: %+v", (*posts)[0])
 	}
-	if (*posts)[0].text != "Use **bold** and click (https://evil.example)" {
+	wantReply := agentLLMReplyWithDisclaimer("Use **bold** and click (https://evil.example)")
+	if (*posts)[0].text != wantReply {
 		t.Errorf("free-text answer body = %q, want masked link revealed", (*posts)[0].text)
 	}
 	// Proposal preview: escaped mrkdwn text seam, never standard Markdown
@@ -1357,6 +1247,35 @@ func TestDeliverAgentResult_RoutesByDialect(t *testing.T) {
 	}
 	if !strings.HasPrefix((*posts)[1].text, agentProposalPreviewPrefix) {
 		t.Errorf("proposal preview = %q, want the preview prefix", (*posts)[1].text)
+	}
+	if !strings.HasSuffix((*posts)[1].text, agentLLMReplyDisclaimer) {
+		t.Errorf("proposal preview = %q, want the generated-content disclaimer", (*posts)[1].text)
+	}
+}
+
+func TestAgentLLMReplyDisclaimer_IsMarkdownHardeningInvariant(t *testing.T) {
+	if got := hardenAgentMarkdown(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("one-shot hardener changed the trusted footer: %q", got)
+	}
+	if got := hardenAgentMarkdownForStreamReconcile(agentLLMReplyDisclaimer); got != agentLLMReplyDisclaimer {
+		t.Fatalf("stream-reconcile hardener changed the trusted footer: %q", got)
+	}
+}
+
+func TestDeliverAgentResult_MalformedMarkdownCannotAbsorbDisclaimer(t *testing.T) {
+	textPost, posts, mu := capturingPostMessage()
+	mdPost := capturingPostMarkdownMessage(posts, mu)
+	h := NewHandler(Config{PostMessage: textPost, PostMarkdownMessage: mdPost})
+	e := env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi")
+	reply := "An unclosed `code span"
+
+	h.deliverAgentResult(slog.Default(), e, "100.1", &agent.Result{Reply: reply})
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := agentLLMReplyWithDisclaimer(hardenAgentMarkdown(reply))
+	if len(*posts) != 1 || (*posts)[0].text != want {
+		t.Fatalf("want malformed reply hardened before the intact footer, got %+v", *posts)
 	}
 }
 
@@ -1372,7 +1291,7 @@ func TestDeliverAgentResult_MarkdownSeamFallsBackToText(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	want := `plain answer (https://evil.example) for \<@U12345678> \<!channel>`
+	want := agentLLMReplyWithDisclaimer(`plain answer (https://evil.example) for \<@U12345678> \<!channel>`)
 	if len(*posts) != 1 || (*posts)[0].text != want {
 		t.Fatalf("want the answer delivered via the text seam, got %+v", *posts)
 	}

@@ -21,7 +21,7 @@ const testStateSecret = "0123456789abcdef0123456789abcdef"
 const (
 	testClientID        = "111.222"
 	testClientSecret    = "secret"
-	testScopeCSV        = botScopeCommands + "," + botScopeChatWrite + "," + botScopeIMWrite
+	testScopeCSV        = botScopeCommands + "," + botScopeChatWrite + "," + botScopeIMWrite + "," + botScopeUsersRead
 	testWorkspaceID     = "T_WORKSPACE"
 	testEnterpriseID    = "E_GRID"
 	testWorkspaceToken  = "xoxb-123456789012345678901234567890"
@@ -108,7 +108,7 @@ func TestDropUnsupportedScopes(t *testing.T) {
 		wantKept    string
 		wantDropped string
 	}{
-		{"nothing unsupported", []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite}, testScopeCSV, ""},
+		{"nothing unsupported", []string{botScopeCommands, botScopeChatWrite, botScopeIMWrite, botScopeUsersRead}, testScopeCSV, ""},
 		{"strips views:write", []string{botScopeCommands, "views:write"}, botScopeCommands, "views:write"},
 		{"case-insensitive", []string{botScopeCommands, "Views:Write"}, botScopeCommands, "Views:Write"},
 		{"only views:write leaves empty", []string{"views:write"}, "", "views:write"},

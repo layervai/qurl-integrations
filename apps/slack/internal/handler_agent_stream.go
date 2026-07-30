@@ -42,6 +42,7 @@ func (h *Handler) newAgentReplyStreamer(ctx context.Context, log *slog.Logger, e
 		threadTS:        replyTS,
 		recipientTeamID: recipientTeamID,
 		userID:          env.Event.User,
+		feedbackEnabled: h.agentFeedbackEnabled(),
 	}
 }
 
@@ -91,6 +92,7 @@ type agentReplyStreamer struct {
 	// lookup team above. They differ for Enterprise Grid/shared-channel mentions.
 	recipientTeamID string
 	userID          string
+	feedbackEnabled bool
 
 	pending  strings.Builder // coalescer: delta text not yet flushed
 	streamed strings.Builder // everything sent to the stream, to reconcile a synthetic reply
@@ -166,8 +168,8 @@ func (s *agentReplyStreamer) flush(ctx context.Context) {
 	s.streamed.WriteString(text) // record only what actually reached Slack, so streamed never lies
 }
 
-func (s *agentReplyStreamer) stop(ctx context.Context) {
-	if err := s.port.StopStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS); err != nil {
+func (s *agentReplyStreamer) stop(ctx context.Context, blocks []any) {
+	if err := s.port.StopStream(ctx, s.teamID, s.enterprise, s.channelID, s.streamTS, blocks); err != nil {
 		s.log.Warn("agent: stopStream failed", "error", err)
 	}
 }
@@ -175,8 +177,8 @@ func (s *agentReplyStreamer) stop(ctx context.Context) {
 // deliveryCtx derives the bounded context the finalize steps run on. It hangs off baseCtx,
 // NOT the turn ctx, because by finalize time the turn ctx may be spent (agentTurnTimeout
 // elapsed) or canceled (SIGTERM) — a stopStream on a dead ctx fails instantly and leaves the
-// stream unfinished. Mirrors saveAgentHistory / postAgentReply, which deliver off
-// h.baseCtx with the same agentDeliveryBudget.
+// stream unfinished. Mirrors postAgentReply, which delivers off h.baseCtx with
+// the same agentDeliveryBudget.
 func (s *agentReplyStreamer) deliveryCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(s.baseCtx, agentDeliveryBudget)
 }
@@ -220,8 +222,23 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 				}
 			}
 		}
+		// The stream itself owns an ordinary free-text reply, so append the same
+		// reviewer-facing LLM footer as the non-streaming post path before stopStream.
+		// Proposal narration is followed by a separately disclosed confirm card and
+		// must not be labeled as the final generated answer.
+		// Key the guard off bytes that actually reached Slack: result.Reply can be
+		// synthesized or trimmed, while streamed is the delivery source of truth.
+		// Re-check broken because the reconcile flush above can fail inside this block.
+		if !s.broken && result.Proposal == nil && strings.TrimSpace(s.streamed.String()) != "" {
+			s.pending.WriteString(agentLLMReplyDisclaimer)
+			s.flush(ctx)
+		}
 	}
-	s.stop(ctx)
+	var blocks []any
+	if s.feedbackEnabled && !s.broken && result.Proposal == nil && strings.TrimSpace(s.streamed.String()) != "" {
+		blocks = []any{agentFeedbackBlock()}
+	}
+	s.stop(ctx, blocks)
 	if s.broken {
 		// A start/append failed somewhere above (including the tail or synthesized append): the
 		// caller posts the full reply so the user still gets the complete answer (a stray partial
@@ -248,6 +265,6 @@ func (s *agentReplyStreamer) finalizeError() (handled bool) {
 		s.pending.WriteString(tail)
 	}
 	s.flush(ctx) // deliver the partial tail (a no-op if the stream already broke)
-	s.stop(ctx)
+	s.stop(ctx, nil)
 	return !s.broken
 }

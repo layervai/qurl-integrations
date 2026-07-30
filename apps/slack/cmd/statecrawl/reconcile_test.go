@@ -6,17 +6,19 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-func TestIsResourceID(t *testing.T) {
-	cases := map[string]bool{
-		"r_abc123":               true,
-		"r_":                     false, // prefix only, no id body
-		"https://legacy.example": false,
-		"":                       false,
-		"resource_id":            false,
+func TestClassifyStoredResourceReference(t *testing.T) {
+	cases := map[string]storedResourceReferenceKind{
+		"r_abc123":               storedReferenceLegacyInternalID,
+		"r_":                     storedReferenceLegacyInternalID,
+		"https://legacy.example": storedReferenceLegacyURL,
+		"http://legacy.example":  storedReferenceLegacyURL,
+		"":                       storedReferenceInvalid,
+		"   ":                    storedReferenceInvalid,
+		"public-resource-id":     storedReferenceOpaqueID,
 	}
 	for in, want := range cases {
-		if got := isResourceID(in); got != want {
-			t.Errorf("isResourceID(%q) = %v, want %v", in, got, want)
+		if got := classifyStoredResourceReference(in); got != want {
+			t.Errorf("classifyStoredResourceReference(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
@@ -27,9 +29,9 @@ func liveFixture() liveness {
 	return liveness{
 		resolved: true,
 		byID: map[string]client.Resource{
-			"r_tunnel": {ResourceID: "r_tunnel", Type: client.ResourceTypeTunnel, Slug: "stats-connector", Status: client.StatusActive},
-			"r_url":    {ResourceID: "r_url", Type: client.ResourceTypeURL, Status: client.StatusActive},
-			"r_dead":   {ResourceID: "r_dead", Type: client.ResourceTypeTunnel, Slug: "gone", Status: client.StatusRevoked},
+			"public-tunnel": {ResourceID: "public-tunnel", Type: client.ResourceTypeTunnel, Slug: "stats-connector", Status: client.StatusActive},
+			"public-url":    {ResourceID: "public-url", Type: client.ResourceTypeURL, Status: client.StatusActive},
+			"public-dead":   {ResourceID: "public-dead", Type: client.ResourceTypeTunnel, Slug: "gone", Status: client.StatusRevoked},
 		},
 	}
 }
@@ -42,10 +44,10 @@ func TestClassifyResource(t *testing.T) {
 		wantStat resourceStatus
 		wantSlug string
 	}{
-		{"live tunnel", "r_tunnel", statusLiveTunnel, "stats-connector"},
-		{"live url", "r_url", statusLiveURL, ""},
-		{"revoked is orphan", "r_dead", statusOrphan, ""},
-		{"absent is orphan", "r_missing", statusOrphan, ""},
+		{"live tunnel", "public-tunnel", statusLiveTunnel, "stats-connector"},
+		{"live url", "public-url", statusLiveURL, ""},
+		{"revoked is orphan", "public-dead", statusOrphan, ""},
+		{"absent is orphan", "public-missing", statusOrphan, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gotStat, gotSlug := classifyResource(live, tc.rid)
@@ -64,13 +66,14 @@ func TestClassifyRow_Resolved(t *testing.T) {
 		teamID:    "T1",
 		channelID: "C1",
 		aliasBindings: map[string]string{
-			"dashboard":       "r_tunnel", // alias name != slug -> #669 mismatch
-			"stats-connector": "r_tunnel", // alias name == slug -> healthy, no finding
-			"ghost":           "r_dead",   // revoked target -> orphan
-			"docs":            "r_url",    // live URL -> informational
-			"legacy":          "http://x", // non-r_ -> legacy
+			"dashboard":       "public-tunnel", // alias name != slug -> #669 mismatch
+			"stats-connector": "public-tunnel", // alias name == slug -> healthy, no finding
+			"ghost":           "public-dead",   // revoked target -> orphan
+			"docs":            "public-url",    // live URL -> informational
+			"legacy":          "http://x",      // raw URL -> legacy
+			"precutover":      "r_internal",    // old internal id -> migration blocker
 		},
-		allowedResourceIDs: []string{"r_tunnel", "r_dead"}, // r_dead -> orphan SS member
+		allowedResourceIDs: []string{"public-tunnel", "public-dead", "r_internal"},
 	}
 	rep := newReport(&flags{})
 	classifyRow(row, live, rep)
@@ -81,6 +84,7 @@ func TestClassifyRow_Resolved(t *testing.T) {
 		findingOrphanAlias:       1,
 		findingAliasURLTarget:    1,
 		findingLegacyAlias:       1,
+		findingLegacyResourceID:  2,
 		findingOrphanAllowedID:   1,
 	}
 	for k, n := range want {
@@ -88,8 +92,8 @@ func TestClassifyRow_Resolved(t *testing.T) {
 			t.Errorf("kind %s: got %d, want %d (all: %v)", k, got[k], n, got)
 		}
 	}
-	if len(rep.findings) != 5 {
-		t.Errorf("total findings = %d, want 5 (healthy alias==slug must be silent): %v", len(rep.findings), rep.findings)
+	if len(rep.findings) != 7 {
+		t.Errorf("total findings = %d, want 7 (healthy alias==slug must be silent): %v", len(rep.findings), rep.findings)
 	}
 }
 
@@ -123,18 +127,19 @@ func TestClassifyRow_Unresolved(t *testing.T) {
 // the dead id.
 func TestPurgeTargets_DedupsAndFilters(t *testing.T) {
 	rep := newReport(&flags{})
-	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "a", resourceID: "r_dead", kind: findingOrphanAlias})
-	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "b", resourceID: "r_dead", kind: findingOrphanAlias})
-	rep.add(&finding{teamID: "T1", channelID: "C1", resourceID: "r_dead", kind: findingOrphanAllowedID})
-	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "c", resourceID: "r_tunnel", kind: findingAliasNameMismatch})
-	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "d", resourceID: "r_url", kind: findingAliasURLTarget})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "a", resourceID: "public-dead", kind: findingOrphanAlias})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "b", resourceID: "public-dead", kind: findingOrphanAlias})
+	rep.add(&finding{teamID: "T1", channelID: "C1", resourceID: "public-dead", kind: findingOrphanAllowedID})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "c", resourceID: "public-tunnel", kind: findingAliasNameMismatch})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "d", resourceID: "public-url", kind: findingAliasURLTarget})
+	rep.add(&finding{teamID: "T1", channelID: "C1", alias: "e", resourceID: "r_internal", kind: findingLegacyResourceID})
 
 	targets := rep.purgeTargets()
 	if len(targets) != 1 {
 		t.Fatalf("purgeTargets = %d, want 1 (dedup by triple, exclude non-orphans): %+v", len(targets), targets)
 	}
-	if targets[0].resourceID != "r_dead" {
-		t.Errorf("target resource = %q, want r_dead", targets[0].resourceID)
+	if targets[0].resourceID != "public-dead" {
+		t.Errorf("target resource = %q, want public-dead", targets[0].resourceID)
 	}
 }
 

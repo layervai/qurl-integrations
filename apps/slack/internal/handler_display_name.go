@@ -359,11 +359,11 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 			return nil, nil, serviceUnreachableMessage
 		case found:
 			// Legacy guard, mirroring resolveTokenForGet: a pre-resource set-alias
-			// row stored a raw URL, not an `r_` id. It can't resolve to a tunnel, so
+			// row stored a raw URL, not an opaque resource id. It can't resolve to a tunnel, so
 			// refuse with the same re-bind hint `/qurl get` gives — and skip the
 			// resource scan it could never match (which, in a >first-page workspace,
 			// would otherwise misreport it as a lookup limit).
-			if !strings.HasPrefix(boundID, "r_") {
+			if isLegacyDirectURLBinding(boundID) {
 				log.Warn("display-name: channel alias bound to a non-resource-id target", "team_id", teamID, "channel_id", channelID, "id", id)
 				return nil, nil, legacyAliasBindingMessage(id)
 			}
@@ -388,8 +388,8 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 // the scan can prove: a seen non-tunnel resource gets connector-only copy, a
 // seen inactive tunnel gets the unset-alias hint, and a resourceID NOT seen
 // while more pages remain (HasMore) gets a non-destructive lookup-limit message
-// because it may be a live alias on a later page. Callers pre-filter non-`r_`
-// bindings (legacy raw-URL rows), so resourceID is always a real resource id
+// because it may be a live alias on a later page. Callers pre-filter direct-URL
+// bindings, so resourceID is always an opaque resource id
 // here. Returns (resource, "") on success or (nil, userMsg).
 func (h *Handler) resolveActiveTunnelByResourceID(ctx context.Context, log *slog.Logger, c *client.Client, teamID, id, resourceID string) (resource *client.Resource, userMsg string) {
 	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})

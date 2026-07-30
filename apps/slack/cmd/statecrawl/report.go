@@ -25,6 +25,7 @@ const (
 	findingAliasNameMismatch findingKind = "alias-name-mismatch"
 	findingAliasURLTarget    findingKind = "alias-url-target"
 	findingLegacyAlias       findingKind = "legacy-alias"
+	findingLegacyResourceID  findingKind = "legacy-resource-id"
 	findingIndeterminate     findingKind = "indeterminate"
 )
 
@@ -82,6 +83,8 @@ func (r *report) add(f *finding) {
 		r.stats.AliasURLTargets.Add(1)
 	case findingLegacyAlias:
 		r.stats.LegacyAliases.Add(1)
+	case findingLegacyResourceID:
+		r.stats.LegacyResourceIDs.Add(1)
 	case findingIndeterminate:
 		r.stats.Indeterminate.Add(1)
 	}
@@ -198,9 +201,11 @@ func kindRank(k findingKind) int {
 		return 3
 	case findingLegacyAlias:
 		return 4
-	case findingIndeterminate:
+	case findingLegacyResourceID:
 		return 5
-	default:
+	case findingIndeterminate:
 		return 6
+	default:
+		return 7
 	}
 }
