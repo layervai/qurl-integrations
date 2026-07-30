@@ -47,9 +47,10 @@ Complete this preflight before giving Slack the reviewer instructions.
 3. If the review workspace has an existing qURL install, rerun the production
    install flow to reauthorize it. Confirm that the requested and granted bot
    scopes exactly match the recorded set without retaining the bot token.
-4. Open the production install URL in a clean workspace. Complete OAuth and
-   confirm that the success page directs the reviewer to
-   `/qurl setup <email>`.
+4. After retaining any reauthorization capture, have the owner remove the app
+   so the designated review workspace is clean. Open the production install
+   URL, complete OAuth, and confirm that the success page directs the reviewer
+   to `/qurl setup <email>`.
 5. Connect the reviewer workspace to the dedicated qURL account.
 6. Add the reviewer and owner/admin to the review channel.
 7. Protect the safe demo destination in that channel. Record its bare ID or
@@ -124,13 +125,13 @@ no change, and any approved demo action records an audit event.
 2. Run the same command as a non-admin reviewer.
 3. Send one unsupported file or image to the Agent or Assistant surface.
 4. Use the Agent feedback controls or run `/qurl feedback`.
-5. Ask the Slack workspace owner/admin to remove and reinstall the app. Then
-   have the same first-connected reviewer from section 1 complete the
-   remaining steps with the same `<reviewer-email>` to re-establish qURL
-   workspace ownership.
-6. Run `/qurl help` to confirm that Slack restored slash-command registration.
-7. Run `/qurl setup <reviewer-email>` and complete passwordless sign-in again.
-8. Run `/qurl list` and confirm the seeded demo resource is listed.
+5. Ask the Slack workspace owner/admin to remove and reinstall the app.
+6. Have the same first-connected reviewer from section 1 run `/qurl help` to
+   confirm that Slack restored slash-command registration.
+7. Have that reviewer run `/qurl setup <reviewer-email>` with the same email
+   and complete passwordless sign-in to re-establish qURL workspace ownership.
+8. Have that reviewer run `/qurl list` and confirm the seeded demo resource is
+   listed.
 
 Expected result: admin authorization is enforced, unsupported media receives a
 clear limitation, feedback has a safe route, and reinstall requires an explicit
