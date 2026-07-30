@@ -509,16 +509,28 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 // discardedStream reports that the abandoned round had already streamed text to
 // the sink (see [WithStreamSink] — deltas are never rolled back). It surfaces as
 // [Result.DiscardedStreamText] so a streaming caller knows the deltas it delivered
-// are NOT a prefix of Reply and must not append to them. Pinned by
-// TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer.
+// are NOT a prefix of Reply and must deliver Reply separately — and it also keeps
+// THIS round off the sink, so the reply the caller delivers was never streamed.
+// Pinned by TestRun_AbandonedStreamedRoundKeepsTheFinalAnswerOffTheSink.
 func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpec, msgs []Message, usage Usage, why Cutoff, discardedStream bool) (Result, []Message, error) {
-	resp, err := a.roundTrip(ctx, &Request{
+	req := &Request{
 		SystemStable:  systemPreamble,
 		SystemPerTurn: perTurn + finalAnswerDirective,
 		Tools:         tools,
 		Messages:      msgs,
 		TextOnly:      true,
-	})
+	}
+	// When the abandoned round already leaked text, this answer must NOT reach the
+	// sink. The caller is going to deliver Reply as its own message (the
+	// DiscardedStreamText contract), and the sink writes into the SAME open stream —
+	// streaming here would append the answer onto the abandoned fragment and then
+	// the caller would post it again, so the user reads it twice. Going straight to
+	// Complete keeps the stream holding only what it cannot retract.
+	roundTrip := a.roundTrip
+	if discardedStream {
+		roundTrip = a.llm.Complete
+	}
+	resp, err := roundTrip(ctx, req)
 	if err != nil {
 		return Result{Usage: usage, Cutoff: why, DiscardedStreamText: discardedStream}, msgs, fmt.Errorf("agent: llm final round-trip: %w", err)
 	}

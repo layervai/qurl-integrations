@@ -347,14 +347,14 @@ func (s *streamingSlowThenAnswerLLM) StreamComplete(ctx context.Context, _ *Requ
 }
 
 // A gathering round that streams text and THEN outruns its ration leaves the
-// fragment with the caller — deltas are never rolled back (see WithStreamSink) —
-// and the reserved final answer streams on top of it. Run reports that with
-// Result.DiscardedStreamText so the delivery layer knows the deltas are NOT a
-// prefix of Reply and must fall back to posting Reply as its own message rather
-// than appending onto the fragment (which on an append-only transport would run
-// the two together). The consuming side is pinned by
+// fragment with the caller — deltas are never rolled back (see WithStreamSink).
+// The reserved final answer must therefore stay OFF the sink: the caller delivers
+// Reply as its own message (the DiscardedStreamText contract), and the sink writes
+// into the SAME already-open stream — streaming it would append the answer onto
+// the fragment and then the caller would post it again, so the user reads it
+// twice. The consuming side is pinned by
 // TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply.
-func TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer(t *testing.T) {
+func TestRun_AbandonedStreamedRoundKeepsTheFinalAnswerOffTheSink(t *testing.T) {
 	llm := &streamingSlowThenAnswerLLM{
 		partial: "Let me check the res",
 		final:   textResp("I couldn't finish checking $docs in this channel."),
@@ -379,9 +379,14 @@ func TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer(t *testing.T) {
 	if !res.DiscardedStreamText {
 		t.Fatal("the abandoned round streamed text, so the caller must be told not to append onto it")
 	}
-	want := []string{"Let me check the res", llm.final.Text}
-	if !reflect.DeepEqual(deltas, want) {
-		t.Fatalf("sink saw %q, want the truncated fragment followed by the final answer", deltas)
+	if llm.calls != 2 {
+		t.Fatalf("the final answer must come from a real round-trip, got %d calls", llm.calls)
+	}
+	// Only the abandoned fragment reaches the sink. If the final answer streamed too
+	// it would be appended onto that fragment in the live message AND reposted by the
+	// caller, so the user would read the answer twice.
+	if want := []string{"Let me check the res"}; !reflect.DeepEqual(deltas, want) {
+		t.Fatalf("sink saw %q, want only the abandoned fragment", deltas)
 	}
 }
 

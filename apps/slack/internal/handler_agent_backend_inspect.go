@@ -127,7 +127,8 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	}
 	resolved, msg := resolveInspectableResource(token, entries, resources)
 	if msg != "" {
-		if partial && resolved == nil {
+		// resolveInspectableResource returns a message only when nothing resolved.
+		if partial {
 			// Slug and resource-alias matching read from the scanned set, so an
 			// unfinished scan cannot support "doesn't resolve to anything reachable
 			// here" — that would be a definitive claim from an incomplete read. Say
