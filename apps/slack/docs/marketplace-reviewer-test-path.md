@@ -24,8 +24,10 @@ tokens, or reviewer personal data to this repository.
 - Support contact:
 - Production app version or commit:
 - Exported manifest version and capture date:
-- Committed production bot scope set:
-- Live production bot scope set:
+- Committed production manifest bot scope set:
+- Exported live production manifest bot scope set:
+- Existing-install requested/granted bot scope set:
+- Clean-install requested/granted bot scope set:
 - Existing-install reauthorization capture date:
 
 The seeded resource must:
@@ -46,11 +48,14 @@ Complete this preflight before giving Slack the reviewer instructions.
    differ.
 3. If the review workspace has an existing qURL install, rerun the production
    install flow to reauthorize it. Confirm that the requested and granted bot
-   scopes exactly match the recorded set without retaining the bot token.
+   scopes exactly match the committed manifest set. Record the requested and
+   granted sets above without retaining the bot token.
 4. After retaining any reauthorization capture, have the owner remove the app
    so the designated review workspace is clean. Open the production install
-   URL, complete OAuth, and confirm that the success page directs the reviewer
-   to `/qurl setup <email>`.
+   URL, complete OAuth, and confirm that the requested and granted scopes match
+   the committed manifest set. Record both sets above without retaining the bot
+   token, and confirm that the success page directs the reviewer to
+   `/qurl setup <email>`.
 5. Connect the reviewer workspace to the dedicated qURL account.
 6. Add the reviewer and owner/admin to the review channel.
 7. Protect the safe demo destination in that channel. Record its bare ID or
@@ -70,8 +75,9 @@ Run these steps in order in the designated review channel.
 
 ### 1. Install and connect
 
-1. Open the production install URL, compare the consent prompt with the bot
-   scope set recorded by the owner, and authorize it only when they match.
+1. Open the production install URL, compare the consent prompt with the
+   committed production manifest bot scope set recorded by the owner, and
+   authorize it only when they match.
 2. Verify that Slack returns to the qURL install-success page.
 3. Run `/qurl setup <reviewer-email>`.
 4. Complete the passwordless qURL sign-in.
