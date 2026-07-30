@@ -535,14 +535,20 @@ func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpe
 		return Result{Usage: usage, Cutoff: why, DiscardedStreamText: discardedStream}, msgs, fmt.Errorf("agent: llm final round-trip: %w", err)
 	}
 	usage.add(resp.Usage)
-	// Record text only. TextOnly forbids tool calls, but appending one anyway (from
-	// a future model or transport that ignored it) would leave a tool_use with no
-	// matching tool_result and poison every later turn in the thread.
-	msgs = append(msgs, Message{Role: roleAssistant, Text: resp.Text})
 	reply := resp.Text
 	if strings.TrimSpace(reply) == "" {
 		reply = iterationCapMessage
 	}
+	// Record what was DELIVERED, and text only:
+	//   - the raw response would leave the transcript saying "   " where the user was
+	//     actually told the ask-again message. [assistantBlocks] drops only a truly
+	//     EMPTY string, so a whitespace-only one survives to be replayed as a text
+	//     block on the next turn in the thread — a divergence between what the
+	//     conversation says happened and what happened.
+	//   - TextOnly forbids tool calls, but appending one anyway (from a future model
+	//     or transport that ignored it) would leave a tool_use with no matching
+	//     tool_result and poison every later turn.
+	msgs = append(msgs, Message{Role: roleAssistant, Text: reply})
 	return Result{Reply: reply, Usage: usage, Cutoff: why, DiscardedStreamText: discardedStream}, msgs, nil
 }
 

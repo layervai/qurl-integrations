@@ -580,8 +580,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingPartialErrorNoDoublePost(t *te
 // NOT reconcile by appending: the stream is append-only, so the abandoned fragment
 // and the real answer would run together into one garbled message. finalizeReply
 // takes the broken-stream fallback so the caller posts the complete answer as its
-// own message. Pairs with agent.TestRun_StreamedPartialRoundIsFollowedByTheFinalAnswer,
-// which pins the producing side.
+// own message. Pairs with
+// agent.TestRun_AbandonedStreamedRoundKeepsTheFinalAnswerOffTheSink, which pins
+// the producing side.
 func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)

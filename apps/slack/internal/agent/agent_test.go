@@ -553,12 +553,19 @@ func TestRun_FinalAnswerFallsBackWhenTheModelSaysNothing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve/2)
 	defer cancel()
 
-	res, _, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "hi")
+	res, history, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "hi")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.Reply != iterationCapMessage {
 		t.Fatalf("a blank final answer must fall back to the ask-again reply, got %q", res.Reply)
+	}
+	// The transcript must say what the user was actually told. Recording the raw
+	// whitespace-only response instead would survive assistantBlocks (which drops
+	// only a truly empty string) and be replayed on the next turn in the thread.
+	last := history[len(history)-1]
+	if last.Role != roleAssistant || last.Text != iterationCapMessage {
+		t.Fatalf("history must record the delivered reply, got %+v", last)
 	}
 }
 
