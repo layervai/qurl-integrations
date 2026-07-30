@@ -417,3 +417,38 @@ func TestRun_SilentAbandonedRoundDoesNotDiscardStreamText(t *testing.T) {
 		t.Fatalf("sink saw %q, want only the final answer", deltas)
 	}
 }
+
+// The blank-final-answer fallback on a STREAMING cut-short turn — the last
+// uncovered corner of that fallback. Two synthesized-vs-streamed hazards meet
+// here: the final round produces no text, so Reply is iterationCapMessage, which
+// no delta ever carried; and the abandoned round DID stream, so the reply must
+// still be kept off the sink. Both must hold at once, or the user gets either an
+// empty message or the fallback twice.
+func TestRun_BlankFinalAnswerOnAStreamedCutShortTurn(t *testing.T) {
+	llm := &streamingSlowThenAnswerLLM{
+		partial: "Let me check the res",
+		final:   textResp("   "), // model returns nothing usable
+	}
+	var deltas []string
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}, WithStreamSink(func(d string) {
+		deltas = append(deltas, d)
+	})).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reply != iterationCapMessage {
+		t.Fatalf("a blank final answer must fall back to the ask-again reply, got %q", res.Reply)
+	}
+	if !res.DiscardedStreamText {
+		t.Fatal("the abandoned round streamed, so the fallback reply must be delivered separately")
+	}
+	// The synthesized fallback was never streamed, and the abandoned fragment is all
+	// the sink ever saw — so the delivery layer posts the fallback as its own message.
+	if want := []string{"Let me check the res"}; !reflect.DeepEqual(deltas, want) {
+		t.Fatalf("sink saw %q, want only the abandoned fragment", deltas)
+	}
+}
