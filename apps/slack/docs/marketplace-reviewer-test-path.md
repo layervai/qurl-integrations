@@ -24,6 +24,8 @@ tokens, or reviewer personal data to this repository.
 - Support contact:
 - Production app version or commit:
 - Exported manifest version and capture date:
+- Exact production bot scope set:
+- Existing-install reauthorization capture date:
 
 The seeded resource must:
 
@@ -39,16 +41,21 @@ Complete this preflight before giving Slack the reviewer instructions.
 
 1. Export the live production manifest and compare its URLs, scopes, events,
    interactivity, and Agent or Assistant feature with the committed manifest.
-2. Open the production install URL in a clean workspace. Complete OAuth and
+2. Record the exact bot scope set from the committed and live manifests above.
+   Stop if the sets differ.
+3. If the review workspace has an existing qURL install, rerun the production
+   install flow to reauthorize it. Confirm that the requested and granted bot
+   scopes exactly match the recorded set without retaining the bot token.
+4. Open the production install URL in a clean workspace. Complete OAuth and
    confirm that the success page directs the reviewer to
    `/qurl setup <email>`.
-3. Connect the reviewer workspace to the dedicated qURL account.
-4. Add the reviewer and owner/admin to the review channel.
-5. Protect the safe demo destination in that channel. Record its bare ID or
+5. Connect the reviewer workspace to the dedicated qURL account.
+6. Add the reviewer and owner/admin to the review channel.
+7. Protect the safe demo destination in that channel. Record its bare ID or
    alias above without the leading `$`.
-6. Confirm `/qurl help`, `/qurl-admin help`, App Home, private delivery, and
+8. Confirm `/qurl help`, `/qurl-admin help`, App Home, private delivery, and
    the selected Agent or Assistant surface work in the production app.
-7. Confirm the privacy policy, support page, AI disclosure, and paid Slack
+9. Confirm the privacy policy, support page, AI disclosure, and paid Slack
    plan disclosure match the live Marketplace listing.
 
 If the production manifest does not enable the reviewer-facing AI surface, do
@@ -61,7 +68,8 @@ Run these steps in order in the designated review channel.
 
 ### 1. Install and connect
 
-1. Open the production install URL and authorize the requested scopes.
+1. Open the production install URL, compare the consent prompt with the bot
+   scope set recorded by the owner, and authorize it only when they match.
 2. Verify that Slack returns to the qURL install-success page.
 3. Run `/qurl setup <reviewer-email>`.
 4. Complete the passwordless qURL sign-in.
@@ -131,7 +139,9 @@ reconnect before connected commands return to a usable state. A successful
 Keep reviewer evidence outside this repository:
 
 - the exported production manifest;
-- OAuth consent and install-success captures;
+- the exact committed and live bot scope sets;
+- existing-install reauthorization, clean OAuth consent, and install-success
+  captures;
 - command, App Home, AI disclosure, proposal, reject, private-delivery, and
   unsupported-media captures;
 - the post-reinstall setup and `/qurl list` capture;
