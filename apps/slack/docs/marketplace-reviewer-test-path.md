@@ -72,6 +72,8 @@ match the submitted app.
 ## Reviewer journey
 
 Run these steps in order in the designated review channel.
+Leave the clean preflight install in place; the reviewer reauthorizes that
+install in section 1 before connecting it to qURL.
 
 ### 1. Install and connect
 
@@ -150,6 +152,8 @@ Keep reviewer evidence outside this repository:
 
 - the exported production manifest;
 - the exact committed and live bot scope sets;
+- the exact existing-install and clean-install requested and granted scope
+  sets;
 - existing-install reauthorization, clean OAuth consent, and install-success
   captures;
 - command, App Home, AI disclosure, proposal, reject, private-delivery, and
