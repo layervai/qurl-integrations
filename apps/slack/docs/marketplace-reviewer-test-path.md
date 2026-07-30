@@ -24,7 +24,8 @@ tokens, or reviewer personal data to this repository.
 - Support contact:
 - Production app version or commit:
 - Exported manifest version and capture date:
-- Exact production bot scope set:
+- Committed production bot scope set:
+- Live production bot scope set:
 - Existing-install reauthorization capture date:
 
 The seeded resource must:
@@ -41,8 +42,8 @@ Complete this preflight before giving Slack the reviewer instructions.
 
 1. Export the live production manifest and compare its URLs, scopes, events,
    interactivity, and Agent or Assistant feature with the committed manifest.
-2. Record the exact bot scope set from the committed and live manifests above.
-   Stop if the sets differ.
+2. Record the exact committed and live bot scope sets above. Stop if the sets
+   differ.
 3. If the review workspace has an existing qURL install, rerun the production
    install flow to reauthorize it. Confirm that the requested and granted bot
    scopes exactly match the recorded set without retaining the bot token.
@@ -123,8 +124,10 @@ no change, and any approved demo action records an audit event.
 2. Run the same command as a non-admin reviewer.
 3. Send one unsupported file or image to the Agent or Assistant surface.
 4. Use the Agent feedback controls or run `/qurl feedback`.
-5. Ask the owner to remove the app, then reinstall it. The same owner must
-   complete the remaining steps to preserve workspace ownership.
+5. Ask the Slack workspace owner/admin to remove and reinstall the app. Then
+   have the same first-connected reviewer from section 1 complete the
+   remaining steps with the same `<reviewer-email>` to re-establish qURL
+   workspace ownership.
 6. Run `/qurl help` to confirm that Slack restored slash-command registration.
 7. Run `/qurl setup <reviewer-email>` and complete passwordless sign-in again.
 8. Run `/qurl list` and confirm the seeded demo resource is listed.
