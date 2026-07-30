@@ -50,13 +50,15 @@ Complete this preflight before giving Slack the reviewer instructions.
    install flow to reauthorize it. Confirm that the requested and granted bot
    scopes exactly match the committed manifest set. Record the requested and
    granted sets above without retaining the bot token.
-4. After retaining any reauthorization capture, have the owner remove the app
-   so the designated review workspace is clean. Open the production install
-   URL, complete OAuth, and confirm that the requested and granted scopes match
-   the committed manifest set. Record both sets above without retaining the bot
-   token, and confirm that the success page directs the reviewer to
-   `/qurl setup <email>`.
-5. Connect the reviewer workspace to the dedicated qURL account.
+4. After retaining any reauthorization capture, have the owner remove the app,
+   if one is installed, so the designated review workspace is clean. Open the
+   production install URL, complete OAuth, and confirm that the requested and
+   granted scopes match the committed manifest set. Record both sets above
+   without retaining the bot token, and confirm that the success page directs
+   the reviewer to `/qurl setup <email>`.
+5. Prepare the dedicated qURL account named above, but do not run
+   `/qurl setup`; the reviewer establishes the workspace connection in
+   section 1.
 6. Add the reviewer and owner/admin to the review channel.
 7. Protect the safe demo destination in that channel. Record its bare ID or
    alias above without the leading `$`.
@@ -72,8 +74,9 @@ match the submitted app.
 ## Reviewer journey
 
 Run these steps in order in the designated review channel.
-Leave the clean preflight install in place; the reviewer reauthorizes that
-install in section 1 before connecting it to qURL.
+Leave the clean preflight install in place. The reviewer reopens the install
+URL in section 1 to capture the reviewer-visible consent prompt and
+reauthorizes the install before connecting it to qURL.
 
 ### 1. Install and connect
 
