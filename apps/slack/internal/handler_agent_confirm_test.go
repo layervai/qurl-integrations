@@ -604,6 +604,31 @@ func TestConfirm_PaneGetUsesMembershipGatedContextChannel(t *testing.T) {
 	}
 }
 
+func TestConfirm_PaneGetMembershipErrorFailsClosedWithoutClaim(t *testing.T) {
+	hc := newConfirmHarness(t, "Uadmin")
+	hc.h.cfg.ChannelMembership = func(context.Context, string, string, string, string) (bool, error) {
+		return false, errors.New("membership unavailable")
+	}
+	hc.h.cfg.NewClient = func(string) *client.Client {
+		t.Fatal("a failed membership re-check must not mint")
+		return nil
+	}
+	id := hc.seedPending(t, &pendingAction{
+		Action: agent.ActionGet, Token: "stats-dashboard", Asker: testAskerUserID,
+		ChannelID: "D1", ChannelType: slackChannelTypeIM, ResourceChannelID: "C9",
+	})
+
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+
+	ro, text := parseResponse(t, hc.bodies.waitForBody(t, 2*time.Second))
+	if ro || text != agentConfirmScopeMismatchReply {
+		t.Fatalf("membership error must deny ephemerally; replace=%v text=%q", ro, text)
+	}
+	if hc.claimed(id) {
+		t.Fatal("membership error must not consume the pending get")
+	}
+}
+
 func TestConfirm_GetApproveInDMMintDeliveryFailureAuditsFailure(t *testing.T) {
 	names := defaultTestTableNames()
 	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
