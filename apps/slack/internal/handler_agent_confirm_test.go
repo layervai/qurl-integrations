@@ -557,6 +557,53 @@ func TestConfirm_GetApproveInDMMintsAndDeliversLinkInThread(t *testing.T) {
 	}
 }
 
+func TestConfirm_PaneGetUsesMembershipGatedContextChannel(t *testing.T) {
+	// Slack renders an Agent-pane card in the app DM, but the turn's read tools are
+	// scoped to the channel the member opened the pane from. Preserve that same
+	// channel for the approved get so a token the agent just resolved cannot fail
+	// merely because the click payload names the app DM.
+	names := defaultTestTableNames()
+	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
+		names.channelPolicy: {
+			seedChannelPolicySet("T1", "C9", "stats-dashboard", []string{testAgentGetResourceID}),
+		},
+	})
+	hc.h.cfg.ChannelMembership = func(_ context.Context, _, _, channelID, userID string) (bool, error) {
+		return channelID == "C9" && userID == testAskerUserID, nil
+	}
+	prop := &agent.Proposal{Action: agent.ActionGet, Token: "stats-dashboard", Reason: "Marketplace review", Summary: "Get a link."}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{
+		Channel: "D1", ChannelType: slackChannelTypeIM, User: testAskerUserID, TS: testConfirmThreadTS,
+	}}
+	hc.h.postAgentConfirmScoped(slog.Default(), env, testConfirmThreadTS, "C9", prop)
+
+	id := hc.pendingID(t, "T1")
+	blob, found, err := hc.store.LoadPendingAction(context.Background(), "T1", id)
+	if err != nil || !found {
+		t.Fatalf("pending action: found=%v err=%v", found, err)
+	}
+	var pa pendingAction
+	if err := json.Unmarshal(blob, &pa); err != nil {
+		t.Fatalf("unmarshal pending action: %v", err)
+	}
+	if pa.ChannelID != "D1" || pa.ResourceChannelID != "C9" {
+		t.Fatalf("card/resource channels = %q/%q, want D1/C9", pa.ChannelID, pa.ResourceChannelID)
+	}
+
+	hc.h.processAgentConfirm(context.Background(), slog.Default(), confirmPayload("T1", "D1", testAskerUserID, hc.respURL, id), id, true, time.Now())
+	hc.h.Wait()
+	if len(hc.blocks.calls) != 2 { // proposal card + private Enter Portal delivery
+		t.Fatalf("want proposal card and private link delivery, got %+v", hc.blocks.calls)
+	}
+	if gotURL, _ := enterPortalButton(t, hc.blocks.calls[1].blocks)["url"].(string); gotURL != testAgentGetQURLLink {
+		t.Fatalf("Enter Portal button url = %q, want %q", gotURL, testAgentGetQURLLink)
+	}
+	entry := requireSingleAuditEntry(t, hc, testAskerUserID)
+	if entry.Channel != "C9" || entry.ResultSuccess == nil || !*entry.ResultSuccess {
+		t.Fatalf("pane get audit = %+v, want successful C9 operation", entry)
+	}
+}
+
 func TestConfirm_GetApproveInDMMintDeliveryFailureAuditsFailure(t *testing.T) {
 	names := defaultTestTableNames()
 	hc := newConfirmHarnessWithSeed(t, "Uadmin", map[string][]map[string]ddbtypes.AttributeValue{
