@@ -1,0 +1,50 @@
+name: "teams: Build and Test"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/teams/**'
+      - '.github/workflows/teams.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/teams/**'
+      - '.github/workflows/teams.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-and-test:
+    name: teams / build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/teams
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: apps/teams/.nvmrc
+          cache: 'npm'
+          cache-dependency-path: apps/teams/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
