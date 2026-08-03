@@ -2,7 +2,7 @@
   "name": "@layervai/qurl-teams-oauth-core",
   "version": "0.0.0",
   "private": true,
-  "description": "Pure OAuth security core for the future qURL Microsoft Teams integration",
+  "description": "Pure OAuth security core for the future qURL™ Microsoft Teams integration",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
