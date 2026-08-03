@@ -51,7 +51,7 @@ behavior from it survives in this package.
 | Conditional create rejects a random-handle collision | Ported | The persistence interface returns an explicit conditional conflict and mint fails closed. |
 | Callback consumes state atomically before token exchange | Ported | The callback orchestrator cannot call fetch or binding until consume succeeds. |
 | Consumed state cannot be replayed | Ported | Missing and already-consumed handles share the same fail-closed typed result. |
-| Expiry is enforced from application time despite asynchronous TTL cleanup | Ported | The consume contract receives application time and the core double-checks returned expiry. |
+| Expiry is enforced from application time despite asynchronous TTL cleanup | Ported | The consume contract receives application time and the core double-checks returned expiry, including Slack's 30-second cross-worker clock-skew allowance. |
 | OIDC nonce is bound to the transaction and verified on the signed token | Ported | Missing or mismatched nonce is fatal. |
 | Subject is mandatory for provider binding | Ported | Empty or missing `sub` is fatal after signature verification. |
 | Email must be present, verified, normalized, and equal setup email | Ported and tightened | Email is mandatory for every Teams setup transaction rather than best-effort display data. |

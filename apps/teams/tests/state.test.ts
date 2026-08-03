@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { OAuthCoreError } from '../src/errors.js';
-import { OAUTH_STATE_TTL_SECONDS, OAuthStateManager } from '../src/state.js';
+import {
+  OAUTH_STATE_CLOCK_SKEW_SECONDS,
+  OAUTH_STATE_TTL_SECONDS,
+  OAuthStateManager,
+} from '../src/state.js';
 import type { MintOAuthStateInput } from '../src/state.js';
 import {
   InMemoryStatePersistence,
@@ -140,6 +144,42 @@ describe('OAuthStateManager', () => {
 
     await expect(manager.consume(minted.handle)).rejects.toSatisfy(
       (error: unknown) => expectCode(error, 'STATE_EXPIRED'),
+    );
+  });
+
+  it('allows the source-parity clock-skew window across state-store workers', async () => {
+    const persistence = new InMemoryStatePersistence();
+    const mintManager = new OAuthStateManager({
+      persistence,
+      clock: fixedClock(),
+      randomBytes: deterministicRandom(),
+    });
+    const minted = await mintManager.mint(mintInput);
+    const consumeManager = new OAuthStateManager({
+      persistence,
+      clock: fixedClock(TEST_NOW - OAUTH_STATE_CLOCK_SKEW_SECONDS),
+    });
+
+    await expect(consumeManager.consume(minted.handle)).resolves.toMatchObject({
+      setupEmail: 'admin@example.com',
+    });
+  });
+
+  it('rejects a stored expiry beyond the clock-skew window', async () => {
+    const persistence = new InMemoryStatePersistence();
+    const mintManager = new OAuthStateManager({
+      persistence,
+      clock: fixedClock(),
+      randomBytes: deterministicRandom(),
+    });
+    const minted = await mintManager.mint(mintInput);
+    const consumeManager = new OAuthStateManager({
+      persistence,
+      clock: fixedClock(TEST_NOW - OAUTH_STATE_CLOCK_SKEW_SECONDS - 1),
+    });
+
+    await expect(consumeManager.consume(minted.handle)).rejects.toSatisfy(
+      (error: unknown) => expectCode(error, 'STATE_STORE_FAILED'),
     );
   });
 

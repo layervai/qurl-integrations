@@ -14,6 +14,7 @@ describe('RedactingLogger', () => {
     const clientSecret = 'synthetic-client-secret-value';
     const opaqueState = Buffer.alloc(32, 8).toString('base64url');
     const edgeBoundedSecret = `-${'A'.repeat(41)}-`;
+    const longOpaqueValue = 'B'.repeat(256);
     const logger = new RedactingLogger(sink, [clientSecret]);
 
     logger.error(`failed with ${clientSecret} and Bearer access-value`, {
@@ -21,6 +22,7 @@ describe('RedactingLogger', () => {
       nested: { clientSecret, error: new Error(`echo ${clientSecret}`) },
       unlabelled: opaqueState,
       unlabelledEdge: edgeBoundedSecret,
+      longOpaqueValue,
       status: 401,
     });
 
@@ -28,6 +30,7 @@ describe('RedactingLogger', () => {
     expect(rendered).not.toContain(clientSecret);
     expect(rendered).not.toContain(opaqueState);
     expect(rendered).not.toContain(edgeBoundedSecret);
+    expect(rendered).not.toContain(longOpaqueValue);
     expect(rendered).not.toContain('access-value');
     expect(rendered).toContain('[REDACTED]');
     expect(rendered).toContain('401');

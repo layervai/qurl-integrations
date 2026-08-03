@@ -177,6 +177,8 @@ export function createIdTokenVerifier(options: IdTokenVerifierOptions): IdTokenV
         algorithms: ['RS256'],
         issuer: issuerUrl.toString(),
         audience: options.audience,
+        // Match the shipped Discord/Auth0 boundary: production clock drift is
+        // expected to be negligible, so temporal claims get no grace period.
         clockTolerance: 0,
         currentDate: new Date(now() * 1_000),
         requiredClaims: ['exp'],

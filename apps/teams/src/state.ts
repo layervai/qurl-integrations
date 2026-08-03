@@ -15,6 +15,7 @@ import { generatePkcePair, isPkceVerifier } from './pkce.js';
 import type { RandomBytes } from './pkce.js';
 
 export const OAUTH_STATE_TTL_SECONDS = 5 * 60;
+export const OAUTH_STATE_CLOCK_SKEW_SECONDS = 30;
 const STATE_HANDLE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const STATE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 const DELIVERY_ID_PATTERN = /^29:[A-Za-z0-9._~-]{1,253}$/;
@@ -169,7 +170,10 @@ export class OAuthStateManager {
     if (now >= transaction.expiresAtEpochSeconds) {
       throw new OAuthCoreError('STATE_EXPIRED', 'OAuth state has expired.');
     }
-    if (transaction.expiresAtEpochSeconds > now + OAUTH_STATE_TTL_SECONDS) {
+    if (
+      transaction.expiresAtEpochSeconds >
+      now + OAUTH_STATE_TTL_SECONDS + OAUTH_STATE_CLOCK_SKEW_SECONDS
+    ) {
       throw new OAuthCoreError('STATE_STORE_FAILED', 'OAuth state storage returned an invalid expiry.');
     }
     return transaction;

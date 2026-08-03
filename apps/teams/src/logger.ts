@@ -1,7 +1,7 @@
 import type { LogContext, Logger } from './interfaces.js';
 
 const REDACTED = '[REDACTED]';
-const OPAQUE_VALUE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43,128}(?![A-Za-z0-9_-])/g;
+const OPAQUE_VALUE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43,}(?![A-Za-z0-9_-])/g;
 const BEARER_VALUE = /\bBearer\s+[^\s,;]+/gi;
 const FORM_SECRET = /\b(client_secret|code|code_verifier)=([^&\s]+)/gi;
 
