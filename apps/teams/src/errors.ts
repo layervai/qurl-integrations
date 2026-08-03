@@ -34,6 +34,11 @@ interface OAuthCoreErrorOptions {
  */
 export class OAuthCoreError extends Error {
   readonly code: OAuthCoreErrorCode;
+  /**
+   * A fresh operation may succeed. This never authorizes replaying the same
+   * OAuth callback: OAuthCallbackCore consumes one-shot state before any
+   * transient token, JWKS, or binding failure can be returned.
+   */
   readonly retryable: boolean;
   readonly safeDetails: Readonly<Record<string, string | number | boolean>>;
 
@@ -49,4 +54,3 @@ export class OAuthCoreError extends Error {
 export function isOAuthCoreError(error: unknown): error is OAuthCoreError {
   return error instanceof OAuthCoreError;
 }
-
