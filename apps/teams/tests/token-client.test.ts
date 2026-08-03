@@ -63,6 +63,21 @@ describe('confidential token client', () => {
     expect(url.searchParams.get('login_hint')).toBe('admin@example.com');
   });
 
+  it.each([
+    ['state', { state: 'bad', codeChallenge: CHALLENGE, nonce: NONCE }],
+    ['challenge', { state: STATE, codeChallenge: 'bad', nonce: NONCE }],
+    ['nonce', { state: STATE, codeChallenge: CHALLENGE, nonce: 'bad' }],
+  ])('rejects an invalid authorization %s with INVALID_INPUT', (_field, input) => {
+    const client = tokenClient(async () => jsonResponse({}));
+    let thrown: unknown;
+    try {
+      client.createAuthorizationUrl(input);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(expectCode(thrown, 'INVALID_INPUT')).toBe(true);
+  });
+
   it('sends the client secret and transaction PKCE verifier in a form-encoded exchange', async () => {
     let submitted: URLSearchParams | undefined;
     const client = tokenClient(async (input, init) => {
@@ -88,6 +103,17 @@ describe('confidential token client', () => {
       idToken: 'synthetic-id-token',
     });
     expect(result).not.toHaveProperty('refreshToken');
+  });
+
+  it.each([
+    ['access_token', { id_token: 'synthetic-id-token' }],
+    ['id_token', { access_token: 'synthetic-access-token' }],
+  ])('rejects a successful token response missing %s', async (_missingField, body) => {
+    const client = tokenClient(async () => jsonResponse(body));
+    await expect(client.exchangeAuthorizationCode({
+      code: 'synthetic-authorization-code',
+      codeVerifier: VERIFIER,
+    })).rejects.toSatisfy((error: unknown) => expectCode(error, 'TOKEN_INVALID_RESPONSE'));
   });
 
   it('uses the fallback secret once and only after an exact invalid_client response', async () => {

@@ -2,7 +2,7 @@ import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import type { JWK } from 'jose';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { OAuthCoreError } from '../src/errors.js';
-import { createIdTokenVerifier } from '../src/id-token-verifier.js';
+import { createIdTokenVerifier, parseJwks } from '../src/id-token-verifier.js';
 import type { FetchLike } from '../src/interfaces.js';
 import { TEST_NOW, fixedClock } from './helpers.js';
 
@@ -57,8 +57,8 @@ async function signToken(overrides: {
   return token.sign(overrides.signingKey ?? privateKey);
 }
 
-function jwksResponse(): Response {
-  return new Response(JSON.stringify({ keys: [publicJwk] }), {
+function jwksResponse(keys: readonly unknown[] = [publicJwk]): Response {
+  return new Response(JSON.stringify({ keys }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
@@ -95,6 +95,40 @@ describe('ID-token verification', () => {
       normalizedEmail: 'admin@example.com',
     })).resolves.toMatchObject({ subject: 'provider|synthetic-user-2' });
     expect(fetches).toBe(1);
+  });
+
+  it('accepts an RSA signing JWK without the optional alg member', async () => {
+    const jwkWithoutAlg: JWK = { ...publicJwk };
+    delete jwkWithoutAlg.alg;
+    const verifier = createIdTokenVerifier({
+      issuer: ISSUER,
+      audience: AUDIENCE,
+      fetch: async () => jwksResponse([jwkWithoutAlg]),
+      clock: fixedClock(),
+    });
+
+    await expect(verifier.verify(await signToken(), {
+      nonce: NONCE,
+      normalizedEmail: 'admin@example.com',
+    })).resolves.toEqual({
+      subject: 'provider|synthetic-user',
+      email: 'admin@example.com',
+    });
+  });
+
+  it.each([
+    ['a non-RSA key', () => [{ ...publicJwk, kty: 'EC' }]],
+    ['duplicate key IDs', () => [{ ...publicJwk }, { ...publicJwk }]],
+    ['an empty key set', () => []],
+  ] as const)('rejects %s at the JWKS parsing boundary', (_description, keys) => {
+    const body = new TextEncoder().encode(JSON.stringify({ keys: keys() }));
+    let thrown: unknown;
+    try {
+      parseJwks(body);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(expectCode(thrown, 'JWKS_UNAVAILABLE')).toBe(true);
   });
 
   it('fails closed on nonce mismatch', async () => {

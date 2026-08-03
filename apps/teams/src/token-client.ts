@@ -30,6 +30,7 @@ export interface ConfidentialTokenClientOptions {
   readonly clientId: string;
   readonly clientSecret: string;
   readonly clientSecretFallback?: string;
+  /** qURL API identifier requested for the access token, not the ID-token audience. */
   readonly audience: string;
   readonly redirectUri: string;
   readonly fetch: FetchLike;

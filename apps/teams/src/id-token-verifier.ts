@@ -20,6 +20,7 @@ const MAX_ID_TOKEN_BYTES = 16 * 1_024;
 
 export interface IdTokenVerifierOptions {
   readonly issuer: string;
+  /** Auth0 client ID used as the ID-token `aud`, not the qURL API audience. */
   readonly audience: string;
   readonly fetch: FetchLike;
   readonly clock?: Clock;
@@ -50,7 +51,7 @@ function validateIssuer(value: string): URL {
   return issuer;
 }
 
-function parseJwks(body: Uint8Array): JSONWebKeySet {
+export function parseJwks(body: Uint8Array): JSONWebKeySet {
   let parsed: unknown;
   try {
     parsed = JSON.parse(decodeUtf8(body));
@@ -70,7 +71,11 @@ function parseJwks(body: Uint8Array): JSONWebKeySet {
       throw new OAuthCoreError('JWKS_UNAVAILABLE', 'JWKS response contained an invalid key.', { retryable: true });
     }
     const candidate = key as Record<string, unknown>;
-    if (candidate.kty !== 'RSA' || candidate.alg !== 'RS256'
+    // RFC 7517 makes JWK `alg` optional. A missing value is safe here because
+    // the JWT protected header is pinned to RS256 and jwtVerify also allowlists
+    // only RS256; present metadata is rejected when it contradicts those pins.
+    if (candidate.kty !== 'RSA'
+      || (candidate.alg !== undefined && candidate.alg !== 'RS256')
       || typeof candidate.kid !== 'string' || candidate.kid === ''
       || typeof candidate.n !== 'string' || candidate.n === ''
       || typeof candidate.e !== 'string' || candidate.e === ''
