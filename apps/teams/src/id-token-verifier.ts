@@ -9,6 +9,7 @@ import { OAuthCoreError, isOAuthCoreError } from './errors.js';
 import { decodeUtf8, readBoundedBody, withStrictTimeout } from './http.js';
 import type { Clock, FetchLike, IdTokenVerifier, Logger, VerifiedIdentity } from './interfaces.js';
 import { nullLogger, systemClock } from './interfaces.js';
+import { RedactingLogger } from './logger.js';
 import { verifyOidcNonce } from './nonce.js';
 import { normalizeEmail } from './state.js';
 
@@ -94,7 +95,7 @@ export function createIdTokenVerifier(options: IdTokenVerifierOptions): IdTokenV
     throw new OAuthCoreError('INVALID_INPUT', 'ID-token audience is required.');
   }
   const clock = options.clock ?? systemClock;
-  const logger = options.logger ?? nullLogger;
+  const logger = new RedactingLogger(options.logger ?? nullLogger);
   const timeoutMs = options.timeoutMs ?? DEFAULT_JWKS_TIMEOUT_MS;
   const bodyLimit = options.responseBodyLimitBytes ?? DEFAULT_JWKS_BODY_LIMIT_BYTES;
   const cacheSeconds = options.cacheSeconds ?? DEFAULT_JWKS_CACHE_SECONDS;

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { base64UrlEncode, constantTimeEqual } from './encoding.js';
+import { OAuthCoreError } from './errors.js';
 import type { RandomBytes } from './pkce.js';
 
 const OIDC_NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -11,7 +12,7 @@ export function isOidcNonce(value: unknown): value is string {
 export function generateOidcNonce(random: RandomBytes = randomBytes): string {
   const nonce = base64UrlEncode(random(32));
   if (!isOidcNonce(nonce)) {
-    throw new TypeError('Random source returned an invalid OIDC nonce.');
+    throw new OAuthCoreError('INVALID_INPUT', 'Random source returned an invalid OIDC nonce.');
   }
   return nonce;
 }

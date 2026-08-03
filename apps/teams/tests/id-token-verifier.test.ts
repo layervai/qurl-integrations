@@ -131,6 +131,17 @@ describe('ID-token verification', () => {
     expect(expectCode(thrown, 'JWKS_UNAVAILABLE')).toBe(true);
   });
 
+  it('maps invalid UTF-8 at the JWKS boundary to a retryable JWKS error', () => {
+    let thrown: unknown;
+    try {
+      parseJwks(Uint8Array.of(0xff));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(expectCode(thrown, 'JWKS_UNAVAILABLE')).toBe(true);
+    expect((thrown as OAuthCoreError).retryable).toBe(true);
+  });
+
   it('fails closed on nonce mismatch', async () => {
     const verifier = createIdTokenVerifier({
       issuer: ISSUER,
@@ -254,5 +265,26 @@ describe('ID-token verification', () => {
       nonce: NONCE,
       normalizedEmail: 'admin@example.com',
     })).rejects.toSatisfy((error: unknown) => expectCode(error, 'JWKS_RESPONSE_TOO_LARGE'));
+  });
+
+  it('enforces the JWKS fetch timeout with a stable retryable code', async () => {
+    const verifier = createIdTokenVerifier({
+      issuer: ISSUER,
+      audience: AUDIENCE,
+      fetch: () => new Promise<Response>(() => undefined),
+      clock: fixedClock(),
+      timeoutMs: 10,
+    });
+    let thrown: unknown;
+    try {
+      await verifier.verify(await signToken(), {
+        nonce: NONCE,
+        normalizedEmail: 'admin@example.com',
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(expectCode(thrown, 'JWKS_TIMEOUT')).toBe(true);
+    expect((thrown as OAuthCoreError).retryable).toBe(true);
   });
 });

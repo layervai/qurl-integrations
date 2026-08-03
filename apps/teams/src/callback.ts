@@ -9,6 +9,7 @@ import type {
   ProviderBinder,
 } from './interfaces.js';
 import { nullLogger } from './interfaces.js';
+import { RedactingLogger } from './logger.js';
 
 export interface OAuthCallbackInput {
   readonly state: string;
@@ -36,7 +37,7 @@ export class OAuthCallbackCore {
     this.#tokenClient = options.tokenClient;
     this.#idTokenVerifier = options.idTokenVerifier;
     this.#providerBinder = options.providerBinder;
-    this.#logger = options.logger ?? nullLogger;
+    this.#logger = new RedactingLogger(options.logger ?? nullLogger);
   }
 
   async complete(input: OAuthCallbackInput): Promise<CallbackCompletion> {

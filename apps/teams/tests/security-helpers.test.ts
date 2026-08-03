@@ -36,6 +36,16 @@ describe('PKCE and OIDC helpers', () => {
     expect(verifyOidcNonce(nonce, nonce)).toBe(true);
     expect(verifyOidcNonce(other, nonce)).toBe(false);
   });
+
+  it('maps an invalid nonce random source to the stable OAuth error contract', () => {
+    let thrown: unknown;
+    try {
+      generateOidcNonce(() => new Uint8Array());
+    } catch (error) {
+      thrown = error;
+    }
+    expect(expectCode(thrown, 'INVALID_INPUT')).toBe(true);
+  });
 });
 
 describe('double-submit cookie contract', () => {
@@ -66,4 +76,3 @@ describe('double-submit cookie contract', () => {
     }
   });
 });
-
