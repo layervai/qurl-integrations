@@ -43,11 +43,9 @@ function validateIssuer(value: string): URL {
   } catch {
     throw new OAuthCoreError('INVALID_INPUT', 'ID-token issuer must be a valid URL.');
   }
-  if (issuer.protocol !== 'https:' || issuer.username !== '' || issuer.password !== '' || issuer.search || issuer.hash) {
-    throw new OAuthCoreError('INVALID_INPUT', 'ID-token issuer must be an HTTPS URL without credentials.');
-  }
-  if (!issuer.pathname.endsWith('/')) {
-    issuer.pathname += '/';
+  if (issuer.protocol !== 'https:' || issuer.username !== '' || issuer.password !== ''
+    || issuer.pathname !== '/' || issuer.search || issuer.hash) {
+    throw new OAuthCoreError('INVALID_INPUT', 'ID-token issuer must be a root HTTPS URL without credentials.');
   }
   return issuer;
 }

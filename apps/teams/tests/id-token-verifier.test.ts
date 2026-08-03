@@ -69,6 +69,19 @@ function expectCode(error: unknown, code: OAuthCoreError['code']): boolean {
 }
 
 describe('ID-token verification', () => {
+  it('rejects a pathed issuer before any JWKS request', () => {
+    let fetches = 0;
+    expect(() => createIdTokenVerifier({
+      issuer: 'https://auth.example.com/tenant/',
+      audience: AUDIENCE,
+      fetch: async () => {
+        fetches += 1;
+        return jwksResponse();
+      },
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_INPUT' }));
+    expect(fetches).toBe(0);
+  });
+
   it('verifies signature, issuer, audience, expiry, nonce, subject, and email in one cached step', async () => {
     let fetches = 0;
     const fetch: FetchLike = async (input) => {
