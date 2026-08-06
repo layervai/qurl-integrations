@@ -46,8 +46,12 @@ func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
 		submission := payload.asViewSubmission()
 		LogViewSubmission(slog.Default(), &submission)
 		switch payload.View.CallbackID {
+		case callbackIDConnectorSetup:
+			h.handleConnectorSetupSubmission(w, &submission)
 		case callbackIDTunnelInstall:
 			h.handleTunnelInstallSubmission(w, &submission)
+		case callbackIDS3WebsiteInstall:
+			h.handleS3WebsiteInstallSubmission(w, &submission)
 		case callbackIDTunnelEdit:
 			h.handleTunnelEditSubmission(w, &submission)
 		case callbackIDExposeURL:
@@ -259,14 +263,14 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		// no trusted approver/target pair to attach to an App Home row; keep this
 		// as structured logs only.
 		slog.Warn("tunnel install modal metadata parse failed", "error", err, "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
+		respondConnectorInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
 	if meta.TeamID == "" || meta.ChannelID == "" || meta.UserID == "" || meta.ResponseURL == "" {
 		// Same as the JSON parse failure: incomplete metadata cannot name a
 		// durable approver-scoped audit row without risking misleading output.
 		slog.Warn("tunnel install modal metadata incomplete", "team_id", payload.Team.ID, "user_id", payload.User.ID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
+		respondConnectorInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		return
 	}
 	log := slog.With(
@@ -296,11 +300,11 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// any mismatched submitter identity stays in the later warning logs.
 	// The timestamp is minted and checked by Slack app pods. Platform clock
 	// sync should keep drift tiny; stale modals and far-future timestamps both
-	// fail closed instead of minting a fresh bootstrap key from stale state.
+	// fail closed instead of minting a fresh enrollment token from stale state.
 	modalAge := h.now().Sub(time.Unix(meta.CreatedAtUnix, 0))
 	if meta.CreatedAtUnix <= 0 || modalAge > tunnelInstallModalTTL || modalAge < -tunnelBootstrapSkew {
 		slog.Warn("tunnel install modal expired", "team_id", meta.TeamID, "user_id", meta.UserID, "view_id", payload.View.ID, "created_at_unix", meta.CreatedAtUnix, "modal_age_ms", modalAge.Milliseconds())
-		respondTunnelInstallModalError(w, "This modal expired. Run /qurl-admin protect-connector again.")
+		respondConnectorInstallModalError(w, "This modal expired. Run /qurl-admin protect-connector again.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
@@ -309,13 +313,13 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	// across workspaces or users.
 	if payload.Team.ID == "" || payload.Team.ID != meta.TeamID {
 		slog.Warn("tunnel install modal team mismatch", "payload_team_id", payload.Team.ID, "metadata_team_id", meta.TeamID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect-connector again.")
+		respondConnectorInstallModalError(w, "This modal was opened for a different workspace. Run /qurl-admin protect-connector again.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
 		return
 	}
 	if payload.User.ID == "" || payload.User.ID != meta.UserID {
 		slog.Warn("tunnel install modal user mismatch", "payload_user_id", payload.User.ID, "metadata_user_id", meta.UserID, "view_id", payload.View.ID)
-		respondTunnelInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
+		respondConnectorInstallModalError(w, "Only the admin who opened this modal can submit it. Run /qurl-admin protect-connector again to start a new setup.")
 		// Keep the App Home row scoped to the legitimate modal opener/approver
 		// from signed metadata; the mismatched submitter stays in the warning log.
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditModalRejectedResult)
@@ -327,17 +331,17 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		// setup attempt, so App Home keeps the approver/target accountability row.
 		// The same-workspace/same-user checks above run first so this durable row
 		// is still scoped to the verified modal opener.
-		respondTunnelInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
+		respondConnectorInstallModalError(w, "Could not verify this modal. Run /qurl-admin protect-connector again.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditActionMismatchResult)
 		return
 	}
 	if h.cfg.AdminStore == nil {
-		respondTunnelInstallModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
+		respondConnectorInstallModalError(w, "Admin features are not configured on this Secure Access Agent deployment.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditConfigurationUnavailableResult)
 		return
 	}
 	if h.aliasStore == nil {
-		respondTunnelInstallModalError(w, "Channel alias storage is not configured on this Secure Access Agent deployment.")
+		respondConnectorInstallModalError(w, "Channel alias storage is not configured on this Secure Access Agent deployment.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditConfigurationUnavailableResult)
 		return
 	}
@@ -355,7 +359,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 	isAdmin, _, err := h.cfg.AdminStore.CheckAdmin(adminCtx, meta.TeamID, meta.UserID)
 	if err != nil {
 		log.Error("tunnel install modal admin check failed", "error", err)
-		respondTunnelInstallModalError(w, "Could not verify admin status. Retry in a moment.")
+		respondConnectorInstallModalError(w, "Could not verify admin status. Retry in a moment.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminVerificationFailedResult)
 		return
 	}
@@ -363,7 +367,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		log.Warn("tunnel install modal denied: non-admin")
 		// The same-user gate above means this row belongs to the admin who
 		// opened the modal; in practice this is the admin-revoked-mid-flow case.
-		respondTunnelInstallModalError(w, "This command is admin-only.")
+		respondConnectorInstallModalError(w, "This command is admin-only.")
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditAdminDeniedResult)
 		return
 	}
@@ -374,7 +378,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 		result := h.processTunnelInstallCore(ctx, log, req)
 		h.recordTunnelInstallAgentAuditAsync(log, req, result)
 	}) {
-		respondTunnelInstallModalError(w, modalBusyMsg)
+		respondConnectorInstallModalError(w, modalBusyMsg)
 		h.recordTunnelInstallAgentAuditAsync(log, req, agentProtectConnectorAuditWorkerUnavailableResult)
 		return
 	}
@@ -384,23 +388,7 @@ func (h *Handler) handleTunnelInstallSubmission(w http.ResponseWriter, payload *
 func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateValue) (args *tunnelInstallArgs, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
-	slug := strings.TrimPrefix(strings.TrimSpace(interactionStateText(values, tunnelInstallBlockSlug, tunnelInstallActionSlug)), "$")
-	if !tunnelSlugPattern.MatchString(slug) {
-		fieldErrors[tunnelInstallBlockSlug] = "Use 3-64 lowercase letters, numbers, and hyphens. Start with a letter and end with a letter or number."
-	}
-
-	shortcutRaw := strings.TrimSpace(interactionStateText(values, tunnelInstallBlockShortcut, tunnelInstallActionShortcut))
-	alias := slug
-	if shortcutRaw != "" && !strings.HasPrefix(shortcutRaw, "$") {
-		shortcutRaw = "$" + shortcutRaw
-	}
-	if shortcutRaw != "" {
-		var aliasReason string
-		alias, aliasReason = validateChannelShortcutToken(shortcutRaw)
-		if aliasReason != "" {
-			fieldErrors[tunnelInstallBlockShortcut] = aliasReason
-		}
-	}
+	slug, alias := parseConnectorSlugAndShortcut(values, tunnelInstallBlockSlug, tunnelInstallActionSlug, tunnelInstallBlockShortcut, tunnelInstallActionShortcut, fieldErrors)
 
 	portText, portFound := interactionStateTextOK(values, tunnelInstallBlockLocalPort, tunnelInstallActionLocalPort)
 	portRaw := strings.TrimSpace(portText)
@@ -454,6 +442,27 @@ func parseTunnelInstallModalArgs(values map[string]map[string]interactionStateVa
 	return args, nil
 }
 
+func parseConnectorSlugAndShortcut(values map[string]map[string]interactionStateValue, slugBlockID, slugActionID, shortcutBlockID, shortcutActionID string, fieldErrors map[string]string) (slug, alias string) {
+	slug = strings.TrimPrefix(strings.TrimSpace(interactionStateText(values, slugBlockID, slugActionID)), "$")
+	if !tunnelSlugPattern.MatchString(slug) {
+		fieldErrors[slugBlockID] = "Use 3-64 lowercase letters, numbers, and hyphens. Start with a letter and end with a letter or number."
+	}
+
+	shortcutRaw := strings.TrimSpace(interactionStateText(values, shortcutBlockID, shortcutActionID))
+	alias = slug
+	if shortcutRaw != "" && !strings.HasPrefix(shortcutRaw, "$") {
+		shortcutRaw = "$" + shortcutRaw
+	}
+	if shortcutRaw != "" {
+		var aliasReason string
+		alias, aliasReason = validateChannelShortcutToken(shortcutRaw)
+		if aliasReason != "" {
+			fieldErrors[shortcutBlockID] = aliasReason
+		}
+	}
+	return slug, alias
+}
+
 func interactionStateText(values map[string]map[string]interactionStateValue, blockID, actionID string) string {
 	text, _ := interactionStateTextOK(values, blockID, actionID)
 	return text
@@ -490,10 +499,10 @@ func respondViewErrors(w http.ResponseWriter, fieldErrors map[string]string) {
 	})
 }
 
-func respondTunnelInstallModalError(w http.ResponseWriter, message string) {
-	view, err := TunnelInstallErrorModal(message)
+func respondConnectorInstallModalError(w http.ResponseWriter, message string) {
+	view, err := ConnectorInstallErrorModal(message)
 	if err != nil {
-		slog.Error("tunnel install modal error render failed", "error", err)
+		slog.Error("connector install modal error render failed", "error", err)
 		// Last-ditch fallback: Slack may silently drop this field-level error if
 		// the current view no longer contains the slug block, but it still gives
 		// the original install modal a user-visible failure path.
@@ -646,7 +655,13 @@ func (v interactionStateValue) text() string {
 	return ""
 }
 
+// S3 bucket, prefix, and index fields are intentionally absent: they can reveal
+// customer infrastructure/object layout and remain redacted. Region is coarse,
+// low-sensitivity deployment context and is safe for operational diagnostics.
 var interactionStateLogAllowlist = map[string]map[string]struct{}{
+	connectorSetupBlockType: {
+		connectorSetupActionType: {},
+	},
 	tunnelInstallBlockSlug: {
 		tunnelInstallActionSlug: {},
 	},
@@ -661,6 +676,18 @@ var interactionStateLogAllowlist = map[string]map[string]struct{}{
 	},
 	tunnelInstallBlockWebRef: {
 		tunnelInstallActionWebRef: {},
+	},
+	s3WebsiteInstallBlockSlug: {
+		s3WebsiteInstallActionSlug: {},
+	},
+	s3WebsiteInstallBlockShortcut: {
+		s3WebsiteInstallActionShortcut: {},
+	},
+	s3WebsiteInstallBlockEnvironment: {
+		s3WebsiteInstallActionEnvironment: {},
+	},
+	s3WebsiteInstallBlockRegion: {
+		s3WebsiteInstallActionRegion: {},
 	},
 }
 
@@ -687,11 +714,19 @@ var viewSubmissionStateLogAllowlist = func() map[string]map[string]struct{} {
 // default in sanitizedViewSubmissionStateValues.
 var viewSubmissionBlockIDs = []string{
 	claimCodeBlockID,
+	connectorSetupBlockType,
 	tunnelInstallBlockSlug,
 	tunnelInstallBlockShortcut,
 	tunnelInstallBlockEnvironment,
 	tunnelInstallBlockLocalPort,
 	tunnelInstallBlockWebRef,
+	s3WebsiteInstallBlockSlug,
+	s3WebsiteInstallBlockShortcut,
+	s3WebsiteInstallBlockEnvironment,
+	s3WebsiteInstallBlockBucket,
+	s3WebsiteInstallBlockRegion,
+	s3WebsiteInstallBlockPrefix,
+	s3WebsiteInstallBlockIndex,
 	tunnelEditBlockDisplayName,
 	tunnelEditBlockAliases,
 	tunnelEditBlockChannels,

@@ -314,6 +314,60 @@ func TestReadTunnelImageConfig(t *testing.T) {
 	}
 }
 
+func TestReadS3OriginImageConfig(t *testing.T) {
+	pinned := testConnectorImageRepo + "@sha256:" + strings.Repeat("b", 64)
+	cases := []struct {
+		name        string
+		image       string
+		wantImage   string
+		wantErrText string
+	}{
+		{
+			name: "unset uses code default",
+		},
+		{
+			name:      "digest-pinned override accepted",
+			image:     pinned,
+			wantImage: pinned,
+		},
+		{
+			name:        "unsafe characters rejected",
+			image:       testConnectorImageRepo + ":bad tag",
+			wantErrText: envQURLS3OriginImage + ":",
+		},
+		{
+			name:        "floating override rejected",
+			image:       testConnectorImageRepo,
+			wantErrText: connectorImageErrFloating,
+		},
+		{
+			name:        "tagged override requires digest",
+			image:       testConnectorImageRepo + ":main",
+			wantErrText: internal.S3OriginImageDigestRequired,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envQURLS3OriginImage, tc.image)
+
+			got, err := readS3OriginImageConfig()
+
+			if tc.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("readS3OriginImageConfig() err = %v, want substring %q", err, tc.wantErrText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readS3OriginImageConfig() err = %v", err)
+			}
+			if got != tc.wantImage {
+				t.Fatalf("readS3OriginImageConfig() = %q, want %q", got, tc.wantImage)
+			}
+		})
+	}
+}
+
 func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 	// run() validates the customer-rendered connector image after only the
 	// prerequisite public endpoint/signing-secret checks and before infra or
@@ -328,6 +382,56 @@ func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), envQURLConnectorImage+" is required") {
 		t.Fatalf("run() err = %v, want %s fail-closed error before infra/env setup", err, envQURLConnectorImage)
+	}
+}
+
+func TestConnectorAPIURLFromEndpoint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		endpoint string
+		wantBase string
+		want     string
+		wantErr  string
+	}{
+		{name: "https", endpoint: " https://api.qurl.invalid/ ", wantBase: "https://api.qurl.invalid", want: "https://api.qurl.invalid/v1"},
+		{name: "loopback http", endpoint: "http://127.0.0.1:8080", wantBase: "http://127.0.0.1:8080", want: "http://127.0.0.1:8080/v1"},
+		{name: "remote http", endpoint: "http://api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
+		{name: "versioned endpoint", endpoint: "https://api.qurl.invalid/v1", wantErr: "must omit the /v1 API suffix"},
+		{name: "case variant versioned endpoint", endpoint: "https://api.qurl.invalid/V1/", wantErr: "must omit the /v1 API suffix"},
+		{name: "endpoint with path", endpoint: "https://api.qurl.invalid/private", wantErr: "must not include a path"},
+		{name: "nested versioned path", endpoint: "https://api.qurl.invalid/private/v1", wantErr: "must not include a path"},
+		{name: "endpoint with credentials", endpoint: "https://user:secret@api.qurl.invalid", wantErr: "must not include credentials"},
+		{name: "endpoint with query", endpoint: "https://api.qurl.invalid?region=sandbox", wantErr: "must not include a query"},
+		{name: "endpoint with fragment", endpoint: "https://api.qurl.invalid#sandbox", wantErr: "must not include a fragment"},
+		{name: "slashes only", endpoint: "///", wantErr: "must be an absolute URL origin"},
+		{name: "relative", endpoint: "api.qurl.invalid", wantErr: "QURL_ENDPOINT is invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotBase, got, err := connectorAPIURLFromEndpoint(tc.endpoint)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("connectorAPIURLFromEndpoint() err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || gotBase != tc.wantBase || got != tc.want {
+				t.Fatalf("connectorAPIURLFromEndpoint() = %q, %q, %v; want %q, %q, nil", gotBase, got, err, tc.wantBase, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunValidatesConnectorAPIURLBeforeInfraSetup(t *testing.T) {
+	t.Setenv("QURL_ENDPOINT", "http://api.qurl.invalid")
+	t.Setenv("SLACK_SIGNING_SECRET", "signing-secret")
+
+	err := run()
+
+	if err == nil || !strings.Contains(err.Error(), "QURL_ENDPOINT is invalid") {
+		t.Fatalf("run() err = %v, want connector endpoint fail-fast error", err)
 	}
 }
 

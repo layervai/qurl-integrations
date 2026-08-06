@@ -153,46 +153,78 @@ at the OAuth-callback bind layer.
     `/qurl-admin protect-connector <id>` (or `$id`) for CLI-style admins.
   - **Backend work (both paths)** — use the workspace API key to
     find-or-create a qURL Connector resource scoped to the connected qURL
-    account, bind `$<id>` or the `alias:` override in the current Slack
-    channel, and mint a one-hour bootstrap API key. When `alias:` is omitted,
-    the ID doubles as the channel alias.
+    account, require its public `resource_id`, DNS-safe
+    `connector_routing_id`, and NHP `knock_resource_id`, bind `$<id>` or the
+    `alias:` override in the current Slack channel, and only then mint a
+    one-hour, one-shot enrollment token bound to that Connector. This ordering
+    matters because successful NHP registration consumes the token. When
+    `alias:` is omitted, the ID
+    doubles as the channel alias.
   - **Idempotency** — retrying the install within the modal's 25-minute
-    validity window reuses the same bootstrap-key idempotency bucket. Retrying
-    after that window can mint a new key, so operators should run the newest
-    Slack install block and discard older bootstrap-key messages.
-  - **Output** — hides the internal resource id and is tailored to the selected
-    environment:
+    validity window reuses the same enrollment-token idempotency bucket.
+    Retrying after that window can mint a new token, so operators should run
+    the newest Slack install block and discard older enrollment-token messages.
+  - **Output** — persists `resource_id` and `connector_routing_id` plus
+    `QURL_API_URL`, and is tailored to the selected environment. The Connector
+    rehydrates `knock_resource_id` from the authenticated resource response on
+    every start; the installer does not set the advanced
+    `LAYERV_KNOCK_RESOURCE_ID` override:
     - **Docker / Docker Compose** — guarded pasteable shell blocks that write
-      `qurl-proxy.yaml`, create a bootstrap-key file, create/chown
-      per-connector durable agent state, pass `QURL_API_KEY_FILE`, and pass
-      `QURL_CONNECTOR_ID=<id>` to the client.
+      `qurl-proxy.yaml`, create an enrollment-token file, create/chown
+      per-connector durable agent state and audit directories, pass
+      `QURL_API_KEY_FILE`, `QURL_AUDIT_FILE`, and `QURL_CONNECTOR_ID=<id>`,
+      and run the Connector with a read-only root filesystem, bounded `/tmp`,
+      all capabilities dropped, no-new-privileges, and a 512-process limit.
     - **ECS/Fargate / Kubernetes** — the same contract as deployment snippets:
       co-locate the sidecar with the target container, mount durable
-      per-instance state at `/var/lib/layerv/agent`, mount or inject the
-      bootstrap key through the runtime's secret mechanism, and remove the key
-      after the logs show a successful connection.
+      per-instance state at `/var/lib/layerv/agent`, persist audit records
+      separately under `/var/log/layerv`, and run the Connector with a
+      read-only root filesystem. ECS renders `user: 65532:65532`; its state,
+      audit, and config EFS access points use POSIX UID/GID `65532:65532` with
+      root modes 0700, 0750, and 0755 respectively. Kubernetes prepares exact
+      state/audit ownership with a digest-pinned init image; do not replace it
+      with pod-level `fsGroup`, because qurl-go rejects group-writable identity
+      state.
+  - **Warm-start transition** — after first registration, remove the enrollment-token
+    reference from the workload definition and prove a replacement task/pod
+    starts from durable agent state before deleting the platform secret.
+    Deleting an ECS Secrets Manager secret or Kubernetes Secret while the
+    active workload definition still references it prevents replacement
+    workloads from starting.
   - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
     fallback because AWS injects task secrets as environment variables; Docker,
     Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.
     Non-interactive operators should inject `QURL_BOOTSTRAP_KEY` from their
     secret manager before running a pasted block; interactive runs prompt for
-    the bootstrap key with terminal echo disabled when possible.
+    the enrollment token with terminal echo disabled when possible.
   - **Constraint** — do not share one agent state volume across concurrently
     running sidecars.
+  - **Promotion gate** — use an immutable qurl-connector release containing the
+    native qurl-go UDP lifecycle tracked by qurl-connector #421 before promoting
+    this Slack build. Public HTTPS registration/knock bridges are not supported.
+    As a fail-closed rollout guard, the Slack renderer rejects a legacy internal
+    `r_` resource label before minting an enrollment token; do not treat that guard
+    as a substitute for verifying the complete producer identity triple in
+    sandbox.
+  - **Endpoint migration** — before promotion, replace any `QURL_ENDPOINT` that
+    includes `/v1`, another path, or remote plaintext `http://`. Startup now
+    rejects those shapes; configure the HTTPS API origin only (for example,
+    `https://api.sandbox.layerv.ai`). Plaintext remains limited to loopback
+    development endpoints.
   - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
-    a bootstrap key, it retries the final text post once, revokes the key, and
+    an enrollment token, it retries the final text post once, revokes the token, and
     posts a discard notice when possible. Cleanup uses the handler's base
     context so request cancellation does not strand a key, but process shutdown
     can still interrupt the five-second cleanup window. If that happens, the
-    bootstrap key remains bounded by its one-hour TTL; revoke it manually if
+    enrollment token remains bounded by its one-hour TTL; revoke it manually if
     logs show `tunnel_bootstrap_cleanup_failed`.
 
-### Bootstrap-key DM live smoke
+### Enrollment-token DM live smoke
 
-Run this smoke before relying on connector bootstrap-key DM delivery in a new
+Run this smoke before relying on Connector enrollment-token DM delivery in a new
 Slack app shape, especially an Enterprise Grid org install. Use a real admin
 user who has not already opened a DM with the bot when possible. The smoke posts
-only non-secret text; do not paste bootstrap keys into the command or result.
+only non-secret text; do not paste enrollment tokens into the command or result.
 Any `-text` value is sent to Slack, so keep it short, non-secret, and at most
 4000 bytes after cleanup. The message text is not written to the JSON evidence.
 Line breaks, tabs, and control characters in `-text` are normalized before the
@@ -242,7 +274,7 @@ of parsed Slack evidence.
 
 For Enterprise Grid fallback, pair the token smoke with the actual guided
 connector setup in a workspace where the org-install token is the delivery
-token. Confirm the admin receives the bootstrap-key DM and that the key-free
+token. Confirm the admin receives the enrollment-token DM and that the token-free
 install instructions post separately. The local fallback contract is covered by
 `TestSlackPostDMFuncOpensIMThenPostsWithGridFallback`; the live smoke confirms
 Slack accepts the org-install token for the real workspace shape.
@@ -691,7 +723,7 @@ that accidentally carried a numeric value.
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector enrollment tokens, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Must include `users:read` if ownership transfer should work before Slack install OAuth captures a per-workspace token. Production multi-customer installs should not depend on this fallback. |
 | `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
 | `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
@@ -715,8 +747,9 @@ that accidentally carried a numeric value.
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
 | `QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's API-key mint replay window for rotation persist-failure logs. Empty uses the current 24-hour qurl-service default mirror. Set only when qurl-service changes the API-key mint idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
-| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
+| `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Pin an immutable release containing the server-issued `resource_id` / `connector_routing_id` / `knock_resource_id` runtime contract and the native qurl-go UDP lifecycle tracked by qurl-connector #421. The rendered YAML persists only `resource_id` and `connector_routing_id`; the Connector rehydrates `knock_resource_id` at runtime. Public HTTPS registration/knock bridge images are unsupported. Production must use a specific non-latest tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
+| `QURL_S3_ORIGIN_IMAGE` | No | Optional S3 website origin image rendered by the guided `/qurl-admin protect` → **Protect qURL Connector** → **S3 static website** flow. Unlike `QURL_CONNECTOR_IMAGE`, an override must use a lowercase SHA-256 digest (tags are rejected), for example `ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:<digest>`. Empty uses the tested digest-pinned default. |
 | `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |
 | `QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED` | No | Set `true` only if Slack bot-token rotation is enabled for the app. When true, `tokens_revoked` bot-token callbacks are acknowledged but not treated as uninstall teardowns; `app_uninstalled` still purges workspace data. Empty preserves the current Marketplace cleanup behavior. Malformed values fail startup because silently choosing either mode can suppress cleanup or make routine token rotation destructive. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
@@ -765,7 +798,7 @@ For customer Slack installs, configure the Slack app with:
 - Bot scopes: `commands,chat:write,im:write,users:read` plus any extra scopes from
   `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
   `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
-  `dm:true` and qURL Connector bootstrap-key delivery; `users:read` lets
+  `dm:true` and qURL Connector enrollment-token delivery; `users:read` lets
   `/qurl-admin transfer-ownership` verify the target user before owner_id changes)
   - Existing installs created before `users:read` was required must re-run this
     Slack install flow before `/qurl-admin transfer-ownership` can verify a
@@ -806,7 +839,7 @@ token. Before deploying a build that depends on newly required Slack scopes,
 send affected workspaces through the reinstall link so guided connector setup
 does not fail closed on day one. New installs through `/oauth/slack/install`
 store that token automatically, and guided `/qurl-admin protect-connector` uses
-it for `views.open` plus bootstrap-key DM delivery. If Slack tells a customer
+it for `views.open` plus enrollment-token DM delivery. If Slack tells a customer
 guided connector setup needs the latest qURL Slack app install, send them
 through this reinstall link.
 Monitor the guided setup open path after deploys: the synchronous admin gate is

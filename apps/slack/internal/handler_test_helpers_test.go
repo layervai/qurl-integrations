@@ -10,21 +10,23 @@ import (
 // constants in tests because goconst would otherwise flag the 4+
 // duplications across fixture builders.
 const (
-	testKeyData        = "data"
-	testKeyError       = "error"
-	testKeyAPIKey      = "api_key"
-	testKeyExpiresAt   = "expires_at"
-	testKeyExpiresIn   = "expires_in"
-	testKeyKeyID       = "key_id"
-	testKeyKeyType     = "key_type"
-	testKeyResourceID  = "resource_id"
-	testKeySlug        = "slug"
-	testKeyStatus      = "status"
-	testKeyTitle       = "title"
-	testKeyTunnelSlug  = "tunnel_slug"
-	testKeyType        = "type"
-	testKeyTargetURL   = "target_url"
-	testKeyDescription = "description"
+	testKeyData               = "data"
+	testKeyError              = "error"
+	testKeyAPIKey             = "api_key"
+	testKeyExpiresAt          = "expires_at"
+	testKeyExpiresIn          = "expires_in"
+	testKeyKeyID              = "key_id"
+	testKeyKeyType            = "key_type"
+	testKeyKnockResourceID    = "knock_resource_id"
+	testKeyConnectorRoutingID = "connector_routing_id"
+	testKeyResourceID         = "resource_id"
+	testKeySlug               = "slug"
+	testKeyStatus             = "status"
+	testKeyTitle              = "title"
+	testKeyTunnelSlug         = "tunnel_slug"
+	testKeyType               = "type"
+	testKeyTargetURL          = "target_url"
+	testKeyDescription        = "description"
 	// A production-shaped public resource ID. Keeping the canonical get-flow
 	// fixture above the old r_ length ensures Slack and the shared client do not
 	// accidentally reintroduce the pre-cutover identifier contract.
