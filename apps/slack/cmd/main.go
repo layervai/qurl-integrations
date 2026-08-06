@@ -213,6 +213,7 @@ func run() error {
 	}
 	workspaceTokenLookup, invalidateWorkspaceSlackToken := newWorkspaceSlackTokenLookupWithInvalidation(ddbProvider, slackBotToken, slackWorkspaceTokenCacheTTL, time.Now)
 	openView := newSlackOpenViewFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackViewsOpenURL, nil)
+	slackUserLookup := newSlackUserLookupFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackUsersInfoURL, nil)
 	slog.Info("Slack views.open wired with per-workspace token lookup", "legacy_fallback_enabled", slackBotToken != "") // #nosec G706 -- only a boolean derived from token presence is logged; the token value is never logged.
 
 	postFeedback := buildPostFeedback(userAgent)
@@ -251,6 +252,9 @@ func run() error {
 	// conversations.info metadata seam for surface-specific confirm decisions (notably
 	// refusing group-DM get links before minting until mpim delivery is proven safe).
 	agentResolveConversationInfo := newSlackResolveConversationInfoFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsInfoURL, nil)
+	// conversations.replies seam for zero-copy agent continuity. Recent thread
+	// context is read from Slack for each turn and is never stored by LayerV.
+	agentThreadHistory := newSlackAgentThreadHistoryFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsRepliesURL, nil)
 	// Channel-name projection so the agent's system prompt can render "#general
 	// (C123)". Shares the same conversations.info closure as the confirm surface
 	// classifier; degrades to the bare channel id until the relevant
@@ -342,6 +346,7 @@ func run() error {
 		MaxConcurrentFollowupAsync:     maxConcurrentFollowupAsync,
 		MaxConcurrentFollowupGateAsync: maxConcurrentFollowupGateAsync,
 		AdminStore:                     adminStore,
+		SlackUserLookup:                slackUserLookup,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
 		S3OriginImage:                  s3OriginImage,
@@ -359,6 +364,7 @@ func run() error {
 		},
 		AgentLLM:                    agentLLM,
 		AgentStore:                  agentStore,
+		AgentThreadHistory:          agentThreadHistory,
 		PostDM:                      postDM,
 		PostMessage:                 postMessage,
 		PostEphemeral:               postEphemeral,

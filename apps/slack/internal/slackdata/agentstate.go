@@ -16,17 +16,15 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// EnvAgentStateTable names the DynamoDB table backing conversation-mode state
-// (per-thread conversation history and Slack event-id dedupe). Provisioned in
-// the infra repo; the table is unused until conversation mode is wired.
+// EnvAgentStateTable names the DynamoDB table backing metadata-only
+// conversation-mode state. Provisioned in the infra repo; the table is unused
+// until conversation mode is wired.
 const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
 
 // Agent-state table attribute names. The table is a single partition-keyed
 // store holding several item types under one (pk, sk) schema, discriminated by
 // the sort-key prefix:
 //
-//   - conversation history: sk = "conv#<thread_key>", carries the serialized
-//     transcript blob + an optimistic-concurrency version.
 //   - event dedupe markers: sk = "evt#<event_id>", existence-only.
 //   - pending confirm-action payloads: sk = "pend#<id>", carries the serialized
 //     proposal snapshot awaiting an Approve/Reject click.
@@ -39,16 +37,12 @@ const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
 //     mutation a user confirmed, carrying a serialized [AuditEntry]. Queried
 //     newest-first by user for the App Home review surface (see agentaudit.go).
 //
-// Every item carries a `ttl` epoch the table's DynamoDB TTL reaps. `conv_version`
-// is a deliberately non-reserved attribute name (DDB reserves "VERSION") so the
-// optimistic-write condition needs no expression-name alias.
+// Every item carries a `ttl` epoch the table's DynamoDB TTL reaps.
 const (
-	attrAgentPK       = "pk"
-	attrAgentSK       = "sk"
-	attrAgentMessages = "messages"
-	attrAgentVersion  = "conv_version"
-	attrAgentTTL      = "ttl"
-	attrPendPayload   = "pend_payload"
+	attrAgentPK     = "pk"
+	attrAgentSK     = "sk"
+	attrAgentTTL    = "ttl"
+	attrPendPayload = "pend_payload"
 	// attrContextChannel is the channel id a user opened the assistant pane FROM,
 	// stored on an "actx#<thread_key>" item for the pane turn to scope its reads to.
 	attrContextChannel = "ctx_channel"
@@ -56,7 +50,6 @@ const (
 	// (sk = "rate#<scope>#<window-start>"), incremented atomically per agent turn.
 	attrTurnCount = "turn_count"
 
-	convSKPrefix      = "conv#"
 	eventSKPrefix     = "evt#"
 	pendSKPrefix      = "pend#"
 	pendClaimSKPrefix = "pendclaim#"
@@ -66,15 +59,15 @@ const (
 	rateSKPrefix = "rate#"
 )
 
-// Default TTLs. Conversations live long enough to span a thread's natural pace
-// but short enough that stale context is dropped. The dedupe marker must outlive
+// Default TTLs. Assistant pane context lives long enough to span a thread's
+// natural pace but short enough that stale metadata is dropped. The dedupe marker must outlive
 // Slack's full retry schedule — Slack re-delivers an un-acked event up to a few
 // times spaced out to roughly half an hour — or a late retry could land after
 // the marker expired and be processed twice. One hour clears that window with
 // margin. (We ack 200 immediately, so retries should be rare regardless.)
 const (
-	defaultConversationTTL = 30 * time.Minute
-	defaultDedupeTTL       = 1 * time.Hour
+	defaultContextTTL = 30 * time.Minute
+	defaultDedupeTTL  = 1 * time.Hour
 	// defaultPendingActionTTL bounds how long a proposed mutation stays clickable.
 	// Long enough for a human (often a different admin than the asker) to notice
 	// and approve, short enough that a stale confirm card can't execute much later.
@@ -82,11 +75,6 @@ const (
 	// TTL reaper), so the window is a real bound.
 	defaultPendingActionTTL = 10 * time.Minute
 )
-
-// ErrConversationConflict is returned by [AgentStore.SaveConversation] when a
-// concurrent turn advanced the thread's version between load and save. The
-// caller should reload and retry (or drop the racing turn).
-var ErrConversationConflict = errors.New("slackdata: conversation version conflict")
 
 // AgentStore is the DDB-direct accessor for conversation-mode state. It owns one
 // table (EnvAgentStateTable), separate from the [Store] tables, so the
@@ -101,9 +89,9 @@ type AgentStore struct {
 
 	// Now is injected so tests can pin the clock. Defaults to time.Now.
 	Now func() time.Time
-	// ConversationTTL / DedupeTTL / PendingActionTTL / AuditTTL default to the
+	// ContextTTL / DedupeTTL / PendingActionTTL / AuditTTL default to the
 	// package defaults when zero.
-	ConversationTTL  time.Duration
+	ContextTTL       time.Duration
 	DedupeTTL        time.Duration
 	PendingActionTTL time.Duration
 	AuditTTL         time.Duration
@@ -126,11 +114,11 @@ func NewAgentStore(client DynamoDBClient, tableName string) (*AgentStore, error)
 		return nil, &Error{StatusCode: http.StatusInternalServerError, Title: "NewAgentStore: client is required"}
 	}
 	return &AgentStore{
-		Client:          client,
-		TableName:       tableName,
-		Now:             time.Now,
-		ConversationTTL: defaultConversationTTL,
-		DedupeTTL:       defaultDedupeTTL,
+		Client:     client,
+		TableName:  tableName,
+		Now:        time.Now,
+		ContextTTL: defaultContextTTL,
+		DedupeTTL:  defaultDedupeTTL,
 	}, nil
 }
 
@@ -154,11 +142,11 @@ func (s *AgentStore) now() time.Time {
 	return resolveNow(s.Now)
 }
 
-func (s *AgentStore) conversationTTL() time.Duration {
-	if s.ConversationTTL > 0 {
-		return s.ConversationTTL
+func (s *AgentStore) contextTTL() time.Duration {
+	if s.ContextTTL > 0 {
+		return s.ContextTTL
 	}
-	return defaultConversationTTL
+	return defaultContextTTL
 }
 
 func (s *AgentStore) dedupeTTL() time.Duration {
@@ -269,72 +257,13 @@ func (s *AgentStore) BumpTurnCount(ctx context.Context, teamID, scope string, wi
 	return readNumber(out.Attributes, attrTurnCount), nil
 }
 
-// LoadConversation returns the stored transcript blob and its version for a
-// thread, or (nil, 0, nil) when no conversation exists yet. The returned version
-// must be passed back to [AgentStore.SaveConversation] to detect a concurrent
-// writer.
-func (s *AgentStore) LoadConversation(ctx context.Context, partition, threadKey string) (history []byte, version int64, err error) {
-	if partition == "" || threadKey == "" {
-		return nil, 0, &Error{StatusCode: http.StatusBadRequest, Title: "LoadConversation: partition and thread_key are required"}
-	}
-	out, err := s.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(s.TableName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrAgentPK: stringAttr(partition),
-			attrAgentSK: stringAttr(convSKPrefix + threadKey),
-		},
-	})
-	if err != nil {
-		return nil, 0, ddbToError("LoadConversation", err)
-	}
-	if len(out.Item) == 0 {
-		return nil, 0, nil
-	}
-	blob := readString(out.Item, attrAgentMessages)
-	return []byte(blob), readNumber(out.Item, attrAgentVersion), nil
-}
-
-// SaveConversation writes the transcript blob for a thread with optimistic
-// concurrency. expectedVersion is the version returned by the matching
-// [AgentStore.LoadConversation] (0 for a brand-new thread). It returns
-// [ErrConversationConflict] when a concurrent turn advanced the version, so two
-// in-flight turns on one thread can't silently clobber each other.
-func (s *AgentStore) SaveConversation(ctx context.Context, partition, threadKey string, history []byte, expectedVersion int64) error {
-	if partition == "" || threadKey == "" {
-		return &Error{StatusCode: http.StatusBadRequest, Title: "SaveConversation: partition and thread_key are required"}
-	}
-	_, err := s.Client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(s.TableName),
-		Item: map[string]ddbtypes.AttributeValue{
-			attrAgentPK:       stringAttr(partition),
-			attrAgentSK:       stringAttr(convSKPrefix + threadKey),
-			attrAgentMessages: stringAttr(string(history)),
-			attrAgentVersion:  numberAttr(expectedVersion + 1),
-			attrAgentTTL:      numberAttr(s.now().Add(s.conversationTTL()).Unix()),
-		},
-		// First write (no row) OR the stored version still matches what we read.
-		ConditionExpression: aws.String("attribute_not_exists(" + attrAgentPK + ") OR " + attrAgentVersion + " = :ev"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":ev": numberAttr(expectedVersion),
-		},
-	})
-	if err != nil {
-		var cond *ddbtypes.ConditionalCheckFailedException
-		if errors.As(err, &cond) {
-			return ErrConversationConflict
-		}
-		return ddbToError("SaveConversation", err)
-	}
-	return nil
-}
-
 // PutThreadContext records the channel a user opened the assistant pane FROM
 // (assistant_thread.context.channel_id), keyed by the pane thread, so a later pane
 // turn — which carries no context of its own — can scope its reads to that channel.
 // Last write wins (no create-condition): an assistant_thread_context_changed event,
 // fired when the user switches the channel they're viewing, overwrites it. TTL'd via
-// conversationTTL so the context lives exactly as long as the conversation it scopes;
-// the turn path refreshes it like SaveConversation refreshes the transcript.
+// contextTTL so the context stays short-lived; the turn path refreshes it
+// while the assistant pane remains active.
 //
 // partition is the SLACK TEAM id, not the enterprise-grid-aware conversation
 // partition. The context is WRITTEN on assistant_thread_started /
@@ -353,7 +282,7 @@ func (s *AgentStore) PutThreadContext(ctx context.Context, partition, threadKey,
 			attrAgentPK:        stringAttr(partition),
 			attrAgentSK:        stringAttr(threadCtxSKPrefix + threadKey),
 			attrContextChannel: stringAttr(channelID),
-			attrAgentTTL:       numberAttr(s.now().Add(s.conversationTTL()).Unix()),
+			attrAgentTTL:       numberAttr(s.now().Add(s.contextTTL()).Unix()),
 		},
 	})
 	if err != nil {
@@ -472,16 +401,17 @@ func (s *AgentStore) ClaimPendingAction(ctx context.Context, partition, id strin
 
 // PurgeWorkspaceAgentState deletes every qurl_agent_state row under partition.
 // It is part of the Slack app-uninstall / token-revoke cascade: unlike the table's
-// normal TTL cleanup, this explicitly removes conversation transcripts, dedupe
-// markers, pending actions, pane context, rate counters, and audit entries when a
-// workspace install is being forgotten.
+// normal TTL cleanup, this explicitly removes dedupe markers, pending actions,
+// pane context, rate counters, audit entries, and any legacy `conv#` transcript
+// rows left by deployments before the zero-copy migration when a workspace
+// install is being forgotten.
 //
 // The table is keyed by (pk, sk), so the purge queries one partition and deletes
 // each observed sort key. Deletes are unconditional and therefore idempotent; an
 // already-removed row is a no-op. Unlike the durable workspace_state /
 // workspace_mappings / channel_policies rows, this ephemeral TTL-backed state is
 // intentionally not reinstall-cutoff guarded, so delayed teardown can remove
-// fresh agent conversation or pane context but cannot remove credentials or
+// fresh agent metadata or pane context but cannot remove credentials or
 // policy. The method attempts every delete in a page even after an individual
 // DeleteItem error, then returns the joined errors so the lifecycle retry path
 // can retry any residue.

@@ -22,6 +22,11 @@ longer than it needs to.
 Run `/qurl help` (or `/qurl-admin help`) any time for the exact commands your
 workspace's Secure Access Agent supports.
 
+Marketplace submission owners should fill and exercise the
+[Slack Marketplace reviewer test path](docs/marketplace-reviewer-test-path.md)
+before giving Slack reviewer instructions. Keep credentials and reviewer
+personal data out of the repository.
+
 ## Concepts
 
 - **Resource** — something you can mint links for. Two kinds: a **qURL
@@ -100,8 +105,16 @@ command variants below it are for power users and scripting.
 |---------|--------------|
 | `/qurl-admin add @user` | Promote a Slack user to admin. |
 | `/qurl-admin remove @user` | Demote a Slack user from admin. |
+| `/qurl-admin transfer-ownership @user` | Owner-only: hand off who may reconnect qURL for this workspace. This changes the Slack owner gate only; the qURL account/key changes only if the new owner later runs `/qurl setup`. |
 | `/qurl-admin admins` | List the owner and the current admins. |
 | `/qurl-admin help` | Show the admin command help. |
+
+Existing Slack installs must re-run the Slack install flow before ownership
+transfer can verify targets, because the command requires the `users:read` bot
+scope. The previous owner remains an admin after transfer and can be removed
+with `/qurl-admin remove @user` if needed. Enterprise Grid org-level bot tokens
+are not used for ownership transfer; use a workspace-level install/token until
+workspace-member verification lands.
 
 ## Protecting a resource
 
