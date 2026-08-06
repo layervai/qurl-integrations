@@ -750,11 +750,17 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
-		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
+	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
+		t.Errorf("api key body = %+v, want bound Connector enrollment token", apiKeyBody)
 	}
-	if _, ok := apiKeyBody["purpose"]; ok {
-		t.Errorf("api key body contained deprecated purpose field: %+v", apiKeyBody)
+	claims, ok := apiKeyBody["claims"].([]any)
+	if !ok || len(claims) != 1 || claims[0].(map[string]any)["type"] != client.CredentialClaimTypeConnector || claims[0].(map[string]any)["id"] != testTunnelSlug {
+		t.Errorf("api key body = %+v, want one connector claim", apiKeyBody)
+	}
+	for _, retired := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
+		if _, ok := apiKeyBody[retired]; ok {
+			t.Errorf("api key body contained retired %s field: %+v", retired, apiKeyBody)
+		}
 	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
@@ -1591,8 +1597,8 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
-	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
-		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
+	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector {
+		t.Errorf("api key body = %+v, want Connector enrollment token", apiKeyBody)
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)

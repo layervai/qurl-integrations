@@ -718,10 +718,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
-		Name:           "Slack qURL Connector bootstrap " + args.Slug,
-		Scopes:         []string{tunnelScopeAgent, tunnelScopeWrite},
-		KeyType:        client.APIKeyTypeTunnelBootstrap,
-		TunnelSlug:     args.Slug,
+		Name:           "Slack qURL Connector enrollment " + args.Slug,
+		Kind:           client.CredentialKindEnrollmentToken,
+		Target:         client.CredentialTargetConnector,
+		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
