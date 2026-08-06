@@ -202,7 +202,7 @@ at the OAuth-callback bind layer.
     native qurl-go UDP lifecycle tracked by qurl-connector #421 before promoting
     this Slack build. Public HTTPS registration/knock bridges are not supported.
     As a fail-closed rollout guard, the Slack renderer rejects a legacy internal
-    `r_` resource label before minting a bootstrap key; do not treat that guard
+    `r_` resource label before minting an enrollment token; do not treat that guard
     as a substitute for verifying the complete producer identity triple in
     sandbox.
   - **Endpoint migration** — before promotion, replace any `QURL_ENDPOINT` that

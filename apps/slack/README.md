@@ -135,9 +135,9 @@ to that choice, plus a one-shot enrollment token that expires after one hour.
 The guided form asks for the connector ID, optional channel alias, target
 environment, bucket, region, optional prefix, and index document. qURL replies
 with deploy steps for both the qURL Connector and the private S3 origin
-container, plus a one-shot enrollment token that expires after one hour. The origin currently requires a
-non-dotted, DNS-compatible bucket name; the form rejects dotted buckets before
-generating deployment instructions.
+container, plus a one-shot enrollment token that expires after one hour. The
+origin currently requires a non-dotted, DNS-compatible bucket name; the form
+rejects dotted buckets before generating deployment instructions.
 
 Remove the enrollment token from your environment once the Connector logs show
 it has connected; the machine keeps the device credential produced by

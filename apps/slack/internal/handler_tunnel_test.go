@@ -3179,7 +3179,7 @@ func TestTunnelInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *test
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No enrollment token was minted") {
 		t.Fatalf("async reply = %q, want incomplete-resource pre-mint refusal", async)
 	}
 	if apiKeyHits != 0 {
@@ -3214,7 +3214,7 @@ func TestTunnelInstallRejectsMissingResourceIDBeforeMintingBootstrapKey(t *testi
 	if len(*dmPosts) != 0 {
 		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
 	}
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "routing metadata") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "routing metadata") {
 		t.Fatalf("async reply = %q, want incomplete resource placement error before key mint", async)
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, testTunnelSlug); err != nil || found {
@@ -4586,7 +4586,7 @@ func TestTunnelInstallRefusesIncompleteConnectorContractBeforeMintingKey(t *test
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No enrollment token was minted") {
 		t.Fatalf("async reply = %q, want incomplete connector contract refusal", async)
 	}
 	if apiKeyHits != 0 {
@@ -4617,7 +4617,7 @@ func TestTunnelInstallRefusesLegacyResourceIDBeforeMintingKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No bootstrap key was minted") {
+	if !strings.Contains(async, "complete Connector routing metadata") || !strings.Contains(async, "No enrollment token was minted") {
 		t.Fatalf("async reply = %q, want legacy resource ID refusal", async)
 	}
 	if apiKeyHits != 0 {
