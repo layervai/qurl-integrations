@@ -146,8 +146,8 @@ jobs:
           fi
           echo "image=$pins" >> "$GITHUB_OUTPUT"
 
-      - name: Verify production Connector v0.5 S3 route
-        run: bash origins/s3-static-connector/test/qurl_connector_v05_contract.sh
+      - name: Verify released Connector S3 route
+        run: bash origins/s3-static-connector/test/qurl_connector_release_contract.sh
 
       - name: Verify Slack-pinned S3 origin (linux/amd64)
         env:
