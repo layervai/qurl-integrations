@@ -191,8 +191,8 @@ const (
 	testForbiddenBootstrapArgv   = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
 	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
-	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
-	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
+	testTunnelKeyHistoryNote     = "prompts for the enrollment token"
+	testTunnelKeyPromptLine      = "Paste qURL enrollment token (input hidden)"
 	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}`
 	testTunnelECSAPIKeyNameLine  = `"name": "QURL_API_KEY"`
 	testForbiddenConnectorSlug   = "QURL_CONNECTOR_SLUG"
@@ -608,9 +608,9 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$" + testTunnelSlug + "` is ready in this channel.",
-		"temporary bootstrap key expires in 1 hour and was sent separately by DM",
+		"temporary enrollment token expires in 1 hour and was sent separately by DM",
 		"The install instructions below either prompt for it or reference your platform secret manager",
-		"Paste the DM key only when prompted or into your secret manager",
+		"Paste the DM token only when prompted or into your secret manager",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
 		"set -eu",
@@ -626,7 +626,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelAgentDirFragment,
 		testTunnelImageRef,
-		"Treat the separate bootstrap-key DM as secret",
+		"Treat the separate enrollment-token DM as secret",
 		"Keep the qURL agent-state directory, volume, or PVC",
 		"/qurl get $" + testTunnelSlug,
 	} {
@@ -647,7 +647,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		t.Fatalf("PostDM target = team %q user %q, want %q/%q", dm.teamID, dm.userID, testAdminTeamID, testAdminUserID)
 	}
 	for _, want := range []string{
-		"Temporary qURL Connector bootstrap key for `" + testTunnelSlug + "` expires in 1 hour.",
+		"Temporary qURL Connector enrollment token for `" + testTunnelSlug + "` expires in 1 hour.",
 		"install instructions were sent separately",
 		"Delete this DM from Slack history",
 		testTunnelAPIKey,
@@ -2944,7 +2944,7 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "did not return a bootstrap key") {
+	if !strings.Contains(async, "did not return an enrollment token") {
 		t.Fatalf("async reply = %q, want missing-plaintext copy", async)
 	}
 	if revokeHits != 1 {
@@ -2969,7 +2969,7 @@ func TestTunnelInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "Slack DM delivery") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "Slack DM delivery") {
 		t.Fatalf("async reply = %q, want DM-unwired pre-mint refusal", async)
 	}
 	if resourceHits != 0 || apiKeyHits != 0 {
@@ -3208,7 +3208,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		t.Fatalf("response_url bodies leaked bootstrap key: %v", responseBodies)
 	}
 	last := responseBodies[len(responseBodies)-1]
-	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard it") {
+	if !strings.Contains(last, "enrollment token was revoked") || !strings.Contains(last, "discard it") {
 		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
 	}
 	if len(*dmPosts) != 2 {
@@ -3217,7 +3217,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
 		t.Fatalf("first DM = %q, want bootstrap key", (*dmPosts)[0].text)
 	}
-	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
+	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that token") {
 		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
 	}
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
@@ -3801,7 +3801,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 			t.Fatalf("DM-failure notice leaked install secret/details %q: %s", forbidden, failure)
 		}
 	}
-	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
+	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary token was revoked") {
 		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
 	}
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
@@ -3876,7 +3876,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	}
 	failure := parseSlackText(t, []byte(responseBodies[0]))
 	for _, want := range []string{
-		"temporary key was revoked",
+		"temporary token was revoked",
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
 		"/qurl-admin protect-connector",

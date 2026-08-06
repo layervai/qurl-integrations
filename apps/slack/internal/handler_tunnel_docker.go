@@ -59,10 +59,10 @@ docker run -d \
 	if err != nil {
 		return "", err
 	}
-	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead."
+	intro := "Run this whole block on the Linux Docker host where your local HTTP server container is running. It prompts for the enrollment token so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead."
 	if args.WebRef == "" {
 		intro += " Replace the value inside `WEB_CONTAINER='YOUR_WEB_CONTAINER_NAME'` first; keep the quotes."
 	}
 	intro += " It writes or overwrites the qURL Connector's qurl-proxy config in the current directory. Re-running this install briefly restarts the qURL Connector container if it already exists. Because the qURL Connector shares the web container's network namespace, restart the qURL Connector after replacing or recreating the web container."
-	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the bootstrap key file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker logs -f qurl-connector-" + args.Slug + "`; after the qURL Connector connects, delete the enrollment-token file.", nil
 }

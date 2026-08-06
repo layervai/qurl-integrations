@@ -586,13 +586,13 @@ func agentConfirmAttributedCard(cardText, asker, approver string) string {
 // before the claim — which also keeps the trigger budget for views.open.
 //
 // The modal SUBMIT (processTunnelInstall) is the real enforcement point: it
-// re-checks admin, collects env/port, mints the bootstrap key, and delivers the
+// re-checks admin, collects env/port, mints the enrollment token, and delivers the
 // install instructions. The proposal is sparse, so v1 opens the blank wizard and
 // the admin completes it.
 //
 // KEY-DELIVERY PRIVACY: meta.ResponseURL is the PUBLIC card's response_url, but
 // processTunnelInstall posts only key-free install instructions there. The
-// temporary bootstrap key goes to meta.UserID by DM, so the same-user-submit gate
+// temporary enrollment token goes to meta.UserID by DM, so the same-user-submit gate
 // forces submitter == clicker == secret target; if those diverged the key would go
 // to the wrong person. processTunnelInstall revokes the key if either Slack
 // delivery step fails, so a freshly minted key cannot stay live after an

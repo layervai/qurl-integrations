@@ -128,11 +128,13 @@ row and pick additional channels.
 guided form asks for the connector ID, an optional channel alias, the local
 port, and where you'll run it (Docker, Docker Compose, ECS/Fargate, or
 Kubernetes). qURL replies with copy-paste deploy steps tailored to that
-choice, plus a short-lived bootstrap key. Remove the bootstrap key from your
-environment once the connector logs show it has connected. If you run the
-paste block from a non-interactive shell, set `QURL_BOOTSTRAP_KEY` from your
-secret manager instead of typing it at the prompt. If you generate setup more
-than once, use the newest Slack message and discard older install blocks.
+choice, plus a one-shot enrollment token that expires after one hour. Remove
+the enrollment token from your environment once the Connector logs show it has
+connected; the machine keeps the device credential produced by enrollment. If
+you run the paste block from a non-interactive shell, set the legacy-named
+`QURL_BOOTSTRAP_KEY` variable from your secret manager instead of typing the
+token at the prompt. If you generate setup more than once, use the newest Slack
+message and discard older install blocks.
 
 **URL resource** — for an existing web URL. Point an alias at it and it's
 immediately available for `/qurl get` in the channel.
