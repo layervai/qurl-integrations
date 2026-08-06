@@ -1444,7 +1444,7 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 	}
 }
 
-func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
+func TestCreateAPIKeyConnectorEnrollmentToken(t *testing.T) {
 	var gotHeader string
 	var gotWire map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1456,24 +1456,25 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 			t.Fatalf("decode body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"key_id":      "key_abc123DEF456",
-			"api_key":     "lv_live_secret",
-			"name":        testTunnelSlug + " bootstrap",
-			"scopes":      []string{"qurl:agent", "qurl:write"},
-			"status":      StatusActive,
-			"key_type":    APIKeyTypeTunnelBootstrap,
-			"tunnel_slug": testTunnelSlug,
-			"expires_at":  "2026-05-28T00:00:00Z",
+			"key_id":     "key_abc123DEF456",
+			"api_key":    "lv_live_secret",
+			"name":       testTunnelSlug + " enrollment",
+			"scopes":     []string{"qurl:agent", "qurl:write"},
+			"status":     StatusActive,
+			"kind":       CredentialKindEnrollmentToken,
+			"target":     CredentialTargetConnector,
+			"claims":     []map[string]string{{"type": CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			"expires_at": "2026-05-28T00:00:00Z",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	got, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
-		Name:           testTunnelSlug + " bootstrap",
-		Scopes:         []string{"qurl:agent", "qurl:write"},
-		KeyType:        APIKeyTypeTunnelBootstrap,
-		TunnelSlug:     testTunnelSlug,
+		Name:           testTunnelSlug + " enrollment",
+		Kind:           CredentialKindEnrollmentToken,
+		Target:         CredentialTargetConnector,
+		Claims:         []CredentialClaim{{Type: CredentialClaimTypeConnector, ID: testTunnelSlug}},
 		ExpiresIn:      "24h",
 		IdempotencyKey: "bootstrap-key-12345678901234567890",
 	})
@@ -1483,13 +1484,19 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	if gotHeader != "bootstrap-key-12345678901234567890" {
 		t.Errorf("Idempotency-Key = %q", gotHeader)
 	}
-	if gotWire["key_type"] != APIKeyTypeTunnelBootstrap || gotWire["tunnel_slug"] != testTunnelSlug {
-		t.Errorf("body = %+v, want tunnel bootstrap fields", gotWire)
+	if gotWire["kind"] != CredentialKindEnrollmentToken || gotWire["target"] != CredentialTargetConnector {
+		t.Errorf("body = %+v, want connector enrollment fields", gotWire)
 	}
-	if _, ok := gotWire["purpose"]; ok {
-		t.Errorf("body contained deprecated purpose field: %+v", gotWire)
+	for _, legacy := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
+		if _, ok := gotWire[legacy]; ok {
+			t.Errorf("body contained retired %s field: %+v", legacy, gotWire)
+		}
 	}
-	if got.APIKey != "lv_live_secret" || got.KeyType != APIKeyTypeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
+	claims, ok := gotWire["claims"].([]any)
+	if !ok || len(claims) != 1 || claims[0].(map[string]any)["type"] != CredentialClaimTypeConnector || claims[0].(map[string]any)["id"] != testTunnelSlug {
+		t.Errorf("body = %+v, want one connector claim", gotWire)
+	}
+	if got.APIKey != "lv_live_secret" || got.Kind != CredentialKindEnrollmentToken || got.Target != CredentialTargetConnector || len(got.Claims) != 1 || got.Claims[0].ID != testTunnelSlug {
 		t.Errorf("decoded key = %+v", got)
 	}
 	if got.ExpiresAt == nil {
