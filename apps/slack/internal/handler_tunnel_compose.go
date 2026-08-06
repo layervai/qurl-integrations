@@ -91,7 +91,7 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_
 	}
 	introParts := []string{
 		"Run this from your Docker Compose project directory on the Linux Docker host.",
-		"It prompts for the bootstrap key so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead.",
+		"It prompts for the enrollment token so the secret does not land in shell history; use a trusted host and shell because local administrators can inspect process state during setup. If your terminal echoes pasted input, stop and use a platform secret manager instead.",
 	}
 	if args.WebRef == "" {
 		introParts = append(introParts, "Replace `YOUR_COMPOSE_SERVICE_NAME` in the block first, fill the Docker service/container field, or use `service:<name>` / `web_container:<name>` in the typed command.")
@@ -102,5 +102,5 @@ docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_
 		"If Compose recreates the web service container, bring the qURL Connector service up again too.",
 	)
 	intro := strings.Join(introParts, " ")
-	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-connector-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the qURL Connector connects, delete the bootstrap key file.", nil
+	return intro + "\n\n" + block + "\n\nVerify with `docker compose -f compose.yaml -f qurl-connector-" + args.Slug + ".compose.yaml logs -f qurl-connector-" + args.Slug + "`; if you changed `APP_COMPOSE_FILE`, use that file there too. After the qURL Connector connects, delete the enrollment-token file.", nil
 }

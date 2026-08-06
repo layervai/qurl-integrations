@@ -32,7 +32,7 @@ const (
 	// submissions inside that window so async install errors can still reach
 	// the admin after Slack accepts the view submission. This is intentionally
 	// shorter than tunnelBootstrapTTL so any submitted modal still leaves setup
-	// headroom after the one-time bootstrap key is minted; a modal submitted at
+	// headroom after the one-shot enrollment token is minted; a modal submitted at
 	// the end of this window still leaves roughly 35 minutes on the bootstrap
 	// key for the operator to start the sidecar.
 	tunnelInstallModalTTL = 25 * time.Minute
@@ -90,8 +90,8 @@ const (
 	agentConnectorAuditWriteTimeout                             = 5 * time.Second
 	agentProtectConnectorAuditOutcome                           = "qURL Connector setup generated."
 	agentProtectConnectorAuditDegradedOutcome                   = "qURL Connector setup generated; install instructions were delivered as plain text after Block Kit delivery failed."
-	agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome  = "qURL Connector setup generated, but Slack could not deliver the bootstrap-key DM and the bootstrap key was revoked."
-	agentProtectConnectorAuditInstructionsDeliveryFailedOutcome = "qURL Connector setup generated, but Slack could not confirm install-instructions delivery and the bootstrap key was revoked."
+	agentProtectConnectorAuditBootstrapDMDeliveryFailedOutcome  = "qURL Connector setup generated, but Slack could not deliver the enrollment-token DM and the enrollment token was revoked."
+	agentProtectConnectorAuditInstructionsDeliveryFailedOutcome = "qURL Connector setup generated, but Slack could not confirm install-instructions delivery and the enrollment token was revoked."
 	agentProtectConnectorAuditBuildFailedOutcome                = "qURL Connector setup failed before install instructions were delivered."
 	agentProtectConnectorAuditDMUnconfiguredOutcome             = "qURL Connector setup was not started because Slack DM delivery is not configured."
 	agentProtectConnectorAuditAdminVerificationFailedOutcome    = "qURL Connector setup was not started because qURL admin status could not be verified."
@@ -102,7 +102,7 @@ const (
 	agentProtectConnectorAuditConfigurationUnavailableOutcome   = "qURL Connector setup was not started because qURL admin configuration was unavailable."
 	agentProtectConnectorAuditUnexpectedFailureOutcome          = "qURL Connector setup stopped unexpectedly before the outcome was recorded."
 	agentProtectConnectorAuditUnknownOutcome                    = "qURL Connector setup outcome could not be determined."
-	tunnelInstallUnexpectedFailureNotice                        = "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received a bootstrap-key DM from this attempt, discard it and run `/qurl-admin protect-connector` again."
+	tunnelInstallUnexpectedFailureNotice                        = "qURL Connector setup stopped unexpectedly before install instructions were confirmed. If you received an enrollment-token DM from this attempt, discard it and run `/qurl-admin protect-connector` again."
 )
 
 const (
@@ -561,7 +561,7 @@ func (h *Handler) guidedTunnelSlackAppInstallMessage() string {
 }
 
 func (h *Handler) tunnelBootstrapDMSlackAppInstallMessage() string {
-	return h.latestSlackAppInstallMessage("qURL Connector bootstrap-key DM delivery", "run `/qurl-admin protect-connector` again")
+	return h.latestSlackAppInstallMessage("qURL Connector enrollment-token DM delivery", "run `/qurl-admin protect-connector` again")
 }
 
 func (h *Handler) latestSlackAppInstallMessage(subject, retryInstruction string) string {
@@ -590,10 +590,10 @@ func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Dura
 
 // errMissingBootstrapPlaintext is returned by [Handler.buildTunnelInstall] when
 // the qURL API accepted the key create but omitted the plaintext key.
-var errMissingBootstrapPlaintext = errors.New("bootstrap key response missing plaintext")
+var errMissingBootstrapPlaintext = errors.New("enrollment token response missing plaintext")
 
 // tunnelInstallBuild is the successful result of [Handler.buildTunnelInstall]:
-// the created resource, the minted bootstrap key, key-free install instructions,
+// the created resource, the minted enrollment token, token-free install instructions,
 // and the secret-bearing DM body. client is retained so the caller can revoke key
 // if either delivery step is never confirmed.
 type tunnelInstallBuild struct {
@@ -606,14 +606,14 @@ type tunnelInstallBuild struct {
 
 // buildTunnelInstall is the qURL Connector mutation core, decoupled from how the
 // result is delivered: create-or-find the tunnel resource, bind the channel
-// alias, mint + validate a short-lived bootstrap key, and render the install
+// alias, mint + validate a short-lived enrollment token, and render the install
 // instructions. Both the `/qurl-admin protect-connector` slash path
 // ([Handler.processTunnelInstall]) and the conversation-mode confirm path drive
 // it, so the create/mint/render logic lives in exactly one place.
 //
 // It does NOT gate admin — callers gate first (requireAdminSync on the slash
 // path; a CheckAdmin re-check on the confirm path). On failure it returns the
-// user-facing message to post plus the error, revoking any bootstrap key it
+// user-facing message to post plus the error, revoking any enrollment token it
 // minted if key validation or the final render fails (so a key whose install
 // block never rendered doesn't stay live). The same revoke-on-build-failure
 // invariant is protected across panics between key mint and the successful
@@ -657,7 +657,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sanitizeAPIError(err, "Failed to create or find the qURL Connector resource"), err
 	}
 
-	// Bind/verify the channel shortcut before minting the bootstrap key so an
+	// Bind/verify the channel shortcut before minting the enrollment token so an
 	// alias conflict fails without creating a secret. After the resource exists,
 	// the binding is intentionally durable across later key/render/delivery
 	// failures: rerunning the same install reuses the same slug+shortcut and
@@ -671,7 +671,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	preparedMessage, err := h.prepareTunnelInstallMessage(args)
 	if err != nil {
 		log.Error("tunnel install: render preflight failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		return nil, "qURL Connector setup could not render the install instructions. No bootstrap key was minted. Please retry or contact support.", err
+		return nil, "qURL Connector setup could not render the install instructions. No enrollment token was minted. Please retry or contact support.", err
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
@@ -683,32 +683,32 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
 	if err != nil {
-		log.Error("tunnel install: bootstrap key mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
-		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector bootstrap key"), err
+		log.Error("tunnel install: enrollment token mint failed", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID)
+		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), err
 	}
 	mintedKey = key
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "missing_plaintext")
-		return nil, "The qURL API did not return a bootstrap key. Please retry or contact support.", errMissingBootstrapPlaintext
+		return nil, "The qURL API did not return an enrollment token. Please retry or contact support.", errMissingBootstrapPlaintext
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		log.Error("tunnel install: create api key response was not shell-renderable", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "shell_validation_failed")
-		return nil, "The qURL API returned a bootstrap key in an unexpected format. Please retry or contact support.", err
+		return nil, "The qURL API returned an enrollment token in an unexpected format. Please retry or contact support.", err
 	}
 
 	msg, err := preparedMessage.render(args, key, aliasStatus, resource.Description, h.now())
 	if err != nil {
-		log.Error("tunnel install: render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		log.Error("tunnel install: render failed after enrollment token mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "message_render_failed")
-		return nil, "qURL Connector setup could not render the install instructions. The temporary bootstrap key was revoked. Please retry or contact support.", err
+		return nil, "qURL Connector setup could not render the install instructions. The temporary enrollment token was revoked. Please retry or contact support.", err
 	}
 	secretMsg, err := renderTunnelBootstrapSecretMessage(args, key, h.now())
 	if err != nil {
-		log.Error("tunnel install: secret message render failed after bootstrap key mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
+		log.Error("tunnel install: secret message render failed after enrollment token mint", "error", err, "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "secret_message_render_failed")
-		return nil, "qURL Connector setup could not render the bootstrap-key DM. The temporary bootstrap key was revoked. Please retry or contact support.", err
+		return nil, "qURL Connector setup could not render the enrollment-token DM. The temporary enrollment token was revoked. Please retry or contact support.", err
 	}
 
 	buildComplete = true
@@ -747,8 +747,8 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 	}
 	args := req.args
 	if h.cfg.PostDM == nil {
-		log.Error("tunnel install: bootstrap-key DM delivery is not configured; refusing to mint", "slug", args.Slug)
-		_ = h.postResponse(log, req.responseURL, "qURL Connector setup needs Slack DM delivery for the temporary bootstrap key. No bootstrap key was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
+		log.Error("tunnel install: enrollment-token DM delivery is not configured; refusing to mint", "slug", args.Slug)
+		_ = h.postResponse(log, req.responseURL, "qURL Connector setup needs Slack DM delivery for the temporary enrollment token. No enrollment token was minted. Ask the operator to update the qURL Slack app, then run `/qurl-admin protect-connector` again.")
 		return agentProtectConnectorAuditDMUnconfiguredResult
 	}
 	build, failMsg, err := h.buildTunnelInstall(ctx, log, req.teamID, req.channelID, req.userID, args, req.attemptID)
@@ -768,10 +768,10 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 
 	log.Info("tunnel install succeeded", "slug", args.Slug, "shortcut", args.Alias, "environment", args.Environment, "resource_id", build.resource.ResourceID)
 	if err := h.postTunnelInstallDM(ctx, req.teamID, req.enterpriseID, req.userID, build.secretMessage); err != nil {
-		log.Error("tunnel install: Slack DM delivery failed after bootstrap key mint; revoking key before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
+		log.Error("tunnel install: Slack DM delivery failed after enrollment token mint; revoking token before posting install instructions", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "dm_delivery_failed")
 		panicCleanup = nil
-		message := "Slack could not deliver the qURL Connector bootstrap key by DM, so the temporary key was revoked and the install instructions were not posted."
+		message := "Slack could not deliver the qURL Connector enrollment token by DM, so the temporary token was revoked and the install instructions were not posted."
 		if errors.Is(err, ErrSlackMissingScope) {
 			message += " " + h.tunnelBootstrapDMSlackAppInstallMessage()
 		} else {
@@ -795,23 +795,23 @@ func (h *Handler) processTunnelInstallCore(ctx context.Context, log *slog.Logger
 		// revoke notice. The key is still revoked because delivery was not
 		// confirmed, and the structured logs retain the resource/key IDs for
 		// operators investigating a disappeared install attempt.
-		log.Error("tunnel install: Slack follow-up delivery failed after bootstrap key mint; revoking key because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
+		log.Error("tunnel install: Slack follow-up delivery failed after enrollment token mint; revoking token because delivery confirmation was not received", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "slack_delivery_confirmed", false, "slack_delivery_may_have_persisted", true)
 		safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "response_url_delivery_failed")
 		panicCleanup = nil
 		// Intentionally notify both places: the DM reaches admins who saw the key
 		// first, while response_url covers the command surface if DM delivery fails.
-		if err := h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The qURL Connector install instructions were not delivered, so the temporary bootstrap key from the previous DM was revoked. Discard that key and run `/qurl-admin protect-connector` again."); err != nil {
-			log.Error("tunnel install: Slack discard DM delivery failed after bootstrap key revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_dm_delivery_failed")
+		if err := h.postTunnelInstallDM(h.baseCtx, req.teamID, req.enterpriseID, req.userID, "The qURL Connector install instructions were not delivered, so the temporary enrollment token from the previous DM was revoked. Discard that token and run `/qurl-admin protect-connector` again."); err != nil {
+			log.Error("tunnel install: Slack discard DM delivery failed after enrollment token revoke", "error", err, "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_dm_delivery_failed")
 		}
-		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the bootstrap key was revoked. If the install block from this attempt appears later, discard it because its key is no longer valid. Run `/qurl-admin protect-connector` again.") {
-			log.Error("tunnel install: Slack discard notice delivery failed after bootstrap key revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
+		if !h.postResponse(log, req.responseURL, "Slack did not confirm delivery of the qURL Connector install instructions, so the enrollment token was revoked. If the install block from this attempt appears later, discard it because its token is no longer valid. Run `/qurl-admin protect-connector` again.") {
+			log.Error("tunnel install: Slack discard notice delivery failed after enrollment token revoke", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "event", "tunnel_bootstrap_discard_notice_delivery_failed")
 		}
 		return agentProtectConnectorAuditInstructionsDeliveryFailedResult
 	}
 	// Unreachable with today's enum; if a future delivery state reaches this guard
 	// before the exhaustive linter catches it, fail closed by revoking the key and
 	// surfacing the anomaly as unexpected.
-	log.Error("tunnel install: unknown Slack follow-up delivery state after bootstrap key mint; revoking key", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "delivery_state", uint8(delivery))
+	log.Error("tunnel install: unknown Slack follow-up delivery state after enrollment token mint; revoking token", "slug", args.Slug, "resource_id", build.resource.ResourceID, "key_id", build.key.KeyID, "delivery_state", uint8(delivery))
 	safeRevokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, build.client, build.key, "unknown_response_url_delivery_state")
 	panicCleanup = nil
 	return agentProtectConnectorAuditUnexpectedFailureResult
@@ -938,14 +938,14 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 		log = slog.Default()
 	}
 	if key == nil || strings.TrimSpace(key.KeyID) == "" {
-		log.Warn("tunnel install: cannot revoke bootstrap key after install failure; missing key_id", "event", "tunnel_bootstrap_cleanup_skipped", "reason", reason)
+		log.Warn("tunnel install: cannot revoke enrollment token after install failure; missing key_id", "event", "tunnel_bootstrap_cleanup_skipped", "reason", reason)
 		return
 	}
 	if parent == nil {
 		parent = context.Background()
 	}
 	// Use the handler base context instead of the request context so a canceled
-	// Slack request cannot strand a freshly minted bootstrap key, while process
+	// Slack request cannot strand a freshly minted enrollment token, while process
 	// shutdown can still cancel cleanup. Keep this synchronous while install
 	// work runs behind a bounded semaphore: it trades up to a few seconds of
 	// worker occupancy on rare render failures for deterministic cleanup before
@@ -957,13 +957,13 @@ func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Log
 	if err := c.RevokeAPIKey(ctx, key.KeyID); err != nil {
 		var apiErr *client.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-			log.Info("tunnel install: bootstrap key already absent after install failure", "event", "tunnel_bootstrap_cleanup_already_absent", "key_id", key.KeyID, "reason", reason)
+			log.Info("tunnel install: enrollment token already absent after install failure", "event", "tunnel_bootstrap_cleanup_already_absent", "key_id", key.KeyID, "reason", reason)
 			return
 		}
-		log.Error("tunnel install: bootstrap key cleanup failed after install failure", "error", err, "event", "tunnel_bootstrap_cleanup_failed", "key_id", key.KeyID, "reason", reason)
+		log.Error("tunnel install: enrollment token cleanup failed after install failure", "error", err, "event", "tunnel_bootstrap_cleanup_failed", "key_id", key.KeyID, "reason", reason)
 		return
 	}
-	log.Info("tunnel install: revoked bootstrap key after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
+	log.Info("tunnel install: revoked enrollment token after install failure", "event", "tunnel_bootstrap_cleanup_succeeded", "key_id", key.KeyID, "reason", reason)
 }
 
 func safeRevokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
@@ -972,7 +972,7 @@ func safeRevokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog
 	}
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Error("tunnel install: panic revoking bootstrap key after failure", "recover", rec, "reason", reason, "stack", string(debug.Stack()))
+			log.Error("tunnel install: panic revoking enrollment token after failure", "recover", rec, "reason", reason, "stack", string(debug.Stack()))
 		}
 	}()
 	revokeBootstrapKeyAfterInstallFailure(parent, log, c, key, reason)
@@ -1022,7 +1022,7 @@ func tunnelBootstrapTimeAttemptID(prefix string, at time.Time) string {
 func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alias, resourceID string) (string, error) {
 	existing, found, err := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, alias)
 	if err != nil {
-		return ":warning: failed to check the existing channel alias; no bootstrap key was minted.", err
+		return ":warning: failed to check the existing channel alias; no enrollment token was minted.", err
 	}
 	if found {
 		if existing == resourceID {
@@ -1040,7 +1040,7 @@ func (h *Handler) ensureTunnelAlias(ctx context.Context, teamID, channelID, alia
 				return fmt.Sprintf("qURL alias `$%s` is ready in this channel.", alias), nil
 			}
 		}
-		return ":warning: failed to bind the channel alias; no bootstrap key was minted.", err
+		return ":warning: failed to bind the channel alias; no enrollment token was minted.", err
 	}
 	return fmt.Sprintf("qURL alias `$%s` is ready in this channel.", alias), nil
 }
@@ -1106,9 +1106,9 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	}
 	b.WriteString(" is ready to install.\n")
 	b.WriteString(aliasStatus)
-	b.WriteString("\n\nInstall instructions are below. The temporary bootstrap key ")
+	b.WriteString("\n\nInstall instructions are below. The temporary enrollment token ")
 	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
-	b.WriteString(" and was sent separately by DM. The install instructions below either prompt for it or reference your platform secret manager; do not add the key to the instruction text itself. Paste the DM key only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.")
+	b.WriteString(" and was sent separately by DM. The install instructions below either prompt for it or reference your platform secret manager; do not add the token to the instruction text itself. Paste the DM token only when prompted or into your secret manager. If a terminal echoes pasted input, stop and use a platform secret manager instead.")
 	b.WriteString(p.imageNote)
 	b.WriteString("\n\n")
 	b.WriteString(p.imageLine)
@@ -1116,7 +1116,7 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 	b.WriteString(p.environmentLabel)
 	b.WriteString(".\n\n")
 	b.WriteString(p.instructions)
-	b.WriteString("\n\nTreat the separate bootstrap-key DM as secret until the sidecar connects. After the first successful start, remove the mounted bootstrap key from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
+	b.WriteString("\n\nTreat the separate enrollment-token DM as secret until the sidecar connects. After the first successful start, remove the mounted enrollment token from the runtime. Keep the qURL agent-state directory, volume, or PVC; it stores the sidecar identity used on future restarts.\n\n")
 	b.WriteString("Then users can run `/qurl get $")
 	b.WriteString(args.Alias)
 	b.WriteString("`.")
@@ -1125,7 +1125,7 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 
 func renderTunnelBootstrapSecretMessage(args *tunnelInstallArgs, key *client.APIKey, now time.Time) (string, error) {
 	if key == nil {
-		return "", errors.New("bootstrap api key is missing")
+		return "", errors.New("enrollment token is missing")
 	}
 	if err := validateBootstrapAPIKeyForShell(key.APIKey); err != nil {
 		return "", err
@@ -1135,20 +1135,20 @@ func renderTunnelBootstrapSecretMessage(args *tunnelInstallArgs, key *client.API
 		return "", err
 	}
 	var b strings.Builder
-	b.WriteString("Temporary qURL Connector bootstrap key for `")
+	b.WriteString("Temporary qURL Connector enrollment token for `")
 	b.WriteString(args.Slug)
 	b.WriteString("` ")
 	b.WriteString(tunnelBootstrapExpiryLabel(key, now))
-	b.WriteString(".\n\nPaste this secret only when the install instructions prompt for it, or store it in the target platform's secret manager. The install instructions were sent separately and intentionally do not include this key.\n\n")
+	b.WriteString(".\n\nPaste this secret only when the install instructions prompt for it, or store it in the target platform's secret manager. The install instructions were sent separately and intentionally do not include this token.\n\n")
 	b.WriteString(keyBlock)
-	b.WriteString("\n\nAfter the qURL Connector connects, remove this bootstrap key from the runtime. Delete this DM from Slack history when your workspace retention policy allows.")
+	b.WriteString("\n\nAfter the qURL Connector connects, remove this enrollment token from the runtime. Delete this DM from Slack history when your workspace retention policy allows.")
 	return b.String(), nil
 }
 
 func (h *Handler) renderTunnelInstallMessage(args *tunnelInstallArgs, key *client.APIKey, aliasStatus string) (string, error) {
 	// Convenience wrapper for focused tests; production uses
 	// prepareTunnelInstallMessage(...).render(...) so render failures before
-	// CreateAPIKey cannot strand a bootstrap key.
+	// CreateAPIKey cannot strand an enrollment token.
 	prepared, err := h.prepareTunnelInstallMessage(args)
 	if err != nil {
 		return "", err
@@ -1177,7 +1177,7 @@ func tunnelInstallRateLimitMessage(err error) string {
 }
 
 func (h *Handler) renderTunnelInstallInstructions(args *tunnelInstallArgs, image string) (string, error) {
-	// Instructions deliberately do not receive the plaintext bootstrap key:
+	// Instructions deliberately do not receive the plaintext enrollment token:
 	// prepareTunnelInstallMessage can preflight all environment-specific
 	// rendering before CreateAPIKey, and processTunnelInstall delivers the
 	// validated key through a separate DM.
@@ -1252,7 +1252,7 @@ func renderBootstrapKeyPromptShell() string {
     echo "Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal." >&2
     exit 1
   fi
-  printf 'Paste qURL bootstrap key (input hidden): ' >&2
+  printf 'Paste qURL enrollment token (input hidden): ' >&2
   STTY_STATE="$(stty -g 2>/dev/null | tr -d '[:space:]' || true)"
   if [ -n "$STTY_STATE" ]; then
     stty -echo
@@ -1264,7 +1264,7 @@ func renderBootstrapKeyPromptShell() string {
       trap - INT TERM EXIT
     fi
     printf '\n' >&2
-    echo "Bootstrap key is required." >&2
+    echo "Enrollment token is required." >&2
     exit 1
   fi
   if [ -n "$STTY_STATE" ]; then
@@ -1274,13 +1274,13 @@ func renderBootstrapKeyPromptShell() string {
   printf '\n' >&2
 fi
 if [ -z "$QURL_BOOTSTRAP_KEY" ]; then
-  echo "Bootstrap key is required." >&2
+  echo "Enrollment token is required." >&2
   exit 1
 fi`
 }
 
 func renderBootstrapKeyFileInstallShell(targetPath string) string {
-	// Avoid passing the bootstrap key as a command argument: under some shells
+	// Avoid passing the enrollment token as a command argument: under some shells
 	// printf may be external, which would briefly expose the secret in argv.
 	// Keep this aligned with validateBootstrapAPIKeyForShell: the key is streamed
 	// through an unquoted heredoc, so that validator owns heredoc-expansion safety.
@@ -1329,7 +1329,7 @@ func tunnelBootstrapExpiryLabel(key *client.APIKey, now time.Time) string {
 }
 
 func validateBootstrapAPIKeyForShell(apiKey string) error {
-	// qurl-service bootstrap keys must be printable single-line ASCII tokens
+	// qurl-service enrollment tokens must be printable single-line ASCII tokens
 	// without heredoc expansion bytes. ASCII keeps ${#QURL_BOOTSTRAP_KEY} and
 	// head -c byte counts aligned across shells/locales. Dollar signs,
 	// backticks, and backslashes are rejected because the generated install
@@ -1460,7 +1460,7 @@ var installFencedCodeBlock = regexp.MustCompile("(?s)```\\n(.*?)\\n```")
 // [slackSectionTextMaxBytes] or a code segment exceeds [slackRichTextMaxBytes],
 // or the block count would exceed [slackMessageBlockMax]. A false result is the
 // caller's signal to post the plain-text message instead: the install flow
-// MUST stay deliverable (an unconfirmed delivery revokes the bootstrap key), so
+// MUST stay deliverable (an unconfirmed delivery revokes the enrollment token), so
 // blocks are strictly a best-effort enhancement over the always-safe text post.
 func installMessageBlocks(msg string) ([]any, bool) {
 	matches := installFencedCodeBlock.FindAllStringSubmatchIndex(msg, -1)
@@ -1511,7 +1511,7 @@ func installMessageBlocks(msg string) ([]any, bool) {
 // Block Kit rendering (copyable rich_text_preformatted snippets) and falling
 // back to the plain-text post on any block-path miss. The final text delivery
 // retries once before reporting failure because a false negative revokes a
-// freshly minted bootstrap key. Returns whether SOME rendering was delivered,
+// freshly minted enrollment token. Returns whether SOME rendering was delivered,
 // so the caller revokes only when delivery remains unconfirmed after the
 // fallback and retry. A text success after a rejected Block Kit attempt is
 // reported distinctly so agent audit rows can show the degraded delivery.
@@ -1523,7 +1523,7 @@ func installMessageBlocks(msg string) ([]any, bool) {
 //
 // If Slack actually persists the blocks post but the client reports failure
 // (e.g. a timeout), the text retry posts a second copy. Neither copy carries the
-// bootstrap key, and the already-DM'd key is not revoked, so this is benign: at
+// enrollment token, and the already-DM'd token is not revoked, so this is benign: at
 // worst the operator sees two ephemeral install messages, never a leaked or
 // stale key.
 func (h *Handler) postInstallInstructions(log *slog.Logger, responseURL, msg string) tunnelInstallInstructionsDelivery {
