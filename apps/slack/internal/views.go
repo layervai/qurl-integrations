@@ -221,7 +221,7 @@ type TunnelInstallAgentMetadata struct {
 // response_url lets the async installer post the same ephemeral follow-up
 // shape as the direct `/qurl-admin protect-connector <slug>` path.
 // CreatedAtUnix lets the submit handler reject stale modals before creating a
-// resource or minting a bootstrap key; Slack response URLs are time-limited.
+// resource or minting an enrollment token; Slack response URLs are time-limited.
 // Agent is present only for the conversation-mode confirm flow, never for
 // slash-command initiated connector setup.
 type TunnelInstallModalMetadata struct {

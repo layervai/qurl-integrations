@@ -2403,7 +2403,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 			lines = append(lines,
 				"• `/qurl-admin protect` — Guided chooser for qURL Connector setup or existing URL resources (recommended)",
 				"• `/qurl-admin protect-connector` — Guided connector setup for web apps and HTTP APIs (Docker, Docker Compose, ECS/Fargate, Kubernetes)",
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed connector setup for web apps and HTTP APIs; creates a bootstrap key and binds `$<id>` in this channel",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Typed Connector setup for web apps and HTTP APIs; creates an enrollment token and binds `$<id>` in this channel",
 				"• `/qurl-admin protect-url` — Guided URL picker; choose an existing URL resource and channel alias",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Typed: protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Typed: protect an existing no-alias URL resource in this channel",
@@ -2411,7 +2411,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 			)
 		} else {
 			lines = append(lines,
-				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar bootstrap key and bind `$<id>` in this channel",
+				"• `/qurl-admin protect-connector <id> [env:...] [port:8080] [alias:$alias]` — Create a sidecar enrollment token and bind `$<id>` in this channel",
 				"• `/qurl-admin protect-url $<alias> [as:$channel-alias]` — Protect an existing URL resource in this channel",
 				"• `/qurl-admin protect-url url:<target-url> as:$channel-alias` — Protect an existing no-alias URL resource in this channel",
 				"  Guided setup (bare `/qurl-admin protect-connector` / `protect-url`) is not enabled in this deployment; use the typed forms above.",

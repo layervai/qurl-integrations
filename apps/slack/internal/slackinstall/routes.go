@@ -107,7 +107,7 @@ type TokenStore interface {
 // DefaultBotScopes returns the minimum Slack bot scopes the install flow
 // requests. `commands` installs the slash-command surface. `chat:write` lets the
 // bot post replies. `im:write` lets the bot open or resume 1:1 DMs before
-// delivering `dm:true` links and qURL Connector bootstrap keys. `users:read`
+// delivering `dm:true` links and qURL Connector enrollment tokens. `users:read`
 // lets the owner-transfer verb verify the target user before rewriting owner_id.
 // Do not add `views:write`: it is not a real Slack scope, so Slack rejects it
 // at the authorize step with `invalid_scope`.

@@ -564,7 +564,7 @@ func TestS3WebsiteInstallDMFailureMissingScopeIncludesInstallHint(t *testing.T) 
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
 	}
 	for _, want := range []string{
-		"temporary key was revoked",
+		"temporary token was revoked",
 		testSlackAppInstallHint,
 		testSlackAppInstallLink,
 		testProtectConnectorCmd,
@@ -600,7 +600,7 @@ func TestS3WebsiteInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) 
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, fixedNow, tunnelEnvDocker))
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "Slack DM delivery") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "Slack DM delivery") {
 		t.Fatalf("async reply = %q, want DM-unwired pre-mint refusal", async)
 	}
 	if resourceHits != 0 || apiKeyHits != 0 {
@@ -667,7 +667,7 @@ func TestS3WebsiteInstallInstructionsDeliveryFailureRevokesAndSendsDiscardNotice
 		t.Fatalf("response_url bodies leaked bootstrap key: %v", responseBodies)
 	}
 	last := responseBodies[len(responseBodies)-1]
-	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard") {
+	if !strings.Contains(last, "enrollment token was revoked") || !strings.Contains(last, "discard") {
 		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
 	}
 	if len(*dmPosts) != 2 {
@@ -676,7 +676,7 @@ func TestS3WebsiteInstallInstructionsDeliveryFailureRevokesAndSendsDiscardNotice
 	if !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("first DM = %q, want bootstrap key", (*dmPosts)[0].text)
 	}
-	if strings.Contains((*dmPosts)[1].text, testTunnelModalKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
+	if strings.Contains((*dmPosts)[1].text, testTunnelModalKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that token") {
 		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
 	}
 }
@@ -719,7 +719,7 @@ func TestS3WebsiteInstallRevokesWhenAPIKeyPlaintextMissing(t *testing.T) {
 	h.processS3WebsiteInstall(context.Background(), slog.Default(), testS3WebsiteInstallRequest(inv.responseU.URL, now, tunnelEnvDocker))
 
 	async := parseSlackText(t, inv.captured.waitForBody(t, 2*time.Second))
-	if !strings.Contains(async, "did not return a bootstrap key") {
+	if !strings.Contains(async, "did not return an enrollment token") {
 		t.Fatalf("async reply = %q, want missing-plaintext copy", async)
 	}
 	if revokeHits != 1 {
@@ -837,7 +837,7 @@ func TestS3WebsiteInstallRejectsIncompleteResourceBeforeMintingBootstrapKey(t *t
 	if len(*dmPosts) != 0 {
 		t.Fatalf("bootstrap DM posts = %+v, want none", *dmPosts)
 	}
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "connector_routing_id") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "connector_routing_id") {
 		t.Fatalf("async reply = %q, want incomplete identity error before key mint", async)
 	}
 	if _, found, err := h.cfg.AdminStore.LookupChannelAlias(context.Background(), testAdminTeamID, testTunnelChannelID, "team-dash"); err != nil || found {

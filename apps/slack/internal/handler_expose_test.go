@@ -62,7 +62,7 @@ func TestExposeChooserBlocks(t *testing.T) {
 		exposeURLActionID,
 		"Protect qURL Connector",
 		"Protect URL",
-		"Generate install instructions and a bootstrap key",
+		"Generate install instructions and a one-shot enrollment token",
 		"Choose an existing URL resource and bind a channel alias",
 		testExposeChannel,
 	} {
