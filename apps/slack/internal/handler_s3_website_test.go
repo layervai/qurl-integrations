@@ -450,8 +450,17 @@ func TestS3WebsiteInstallModalSubmissionPinsResourceIdentity(t *testing.T) {
 	if apiKeyHits != 1 {
 		t.Fatalf("api key hits = %d, want 1", apiKeyHits)
 	}
-	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
-		t.Errorf("api key body = %+v, want connector bootstrap key", apiKeyBody)
+	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector {
+		t.Errorf("api key body = %+v, want Connector enrollment token", apiKeyBody)
+	}
+	claims, ok := apiKeyBody["claims"].([]any)
+	if !ok || len(claims) != 1 || claims[0].(map[string]any)["type"] != client.CredentialClaimTypeConnector || claims[0].(map[string]any)["id"] != testTunnelSlug {
+		t.Errorf("api key body = %+v, want one connector claim", apiKeyBody)
+	}
+	for _, retired := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
+		if _, ok := apiKeyBody[retired]; ok {
+			t.Errorf("api key body contained retired %s field: %+v", retired, apiKeyBody)
+		}
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)

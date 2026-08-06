@@ -20,7 +20,7 @@ import (
 const (
 	// TODO(upstream-contract): keep this digest in lockstep with the
 	// origins/s3-static-connector image promoted for Slack S3 website installs.
-	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:402983490c2551dcbb7c51a1ecdaebe826320dce0720c050dfbd21f0f101f31f"
+	defaultS3StaticConnectorImage = "ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3"
 	defaultS3WebsiteDescription   = "Slack qURL Connector install for S3 website"
 	defaultS3WebsiteIndexDocument = "index.html"
 	// TODO(upstream-contract): keep in lockstep with
@@ -511,10 +511,10 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 	}
 
 	key, err := c.CreateAPIKey(ctx, &client.CreateAPIKeyInput{
-		Name:           "Slack qURL Connector bootstrap " + args.Slug,
-		Scopes:         []string{tunnelScopeAgent, tunnelScopeWrite},
-		KeyType:        client.APIKeyTypeTunnelBootstrap,
-		TunnelSlug:     args.Slug,
+		Name:           "Slack qURL Connector enrollment " + args.Slug,
+		Kind:           client.CredentialKindEnrollmentToken,
+		Target:         client.CredentialTargetConnector,
+		Claims:         []client.CredentialClaim{{Type: client.CredentialClaimTypeConnector, ID: args.Slug}},
 		ExpiresIn:      tunnelBootstrapTTL,
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
