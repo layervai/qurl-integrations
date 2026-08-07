@@ -66,8 +66,8 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("login_hint") != "" {
 		t.Errorf("login_hint: got %q want empty for legacy setup", q.Get("login_hint"))
 	}
-	if !strings.Contains(q.Get("scope"), "qurl:write") || !strings.Contains(q.Get("scope"), "qurl:read") {
-		t.Errorf("scope missing qurl:write/read: %q", q.Get("scope"))
+	if !strings.Contains(q.Get("scope"), "qurl:write") || !strings.Contains(q.Get("scope"), "qurl:read") || !strings.Contains(q.Get("scope"), "qurl:agent") {
+		t.Errorf("scope missing qurl:read/write/agent: %q", q.Get("scope"))
 	}
 	if !strings.Contains(q.Get("scope"), "openid") || !strings.Contains(q.Get("scope"), "email") {
 		t.Errorf("scope missing openid/email: %q", q.Get("scope"))
