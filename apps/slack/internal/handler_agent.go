@@ -1117,7 +1117,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	}
 	// Deliver: an interactive confirm card for an executable proposal once the
 	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
-	h.deliverAgentResult(log, env, replyTS, &result)
+	h.deliverAgentResultScoped(log, env, replyTS, operatingChannel, &result)
 }
 
 func (h *Handler) prepareAgentEventAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string, pre *loadedHistory, preadmitted bool) (string, *loadedHistory, bool) {
