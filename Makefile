@@ -1,8 +1,8 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-teams build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
-all: check build-slack build-cli
+all: check build-slack build-teams build-cli
 
 ## Formatting
 
@@ -46,6 +46,9 @@ coverage:
 
 build-slack:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-w -s -X main.version=$(VERSION)" -o release/slack/qurl-bot-slack ./apps/slack/cmd/
+
+build-teams:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-w -s -X main.version=$(VERSION)" -o release/teams/qurl-bot-teams ./apps/teams/cmd/
 
 build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually if needed.
 	CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION)" -o release/cli/qurl ./apps/cli/cmd/

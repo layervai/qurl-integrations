@@ -6,17 +6,20 @@ Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that 
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. Microsoft Teams and Zapier are planned.
+This monorepo contains qURL integrations across several surfaces — Slack and
+Microsoft Teams secure-access bots plus a CLI tool (Go), a Discord app
+(Node.js), and a Chrome extension for Gmail — along with shared Go libraries.
+Zapier is still planned.
 
 ## Structure
 
 ```
 apps/                Per-integration apps (independent release tracks)
   slack/             Slack Secure Access Agent — /qurl slash commands (Go)
+  teams/             Microsoft Teams Secure Access Agent — channel + DM workflows (Go)
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   cli/               CLI — create & manage qURLs from the terminal (Go)
-  teams/             Microsoft Teams (planned)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
@@ -40,9 +43,9 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 
 ## Configuration
 
-The Slack, Discord, and CLI apps connect to the qURL API:
+The Slack, Teams, Discord, and CLI apps connect to the qURL API:
 
-- **Endpoint** — the qURL API is `https://api.layerv.ai`, set via `QURL_ENDPOINT`. Required for Slack; the CLI and Discord use it by default.
+- **Endpoint** — the qURL API is `https://api.layerv.ai`, set via `QURL_ENDPOINT`. Required for Slack and Teams; the CLI and Discord use it by default.
 - **Authentication** — an API key (`lv_live_…`) in `QURL_API_KEY`.
 
 The Chrome extension uploads to a qURL file server instead; see its [README](apps/chrome-extension/README.md) for configuration.
@@ -56,6 +59,17 @@ anyone runs `/qurl get` to mint a one-time link.
 See [apps/slack/README.md](apps/slack/README.md) for the full command reference
 and onboarding walkthrough, and [apps/slack/docs/operating.md](apps/slack/docs/operating.md)
 for deploying and operating the Secure Access Agent.
+
+## Teams Connector Onboarding
+
+Onboarding is also install-first on Teams: install the bot, open a personal
+chat with it once, run `@qurl setup <email>` in a channel, then an admin runs
+`@qurl protect-url ...` or `@qurl protect-connector ...`. Users in that channel
+can then mint one-time links with `@qurl get ...`.
+
+See [apps/teams/README.md](apps/teams/README.md) for the Teams command surface
+and [apps/teams/docs/operating.md](apps/teams/docs/operating.md) for
+deployment and OAuth/runtime wiring.
 
 ## Development
 
@@ -71,9 +85,11 @@ go test ./...
 
 # Run tests for a specific app
 go test ./apps/slack/...
+go test ./apps/teams/...
 
-# Build Slack Lambda
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
+# Build bot binaries
+make build-slack
+make build-teams
 ```
 
 ## Contributing

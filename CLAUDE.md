@@ -14,9 +14,10 @@
 Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-python](https://github.com/layervai/qurl-python), [qurl-typescript](https://github.com/layervai/qurl-typescript).
 
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
+- `apps/teams/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
-- `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
+- `apps/zapier/` — placeholder dir, no implementation yet
 - `origins/s3-static-connector/` — reusable private S3 static origin image
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
