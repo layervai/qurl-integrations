@@ -50,12 +50,12 @@ const (
 const oauthHandlerTimeout = 60 * time.Second
 
 // apiKeyScopes is the qurl-service scope set requested by the legacy fallback
-// for the workspace API key. Returned fresh on each call so an in-package caller
-// can't mutate the slice and silently change every future mint. authorizeURL
-// also weaves "openid email" in for the id_token email claim consumed by the
-// success page.
+// for the workspace API key and by the Auth0 user token that mints it. Returned
+// fresh on each call so an in-package caller can't mutate the slice and silently
+// change every future mint. authorizeURL also weaves "openid email" in for the
+// id_token email claim consumed by the success page.
 func apiKeyScopes() []string {
-	return []string{"qurl:read", "qurl:write"}
+	return []string{"qurl:read", "qurl:write", "qurl:agent"}
 }
 
 // callbackURL composes the Auth0 redirect_uri. SlackBaseURL is tolerated
@@ -436,9 +436,11 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 	q.Set("response_type", "code")
 	q.Set("client_id", cfg.Auth0ClientID)
 	q.Set("audience", cfg.Auth0Audience)
-	// Scope set is symmetric with the Discord flow (qurl-oauth.js):
-	// APIKeyScopes for the qurl-service mint, openid + email for the
-	// id_token claim used in the success-page binding readout.
+	// The qurl:* scopes authorize the qurl-service mint and become the legacy
+	// workspace key's requested scopes. qurl:agent must be present on the JWT
+	// because agent-bearing durable keys may only be minted by a principal that
+	// already holds qurl:agent. openid + email provide the id_token claim used in
+	// the success-page binding readout.
 	q.Set("scope", strings.Join(apiKeyScopes(), " ")+" openid email")
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)

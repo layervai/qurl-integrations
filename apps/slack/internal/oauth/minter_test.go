@@ -208,6 +208,11 @@ func TestHTTPAPIKeyMinterMintWorkspaceReplacementUsesAPIKeysEndpoint(t *testing.
 	if strings.Join(gotBody.Scopes, ",") != strings.Join(apiKeyScopes(), ",") {
 		t.Errorf("scopes = %#v want %#v", gotBody.Scopes, apiKeyScopes())
 	}
+	// Pin the literal contract independently of apiKeyScopes() so an
+	// accidental edit to the shared set cannot silently pass both call sites.
+	if strings.Join(gotBody.Scopes, ",") != "qurl:read,qurl:write,qurl:agent" {
+		t.Errorf("scopes = %#v want the pinned qurl:read/write/agent workspace set", gotBody.Scopes)
+	}
 }
 
 func TestHTTPAPIKeyMinterMintWorkspaceReplacementRejectsUnsafeIdempotencyKey(t *testing.T) {
