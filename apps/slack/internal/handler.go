@@ -399,6 +399,14 @@ type Config struct {
 	// intentionally exercise the dev/sandbox fallback path.
 	TunnelImage string
 
+	// HubTrust optionally threads the Connector Hub trust triple into
+	// `/qurl-admin protect-connector` install snippets. The public envs are
+	// QURL_CONNECTOR_HUB_HOST/_PORT/_SERVER_PUBLIC_KEY_B64; the zero value
+	// means unset and every renderer omits the triple entirely. cmd/main.go's
+	// validateHubTrustEnv enforces all-or-none before this is ever set, so a
+	// half-configured value never reaches a renderer.
+	HubTrust HubTrust
+
 	// S3OriginImage is the private S3 website origin image shown by the
 	// `/qurl-admin protect` S3 website flow. Empty falls back to this package's
 	// digest-pinned default; production can set QURL_S3_ORIGIN_IMAGE to a

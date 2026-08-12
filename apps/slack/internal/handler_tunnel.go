@@ -166,6 +166,25 @@ type tunnelInstallArgs struct {
 	// enrollment and knocks use qurl-go's assigned-cell UDP lifecycle instead of
 	// a public HTTP registration or bootstrap endpoint.
 	APIURL string
+	// HubTrust optionally carries the Connector Hub trust triple into the
+	// rendered install snippets. The zero value means unset, in which case
+	// every renderer omits the triple entirely; prepareTunnelInstallMessage
+	// populates this from Config.HubTrust, which cmd/main.go only ever sets
+	// after validateHubTrustEnv confirms all three envs are set together.
+	HubTrust HubTrust
+}
+
+// HubTrust is the Connector Hub trust triple (env
+// QURL_CONNECTOR_HUB_HOST/_PORT/_SERVER_PUBLIC_KEY_B64) threaded from Config
+// into the customer-facing install snippets. It exists only because current
+// connector image builds ship "dark" (no compiled-in Hub pin) and refuse to
+// start without it; once release images carry a pinned Hub, operators leave
+// all three envs unset and the zero value here keeps every renderer's output
+// unchanged.
+type HubTrust struct {
+	Host         string
+	Port         string
+	PublicKeyB64 string
 }
 
 type tunnelInstallRequest struct {
@@ -1112,6 +1131,10 @@ func (h *Handler) prepareTunnelInstallMessage(args *tunnelInstallArgs) (prepared
 	if err := ValidateTunnelImageRef(image); err != nil {
 		return preparedTunnelInstallMessage{}, fmt.Errorf("tunnel image reference: %w", err)
 	}
+	// cmd/main.go only ever sets Config.HubTrust after validateHubTrustEnv
+	// confirms all three envs are set together, so this is either the zero
+	// value (every renderer omits the triple) or a complete triple.
+	args.HubTrust = h.cfg.HubTrust
 	environmentLabel, err := args.Environment.label()
 	if err != nil {
 		return preparedTunnelInstallMessage{}, err

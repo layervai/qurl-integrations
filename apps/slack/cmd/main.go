@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -40,6 +41,12 @@ const (
 	envQURLConnectorImage         = "QURL_CONNECTOR_IMAGE"
 	envQURLConnectorImageFallback = "QURL_CONNECTOR_IMAGE_FALLBACK"
 	envQURLS3OriginImage          = "QURL_S3_ORIGIN_IMAGE"
+	envQURLConnectorHubHost       = "QURL_CONNECTOR_HUB_HOST"
+	envQURLConnectorHubPort       = "QURL_CONNECTOR_HUB_PORT"
+	envQURLConnectorHubKeyB64     = "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"
+	// requiredHubTrustPort is the only accepted QURL_CONNECTOR_HUB_PORT value:
+	// the Connector Hub always terminates NHP knocks on 443.
+	requiredHubTrustPort          = "443"
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
@@ -181,6 +188,10 @@ func run() error {
 		return err
 	}
 	s3OriginImage, err := readS3OriginImageConfig()
+	if err != nil {
+		return err
+	}
+	hubTrust, err := readHubTrustConfig()
 	if err != nil {
 		return err
 	}
@@ -349,6 +360,7 @@ func run() error {
 		SlackUserLookup:                slackUserLookup,
 		OpenView:                       openView,
 		TunnelImage:                    tunnelImage,
+		HubTrust:                       hubTrust,
 		S3OriginImage:                  s3OriginImage,
 		ConnectorAPIURL:                connectorAPIURL,
 		PostFeedback:                   postFeedback,
@@ -1278,6 +1290,54 @@ func readS3OriginImageConfig() (string, error) {
 		return "", fmt.Errorf("%s: %w", envQURLS3OriginImage, err)
 	}
 	return pinned, nil
+}
+
+// readHubTrustConfig reads the optional Connector Hub trust triple. Today's
+// connector image builds ship "dark" (no compiled-in Hub pin), so operators
+// running those builds must supply all three values for a Connector to start
+// at all; once release images carry a pinned Hub, operators leave all three
+// unset and this returns the zero HubTrust, which every renderer omits.
+func readHubTrustConfig() (internal.HubTrust, error) {
+	host := strings.TrimSpace(os.Getenv(envQURLConnectorHubHost))
+	port := strings.TrimSpace(os.Getenv(envQURLConnectorHubPort))
+	key := strings.TrimSpace(os.Getenv(envQURLConnectorHubKeyB64))
+	if err := validateHubTrustEnv(host, port, key); err != nil {
+		return internal.HubTrust{}, err
+	}
+	if host == "" {
+		return internal.HubTrust{}, nil
+	}
+	return internal.HubTrust{Host: host, Port: port, PublicKeyB64: key}, nil
+}
+
+// validateHubTrustEnv enforces that the Connector Hub trust triple is
+// configured all-or-none: a partial set fails fast here at startup, because a
+// half-configured Connector otherwise fails later and more confusingly, mid
+// enrollment.
+func validateHubTrustEnv(host, port, key string) error {
+	set := 0
+	for _, v := range []string{host, port, key} {
+		if v != "" {
+			set++
+		}
+	}
+	if set == 0 {
+		return nil
+	}
+	if set != 3 {
+		return fmt.Errorf("%s, %s, and %s must be set together or all left unset", envQURLConnectorHubHost, envQURLConnectorHubPort, envQURLConnectorHubKeyB64)
+	}
+	if port != requiredHubTrustPort {
+		return fmt.Errorf("%s=%q is unsupported; the Connector Hub only accepts %s", envQURLConnectorHubPort, port, requiredHubTrustPort)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		return fmt.Errorf("%s: invalid base64: %w", envQURLConnectorHubKeyB64, err)
+	}
+	if len(decoded) != 32 {
+		return fmt.Errorf("%s must decode to exactly 32 bytes (X25519 public key), got %d", envQURLConnectorHubKeyB64, len(decoded))
+	}
+	return nil
 }
 
 func readPinnedImageConfig(envName, image, floatingHint string) (string, error) {

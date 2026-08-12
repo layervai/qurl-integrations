@@ -368,6 +368,34 @@ func TestReadS3OriginImageConfig(t *testing.T) {
 	}
 }
 
+func TestHubTrustEnv_AllOrNone(t *testing.T) {
+	cases := []struct {
+		name    string
+		host    string
+		port    string
+		key     string
+		wantErr bool
+	}{
+		{name: "all unset ok", host: "", port: "", key: "", wantErr: false},
+		{name: "all set ok", host: "hub.example.com", port: "443", key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", wantErr: false},
+		{name: "host only fails", host: "hub.example.com", port: "", key: "", wantErr: true},
+		{name: "port must be 443", host: "hub.example.com", port: "62206", key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", wantErr: true},
+		{name: "malformed base64 key fails", host: "hub.example.com", port: "443", key: "not-valid-base64!!", wantErr: true},
+		{name: "key wrong decoded length fails", host: "hub.example.com", port: "443", key: "AAAA", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateHubTrustEnv(tc.host, tc.port, tc.key)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateHubTrustEnv(%q, %q, %q) = nil, want error", tc.host, tc.port, tc.key)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateHubTrustEnv(%q, %q, %q) = %v, want no error", tc.host, tc.port, tc.key, err)
+			}
+		})
+	}
+}
+
 func TestRunValidatesTunnelImageBeforeInfraSetup(t *testing.T) {
 	// run() validates the customer-rendered connector image after only the
 	// prerequisite public endpoint/signing-secret checks and before infra or
