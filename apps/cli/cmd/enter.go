@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-go/qurl"
-	"github.com/layervai/qurl-go/qv2"
 )
 
 // Friendly, jargon-free messages surfaced to customers. These are the ONLY
@@ -151,7 +150,7 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 		}
 		derByKID[kid] = der
 	}
-	ts, err := qv2.NewTrustStoreFromDER(derByKID)
+	ts, err := qurl.NewTrustStoreFromDER(derByKID)
 	if err != nil {
 		return qurl.Config{}, fmt.Errorf("build trust store: %w", err)
 	}
@@ -169,6 +168,6 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 
 	return qurl.Config{
 		TrustStore:     ts,
-		RelayAllowlist: qv2.NewRelayAllowlist(relays),
+		RelayAllowlist: qurl.NewRelayAllowlist(relays),
 	}, nil
 }
