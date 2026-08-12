@@ -38,6 +38,27 @@ func renderKubernetesTunnelInstructions(args *tunnelInstallArgs, image string) (
 	if err != nil {
 		return "", err
 	}
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so an empty hubTrustEnvYAML
+	// leaves the qurl-connector container's env: list byte-identical to the
+	// no-Hub-trust output.
+	hubTrustEnvYAML := ""
+	if args.HubTrust.Host != "" {
+		quotedHubHost, err := yamlSingleQuoted(args.HubTrust.Host)
+		if err != nil {
+			return "", err
+		}
+		quotedHubPort, err := yamlSingleQuoted(args.HubTrust.Port)
+		if err != nil {
+			return "", err
+		}
+		quotedHubKey, err := yamlSingleQuoted(args.HubTrust.PublicKeyB64)
+		if err != nil {
+			return "", err
+		}
+		hubTrustEnvYAML = fmt.Sprintf("      - name: QURL_CONNECTOR_HUB_HOST\n        value: %s\n      - name: QURL_CONNECTOR_HUB_PORT\n        value: %s\n      - name: QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64\n        value: %s\n",
+			quotedHubHost, quotedHubPort, quotedHubKey)
+	}
 	configYAML, err := renderTunnelConfigYAML(args)
 	if err != nil {
 		return "", err
@@ -80,13 +101,14 @@ spec:
 QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret), renderBootstrapKeyPromptShell(), renderBootstrapKeyToCommandShell(`kubectl create secret generic "$QURL_BOOTSTRAP_SECRET" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -`), quotedConfigMap, indentLines(configYAML, 4), quotedAgentPVC, quotedAuditPVC)
 
 	patch := renderKubernetesConnectorPodSpec(&kubernetesConnectorPodSpecArgs{
-		imageYAML:     quotedImage,
-		slugYAML:      quotedSlug,
-		apiURLYAML:    quotedAPIURL,
-		agentPVCYAML:  quotedAgentPVC,
-		auditPVCYAML:  quotedAuditPVC,
-		secretYAML:    quotedSecret,
-		configMapYAML: quotedConfigMap,
+		imageYAML:       quotedImage,
+		slugYAML:        quotedSlug,
+		hubTrustEnvYAML: hubTrustEnvYAML,
+		apiURLYAML:      quotedAPIURL,
+		agentPVCYAML:    quotedAgentPVC,
+		auditPVCYAML:    quotedAuditPVC,
+		secretYAML:      quotedSecret,
+		configMapYAML:   quotedConfigMap,
 	})
 
 	objectsBlock, err := slackCodeBlock(objects)
@@ -112,11 +134,16 @@ type kubernetesConnectorPodSpecArgs struct {
 	precedingContainers string
 	imageYAML           string
 	slugYAML            string
-	apiURLYAML          string
-	agentPVCYAML        string
-	auditPVCYAML        string
-	secretYAML          string
-	configMapYAML       string
+	// hubTrustEnvYAML is empty unless the caller has a Hub trust triple to
+	// thread through; renderKubernetesTunnelInstructions is the only caller
+	// that ever sets it today, so handler_s3_website.go's connector container
+	// is unaffected and keeps its current (unset) shape.
+	hubTrustEnvYAML string
+	apiURLYAML      string
+	agentPVCYAML    string
+	auditPVCYAML    string
+	secretYAML      string
+	configMapYAML   string
 }
 
 func renderKubernetesConnectorPodSpec(args *kubernetesConnectorPodSpecArgs) string {
@@ -200,7 +227,7 @@ containers:
         value: /run/secrets/qurl-connector/api_key
       - name: QURL_CONNECTOR_ID
         value: %s
-      - name: QURL_API_URL
+%s      - name: QURL_API_URL
         value: %s
       - name: QURL_AUDIT_FILE
         value: /var/log/layerv/qurl-connector/audit.log
@@ -239,7 +266,7 @@ volumes:
       sizeLimit: 1Mi
   - name: qurl-proxy
     configMap:
-      name: %s`, connectorVolumePermissionsImage, connectorVolumePermissionsImage, precedingContainers, args.imageYAML, args.slugYAML, args.apiURLYAML, args.agentPVCYAML, args.auditPVCYAML, args.secretYAML, args.configMapYAML)
+      name: %s`, connectorVolumePermissionsImage, connectorVolumePermissionsImage, precedingContainers, args.imageYAML, args.slugYAML, args.hubTrustEnvYAML, args.apiURLYAML, args.agentPVCYAML, args.auditPVCYAML, args.secretYAML, args.configMapYAML)
 }
 
 type kubernetesTunnelNames struct {

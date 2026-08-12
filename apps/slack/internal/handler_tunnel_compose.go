@@ -36,6 +36,32 @@ func renderDockerComposeTunnelInstructions(args *tunnelInstallArgs, image string
 	// parameter expansion is not recursive, so URL shell metacharacters remain
 	// literal when the heredoc expands this variable.
 	quotedAPIURLShell := shellSingleQuote(quotedAPIURL)
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so empty hubTrustShellVars/
+	// hubTrustEnvironmentYAML leave this block byte-identical to the
+	// no-Hub-trust output. Values route through the same YAML-then-shell
+	// quoting as QURL_API_URL_YAML above because, like the API URL, the Hub
+	// host is an unconstrained operator-supplied string expanded into this
+	// intentionally unquoted heredoc.
+	hubTrustShellVars := ""
+	hubTrustEnvironmentYAML := ""
+	if args.HubTrust.Host != "" {
+		quotedHubHost, err := yamlSingleQuoted(args.HubTrust.Host)
+		if err != nil {
+			return "", err
+		}
+		quotedHubPort, err := yamlSingleQuoted(args.HubTrust.Port)
+		if err != nil {
+			return "", err
+		}
+		quotedHubKey, err := yamlSingleQuoted(args.HubTrust.PublicKeyB64)
+		if err != nil {
+			return "", err
+		}
+		hubTrustShellVars = fmt.Sprintf("QURL_CONNECTOR_HUB_HOST_YAML=%s\nQURL_CONNECTOR_HUB_PORT_YAML=%s\nQURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML=%s\n",
+			shellSingleQuote(quotedHubHost), shellSingleQuote(quotedHubPort), shellSingleQuote(quotedHubKey))
+		hubTrustEnvironmentYAML = "      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}\n      QURL_CONNECTOR_HUB_PORT: ${QURL_CONNECTOR_HUB_PORT_YAML}\n      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}\n"
+	}
 	// SECURITY: The Compose heredoc below is intentionally unquoted so it can
 	// expand WEB_SERVICE, QURL_CONNECTOR_ID, AGENT_STATE_DIR, and SECRET_DIR
 	// into the generated file. Trust assumptions: WEB_SERVICE comes from
@@ -57,7 +83,7 @@ WEB_SERVICE=%s
 
 QURL_CONNECTOR_ID=%s
 CONNECTOR_SERVICE=%s
-QURL_API_URL_YAML=%s
+%sQURL_API_URL_YAML=%s
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
 AUDIT_DIR="/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}"
@@ -110,10 +136,10 @@ services:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
       QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log
       QURL_CONNECTOR_ID: ${QURL_CONNECTOR_ID}
-      QURL_API_URL: ${QURL_API_URL_YAML}
+%s      QURL_API_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, quotedAPIURLShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage)
+docker compose -f "$APP_COMPOSE_FILE" -f "$QURL_COMPOSE_FILE" up -d "$CONNECTOR_SERVICE"`, renderPortablePipefailShell(), renderSudoDetectionShell(), webService, renderRequiredShellNameGuard("WEB_SERVICE", "YOUR_COMPOSE_SERVICE_NAME", "the Compose service name for your local HTTP server", "A-Za-z0-9_-", "letters, numbers, underscores, and hyphens"), shellSingleQuote(args.Slug), tunnelService, hubTrustShellVars, quotedAPIURLShell, configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedTunnelServiceName, quotedImage, hubTrustEnvironmentYAML)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {

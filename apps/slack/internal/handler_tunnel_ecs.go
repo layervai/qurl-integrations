@@ -107,17 +107,28 @@ func renderECSFargateTunnelInstructions(args *tunnelInstallArgs, image string) (
 }
 
 func renderECSSidecarContainerJSON(args *tunnelInstallArgs, image string) (string, error) {
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so an unset HubTrust leaves
+	// this environment list unchanged.
+	environment := []ecsEnvironmentVar{{Name: ecsConnectorIDEnv, Value: args.Slug}}
+	if args.HubTrust.Host != "" {
+		environment = append(environment,
+			ecsEnvironmentVar{Name: "QURL_CONNECTOR_HUB_HOST", Value: args.HubTrust.Host},
+			ecsEnvironmentVar{Name: "QURL_CONNECTOR_HUB_PORT", Value: args.HubTrust.Port},
+			ecsEnvironmentVar{Name: "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64", Value: args.HubTrust.PublicKeyB64},
+		)
+	}
+	environment = append(environment,
+		ecsEnvironmentVar{Name: "QURL_API_URL", Value: args.APIURL},
+		ecsEnvironmentVar{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
+	)
 	container := ecsContainerDefinition{
 		Name:                   connectorContainerName,
 		Image:                  image,
 		User:                   ecsConnectorUser,
 		Essential:              false,
 		ReadonlyRootFilesystem: true,
-		Environment: []ecsEnvironmentVar{
-			{Name: ecsConnectorIDEnv, Value: args.Slug},
-			{Name: "QURL_API_URL", Value: args.APIURL},
-			{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
-		},
+		Environment:            environment,
 		// TODO(qurl-connector-ecs-secret-file): prefer QURL_API_KEY_FILE once the
 		// ECS/Fargate guide uses a file-mounted secret runtime instead of native
 		// Secrets Manager environment injection.

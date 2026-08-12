@@ -5,6 +5,7 @@ import (
 	"context"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -303,6 +304,63 @@ func kubernetesPodSpecFragmentFromInstructions(t *testing.T, got string) string 
 		t.Fatalf("Kubernetes instructions missing pod spec code block terminator:\n%s", got)
 	}
 	return got[patchCodeStart : patchCodeStart+patchCodeEnd]
+}
+
+func TestRenderKubernetesTunnelInstructionsHubTrustSet(t *testing.T) {
+	t.Parallel()
+	args := testTunnelInstallArgs()
+	args.HubTrust = testTunnelHubTrust()
+
+	got := mustRenderKubernetesTunnelInstructions(t, args, testTunnelImageRef)
+	fragment := kubernetesPodSpecFragmentFromInstructions(t, got)
+
+	var podSpecFragment struct {
+		Containers []struct {
+			Name string              `yaml:"name"`
+			Env  []ecsEnvironmentVar `yaml:"env"`
+		} `yaml:"containers"`
+	}
+	if err := yaml.Unmarshal([]byte(fragment), &podSpecFragment); err != nil {
+		t.Fatalf("PodSpec fragment YAML did not parse: %v", err)
+	}
+	if len(podSpecFragment.Containers) != 1 || podSpecFragment.Containers[0].Name != "qurl-connector" {
+		t.Fatalf("PodSpec fragment containers = %+v, want one qurl-connector container", podSpecFragment.Containers)
+	}
+	env := map[string]string{}
+	names := make([]string, 0, len(podSpecFragment.Containers[0].Env))
+	for _, e := range podSpecFragment.Containers[0].Env {
+		env[e.Name] = e.Value
+		names = append(names, e.Name)
+	}
+	for name, want := range map[string]string{
+		"QURL_CONNECTOR_HUB_HOST":                  testTunnelHubHost,
+		"QURL_CONNECTOR_HUB_PORT":                  testTunnelHubPort,
+		"QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64": testTunnelHubKeyB64,
+	} {
+		if got := env[name]; got != want {
+			t.Fatalf("Kubernetes container env %s = %q, want %q", name, got, want)
+		}
+	}
+	idIdx := slices.Index(names, "QURL_CONNECTOR_ID")
+	hubIdx := slices.Index(names, "QURL_CONNECTOR_HUB_HOST")
+	apiIdx := slices.Index(names, "QURL_API_URL")
+	if idIdx < 0 || hubIdx < 0 || apiIdx < 0 || idIdx >= hubIdx || hubIdx >= apiIdx {
+		t.Fatalf("Kubernetes container env order = %v, want QURL_CONNECTOR_ID before Hub trust before QURL_API_URL", names)
+	}
+}
+
+// wantKubernetesHubUnsetGolden is byte-for-byte what renderKubernetesTunnelInstructions
+// produced for testTunnelInstallArgs()+testTunnelImageRef before Hub trust
+// passthrough existed, captured mechanically (not hand-transcribed) to prove
+// the unset path is unchanged rather than assume it.
+const wantKubernetesHubUnsetGolden = "Run this once in the target namespace, then add the init-container/sidecar/volumes block to the same pod spec as the target container so `127.0.0.1:8080` reaches the local service.\n- Use one PVC per sidecar replica; if you scale replicas, use a StatefulSet with a volumeClaimTemplate instead of sharing this PVC.\n- The Connector uses separate state and audit PVCs. qurl-go rejects group-writable identity state, so do not add pod-level `fsGroup`; the permissions init container enforces owner-only state modes before each start.\n- Your admission policy must permit the two root init containers: volume permissions uses CHOWN, DAC_OVERRIDE, and FOWNER, while the one-time bootstrap copy uses CHOWN only. The long-running Connector remains nonroot, read-only-root, seccomp-confined, and capability-free.\n- The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session. The apply pipeline briefly carries a generated Secret manifest between `kubectl` processes.\n- After the pod connects, create and roll out a warm-start workload revision that removes `qurl-bootstrap-copy`, both enrollment-token volumes and their mounts, and `QURL_API_KEY_FILE`. Verify the replacement pod connects from its persisted state, then delete the enrollment-token Secret; deleting it first prevents a replacement pod from starting.\n\n```\nset -eu\nif (set -o pipefail) 2>/dev/null; then\n  set -o pipefail\nfi\n\nQURL_BOOTSTRAP_SECRET='qurl-connector-prod-dashboard'\nif [ -z \"${QURL_BOOTSTRAP_KEY:-}\" ]; then\n  if [ ! -t 0 ]; then\n    echo \"Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal.\" >&2\n    exit 1\n  fi\n  printf 'Paste qURL enrollment token (input hidden): ' >&2\n  STTY_STATE=\"$(stty -g 2>/dev/null | tr -d '[:space:]' || true)\"\n  if [ -n \"$STTY_STATE\" ]; then\n    stty -echo\n    trap 'if [ -n \"$STTY_STATE\" ]; then stty \"$STTY_STATE\" 2>/dev/null || true; fi' INT TERM EXIT\n  fi\n  if ! IFS= read -r QURL_BOOTSTRAP_KEY; then\n    if [ -n \"$STTY_STATE\" ]; then\n      stty \"$STTY_STATE\"\n      trap - INT TERM EXIT\n    fi\n    printf '\\n' >&2\n    echo \"Enrollment token is required.\" >&2\n    exit 1\n  fi\n  if [ -n \"$STTY_STATE\" ]; then\n    stty \"$STTY_STATE\"\n    trap - INT TERM EXIT\n  fi\n  printf '\\n' >&2\nfi\nif [ -z \"$QURL_BOOTSTRAP_KEY\" ]; then\n  echo \"Enrollment token is required.\" >&2\n  exit 1\nfi\nQURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}\nhead -c \"$QURL_BOOTSTRAP_KEY_LEN\" <<QURL_BOOTSTRAP_KEY_EOF | kubectl create secret generic \"$QURL_BOOTSTRAP_SECRET\" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -\n$QURL_BOOTSTRAP_KEY\nQURL_BOOTSTRAP_KEY_EOF\nunset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN\n\nkubectl apply -f - <<'QURL_K8S_YAML_EOF'\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: 'qurl-proxy-prod-dashboard'\ndata:\n  qurl-proxy.yaml: |\n    routes:\n      - id: 'prod-dashboard'\n        type: http\n        local_ip: 127.0.0.1\n        local_port: 8080\n        resource_id: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA'\n        connector_routing_id: 'c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: 'qurl-agent-prod-dashboard'\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n  resources:\n    requests:\n      storage: 1Gi\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: 'qurl-audit-prod-dashboard'\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n  resources:\n    requests:\n      storage: 1Gi\nQURL_K8S_YAML_EOF\n```\n\nPod spec additions:\nAppend both generated init containers under your existing `initContainers:` list, append the `qurl-connector` container under `containers:`, and append the volumes under `volumes:`. Do not add pod-level `fsGroup` and do not duplicate existing YAML keys.\n\n```\ninitContainers:\n  - name: qurl-volume-permissions\n    image: docker.io/library/busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028\n    command:\n      - sh\n      - -ceu\n      - |\n        find /state -type d -exec chmod 0700 '{}' ';'\n        find /state -type f -exec chmod 0600 '{}' ';'\n        chown -R 65532:65532 /state\n        mkdir -p /audit/qurl-connector\n        find /audit -type d -exec chmod 0750 '{}' ';'\n        find /audit -type f -exec chmod 0640 '{}' ';'\n        chown -R 65532:65532 /audit\n        chown 65532:65532 /tmp-runtime\n        chmod 0700 /tmp-runtime\n    securityContext:\n      runAsUser: 0\n      runAsNonRoot: false\n      readOnlyRootFilesystem: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n        add: [\"CHOWN\", \"DAC_OVERRIDE\", \"FOWNER\"]\n      seccompProfile:\n        type: RuntimeDefault\n    volumeMounts:\n      - name: qurl-agent-state\n        mountPath: /state\n      - name: qurl-audit\n        mountPath: /audit\n      - name: qurl-tmp\n        mountPath: /tmp-runtime\n  - name: qurl-bootstrap-copy\n    image: docker.io/library/busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028\n    command:\n      - sh\n      - -ceu\n      - |\n        cp /bootstrap-source/api_key /bootstrap/api_key\n        chmod 0400 /bootstrap/api_key\n        chown 65532:65532 /bootstrap/api_key\n    securityContext:\n      runAsUser: 0\n      runAsNonRoot: false\n      readOnlyRootFilesystem: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n        add: [\"CHOWN\"]\n      seccompProfile:\n        type: RuntimeDefault\n    volumeMounts:\n      - name: qurl-bootstrap-source\n        mountPath: /bootstrap-source\n        readOnly: true\n      - name: qurl-bootstrap\n        mountPath: /bootstrap\ncontainers:\n  - name: qurl-connector\n    image: 'ghcr.io/layervai/qurl-connector:v-test'\n    securityContext:\n      runAsUser: 65532\n      runAsGroup: 65532\n      runAsNonRoot: true\n      readOnlyRootFilesystem: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n      seccompProfile:\n        type: RuntimeDefault\n    env:\n      - name: QURL_API_KEY_FILE\n        value: /run/secrets/qurl-connector/api_key\n      - name: QURL_CONNECTOR_ID\n        value: 'prod-dashboard'\n      - name: QURL_API_URL\n        value: 'https://api.sandbox.example/v1'\n      - name: QURL_AUDIT_FILE\n        value: /var/log/layerv/qurl-connector/audit.log\n    volumeMounts:\n      - name: qurl-tmp\n        mountPath: /tmp\n      - name: qurl-agent-state\n        mountPath: /var/lib/layerv/agent\n      - name: qurl-audit\n        mountPath: /var/log/layerv\n      - name: qurl-bootstrap\n        mountPath: /run/secrets/qurl-connector\n        readOnly: true\n      - name: qurl-proxy\n        mountPath: /work/qurl-proxy.yaml\n        subPath: qurl-proxy.yaml\n        readOnly: true\nvolumes:\n  - name: qurl-tmp\n    emptyDir:\n      sizeLimit: 64Mi\n  - name: qurl-agent-state\n    persistentVolumeClaim:\n      claimName: 'qurl-agent-prod-dashboard'\n  - name: qurl-audit\n    persistentVolumeClaim:\n      claimName: 'qurl-audit-prod-dashboard'\n  - name: qurl-bootstrap-source\n    secret:\n      secretName: 'qurl-connector-prod-dashboard'\n      # Mounted only into the root copy init; the runtime receives UID-65532 0400.\n      defaultMode: 0400\n  - name: qurl-bootstrap\n    emptyDir:\n      medium: Memory\n      sizeLimit: 1Mi\n  - name: qurl-proxy\n    configMap:\n      name: 'qurl-proxy-prod-dashboard'\n```"
+
+func TestRenderKubernetesTunnelInstructionsHubTrustUnsetOutputUnchanged(t *testing.T) {
+	t.Parallel()
+	got := mustRenderKubernetesTunnelInstructions(t, testTunnelInstallArgs(), testTunnelImageRef)
+	if got != wantKubernetesHubUnsetGolden {
+		t.Fatalf("Kubernetes instructions changed with HubTrust unset:\ngot:\n%s\nwant:\n%s", got, wantKubernetesHubUnsetGolden)
+	}
 }
 
 func TestKubernetesNameWithSlugHandlesEmptyTrimmedBase(t *testing.T) {

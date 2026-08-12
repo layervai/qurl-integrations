@@ -54,6 +54,12 @@ const (
 	testSlackTriggerID               = "trigger_test"
 	testEnterpriseID                 = "E_GRID"
 	testCapabilityAll                = "ALL"
+	// testTunnelHubHost/Port/KeyB64 are neutral placeholder Hub trust values
+	// (this repo is public; real values are never committed here). The key is
+	// 32 zero bytes base64-encoded, matching validateHubTrustEnv's shape check.
+	testTunnelHubHost   = "hub.example.com"
+	testTunnelHubPort   = "443"
+	testTunnelHubKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 )
 
 type failingAuthProvider struct{ err error }
@@ -173,6 +179,13 @@ func testTunnelInstallArgs() *tunnelInstallArgs {
 		KnockResourceID:    testTunnelKnockID,
 		APIURL:             testTunnelAPIURL,
 	}
+}
+
+// testTunnelHubTrust returns a complete HubTrust triple built from the
+// neutral placeholder values above, for renderer tests that exercise the
+// hub-set path.
+func testTunnelHubTrust() HubTrust {
+	return HubTrust{Host: testTunnelHubHost, Port: testTunnelHubPort, PublicKeyB64: testTunnelHubKeyB64}
 }
 
 func ecsMountPointPresent(mounts []ecsMountPoint, source, path string, readOnly bool) bool {

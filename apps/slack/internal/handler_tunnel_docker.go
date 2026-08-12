@@ -14,6 +14,14 @@ func renderDockerTunnelInstructions(args *tunnelInstallArgs, image string) (stri
 		return "", err
 	}
 	quotedAPIURL := shellSingleQuote(args.APIURL)
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so an empty hubTrustEnvLines
+	// leaves this block byte-identical to the no-Hub-trust output.
+	hubTrustEnvLines := ""
+	if args.HubTrust.Host != "" {
+		hubTrustEnvLines = fmt.Sprintf("  -e QURL_CONNECTOR_HUB_HOST=%s \\\n  -e QURL_CONNECTOR_HUB_PORT=%s \\\n  -e QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=%s \\\n",
+			shellSingleQuote(args.HubTrust.Host), shellSingleQuote(args.HubTrust.Port), shellSingleQuote(args.HubTrust.PublicKeyB64))
+	}
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -67,8 +75,8 @@ docker run -d \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_AUDIT_FILE=%s \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  -e QURL_API_URL=%s \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(connectorAuditFilePath), quotedAPIURL, shellSingleQuote(image))
+%s  -e QURL_API_URL=%s \
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), webContainer, renderRequiredShellNameGuard("WEB_CONTAINER", "YOUR_WEB_CONTAINER_NAME", "the Docker container name or ID for your local HTTP server", "A-Za-z0-9_.-", "letters, numbers, dots, underscores, and hyphens"), shellSingleQuote(args.Slug), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(connectorAuditFilePath), hubTrustEnvLines, quotedAPIURL, shellSingleQuote(image))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
