@@ -135,9 +135,11 @@ type kubernetesConnectorPodSpecArgs struct {
 	imageYAML           string
 	slugYAML            string
 	// hubTrustEnvYAML is empty unless the caller has a Hub trust triple to
-	// thread through; renderKubernetesTunnelInstructions is the only caller
-	// that ever sets it today, so handler_s3_website.go's connector container
-	// is unaffected and keeps its current (unset) shape.
+	// thread through. Both renderKubernetesTunnelInstructions and
+	// renderKubernetesS3WebsiteInstructions (handler_s3_website.go) set it
+	// for the shared qurl-connector container built here; neither ever sets
+	// it for a preceding container (for example the S3 origin), which has no
+	// Hub relationship.
 	hubTrustEnvYAML string
 	apiURLYAML      string
 	agentPVCYAML    string

@@ -79,6 +79,12 @@ type s3WebsiteInstallArgs struct {
 	ConnectorRoutingID string
 	KnockResourceID    string
 	APIURL             string
+	// HubTrust optionally carries the Connector Hub trust triple into the
+	// rendered qURL Connector container only (never the S3 origin container,
+	// which is a different image with no Hub relationship). The zero value
+	// means unset, in which case every renderer omits the triple entirely;
+	// prepareS3WebsiteInstallMessage populates this from Config.HubTrust.
+	HubTrust HubTrust
 }
 
 type s3WebsiteInstallRequest struct {
@@ -572,6 +578,10 @@ func (h *Handler) prepareS3WebsiteInstallMessage(args *s3WebsiteInstallArgs) (pr
 	if err := RequireS3OriginImageDigest(originImage); err != nil {
 		return preparedS3WebsiteInstallMessage{}, err
 	}
+	// cmd/main.go only ever sets Config.HubTrust after validateHubTrustEnv
+	// confirms all three envs are set together, so this is either the zero
+	// value (every renderer omits the triple) or a complete triple.
+	args.HubTrust = h.cfg.HubTrust
 	environmentLabel, err := args.Environment.label()
 	if err != nil {
 		return preparedS3WebsiteInstallMessage{}, err
@@ -717,6 +727,16 @@ func renderDockerS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImag
 	if err != nil {
 		return "", err
 	}
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so an empty hubTrustEnvLines
+	// leaves this block byte-identical to the no-Hub-trust output. Only the
+	// qURL Connector container gets the trio; the S3 origin container is a
+	// different image with no Hub relationship.
+	hubTrustEnvLines := ""
+	if args.HubTrust.Host != "" {
+		hubTrustEnvLines = fmt.Sprintf("  -e QURL_CONNECTOR_HUB_HOST=%s \\\n  -e QURL_CONNECTOR_HUB_PORT=%s \\\n  -e QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64=%s \\\n",
+			shellSingleQuote(args.HubTrust.Host), shellSingleQuote(args.HubTrust.Port), shellSingleQuote(args.HubTrust.PublicKeyB64))
+	}
 	docker := fmt.Sprintf(`set -eu
 %s
 
@@ -782,8 +802,8 @@ docker run -d \
   -e QURL_API_KEY_FILE="$SECRET_DIR/api_key" \
   -e QURL_AUDIT_FILE=%s \
   -e QURL_CONNECTOR_ID="$QURL_CONNECTOR_ID" \
-  -e QURL_API_URL=%s \
-  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(connectorAuditFilePath), shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
+%s  -e QURL_API_URL=%s \
+  %s`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(args.Bucket), shellSingleQuote(args.Region), shellSingleQuote(args.Prefix), shellSingleQuote(args.IndexDocument), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), shellSingleQuote(originImage), shellSingleQuote(connectorAuditFilePath), hubTrustEnvLines, shellSingleQuote(args.APIURL), shellSingleQuote(connectorImage))
 
 	block, err := slackCodeBlock(docker)
 	if err != nil {
@@ -812,6 +832,34 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 	quotedAPIURL, quotedBucket, quotedRegion := quoted[3], quoted[4], quoted[5]
 	quotedPrefix, quotedIndex := quoted[6], quoted[7]
 	quotedOriginService, quotedConnectorService := quoted[8], quoted[9]
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so empty hubTrustShellVars/
+	// hubTrustEnvironmentYAML leave this block byte-identical to the
+	// no-Hub-trust output. Values route through the same YAML-then-shell
+	// quoting as QURL_API_URL_YAML above because, like the API URL, the Hub
+	// host is an unconstrained operator-supplied string expanded into this
+	// intentionally unquoted heredoc. Only the qURL Connector service's
+	// environment: block gets the trio; the S3 origin service is a different
+	// image with no Hub relationship.
+	hubTrustShellVars := ""
+	hubTrustEnvironmentYAML := ""
+	if args.HubTrust.Host != "" {
+		quotedHubHost, err := yamlSingleQuoted(args.HubTrust.Host)
+		if err != nil {
+			return "", err
+		}
+		quotedHubPort, err := yamlSingleQuoted(args.HubTrust.Port)
+		if err != nil {
+			return "", err
+		}
+		quotedHubKey, err := yamlSingleQuoted(args.HubTrust.PublicKeyB64)
+		if err != nil {
+			return "", err
+		}
+		hubTrustShellVars = fmt.Sprintf("QURL_CONNECTOR_HUB_HOST_YAML=%s\nQURL_CONNECTOR_HUB_PORT_YAML=%s\nQURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML=%s\n",
+			shellSingleQuote(quotedHubHost), shellSingleQuote(quotedHubPort), shellSingleQuote(quotedHubKey))
+		hubTrustEnvironmentYAML = "      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}\n      QURL_CONNECTOR_HUB_PORT: ${QURL_CONNECTOR_HUB_PORT_YAML}\n      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}\n"
+	}
 	// The Compose heredoc is intentionally unquoted so the target host expands
 	// ${AGENT_STATE_DIR}, ${SECRET_DIR}, and ${QURL_CONNECTOR_ID}. Interpolated
 	// S3 fields reach this template only after strict modal validation, and image
@@ -826,7 +874,7 @@ func renderDockerComposeS3WebsiteInstructions(args *s3WebsiteInstallArgs, connec
 %s
 
 QURL_CONNECTOR_ID=%s
-QURL_API_URL_YAML=%s
+%sQURL_API_URL_YAML=%s
 ORIGIN_SERVICE_NAME=%s
 SECRET_DIR="/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}"
 AGENT_STATE_DIR="/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent"
@@ -888,10 +936,10 @@ services:
       QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key
       QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log
       QURL_CONNECTOR_ID: %s
-      QURL_API_URL: ${QURL_API_URL_YAML}
+%s      QURL_API_URL: ${QURL_API_URL_YAML}
 QURL_COMPOSE_YAML_EOF
 
-docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService, quotedSlug)
+docker compose -f "$QURL_COMPOSE_FILE" up -d`, renderPortablePipefailShell(), renderSudoDetectionShell(), shellSingleQuote(args.Slug), hubTrustShellVars, shellSingleQuote(quotedAPIURL), shellSingleQuote(originServiceName), configYAML, renderBootstrapKeyPromptShell(), renderBootstrapKeyFileInstallShell(`"$SECRET_DIR/api_key"`), quotedOriginService, quotedOriginImage, quotedBucket, quotedRegion, quotedPrefix, quotedIndex, quotedSlug, quotedConnectorService, quotedConnectorImage, quotedOriginService, quotedSlug, hubTrustEnvironmentYAML)
 
 	block, err := slackCodeBlock(compose)
 	if err != nil {
@@ -941,6 +989,23 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so an unset HubTrust leaves
+	// this environment list unchanged. Only the qURL Connector container gets
+	// the trio; the S3 origin container is a different image with no Hub
+	// relationship.
+	connectorEnvironment := []ecsEnvironmentVar{{Name: ecsConnectorIDEnv, Value: args.Slug}}
+	if args.HubTrust.Host != "" {
+		connectorEnvironment = append(connectorEnvironment,
+			ecsEnvironmentVar{Name: "QURL_CONNECTOR_HUB_HOST", Value: args.HubTrust.Host},
+			ecsEnvironmentVar{Name: "QURL_CONNECTOR_HUB_PORT", Value: args.HubTrust.Port},
+			ecsEnvironmentVar{Name: "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64", Value: args.HubTrust.PublicKeyB64},
+		)
+	}
+	connectorEnvironment = append(connectorEnvironment,
+		ecsEnvironmentVar{Name: "QURL_API_URL", Value: args.APIURL},
+		ecsEnvironmentVar{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
+	)
 	// The S3 origin is the protected workload, so both containers are essential:
 	// losing either one should fail/restart the ECS task.
 	containers := []ecsContainerDefinition{
@@ -965,11 +1030,7 @@ func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage,
 			User:                   ecsConnectorUser,
 			Essential:              true,
 			ReadonlyRootFilesystem: true,
-			Environment: []ecsEnvironmentVar{
-				{Name: ecsConnectorIDEnv, Value: args.Slug},
-				{Name: "QURL_API_URL", Value: args.APIURL},
-				{Name: connectorAuditFileEnv, Value: connectorAuditFilePath},
-			},
+			Environment:            connectorEnvironment,
 			Secrets: []ecsSecret{
 				{Name: tunnelEnvAPIKey, ValueFrom: "REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug},
 			},
@@ -1005,6 +1066,29 @@ func renderKubernetesS3WebsiteInstructions(args *s3WebsiteInstallArgs, connector
 	configYAML, err := renderS3WebsiteConnectorConfigYAML(args)
 	if err != nil {
 		return "", err
+	}
+	// HubTrust is unset (zero value) unless cmd/main.go's validateHubTrustEnv
+	// confirmed all three envs are set together, so an empty hubTrustEnvYAML
+	// leaves the qurl-connector container's env: list byte-identical to the
+	// no-Hub-trust output. Only the qURL Connector container gets the trio;
+	// the S3 origin container (built separately below as originContainer) is
+	// a different image with no Hub relationship.
+	hubTrustEnvYAML := ""
+	if args.HubTrust.Host != "" {
+		quotedHubHost, err := yamlSingleQuoted(args.HubTrust.Host)
+		if err != nil {
+			return "", err
+		}
+		quotedHubPort, err := yamlSingleQuoted(args.HubTrust.Port)
+		if err != nil {
+			return "", err
+		}
+		quotedHubKey, err := yamlSingleQuoted(args.HubTrust.PublicKeyB64)
+		if err != nil {
+			return "", err
+		}
+		hubTrustEnvYAML = fmt.Sprintf("      - name: QURL_CONNECTOR_HUB_HOST\n        value: %s\n      - name: QURL_CONNECTOR_HUB_PORT\n        value: %s\n      - name: QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64\n        value: %s\n",
+			quotedHubHost, quotedHubPort, quotedHubKey)
 	}
 	objects := fmt.Sprintf(`set -eu
 %s
@@ -1069,6 +1153,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 		precedingContainers: originContainer,
 		imageYAML:           quotedConnectorImage,
 		slugYAML:            quotedSlug,
+		hubTrustEnvYAML:     hubTrustEnvYAML,
 		apiURLYAML:          quotedAPIURL,
 		agentPVCYAML:        quotedAgentPVC,
 		auditPVCYAML:        quotedAuditPVC,

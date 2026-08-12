@@ -1351,6 +1351,55 @@ func TestRenderDockerS3WebsiteInstructionsEmitsValidShell(t *testing.T) {
 	}
 }
 
+func TestRenderDockerS3WebsiteInstructionsHubTrustSet(t *testing.T) {
+	t.Parallel()
+	args := *testS3WebsiteArgs(tunnelEnvDocker)
+	args.HubTrust = testTunnelHubTrust()
+
+	got, err := renderDockerS3WebsiteInstructions(&args, testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
+	}
+
+	want := "  -e QURL_CONNECTOR_ID=\"$QURL_CONNECTOR_ID\" \\\n" +
+		"  -e QURL_CONNECTOR_HUB_HOST='" + testTunnelHubHost + "' \\\n" +
+		"  -e QURL_CONNECTOR_HUB_PORT='" + testTunnelHubPort + "' \\\n" +
+		"  -e QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64='" + testTunnelHubKeyB64 + "' \\\n" +
+		"  -e QURL_API_URL='" + testTunnelAPIURL + "' \\\n"
+	if !strings.Contains(got, want) {
+		t.Fatalf("Docker instructions missing Hub trust env block on the connector container:\n%s", got)
+	}
+	// Only the qURL Connector container carries the trio, not the S3 origin container.
+	originStart := strings.Index(got, `--name "$ORIGIN_CONTAINER"`)
+	connectorStart := strings.Index(got, `--name "$CONNECTOR_CONTAINER"`)
+	if originStart < 0 || connectorStart < 0 || connectorStart < originStart {
+		t.Fatalf("Docker instructions missing expected origin/connector container order:\n%s", got)
+	}
+	if strings.Contains(got[originStart:connectorStart], "QURL_CONNECTOR_HUB_HOST") {
+		t.Fatalf("Docker S3 origin container block rendered Hub trust:\n%s", got[originStart:connectorStart])
+	}
+	if gotCount := strings.Count(got, "QURL_CONNECTOR_HUB_HOST"); gotCount != 1 {
+		t.Fatalf("Docker instructions rendered QURL_CONNECTOR_HUB_HOST %d times, want exactly once:\n%s", gotCount, got)
+	}
+}
+
+// wantS3WebsiteDockerHubUnsetGolden is byte-for-byte what renderDockerS3WebsiteInstructions
+// produced for testS3WebsiteArgs(tunnelEnvDocker)+testTunnelImageRef+defaultS3StaticConnectorImage
+// before S3-website Hub trust passthrough existed, captured mechanically (not
+// hand-transcribed) to prove the unset path is unchanged rather than assume it.
+const wantS3WebsiteDockerHubUnsetGolden = "Run this whole block on the Linux Docker host that has IAM access to the private S3 bucket. The host or container runtime must provide AWS credentials with s3:GetObject on the objects and s3:ListBucket on the bucket; on EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. No static AWS key is needed in the generated qURL Connector setup. The block prompts for the enrollment token so the secret does not land in shell history.\n\n```\nset -eu\nif (set -o pipefail) 2>/dev/null; then\n  set -o pipefail\nfi\n\nif [ \"$(id -u)\" -eq 0 ]; then\n  SUDO=\"\"\nelif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then\n  SUDO=\"sudo -n\"\nelse\n  echo \"Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532.\" >&2\n  exit 1\nfi\n\nQURL_CONNECTOR_ID='prod-dashboard'\nS3_BUCKET='stats-site-bucket'\nAWS_REGION='us-east-1'\nS3_PREFIX='website'\nINDEX_DOCUMENT='index.html'\nORIGIN_CONTAINER=\"qurl-s3-origin-${QURL_CONNECTOR_ID}\"\nCONNECTOR_CONTAINER=\"qurl-connector-${QURL_CONNECTOR_ID}\"\nSECRET_DIR=\"/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}\"\nAGENT_STATE_DIR=\"/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent\"\nAUDIT_DIR=\"/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}\"\nCONFIG_FILE=\"$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml\"\n\ncat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'\nroutes:\n  - id: 'prod-dashboard'\n    type: http\n    local_ip: 127.0.0.1\n    local_port: 8080\n    resource_id: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA'\n    connector_routing_id: 'c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\nQURL_PROXY_YAML_EOF\n$SUDO chmod 0644 \"$CONFIG_FILE\"\n\n$SUDO install -d -m 0700 -o 65532 -g 65532 \"$SECRET_DIR\"\n$SUDO install -d -m 0700 -o 65532 -g 65532 \"$AGENT_STATE_DIR\"\n$SUDO install -d -m 0700 -o 65532 -g 65532 \"$AUDIT_DIR\"\nif [ -z \"${QURL_BOOTSTRAP_KEY:-}\" ]; then\n  if [ ! -t 0 ]; then\n    echo \"Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal.\" >&2\n    exit 1\n  fi\n  printf 'Paste qURL enrollment token (input hidden): ' >&2\n  STTY_STATE=\"$(stty -g 2>/dev/null | tr -d '[:space:]' || true)\"\n  if [ -n \"$STTY_STATE\" ]; then\n    stty -echo\n    trap 'if [ -n \"$STTY_STATE\" ]; then stty \"$STTY_STATE\" 2>/dev/null || true; fi' INT TERM EXIT\n  fi\n  if ! IFS= read -r QURL_BOOTSTRAP_KEY; then\n    if [ -n \"$STTY_STATE\" ]; then\n      stty \"$STTY_STATE\"\n      trap - INT TERM EXIT\n    fi\n    printf '\\n' >&2\n    echo \"Enrollment token is required.\" >&2\n    exit 1\n  fi\n  if [ -n \"$STTY_STATE\" ]; then\n    stty \"$STTY_STATE\"\n    trap - INT TERM EXIT\n  fi\n  printf '\\n' >&2\nfi\nif [ -z \"$QURL_BOOTSTRAP_KEY\" ]; then\n  echo \"Enrollment token is required.\" >&2\n  exit 1\nfi\nQURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}\n$SUDO sh -c 'set -eu\numask 077\nhead -c \"$2\" > \"$1\"\nchown 65532:65532 \"$1\"\nchmod 0400 \"$1\"\n' _ \"$SECRET_DIR/api_key\" \"$QURL_BOOTSTRAP_KEY_LEN\" <<QURL_BOOTSTRAP_KEY_EOF\n$QURL_BOOTSTRAP_KEY\nQURL_BOOTSTRAP_KEY_EOF\nunset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN\n\nif docker ps -a --format '{{.Names}}' | grep -Fxq \"$CONNECTOR_CONTAINER\"; then\n  docker rm -f \"$CONNECTOR_CONTAINER\" >/dev/null\nfi\nif docker ps -a --format '{{.Names}}' | grep -Fxq \"$ORIGIN_CONTAINER\"; then\n  docker rm -f \"$ORIGIN_CONTAINER\" >/dev/null\nfi\n\ndocker run -d \\\n  --name \"$ORIGIN_CONTAINER\" \\\n  --user 65532:65532 \\\n  --restart=on-failure:5 \\\n  --cap-drop=ALL \\\n  --security-opt=no-new-privileges:true \\\n  -e S3_BUCKET=\"$S3_BUCKET\" \\\n  -e AWS_REGION=\"$AWS_REGION\" \\\n  -e S3_PREFIX=\"$S3_PREFIX\" \\\n  -e INDEX_DOCUMENT=\"$INDEX_DOCUMENT\" \\\n  -e CACHE_CONNECTOR_ID=\"$QURL_CONNECTOR_ID\" \\\n  'ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3'\n\ndocker run -d \\\n  --name \"$CONNECTOR_CONTAINER\" \\\n  --user 65532:65532 \\\n  --network \"container:${ORIGIN_CONTAINER}\" \\\n  --restart=on-failure:5 \\\n  --read-only \\\n  --tmpfs /tmp:rw,size=64m \\\n  --cap-drop=ALL \\\n  --security-opt=no-new-privileges:true \\\n  --pids-limit=512 \\\n  -v \"$AGENT_STATE_DIR:/var/lib/layerv/agent\" \\\n  -v \"$AUDIT_DIR:/var/log/layerv/qurl-connector\" \\\n  -v \"$SECRET_DIR:$SECRET_DIR:ro\" \\\n  -v \"$CONFIG_FILE:/work/qurl-proxy.yaml:ro\" \\\n  -e QURL_API_KEY_FILE=\"$SECRET_DIR/api_key\" \\\n  -e QURL_AUDIT_FILE='/var/log/layerv/qurl-connector/audit.log' \\\n  -e QURL_CONNECTOR_ID=\"$QURL_CONNECTOR_ID\" \\\n  -e QURL_API_URL='https://api.sandbox.example/v1' \\\n  'ghcr.io/layervai/qurl-connector:v-test'\n```\n\nVerify with `docker logs -f qurl-connector-prod-dashboard` and `docker logs -f qurl-s3-origin-prod-dashboard`; after the qURL Connector connects, delete the enrollment-token file. If you recreate the S3 origin container or Docker auto-restarts it after a crash, recreate or restart the qURL Connector container too because it shares the origin container's network namespace. After a Docker daemon restart, verify both containers are running; if the Connector exhausted retries before the origin namespace existed, rerun this block to recreate both containers."
+
+func TestRenderDockerS3WebsiteInstructionsHubTrustUnsetOutputUnchanged(t *testing.T) {
+	t.Parallel()
+	got, err := renderDockerS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvDocker), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerS3WebsiteInstructions: %v", err)
+	}
+	if got != wantS3WebsiteDockerHubUnsetGolden {
+		t.Fatalf("Docker S3 website instructions changed with HubTrust unset:\ngot:\n%s\nwant:\n%s", got, wantS3WebsiteDockerHubUnsetGolden)
+	}
+}
+
 func TestRenderDockerComposeS3WebsiteInstructionsEmitsParseableCompose(t *testing.T) {
 	got, err := renderDockerComposeS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvCompose), testTunnelImageRef, defaultS3StaticConnectorImage)
 	if err != nil {
@@ -1493,6 +1542,69 @@ func TestRenderDockerComposeS3WebsiteInstructionsRejectsShellKnockResourceID(t *
 	}
 }
 
+func TestRenderDockerComposeS3WebsiteInstructionsHubTrustSet(t *testing.T) {
+	t.Parallel()
+	args := *testS3WebsiteArgs(tunnelEnvCompose)
+	args.HubTrust = testTunnelHubTrust()
+
+	got, err := renderDockerComposeS3WebsiteInstructions(&args, testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerComposeS3WebsiteInstructions: %v", err)
+	}
+
+	quotedHost, err := yamlSingleQuoted(testTunnelHubHost)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted(host): %v", err)
+	}
+	quotedPort, err := yamlSingleQuoted(testTunnelHubPort)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted(port): %v", err)
+	}
+	quotedKey, err := yamlSingleQuoted(testTunnelHubKeyB64)
+	if err != nil {
+		t.Fatalf("yamlSingleQuoted(key): %v", err)
+	}
+	for _, want := range []string{
+		"QURL_CONNECTOR_HUB_HOST_YAML=" + shellSingleQuote(quotedHost),
+		"QURL_CONNECTOR_HUB_PORT_YAML=" + shellSingleQuote(quotedPort),
+		"QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML=" + shellSingleQuote(quotedKey),
+		"      QURL_CONNECTOR_HUB_HOST: ${QURL_CONNECTOR_HUB_HOST_YAML}",
+		"      QURL_CONNECTOR_HUB_PORT: ${QURL_CONNECTOR_HUB_PORT_YAML}",
+		"      QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64: ${QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64_YAML}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Compose instructions missing Hub trust entry %q:\n%s", want, got)
+		}
+	}
+	// Only the qURL Connector service's environment: block carries the trio,
+	// not the S3 origin service's.
+	originServiceStart := strings.Index(got, "'qurl-s3-origin-"+testTunnelSlug+"':")
+	connectorServiceStart := strings.Index(got, "'qurl-connector-"+testTunnelSlug+"':")
+	if originServiceStart < 0 || connectorServiceStart < 0 || connectorServiceStart < originServiceStart {
+		t.Fatalf("Compose instructions missing expected origin/connector service order:\n%s", got)
+	}
+	if strings.Contains(got[originServiceStart:connectorServiceStart], "QURL_CONNECTOR_HUB_HOST") {
+		t.Fatalf("Compose S3 origin service block rendered Hub trust:\n%s", got[originServiceStart:connectorServiceStart])
+	}
+}
+
+// wantS3WebsiteComposeHubUnsetGolden is byte-for-byte what renderDockerComposeS3WebsiteInstructions
+// produced for testS3WebsiteArgs(tunnelEnvCompose)+testTunnelImageRef+defaultS3StaticConnectorImage
+// before S3-website Hub trust passthrough existed, captured mechanically (not
+// hand-transcribed) to prove the unset path is unchanged rather than assume it.
+const wantS3WebsiteComposeHubUnsetGolden = "Run this from the Docker Compose project directory on a Linux host that has IAM access to the private S3 bucket. On EC2 Docker hosts using instance roles, IMDSv2 needs hop-limit 2 for container credential access. It writes a standalone Compose file for the private S3 origin plus qURL Connector, and prompts for the enrollment token so the secret does not land in shell history.\n\n```\nset -eu\nif (set -o pipefail) 2>/dev/null; then\n  set -o pipefail\nfi\n\nif [ \"$(id -u)\" -eq 0 ]; then\n  SUDO=\"\"\nelif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then\n  SUDO=\"sudo -n\"\nelse\n  echo \"Run as root or configure passwordless sudo so the state and secret directories can be owned by UID 65532.\" >&2\n  exit 1\nfi\n\nQURL_CONNECTOR_ID='prod-dashboard'\nQURL_API_URL_YAML=''\"'\"'https://api.sandbox.example/v1'\"'\"''\nORIGIN_SERVICE_NAME='qurl-s3-origin-prod-dashboard'\nSECRET_DIR=\"/run/secrets/qurl-connector/${QURL_CONNECTOR_ID}\"\nAGENT_STATE_DIR=\"/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent\"\nAUDIT_DIR=\"/var/log/layerv/qurl-connector/${QURL_CONNECTOR_ID}\"\nCONFIG_FILE=\"$PWD/qurl-proxy-${QURL_CONNECTOR_ID}.yaml\"\nQURL_COMPOSE_FILE=\"$PWD/qurl-s3-website-${QURL_CONNECTOR_ID}.compose.yaml\"\n\ncat > \"$CONFIG_FILE\" <<'QURL_PROXY_YAML_EOF'\nroutes:\n  - id: 'prod-dashboard'\n    type: http\n    local_ip: 127.0.0.1\n    local_port: 8080\n    resource_id: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA'\n    connector_routing_id: 'c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\nQURL_PROXY_YAML_EOF\n$SUDO chmod 0644 \"$CONFIG_FILE\"\n\n$SUDO install -d -m 0700 -o 65532 -g 65532 \"$SECRET_DIR\"\n$SUDO install -d -m 0700 -o 65532 -g 65532 \"$AGENT_STATE_DIR\"\n$SUDO install -d -m 0700 -o 65532 -g 65532 \"$AUDIT_DIR\"\nif [ -z \"${QURL_BOOTSTRAP_KEY:-}\" ]; then\n  if [ ! -t 0 ]; then\n    echo \"Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal.\" >&2\n    exit 1\n  fi\n  printf 'Paste qURL enrollment token (input hidden): ' >&2\n  STTY_STATE=\"$(stty -g 2>/dev/null | tr -d '[:space:]' || true)\"\n  if [ -n \"$STTY_STATE\" ]; then\n    stty -echo\n    trap 'if [ -n \"$STTY_STATE\" ]; then stty \"$STTY_STATE\" 2>/dev/null || true; fi' INT TERM EXIT\n  fi\n  if ! IFS= read -r QURL_BOOTSTRAP_KEY; then\n    if [ -n \"$STTY_STATE\" ]; then\n      stty \"$STTY_STATE\"\n      trap - INT TERM EXIT\n    fi\n    printf '\\n' >&2\n    echo \"Enrollment token is required.\" >&2\n    exit 1\n  fi\n  if [ -n \"$STTY_STATE\" ]; then\n    stty \"$STTY_STATE\"\n    trap - INT TERM EXIT\n  fi\n  printf '\\n' >&2\nfi\nif [ -z \"$QURL_BOOTSTRAP_KEY\" ]; then\n  echo \"Enrollment token is required.\" >&2\n  exit 1\nfi\nQURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}\n$SUDO sh -c 'set -eu\numask 077\nhead -c \"$2\" > \"$1\"\nchown 65532:65532 \"$1\"\nchmod 0400 \"$1\"\n' _ \"$SECRET_DIR/api_key\" \"$QURL_BOOTSTRAP_KEY_LEN\" <<QURL_BOOTSTRAP_KEY_EOF\n$QURL_BOOTSTRAP_KEY\nQURL_BOOTSTRAP_KEY_EOF\nunset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN\n\ncat > \"$QURL_COMPOSE_FILE\" <<QURL_COMPOSE_YAML_EOF\nservices:\n  'qurl-s3-origin-prod-dashboard':\n    image: 'ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3'\n    user: \"65532:65532\"\n    restart: on-failure:5\n    cap_drop:\n      - ALL\n    security_opt:\n      - 'no-new-privileges:true'\n    environment:\n      S3_BUCKET: 'stats-site-bucket'\n      AWS_REGION: 'us-east-1'\n      S3_PREFIX: 'website'\n      INDEX_DOCUMENT: 'index.html'\n      CACHE_CONNECTOR_ID: 'prod-dashboard'\n  'qurl-connector-prod-dashboard':\n    image: 'ghcr.io/layervai/qurl-connector:v-test'\n    user: \"65532:65532\"\n    restart: on-failure:5\n    read_only: true\n    tmpfs:\n      - /tmp:rw,size=64m\n    pids_limit: 512\n    cap_drop:\n      - ALL\n    security_opt:\n      - 'no-new-privileges:true'\n    network_mode: \"service:${ORIGIN_SERVICE_NAME}\"\n    depends_on:\n      'qurl-s3-origin-prod-dashboard':\n        condition: service_started\n    volumes:\n      - ${AGENT_STATE_DIR}:/var/lib/layerv/agent\n      - ${AUDIT_DIR}:/var/log/layerv/qurl-connector\n      # Compose uses one stable in-container secret path; the Docker renderer\n      # instead preserves its connector-specific host path inside the container.\n      - ${SECRET_DIR}:/run/secrets/qurl-connector:ro\n      - ./qurl-proxy-${QURL_CONNECTOR_ID}.yaml:/work/qurl-proxy.yaml:ro\n    environment:\n      QURL_API_KEY_FILE: /run/secrets/qurl-connector/api_key\n      QURL_AUDIT_FILE: /var/log/layerv/qurl-connector/audit.log\n      QURL_CONNECTOR_ID: 'prod-dashboard'\n      QURL_API_URL: ${QURL_API_URL_YAML}\nQURL_COMPOSE_YAML_EOF\n\ndocker compose -f \"$QURL_COMPOSE_FILE\" up -d\n```\n\nVerify with `docker compose -f qurl-s3-website-prod-dashboard.compose.yaml logs -f qurl-connector-prod-dashboard`; after the qURL Connector connects, delete the enrollment-token file. If you recreate, rename, or Docker auto-restarts the S3 origin service after a crash, recreate or restart the qURL Connector service too because it shares the origin service network namespace. After a Docker daemon restart, verify both services are running; if the Connector exhausted retries before the origin namespace existed, rerun this block to recreate both services."
+
+func TestRenderDockerComposeS3WebsiteInstructionsHubTrustUnsetOutputUnchanged(t *testing.T) {
+	t.Parallel()
+	got, err := renderDockerComposeS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvCompose), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderDockerComposeS3WebsiteInstructions: %v", err)
+	}
+	if got != wantS3WebsiteComposeHubUnsetGolden {
+		t.Fatalf("Compose S3 website instructions changed with HubTrust unset:\ngot:\n%s\nwant:\n%s", got, wantS3WebsiteComposeHubUnsetGolden)
+	}
+}
+
 func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 	instructions, err := renderECSS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvECSFargate), testTunnelImageRef, defaultS3StaticConnectorImage)
 	if err != nil {
@@ -1600,6 +1712,71 @@ func TestRenderS3WebsiteECSContainerJSONUsesBootstrapIdentity(t *testing.T) {
 		}
 	}
 	assertNoS3SecretLeaks(t, containerJSON)
+}
+
+func TestRenderS3WebsiteECSContainerJSONHubTrustSet(t *testing.T) {
+	t.Parallel()
+	args := *testS3WebsiteArgs(tunnelEnvECSFargate)
+	args.HubTrust = testTunnelHubTrust()
+
+	containerJSON, err := renderS3WebsiteECSContainerJSON(&args, testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderS3WebsiteECSContainerJSON: %v", err)
+	}
+	var containers []ecsContainerDefinition
+	if err := json.Unmarshal([]byte(containerJSON), &containers); err != nil {
+		t.Fatalf("ECS container JSON did not parse: %v\n%s", err, containerJSON)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("containers = %+v, want origin + qurl connector", containers)
+	}
+	origin, connector := containers[0], containers[1]
+	if origin.Name != testS3OriginContainer || connector.Name != connectorContainerName {
+		t.Fatalf("container order = %+v, want origin then connector", containers)
+	}
+	originEnv := ecsEnvMap(origin.Environment)
+	for _, name := range []string{"QURL_CONNECTOR_HUB_HOST", "QURL_CONNECTOR_HUB_PORT", "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"} {
+		if _, ok := originEnv[name]; ok {
+			t.Fatalf("ECS origin container rendered Hub trust %s, want connector-only", name)
+		}
+	}
+	connectorEnv := ecsEnvMap(connector.Environment)
+	names := make([]string, 0, len(connector.Environment))
+	for _, e := range connector.Environment {
+		names = append(names, e.Name)
+	}
+	for name, want := range map[string]string{
+		"QURL_CONNECTOR_HUB_HOST":                  testTunnelHubHost,
+		"QURL_CONNECTOR_HUB_PORT":                  testTunnelHubPort,
+		"QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64": testTunnelHubKeyB64,
+	} {
+		if got := connectorEnv[name]; got != want {
+			t.Fatalf("ECS connector environment %s = %q, want %q", name, got, want)
+		}
+	}
+	idIdx := slices.Index(names, ecsConnectorIDEnv)
+	hubIdx := slices.Index(names, "QURL_CONNECTOR_HUB_HOST")
+	apiIdx := slices.Index(names, "QURL_API_URL")
+	if idIdx < 0 || hubIdx < 0 || apiIdx < 0 || idIdx >= hubIdx || hubIdx >= apiIdx {
+		t.Fatalf("ECS connector environment order = %v, want %s before Hub trust before QURL_API_URL", names, ecsConnectorIDEnv)
+	}
+}
+
+// wantS3WebsiteECSHubUnsetGolden is byte-for-byte what renderECSS3WebsiteInstructions
+// produced for testS3WebsiteArgs(tunnelEnvECSFargate)+testTunnelImageRef+defaultS3StaticConnectorImage
+// before S3-website Hub trust passthrough existed, captured mechanically (not
+// hand-transcribed) to prove the unset path is unchanged rather than assume it.
+const wantS3WebsiteECSHubUnsetGolden = "Use this as an ECS/Fargate task-definition checklist. Create the AWS Secrets Manager secret as `qurl-connector-prod-dashboard` using the temporary enrollment token delivered separately by DM. Run both containers in the same task; Fargate awsvpc networking lets the qURL Connector reach the private S3 origin on `127.0.0.1:8080`. Both containers are essential, so a failure of either one restarts the whole task. The START dependency orders container launch only, so the qURL Connector may log local connection errors until the origin is listening. The task role needs s3:GetObject on the objects and s3:ListBucket on the bucket. Configure the qurl-agent-state, qurl-audit, and qurl-config EFS access points with POSIX UID/GID `65532:65532`, matching the qURL Connector image user; use root-directory modes 0700, 0750, and 0755 respectively, and make qurl-proxy.yaml mode 0644. The qurl-audit volume preserves rotated audit records while the Connector uses a read-only root filesystem. Both generated containers drop every Linux capability.\n\n1. Store the enrollment token from the separate DM in AWS Secrets Manager. This install-instructions message intentionally does not contain the token.\n\n2. Put qurl-proxy.yaml at `/work/qurl-proxy.yaml` on an EFS access point mounted into the task as the `qurl-config` volume:\n\n```\nroutes:\n  - id: 'prod-dashboard'\n    type: http\n    local_ip: 127.0.0.1\n    local_port: 8080\n    resource_id: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA'\n    connector_routing_id: 'c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n```\n\n3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_prod-dashboard` with the full secret ARN shown by Secrets Manager and replace each `<region>` with the ECS task region:\n\n```\n[\n  {\n    \"name\": \"s3-static-origin\",\n    \"image\": \"ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3\",\n    \"user\": \"65532:65532\",\n    \"essential\": true,\n    \"readonlyRootFilesystem\": false,\n    \"environment\": [\n      {\n        \"name\": \"S3_BUCKET\",\n        \"value\": \"stats-site-bucket\"\n      },\n      {\n        \"name\": \"AWS_REGION\",\n        \"value\": \"us-east-1\"\n      },\n      {\n        \"name\": \"S3_PREFIX\",\n        \"value\": \"website\"\n      },\n      {\n        \"name\": \"INDEX_DOCUMENT\",\n        \"value\": \"index.html\"\n      },\n      {\n        \"name\": \"CACHE_CONNECTOR_ID\",\n        \"value\": \"prod-dashboard\"\n      }\n    ],\n    \"secrets\": null,\n    \"mountPoints\": null,\n    \"logConfiguration\": {\n      \"logDriver\": \"awslogs\",\n      \"options\": {\n        \"awslogs-group\": \"/ecs/qurl-s3-website\",\n        \"awslogs-region\": \"<region>\",\n        \"awslogs-stream-prefix\": \"origin\"\n      }\n    },\n    \"linuxParameters\": {\n      \"capabilities\": {\n        \"drop\": [\n          \"ALL\"\n        ]\n      }\n    }\n  },\n  {\n    \"name\": \"qurl-connector\",\n    \"image\": \"ghcr.io/layervai/qurl-connector:v-test\",\n    \"user\": \"65532:65532\",\n    \"essential\": true,\n    \"readonlyRootFilesystem\": true,\n    \"environment\": [\n      {\n        \"name\": \"QURL_CONNECTOR_ID\",\n        \"value\": \"prod-dashboard\"\n      },\n      {\n        \"name\": \"QURL_API_URL\",\n        \"value\": \"https://api.sandbox.example/v1\"\n      },\n      {\n        \"name\": \"QURL_AUDIT_FILE\",\n        \"value\": \"/var/log/layerv/qurl-connector/audit.log\"\n      }\n    ],\n    \"secrets\": [\n      {\n        \"name\": \"QURL_API_KEY\",\n        \"valueFrom\": \"REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_prod-dashboard\"\n      }\n    ],\n    \"mountPoints\": [\n      {\n        \"sourceVolume\": \"qurl-agent-state\",\n        \"containerPath\": \"/var/lib/layerv/agent\",\n        \"readOnly\": false\n      },\n      {\n        \"sourceVolume\": \"qurl-audit\",\n        \"containerPath\": \"/var/log/layerv/qurl-connector\",\n        \"readOnly\": false\n      },\n      {\n        \"sourceVolume\": \"qurl-config\",\n        \"containerPath\": \"/work\",\n        \"readOnly\": true\n      }\n    ],\n    \"logConfiguration\": {\n      \"logDriver\": \"awslogs\",\n      \"options\": {\n        \"awslogs-group\": \"/ecs/qurl-s3-website\",\n        \"awslogs-region\": \"<region>\",\n        \"awslogs-stream-prefix\": \"qurl\"\n      }\n    },\n    \"linuxParameters\": {\n      \"capabilities\": {\n        \"drop\": [\n          \"ALL\"\n        ]\n      }\n    },\n    \"dependsOn\": [\n      {\n        \"containerName\": \"s3-static-origin\",\n        \"condition\": \"START\"\n      }\n    ]\n  }\n]\n```\n\n4. Create the CloudWatch Logs group `/ecs/qurl-s3-website` in the ECS task region if it does not already exist.\n5. Add durable EFS-backed volumes named qurl-agent-state, qurl-audit, and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, register and deploy a warm-start task revision with the QURL_API_KEY entry removed from `secrets`; verify the replacement task connects from qurl-agent-state, then delete the enrollment-token secret. Deleting it first prevents replacement tasks from starting."
+
+func TestRenderECSS3WebsiteInstructionsHubTrustUnsetOutputUnchanged(t *testing.T) {
+	t.Parallel()
+	got, err := renderECSS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvECSFargate), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderECSS3WebsiteInstructions: %v", err)
+	}
+	if got != wantS3WebsiteECSHubUnsetGolden {
+		t.Fatalf("ECS S3 website instructions changed with HubTrust unset:\ngot:\n%s\nwant:\n%s", got, wantS3WebsiteECSHubUnsetGolden)
+	}
 }
 
 func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testing.T) {
@@ -1719,6 +1896,81 @@ func TestRenderKubernetesS3WebsiteInstructionsYAMLAndBootstrapIdentity(t *testin
 		t.Fatal("Kubernetes connector rendered the advanced knock-resource override")
 	}
 	assertNoS3SecretLeaks(t, got)
+}
+
+func TestRenderKubernetesS3WebsiteInstructionsHubTrustSet(t *testing.T) {
+	t.Parallel()
+	args := *testS3WebsiteArgs(tunnelEnvKubernetes)
+	args.HubTrust = testTunnelHubTrust()
+
+	got, err := renderKubernetesS3WebsiteInstructions(&args, testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderKubernetesS3WebsiteInstructions: %v", err)
+	}
+	patchStart := strings.Index(got, "Pod spec additions:")
+	if patchStart < 0 {
+		t.Fatalf("Kubernetes instructions missing pod spec section:\n%s", got)
+	}
+	patch := extractS3TestBlock(t, got[patchStart:], "```\n", "\n```")
+	var podSpec struct {
+		Containers []struct {
+			Name string              `yaml:"name"`
+			Env  []ecsEnvironmentVar `yaml:"env"`
+		} `yaml:"containers"`
+	}
+	if err := yaml.Unmarshal([]byte(patch), &podSpec); err != nil {
+		t.Fatalf("Pod spec fragment YAML did not parse: %v\n%s", err, patch)
+	}
+	if len(podSpec.Containers) != 2 {
+		t.Fatalf("pod spec containers = %+v, want origin + connector", podSpec.Containers)
+	}
+	origin, connector := podSpec.Containers[0], podSpec.Containers[1]
+	if origin.Name != testS3OriginContainer || connector.Name != connectorContainerName {
+		t.Fatalf("pod spec container order = %+v, want origin then connector", podSpec.Containers)
+	}
+	originEnv := ecsEnvMap(origin.Env)
+	for _, name := range []string{"QURL_CONNECTOR_HUB_HOST", "QURL_CONNECTOR_HUB_PORT", "QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64"} {
+		if _, ok := originEnv[name]; ok {
+			t.Fatalf("Kubernetes origin container rendered Hub trust %s, want connector-only", name)
+		}
+	}
+	connectorEnv := ecsEnvMap(connector.Env)
+	names := make([]string, 0, len(connector.Env))
+	for _, e := range connector.Env {
+		names = append(names, e.Name)
+	}
+	for name, want := range map[string]string{
+		"QURL_CONNECTOR_HUB_HOST":                  testTunnelHubHost,
+		"QURL_CONNECTOR_HUB_PORT":                  testTunnelHubPort,
+		"QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64": testTunnelHubKeyB64,
+	} {
+		if got := connectorEnv[name]; got != want {
+			t.Fatalf("Kubernetes connector env %s = %q, want %q", name, got, want)
+		}
+	}
+	idIdx := slices.Index(names, "QURL_CONNECTOR_ID")
+	hubIdx := slices.Index(names, "QURL_CONNECTOR_HUB_HOST")
+	apiIdx := slices.Index(names, "QURL_API_URL")
+	if idIdx < 0 || hubIdx < 0 || apiIdx < 0 || idIdx >= hubIdx || hubIdx >= apiIdx {
+		t.Fatalf("Kubernetes connector env order = %v, want QURL_CONNECTOR_ID before Hub trust before QURL_API_URL", names)
+	}
+}
+
+// wantS3WebsiteKubernetesHubUnsetGolden is byte-for-byte what renderKubernetesS3WebsiteInstructions
+// produced for testS3WebsiteArgs(tunnelEnvKubernetes)+testTunnelImageRef+defaultS3StaticConnectorImage
+// before S3-website Hub trust passthrough existed, captured mechanically (not
+// hand-transcribed) to prove the unset path is unchanged rather than assume it.
+const wantS3WebsiteKubernetesHubUnsetGolden = "Run this once in the target namespace, then deploy the S3 origin and qURL Connector containers in the same pod so `127.0.0.1:8080` reaches the private S3 origin.\nThe pod identity or node role needs s3:GetObject on the objects and s3:ListBucket on the bucket.\nThe Connector uses separate state and audit PVCs. qurl-go rejects group-writable identity state, so do not add pod-level `fsGroup`; the permissions init container enforces owner-only state modes before each start.\nYour admission policy must permit the two root init containers: volume permissions uses CHOWN, DAC_OVERRIDE, and FOWNER, while the one-time bootstrap copy uses CHOWN only. The long-running Connector remains nonroot, read-only-root, seccomp-confined, and capability-free.\nThe enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.\nAfter the pod connects, create and roll out a warm-start workload revision that removes `qurl-bootstrap-copy`, both enrollment-token volumes and their mounts, and `QURL_API_KEY_FILE`. Verify the replacement pod connects from its persisted state, then delete the enrollment-token Secret; deleting it first prevents a replacement pod from starting.\n\n```\nset -eu\nif (set -o pipefail) 2>/dev/null; then\n  set -o pipefail\nfi\n\nQURL_BOOTSTRAP_SECRET='qurl-connector-prod-dashboard'\nif [ -z \"${QURL_BOOTSTRAP_KEY:-}\" ]; then\n  if [ ! -t 0 ]; then\n    echo \"Set QURL_BOOTSTRAP_KEY or run this block from an interactive terminal.\" >&2\n    exit 1\n  fi\n  printf 'Paste qURL enrollment token (input hidden): ' >&2\n  STTY_STATE=\"$(stty -g 2>/dev/null | tr -d '[:space:]' || true)\"\n  if [ -n \"$STTY_STATE\" ]; then\n    stty -echo\n    trap 'if [ -n \"$STTY_STATE\" ]; then stty \"$STTY_STATE\" 2>/dev/null || true; fi' INT TERM EXIT\n  fi\n  if ! IFS= read -r QURL_BOOTSTRAP_KEY; then\n    if [ -n \"$STTY_STATE\" ]; then\n      stty \"$STTY_STATE\"\n      trap - INT TERM EXIT\n    fi\n    printf '\\n' >&2\n    echo \"Enrollment token is required.\" >&2\n    exit 1\n  fi\n  if [ -n \"$STTY_STATE\" ]; then\n    stty \"$STTY_STATE\"\n    trap - INT TERM EXIT\n  fi\n  printf '\\n' >&2\nfi\nif [ -z \"$QURL_BOOTSTRAP_KEY\" ]; then\n  echo \"Enrollment token is required.\" >&2\n  exit 1\nfi\nQURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}\nhead -c \"$QURL_BOOTSTRAP_KEY_LEN\" <<QURL_BOOTSTRAP_KEY_EOF | kubectl create secret generic \"$QURL_BOOTSTRAP_SECRET\" --from-file=api_key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -\n$QURL_BOOTSTRAP_KEY\nQURL_BOOTSTRAP_KEY_EOF\nunset QURL_BOOTSTRAP_KEY QURL_BOOTSTRAP_KEY_LEN\n\nkubectl apply -f - <<'QURL_K8S_YAML_EOF'\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: 'qurl-proxy-prod-dashboard'\ndata:\n  qurl-proxy.yaml: |\n    routes:\n      - id: 'prod-dashboard'\n        type: http\n        local_ip: 127.0.0.1\n        local_port: 8080\n        resource_id: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2cTVv5_3eeYCcLLq5ROYCqcmY50HiKZ9ATglIkPnCji1E_S63UMtXba1moR8-Q6EV7oM6zwwh9_j2CDujzXvLA'\n        connector_routing_id: 'c-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: 'qurl-agent-prod-dashboard'\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n  resources:\n    requests:\n      storage: 1Gi\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: 'qurl-audit-prod-dashboard'\nspec:\n  accessModes: [\"ReadWriteOnce\"]\n  resources:\n    requests:\n      storage: 1Gi\nQURL_K8S_YAML_EOF\n```\n\nPod spec additions:\nAppend both generated init containers under your existing `initContainers:` list, add both runtime containers under `containers:`, and append the volumes under `volumes:`. Do not add pod-level `fsGroup` and do not duplicate existing YAML keys.\n\n```\ninitContainers:\n  - name: qurl-volume-permissions\n    image: docker.io/library/busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028\n    command:\n      - sh\n      - -ceu\n      - |\n        find /state -type d -exec chmod 0700 '{}' ';'\n        find /state -type f -exec chmod 0600 '{}' ';'\n        chown -R 65532:65532 /state\n        mkdir -p /audit/qurl-connector\n        find /audit -type d -exec chmod 0750 '{}' ';'\n        find /audit -type f -exec chmod 0640 '{}' ';'\n        chown -R 65532:65532 /audit\n        chown 65532:65532 /tmp-runtime\n        chmod 0700 /tmp-runtime\n    securityContext:\n      runAsUser: 0\n      runAsNonRoot: false\n      readOnlyRootFilesystem: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n        add: [\"CHOWN\", \"DAC_OVERRIDE\", \"FOWNER\"]\n      seccompProfile:\n        type: RuntimeDefault\n    volumeMounts:\n      - name: qurl-agent-state\n        mountPath: /state\n      - name: qurl-audit\n        mountPath: /audit\n      - name: qurl-tmp\n        mountPath: /tmp-runtime\n  - name: qurl-bootstrap-copy\n    image: docker.io/library/busybox:1.37.0@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028\n    command:\n      - sh\n      - -ceu\n      - |\n        cp /bootstrap-source/api_key /bootstrap/api_key\n        chmod 0400 /bootstrap/api_key\n        chown 65532:65532 /bootstrap/api_key\n    securityContext:\n      runAsUser: 0\n      runAsNonRoot: false\n      readOnlyRootFilesystem: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n        add: [\"CHOWN\"]\n      seccompProfile:\n        type: RuntimeDefault\n    volumeMounts:\n      - name: qurl-bootstrap-source\n        mountPath: /bootstrap-source\n        readOnly: true\n      - name: qurl-bootstrap\n        mountPath: /bootstrap\ncontainers:\n  - name: s3-static-origin\n    image: 'ghcr.io/layervai/qurl-integrations/s3-static-connector@sha256:808620eb60fcb128cda086f4af80f69d876bc5bef5092dfedde3d94902e1c7c3'\n    securityContext:\n      runAsUser: 65532\n      runAsGroup: 65532\n      runAsNonRoot: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n      seccompProfile:\n        type: RuntimeDefault\n    env:\n      - name: S3_BUCKET\n        value: 'stats-site-bucket'\n      - name: AWS_REGION\n        value: 'us-east-1'\n      - name: S3_PREFIX\n        value: 'website'\n      - name: INDEX_DOCUMENT\n        value: 'index.html'\n      - name: CACHE_CONNECTOR_ID\n        value: 'prod-dashboard'\n  - name: qurl-connector\n    image: 'ghcr.io/layervai/qurl-connector:v-test'\n    securityContext:\n      runAsUser: 65532\n      runAsGroup: 65532\n      runAsNonRoot: true\n      readOnlyRootFilesystem: true\n      allowPrivilegeEscalation: false\n      capabilities:\n        drop: [\"ALL\"]\n      seccompProfile:\n        type: RuntimeDefault\n    env:\n      - name: QURL_API_KEY_FILE\n        value: /run/secrets/qurl-connector/api_key\n      - name: QURL_CONNECTOR_ID\n        value: 'prod-dashboard'\n      - name: QURL_API_URL\n        value: 'https://api.sandbox.example/v1'\n      - name: QURL_AUDIT_FILE\n        value: /var/log/layerv/qurl-connector/audit.log\n    volumeMounts:\n      - name: qurl-tmp\n        mountPath: /tmp\n      - name: qurl-agent-state\n        mountPath: /var/lib/layerv/agent\n      - name: qurl-audit\n        mountPath: /var/log/layerv\n      - name: qurl-bootstrap\n        mountPath: /run/secrets/qurl-connector\n        readOnly: true\n      - name: qurl-proxy\n        mountPath: /work/qurl-proxy.yaml\n        subPath: qurl-proxy.yaml\n        readOnly: true\nvolumes:\n  - name: qurl-tmp\n    emptyDir:\n      sizeLimit: 64Mi\n  - name: qurl-agent-state\n    persistentVolumeClaim:\n      claimName: 'qurl-agent-prod-dashboard'\n  - name: qurl-audit\n    persistentVolumeClaim:\n      claimName: 'qurl-audit-prod-dashboard'\n  - name: qurl-bootstrap-source\n    secret:\n      secretName: 'qurl-connector-prod-dashboard'\n      # Mounted only into the root copy init; the runtime receives UID-65532 0400.\n      defaultMode: 0400\n  - name: qurl-bootstrap\n    emptyDir:\n      medium: Memory\n      sizeLimit: 1Mi\n  - name: qurl-proxy\n    configMap:\n      name: 'qurl-proxy-prod-dashboard'\n```"
+
+func TestRenderKubernetesS3WebsiteInstructionsHubTrustUnsetOutputUnchanged(t *testing.T) {
+	t.Parallel()
+	got, err := renderKubernetesS3WebsiteInstructions(testS3WebsiteArgs(tunnelEnvKubernetes), testTunnelImageRef, defaultS3StaticConnectorImage)
+	if err != nil {
+		t.Fatalf("renderKubernetesS3WebsiteInstructions: %v", err)
+	}
+	if got != wantS3WebsiteKubernetesHubUnsetGolden {
+		t.Fatalf("Kubernetes S3 website instructions changed with HubTrust unset:\ngot:\n%s\nwant:\n%s", got, wantS3WebsiteKubernetesHubUnsetGolden)
+	}
 }
 
 func connectorSetupViewSubmissionBody(t *testing.T, meta *TunnelInstallModalMetadata, setupType string) string {
