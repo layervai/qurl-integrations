@@ -162,6 +162,7 @@ func responseExceededError(method, path string, status int, label string, limit 
 }
 
 type mintRequest struct {
+	Kind   string   `json:"kind"`
 	Name   string   `json:"name"`
 	Scopes []string `json:"scopes"`
 }
@@ -399,7 +400,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceReplacementAPIKey(ctx context.Context, a
 // present for success — a missing keyID would leave us unable to revoke an
 // orphan key if the subsequent DDB persist fails.
 func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, name string, scopes []string, idempotencyKey string) (WorkspaceAPIKeyMint, error) {
-	body, err := json.Marshal(mintRequest{Name: name, Scopes: scopes})
+	body, err := json.Marshal(mintRequest{Kind: "api_key", Name: name, Scopes: scopes})
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("marshal: %w", err)
 	}

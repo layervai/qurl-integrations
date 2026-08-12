@@ -163,14 +163,25 @@ func TestHTTPAPIKeyMinterMintWorkspaceReplacementUsesAPIKeysEndpoint(t *testing.
 		gotAuth           string
 		gotIdempotencyKey string
 		gotBody           mintRequest
+		got               map[string]any
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
 			t.Fatalf("decode request: %v", err)
+		}
+		// Decode the same wire body into a map so the kind-first assertions
+		// below inspect the actual JSON sent, not just the mintRequest fields
+		// the struct happens to declare.
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode mint body: %v", err)
 		}
 		writeLegacyMintSuccess(t, w)
 	}))
@@ -212,6 +223,12 @@ func TestHTTPAPIKeyMinterMintWorkspaceReplacementUsesAPIKeysEndpoint(t *testing.
 	// accidental edit to the shared set cannot silently pass both call sites.
 	if strings.Join(gotBody.Scopes, ",") != "qurl:read,qurl:write,qurl:agent" {
 		t.Errorf("scopes = %#v want the pinned qurl:read/write/agent workspace set", gotBody.Scopes)
+	}
+	if got["kind"] != "api_key" {
+		t.Fatalf(`mint body kind = %v, want "api_key" (kind-first credential API)`, got["kind"])
+	}
+	if _, has := got["key_type"]; has {
+		t.Fatal("mint body must not send retired key_type")
 	}
 }
 
