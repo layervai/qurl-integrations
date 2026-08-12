@@ -1176,9 +1176,9 @@ func (p preparedTunnelInstallMessage) render(args *tunnelInstallArgs, key *clien
 func tunnelBootstrapRetirementNote(environment tunnelInstallEnvironment) string {
 	switch environment {
 	case tunnelEnvECSFargate:
-		return "Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager bootstrap secret."
+		return "Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager enrollment-token secret."
 	case tunnelEnvKubernetes:
-		return "Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes bootstrap Secret."
+		return "Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes enrollment-token Secret."
 	case tunnelEnvDocker, tunnelEnvCompose:
 	default:
 	}

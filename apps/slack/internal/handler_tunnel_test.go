@@ -4468,7 +4468,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"Target environment: AWS ECS/Fargate.",
 				ecsFargateChecklistText,
 				testTunnelECSAPIKeyNameLine,
-				"Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager bootstrap secret.",
+				"Complete the warm-start task revision and replacement-task proof above before deleting the Secrets Manager enrollment-token secret.",
 			},
 		},
 		{
@@ -4479,7 +4479,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				"kubectl apply -f -",
 				"Pod spec additions:",
 				"do not duplicate existing YAML keys.",
-				"Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes bootstrap Secret.",
+				"Complete the warm-start workload revision and replacement-pod proof above before deleting the Kubernetes enrollment-token Secret.",
 			},
 		},
 	}

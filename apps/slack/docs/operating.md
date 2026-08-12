@@ -208,7 +208,7 @@ at the OAuth-callback bind layer.
   - **Endpoint migration** — before promotion, replace any `QURL_ENDPOINT` that
     includes `/v1`, another path, or remote plaintext `http://`. Startup now
     rejects those shapes; configure the HTTPS API origin only (for example,
-    `https://api.sandbox.layerv.ai`). Plaintext remains limited to loopback
+    `https://api.layerv.ai`). Plaintext remains limited to loopback
     development endpoints.
   - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
     an enrollment token, it retries the final text post once, revokes the token, and

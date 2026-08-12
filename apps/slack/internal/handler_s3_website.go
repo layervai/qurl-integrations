@@ -937,7 +937,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 		"3. Add these two containers to the same task definition. Replace `REPLACE_WITH_SECRET_ARN_FOR_QURL_CONNECTOR_" + args.Slug + "` with the full secret ARN shown by Secrets Manager and replace each `" + ecsLogRegionPlaceholder + "` with the ECS task region:\n\n" +
 		containerBlock + "\n\n" +
 		"4. Create the CloudWatch Logs group `" + s3WebsiteECSLogGroup + "` in the ECS task region if it does not already exist.\n" +
-		"5. Add durable EFS-backed volumes named qurl-agent-state, qurl-audit, and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, register and deploy a warm-start task revision with the QURL_API_KEY entry removed from `secrets`; verify the replacement task connects from qurl-agent-state, then delete the bootstrap secret. Deleting it first prevents replacement tasks from starting.", nil
+		"5. Add durable EFS-backed volumes named qurl-agent-state, qurl-audit, and qurl-config. Do not share qurl-agent-state across concurrently running sidecars. After the qURL Connector logs show it connected, register and deploy a warm-start task revision with the QURL_API_KEY entry removed from `secrets`; verify the replacement task connects from qurl-agent-state, then delete the enrollment-token secret. Deleting it first prevents replacement tasks from starting.", nil
 }
 
 func renderS3WebsiteECSContainerJSON(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
@@ -1090,7 +1090,7 @@ QURL_K8S_YAML_EOF`, renderPortablePipefailShell(), shellSingleQuote(names.secret
 		"The Connector uses separate state and audit PVCs. qurl-go rejects group-writable identity state, so do not add pod-level `fsGroup`; the permissions init container enforces owner-only state modes before each start.",
 		"Your admission policy must permit the two root init containers: volume permissions uses CHOWN, DAC_OVERRIDE, and FOWNER, while the one-time bootstrap copy uses CHOWN only. The long-running Connector remains nonroot, read-only-root, seccomp-confined, and capability-free.",
 		"The enrollment token is streamed through your local shell into `kubectl`; do not run this from a shared, recorded, or command-traced terminal session.",
-		"After the pod connects, create and roll out a warm-start workload revision that removes `qurl-bootstrap-copy`, both bootstrap volumes and their mounts, and `QURL_API_KEY_FILE`. Verify the replacement pod connects from its persisted state, then delete the bootstrap Secret; deleting it first prevents a replacement pod from starting.",
+		"After the pod connects, create and roll out a warm-start workload revision that removes `qurl-bootstrap-copy`, both enrollment-token volumes and their mounts, and `QURL_API_KEY_FILE`. Verify the replacement pod connects from its persisted state, then delete the enrollment-token Secret; deleting it first prevents a replacement pod from starting.",
 	}, "\n")
 	return intro + "\n\n" + objectsBlock + "\n\nPod spec additions:\nAppend both generated init containers under your existing `initContainers:` list, add both runtime containers under `containers:`, and append the volumes under `volumes:`. Do not add pod-level `fsGroup` and do not duplicate existing YAML keys.\n\n" + patchBlock, nil
 }
