@@ -14,7 +14,6 @@ import (
 
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
@@ -350,7 +349,7 @@ func TestHandleAdminTransferOwnership_OwnerSuccessMovesSetupGate(t *testing.T) {
 		t.Fatalf("owner_id after transfer = %q, want %q", ownerID, testTargetUserID)
 	}
 
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: []byte("0123456789abcdef0123456789abcdef"), SlackBaseURL: testSlackBaseURL})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 	oldOwner := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testAdminOwnerID)
 	if text := oldOwner[respFieldText]; !strings.Contains(text, "can only be re-run") || !strings.Contains(text, "<@"+testTargetUserID+">") {
 		t.Fatalf("old owner setup reply missing new-owner gate: %q", text)
@@ -1259,15 +1258,9 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		stranger = "USTRANGER000"   // Different Slack user — non-owner caller.
 		team     = testAdminTeamID  // T_team
 	)
-	const slackBaseURL = "https://slack-bot.example"
-	stateSecret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes.
-
 	wireSetup := func(t *testing.T, h *Handler) {
 		t.Helper()
-		h.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  stateSecret,
-			SlackBaseURL: slackBaseURL,
-		})
+		h.SetOAuthSetup(newTestOAuthSetupConfig())
 	}
 
 	invokeSetup := func(t *testing.T, h *Handler, userID string) string {
@@ -1300,11 +1293,11 @@ func TestHandleSetup_OwnerGate(t *testing.T) {
 		}
 	})
 
-	t.Run("AdminStore nil (sandbox/no-DDB): normal setup URL minted", func(t *testing.T) {
+	t.Run("AdminStore nil: normal setup URL minted", func(t *testing.T) {
 		ts := newAdminTestServers(t)
 		h := newAdminTestHandler(t, ts)
 		wireSetup(t, h)
-		// Sandbox / no-DDB posture: normal /setup still mints without an
+		// Admin-storage-disabled posture: normal /setup still mints without an
 		// AdminStore, same as a fresh install. Null the store after construction
 		// to exercise that short-circuit (mirrors the sandbox cmd/main.go
 		// wiring). Explicit rotation is rejected separately because it must not
