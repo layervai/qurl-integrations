@@ -42,9 +42,9 @@ Accepted blind spot: because browser names are masked symmetrically, a comment n
 
 Intentional differences (do **not** sync these):
 - `manifest.json` / `package.json` `version` — separate release-please tracks (`chrome-extension-v*` vs `edge-extension-v*`), so the two versions move independently. This is the *only* manifest delta; Edge Add-ons hosts updates itself, so the Edge manifest carries no `update_url` (that key is the self-hosted Chrome mechanism — don't add it).
-- `_locales/en/messages.json` — `ext_name` ("qURL File Upload" vs "qURL File Upload for Edge"), and `permission_request_confirm`, which names the host browser showing the prompt ("Chrome will show…" vs "Edge will show…").
+- `_locales/en/messages.json` — `ext_name` ("qURL Agent" vs "qURL File Upload for Edge"), and `permission_request_confirm`, which names the host browser showing the prompt ("Chrome will show…" vs "Edge will show…").
 - Inside lockstep files, the masked tokens above: `lib/qurl-api.js` names the host browser whose minimum version guarantees `crypto.getRandomValues`; `popup/popup.js` names the browser that will show the permission prompt; `lib/qurl-config.js` points at its own app directory for the packaging `.env`. All prose; the code is identical.
-- Store-facing docs and assets: `docs/chrome-web-store-review.md` vs `docs/edge-add-ons-review.md` / `docs/edge-add-ons-submission-guide.md`, plus per-store branded `icons/`.
+- Store-facing docs and assets: `docs/chrome-web-store-review.md` vs `docs/edge-add-ons-review.md` / `docs/edge-add-ons-submission-guide.md`. The `icons/` are *not* a delta: both apps generate them from the same `icons/logo.png` with `scripts/generate-icons.js`, so all four PNGs are byte-identical and must stay that way.
 
 ## Commit format
 
