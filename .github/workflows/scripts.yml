@@ -16,6 +16,12 @@ concurrency:
 permissions:
   contents: read
 
+# This job executes shell from the PR under review, including the run
+# block that check-main-ci-notification-payload.sh extracts. That is safe
+# only because the job stays secret-free on a read-only `pull_request`
+# token — adding secrets or write permissions here would turn it into an
+# exfiltration path. Keep it that way.
+
 jobs:
   scripts:
     name: Lint and test scripts
@@ -32,3 +38,10 @@ jobs:
 
       - name: Check release-please config/manifest sync
         run: scripts/check-release-please-sync.sh
+
+      # The jq <= 1.7 parse check is only meaningful on a runner whose jq
+      # still has the restricted grammar; jq 1.8 (typical locally, and
+      # eventually here) accepts the form it rejects. The script reports
+      # which half it actually enforced.
+      - name: Check main CI notification payload builds
+        run: scripts/check-main-ci-notification-payload.sh

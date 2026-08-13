@@ -90,7 +90,7 @@ jobs:
               ;;
             "Release Please")
               # Keep in sync with the recovery notes in release-please.yml's header.
-              impact="Release automation failed on main. Release PRs, tags, or changelogs may be stale — and if the release-cli job failed, a CLI release may exist without binaries (installer 404s on the newest version, Homebrew tap not updated). Fix the cause, then re-run failed jobs on the linked run or dispatch Release Please with cli_tag=<tag>."
+              impact="Release automation failed on main. Release PRs, tags, or changelogs may be stale — and if the release-cli job failed, a CLI release may exist without binaries (installer 404s on the newest version, Homebrew tap not updated). Fix the cause, then re-run failed jobs on the linked run or dispatch Release Please with cli_tag=&lt;tag&gt;."
               ;;
             "Validate issue templates")
               impact="Issue-template validation failed on main. GitHub issue forms may be broken until the schema is fixed."
@@ -100,6 +100,13 @@ jobs:
               ;;
           esac
 
+          # jq parses object-construction values with a restricted
+          # production on jq <= 1.7, which ubuntu-latest ships: a bare `+`
+          # concatenation in that position is a parse error, so every
+          # concatenation below stays wrapped in parentheses. jq 1.8
+          # accepts the bare form, so checking this on a newer local jq
+          # will not catch a regression —
+          # scripts/check-main-ci-notification-payload.sh gates it in CI.
           payload="$(jq -n \
             --arg text ":rotating_light: ${WORKFLOW_NAME} ${CONCLUSION} on ${DEFAULT_BRANCH} - ${short_sha}" \
             --arg repository "$REPOSITORY" \
@@ -120,23 +127,23 @@ jobs:
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: "*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`."
+                    text: ("*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`.")
                   }
                 },
                 {
                   type: "section",
                   fields: [
-                    { type: "mrkdwn", text: "*Repository*\n<" + $repository_url + "|" + $repository + ">" },
-                    { type: "mrkdwn", text: "*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>" },
-                    { type: "mrkdwn", text: "*Triggered by*\n" + $actor },
-                    { type: "mrkdwn", text: "*Run*\n<" + $run_url + "|#" + $run_number + ">" }
+                    { type: "mrkdwn", text: ("*Repository*\n<" + $repository_url + "|" + $repository + ">") },
+                    { type: "mrkdwn", text: ("*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>") },
+                    { type: "mrkdwn", text: ("*Triggered by*\n" + $actor) },
+                    { type: "mrkdwn", text: ("*Run*\n<" + $run_url + "|#" + $run_number + ">") }
                   ]
                 },
                 {
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: "*Impact*\n" + $impact
+                    text: ("*Impact*\n" + $impact)
                   }
                 },
                 {
@@ -152,7 +159,7 @@ jobs:
             }')"
 
           for attempt in 1 2 3; do
-            if curl -sSf \
+            if curl -sS --fail-with-body \
               --max-time 30 \
               -X POST \
               -H 'Content-type: application/json' \
