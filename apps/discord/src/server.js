@@ -124,8 +124,8 @@ app.get('/health', async (req, res) => {
 });
 
 // Per-IP rate limit on /metrics. Even a token holder shouldn't be able to
-// hammer the endpoint — getStats() does several SQL reads + memoryUsage() +
-// uptime() every hit. Simple in-memory window; single-instance only
+// hammer the endpoint — getStats() runs a paginated full-table Scan per
+// counted table, plus memoryUsage() + uptime(), every hit. Simple in-memory window; single-instance only
 // (matches the SCALING comments on the OAuth/webhooks rate limiters).
 const metricsRateStore = new Map(); // ip -> number[] (request timestamps)
 const METRICS_WINDOW_MS = 60_000;

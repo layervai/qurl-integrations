@@ -17,35 +17,13 @@
 // scoping happens infra-side, not here.
 //
 // App-layer encryption: sensitive fields
-// (`guild_configs.qurl_api_key`, `orphaned_oauth_tokens.access_token`,
-// `qurl_send_configs.attachment_url`, `qurl_send_configs.interaction_token`)
-// are envelope-encrypted via `utils/crypto.encrypt`. Ciphertext is stored
-// as a regular `S` string.
+// (`guild_configs.qurl_api_key`, `qurl_send_configs.attachment_url`,
+// `qurl_send_configs.interaction_token`) are envelope-encrypted via
+// `utils/crypto.encrypt`. Ciphertext is stored as a regular `S` string.
 // DDB server-side encryption (AWS-managed aws/dynamodb CMK,
 // configured at the table level) is defense-in-
 // depth — the primary encryption is the app-layer envelope.
 //
-// Composite key encoding — two tables flatten a SQLite UNIQUE into
-// a string hash key to preserve dedup semantics under
-// `ConditionExpression: attribute_not_exists(pk)`:
-//
-//   - `contributions.contribution_id = "<repo>#<pr_number>"`
-//     Uniqueness invariant: neither component contains `#`
-//     (GitHub owner/name slug disallows it; PR numbers are
-//     integers).
-//
-//   - `milestones.milestone_id = "<repo-or-sentinel>#<type>#<value>"`
-//     Uniqueness invariant: real repo values always contain `/`
-//     (owner/name GitHub slug) so no real repo can equal the
-//     `__NONE__` sentinel used for account-wide milestones.
-//
-// Cross-process streak + badge writes: `recordContribution` chains
-// into `updateStreak` and badge-award helpers just like the SQLite
-// impl. DDB doesn't support atomic read-modify-write on different
-// items, so the streak update is a best-effort follow-up — a
-// concurrent second recordContribution call for the same user could
-// race the streak counter. Acceptable at projected write volume;
-// revisit with `TransactWriteItems` if contention ever surfaces.
 
 const crypto = require('crypto');
 const {
@@ -141,15 +119,15 @@ if (!TABLE_PREFIX) {
   throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
 }
 // Trailing-dash check. The prefix is concatenated directly with each
-// table's kebab-case suffix (`${TABLE_PREFIX}github-links`), so a
+// table's kebab-case suffix (`${TABLE_PREFIX}qurl-sends`), so a
 // missing trailing dash silently produces malformed names like
-// `qurl-bot-discord-prodgithub-links` and the bot's first DDB call
+// `qurl-bot-discord-prodqurl-sends` and the bot's first DDB call
 // returns ResourceNotFoundException — clear at the first call but
 // confusing in CloudWatch logs (looks like a permission or naming
 // issue, not a config typo). Catch it at boot so the failure points
 // directly at the env var.
 if (!TABLE_PREFIX.endsWith('-')) {
-  throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}github-links'. Add the trailing '-' in the deployment template.`);
+  throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}qurl-sends'. Add the trailing '-' in the deployment template.`);
 }
 const TABLES = Object.freeze({
   qurl_sends: `${TABLE_PREFIX}qurl-sends`,

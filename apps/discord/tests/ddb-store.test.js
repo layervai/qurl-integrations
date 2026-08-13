@@ -1672,7 +1672,7 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
 
   test('throws when DDB_TABLE_PREFIX is missing the trailing dash', () => {
     // Without the trailing '-', concat with kebab table suffixes
-    // produces malformed names like 'qurl-bot-discord-sandboxgithub-links'.
+    // produces malformed names like 'qurl-bot-discord-sandboxqurl-sends'.
     // First DDB call would return ResourceNotFoundException — clear at
     // the call site but confusing in CloudWatch (looks like a perms or
     // schema problem, not a config typo). Boot-time check points
@@ -1681,9 +1681,11 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/must end with '-'/);
     // Names the offending value AND the example malformed table the
-    // operator would've otherwise hit — concrete next action.
+    // operator would've otherwise hit — concrete next action. The
+    // example must be a table that actually exists, so an operator
+    // grepping for it doesn't land on one infra #372 dropped.
     expect(result.stderr).toMatch(/qurl-bot-discord-sandbox/);
-    expect(result.stderr).toMatch(/github-links/);
+    expect(result.stderr).toMatch(/qurl-sends/);
   });
 });
 

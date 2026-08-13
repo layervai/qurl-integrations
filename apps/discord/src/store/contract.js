@@ -32,7 +32,11 @@
 //      sides of the change land in the same PR — intentional lockstep.
 
 const STORE_METHODS = Object.freeze([
-  // Aggregate stats for /metrics
+  // Aggregate stats for /metrics. Backends must count only tables
+  // that exist in every environment — today `guild_configs` and
+  // `qurl_sends`. The eight tables the GitHub-community surface used
+  // were dropped by qurl-integrations-infra #372, so a read against
+  // one throws ResourceNotFoundException rather than returning empty.
   'getStats',
 
   // QURL sends
