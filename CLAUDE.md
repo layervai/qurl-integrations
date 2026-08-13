@@ -34,9 +34,13 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 | `content/gmail-compose.js`| `content/gmail-compose.js`| Gmail DOM manipulation                 |
 | `background.js`           | `background.js`           | Service worker message handling        |
 
+`scripts/check-extension-lockstep.sh` enforces this on every PR (via the Scripts workflow): it normalizes the host browser's name in the Edge copy and then requires an exact match, so drift fails CI instead of relying on a reviewer noticing. The `chrome.*` extension API namespace is spelled the same in both browsers and is deliberately not normalized. When a deliberate divergence is added, document it below **and** update that script.
+
 Intentional differences (do **not** sync these):
-- `manifest.json` — Edge uses `update_url` pointing to the Edge Add-ons store
-- `_locales/en/messages.json` `ext_name` — "qURL File Upload" vs "qURL File Upload for Edge"
+- `manifest.json` / `package.json` `version` — separate release-please tracks (`chrome-extension-v*` vs `edge-extension-v*`), so the two versions move independently. This is the *only* manifest delta; Edge Add-ons hosts updates itself, so the Edge manifest carries no `update_url` (that key is the self-hosted Chrome mechanism — don't add it).
+- `_locales/en/messages.json` — `ext_name` ("qURL File Upload" vs "qURL File Upload for Edge"), and `ask_origin_permission`, which names the host browser showing the prompt ("Chrome will show…" vs "Edge will show…").
+- `lib/qurl-api.js` — one comment names the host browser whose minimum version guarantees `crypto.getRandomValues`. Prose only; the code is identical.
+- Store-facing docs and assets: `docs/chrome-web-store-review.md` vs `docs/edge-add-ons-review.md` / `docs/edge-add-ons-submission-guide.md`, plus per-store branded `icons/`.
 
 ## Commit format
 
