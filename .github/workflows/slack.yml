@@ -125,6 +125,18 @@ jobs:
     # the observed build+cache path so successful image builds do not get
     # canceled during cache upload.
     timeout-minutes: 30
+    env:
+      # The customer-facing Connector release image cannot be published until
+      # the underlying platform reaches production, so the digest pinned in the
+      # release contract script may not resolve yet. While "false", an
+      # unresolvable pin degrades to the emitter-side fence in `slack / test`
+      # (TestS3WebsiteReleaseContractRouteMatchesRenderedConfig, which keeps the
+      # fixture route in lockstep with the config the Slack flow generates) plus
+      # a loud warning — never a silent pass. Flip to "true" in a one-line PR
+      # once a public release exists, which makes a missing image fail closed
+      # again. Mirrors the *_PRODUCER_FIXTURE_REQUIRED knobs in
+      # layervai/qurl-connector's cross-repo-contracts.yml.
+      CONNECTOR_RELEASE_IMAGE_REQUIRED: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -147,7 +159,26 @@ jobs:
           echo "image=$pins" >> "$GITHUB_OUTPUT"
 
       - name: Verify released Connector S3 route
-        run: bash origins/s3-static-connector/test/qurl_connector_release_contract.sh
+        shell: bash
+        run: |
+          script=origins/s3-static-connector/test/qurl_connector_release_contract.sh
+          pins="$(sed -nE 's|^IMG="\$\{IMG:-(.+)\}"$|\1|p' "$script")"
+          count="$(printf '%s\n' "$pins" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly one pinned Connector image in $script, found $count"
+            exit 1
+          fi
+          # Resolve without pulling so an unpublished pin is distinguished from
+          # a broken contract rather than surfacing as an opaque `docker run`
+          # exit 125.
+          if docker manifest inspect "$pins" >/dev/null 2>&1; then
+            bash "$script"
+          elif [ "$CONNECTOR_RELEASE_IMAGE_REQUIRED" = "true" ]; then
+            echo "::error::pinned Connector release image $pins does not resolve and CONNECTOR_RELEASE_IMAGE_REQUIRED=true"
+            exit 1
+          else
+            echo "::warning title=Connector release image pending::$pins does not resolve. The customer-facing Connector release cannot publish until the underlying platform reaches production, so this run falls back to the emitter-side fence in slack / test (TestS3WebsiteReleaseContractRouteMatchesRenderedConfig). Flip CONNECTOR_RELEASE_IMAGE_REQUIRED to true once a public release exists."
+          fi
 
       - name: Verify Slack-pinned S3 origin (linux/amd64)
         env:
