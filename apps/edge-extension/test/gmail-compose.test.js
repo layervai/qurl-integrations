@@ -121,8 +121,10 @@ function applyOverrides(target, source) {
 //   globals        merged over the sandbox itself (requestAnimationFrame, getComputedStyle, ...)
 //   decorateRange  mutates each range document.createRange hands out, for the selection paths
 //
-// Both merges go through applyOverrides, so `undefined` removes a key. `t` is only used to register
-// the tracked timer harness; a test supplying its own `timers` leaves it unused.
+// Both merges go through applyOverrides, so `undefined` removes a key. `globals` cannot reach
+// window/globalThis/self: those are assigned afterwards and have to stay self-referential for the
+// content script's `window.foo` lookups to resolve. `t` is only used to register the tracked timer
+// harness, so a test supplying its own `timers` leaves it unused.
 //
 // The returned handle carries what tests assert against: the captured `messageListener`, the
 // MutationObserver `observers` (each recording its observe() calls and its disconnect), the
@@ -130,6 +132,13 @@ function applyOverrides(target, source) {
 // failure toast), and the `warnings` console.warn collected.
 function createComposeSandbox(t, config) {
   const settings = config || {};
+  // Refuse the combination rather than dropping expectedArmed on the floor: it only means anything
+  // to the tracked harness, so a test that stubs timers *and* declares survivors is asking for a
+  // leaked-timer assertion that would never run.
+  assert.ok(
+    !(settings.timers && settings.expectedArmed),
+    'expectedArmed drives the tracked timer harness; a test supplying its own timers cannot use it'
+  );
   const timers = settings.timers || createTimerHarness(t, settings.expectedArmed);
   const selectionHarness = createSelectionHarness();
   const documentElement = { nodeName: 'HTML' };
