@@ -120,15 +120,18 @@ var redactedSubmissionBlockIDs = map[string]struct{}{
 	// Edit/expose aliases and names are redacted even when install aliases are
 	// visible diagnostics: edit/expose submissions can carry existing resource
 	// labels, URL targets, or broad free-form edits from an established setup.
-	claimCodeBlockID:           {},
-	tunnelEditBlockDisplayName: {},
-	tunnelEditBlockAliases:     {},
-	tunnelEditBlockChannels:    {},
-	exposeURLBlockResource:     {},
-	exposeURLBlockAlias:        {},
-	exposeURLBlockTarget:       {},
-	feedbackBlockSummary:       {},
-	feedbackBlockDetails:       {},
+	claimCodeBlockID:            {},
+	tunnelEditBlockDisplayName:  {},
+	tunnelEditBlockAliases:      {},
+	tunnelEditBlockChannels:     {},
+	exposeURLBlockResource:      {},
+	exposeURLBlockAlias:         {},
+	exposeURLBlockTarget:        {},
+	s3WebsiteInstallBlockBucket: {},
+	s3WebsiteInstallBlockPrefix: {},
+	s3WebsiteInstallBlockIndex:  {},
+	feedbackBlockSummary:        {},
+	feedbackBlockDetails:        {},
 }
 
 // IsRedactedSubmissionBlock reports whether a submitted Slack view state block
@@ -276,10 +279,10 @@ func TunnelInstallModal(meta *TunnelInstallModalMetadata) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// TunnelInstallErrorModal replaces a submitted tunnel-install modal with a
+// ConnectorInstallErrorModal replaces a submitted connector-install modal with a
 // form-level error. Slack's `response_action: errors` can only attach copy to
 // input fields, which makes auth/config failures look like bad user input.
-func TunnelInstallErrorModal(message string) ([]byte, error) {
+func ConnectorInstallErrorModal(message string) ([]byte, error) {
 	payload := map[string]any{
 		blockKitFieldType:  blockKitTypeModal,
 		blockKitFieldTitle: plainTextObj("qURL Connector setup"),
@@ -766,6 +769,18 @@ func staticSelect(actionID string, options []map[string]any, initial map[string]
 	return element
 }
 
+func radioButtons(actionID string, options []map[string]any, initial map[string]any) map[string]any {
+	element := map[string]any{
+		"type":                "radio_buttons",
+		blockKitFieldActionID: actionID,
+		"options":             options,
+	}
+	if initial != nil {
+		element["initial_option"] = initial
+	}
+	return element
+}
+
 // multiConversationsSelect returns a multi_conversations_select element — used
 // by the edit modal's "expose to channels" field. It is filtered to public and
 // private channels (DMs/group-DMs and externally-shared channels aren't
@@ -797,6 +812,12 @@ func optionObj(text, value string) map[string]any {
 		"text":             plainTextObj(text),
 		blockKitFieldValue: value,
 	}
+}
+
+func optionObjWithDescription(text, value, description string) map[string]any {
+	option := optionObj(text, value)
+	option["description"] = plainTextObj(description)
+	return option
 }
 
 // plainTextSectionBlock returns a `section` block whose text is a plain_text

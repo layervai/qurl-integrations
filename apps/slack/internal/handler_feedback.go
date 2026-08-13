@@ -170,7 +170,7 @@ func (h *Handler) processFeedback(ctx context.Context, log *slog.Logger, meta *F
 }
 
 // respondFeedbackModalError replaces the submitted feedback modal with a
-// form-level error view. Mirrors respondTunnelInstallModalError: on a render
+// form-level error view. Mirrors respondConnectorInstallModalError: on a render
 // failure it falls back to a field-level error so the user still sees a
 // failure path.
 func respondFeedbackModalError(w http.ResponseWriter, message string) {

@@ -1,4 +1,4 @@
-# qURL File Upload for Gmail
+# qURL Agent for Gmail
 
 Upload files straight from Gmail's compose window and drop secure, expiring
 links into your draft — no need to attach them to the email itself. Your
@@ -11,7 +11,7 @@ expiry, so a file you share today won't stay reachable forever.
 
 1. **Install** the extension (see [Installing](#installing) below).
 2. Open **Gmail** and click **Compose**.
-3. Click the **qURL File Upload** icon in the Chrome toolbar.
+3. Click the **qURL Agent** icon in the Chrome toolbar.
 4. Click **Browse files**, pick one or more, and click **Upload to qURL**.
 5. The secure links appear at the bottom of your draft. Keep writing and send
    as normal.
@@ -27,7 +27,7 @@ give you:
    Brave).
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and select the extension folder.
-5. The **qURL File Upload** icon appears in your toolbar. Pin it for quick
+5. The **qURL Agent** icon appears in your toolbar. Pin it for quick
    access.
 
 Building the extension yourself, or publishing it to the Chrome Web Store, is
@@ -36,7 +36,7 @@ covered in the [developer guide](docs/development.md).
 ## Using the extension
 
 1. Open Gmail and start a **Compose** window — keep it open while you upload.
-2. Click the **qURL File Upload** toolbar icon to open the popup.
+2. Click the **qURL Agent** toolbar icon to open the popup.
 3. Click **Browse files** and choose one or more files. Selected files are
    listed in the popup; remove any you didn't mean to add before uploading.
 4. Click **Upload to qURL**. Each file shows its own progress, and the links
@@ -54,8 +54,9 @@ A few things worth knowing:
   instead of failing the whole batch. Your qURL server may set a lower limit,
   in which case a smaller file can still be rejected after upload.
 - **Manual copy fallback.** If the links can't be inserted automatically (for
-  example, no compose window is open), the popup keeps a **Copy inserted
-  content** button so you can paste them into your draft yourself.
+  example, no compose window is open), the popup keeps a **Copy the qURL link**
+  button so you can paste the accessible link — with its expiry — into your
+  draft yourself.
 
 ## Pointing at a different qURL server
 
