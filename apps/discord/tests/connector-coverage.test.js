@@ -1413,10 +1413,15 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toThrow(/private\/internal/);
       expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(get()).toBeNull();
-      // Breadcrumb: a rejected target is logged (message only, never the URL).
+      // Breadcrumb: a rejected target is logged as message + host — never the
+      // full URL, and never the at_ token (which lives in the qurl_link
+      // fragment, a part `hostname` structurally cannot carry).
       expect(logger.warn).toHaveBeenCalledWith(
         'Detect tunnel target rejected by SSRF guard',
-        expect.objectContaining({ error: expect.stringMatching(/private\/internal/) }),
+        expect.objectContaining({
+          error: expect.stringMatching(/private\/internal/),
+          hostname: '127.0.0.1',
+        }),
       );
     });
 
@@ -1434,6 +1439,13 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toThrow(/private\/internal/);
       expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(get()).toBeNull();
+      // The breadcrumb names the host in the re-serialized form the guard judged,
+      // so the ORDER this test pins is legible in CloudWatch too: a reader can
+      // see it was the private-address layer that fired, on which host.
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Detect tunnel target rejected by SSRF guard',
+        expect.objectContaining({ hostname: '[::ffff:a9fe:a9fe]' }),
+      );
     });
 
     it('SSRF guard: a non-https minted qurl_site throws and NO knock or POST happens', async () => {
@@ -1473,10 +1485,15 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       ).rejects.toThrow(/qURL tunnel domain/);
       expect(mockClient.resolve).not.toHaveBeenCalled();
       expect(get()).toBeNull();
-      // And it's logged via the SSRF-rejection breadcrumb (message only).
+      // And it's logged via the SSRF-rejection breadcrumb, naming the host —
+      // which on the host-pin leg is the whole point: the constant message alone
+      // can't tell an operator WHERE a spoofed mint tried to send the bytes.
       expect(logger.warn).toHaveBeenCalledWith(
         'Detect tunnel target rejected by SSRF guard',
-        expect.objectContaining({ error: expect.stringMatching(/qURL tunnel domain/) }),
+        expect.objectContaining({
+          error: expect.stringMatching(/qURL tunnel domain/),
+          hostname: 'evil.example.com',
+        }),
       );
     });
 
@@ -1601,6 +1618,13 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
         'Detect tunnel mint returned an invalid qurl_site',
         expect.objectContaining({ error: expect.stringMatching(/unparseable qurl_site/) }),
       );
+      // No qurl_site to parse => no host to name. JSON.stringify drops the
+      // undefined key, so this line reads exactly as it did before the host was
+      // added to the payload -- no `hostname: null` noise.
+      const warn = logger.warn.mock.calls.find(
+        ([msg]) => msg === 'Detect tunnel mint returned an invalid qurl_site',
+      );
+      expect(warn[1].hostname).toBeUndefined();
     });
 
     it('backs off on repeated resolve resource_id mismatches, then re-resolves after the retry window', async () => {
