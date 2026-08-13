@@ -251,10 +251,15 @@ Symptoms of a deploy-order violation, and what to check:
 
   This is the in-band enforcement of the deploy-order gate, so it is expected
   to be silent once every environment is on the kind-first API. If it fires,
-  the fix is to roll the producer forward — retrying will not clear it. Note
-  the revoke is best-effort: if it fails, the log shows
-  `tunnel_bootstrap_cleanup_failed` and the credential remains bounded by its
-  one-hour TTL; revoke it manually.
+  the fix is to roll the producer forward — retrying will not clear it.
+
+  **The revoke is best-effort. If it fails (`tunnel_bootstrap_cleanup_failed`),
+  revoke the `key_id` by hand and do not wait for it to expire.** The usual
+  one-hour bound comes from the `expires_in` this bot requests, and a producer
+  that ignored the credential *kind* gives no assurance it honored the
+  *expiry* either — the credential may be long-lived or non-expiring, and it
+  may carry broader scopes than an enrollment token. Treat a failed cleanup
+  here as a live, potentially over-scoped credential.
 
   Expect one `level=error` line per attempt while a pre-cutover producer is
   still serving, so mute or scope any alert that pages on error level for this

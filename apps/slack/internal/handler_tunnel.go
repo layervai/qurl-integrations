@@ -753,10 +753,14 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		// predates this credential contract, and retrying against it will
 		// fail identically until it is rolled forward.
 		//
-		// The copy claims non-delivery and the TTL bound, both of which hold
-		// unconditionally — not that the revoke succeeded, which is
-		// best-effort and may have failed (tunnel_bootstrap_cleanup_failed).
-		return nil, "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it, and it expires within the hour. Contact support — retrying will not help until the qURL API is updated.", errKindFirstUnconfirmed
+		// Non-delivery is the only reassurance that holds unconditionally, so
+		// it is the only one the copy makes. Deliberately no TTL claim: the
+		// requested one-hour expiry binds only a producer that honored
+		// `expires_in`, and the case this gate catches is a producer that
+		// ignored the request shape — it may well have minted something
+		// longer-lived. Nor does the copy claim the revoke succeeded; that is
+		// best-effort (tunnel_bootstrap_cleanup_failed).
+		return nil, "The qURL API did not return a Connector enrollment token. Setup stopped without delivering it. Contact support — retrying will not help until the qURL API is updated.", errKindFirstUnconfirmed
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
