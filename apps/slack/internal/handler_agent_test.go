@@ -360,6 +360,42 @@ func TestAgentEventHasUpload(t *testing.T) {
 	}
 }
 
+// TestSlackMessageHasUploadMatchesEventDetection pins the two upload classifiers
+// against each other rather than restating expectations for one of them. The event
+// path decides whether an upload's OWN turn is refused; SlackMessageHasUpload
+// decides whether every LATER turn in that thread is told the attachment was there.
+// A disagreement is not a miscount — it puts a caption back in front of the model
+// stripped of the fact that it described a file.
+func TestSlackMessageHasUploadMatchesEventDetection(t *testing.T) {
+	shapes := []string{
+		`[{"id":"F1"}]`, `[{"id":"F1"},{"id":"F2"}]`, `["F1"]`, `[]`, `null`,
+		`{"id":"F1"}`, `"F1"`, `7`,
+	}
+	for _, raw := range shapes {
+		for _, subtype := range []string{"", slackMessageSubtypeFileShare, "message_changed"} {
+			event := slackInnerEvent{Files: filesFromJSON(t, raw), Subtype: subtype}
+			want := agentEventHasUpload(&event)
+			if got := SlackMessageHasUpload(json.RawMessage(raw), subtype); got != want {
+				t.Errorf("SlackMessageHasUpload(%s, %q) = %v, want %v to match the event path", raw, subtype, got, want)
+			}
+		}
+	}
+	// An absent files key has no event counterpart to compare against: the seam hands
+	// over a nil RawMessage where the envelope decode never calls the Unmarshaler.
+	if SlackMessageHasUpload(nil, "") {
+		t.Error("a message with no files field and no subtype is not an upload")
+	}
+	if !SlackMessageHasUpload(nil, slackMessageSubtypeFileShare) {
+		t.Error("file_share alone must still read as an upload, as it does on the event path")
+	}
+	// Routing through json.Unmarshal rather than calling the Unmarshaler directly is
+	// what makes the byte-for-byte "null" check safe here too: the decoder strips the
+	// padding either way. Called directly, a padded null would read as an attachment.
+	if SlackMessageHasUpload(json.RawMessage(" null "), "") {
+		t.Error("a padded null must still read as no attachment")
+	}
+}
+
 // TestSlackEventFilesNestedDecodeIsUnpadded pins the stdlib behavior the decoder's
 // null check relies on: as a struct field, files arrives with the whitespace around
 // it already stripped, so comparing the value against "null" byte-for-byte is safe.
@@ -1945,6 +1981,131 @@ func TestLoadAgentThreadHistory_ReconstructsOnlyCompletedQURLExchanges(t *testin
 	}
 	if !reflect.DeepEqual(history, want) {
 		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+// agentHistoryTestFollowupTS is the inbound follow-up turn's ts in the
+// attachment-history tests: later than every entry the stub returns, so it is the
+// current turn (which Agent.Run adds) rather than part of the rebuilt transcript.
+const agentHistoryTestFollowupTS = "100.2"
+
+// TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn pins the text-only
+// boundary ACROSS turns. An upload's own turn is refused outright, but the caption
+// stays in the Slack thread and every later turn rebuilds that thread from
+// conversations.replies. Replayed bare, "protect everything in this" reads as a
+// complete instruction the model can act on when the next message says "ok do it" —
+// a referent it never saw, presented as plain text. That is the same
+// misrepresentation agentUnsupportedMediaReply exists to remove, one turn later.
+//
+// The note travels with the caption rather than relying on the refusal reply beside
+// it: repeated uploads in one conversation are capped (claimMediaNotice) and post no
+// reply at all, so an annotated caption can be the only surviving evidence.
+func TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn(t *testing.T) {
+	const caption = "protect everything in this"
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "<@U12345678> " + caption, TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+			}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined {
+		t.Fatalf("load history: joined=%v err=%v", joined, err)
+	}
+	want := []agent.Message{
+		{Role: "user", Text: caption + " " + agentHistoryAttachmentNote},
+		{Role: "assistant", Text: agentUnsupportedMediaReply},
+	}
+	if !reflect.DeepEqual(history, want) {
+		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+// TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone covers the
+// two edges of the annotation. A file-only upload has no caption at all, so before
+// the note it left model context entirely — the refusal reply beside it answered
+// nothing, and a thread could read as if the user had never spoken. It becomes the
+// note on its own instead of vanishing. An own reply is never annotated: this
+// surface posts no files, so a HasFiles on one is Slack describing something we did
+// not attach.
+func TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone(t *testing.T) {
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: "answer", TS: "100.1", HasFiles: true},
+			}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined {
+		t.Fatalf("load history: joined=%v err=%v", joined, err)
+	}
+	want := []agent.Message{
+		{Role: "user", Text: agentHistoryAttachmentNote},
+		{Role: "assistant", Text: "answer"},
+	}
+	if !reflect.DeepEqual(history, want) {
+		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+// TestProcessAgentEvent_EarlierAttachmentTurnReachesModelAnnotated is the
+// end-to-end half: it asserts on what the LLM is actually handed, not on the
+// rebuilt slice, so an annotation lost anywhere between loadAgentThreadHistory and
+// the request still fails.
+func TestProcessAgentEvent_EarlierAttachmentTurnReachesModelAnnotated(t *testing.T) {
+	const caption = "protect everything in this"
+	llm := &scriptedHandlerAgentLLM{responses: []agent.Response{{
+		Text:       testAgentStillWorksReply,
+		StopReason: testAgentStopEndTurn,
+	}}}
+	post, _, _ := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            llm,
+		AgentStore:          &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: caption, TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+			}, nil
+		},
+	})
+
+	e := env(slackEventTypeMessage, "im", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+	h.processAgentEvent(context.Background(), slog.Default(), e)
+
+	if llm.calls != 1 {
+		t.Fatalf("follow-up should reach the model once, got %d calls", llm.calls)
+	}
+	var annotated bool
+	for _, msg := range llm.captured[0].Messages {
+		if msg.Text == caption {
+			t.Fatalf("an attachment's caption must never reach the model as plain text; messages = %#v", llm.captured[0].Messages)
+		}
+		if strings.Contains(msg.Text, caption) && strings.Contains(msg.Text, agentHistoryAttachmentNote) {
+			annotated = true
+		}
+	}
+	if !annotated {
+		t.Fatalf("the caption must survive alongside its note, not be dropped; messages = %#v", llm.captured[0].Messages)
 	}
 }
 

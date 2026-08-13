@@ -770,6 +770,30 @@ func agentEventHasUpload(e *slackInnerEvent) bool {
 	return e.Files.present || e.Subtype == slackMessageSubtypeFileShare
 }
 
+// SlackMessageHasUpload is the same classification for a message read back from
+// conversations.replies rather than delivered as an event. The thread-history seam
+// lives in package main, which cannot see slackEventFiles, so it hands the raw
+// `files` value and the subtype here instead of re-deriving the rule — the two
+// call sites must agree, because a history message classified as text-only would
+// replay an upload's caption as if it had been the whole message.
+//
+// files is the message's raw `files` value (nil when the key is absent). Routing it
+// back through encoding/json rather than calling the Unmarshaler directly keeps
+// the shape-tolerance AND the unpadded-value guarantee that slackEventFiles
+// documents: the nested-field and top-level decode paths hand the Unmarshaler the
+// same whitespace-stripped bytes. A decode error is impossible for a value the
+// caller already decoded into json.RawMessage, and an unrecognized shape resolves
+// to "an attachment we cannot count" inside the Unmarshaler rather than an error,
+// so a failure here would still leave present=false — the safe direction is
+// unreachable and unneeded.
+func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
+	var parsed slackEventFiles
+	if len(files) > 0 {
+		_ = json.Unmarshal(files, &parsed)
+	}
+	return parsed.present || subtype == slackMessageSubtypeFileShare
+}
+
 // agentAdmitsSubtype reports whether this surface answers a message carrying this
 // subtype. It is a POLICY whitelist, not a taxonomy: thread_broadcast and
 // me_message are perfectly deliberate human messages and still return false here —
@@ -936,6 +960,11 @@ func (h *Handler) resolveTurnHistory(ctx context.Context, log *slog.Logger, env 
 // other apps are excluded, the current inbound turn is excluded (Agent.Run adds
 // it), and any incomplete tail after the last qURL response is dropped so the
 // model always receives completed prior exchanges.
+//
+// A user message Slack flagged as carrying an attachment is rebuilt with
+// agentHistoryAttachmentNote appended, so the text-only boundary the upload's own
+// turn stated survives into every later turn in that thread. Own replies are not
+// annotated: this surface posts no files.
 func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnvelope) (history []agent.Message, joined bool, err error) {
 	if h.cfg.AgentThreadHistory == nil {
 		return nil, false, nil
@@ -973,19 +1002,13 @@ func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnv
 			// even when Slack supplies no top-level text to rebuild as context.
 			joined = true
 		}
-		text := strings.TrimSpace(msg.Text)
+		role, text := agentHistoryEntry(&msg, ownReply)
 		if text == "" {
 			continue
 		}
-		switch {
-		case ownReply:
-			visible = appendVisibleAgentMessage(visible, "assistant", text)
+		visible = appendVisibleAgentMessage(visible, role, text)
+		if role == roleAssistant {
 			lastAssistant = len(visible) - 1
-		case msg.BotID == "" && msg.UserID != "":
-			text = stripBotMention(text)
-			if text != "" {
-				visible = appendVisibleAgentMessage(visible, "user", text)
-			}
 		}
 	}
 	if lastAssistant < 0 {
@@ -995,10 +1018,64 @@ func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnv
 	if len(visible) > maxAgentHistoryMessages {
 		visible = visible[len(visible)-maxAgentHistoryMessages:]
 	}
-	for len(visible) > 0 && visible[0].Role != "user" {
+	for len(visible) > 0 && visible[0].Role != roleUser {
 		visible = visible[1:]
 	}
 	return visible, joined, nil
+}
+
+// roleUser and roleAssistant are the two roles rebuilt history carries. Slack
+// attribution does not survive the rebuild — see appendVisibleAgentMessage.
+const (
+	roleUser      = "user"
+	roleAssistant = "assistant"
+)
+
+// agentHistoryEntry classifies one raw thread message into the role and text it
+// contributes to model context. An empty text means the message contributes
+// nothing: a block-only reply, or a message from another app, which is excluded
+// rather than attributed to either side of the conversation.
+//
+// ownReply is decided by the caller, which needs it for the thread-joined signal
+// as well.
+func agentHistoryEntry(msg *AgentThreadMessage, ownReply bool) (role, text string) {
+	text = strings.TrimSpace(msg.Text)
+	if ownReply {
+		return roleAssistant, text
+	}
+	if msg.BotID != "" || msg.UserID == "" {
+		return "", ""
+	}
+	text = stripBotMention(text)
+	if msg.HasFiles {
+		text = noteAgentHistoryAttachment(text)
+	}
+	return roleUser, text
+}
+
+// agentHistoryAttachmentNote is appended to a rebuilt user message whose Slack
+// original carried an attachment, so a later turn in that thread cannot read a
+// caption as the user's whole request. Its own turn was refused outright
+// (agentUnsupportedMediaReply), but the caption stays in the thread and every
+// later turn rebuilds it from conversations.replies.
+//
+// Annotating rather than dropping is deliberate: "protect everything in this"
+// followed by "ok do it" is only coherent if the first message is still there, and
+// a silently missing turn would leave the refusal reply answering nothing. The
+// note is self-describing because it has to survive on its own — history carries
+// no roles beyond user/assistant, so there is no system slot to explain a marker
+// in, and it reaches the model as ordinary user-role text.
+const agentHistoryAttachmentNote = "[attachment omitted — a file was attached to this message but never reached you, so its contents are unknown]"
+
+// noteAgentHistoryAttachment appends agentHistoryAttachmentNote to a rebuilt
+// message's text. A file-only upload has no text of its own and becomes the note
+// alone: the user did send a turn, and an empty string would drop it back into the
+// silence this is meant to close.
+func noteAgentHistoryAttachment(text string) string {
+	if text == "" {
+		return agentHistoryAttachmentNote
+	}
+	return text + " " + agentHistoryAttachmentNote
 }
 
 func appendVisibleAgentMessage(history []agent.Message, role, text string) []agent.Message {
