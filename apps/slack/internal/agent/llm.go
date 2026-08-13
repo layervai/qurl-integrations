@@ -93,15 +93,13 @@ func streamTextDelta(event *anthropic.MessageStreamEventUnion) string {
 // cache-breakpoint placement is unit-testable.
 func (l *anthropicLLM) buildParams(req *Request) anthropic.MessageNewParams {
 	return anthropic.MessageNewParams{
-		Model:     l.model,
-		MaxTokens: l.maxTokens,
-		System:    systemBlocks(req),
-		Messages:  toSDKMessages(req.Messages),
-		Tools:     toSDKTools(req.Tools),
-		ToolChoice: anthropic.ToolChoiceUnionParam{
-			OfAuto: &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: anthropic.Bool(true)},
-		},
-		Thinking: anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
+		Model:      l.model,
+		MaxTokens:  l.maxTokens,
+		System:     systemBlocks(req),
+		Messages:   toSDKMessages(req.Messages),
+		Tools:      toSDKTools(req.Tools),
+		ToolChoice: toSDKToolChoice(req.TextOnly),
+		Thinking:   anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
 		// A second cache breakpoint, auto-placed on the last message block. Within
 		// a turn's up-to-6 round-trips TurnContext is fixed and the transcript
 		// only grows, so each round-trip reads the prior cache and extends it —
@@ -109,6 +107,21 @@ func (l *anthropicLLM) buildParams(req *Request) anthropic.MessageNewParams {
 		// since the per-turn context block precedes the messages.) Harmless no-op
 		// while the prefix is below the model's minimum cacheable length.
 		CacheControl: anthropic.NewCacheControlEphemeralParam(),
+	}
+}
+
+// toSDKToolChoice maps the round's tool policy. The ordinary round is `auto` with
+// parallel tool use disabled (one call per round, which the loop relies on). The
+// final round is `none`: the model MUST answer in text. `none` is used rather than
+// dropping Tools from the request because the Messages API rejects a transcript
+// containing tool_use/tool_result blocks when no tools are defined — and by the
+// time a turn finalizes, the transcript virtually always contains them.
+func toSDKToolChoice(textOnly bool) anthropic.ToolChoiceUnionParam {
+	if textOnly {
+		return anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
+	}
+	return anthropic.ToolChoiceUnionParam{
+		OfAuto: &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: anthropic.Bool(true)},
 	}
 }
 

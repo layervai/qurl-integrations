@@ -194,6 +194,16 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 	}
 	ctx, cancel := s.deliveryCtx()
 	defer cancel()
+	if result.DiscardedStreamText {
+		// The turn streamed narration from a round it then ABANDONED, and Reply comes
+		// from a later, independent round (see agent.Result.DiscardedStreamText). The
+		// stream is append-only, so the reconcile below could only run the two
+		// together into one message — "Let me check the res" immediately followed by
+		// the real answer. Take the broken-stream fallback instead: stop what the user
+		// already saw, and let the caller post the complete answer as its own message.
+		s.stop(ctx, nil)
+		return false
+	}
 	if tail := s.markdown.flush(); tail != "" {
 		s.pending.WriteString(tail)
 	}
