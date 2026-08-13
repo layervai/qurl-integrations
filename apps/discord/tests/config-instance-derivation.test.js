@@ -3,42 +3,7 @@
 // object at require-time, so a fresh module graph is required per
 // test to exercise different `os` shapes.
 
-function withFreshConfig({ env = {}, hostname, networkInterfaces }, run) {
-  jest.isolateModules(() => {
-    const prevEnv = {};
-    for (const key of ['INSTANCE_ID', 'INSTANCE_IP']) {
-      prevEnv[key] = process.env[key];
-      if (env[key] === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = env[key];
-      }
-    }
-    jest.doMock('os', () => {
-      const actual = jest.requireActual('os');
-      return {
-        ...actual,
-        hostname: () => (hostname !== undefined ? hostname : actual.hostname()),
-        networkInterfaces: () =>
-          networkInterfaces !== undefined ? networkInterfaces : actual.networkInterfaces(),
-      };
-    });
-    try {
-      const config = require('../src/config');
-      run(config);
-    } finally {
-      for (const key of Object.keys(prevEnv)) {
-        if (prevEnv[key] === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = prevEnv[key];
-        }
-      }
-      jest.dontMock('os');
-    }
-  });
-}
-
+const { withFreshConfigMockingOs: withFreshConfig } = require('./helpers/fresh-config');
 describe('INSTANCE_ID derivation', () => {
   it('uses INSTANCE_ID env override when set (wins over hostname)', () => {
     withFreshConfig(
