@@ -1,13 +1,10 @@
 // Tests for src/utils/oauth-state.js — the shared secret-resolution +
-// HMAC signer behind both OAuth state flows (the GitHub OAuth binding
-// in commands.js and the qURL OAuth setup state in
-// utils/qurl-oauth-state.js). Covers the contract both flows rely on:
+// HMAC signer behind the qURL OAuth setup state
+// (utils/qurl-oauth-state.js). Covers the contract that flow relies on:
 //   1. precedence — first truthy secretConfigKeys entry wins, then
-//      GITHUB_CLIENT_SECRET, then the jest-only random fallback
+//      the jest-only random fallback
 //   2. MIN_STATE_SECRET_LENGTH — whichever key wins the resolution is
-//      rejected under 32 chars. This is the drift the extraction
-//      closed: the GitHub flow's resolver used to accept a 4-char
-//      OAUTH_STATE_SECRET silently.
+//      rejected under 32 chars.
 //   3. sign/verify — round-trip, tamper rejection, and no-throw on
 //      malformed signature input
 //   4. test-harness gating — outside jest/CI the resolver throws
@@ -54,8 +51,9 @@ describe('oauth-state createStateSigner', () => {
   });
 
   it('rejects missing or empty secretConfigKeys at construction', () => {
-    // An empty list would silently resolve straight to
-    // GITHUB_CLIENT_SECRET — a precedence change, not a cosmetic bug.
+    // An empty list would leave nothing to resolve, so every
+    // sign/verify would fall through to the throw (or, inside jest, to
+    // the random test fallback) instead of failing at construction.
     expect(() => createStateSigner({ flowLabel: 'x' })).toThrow(/secretConfigKeys/);
     expect(() => createStateSigner({ flowLabel: 'x', secretConfigKeys: [] })).toThrow(/secretConfigKeys/);
   });
@@ -72,11 +70,6 @@ describe('oauth-state createStateSigner', () => {
       config.OAUTH_STATE_SECRET = 's'.repeat(64);
       const signer = makeSigner({ secretConfigKeys: ['QURL_OAUTH_STATE_SECRET', 'OAUTH_STATE_SECRET'] });
       expect(signer.sign('data')).toBe(hmacHex('s'.repeat(64), 'data'));
-    });
-
-    it('falls back to GITHUB_CLIENT_SECRET when no dedicated key is set', () => {
-      config.GITHUB_CLIENT_SECRET = 'g'.repeat(64);
-      expect(makeSigner().sign('data')).toBe(hmacHex('g'.repeat(64), 'data'));
     });
 
     it('resolves lazily per call — a rotated secret invalidates states signed with the old one', () => {
@@ -103,9 +96,10 @@ describe('oauth-state createStateSigner', () => {
       expect(signer.verify('data', signer.sign('data'))).toBe(true);
     });
 
-    it('refuses a GITHUB_CLIENT_SECRET fallback under 32 chars, naming the key', () => {
-      config.GITHUB_CLIENT_SECRET = 'test-client-secret';
-      expect(() => makeSigner().sign('data')).toThrow(/GITHUB_CLIENT_SECRET is shorter than 32 chars/);
+    it('refuses a later-precedence key under 32 chars, naming that key', () => {
+      config.OAUTH_STATE_SECRET = 'test-state-secret';
+      const signer = makeSigner({ secretConfigKeys: ['QURL_OAUTH_STATE_SECRET', 'OAUTH_STATE_SECRET'] });
+      expect(() => signer.sign('data')).toThrow(/OAUTH_STATE_SECRET is shorter than 32 chars/);
     });
 
     it('names the flow (brand spelling preserved) in the refusal message', () => {
@@ -180,7 +174,7 @@ describe('oauth-state createStateSigner', () => {
       delete process.env.CI;
       try {
         expect(() => signer.sign('data')).toThrow(
-          /Refusing to mint test OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set\./,
+          /Refusing to mint test OAuth state: OAUTH_STATE_SECRET must be set\./,
         );
       } finally {
         if (savedWorker !== undefined) process.env.JEST_WORKER_ID = savedWorker;

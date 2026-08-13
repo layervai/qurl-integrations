@@ -4,10 +4,9 @@
  * prod with missing secrets or die on a spurious false-positive, so the
  * exact set per mode is pinned down here.
  *
- * NOTE: the helpers are parameterized on `isOpenNHPActive`, not
- * `isMultiTenant`. Single-guild-plain (GUILD_ID set, flag off) behaves
- * identically to multi-tenant here — neither mounts /auth or /webhook,
- * so neither needs GITHUB_* / BASE_URL.
+ * NOTE: the boot key helpers take no mode parameter. Both deployment
+ * modes (single-guild and multi-tenant) require the same keys — the
+ * only thing GUILD_ID changes is command registration scope.
  */
 
 const {
@@ -33,27 +32,14 @@ const {
 const { MIN_STATE_SECRET_LENGTH } = require('../src/utils/oauth-state');
 
 describe('bootRequired', () => {
-  it('OpenNHP-active mode demands DISCORD_TOKEN + GITHUB_* (but not GUILD_ID or BASE_URL — those are enforced upstream)', () => {
-    expect(bootRequired(true).sort()).toEqual([
-      'DISCORD_TOKEN', 'GITHUB_CLIENT_ID',
-      'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET',
-    ]);
-  });
-
-  it('non-OpenNHP modes (multi-tenant OR single-guild-plain) demand only DISCORD_TOKEN', () => {
-    expect(bootRequired(false)).toEqual(['DISCORD_TOKEN']);
+  it('demands only DISCORD_TOKEN (GUILD_ID and BASE_URL are enforced upstream)', () => {
+    expect(bootRequired()).toEqual(['DISCORD_TOKEN']);
   });
 });
 
 describe('prodRequired', () => {
-  it('OpenNHP prod requires QURL_API_KEY (global fallback)', () => {
-    expect(prodRequired(true).sort()).toEqual([
-      'KEY_ENCRYPTION_KEY', 'METRICS_TOKEN', 'QURL_API_KEY',
-    ]);
-  });
-
-  it('non-OpenNHP prod omits QURL_API_KEY (per-guild via /qurl setup)', () => {
-    expect(prodRequired(false).sort()).toEqual([
+  it('omits QURL_API_KEY — every deployment configures per-guild via /qurl setup', () => {
+    expect(prodRequired().sort()).toEqual([
       'KEY_ENCRYPTION_KEY', 'METRICS_TOKEN',
     ]);
   });
@@ -61,89 +47,56 @@ describe('prodRequired', () => {
 
 describe('missingBootKeys', () => {
   it('returns empty when every boot key is present', () => {
-    const cfg = {
-      DISCORD_TOKEN: 't', GITHUB_CLIENT_ID: 'x', GITHUB_CLIENT_SECRET: 'x',
-      GITHUB_WEBHOOK_SECRET: 'x', GUILD_ID: '123', BASE_URL: 'https://h',
-    };
-    expect(missingBootKeys(cfg, true)).toEqual([]);
-    expect(missingBootKeys(cfg, false)).toEqual([]);
+    expect(missingBootKeys({ DISCORD_TOKEN: 't', GUILD_ID: '123', BASE_URL: 'https://h' })).toEqual([]);
   });
 
-  it('surfaces exact missing keys (not just a count) in OpenNHP mode', () => {
-    const cfg = { DISCORD_TOKEN: 't' };
-    expect(missingBootKeys(cfg, true).sort()).toEqual([
-      'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET',
-    ]);
+  it('surfaces the exact missing key (not just a count)', () => {
+    expect(missingBootKeys({})).toEqual(['DISCORD_TOKEN']);
   });
 
-  it('only DISCORD_TOKEN missing triggers fail in non-OpenNHP mode', () => {
-    expect(missingBootKeys({}, false)).toEqual(['DISCORD_TOKEN']);
-  });
-
-  it('does not flag OpenNHP-only keys as missing in non-OpenNHP mode', () => {
-    // Single-guild-plain: GUILD_ID may be set but GITHUB_* unset — boot should not fail.
-    expect(missingBootKeys({ DISCORD_TOKEN: 't', GUILD_ID: '123' }, false)).toEqual([]);
-    // Multi-tenant: GUILD_ID unset, nothing else set — boot should not fail as long as DISCORD_TOKEN is there.
-    expect(missingBootKeys({ DISCORD_TOKEN: 't' }, false)).toEqual([]);
+  it('does not flag GUILD_ID or BASE_URL as missing — both are optional here', () => {
+    // Multi-tenant: GUILD_ID unset, BASE_URL unset — boot should not
+    // fail as long as DISCORD_TOKEN is there.
+    expect(missingBootKeys({ DISCORD_TOKEN: 't' })).toEqual([]);
   });
 
   it('treats empty strings as missing (not just undefined)', () => {
-    const cfg = {
-      DISCORD_TOKEN: '', GITHUB_CLIENT_ID: '', GITHUB_CLIENT_SECRET: 'x',
-      GITHUB_WEBHOOK_SECRET: 'x',
-    };
-    expect(missingBootKeys(cfg, true).sort()).toEqual([
-      'DISCORD_TOKEN', 'GITHUB_CLIENT_ID',
-    ]);
+    expect(missingBootKeys({ DISCORD_TOKEN: '' })).toEqual(['DISCORD_TOKEN']);
   });
 });
 
 describe('missingProdKeys', () => {
   it('returns empty when every prod key is set in env', () => {
-    const env = { METRICS_TOKEN: 'x', QURL_API_KEY: 'x', KEY_ENCRYPTION_KEY: 'x' };
-    expect(missingProdKeys(env, true)).toEqual([]);
-    expect(missingProdKeys(env, false)).toEqual([]);
+    expect(missingProdKeys({ METRICS_TOKEN: 'x', KEY_ENCRYPTION_KEY: 'x' })).toEqual([]);
   });
 
-  it('does not demand QURL_API_KEY in non-OpenNHP prod', () => {
-    const env = { METRICS_TOKEN: 'x', KEY_ENCRYPTION_KEY: 'x' };
-    expect(missingProdKeys(env, false)).toEqual([]);
-    // But it IS required in OpenNHP mode
-    expect(missingProdKeys(env, true)).toEqual(['QURL_API_KEY']);
+  it('does not demand QURL_API_KEY', () => {
+    expect(missingProdKeys({ METRICS_TOKEN: 'x', KEY_ENCRYPTION_KEY: 'x', QURL_API_KEY: undefined })).toEqual([]);
   });
 
   it('surfaces missing encryption key loudly — no silent fallback possible', () => {
-    const env = { METRICS_TOKEN: 'x' };
-    expect(missingProdKeys(env, false)).toEqual(['KEY_ENCRYPTION_KEY']);
-    expect(missingProdKeys(env, true).sort()).toEqual([
-      'KEY_ENCRYPTION_KEY', 'QURL_API_KEY',
-    ]);
+    expect(missingProdKeys({ METRICS_TOKEN: 'x' })).toEqual(['KEY_ENCRYPTION_KEY']);
   });
 });
 
 describe('missingKekRequiredKeys', () => {
-  it('returns empty when GITHUB_CLIENT_SECRET is unset (no token-issuing surface, no KEK demand)', () => {
-    expect(missingKekRequiredKeys({})).toEqual([]);
-    // Empty string also counts as unset — same as missingBootKeys's robustness.
-    expect(missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: '' })).toEqual([]);
+  it('returns empty when qURL OAuth is not configured (nothing persists a key, no KEK demand)', () => {
+    expect(missingKekRequiredKeys({}, false)).toEqual([]);
+    expect(missingKekRequiredKeys({ KEY_ENCRYPTION_KEY: '' }, false)).toEqual([]);
   });
 
-  it('flags KEY_ENCRYPTION_KEY when GITHUB_CLIENT_SECRET is set without KEK', () => {
-    expect(missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x' })).toEqual(['KEY_ENCRYPTION_KEY']);
+  it('flags KEY_ENCRYPTION_KEY when qURL OAuth is configured without KEK', () => {
+    expect(missingKekRequiredKeys({}, true)).toEqual(['KEY_ENCRYPTION_KEY']);
     // Empty-string KEK counts as missing (matches the
     // boot-requirements `!env[k]` falsy treatment elsewhere).
-    expect(
-      missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: '' })
-    ).toEqual(['KEY_ENCRYPTION_KEY']);
+    expect(missingKekRequiredKeys({ KEY_ENCRYPTION_KEY: '' }, true)).toEqual(['KEY_ENCRYPTION_KEY']);
   });
 
-  it('returns empty when both are set, regardless of NODE_ENV', () => {
-    // Independent of NODE_ENV by design — staging/preview deploys with
-    // a real GitHub client secret must satisfy this gate even though
-    // missingProdKeys does not run for them.
-    expect(
-      missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: 'k' })
-    ).toEqual([]);
+  it('returns empty when both hold, regardless of NODE_ENV', () => {
+    // Independent of NODE_ENV by design — staging/preview deploys that
+    // run guided setup persist real qURL API keys and must satisfy this
+    // gate even though missingProdKeys does not run for them.
+    expect(missingKekRequiredKeys({ KEY_ENCRYPTION_KEY: 'k' }, true)).toEqual([]);
   });
 });
 
@@ -890,40 +843,37 @@ describe('invalidHotStandbyValues', () => {
 
 describe('invalidStateSecretValues', () => {
   // The caller in index.js sits inside the NODE_ENV=production block —
-  // these tests pin the predicate itself: presence is OpenNHP-gated
-  // (only mode that mounts the GitHub OAuth surface), shape applies to
-  // any SET secret in every mode (the qURL OAuth flow mounts outside
-  // OpenNHP too, so a short secret would deferred-500 /qurl setup in a
-  // multi-tenant deploy). Unset keys are never shape-checked — they
-  // simply fall out of the signer's resolution (the separation-of-
-  // concerns mirroring invalidHotStandbyValues) — pinned implicitly by
-  // every []-returning case below.
+  // these tests pin the predicate itself: presence is gated on the qURL
+  // OAuth flow being configured (the only consumer of the signer),
+  // while shape applies to any SET secret in every mode, so a short
+  // secret can't deferred-500 the first /qurl setup. Unset keys are
+  // never shape-checked — they simply fall out of the signer's
+  // resolution (the separation-of-concerns mirroring
+  // invalidHotStandbyValues) — pinned implicitly by every []-returning
+  // case below.
 
-  it('returns [] when OpenNHP is inactive and no state secret is set', () => {
-    expect(invalidStateSecretValues({ isOpenNHPActive: false })).toEqual([]);
+  it('returns [] when nothing is configured and no state secret is set', () => {
+    expect(invalidStateSecretValues({})).toEqual([]);
   });
 
-  it('flags a missing OAUTH_STATE_SECRET only when OpenNHP is active', () => {
-    const problems = invalidStateSecretValues({ isOpenNHPActive: true });
+  it('flags a missing state secret only when the qURL flow is configured', () => {
+    const problems = invalidStateSecretValues({ isQurlOAuthConfigured: true });
     expect(problems).toHaveLength(1);
-    expect(problems[0]).toMatch(/OAUTH_STATE_SECRET must be set/);
+    expect(problems[0]).toMatch(/no state-signing secret is available/);
     expect(problems[0]).toMatch(/openssl rand -hex 32/);
+
+    // Flow not configured → nothing resolves the signer, nothing to flag.
+    expect(invalidStateSecretValues({ isQurlOAuthConfigured: false })).toEqual([]);
   });
 
   it('flags a configured qURL OAuth flow with NO available signer key (would deferred-500 the first /qurl setup)', () => {
-    const problems = invalidStateSecretValues({ isOpenNHPActive: false, isQurlOAuthConfigured: true });
+    const problems = invalidStateSecretValues({ isQurlOAuthConfigured: true });
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/qURL OAuth is configured .* but no state-signing secret/);
     expect(problems[0]).toMatch(/QURL_OAUTH_STATE_SECRET \(preferred\) or OAUTH_STATE_SECRET/);
   });
 
-  it('accepts a configured qURL OAuth flow when any chain key exists — including the GITHUB_CLIENT_SECRET fallback tier', () => {
-    // Unlike the OpenNHP presence rule, the documented backward-compat
-    // fallback satisfies the qURL flow.
-    expect(invalidStateSecretValues({
-      isQurlOAuthConfigured: true,
-      GITHUB_CLIENT_SECRET: 'g'.repeat(40),
-    })).toEqual([]);
+  it('accepts a configured qURL OAuth flow when either chain key exists', () => {
     expect(invalidStateSecretValues({
       isQurlOAuthConfigured: true,
       QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
@@ -934,30 +884,16 @@ describe('invalidStateSecretValues', () => {
     })).toEqual([]);
   });
 
-  it('flags a short GITHUB_CLIENT_SECRET only when it is the winning key for a configured qURL flow', () => {
-    // Winning key + configured flow → the first /qurl setup is
-    // guaranteed to 500, so boot rejection has zero false positives.
+  it('flags a set-but-short state secret even when the qURL flow is not configured', () => {
+    // Deliberately fail-loud-on-any-set-value: set-but-wrong is a
+    // misconfig in its own right, and a later config change shouldn't
+    // unearth a latent bad value at the first /qurl setup.
     const problems = invalidStateSecretValues({
-      isQurlOAuthConfigured: true,
-      GITHUB_CLIENT_SECRET: 'shrt',
+      isQurlOAuthConfigured: false,
+      OAUTH_STATE_SECRET: 'shrt',
     });
     expect(problems).toHaveLength(1);
-    expect(problems[0]).toMatch(/GITHUB_CLIENT_SECRET is its only available state-signing key/);
-    expect(problems[0]).toMatch(/shorter than \d+ chars \(got 4\)/);
-
-    // Not the winning key (a valid dedicated key outranks it) → no problem.
-    expect(invalidStateSecretValues({
-      isQurlOAuthConfigured: true,
-      QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
-      GITHUB_CLIENT_SECRET: 'shrt',
-    })).toEqual([]);
-
-    // Flow not configured → provider-issued value is not this gate's
-    // business, however short.
-    expect(invalidStateSecretValues({
-      isQurlOAuthConfigured: false,
-      GITHUB_CLIENT_SECRET: 'shrt',
-    })).toEqual([]);
+    expect(problems[0]).toMatch(/OAUTH_STATE_SECRET is shorter than \d+ chars \(got 4\)/);
   });
 
   it('does not demand a signer key when qURL OAuth is unconfigured (signer call sites all gate on isQurlOAuthConfigured)', () => {
@@ -966,17 +902,17 @@ describe('invalidStateSecretValues', () => {
 
   it('flags a set-but-short OAUTH_STATE_SECRET in every mode (a short secret must fail at boot, not at first use)', () => {
     const oneShort = 'x'.repeat(MIN_STATE_SECRET_LENGTH - 1);
-    for (const isOpenNHPActive of [true, false]) {
-      const problems = invalidStateSecretValues({ isOpenNHPActive, OAUTH_STATE_SECRET: oneShort });
+    for (const isQurlOAuthConfigured of [true, false]) {
+      const problems = invalidStateSecretValues({ isQurlOAuthConfigured, OAUTH_STATE_SECRET: oneShort });
       expect(problems).toHaveLength(1);
       expect(problems[0]).toMatch(new RegExp(`OAUTH_STATE_SECRET is shorter than ${MIN_STATE_SECRET_LENGTH} chars \\(got ${oneShort.length}\\)`));
     }
   });
 
   it('flags a set-but-short QURL_OAUTH_STATE_SECRET in every mode (the qURL flow must not deferred-500)', () => {
-    for (const isOpenNHPActive of [true, false]) {
+    for (const isQurlOAuthConfigured of [true, false]) {
       const problems = invalidStateSecretValues({
-        isOpenNHPActive,
+        isQurlOAuthConfigured,
         OAUTH_STATE_SECRET: '0'.repeat(64),
         QURL_OAUTH_STATE_SECRET: 'shrt',
       });
@@ -987,7 +923,7 @@ describe('invalidStateSecretValues', () => {
 
   it('reports every problem on a single call (one-shot operator remediation)', () => {
     const problems = invalidStateSecretValues({
-      isOpenNHPActive: false,
+      isQurlOAuthConfigured: false,
       OAUTH_STATE_SECRET: 'shrt',
       QURL_OAUTH_STATE_SECRET: 'also-shrt',
     });
@@ -996,12 +932,12 @@ describe('invalidStateSecretValues', () => {
 
   it('accepts secrets at and above the floor', () => {
     expect(invalidStateSecretValues({
-      isOpenNHPActive: true,
+      isQurlOAuthConfigured: true,
       OAUTH_STATE_SECRET: 'x'.repeat(MIN_STATE_SECRET_LENGTH),
     })).toEqual([]);
     // openssl rand -hex 32 → 64 chars, the documented generator.
     expect(invalidStateSecretValues({
-      isOpenNHPActive: true,
+      isQurlOAuthConfigured: true,
       OAUTH_STATE_SECRET: '0'.repeat(64),
       QURL_OAUTH_STATE_SECRET: '1'.repeat(64),
     })).toEqual([]);
