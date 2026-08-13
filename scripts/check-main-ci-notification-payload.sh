@@ -88,10 +88,10 @@ triggers = []
 for i, line in enumerate(lines):
     if re.match(r"^ {4}workflows:\s*$", line):
         for nxt in lines[i + 1:]:
-            m = re.match(r'^ {6}- "?([^"]+)"?\s*$', nxt)
+            m = re.match(r'^ {6}- ([\'"]?)(.+?)\1\s*$', nxt)
             if not m:
                 break
-            triggers.append(m.group(1))
+            triggers.append(m.group(2))
         break
 if not triggers:
     die("could not extract on.workflow_run.workflows")
@@ -105,9 +105,9 @@ for entry in sorted(os.listdir(".github/workflows")):
         continue
     with open(os.path.join(".github/workflows", entry)) as fh:
         for line in fh:
-            m = re.match(r'^name: *"?([^"\n]+?)"?\s*$', line)
+            m = re.match(r'^name: *([\'"]?)(.+?)\1\s*$', line)
             if m:
-                names.add(m.group(1))
+                names.add(m.group(2))
                 break
 
 missing = [t for t in triggers if t not in names]
@@ -206,7 +206,8 @@ try:
 
         for block in obj["blocks"]:
             for text in ([block["text"]["text"]] if "text" in block else []) + \
-                        [f["text"] for f in block.get("fields", [])]:
+                        [f["text"] for f in block.get("fields", [])] + \
+                        [e["text"] for e in block.get("elements", [])]:
                 if text.strip() in ("", "*Impact*"):
                     die("empty text rendered for %s: %r" % (label, text))
 
