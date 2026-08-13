@@ -23,17 +23,36 @@ function loadSharp() {
   try {
     return require('sharp');
   } catch (error) {
-    throw new Error('Missing dependency: "sharp". Run "npm install" in the project root before generating icons.');
+    // Keep the original failure as `cause`. Every require failure surfaces through this one
+    // message, but they do not share a fix: a missing package needs `npm install`, while an
+    // installed-but-unloadable native binding needs `npm install --include=optional`. The
+    // cause is the only thing that tells them apart, and this message now also reaches
+    // whoever is reading a red `npm test`.
+    throw new Error(
+      'Missing dependency: "sharp". Run "npm install" in the project root before generating icons ' +
+      '(if sharp is installed but its native binding failed to load, try "npm install --include=optional").',
+      { cause: error }
+    );
   }
 }
 
 /**
  * Renders every icon size into `outDir` and resolves with the written paths.
- * Callers other than the CLI (the drift test) pass a temp `outDir` so they can
- * compare against the committed icons without overwriting them.
+ *
+ * `outDir` is required rather than defaulting to `icons/`: this module is exported so tests can
+ * render somewhere disposable, and a caller that forgot the argument would silently overwrite the
+ * committed icons. `main()` is the only caller that passes the real directory.
+ *
+ * `onGenerated` is called after each file lands, so the CLI can report progress — and so a run
+ * that dies partway still says which icons it had already overwritten.
  */
 async function generateIcons(options) {
-  const { sourcePath = defaultSourcePath, outDir = defaultIconsDir } = options || {};
+  const { sourcePath = defaultSourcePath, outDir, onGenerated } = options || {};
+
+  if (!outDir) {
+    throw new Error('generateIcons requires an explicit outDir.');
+  }
+
   const sharp = loadSharp();
 
   if (!fs.existsSync(sourcePath)) {
@@ -55,23 +74,37 @@ async function generateIcons(options) {
       .toFile(pngPath);
 
     written.push(pngPath);
+
+    if (onGenerated) {
+      onGenerated(pngPath);
+    }
   }
 
   return written;
 }
 
 async function main() {
-  const written = await generateIcons();
-
-  for (const pngPath of written) {
-    console.log(`Generated: ${path.relative(extensionRoot, pngPath)}`);
-  }
+  await generateIcons({
+    outDir: defaultIconsDir,
+    onGenerated: function (pngPath) {
+      console.log(`Generated: ${path.relative(extensionRoot, pngPath)}`);
+    },
+  });
 }
 
 if (require.main === module) {
   main().catch(function (error) {
-    console.error(error.message);
-    process.exit(1);
+    // Prefer the stack; a non-Error rejection has no `.message` and would print as undefined.
+    console.error(error && error.stack ? error.stack : error);
+
+    if (error && error.cause) {
+      console.error(`Caused by: ${error.cause.stack || error.cause}`);
+    }
+
+    // Not `process.exit()`: stdio to a pipe is async on macOS, so exiting here can discard the
+    // diagnostic above under `npm run icons | tee build.log`. Setting the code lets Node drain
+    // and exit 1 on its own.
+    process.exitCode = 1;
   });
 }
 
