@@ -254,6 +254,9 @@ run_case manifest-literal-names-wrong-browser 1 "manifest.json: name names the w
 run_case manifest-key-absent-from-catalog 1 "references 1 key(s) absent from" \
   set_json "apps/edge-extension/manifest.json" name "" "__MSG_ext_title__"
 
+run_case manifest-key-absent-chrome-side 1 "references 1 key(s) absent from" \
+  set_json "apps/chrome-extension/manifest.json" name "" "__MSG_ext_title__"
+
 run_case manifest-stopped-localizing 1 "no __MSG_*__ references found" \
   python3 -c 'import json; json.dump({"manifest_version": 3, "name": "qURL", "description": "x"}, open("apps/edge-extension/manifest.json", "w"))'
 
@@ -275,6 +278,9 @@ run_case popup-header-mismatch 1 "data-i18n=\"ext_name\" reads 'qURL Agent' but 
 # "the scan is broken".
 run_case popup-header-tolerates-extra-class 0 "i18n in parity" \
   python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<div class=\"title\" data-i18n=\"ext_name\">", "<div data-i18n=\"ext_name\" class=\"title utility\">"))'
+
+run_case popup-header-tolerates-element-change 0 "i18n in parity" \
+  python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); s = s.replace("<div class=\"title\" data-i18n=\"ext_name\">qURL File Upload for Edge</div>", "<h1 data-i18n=\"ext_name\">qURL File Upload for Edge</h1>"); open(p, "w").write(s)'
 
 # Rule 6 is symmetric over both apps; the cases above only mutate Edge.
 run_case popup-title-mismatch-chrome-side 1 "<title> reads 'qURL File Upload for Edge' but this app's ext_name is" \

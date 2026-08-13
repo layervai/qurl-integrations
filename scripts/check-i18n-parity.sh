@@ -112,13 +112,19 @@ MANIFEST_KEY = re.compile(r"__MSG_([A-Za-z0-9_]+)__")
 # Only the FIRST match of each pattern is checked; each appears exactly once
 # today, and a second copy of either would be a markup bug of its own.
 POPUP_MIRRORS = (
-    ("<title>", re.compile(r"<title>(.*?)</title>", re.DOTALL)),
+    ("<title>", re.compile(r"<title>(?P<text>.*?)</title>", re.DOTALL)),
     (
         'data-i18n="ext_name"',
-        # Deliberately tolerant of extra classes and attribute order: the element
-        # is identified by its data-i18n key alone, so an innocent CSS refactor
-        # (class="title utility") does not surface as "the scan is broken".
-        re.compile(r'<div\b[^>]*\bdata-i18n="ext_name"[^>]*>(.*?)</div>', re.DOTALL),
+        # Identified by its data-i18n key alone — the tag name, its other
+        # attributes and their order are all free. So neither a CSS refactor
+        # (class="title utility") nor a change of element (<div> to <h1>)
+        # surfaces as "the scan is broken" on correct markup. The backreference
+        # keeps the closing tag matched to whatever the opening one was.
+        re.compile(
+            r'<(?P<tag>[a-zA-Z][a-zA-Z0-9]*)\b[^>]*\bdata-i18n="ext_name"[^>]*>'
+            r"(?P<text>.*?)</(?P=tag)>",
+            re.DOTALL,
+        ),
     ),
 )
 
@@ -313,7 +319,7 @@ for name, root in APPS.items():
         # Stripped on both sides: surrounding whitespace in the markup is not
         # rendered, so comparing it against a raw catalog value would report a
         # difference the user could never see.
-        actual = html.unescape(match.group(1)).strip()
+        actual = html.unescape(match.group("text")).strip()
         if actual != expected.strip():
             failures.append(
                 f"{popup}: {label} reads {actual!r} but this app's ext_name is "
