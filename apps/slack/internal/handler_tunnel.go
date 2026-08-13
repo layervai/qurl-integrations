@@ -706,7 +706,10 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
 			"got_target", key.Target, "want_target", client.CredentialTargetConnector)
 		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "kind_first_unconfirmed")
-		return nil, "The qURL API did not return a Connector enrollment token. Please retry or contact support.", errKindFirstUnconfirmed
+		// No "please retry" here: the dominant cause is a qURL API that
+		// predates this credential contract, and retrying against it will
+		// fail identically until it is rolled forward.
+		return nil, "The qURL API did not return a Connector enrollment token, so setup stopped and the temporary credential was revoked. Contact support — retrying will not help until the qURL API is updated.", errKindFirstUnconfirmed
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)

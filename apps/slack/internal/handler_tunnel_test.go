@@ -3038,8 +3038,11 @@ func TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst(t *testing.T)
 			if revokeHits != 1 {
 				t.Fatalf("unconfirmed credential revoke hits = %d, want 1", revokeHits)
 			}
+			// Non-fatal so the more specific leak assertion below still runs:
+			// "a DM was sent" and "the DM carried the secret" are different
+			// failures, and the second is the one that matters most.
 			if len(*dmPosts) != 0 {
-				t.Fatalf("an unconfirmed credential must never be DMed; got %d DM(s)", len(*dmPosts))
+				t.Errorf("an unconfirmed credential must never be DMed; got %d DM(s)", len(*dmPosts))
 			}
 			for _, post := range *dmPosts {
 				if strings.Contains(post.text, testTunnelAPIKey) {
