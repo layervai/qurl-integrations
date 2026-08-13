@@ -94,15 +94,163 @@ function createTimerHarness(t, expectedArmed) {
   };
 }
 
-test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
-  const observerCalls = [];
-  let composeBodies = [];
+// Copies `source` onto `target`, except that a key whose value is `undefined` is deleted instead.
+// The content script feature-detects everything optional with `typeof`, so deletion is how a test
+// says "this browser has no execCommand" rather than "execCommand returns undefined".
+function applyOverrides(target, source) {
+  Object.keys(source || {}).forEach(function (key) {
+    if (source[key] === undefined) {
+      delete target[key];
+      return;
+    }
+    target[key] = source[key];
+  });
+  return target;
+}
+
+// Every test below drives the content script through the same shape of vm sandbox: an object that
+// is its own window/globalThis/self, a chrome.runtime.onMessage listener to capture, a document
+// stub deep enough for compose discovery plus all three insertion paths, and a formatter that
+// yields '<p>links</p>'. Hand-writing that eleven times made every cross-cutting change an
+// eleven-way edit — createSelectionHarness was one such change, createTimerHarness another — so it
+// lives here once and the genuinely per-test parts arrive as `config`:
+//
+//   expectedArmed  forwarded to createTimerHarness for timers the test means to outlive it
+//   timers         {setTimeout, clearTimeout} to opt out of the tracked harness altogether
+//   document       merged over the document stub (body, querySelectorAll, execCommand, ...)
+//   globals        merged over the sandbox itself (requestAnimationFrame, getComputedStyle, ...)
+//   decorateRange  mutates each range document.createRange hands out, for the selection paths
+//
+// Both merges go through applyOverrides, so `undefined` removes a key. `t` is only used to register
+// the tracked timer harness; a test supplying its own `timers` leaves it unused.
+//
+// The returned handle carries what tests assert against: the captured `messageListener`, the
+// MutationObserver `observers` (each recording its observe() calls and its disconnect), the
+// `documentElement` an observer should fall back to, the nodes `appended` to document.body (the
+// failure toast), and the `warnings` console.warn collected.
+function createComposeSandbox(t, config) {
+  const settings = config || {};
+  const timers = settings.timers || createTimerHarness(t, settings.expectedArmed);
+  const selectionHarness = createSelectionHarness();
+  const documentElement = { nodeName: 'HTML' };
+  const observers = [];
+  const appended = [];
+  const warnings = [];
   let messageListener = null;
-  let observerInstance = null;
+
+  class RecordingMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.observeCalls = [];
+      this.disconnected = false;
+      observers.push(this);
+    }
+
+    observe(target, options) {
+      this.observeCalls.push({ target, options });
+    }
+
+    disconnect() {
+      this.disconnected = true;
+    }
+  }
+
+  const sandbox = {
+    chrome: {
+      i18n: {
+        getMessage() {
+          return '';
+        },
+      },
+      runtime: {
+        lastError: null,
+        onMessage: {
+          addListener(listener) {
+            messageListener = listener;
+          },
+        },
+      },
+    },
+    clearTimeout: timers.clearTimeout,
+    console: {
+      warn(...args) {
+        warnings.push(args.map(String).join(' '));
+      },
+    },
+    document: applyOverrides({
+      body: {
+        appendChild(node) {
+          appended.push(node);
+        },
+      },
+      documentElement,
+      createElement() {
+        return {
+          setAttribute() {},
+          style: {},
+          remove() {},
+          textContent: '',
+        };
+      },
+      createRange() {
+        const range = selectionHarness.createRange();
+        if (settings.decorateRange) {
+          settings.decorateRange(range);
+        }
+        return range;
+      },
+      execCommand() {
+        return true;
+      },
+      queryCommandSupported() {
+        return true;
+      },
+      querySelectorAll() {
+        return [];
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    }, settings.document),
+    MutationObserver: RecordingMutationObserver,
+    requestAnimationFrame(callback) {
+      callback();
+      return 1;
+    },
+    setTimeout: timers.setTimeout,
+    getComputedStyle() {
+      return { display: 'block', visibility: 'visible' };
+    },
+    getSelection() {
+      return selectionHarness.selection;
+    },
+    QURLComposeFormatter: {
+      buildLinkHtml() {
+        return '<p>links</p>';
+      },
+    },
+  };
+
+  applyOverrides(sandbox, settings.globals);
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+
+  vm.createContext(sandbox);
+  vm.runInContext(contentScriptSource, sandbox);
+
+  return {
+    appended,
+    documentElement,
+    messageListener,
+    observers,
+    warnings,
+  };
+}
+
+test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
+  let composeBodies = [];
   const execCalls = [];
   const caretMoves = [];
-  const documentElement = { nodeName: 'HTML' };
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -124,62 +272,12 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
     },
   };
 
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstance = this;
-    }
-
-    observe(target, options) {
-      observerCalls.push({ target, options });
-    }
-
-    disconnect() {
-      this.disconnected = true;
-    }
-  }
-
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { documentElement, messageListener, observers } = createComposeSandbox(t, {
     document: {
       body: null,
-      documentElement,
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
       execCommand(command, showUi, html) {
         execCalls.push({ command, showUi, html });
         return true;
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.selectNodeContents = function (node) {
-          caretMoves.push(node);
-        };
-        return range;
       },
       queryCommandSupported(command) {
         assert.equal(command, 'insertHTML');
@@ -191,33 +289,13 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
       addEventListener() {
         assert.fail('documentElement observation should avoid waiting for DOMContentLoaded');
       },
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
     },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const responsePromise = new Promise(function (resolve) {
     const keepAlive = messageListener({
@@ -227,14 +305,16 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
     assert.equal(keepAlive, true);
   });
 
-  assert.equal(observerCalls.length, 1);
-  assert.equal(observerCalls[0].target, documentElement);
-  assert.equal(observerCalls[0].options.childList, true);
-  assert.equal(observerCalls[0].options.subtree, true);
-  assert.equal('attributes' in observerCalls[0].options, false);
+  assert.equal(observers.length, 1);
+  const [observer] = observers;
+  assert.equal(observer.observeCalls.length, 1);
+  assert.equal(observer.observeCalls[0].target, documentElement);
+  assert.equal(observer.observeCalls[0].options.childList, true);
+  assert.equal(observer.observeCalls[0].options.subtree, true);
+  assert.equal('attributes' in observer.observeCalls[0].options, false);
 
   composeBodies = [composeBody];
-  observerInstance.callback();
+  observer.callback();
 
   const response = await responsePromise;
   assert.equal(response.success, true);
@@ -245,14 +325,12 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
   }]);
   assert.equal(caretMoves.length, 1);
   assert.equal(caretMoves[0], composeBody);
-  assert.equal(observerInstance.disconnected, true);
+  assert.equal(observer.disconnected, true);
 });
 
 test('findComposeBodyAsync performs an immediate post-observe lookup on the next frame', async function (t) {
   let composeBodies = [];
-  let messageListener = null;
   const rafCallbacks = [];
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -271,80 +349,19 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
     },
   };
 
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      execCommand() {
-        return true;
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    globals: {
+      requestAnimationFrame(callback) {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      },
     },
-    requestAnimationFrame(callback) {
-      rafCallbacks.push(callback);
-      return rafCallbacks.length;
-    },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const responsePromise = new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -363,11 +380,7 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
 
 test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function (t) {
   let composeBodies = [];
-  let messageListener = null;
-  let observerInstance = null;
   let execInsertCount = 0;
-  const documentElement = { nodeName: 'HTML' };
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -386,89 +399,20 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
     },
   };
 
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstance = this;
-    }
-
-    observe() {}
-    disconnect() {}
-  }
-
-  const timers = createTimerHarness(t, { 30000: 1 });
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener, observers } = createComposeSandbox(t, {
+    expectedArmed: { 30000: 1 },
     document: {
       body: null,
-      documentElement,
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
       execCommand(command) {
         assert.equal(command, 'insertHTML');
         execInsertCount += 1;
         return true;
       },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
-    },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const message = {
     type: 'INSERT_LINKS',
@@ -484,7 +428,8 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
   });
 
   composeBodies = [composeBody];
-  observerInstance.callback();
+  assert.equal(observers.length, 1, 'the duplicate request must not start a second discovery');
+  observers[0].callback();
 
   const [first, second] = await Promise.all([firstResponse, secondResponse]);
   assert.equal(first.success, true);
@@ -492,10 +437,8 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
   assert.equal(execInsertCount, 1);
 });
 
-test('completed requests are retained (under the cap) so retries replay instead of re-inserting', async function () {
-  let messageListener = null;
+test('completed requests are retained (under the cap) so retries replay instead of re-inserting', async function (t) {
   let execInsertCount = 0;
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -514,84 +457,25 @@ test('completed requests are retained (under the cap) so retries replay instead 
     },
   };
 
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
+  const { messageListener } = createComposeSandbox(t, {
     // Timers are stubbed rather than tracked through createTimerHarness: this test needs the 30s
     // response cache to stay un-expirable across all 33 requests, which a real timer cannot give it.
-    clearTimeout() {},
-    console: {
-      warn() {},
+    timers: {
+      clearTimeout() {},
+      setTimeout() {
+        return 1;
+      },
     },
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
       execCommand() {
         execInsertCount += 1;
-        return true;
-      },
-      queryCommandSupported() {
         return true;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
-    },
-    setTimeout() {
-      return 1;
-    },
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   for (let i = 0; i < 33; i += 1) {
     const response = await new Promise(function (resolve) {
@@ -622,10 +506,8 @@ test('completed requests are retained (under the cap) so retries replay instead 
 });
 
 test('Selection API fallback inserts at the end when execCommand is unavailable', async function (t) {
-  let messageListener = null;
   const insertedFragments = [];
   const startAfterCalls = [];
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -644,80 +526,25 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
     },
   };
 
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.insertNode = function (fragment) {
-          insertedFragments.push(fragment.html);
-        };
-        range.setStartAfter = function (node) {
-          startAfterCalls.push(node.nodeName);
-        };
-        return range;
-      },
+      execCommand: undefined,
       queryCommandSupported() {
         return false;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.insertNode = function (fragment) {
+        insertedFragments.push(fragment.html);
+      };
+      range.setStartAfter = function (node) {
+        startAfterCalls.push(node.nodeName);
+      };
     },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -732,10 +559,8 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
 });
 
 test('Selection API fallback runs when execCommand reports insertion failure', async function (t) {
-  let messageListener = null;
   const execCalls = [];
   const insertedFragments = [];
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -754,81 +579,22 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
     },
   };
 
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.insertNode = function (fragment) {
-          insertedFragments.push(fragment.html);
-        };
-        return range;
-      },
       execCommand(command, showUi, html) {
         execCalls.push({ command, showUi, html });
         return false;
       },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.insertNode = function (fragment) {
+        insertedFragments.push(fragment.html);
+      };
     },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -847,10 +613,8 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
 });
 
 test('findComposeBody prefers the topmost visible compose body when none is focused', async function (t) {
-  let messageListener = null;
   const caretMoves = [];
   const focusCalls = [];
-  const selectionHarness = createSelectionHarness();
   const backgroundCompose = {
     classList: {
       contains(name) {
@@ -890,85 +654,28 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
     },
   };
 
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      execCommand() {
-        return true;
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.selectNodeContents = function (node) {
-          caretMoves.push(node);
-        };
-        return range;
-      },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll(selector) {
         return selector.includes(':focus')
           ? []
           : [backgroundCompose, foregroundCompose];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    globals: {
+      getComputedStyle(element) {
+        if (element === foregroundCompose) {
+          return { display: 'block', visibility: 'visible', zIndex: '20' };
+        }
+        return { display: 'block', visibility: 'visible', zIndex: '1' };
+      },
     },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function (element) {
-    if (element === foregroundCompose) {
-      return { display: 'block', visibility: 'visible', zIndex: '20' };
-    }
-    return { display: 'block', visibility: 'visible', zIndex: '1' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
     },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -983,11 +690,8 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
 });
 
 test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
-  let messageListener = null;
-  const observerInstances = [];
   let composeBodies = [];
   const responseOrder = [];
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -1006,87 +710,14 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
     },
   };
 
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstances.push(this);
-    }
-
-    observe() {}
-    disconnect() {}
-  }
-
-  const timers = createTimerHarness(t, { 30000: 33 });
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener, observers } = createComposeSandbox(t, {
+    expectedArmed: { 30000: 33 },
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
-      execCommand() {
-        return true;
-      },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    requestAnimationFrame(callback) {
-      callback();
-      return 1;
-    },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   for (let i = 0; i < 33; i += 1) {
     assert.equal(messageListener({
@@ -1099,7 +730,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
   }
 
   composeBodies = [composeBody];
-  observerInstances.forEach(function (observer) {
+  observers.forEach(function (observer) {
     observer.callback();
   });
 
@@ -1111,9 +742,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
 });
 
 test('insertAdjacentHTML is the last resort when selection insertion fails', async function (t) {
-  let messageListener = null;
   const insertAdjacentCalls = [];
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -1135,77 +764,22 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
     },
   };
 
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        const range = selectionHarness.createRange();
-        range.createContextualFragment = function () {
-          throw new Error('fragment parse failed');
-        };
-        return range;
-      },
+      execCommand: undefined,
       queryCommandSupported() {
         return false;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    decorateRange(range) {
+      range.createContextualFragment = function () {
+        throw new Error('fragment parse failed');
+      };
     },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -1222,11 +796,8 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
 });
 
 test('a missing compose formatter reports failure instead of inserting nothing', async function (t) {
-  let messageListener = null;
   const insertAdjacentCalls = [];
   const execCalls = [];
-  const notified = [];
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -1248,76 +819,21 @@ test('a missing compose formatter reports failure instead of inserting nothing',
     },
   };
 
-  const timers = createTimerHarness(t, { 4000: 1 });
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn(message) {
-        notified.push(String(message));
-      },
-    },
+  const { messageListener, warnings } = createComposeSandbox(t, {
+    expectedArmed: { 4000: 1 },
     document: {
-      body: { appendChild() {} },
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
       execCommand(command, showUi, html) {
         execCalls.push({ command, showUi, html });
-        return true;
-      },
-      queryCommandSupported() {
         return true;
       },
       querySelectorAll() {
         return [composeBody];
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
-    },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  // Deliberately no sandbox.QURLComposeFormatter: buildLinkHtml then yields '',
-  // and every insertion path would happily append that empty string.
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+    // Deliberately no QURLComposeFormatter: buildLinkHtml then yields '',
+    // and every insertion path would happily append that empty string.
+    globals: { QURLComposeFormatter: undefined },
+  });
 
   const response = await new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -1330,94 +846,25 @@ test('a missing compose formatter reports failure instead of inserting nothing',
   assert.deepEqual(execCalls, [], 'nothing should be inserted without the formatter');
   assert.deepEqual(insertAdjacentCalls, [], 'the fallback path must not append an empty string either');
   assert.ok(
-    notified.some(function (line) { return line.includes('formatter unavailable'); }),
+    warnings.some(function (line) { return line.includes('formatter unavailable'); }),
     'the refusal should be logged'
   );
 });
 
-test('findComposeBodyAsync times out and reports failure when no compose body appears', async function () {
-  let messageListener = null;
-  let observerInstance = null;
+test('findComposeBodyAsync times out and reports failure when no compose body appears', async function (t) {
   const timeoutCallbacks = [];
-  const appendedAlerts = [];
 
-  class MockMutationObserver {
-    constructor(callback) {
-      this.callback = callback;
-      observerInstance = this;
-    }
-
-    observe() {}
-
-    disconnect() {
-      this.disconnected = true;
-    }
-  }
-
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
+  const { appended, messageListener, observers } = createComposeSandbox(t, {
     // Timers are stubbed rather than tracked through createTimerHarness: this test fires the 4s
     // discovery timeout by hand (timeoutCallbacks below), which a real timer would stretch to 4s.
-    clearTimeout() {},
-    console: {
-      warn() {},
-    },
-    document: {
-      body: {
-        appendChild(node) {
-          appendedAlerts.push(node);
-        },
+    timers: {
+      clearTimeout() {},
+      setTimeout(callback, delay) {
+        timeoutCallbacks.push({ callback, delay });
+        return timeoutCallbacks.length;
       },
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-          textContent: '',
-        };
-      },
-      querySelectorAll() {
-        return [];
-      },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: MockMutationObserver,
-    setTimeout(callback, delay) {
-      timeoutCallbacks.push({ callback, delay });
-      return timeoutCallbacks.length;
-    },
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   const responsePromise = new Promise(function (resolve) {
     assert.equal(messageListener({
@@ -1434,6 +881,6 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
 
   const response = await responsePromise;
   assert.equal(response.success, false);
-  assert.equal(observerInstance.disconnected, true);
-  assert.equal(appendedAlerts.length, 1);
+  assert.equal(observers[0].disconnected, true);
+  assert.equal(appended.length, 1);
 });
