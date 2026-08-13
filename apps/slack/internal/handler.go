@@ -2299,17 +2299,29 @@ const lifecycleDropDriftReason = "lifecycle event NOT purged: envelope field typ
 // nil-receiver-safe, and correct on a Handler built without NewHandler: sync.Map
 // needs no construction, so only a nil *Handler* skips the latch.
 func (h *Handler) logEventDrift(err error, driftField string, env *slackEventEnvelope, bodyLength int) {
-	level := slog.LevelDebug
-	if h == nil || h.driftFieldUnseen(driftField) {
-		level = slog.LevelWarn
-	}
 	// slog evaluates its variadic args before it filters on level, so the
 	// demoted repeats would each build a record the sink then discards — and
 	// those repeats are per-request during exactly the systematic drift this
 	// latch exists for. Ask first.
+	//
+	// ORDER MATTERS: the level check comes before the latch is claimed, never
+	// after. Claiming first would let a sink with Warn disabled consume a
+	// field's one guaranteed report, so a later REAL schema move on that field
+	// would only ever surface at Debug — the latch quietly eating the thing it
+	// exists to deliver. Returning early instead costs nothing, because a
+	// threshold sink that rejects Warn rejects Debug too.
 	ctx := context.Background()
+	level := slog.LevelWarn
 	if !slog.Default().Enabled(ctx, level) {
 		return
+	}
+	if h != nil {
+		if _, seen := h.driftLogged.LoadOrStore(driftField, struct{}{}); seen {
+			level = slog.LevelDebug
+			if !slog.Default().Enabled(ctx, level) {
+				return
+			}
+		}
 	}
 	// team_id/event_id match what the adjacent lifecycle and agent branches
 	// already log in the clear, and are what makes a drift report actionable
@@ -2323,13 +2335,6 @@ func (h *Handler) logEventDrift(err error, driftField string, env *slackEventEnv
 		"team_id", env.TeamID,
 		"event_id", env.EventID,
 	)
-}
-
-// driftFieldUnseen records driftField and reports whether this call is the first
-// to do so in this process.
-func (h *Handler) driftFieldUnseen(driftField string) bool {
-	_, seen := h.driftLogged.LoadOrStore(driftField, struct{}{})
-	return !seen
 }
 
 // isLifecycleEventType reports whether an inner event type names a teardown,

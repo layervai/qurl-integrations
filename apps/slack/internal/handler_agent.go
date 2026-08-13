@@ -844,6 +844,9 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	// to bot_id (degradation); if it ever appeared on a human-authored event, the
 	// guard would silence that member (breakage). isOwnAppPost is also used by
 	// loadAgentThreadHistory, so the same assumption is load-bearing there.
+	// The bot-scopes-only argument is what makes the breakage direction
+	// unreachable, so adding user_scope to the install flow is the specific
+	// change that would put it back in play — revisit here if that happens.
 	if e.BotID != "" || e.User == "" || isOwnAppPost(e.AppID, env.APIAppID) {
 		return false
 	}

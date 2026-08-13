@@ -614,3 +614,40 @@ func TestHandleEvent_DriftedEnvelopeTypeStillNamesTheLostTeardown(t *testing.T) 
 		t.Fatalf("recognizing the teardown must not purge it: %d deletes", provider.deleteStateCalls)
 	}
 }
+
+// TestHandleEvent_DriftLatchIsNotConsumedWhileSilenced pins the ORDER of the
+// level check and the latch claim, which is the difference between the latch
+// suppressing noise and the latch eating its own signal.
+//
+// If a field were marked "already reported" while the sink had Warn disabled,
+// that field would have spent its one guaranteed Warn on a line nobody saw —
+// and a later, real schema move on it would surface only at Debug, forever.
+func TestHandleEvent_DriftLatchIsNotConsumedWhileSilenced(t *testing.T) {
+	prevLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h, _, _ := newAgentEventHandler(t, testAgentReachStagingReply)
+	drifted := func(eventID string) []byte {
+		return []byte(`{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+			`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"100.1","text":"<@U12345678> hi"},"event_time":"nope"}`)
+	}
+
+	// Sink silenced above Warn: the drift happens, but nothing is emitted.
+	var silenced bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&silenced, &slog.HandlerOptions{Level: slog.LevelError})))
+	h.handleEvent(httptest.NewRecorder(), drifted("EvSilenced"))
+	h.Wait()
+	if strings.Contains(silenced.String(), "type drift") {
+		t.Fatalf("Warn-disabled sink still received the drift line: %q", silenced.String())
+	}
+
+	// Same field again, now with Warn enabled. It must still be treated as a
+	// first sighting.
+	var heard bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&heard, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	h.handleEvent(httptest.NewRecorder(), drifted("EvHeard"))
+	h.Wait()
+	if !strings.Contains(heard.String(), "level=WARN") || !strings.Contains(heard.String(), "drift_field=event_time") {
+		t.Fatalf("a field silenced on its first sighting must still Warn once heard; got %q", heard.String())
+	}
+}
