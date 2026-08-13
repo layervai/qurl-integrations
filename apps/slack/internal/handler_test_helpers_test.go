@@ -4,6 +4,8 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 // Common keys for the qurl-service response envelope. Lifted to
@@ -43,4 +45,41 @@ const (
 // fixtures can pass a slog.Logger without polluting -v output.
 func slogTestLogger(_ *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// assertSingleConnectorClaim pins the decoded `POST /v1/api-keys` body to
+// exactly one Connector claim bound to slug. Every step is type-checked so a
+// wrong-shaped body reports a readable failure instead of panicking the test
+// binary on a bad assertion.
+func assertSingleConnectorClaim(t *testing.T, body map[string]any, slug string) {
+	t.Helper()
+	raw, ok := body["claims"].([]any)
+	if !ok {
+		t.Errorf("api key body claims = %v, want a JSON array; body=%+v", body["claims"], body)
+		return
+	}
+	if len(raw) != 1 {
+		t.Errorf("api key body has %d claims, want exactly 1; body=%+v", len(raw), body)
+		return
+	}
+	claim, ok := raw[0].(map[string]any)
+	if !ok {
+		t.Errorf("api key body claims[0] = %v, want a JSON object; body=%+v", raw[0], body)
+		return
+	}
+	if claim[testKeyType] != client.CredentialClaimTypeConnector || claim["id"] != slug {
+		t.Errorf("api key body claim = %+v, want {type:%q, id:%q}", claim, client.CredentialClaimTypeConnector, slug)
+	}
+}
+
+// assertNoRetiredCredentialFields pins the kind-first cutover: the retired
+// request fields must never reappear on the wire. They are no longer fields on
+// client.CreateAPIKeyInput, so this fires only if someone re-adds one.
+func assertNoRetiredCredentialFields(t *testing.T, body map[string]any) {
+	t.Helper()
+	for _, retired := range []string{testKeyKeyType, testKeyTunnelSlug, "scopes", "purpose"} {
+		if _, ok := body[retired]; ok {
+			t.Errorf("api key body contained retired %s field: %+v", retired, body)
+		}
+	}
 }

@@ -539,7 +539,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
@@ -589,15 +589,8 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
 		t.Errorf("api key body = %+v, want bound Connector enrollment token", apiKeyBody)
 	}
-	claims, ok := apiKeyBody["claims"].([]any)
-	if !ok || len(claims) != 1 || claims[0].(map[string]any)["type"] != client.CredentialClaimTypeConnector || claims[0].(map[string]any)["id"] != testTunnelSlug {
-		t.Errorf("api key body = %+v, want one connector claim", apiKeyBody)
-	}
-	for _, retired := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
-		if _, ok := apiKeyBody[retired]; ok {
-			t.Errorf("api key body contained retired %s field: %+v", retired, apiKeyBody)
-		}
-	}
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
 	}
@@ -696,7 +689,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
@@ -1377,7 +1370,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelModalKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
@@ -1430,6 +1423,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector {
 		t.Errorf("api key body = %+v, want Connector enrollment token", apiKeyBody)
 	}
+	// The modal path shares buildTunnelInstall with the slash path, but assert
+	// the full wire contract here too so a claims/retired-field regression is
+	// caught on either entry point independently.
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
 	}
