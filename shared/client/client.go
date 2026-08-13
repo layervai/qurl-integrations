@@ -773,9 +773,12 @@ type APIKey struct {
 	Target    string            `json:"target,omitempty"`
 	Claims    []CredentialClaim `json:"claims,omitempty"`
 	// Legacy response fields, decoded so a pre-cutover producer's response
-	// still round-trips during the rollout window. No production code reads
-	// them, and they are absent from CreateAPIKeyInput, so this client cannot
-	// send them. Drop both once every environment is on the kind-first API.
+	// still round-trips rather than erroring at the decode layer. Decoding is
+	// not acceptance: callers that require a kind-first credential check Kind
+	// and Target and fail closed (see the Slack Connector enrollment path). No
+	// production code reads these, and they are absent from CreateAPIKeyInput,
+	// so this client cannot send them. Drop both once every environment is on
+	// the kind-first API.
 	KeyType    string `json:"key_type,omitempty"`
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }

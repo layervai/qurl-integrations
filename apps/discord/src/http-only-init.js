@@ -3,8 +3,8 @@
 // In combined / gateway mode, `client.login()` does two things our
 // route handlers depend on: (1) it sets the bot token on
 // `client.rest`, so REST helpers can authenticate, and (2) the
-// resulting `ready` event triggers refreshCache(), populating
-// guild/roles/channels for OAuth + webhook handlers.
+// resulting `ready` event triggers refreshCache(), populating the
+// cached guild handle.
 //
 // http-only mode skips login() (Discord bot tokens admit only one
 // active Gateway connection per token, so the http-only replica
@@ -19,21 +19,15 @@
 // crash-loop and let the orchestrator reschedule rather than
 // silently start with a cold cache and 5xx every webhook.
 //
-// Cache invalidation: in combined / gateway mode, the
-// `client.on('roleDelete' / 'channelDelete')` handlers in
-// `src/discord.js` invalidate the cache when guild admins delete
-// tracked roles or channels. Those events ride the Gateway and
-// don't fire in http-only mode. To close the resulting staleness
-// window we run a periodic REST refreshCache() (every
-// REFRESH_INTERVAL_MS) so deletions propagate within one interval
-// rather than waiting for a replica restart.
+// Cache freshness: in combined / gateway mode the Gateway keeps the
+// cached guild in sync. http-only replicas have no Gateway
+// connection, so we run a periodic REST refreshCache() (every
+// REFRESH_INTERVAL_MS) instead of waiting for a replica restart.
 
-// 10-minute refresh interval — short enough that a deleted role
-// stays cached for at most one window before invalidation, long
-// enough that the periodic two-REST-call cost (guild.roles.fetch +
-// guild.channels.fetch) is rounding error against the bot's normal
-// REST budget. Tunable via env var if a future operator needs more
-// or less aggressive invalidation.
+// 10-minute refresh interval — short enough that a renamed or
+// newly-unavailable guild is picked up within one window, long
+// enough that the periodic single-REST-call cost is rounding error
+// against the bot's normal REST budget. Tunable via env var.
 const DEFAULT_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const MIN_REFRESH_INTERVAL_MS = 30_000;
 const REFRESH_INTERVAL_MS = (() => {
@@ -78,12 +72,10 @@ function formatInterval(ms) {
  * Side effects:
  *   - `client.rest.setToken(config.DISCORD_TOKEN)` so REST calls
  *     authenticate (login() is the normal seeder; we skip it here).
- *   - Initial `await refreshCache()` when GUILD_ID is set, so
- *     single-guild OAuth + webhook handlers find a populated cache
- *     on the first request. Multi-tenant deployments (GUILD_ID
- *     unset) skip the refresh — refreshCache is a no-op there, and
- *     the OpenNHP routes that consume the cache aren't mounted
- *     anyway.
+ *   - Initial `await refreshCache()` when GUILD_ID is set, so the
+ *     cached guild handle is populated before the first request.
+ *     Multi-tenant deployments (GUILD_ID unset) skip the refresh —
+ *     refreshCache is a no-op there.
  *   - Periodic `setInterval` calling refreshCache every
  *     REFRESH_INTERVAL_MS, gated on the same GUILD_ID check.
  *     `.unref()` so the timer doesn't block process exit;
@@ -142,7 +134,7 @@ async function initHttpOnly({ client, config, refreshCache, logger }) {
   }
   await refreshCache();
   logger.warn(
-    'http-only mode: Gateway-driven cache invalidation (roleDelete/channelDelete) is unavailable. ' +
+    'http-only mode: Gateway-driven cache updates are unavailable. ' +
     `Periodic REST refreshCache compensates every ${formatInterval(REFRESH_INTERVAL_MS)}. ` +
     'See src/http-only-init.js for rationale; tune via HTTP_ONLY_REFRESH_INTERVAL_MS env var.'
   );
