@@ -8,7 +8,7 @@ Add-ons.
 - Directory: `apps/edge-extension`
 - Package name: `qurl-gmail-edge-extension`
 - Default version: `1.0.0`
-- Extension name: `qURL File Upload`
+- Extension name: `qURL File Upload for Edge` (the localized `ext_name`, which is what the store listing shows)
 - Default upload server: `https://getqurllink.layerv.ai/`
 
 ## Build
@@ -28,7 +28,7 @@ for the wildcard `optional_host_permissions` declaration.
 
 ## Store listing
 
-- Extension name: `qURL File Upload`
+- Extension name: `qURL File Upload for Edge` (the localized `ext_name`, which is what the store listing shows)
 - Short description: `Upload files to qURL and insert secure access links into Gmail compose drafts.`
 - Privacy policy: explain that the extension uploads only user-selected files
   to the configured qURL server and inserts links into Gmail drafts.

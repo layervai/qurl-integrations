@@ -78,7 +78,7 @@ function bumpVersion(version, level) {
 }
 
 function validateVersion(version) {
-  // Pre-release suffixes (e.g. 1.0.0-rc.1) are intentionally rejected: the Chrome manifest
+  // Pre-release suffixes (e.g. 1.0.0-rc.1) are intentionally rejected: the MV3 manifest
   // version field is dot-separated integers only, and Release Please owns released versions
   // anyway. Don't relax this to accept semver pre-release tags.
   if (!/^\d+\.\d+\.\d+$/.test(version)) {

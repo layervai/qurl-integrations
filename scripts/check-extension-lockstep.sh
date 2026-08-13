@@ -8,13 +8,19 @@
 # shows the divergence — and the failure mode is a security bug that only affects
 # one browser's users. See the Chrome<->Edge lockstep table in CLAUDE.md.
 #
-# The two copies are byte-identical except for the host browser's name and each
-# copy's own app directory, so this masks those tokens on BOTH sides before
-# demanding an exact match. Masking both sides rather than rewriting Edge ->
-# Chrome keeps an ordinary comment about an "Edge case" from reading as drift.
-# The lowercase `chrome.*` extension API namespace is spelled the same in both
-# browsers and is deliberately NOT masked, so a real change to an API call can
-# never be hidden by the normalization.
+# The two copies are byte-identical except for the host browser's name, its
+# store's name, and each copy's own app directory, so this masks those tokens on
+# BOTH sides before demanding an exact match. Masking both sides rather than
+# rewriting Edge -> Chrome keeps an ordinary comment about an "Edge case" from
+# reading as drift. The lowercase `chrome.*` extension API namespace is spelled
+# the same in both browsers and is deliberately NOT masked, so a real change to
+# an API call can never be hidden by the normalization.
+#
+# Known blind spot, accepted: because browser names are masked symmetrically, a
+# comment naming the WRONG browser (Edge's copy still saying "Chrome") reads as
+# a match. That is prose-only by construction — every browser name a user sees
+# lives in _locales/en/messages.json, which is outside this check and covered by
+# each app's test/i18n-coverage.test.js instead.
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
@@ -35,6 +41,7 @@ EDGE = pathlib.Path("apps/edge-extension")
 
 # Keep in sync with the lockstep table in CLAUDE.md.
 LOCKSTEP_FILES = [
+    # Runtime: sanitizers, HTTPS-only normalization, permission handling, UI.
     "lib/qurl-api.js",
     "lib/qurl-compose-format.js",
     "lib/qurl-config.js",
@@ -42,7 +49,32 @@ LOCKSTEP_FILES = [
     "content/gmail-compose.js",
     "popup/popup.js",
     "background.js",
+    # Build/release: build-release.js re-implements the runtime's https-only and
+    # credential-stripping normalization (it cannot require() the runtime module)
+    # and decides the bundled default origin and host permission, so it carries
+    # the same class of logic as the runtime files above.
+    "scripts/build-release.js",
+    "scripts/bump-version.js",
+    "scripts/generate-icons.js",
+    "scripts/package-release.js",
+    "scripts/package-all.sh",
+    # Tests: the guard on everything above. Identical today; a deliberately
+    # browser-specific assertion should be a documented divergence, not a drift.
+    "test/background.test.js",
+    "test/build-release.test.js",
+    "test/bump-version.test.js",
+    "test/gmail-compose.test.js",
+    "test/i18n-coverage.test.js",
+    "test/package-release.test.js",
+    "test/popup.test.js",
+    "test/qurl-api.test.js",
+    "test/qurl-compose-format.test.js",
+    "test/qurl-i18n.test.js",
 ]
+
+# Store names are whole phrases rather than a swapped word, so they are masked
+# before BROWSER_PROSE gets a chance to rewrite the "Chrome"/"Edge" inside them.
+STORE_NAME = re.compile(r"Chrome Web Store|Microsoft Edge Add-ons")
 
 # Prose/comment mentions of the host browser are the only sanctioned delta.
 # Word-boundary anchored and case-sensitive so the lowercase `chrome.*` API
@@ -57,7 +89,12 @@ BROWSER_PROSE = re.compile(r"\b(?:Chrome|Edge)\b")
 # these files checked at all rather than excluded outright.
 APP_DIR = re.compile(r"apps/(?:chrome|edge)-extension")
 
-MASKS = ((BROWSER_PROSE, "<browser>"), (APP_DIR, "apps/<browser>-extension"))
+# Order matters: STORE_NAME first, since its phrases contain a browser name.
+MASKS = (
+    (STORE_NAME, "<store>"),
+    (BROWSER_PROSE, "<browser>"),
+    (APP_DIR, "apps/<browser>-extension"),
+)
 
 
 def normalize(text):
