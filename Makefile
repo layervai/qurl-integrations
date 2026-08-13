@@ -194,16 +194,16 @@ check-teams:
 	cd apps/teams && npm test
 	cd apps/teams && npm run build
 
-# e2e/ has no CI workflow at all, so this is the only gate its TypeScript gets.
-# Offline subset only: `npm test` there also runs the live suite, which mints
-# real qURL resources and posts real Discord messages against credentials in
-# e2e/.env (see e2e/README.md).
+# e2e.yml's build-and-test in full. Offline subset only: `npm test` there also
+# runs the live suite, which mints real qURL resources and posts real Discord
+# messages against credentials in e2e/.env (see e2e/README.md). CI omits that
+# script for the same reason and has no such credentials, so the two stay
+# step-for-step identical rather than this being the weaker signal.
 #
-# Alone among these apps e2e/ has no .nvmrc, so it gets no version warning —
-# note its package.json asks for node >=24 (the others pin 22.21.0), and npm
-# does not enforce engines by default. Giving it an .nvmrc is the right fix,
-# but the pin belongs with the e2e CI workflow that would verify it; inventing
-# one here would be a version nothing checks.
+# e2e/.nvmrc pins 24.x where the apps pin 22.21.0: e2e/package.json asks for
+# node >=24, and npm does not enforce engines by default, so that file is the
+# only thing making the two agree. It landed with the CI workflow that reads
+# it — before that there was nothing to verify a pin.
 #
 # -p is explicit rather than relying on tsc's upward search, and names the same
 # config ts-jest compiles with (neither jest config overrides it). Note the
@@ -211,6 +211,7 @@ check-teams:
 # it covers helpers/ and the live tests/ too, while test:unit runs only
 # unit/**. For the live suite that typecheck is the only gate there is.
 check-e2e:
+	$(call node_version_warning,e2e)
 	cd e2e && npm ci --no-audit --no-fund
 	cd e2e && npx tsc -p tsconfig.json --noEmit
 	cd e2e && npm run test:unit
