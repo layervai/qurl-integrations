@@ -254,6 +254,26 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
+  // The public-origin screen and the SSRF guard share one range table
+  // (src/utils/private-host.js), but deliberately ask different questions —
+  // these pin the ranges this caller must NOT screen. Widening the shared
+  // table, or passing includeCgnat/includeMulticast here, would fail a valid
+  // deploy with every other test in this file still green.
+  it('accepts public origins the SSRF guard would reject', () => {
+    for (const ok of [
+      'https://100.64.0.1', //       CGNAT 100.64/10 can front a reachable origin
+      'https://100.127.255.255', //  top of the CGNAT range
+      'https://[fec0::1]', //        deprecated site-local, not a boot concern
+      'https://10.2.3.1e2', //       DOMAIN: Number('1e2') is 100, but the URL
+      'https://192.168.0.1e1', //    spec's IPv4 parser rejects the label
+      'https://bot.example.com',
+      'https://fd-detect.qurl.link', //  ULA-looking name, but no colon
+    ]) {
+      expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: ok }), true))
+        .toBeNull();
+    }
+  });
+
   // The #619 headline regression: a deploy with the qURL OAuth setup flow
   // configured (AUTH0_* set) but BASE_URL left unset silently falls back to
   // localhost and dead-ends /qurl setup at the OAuth redirect. Boot must

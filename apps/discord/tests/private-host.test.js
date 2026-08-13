@@ -199,7 +199,8 @@ describe('isPrivateHost — fail-closed SSRF posture', () => {
   });
 
   it('rejects out-of-range and octal-looking literals outright', () => {
-    expect(isPrivateHost('4294967296')).toBe(true);
+    expect(isPrivateHost('4294967296')).toBe(true);   // decimal past 32 bits
+    expect(isPrivateHost('0x1ffffffff')).toBe(true);  // hex past 32 bits
     expect(isPrivateHost('0177.0.0.1')).toBe(true);
     expect(isPrivateHost('010.0.0.1')).toBe(true);
   });
@@ -228,56 +229,5 @@ describe('isPrivateHost — fail-closed SSRF posture', () => {
     expect(isPrivateHost('8.8.8.8')).toBe(false);
     expect(isPrivateHost('203.0.113.10')).toBe(false);
     expect(isPrivateHost('qurl.link')).toBe(false);
-  });
-});
-
-describe('composing a public-origin posture from the same table', () => {
-  // Pins the composition a boot-time BASE_URL origin check performs, so the
-  // shared table can't drift out from under it before that caller lands.
-  // Input is always `new URL().hostname`, i.e. already canonicalized.
-  function isLocalOnlyHost(hostname) {
-    // Strip the brackets the parser keeps around an IPv6 literal, and the
-    // trailing dot of an absolute FQDN — `localhost.` resolves the same as
-    // `localhost`, so it must not slip past the name compares.
-    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-    if (host === 'localhost' || host.endsWith('.localhost')) return true;
-    const mapped = unwrapIPv4Mapped(host);
-    const v4 = parseIPv4Octets(mapped || host);
-    if (v4) return Boolean(ipv4LocalScope(v4, { includeCgnat: false, includeMulticast: false }));
-    // The colon gate keeps a public DNS name out of the lenient parseInt.
-    if (!host.includes(':')) return false;
-    return ['unspecified', 'loopback', 'unique-local', 'link-local']
-      .includes(ipv6LocalScope(host));
-  }
-
-  it.each(['localhost', 'LOCALHOST', 'localhost.', 'foo.localhost', 'foo.localhost.'])(
-    'rejects the localhost name form %s', host => {
-      expect(isLocalOnlyHost(host)).toBe(true);
-    });
-
-  it.each(['127.0.0.1', '10.0.0.1', '192.168.0.1', '172.16.0.1', '169.254.169.254', '0.0.0.0'])(
-    'rejects private literal %s', host => {
-      expect(isLocalOnlyHost(host)).toBe(true);
-    });
-
-  it.each(['::', '::1', '[::1]', 'fc00::1', 'fe80::1', '::ffff:7f00:1'])(
-    'rejects local IPv6 literal %s', host => {
-      expect(isLocalOnlyHost(host)).toBe(true);
-    });
-
-  it('accepts CGNAT — it can front a reachable origin', () => {
-    expect(isLocalOnlyHost('100.64.0.1')).toBe(false);
-  });
-
-  it('does not screen deprecated site-local', () => {
-    expect(isLocalOnlyHost('fec0::1')).toBe(false);
-  });
-
-  it.each([
-    'example.com', 'bot.example.com', '8.8.8.8', '203.0.113.10',
-    'fd-detect.qurl.link', 'fcdn.example.com', 'fc00.example.com',
-    '10.2.3.1e2', '192.168.0.1e1', '2606:4700:4700::1111',
-  ])('accepts public origin %s', host => {
-    expect(isLocalOnlyHost(host)).toBe(false);
   });
 });
