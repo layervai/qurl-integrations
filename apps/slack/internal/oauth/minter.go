@@ -65,6 +65,15 @@ const (
 	// cannot be misclassified as a route-missing 404 and fall back to legacy
 	// minting.
 	structuredErrorEnvelopeCode = "__structured_error_envelope__"
+
+	// credentialKindAPIKey is the `kind` sent on the workspace-key mint. This
+	// package hand-rolls its qurl-service HTTP client and does not import
+	// shared/client, so it keeps its own copy of the enum value.
+	//
+	// TODO(upstream-contract): mirrors qurl-service's kind-first
+	// `CreateApiKeyRequest.kind`; keep in lockstep with
+	// shared/client.CredentialKindAPIKey.
+	credentialKindAPIKey = "api_key"
 )
 
 // ErrAPIKeyProvisioningQuotaReached is returned when qurl-service refuses key
@@ -123,12 +132,26 @@ type DependencyAuthFailureError struct {
 }
 
 func (e *DependencyAuthFailureError) Error() string {
-	msg := fmt.Sprintf("qurl-service %s %s returned %d", e.Method, e.Path, e.StatusCode)
-	if e.Code != "" {
-		msg += " code=" + e.Code
+	return fmt.Sprintf("qurl-service %s %s returned %d", e.Method, e.Path, e.StatusCode) +
+		errorEnvelopeSuffix(e.Code, e.RequestID)
+}
+
+// errorEnvelopeSuffix renders parsed envelope context as a trailing
+// " code=… request_id=…". Non-auth-class rejections discard both by default,
+// which makes a 400 surface in CloudWatch as only "returned 400" — the least
+// debuggable form of the most likely kind-first cutover failure.
+//
+// The sentinel guard is for the raw-parse callers, which pass fields.Code
+// straight through; the auth-class path pre-strips it in
+// dependencyAuthFailureError so DependencyAuthFailureError.Code can be read
+// structurally by the audit event.
+func errorEnvelopeSuffix(code, requestID string) string {
+	var msg string
+	if code != "" && code != structuredErrorEnvelopeCode {
+		msg += " code=" + code
 	}
-	if e.RequestID != "" {
-		msg += " request_id=" + e.RequestID
+	if requestID != "" {
+		msg += " request_id=" + requestID
 	}
 	return msg
 }
@@ -162,6 +185,7 @@ func responseExceededError(method, path string, status int, label string, limit 
 }
 
 type mintRequest struct {
+	Kind   string   `json:"kind"`
 	Name   string   `json:"name"`
 	Scopes []string `json:"scopes"`
 }
@@ -343,7 +367,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if authErr := dependencyAuthFailureError(http.MethodPost, externalBindingPath, resp.StatusCode, code, fields.RequestID); authErr != nil {
 			return WorkspaceAPIKeyMint{}, authErr
 		}
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d", externalBindingPath, resp.StatusCode)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d%s",
+			externalBindingPath, resp.StatusCode, errorEnvelopeSuffix(code, fields.RequestID))
 	}
 	// Success bodies never participate in fallback; reject oversized responses
 	// before parsing the api_key payload.
@@ -399,7 +424,7 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceReplacementAPIKey(ctx context.Context, a
 // present for success — a missing keyID would leave us unable to revoke an
 // orphan key if the subsequent DDB persist fails.
 func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, name string, scopes []string, idempotencyKey string) (WorkspaceAPIKeyMint, error) {
-	body, err := json.Marshal(mintRequest{Name: name, Scopes: scopes})
+	body, err := json.Marshal(mintRequest{Kind: credentialKindAPIKey, Name: name, Scopes: scopes})
 	if err != nil {
 		return WorkspaceAPIKeyMint{}, fmt.Errorf("marshal: %w", err)
 	}
@@ -442,7 +467,8 @@ func (m *HTTPAPIKeyMinter) mintLegacyAPIKey(ctx context.Context, accessToken, na
 		if authErr := dependencyAuthFailureError(http.MethodPost, apiKeysPath, resp.StatusCode, fields.Code, fields.RequestID); authErr != nil {
 			return WorkspaceAPIKeyMint{}, authErr
 		}
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d", apiKeysPath, resp.StatusCode)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d%s",
+			apiKeysPath, resp.StatusCode, errorEnvelopeSuffix(fields.Code, fields.RequestID))
 	}
 	var mr mintResponse
 	if err := json.Unmarshal(rb, &mr); err != nil {

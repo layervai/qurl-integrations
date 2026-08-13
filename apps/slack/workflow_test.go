@@ -79,6 +79,18 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		unchangedOutput:      "No Edge extension-impacting changes detected",
 	},
 	{
+		name:                 "teams",
+		path:                 "teams.yml",
+		checkNamePrefix:      "teams / ",
+		changeOutput:         "teams",
+		changedEnv:           "TEAMS_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.teams == 'true'",
+		detectChangesName:    "teams / detect changes",
+		requiredName:         "teams / required",
+		verifierStepName:     "Verify Teams CI result",
+		unchangedOutput:      "No Teams-impacting changes detected",
+	},
+	{
 		name:                 "shared",
 		path:                 "shared-test.yml",
 		checkNamePrefix:      "shared / ",
@@ -109,6 +121,50 @@ type step struct {
 	Shell string `yaml:"shell"`
 }
 
+// TestRequiredWorkflowSpecsCoverEveryAggregate keeps requiredWorkflowSpecs
+// honest. The table above is maintained by hand, and nothing else notices when
+// a workflow grows a required aggregate without a matching entry — the new
+// aggregate then gets zero enforcement while looking fully covered. That is
+// exactly how apps/teams shipped an aggregate-less workflow in #1001 and went
+// unregistered until #1023.
+func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	registered := make(map[string]bool, len(requiredWorkflowSpecs))
+	for i := range requiredWorkflowSpecs {
+		registered[requiredWorkflowSpecs[i].path] = true
+	}
+
+	seen := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		if _, ok := readWorkflow(t, name).Jobs["required"]; !ok {
+			continue
+		}
+		seen++
+		if !registered[name] {
+			t.Errorf("%s defines a required aggregate job but has no requiredWorkflowSpecs entry", name)
+		}
+	}
+
+	// Guard against the scan silently matching nothing (renamed directory,
+	// changed extension), which would make every assertion above vacuous.
+	// This deliberately couples the two counts: a workflow that grows a job
+	// keyed `required` must land its spec entry in the same change, or the
+	// whole suite goes red rather than quietly under-enforcing the new
+	// aggregate.
+	if seen != len(requiredWorkflowSpecs) {
+		t.Errorf("found %d workflows with a required aggregate, want %d (one per spec)", seen, len(requiredWorkflowSpecs))
+	}
+}
+
 func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 	for i := range requiredWorkflowSpecs {
 		spec := &requiredWorkflowSpecs[i]
@@ -121,6 +177,14 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 			}
 			if required.Name != spec.requiredName {
 				t.Fatalf("required job name = %q, want %q", required.Name, spec.requiredName)
+			}
+			// if: always() is the load-bearing line of this pattern. Without it the
+			// aggregate inherits success() and is skipped whenever a gate is skipped
+			// or fails. GitHub scores a skipped required check as satisfied, so a red
+			// gate would stop blocking merges, and PRs that touch no app-impacting
+			// path would never see the context report at all.
+			if strings.TrimSpace(required.If) != "always()" {
+				t.Fatalf("%s required.if = %q, want always()", spec.name, required.If)
 			}
 
 			requiredNeeds := stringSet(parseWorkflowNeeds(t, "required", required.Needs))
@@ -155,11 +219,23 @@ func TestRequiredWorkflowVerifierDisplayNamesCoverQualityGates(t *testing.T) {
 		spec := &requiredWorkflowSpecs[i]
 		t.Run(spec.name, func(t *testing.T) {
 			workflow := readWorkflow(t, spec.path)
-			script := requiredVerifierScriptNamed(t, workflow, spec.verifierStepName)
+			script := requiredVerifierScript(t, spec, workflow)
 
-			for id := range requiredWorkflowQualityGates(t, spec, workflow) {
+			qualityGates := requiredWorkflowQualityGates(t, spec, workflow)
+			if len(qualityGates) == 0 {
+				t.Fatalf("no %s quality gates found with if containing %q", spec.name, spec.qualityGateCondition)
+			}
+
+			for id := range qualityGates {
 				if !strings.Contains(script, id+")") {
 					t.Errorf("%s is missing a display_name case for %q", spec.verifierStepName, id)
+				}
+				// Matching only "<id>)" is satisfied by a comment that happens to
+				// mention the job, so require the display name itself. Otherwise a
+				// gate can reach needs with no working case arm and its failure
+				// annotation renders the bare job id instead of "<app> / <gate>".
+				if name := workflow.Jobs[id].Name; !strings.Contains(script, name) {
+					t.Errorf("%s display_name case for %q omits display name %q", spec.verifierStepName, id, name)
 				}
 			}
 		})
@@ -174,7 +250,7 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 		spec := &requiredWorkflowSpecs[i]
 		t.Run(spec.name, func(t *testing.T) {
 			workflow := readWorkflow(t, spec.path)
-			script := requiredVerifierScriptNamed(t, workflow, spec.verifierStepName)
+			script := requiredVerifierScript(t, spec, workflow)
 			qualityGates := sortedQualityGateIDs(requiredWorkflowQualityGates(t, spec, workflow))
 			if len(qualityGates) == 0 {
 				t.Fatal("no quality gates found")
@@ -255,7 +331,8 @@ func TestRequiredWorkflowVerifierScripts(t *testing.T) {
 func readWorkflow(t *testing.T, name string) githubWorkflow {
 	t.Helper()
 
-	// #nosec G304 -- callers pass checked-in workflow names from requiredWorkflowSpecs.
+	// #nosec G304 -- callers pass checked-in workflow file names, either from
+	// requiredWorkflowSpecs or from a ReadDir of .github/workflows itself.
 	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name))
 	if err != nil {
 		t.Fatalf("read %s workflow: %v", name, err)
@@ -352,26 +429,26 @@ func stringSet(values []string) map[string]bool {
 	return set
 }
 
-func requiredVerifierScriptNamed(t *testing.T, workflow githubWorkflow, stepName string) string {
+func requiredVerifierScript(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) string {
 	t.Helper()
 
 	required, ok := workflow.Jobs["required"]
 	if !ok {
-		t.Fatal("slack workflow is missing required aggregate job")
+		t.Fatalf("%s workflow is missing required aggregate job", spec.name)
 	}
 	for _, step := range required.Steps {
-		if step.Name != stepName {
+		if step.Name != spec.verifierStepName {
 			continue
 		}
 		if step.Shell != "bash" {
-			t.Fatalf("%s shell = %q, want bash", stepName, step.Shell)
+			t.Fatalf("%s shell = %q, want bash", spec.verifierStepName, step.Shell)
 		}
 		if strings.TrimSpace(step.Run) == "" {
-			t.Fatalf("%s step has empty run script", stepName)
+			t.Fatalf("%s step has empty run script", spec.verifierStepName)
 		}
 		return step.Run
 	}
-	t.Fatalf("required job is missing %s step", stepName)
+	t.Fatalf("%s required job is missing %s step", spec.name, spec.verifierStepName)
 	return ""
 }
 
