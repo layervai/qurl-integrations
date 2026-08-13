@@ -55,12 +55,17 @@ fi
 [[ -n "$repo" ]] || force_full 'GITHUB_REPOSITORY is unset'
 [[ -n "$branch" ]] || force_full 'GITHUB_REF_NAME is unset'
 [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || force_full "GITHUB_SHA is not a commit SHA: ${head_sha:-<empty>}"
-[[ "$workflow_file" == *.y*ml ]] ||
+[[ "$workflow_file" == *.yml || "$workflow_file" == *.yaml ]] ||
   force_full "could not derive a workflow file name from GITHUB_WORKFLOW_REF: ${GITHUB_WORKFLOW_REF:-<empty>}"
 
 # `status=success` selects on conclusion, so a cancelled or failed run never
 # advances the base. The in-flight run cannot match itself — it is still
 # in_progress while this step executes.
+#
+# This relies on the endpoint's default `created_at` descending sort to make
+# per_page=1 mean "most recent". A re-run keeps its original created_at, so
+# re-running an old success cannot pull the base backwards past a newer one;
+# any staleness here widens the diff, which is the safe direction.
 api_status=0
 base_sha="$(gh api \
   --method GET "repos/${repo}/actions/workflows/${workflow_file}/runs" \

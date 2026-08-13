@@ -132,6 +132,10 @@ run_case missing-repository 0 '' true 'GITHUB_REPOSITORY is unset' GITHUB_REPOSI
 run_case missing-ref-name 0 '' true 'GITHUB_REF_NAME is unset' GITHUB_REF_NAME=
 run_case missing-head-sha 0 '' true 'GITHUB_SHA is not a commit SHA' GITHUB_SHA=
 run_case undrivable-workflow-ref 0 '' true 'could not derive a workflow file name' GITHUB_WORKFLOW_REF=
+# Non-empty but with no workflow-file tail, so the derivation runs and still
+# has to reject what it produced.
+run_case workflow-ref-without-extension 0 '' true 'could not derive a workflow file name' \
+  GITHUB_WORKFLOW_REF=layervai/qurl-integrations/.github/workflows/discord@refs/heads/main
 
 # --- a missing GITHUB_OUTPUT is a harness bug, not a fail-closed case: there
 #     is nowhere to report `force`, so the step must go red instead of letting

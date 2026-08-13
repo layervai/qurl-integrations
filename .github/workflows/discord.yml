@@ -55,10 +55,14 @@ jobs:
 
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
+        # Skipped when no base could be resolved. The job output already forces
+        # every gate true there, and running the filter anyway would let a
+        # filter error redden this job instead of honouring the fail-closed
+        # intent.
+        if: steps.base.outputs.force != 'true'
         with:
-          # Empty on pull_request (the step above is push-only), which leaves
-          # paths-filter on its PR API path; empty on a forced full run too,
-          # where the job output above ignores this filter's verdict.
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
           base: ${{ steps.base.outputs.sha }}
           filters: |
             discord:

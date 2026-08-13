@@ -63,14 +63,16 @@ jobs:
         run: scripts/resolve-validated-base.sh
 
       # Skipped on workflow_dispatch, which checks nothing out and has no diff
-      # to compute; the job output above already forces that case true.
+      # to compute, and skipped when no base could be resolved. The job output
+      # above already forces both cases true, and running the filter anyway
+      # would let a filter error redden this job instead of honouring the
+      # fail-closed intent.
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && steps.base.outputs.force != 'true'
         with:
-          # Empty on pull_request (the step above is push-only), which leaves
-          # paths-filter on its PR API path; empty on a forced full run too,
-          # where the job output above ignores this filter's verdict.
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
           base: ${{ steps.base.outputs.sha }}
           filters: |
             s3_static_connector:
