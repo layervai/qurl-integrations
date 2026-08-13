@@ -1677,3 +1677,68 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     });
   });
 });
+
+// detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowlist.
+// config.js owns parsing/validation of DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS
+// / DETECT_EXTRA_NON_PROD_HOST_SUFFIXES (see config-detect-extra-hosts.test.js);
+// these tests cover connector.js's consumption side — merging the extras into
+// the built-in non-prod sets — using the same jest.doMock('../src/config', ...)
+// + jest.resetModules() pattern the QURL_ENDPOINT-variance tests above use.
+describe('detectTunnelHostSuffixesForEndpoint — env-extendable non-prod allowlist', () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('grants the extra suffix when QURL_ENDPOINT matches an extra non-prod endpoint host', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.sandbox.example',
+      QURL_API_KEY: 'test-key',
+      DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS: ['api.sandbox.example'],
+      DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: ['.tunnel.sandbox.example'],
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.sandbox.example'))
+      .toContain('.tunnel.sandbox.example');
+  });
+
+  it('does NOT grant the extra suffix for an endpoint absent from the extra allowlist (fail closed)', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.layerv.ai',
+      QURL_API_KEY: 'test-key',
+      DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS: ['api.sandbox.example'],
+      DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: ['.tunnel.sandbox.example'],
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.layerv.ai')).toEqual(['.qurl.site']);
+  });
+
+  it('still returns only the production suffix for an unknown endpoint when the extra vars are unset (no behavior change)', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.layerv.ai',
+      QURL_API_KEY: 'test-key',
+      // DETECT_EXTRA_* intentionally absent — matches every other mocked
+      // config object in this file and pins that an undefined value
+      // doesn't crash the merge (must fall back to an empty extra set).
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.layerv.ai')).toEqual(['.qurl.site']);
+  });
+
+  it('still grants the built-in non-prod suffixes for a built-in endpoint host when the extra vars are unset', () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_ENDPOINT: 'https://api.staging.layerv.ai',
+      QURL_API_KEY: 'test-key',
+    }));
+    const { detectTunnelHostSuffixesForEndpoint } = require('../src/connector');
+    expect(detectTunnelHostSuffixesForEndpoint('https://api.staging.layerv.ai'))
+      .toEqual(['.qurl.site', '.qurl.site.layerv.xyz', '.qurl.site.layerv.ai']);
+  });
+});
