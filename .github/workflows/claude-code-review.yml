@@ -172,11 +172,11 @@ jobs:
         # composite action step; actions/runner#1979 (timeouts on steps *inside*
         # a composite action) is a different, still-unsupported case.
         timeout-minutes: ${{ fromJSON(env.CLAUDE_REVIEW_BUDGET_MINUTES) }}
-        # TODO(upstream-contract): Requires v1.0.180 or newer, which carries
-        # upstream #1496: a terminal
-        # SDK result with `subtype: success` plus `is_error: true` fails instead
-        # of producing a false-green review check. Moving the pin forward keeps
-        # that guarantee; do not pin below that floor.
+        # TODO(upstream-contract): Requires v1.0.180 or newer. Upstream #1496
+        # makes a terminal SDK result with `subtype: success` plus
+        # `is_error: true` fail instead of producing a false-green review
+        # check. Moving the pin forward keeps that guarantee; do not pin below
+        # that floor.
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -216,6 +216,8 @@ jobs:
             anything yourself: this workflow publishes that final message
             verbatim as this run's pull-request comment.
 
+          # Nothing enforces model lockstep; keep --model identical to
+          # claude.yml's and change both in the same pull request.
           # Use the action's GitHub MCP subprocess for reads only. It receives
           # the repository token but not the Anthropic key. Local, network,
           # delegation, and GitHub write tools stay denied: the publish step
