@@ -1219,6 +1219,36 @@ func newMediaNoticeHandlerAt(t *testing.T, mem *memAgentDDB, now func() time.Tim
 	return h, posts, mu
 }
 
+// TestMediaMarkerShapeMatchesFake closes the one coupling memCondWins cannot
+// express in code. It reads the literals "ttl" and "media#" because slackdata's
+// attrAgentTTL and mediaNoticeSKPrefix are unexported and cross-package — and a
+// change to either VALUE would silently stop the fake from modeling the expiry
+// branch, leaving every latch test green while none of them still exercised
+// reopen. Drive the real store once and assert the shape, so that drift fails
+// loudly here instead of going quiet everywhere.
+func TestMediaMarkerShapeMatchesFake(t *testing.T) {
+	mem := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	if _, err := store.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2"); err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	item, ok := mem.items["T1|media#C1:U2"]
+	if !ok {
+		keys := make([]string, 0, len(mem.items))
+		for k := range mem.items {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		t.Fatalf(`no marker at "T1|media#C1:U2" — the sk prefix memCondWins keys on has drifted. wrote: %v`, keys)
+	}
+	if _, ok := item["ttl"]; !ok {
+		t.Fatal(`marker carries no "ttl" attribute — memCondWins reads that key, so the expiry branch is no longer modeled`)
+	}
+}
+
 // TestHandleEvent_UnsupportedMediaNoticeCapsBurst is the point of the latch: one
 // member dragging in a pile of files must cost one reply, not one per file.
 //
