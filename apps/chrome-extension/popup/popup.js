@@ -408,7 +408,7 @@ copyBtn.addEventListener('click', async () => {
   }
 
   window.setTimeout(function () {
-    copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
+    copyBtn.textContent = copyButtonLabel(collectCopyableLinks(lastSuccessfulResults));
   }, COPY_BUTTON_REVERT_MS);
 });
 
@@ -483,19 +483,15 @@ function showResults(results, errors, insertionError) {
   errorArea.classList.remove('notice');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
-  copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
   const copyableLinks = collectCopyableLinks(results);
   const hasCopyableLinks = copyableLinks.length > 0;
+  copyBtn.textContent = copyButtonLabel(copyableLinks);
 
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
   if (results.length > 0) {
     copyArea.classList.remove('hidden');
     copyBtn.disabled = !hasCopyableLinks;
-    // The button copies every accessible link, so label it for the count it will actually copy.
-    if (copyableLinks.length > 1) {
-      copyBtn.textContent = getMessage('copy_btn_plural', 'Copy the qURL links');
-    }
     resultArea.classList.remove('hidden');
     const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
     const summaryText = results.length === 1
@@ -777,6 +773,15 @@ function formatFileSize(bytes) {
 
 function normalizeAllowedLink(link) {
   return getComposeFormatter().normalizeAllowedLink(link);
+}
+
+// Label the copy button for the number of links it will actually copy. Every path that sets
+// the label goes through here — the initial render and the post-"Copied" revert alike — so the
+// button can't revert to the singular form while several links are still copyable.
+function copyButtonLabel(links) {
+  return links.length > 1
+    ? getMessage('copy_btn_plural', 'Copy the qURL links')
+    : getMessage('copy_btn', 'Copy the qURL link');
 }
 
 // The one place that decides which links are copyable. Both clipboard flavors and the button's

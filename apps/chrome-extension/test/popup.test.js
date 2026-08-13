@@ -224,7 +224,7 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
   global.requestQurlHostPermission = async function (value) {
     return resolvedOptions.requestQurlHostPermission ? resolvedOptions.requestQurlHostPermission(value) : true;
   };
-  global.uploadFile = async function () {
+  global.uploadFile = resolvedOptions.uploadFile || async function () {
     throw new Error('uploadFile should not run in popup helper tests');
   };
   global.normalizeQurlApiBase = resolvedOptions.normalizeQurlApiBase || function (value) {
@@ -957,4 +957,67 @@ test('showResults labels the copy button for the number of links it copies', fun
     null
   );
   assert.equal(copyBtn.textContent, 'Copy the qURL link');
+});
+
+test('the copy button keeps the plural label after the "Copied" text reverts', async function () {
+  // The revert fires ~1.5s after a click. Capture the callback instead of waiting on a timer.
+  let revert = null;
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout(callback) {
+        revert = callback;
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        copy_btn: 'Copy the qURL link',
+        copy_btn_plural: 'Copy the qURL links',
+        copy_done: 'Copied',
+      },
+      uploadFile: async function (buffer, filename) {
+        return { success: true, qurl_link: `https://files.example.com/${filename}` };
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const fileInput = popup.__testElements.get('fileInput');
+  const uploadBtn = popup.__testElements.get('uploadBtn');
+  const copyBtn = popup.__testElements.get('copyBtn');
+
+  function fakeFile(name) {
+    return {
+      name,
+      size: 10,
+      type: 'text/plain',
+      arrayBuffer: async function () {
+        return new ArrayBuffer(10);
+      },
+    };
+  }
+
+  fileInput.files = [fakeFile('a.txt'), fakeFile('b.txt')];
+  await fileInput.trigger('change');
+  await uploadBtn.trigger('click');
+
+  // Two accessible links, so the rendered label is plural.
+  assert.equal(copyBtn.textContent, 'Copy the qURL links');
+
+  await copyBtn.trigger('click');
+  assert.equal(copyBtn.textContent, 'Copied');
+
+  assert.ok(revert, 'clicking copy should schedule a label revert');
+  revert();
+
+  // The revert must follow the same count the render used, not fall back to the singular label
+  // while both links are still copyable.
+  assert.equal(copyBtn.textContent, 'Copy the qURL links');
 });
