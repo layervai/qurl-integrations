@@ -1282,13 +1282,16 @@ func agentHistoryOldestTS(currentTS string) string {
 	return strconv.FormatInt(oldest, 10) + ".000000"
 }
 
-// botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
-// "<@U123|name>", so an @-mention's text can be reduced to the actual request.
-// The [UW][A-Z0-9]{8,63} id body matches the established mention-id grammar in
-// parser.go's userMentionPattern (rejects toy ids; caps pathological pastes) —
-// this one strips a leading mention rather than validating a whole token, so the
-// anchoring differs, but the id charset is kept in sync.
-var botMentionPattern = regexp.MustCompile(`^\s*<@([UW][A-Z0-9]{8,63})(?:\|[^>]*)?>\s*`)
+// slackUserMentionExpr matches Slack's encoded user mention. The ID grammar mirrors
+// parser.go's userMentionPattern (rejects toy ids; caps pathological pastes).
+const slackUserMentionExpr = `<@([UW][A-Z0-9]{8,63})(?:\|[^>]*)?>`
+
+var (
+	slackUserMentionPattern = regexp.MustCompile(slackUserMentionExpr)
+	// botMentionPattern is anchored because stripBotMention removes only the bot
+	// mention Slack prefixes to a normal app_mention request.
+	botMentionPattern = regexp.MustCompile(`^\s*` + slackUserMentionExpr + `\s*`)
+)
 
 // stripBotMention removes a leading bot mention from app_mention text.
 func stripBotMention(text string) string {
@@ -1296,16 +1299,18 @@ func stripBotMention(text string) string {
 }
 
 // agentEventMentionsAuthorizedBot identifies the message event paired with an
-// app_mention delivery. Requiring both the captured mention target and is_bot avoids
-// treating an upload that mentions another member as if a second event will count it.
+// app_mention delivery. Requiring both the mention target and is_bot avoids treating
+// an upload that mentions another member as if a second event will count it.
+//
+// TODO(upstream-contract): suppressing this record assumes Slack also delivers the
+// paired app_mention that claimMediaNotice counts. If Slack stops emitting that twin,
+// mentioned uploads would be undercounted rather than double-counted.
 func agentEventMentionsAuthorizedBot(env *slackEventEnvelope) bool {
-	match := botMentionPattern.FindStringSubmatch(env.Event.Text)
-	if len(match) < 2 {
-		return false
-	}
-	for _, authz := range env.Authorizations {
-		if authz.IsBot && authz.UserID == match[1] {
-			return true
+	for _, match := range slackUserMentionPattern.FindAllStringSubmatch(env.Event.Text, -1) {
+		for _, authz := range env.Authorizations {
+			if authz.IsBot && authz.UserID == match[1] {
+				return true
+			}
 		}
 	}
 	return false

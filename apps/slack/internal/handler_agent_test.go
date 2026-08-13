@@ -308,7 +308,7 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		// A message/file_share event that mentions this bot is the twin of an
 		// app_mention event for the same upload. The admitted mention counts it, so the
 		// twin must stay silent or the demand total counts one member action twice.
-		{"mentioned channel upload twin is not counted twice", withBotAuthorization(withFile(chReply("<@U12345678>", agentPoolTestThreadTS)), "U12345678", true), true, false, agentDropSilent},
+		{"mid-caption mentioned channel upload twin is not counted twice", withBotAuthorization(withFile(chReply("please review <@U12345678> this", agentPoolTestThreadTS)), "U12345678", true), true, false, agentDropSilent},
 		{"upload mentioning another user is still counted", withBotAuthorization(withFile(chReply("<@U87654321>", agentPoolTestThreadTS)), "U12345678", true), true, false, agentDropChannelUpload},
 		{"non-bot authorization does not suppress the upload count", withBotAuthorization(withFile(chReply("<@U12345678>", agentPoolTestThreadTS)), "U12345678", false), true, false, agentDropChannelUpload},
 		// The arm is every non-IM channel_type, not just "channel": a private channel and
@@ -2042,8 +2042,10 @@ func TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly(t *testi
 	slog.SetDefault(slog.New(observability.NewRedactingJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prevLogger) })
 
-	h.handleEvent(httptest.NewRecorder(), []byte(botAuthorizedEventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
-	h.handleEvent(httptest.NewRecorder(), []byte(botAuthorizedEventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	// The mention is deliberately mid-caption: Slack still emits app_mention for
+	// this shape, so a leading-only twin detector would count the same upload twice.
+	h.handleEvent(httptest.NewRecorder(), []byte(botAuthorizedEventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"please review <@U12345678> this","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(botAuthorizedEventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"please review <@U12345678> this","files":[{"id":"F3"}]}`)))
 	h.Wait()
 
 	// The whole point of the filter drop: a channel upload buys no conversations.replies
