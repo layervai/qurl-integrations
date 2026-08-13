@@ -15,14 +15,14 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 )
 
-// These tests fence handleEvent's field-type tolerance: a single Slack field
-// arriving as an unexpected JSON type must not cost the whole event, and the
-// partially-decoded envelope it produces must not be able to reach anything it
-// could not have reached with that field simply absent.
+// These tests fence handleEvent's field-type tolerance, which is scoped by
+// CONSEQUENCE: a single Slack field arriving as an unexpected JSON type must
+// not cost a conversation turn, and must never drive the workspace purge.
 //
-// The two halves are inseparable. Tolerating drift without the second half
-// would trade a silent drop for a silent misfire on the uninstall cascade,
-// which is strictly worse.
+// The two halves are inseparable. Tolerating drift everywhere would trade a
+// silent drop for a silent MISFIRE on the uninstall cascade, which is strictly
+// worse — and is not hypothetical: three separate fields can redirect that
+// purge rather than merely withhold it (see the lifecycle tests below).
 
 // mistypedDriftEventID is the event id shared by the drift fixtures. Dedupe is
 // per-partition and these handlers are per-test, so one constant is fine.
@@ -46,8 +46,8 @@ func TestSlackEnvelopeDriftPopulatesTheRestOfTheStruct(t *testing.T) {
 	if err == nil {
 		t.Fatal("a mistyped field must still report an error; the tolerance is a routing decision, not a claim the payload was clean")
 	}
-	if !eventEnvelopeTypeDrift(err) {
-		t.Fatalf("mistyped field classified as a body-level parse failure: %v", err)
+	if field, ok := jsonFieldTypeDrift(err); !ok || field != "event.bot_id" {
+		t.Fatalf("mistyped field classified as field=%q drift=%v, want the bot_id path", field, ok)
 	}
 	if env.Type != "event_callback" || env.Event.Type != "app_mention" || env.Event.User != "U2" || env.Event.Text != "hi" {
 		t.Fatalf("sibling fields lost alongside the drifted one: %+v", env)
@@ -60,8 +60,17 @@ func TestSlackEnvelopeDriftPopulatesTheRestOfTheStruct(t *testing.T) {
 	// reaches the struct at all.
 	var syntaxEnv slackEventEnvelope
 	syntaxErr := json.Unmarshal([]byte(`{"type":"event_callback","event":{"type":"app_uninstalled"}} trailing`), &syntaxEnv)
-	if eventEnvelopeTypeDrift(syntaxErr) {
+	if _, ok := jsonFieldTypeDrift(syntaxErr); ok {
 		t.Fatalf("body-level parse failure classified as field drift: %v", syntaxErr)
+	}
+
+	// A mismatch against the WHOLE document is an UnmarshalTypeError too, but it
+	// names no field and populates nothing — classifying it as field drift would
+	// make the log claim "routing on the fields that decoded" when none did.
+	var bareEnv slackEventEnvelope
+	bareErr := json.Unmarshal([]byte(`["not","an","object"]`), &bareEnv)
+	if field, ok := jsonFieldTypeDrift(bareErr); ok {
+		t.Fatalf("whole-document mismatch classified as drift on field %q: %v", field, bareErr)
 	}
 	if !reflect.DeepEqual(syntaxEnv, slackEventEnvelope{}) {
 		t.Fatalf("syntax error left a partially-populated envelope: %+v — the abort branch assumes there is nothing to route on", syntaxEnv)
@@ -118,14 +127,31 @@ func TestHandleEvent_MistypedFieldStillRoutes(t *testing.T) {
 			if len(*posts) != 1 {
 				t.Fatalf("a drifted %s must not swallow the turn: got %d replies, want 1", tt.name, len(*posts))
 			}
+			// Counting replies is not enough: a bug that refused every turn as
+			// unsupported media would also post exactly one. Assert it is the
+			// real answer.
+			if want := agentLLMReplyWithDisclaimer(testAgentReachStagingReply); (*posts)[0].text != want {
+				t.Fatalf("drifted %s got reply %q, want the model's answer %q", tt.name, (*posts)[0].text, want)
+			}
 		})
 	}
 }
 
-// TestHandleEvent_SyntaxErrorRoutesNothing is the other side of the tolerance:
-// a body that never parsed still dispatches nothing. Without this, "tolerate
-// decode errors" could quietly widen into routing on a zero envelope.
-func TestHandleEvent_SyntaxErrorRoutesNothing(t *testing.T) {
+// TestHandleEvent_SyntaxErrorIsNotTreatedAsDrift is the other side of the
+// tolerance: a body that never parsed dispatches nothing AND is not reported as
+// drift.
+//
+// The reply-count half alone is vacuous, which is worth spelling out because it
+// looks like the obvious assertion. A syntax error leaves the envelope zero, so
+// "no replies" holds no matter which branch runs — misclassifying it would not
+// move that number at all. The log line is the only place the classification is
+// observable, so that is what has to be asserted.
+func TestHandleEvent_SyntaxErrorIsNotTreatedAsDrift(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
 	h, posts, mu := newAgentEventHandler(t, testAgentReachStagingReply)
 
 	w := httptest.NewRecorder()
@@ -137,6 +163,17 @@ func TestHandleEvent_SyntaxErrorRoutesNothing(t *testing.T) {
 		t.Fatalf("ack code = %d, want 200", w.Code)
 	}
 	h.Wait()
+
+	got := logBuf.String()
+	if strings.Contains(got, "type drift") {
+		t.Fatalf("unparseable body reported as field drift, which claims fields decoded when none did: %q", got)
+	}
+	// The abort branch logs at Warn, not Debug: this path discards an event
+	// permanently (the 200 stops Slack redelivering), so it is the failure that
+	// most needs to be visible in prod.
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "event JSON parse failed") {
+		t.Fatalf("parse failure must be visible at Warn; got %q", got)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -182,44 +219,77 @@ func TestHandleEvent_TypeDriftIsLoggedAtWarn(t *testing.T) {
 	}
 }
 
-// TestHandleEvent_MistypedFieldCannotFabricateLifecycleRouting is the
-// highest-stakes guarantee in this change. Routing a partially-decoded envelope
-// is only defensible if drift cannot INVENT an uninstall, so each fixture here
-// is a payload that is one plausible decoder mistake away from wiping a live
-// workspace, and none of them may purge anything.
-func TestHandleEvent_MistypedFieldCannotFabricateLifecycleRouting(t *testing.T) {
+// TestHandleEvent_DriftNeverDrivesTheWorkspacePurge is the highest-stakes
+// guarantee in this change, and the reason the tolerance is scoped by
+// consequence rather than applied uniformly.
+//
+// Every row is a signature-valid teardown that a uniform tolerance WOULD have
+// routed, and three of them would have been routed WRONG — this is not a
+// precaution against a hypothetical. Each one is annotated with what it would
+// have done, because the temptation to "just tolerate everything" is exactly
+// what these rows exist to answer.
+//
+// The rows are not all held up by the same guard, by design. Deleting the
+// refusal in handleEvent turns the first two red; the tokens.bot row stays green
+// because isBotTokensRevokedEvent independently refuses to count an entry that
+// names no token. That is defense in depth, not redundancy — the tokens.bot
+// shape can also arrive with NO decode error, where the refusal never applies.
+func TestHandleEvent_DriftNeverDrivesTheWorkspacePurge(t *testing.T) {
+	const otherWorkspace = testEnterpriseID
 	tests := []struct {
 		name string
 		body string
-		why  string
+		// wouldHaveDone records the behavior a uniform tolerance produces, so a
+		// future reader can see the cost of relaxing this instead of guessing.
+		wouldHaveDone string
 	}{
+		{
+			name: "team_id drift, with an enterprise_id to fall back to",
+			body: `{"type":"event_callback","team_id":9,"enterprise_id":"` + otherWorkspace + `","api_app_id":"A1","event_id":"EvDriftTeam","event":{"type":"app_uninstalled"}}`,
+			// The nastiest of the three: resolveSlackEventPartitions does not
+			// SKIP an unresolvable team id, it SUBSTITUTES enterprise_id. For an
+			// identity field, "drifted" and "absent" have different right
+			// answers, and the fallback silently picks the wrong one.
+			wouldHaveDone: "fully purged the ENTERPRISE partition for a workspace-level uninstall",
+		},
+		{
+			name: "is_enterprise_install drift on a Grid org teardown",
+			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","enterprise_id":"` + otherWorkspace + `","api_app_id":"A1","event_id":"EvDriftGrid",` +
+				`"authorizations":[{"enterprise_id":"` + otherWorkspace + `","team_id":"` + testAdminTeamID + `","is_enterprise_install":"true"}],` +
+				`"event":{"type":"app_uninstalled"}}`,
+			// The counterexample to "every routing case selects on a string":
+			// this one selects on a BOOL, whose zero value is a different and
+			// more destructive branch.
+			wouldHaveDone: "flipped the org teardown onto the workspace branch — over-deleting the team and never purging the org",
+		},
+		{
+			name: "tokens.bot element drift",
+			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftTok",` +
+				`"event":{"type":"tokens_revoked","tokens":{"bot":[{"id":"B1"}]}}}`,
+			// A slice is SIZED before its elements decode, so a mistyped element
+			// still occupies a slot. len(Bot) > 0 was true here.
+			wouldHaveDone: "fabricated a full purge from a payload that named no token",
+		},
 		{
 			name: "inner event is a string, not an object",
 			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftA","event":"app_uninstalled"}`,
-			why:  "env.Event stays zero, so isLifecycleEvent sees no event type",
+			// This one is safe under either policy — env.Event stays zero, so no
+			// teardown is even recognized. Kept as the contrast case.
+			wouldHaveDone: "nothing; env.Event stays zero so no teardown is recognized",
 		},
 		{
-			name: "envelope type drifted away from event_callback",
-			body: `{"type":123,"team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftB","event":{"type":"app_uninstalled"}}`,
-			why:  "every routing case is gated on env.Type, which drift zeroes",
-		},
-		{
-			name: "tokens object is a string",
-			// The trap: encoding/json ALLOCATES Tokens before it discovers the
-			// value is a string, so a nil check alone would read this as a
-			// revocation of every bot token.
-			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftC","event":{"type":"tokens_revoked","tokens":"revoked"}}`,
-			why:  "isBotTokensRevokedEvent requires a listed bot token, not just a non-nil tokens object",
-		},
-		{
-			name: "tokens.bot is a string, not an array",
-			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftD","event":{"type":"tokens_revoked","tokens":{"bot":"B123"}}}`,
-			why:  "an uncountable bot list is not proof the bot token died",
+			name:          "envelope type drifted away from event_callback",
+			body:          `{"type":123,"team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftB","event":{"type":"app_uninstalled"}}`,
+			wouldHaveDone: "nothing; every route is gated on env.Type, which drift zeroes",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, provider, _ := newLifecycleTestHandler(t)
+			h, provider, ts := newLifecycleTestHandler(t)
+			// Seed the OTHER workspace too, so a misdirected purge has something
+			// real to destroy rather than silently no-op'ing on an absent row.
+			ts.seedWorkspace(t, otherWorkspace, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
+			seedLifecycleAgentState(t, h.cfg.AgentStore, otherWorkspace)
 
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, tt.body, tt.body))
@@ -229,48 +299,97 @@ func TestHandleEvent_MistypedFieldCannotFabricateLifecycleRouting(t *testing.T) 
 			h.Wait()
 
 			if provider.deleteStateCalls != 0 {
-				t.Fatalf("drifted payload triggered %d workspace_state deletes, want 0 (%s)", provider.deleteStateCalls, tt.why)
+				t.Fatalf("drifted teardown deleted %d workspace_state rows (targets %v), want 0 — a uniform tolerance %s",
+					provider.deleteStateCalls, provider.deleteStateWorkspaceIDs, tt.wouldHaveDone)
 			}
-			assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testAdminTeamID)
-			if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID); err != nil {
-				t.Fatalf("workspace mapping destroyed by a drifted payload: %v (%s)", err, tt.why)
+			for _, workspaceID := range []string{testAdminTeamID, otherWorkspace} {
+				assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, workspaceID)
+				if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), workspaceID); err != nil {
+					t.Fatalf("workspace %q destroyed by a drifted teardown: %v — a uniform tolerance %s", workspaceID, err, tt.wouldHaveDone)
+				}
 			}
 		})
 	}
 }
 
-// TestHandleEvent_MistypedTeamIDPurgesNothingRatherThanTheWrongWorkspace pins
-// the property that makes routing a partial envelope safe on the purge path:
-// drift zeroes a string, and lifecycleWorkspaceIDs skips empty ids. So a real
-// uninstall whose team_id drifted resolves to no target and is logged as such —
-// it can never resolve to somebody else's workspace.
-func TestHandleEvent_MistypedTeamIDPurgesNothingRatherThanTheWrongWorkspace(t *testing.T) {
-	h, provider, _ := newLifecycleTestHandler(t)
+// TestHandleEvent_DroppedTeardownSaysSoAtWarn pins the other half of refusing
+// the purge. Dropping a teardown silently is the failure mode this whole PR
+// exists to remove, so the refusal has to be louder than what it replaces — the
+// operator has to be able to find the workspace and clean it up by hand.
+func TestHandleEvent_DroppedTeardownSaysSoAtWarn(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
 
-	body := `{"type":"event_callback","team_id":9,"api_app_id":"A1","event_id":"EvDriftTeam","event":{"type":"app_uninstalled"}}`
+	h, _, _ := newLifecycleTestHandler(t)
+	body := `{"type":"event_callback","team_id":9,"enterprise_id":"` + testEnterpriseID + `","api_app_id":"A1","event_id":"EvDropWarn","event":{"type":"app_uninstalled"}}`
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	h.Wait()
 	if w.Code != http.StatusOK {
 		t.Fatalf("ack code = %d, want 200", w.Code)
 	}
-	h.Wait()
 
-	if provider.deleteStateCalls != 0 {
-		t.Fatalf("unaddressable uninstall deleted %d workspace_state rows, want 0", provider.deleteStateCalls)
+	got := logBuf.String()
+	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "NOT purged") {
+		t.Fatalf("a refused teardown must say so at Warn; got %q", got)
 	}
-	assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testAdminTeamID)
+	// Enough to act on: which teardown, which field moved, and whether there was
+	// an id to chase. The ids themselves are not logged in the clear here, which
+	// matches the surrounding lifecycle lines.
+	for _, want := range []string{"event_type=app_uninstalled", "drift_field=team_id", "has_enterprise_id=true"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("refusal log missing %q, got %q", want, got)
+		}
+	}
 }
 
-// TestHandleEvent_UninstallSurvivesADriftedSiblingField is the reason the
-// tolerance is worth its risk. A dropped uninstall is unrecoverable: handleEvent
-// has already acked 200, Slack never redelivers, and the departed workspace's
-// data stays behind — so one drifted field used to mean a permanent retention
-// failure. Here the cascade runs on the fields that did decode.
-func TestHandleEvent_UninstallSurvivesADriftedSiblingField(t *testing.T) {
+// TestIsBotTokensRevokedEvent_RequiresANamedToken fences a teardown trigger that
+// can fire on a payload revoking nothing.
+//
+// The array is SIZED before its elements are decoded, so a null or mistyped
+// entry still occupies a slot — and `[null]` reaches that state with NO decode
+// error at all, which means no amount of care at the routing layer would catch
+// it. This is why the check is "names a token", not "the list is non-empty".
+func TestIsBotTokensRevokedEvent_RequiresANamedToken(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"a real bot token", `{"type":"tokens_revoked","tokens":{"bot":["B123"]}}`, true},
+		{"one real token among empties", `{"type":"tokens_revoked","tokens":{"bot":["","B123"]}}`, true},
+		{"null element decodes clean but names nothing", `{"type":"tokens_revoked","tokens":{"bot":[null]}}`, false},
+		{"empty string names nothing", `{"type":"tokens_revoked","tokens":{"bot":[""]}}`, false},
+		{"whitespace names nothing", `{"type":"tokens_revoked","tokens":{"bot":["   "]}}`, false},
+		{"mistyped element still occupies a slot", `{"type":"tokens_revoked","tokens":{"bot":[{"id":"B1"}]}}`, false},
+		{"empty array", `{"type":"tokens_revoked","tokens":{"bot":[]}}`, false},
+		{"tokens drifted to a string (allocates a zero struct)", `{"type":"tokens_revoked","tokens":"revoked"}`, false},
+		{"user-token revoke is not a teardown", `{"type":"tokens_revoked","tokens":{"oauth":["U123"]}}`, false},
+		{"wrong event type", `{"type":"app_mention","tokens":{"bot":["B123"]}}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var event slackInnerEvent
+			// The decode error is deliberately ignored: these shapes are exactly
+			// the ones that produce one, and the point is what the guard does
+			// with the struct that results.
+			_ = json.Unmarshal([]byte(tt.raw), &event)
+			if got := isBotTokensRevokedEvent(&event); got != tt.want {
+				t.Fatalf("isBotTokensRevokedEvent(%s) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleEvent_CleanUninstallStillPurges is the control for the refusal
+// above: the drift gate must not have broken the ordinary teardown it sits in
+// front of. Without this, "refuse on drift" could silently become "refuse".
+func TestHandleEvent_CleanUninstallStillPurges(t *testing.T) {
 	h, provider, _ := newLifecycleTestHandler(t)
 
-	body := `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftUninstall",` +
-		`"event_time":"1700000000","event":{"type":"app_uninstalled"}}`
+	body := appUninstalledBody(testAdminTeamID)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
 	if w.Code != http.StatusOK {
@@ -278,18 +397,16 @@ func TestHandleEvent_UninstallSurvivesADriftedSiblingField(t *testing.T) {
 	}
 	h.Wait()
 
-	if provider.deleteStateCalls != 1 {
-		t.Fatalf("DeleteWorkspaceState calls = %d, want 1", provider.deleteStateCalls)
-	}
-	if provider.deleteStateWorkspaceID != testAdminTeamID {
-		t.Fatalf("purged workspace = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
+	if provider.deleteStateCalls != 1 || provider.deleteStateWorkspaceID != testAdminTeamID {
+		t.Fatalf("clean uninstall purged %d rows targeting %q, want 1 targeting %q",
+			provider.deleteStateCalls, provider.deleteStateWorkspaceID, testAdminTeamID)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 
 	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
 	var ae *slackdata.Error
 	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
-		t.Fatalf("ListAdmins after drifted-field purge: err = %v, want 404 *Error", err)
+		t.Fatalf("ListAdmins after clean purge: err = %v, want 404 *Error", err)
 	}
 }
 

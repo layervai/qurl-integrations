@@ -215,11 +215,16 @@ type slackEventAuthorization struct {
 // fetches a file or reads inside one while conversation mode is text-only, so
 // only "did this carry an attachment" and "how many" survive the decode.
 //
-// It decodes tolerantly on purpose, at two levels, because handleEvent treats ANY
-// envelope decode error as "log at Debug, ack 200, dispatch nothing" — so a single
-// shape surprise anywhere in `files` would silently drop the whole event, taking
-// ordinary text turns and lifecycle/uninstall routing with it. That is the exact
-// silent disappearance agentUnsupportedMediaReply exists to prevent.
+// It decodes tolerantly on purpose, at two levels. Originally that was because
+// handleEvent treated ANY envelope decode error as "ack 200, dispatch nothing",
+// so one shape surprise here dropped the whole event. handleEvent now tolerates
+// field-type drift, which retires that reason and replaces it with a sharper
+// one: the blanket tolerance can only degrade a field to its ZERO value, and
+// this field's zero value is a LIE — `present=false` reads as "no attachment",
+// so the agent would answer past a file instead of refusing. Only a decoder
+// that classifies by shape can degrade to the safe answer ("an attachment I
+// cannot count"), which is the silent mis-answer agentUnsupportedMediaReply
+// exists to prevent.
 //
 //   - ELEMENT shape: a bare []struct{} fails on a non-object element, so entries
 //     are decoded as json.RawMessage, which accepts any JSON value. (This is the
@@ -819,19 +824,27 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	// The app_id half is redundant with bot_id on every payload Slack sends
 	// today, and that redundancy is the point: handleEvent now routes an
 	// envelope whose fields drifted in type, and a drifted string decodes to ""
-	// — so a bot_id that ever arrived as a non-string would silently turn this
-	// self-loop guard off. That is the one guard whose failure compounds: an
-	// unguarded reply to our own post is another message event, and the
-	// per-turn rate limiter is a cost backstop that fails OPEN. Two independent
-	// fields have to drift at once to reach that, instead of one.
+	// — so a bot_id that ever arrived as a non-string would turn the self-loop
+	// guard off. Answering our own post is the failure worth extra strands,
+	// because each self-reply is another message event; the per-turn rate
+	// limiter caps that, but it fails OPEN on a counter error rather than
+	// closed. Note the strands are not independent EVENTS — one payload can
+	// drift several fields at once, and only the first is reported — so this is
+	// depth, not a probability argument. e.User == "" is a third strand: an
+	// app-authored post that omits `user` is dropped whether or not either id
+	// survived.
 	//
-	// It only ever ADDS a drop: e.AppID is empty on human messages, so this
-	// cannot silence a member. The comparison is the same one
-	// loadAgentThreadHistory uses to recognize this app's own replies.
-	// TODO(upstream-contract): Slack stamps app-authored message events with
-	// app_id alongside bot_id. If that stops, this quietly reverts to
-	// bot_id-only — degradation, not breakage.
-	if e.BotID != "" || e.User == "" || (e.AppID != "" && e.AppID == env.APIAppID) {
+	// It only ever ADDS a drop, and cannot silence a member: the install flow
+	// requests bot scopes only (no user_scope — see slackinstall.DefaultBotScopes),
+	// so this app never posts as a user and an event stamped with its app id is
+	// necessarily its own.
+	// TODO(upstream-contract): this assumes Slack stamps app_id on app-authored
+	// message events and ONLY on those. Both directions matter and they fail
+	// differently: if app_id stops arriving, the guard goes inert and falls back
+	// to bot_id (degradation); if it ever appeared on a human-authored event, the
+	// guard would silence that member (breakage). isOwnAppPost is also used by
+	// loadAgentThreadHistory, so the same assumption is load-bearing there.
+	if e.BotID != "" || e.User == "" || isOwnAppPost(e.AppID, env.APIAppID) {
 		return false
 	}
 	switch e.Type {
@@ -882,6 +895,19 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 		return false
 	}
 	return agentEventHasUpload(e) || strings.TrimSpace(stripBotMention(e.Text)) != ""
+}
+
+// isOwnAppPost reports whether a message this app can see was authored by this
+// app itself, by comparing the message's app_id against the envelope's
+// api_app_id. Both operands must be non-empty: an absent app_id proves nothing,
+// and an absent api_app_id would otherwise match every human message.
+//
+// It is deliberately one function for two callers that consume it differently —
+// shouldDispatchAgentEvent to refuse a turn, loadAgentThreadHistory to classify
+// a thread message as the assistant's own — so the shared assumption about what
+// app_id means has one home. See shouldDispatchAgentEvent for that assumption.
+func isOwnAppPost(appID, apiAppID string) bool {
+	return appID != "" && appID == apiAppID
 }
 
 // isAgentChannelFollowup reports whether this event is a non-@mention reply in a
@@ -999,7 +1025,7 @@ func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnv
 			continue
 		}
 		_, ownUser := botUsers[msg.UserID]
-		ownReply := (msg.AppID != "" && msg.AppID == env.APIAppID) ||
+		ownReply := isOwnAppPost(msg.AppID, env.APIAppID) ||
 			(msg.BotID != "" && ownUser)
 		if ownReply {
 			// A block-only qURL response still proves this is an agent thread
