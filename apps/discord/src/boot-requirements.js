@@ -242,12 +242,16 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
 // monitoring until /qurl interactions start timing out from the user's
 // end. Fail-closed at boot is preferable.
 //
-// API asymmetry: this takes the PARSED `cfg` while the siblings
-// (missingBootKeys, missingProdKeys, missingKekRequiredKeys) take
-// raw `env`. The reason is that ENABLE_EVENT_SHIPPER is parsed in
-// config.js (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean)
-// and consumers should not re-implement that parsing. Reading from
-// cfg keeps the literal-'true' contract in one place.
+// API asymmetry across this module's helpers, so a caller knows what
+// to pass: `missingBootKeys` and this helper take the PARSED `cfg`;
+// `missingProdKeys` takes raw `env`; `missingKekRequiredKeys` takes
+// both (raw `env` for KEY_ENCRYPTION_KEY, which never lands on config,
+// plus the derived `isQurlOAuthConfigured` flag). The rule is that a
+// value parsed in config.js should be read from cfg rather than
+// re-parsed here — ENABLE_EVENT_SHIPPER
+// (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean) is the
+// case that motivated it, keeping the literal-'true' contract in one
+// place.
 function missingEventShipperKeys(cfg) {
   if (!cfg.ENABLE_EVENT_SHIPPER) return [];
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
