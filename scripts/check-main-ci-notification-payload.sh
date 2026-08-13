@@ -24,12 +24,13 @@
 #     mkdir -p /work && cd /work
 #     cp -R /src/.github /src/scripts .
 #     git init -q .
-#     scripts/check-main-ci-notification-payload.sh'
+#     sh scripts/check-main-ci-notification-payload.sh'
 #
 # The copy and fresh `git init` are load-bearing: this script starts with
 # `cd "$(git rev-parse --show-toplevel)"`, and the read-only mount carries no
 # .git the container can use (in a worktree it is a file pointing outside the
-# mount), so /work has to be a repo root of its own.
+# mount), so /work has to be a repo root of its own. `sh` runs it so the recipe
+# does not depend on the executable bit surviving the copy.
 #
 # Rather than pattern-matching the jq source (brittle, and would need updating
 # on every reword), this extracts the step's shell body and runs it verbatim
