@@ -548,10 +548,10 @@ function showResults(results, errors, insertionError) {
 
   if (errors.length > 0 || insertionError) {
     errorArea.classList.remove('hidden');
-    // Every upload worked and only the Gmail insertion failed, so this box carries a
-    // success-toned message plus a pointer at the copy fallback — style it as a notice rather
-    // than an error. This only holds while there is actually a fallback: with no copyable link
-    // the user has no way left to reach their upload from the popup, which is an error state
+    // Every upload worked and only the Gmail insertion failed, so this box names that failure
+    // and points at the copy fallback — recoverable, so style it as a notice rather than an
+    // error. This only holds while there is actually a fallback: with no copyable link the
+    // user has no way left to reach their upload from the popup, which is an error state
     // however well the uploads themselves went.
     errorArea.classList.toggle(
       'notice',
@@ -793,22 +793,25 @@ function normalizeAllowedLink(link) {
 
 // Mirrors copyButtonLabel: the insertion-only message points the user at the copy button, so it
 // has to agree with that button about how many links are waiting there.
+// The apostrophes below are backslash-escaped rather than the literals switched to double quotes:
+// the fallback-sync test in test/popup.test.js only scans single-quoted getMessage fallbacks, so a
+// double-quoted one drops out of its coverage and trips its call-site arithmetic.
 function insertionOnlyFailureMessage(links) {
   if (links.length === 0) {
     return getMessage(
       'result_insertion_only_failed_no_copy',
-      'Upload completed successfully, but no accessible qURL link is available to copy.'
+      'Couldn\'t insert into your Gmail draft, and no accessible qURL link is available to copy.'
     );
   }
 
   return links.length > 1
     ? getMessage(
       'result_insertion_only_failed_plural',
-      'Upload completed successfully. Use the copy button below to get the accessible qURL links.'
+      'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL links.'
     )
     : getMessage(
       'result_insertion_only_failed',
-      'Upload completed successfully. Use the copy button below to get the accessible qURL link.'
+      'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL link.'
     );
 }
 

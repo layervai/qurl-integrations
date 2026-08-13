@@ -35,7 +35,7 @@ process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 // (src/utils/oauth-state.js) via /link dispatch or route tests. The
 // signer enforces a 32-char minimum, so an unpinned worker would
 // resolve whatever secret-shaped value an earlier suite leaked into
-// process.env (e.g. a short GITHUB_CLIENT_SECRET fixture) and throw
+// process.env (e.g. a short OAUTH_STATE_SECRET fixture) and throw
 // order-dependently. One pin makes the resolved secret deterministic
 // for every suite. Suites that need different resolution mock
 // ../src/config wholesale (the signer reads config, not env) or
