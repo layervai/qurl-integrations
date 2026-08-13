@@ -88,15 +88,26 @@ fi
 if ! grep -qF 'timeout-minutes: ${{ fromJSON(env.CLAUDE_REVIEW_BUDGET_MINUTES) }}' "$workflow"; then
   note_failure "the review step no longer derives timeout-minutes from CLAUDE_REVIEW_BUDGET_MINUTES"
 fi
+# The job cap must clear the review budget by more than the steps around the
+# review can cost, or the job is cancelled before the review step can fail --
+# and a cancelled job runs nothing, so nothing reports. Worst case measured
+# from the workflow, in seconds:
+#
+#   30   job setup + fetch-depth:0 checkout + origin preparation
+#   60   checkout's internal retry, when it fires
+#   62   Verify terminal Claude review: two `timeout 30s` gh calls
+#   ---
+#   152  = 2m32s, rounded up to a 3-minute floor
+#
+# Raise this alongside the cap if the surrounding steps grow; it is a floor on
+# the gap, not a prediction of it.
+min_headroom_minutes=3
+
 job_cap="$(sed -n 's/^    timeout-minutes: \([0-9]\{1,\}\)$/\1/p' "$workflow")"
 if [ -z "$job_cap" ]; then
   note_failure "no job-level timeout-minutes found in $workflow"
-elif [ "$((job_cap - budget))" -lt 3 ]; then
-  # Not just "greater than": the cap also has to absorb setup, checkout (plus
-  # its internal retry), origin preparation and the verify step's two
-  # `timeout 30s` gh calls. Too thin a margin and the job is cancelled around
-  # the review instead of the review step failing, which reports nothing.
-  note_failure "job cap ${job_cap}m leaves under 3m over the ${budget}m review budget; too thin for setup, checkout retry and verify"
+elif [ "$((job_cap - budget))" -lt "$min_headroom_minutes" ]; then
+  note_failure "job cap ${job_cap}m leaves under ${min_headroom_minutes}m over the ${budget}m review budget; too thin for setup, checkout retry and verify"
 fi
 
 budget_seconds=$((budget * 60))
