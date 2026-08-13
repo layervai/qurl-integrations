@@ -4,7 +4,7 @@ Brief description of changes.
 
 ## Scope
 
-<!-- Which app does this PR change? Check one. -->
+<!-- Which area(s) does this PR change? Check all that apply. -->
 
 - [ ] `apps/slack/`
 - [ ] `apps/teams/`
