@@ -778,6 +778,10 @@ func agentEventHasUpload(e *slackInnerEvent) bool {
 // subtype, because an upload is a turn this surface answers (with the text-only
 // limitation) rather than ignores. Everything else — edits, joins, bot posts — is
 // system noise from here.
+//
+// Admitting the subtype is not admitting the message: a channel upload is dropped
+// a few lines later regardless of subtype (see shouldDispatchAgentEvent), so what
+// this whitelist unlocks for file_share is the @mention and DM surfaces.
 func agentAdmitsSubtype(subtype string) bool {
 	return subtype == "" || subtype == slackMessageSubtypeFileShare
 }
@@ -786,12 +790,14 @@ func agentAdmitsSubtype(subtype string) bool {
 // agent something: non-mention/DM events, bot and system/edited messages (the
 // self-loop guard), authorless events, top-level channel messages, and events
 // with neither text nor an attached file. File-only deliberate messages are
-// admitted so processAgentEventWithAdmission can explain the text-only boundary.
+// admitted on the @mention and DM surfaces so processAgentEventWithAdmission can
+// explain the text-only boundary; a channel message carrying an upload is dropped
+// instead, and the branch below is where that trade is argued.
 //
-// When channelFollowupsEnabled is true, a channel message that is a thread REPLY is
-// also admitted — so a follow-up in a thread the agent is already in continues the
-// conversation without a re-@mention. Slack's thread_broadcast subtype follows that
-// same path when a user also sends the thread reply to the channel.
+// When channelFollowupsEnabled is true, a channel message that is a TEXT thread
+// REPLY is also admitted — so a follow-up in a thread the agent is already in
+// continues the conversation without a re-@mention. Slack's thread_broadcast subtype
+// follows that same path when a user also sends the thread reply to the channel.
 // runAgentFollowupPipeline then confirms it's the agent's OWN thread (it has saved
 // history) before answering; a top-level channel message is never admitted, so we never
 // respond to un-addressed channel chatter.
@@ -818,29 +824,43 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			if !agentAdmitsSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
 				return false
 			}
+			// An upload in a channel is dropped here, flag or no flag, before any of
+			// the follow-up machinery below. The limitation reply answers turns that
+			// ADDRESS the agent, and a file dropped into a channel mid-conversation is
+			// not one; replying would make the bot interject on people talking to each
+			// other, which is the louder failure. That argument does not weaken when
+			// follow-ups ship, so the drop is not conditioned on the flag. The one
+			// channel upload this surface still answers is one that @mentions it — a
+			// different event type, admitted above — which is the route the limitation
+			// text itself tells members to take.
+			//
+			// This deliberately gives up a reply that costs too much to keep. With
+			// follow-ups on, an upload in a thread the agent HAD joined would draw the
+			// limitation; charging for it means routing every thread upload through the
+			// gate, because "did we join this thread?" IS the conversations.replies read
+			// (loadAgentThreadHistory) — there is no cheaper oracle for it. So each one
+			// would spend a followupGateSem slot and a Slack read before dedupe, for
+			// threads the agent never joined too, and that pool's saturation path drops
+			// legitimate TEXT follow-ups. Slack stamps file_share on essentially every
+			// message-with-files, so any member of any channel the bot is in could drive
+			// that with no @mention. Admitting the upload but skipping the gate is worse
+			// still: it converts that read into an outbound post in threads the agent was
+			// never part of — exactly the interjection this branch refuses.
+			//
+			// Dropping closes a second path with it. Answering an upload would mark the
+			// thread as one the agent joined (see loadAgentThreadHistory), so later
+			// replies there reach the model. That mechanism predates uploads — help and
+			// the invalid-alias replies do it too — but each of those is a turn someone
+			// addressed to the agent, and in a channel an upload is not.
+			//
+			// Keyed on agentEventHasUpload, not the subtype: an upload whose files array
+			// arrives without file_share must not slip past into the gate.
+			if agentEventHasUpload(e) {
+				return false
+			}
 			// A channel message reaches the follow-up pipeline only when channel
 			// follow-ups are enabled AND it's a thread reply. The pipeline then checks
 			// whether this is already an agent thread, using store access.
-			//
-			// An upload is deliberately not special-cased here. With follow-ups off it
-			// is dropped like any other follow-up, which reads oddly against "never
-			// disappear silently" — but the limitation reply answers turns that ADDRESS
-			// the agent, and a file dropped into a channel mid-conversation is not one.
-			// Replying to it would make the bot interject on people talking to each
-			// other, which is the louder failure.
-			//
-			// Two costs come with admitting it rather than dropping it at this filter,
-			// both inert while AgentChannelFollowups is off:
-			//   - a thread upload now pays a followupGateSem slot and a
-			//     conversations.replies read before dedupe, even for threads the agent
-			//     never joined — and that pool's saturation path drops legitimate text
-			//     follow-ups. An upload can only ever produce the fixed limitation, so
-			//     it never needs history; short-circuiting it before the gate read is
-			//     the fix if that flag ships.
-			//   - answering an upload marks the thread as one the agent joined (see
-			//     loadAgentThreadHistory), so later replies there reach the model. That
-			//     mechanism predates uploads — help and the invalid-alias replies do it
-			//     too — but an upload is a new way to trigger it.
 			if !channelFollowupsEnabled || e.ThreadTS == "" {
 				return false
 			}
