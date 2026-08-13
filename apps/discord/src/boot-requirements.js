@@ -81,6 +81,11 @@ function isPrivateIPv4Literal(hostname) {
   if (octets.some((octet, idx) => !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== parts[idx])) {
     return false;
   }
+  // CGNAT 100.64.0.0/10 is deliberately NOT screened: unlike the ranges below
+  // it can front a legitimately reachable origin, so rejecting it would fail
+  // a valid deploy. Same reasoning excludes the TEST-NET blocks — the screen
+  // rejects hosts that CANNOT serve a public OAuth redirect, not every host
+  // that merely looks unusual.
   const [a, b] = octets;
   return a === 0 //                              0.0.0.0/8 "this network"
     || a === 10
