@@ -76,7 +76,7 @@ jobs:
         # it ran failed, which would make this step silently green.
         run: |
           find background.js popup content lib scripts -name '*.js' -print0 \
-            | xargs -0 -n1 node --check
+            | xargs -0 -r -n1 node --check
 
       - name: Run tests
         run: npm test

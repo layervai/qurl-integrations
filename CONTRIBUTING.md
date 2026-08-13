@@ -16,6 +16,11 @@ pip install pre-commit && pre-commit install
 make check
 ```
 
+`make check` shells out to `python3` for the repo-consistency checks
+(`scripts/check-release-please-sync.sh`, `scripts/check-extension-lockstep.sh`).
+Both fail with an explicit install message rather than silently passing if it is
+missing.
+
 ## Project Structure
 
 Each integration lives in `apps/{name}/`. Shared libraries live in `shared/`.

@@ -15,9 +15,11 @@ const ROOT = path.join(__dirname, '..');
 const SOURCE_ROOTS = ['background.js', 'content', 'lib', 'popup', 'scripts'];
 
 // Matches getMessage('key', …) and apiGetMessage('key', …) — literal keys only.
-// Calls that pass a variable (chrome.i18n.getMessage(key), QURLI18n.getMessage(key))
-// cannot be checked statically and are skipped by the string-literal requirement.
-const JS_KEY = /\b(?:api)?getMessage\(\s*'([a-zA-Z0-9_]+)'/g;
+// The [gG] is load-bearing: lib/qurl-api.js calls the wrapper as apiGetMessage with a
+// capital G, so a lowercase-only pattern silently skips that whole file. Calls that pass
+// a variable (chrome.i18n.getMessage(key), QURLI18n.getMessage(key)) cannot be checked
+// statically and are skipped by the string-literal requirement.
+const JS_KEY = /\b(?:api)?[gG]etMessage\(\s*'([a-zA-Z0-9_]+)'/g;
 
 // popup.html localizes nodes declaratively; these attributes name catalog keys too.
 const HTML_KEY = /\bdata-i18n(?:-attr-key)?="([a-zA-Z0-9_]+)"/g;
@@ -66,6 +68,27 @@ test('every data-i18n key used in markup is declared in _locales/en/messages.jso
     missing.map(([key, file]) => `${key} (${file})`),
     [],
     'keys referenced in markup but missing from the message catalog'
+  );
+});
+
+test('the scan reaches the apiGetMessage call sites in lib/qurl-api.js', function () {
+  // lib/qurl-api.js calls the wrapper under its renamed identifier (apiGetMessage) to
+  // avoid a shared-global collision with popup.js in the popup page. That file holds
+  // most of the error keys, and the suite above keeps passing on other files' keys if
+  // the pattern stops reaching it — so assert the coverage directly rather than trusting
+  // the aggregate count.
+  const used = collect([path.join(ROOT, 'lib/qurl-api.js')], JS_KEY, ['.js']);
+
+  assert.ok(
+    used.size > 0,
+    'no keys found in lib/qurl-api.js — JS_KEY no longer matches apiGetMessage(...)'
+  );
+
+  const missing = [...used].filter(([key]) => !(key in catalog));
+  assert.deepEqual(
+    missing.map(([key]) => key),
+    [],
+    'keys referenced in lib/qurl-api.js but missing from the message catalog'
   );
 });
 
