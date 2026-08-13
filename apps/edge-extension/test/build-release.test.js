@@ -1,14 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const buildRelease = require('../scripts/build-release.js');
 
-function makeTempReleaseRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'qurl-release-test-'));
-}
+const { withTempDirSync } = require('./helpers/temp-dir.js');
+const { EXPECTED_ICON_FILES } = require('./helpers/icons.js');
 
 // Mirrors lib/qurl-config.js: a tiny CommonJS-compatible module exporting DEFAULT_QURL_API_BASE.
 // The marked declaration line is what writeDefaultApiBaseConfig rewrites.
@@ -33,9 +31,7 @@ function readConfigBase(releaseRoot) {
 }
 
 test('writeDefaultApiBaseConfig regenerates the marked declaration regardless of source formatting', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     // Odd spacing + single quotes — the rewrite is anchored to the declaration, not its formatting.
     fs.mkdirSync(path.join(releaseRoot, 'lib'), { recursive: true });
     fs.writeFileSync(
@@ -53,15 +49,11 @@ test('writeDefaultApiBaseConfig regenerates the marked declaration regardless of
     buildRelease.writeDefaultApiBaseConfig('https://custom.example.com/base', releaseRoot);
 
     assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/base/');
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('writeDefaultApiBaseConfig rewrites the declaration, not a matching comment/string', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     // The real lib/qurl-config.js carries a marker comment that itself contains the literal
     // `const DEFAULT_QURL_API_BASE = '...';`. The rewrite must target the actual declaration
     // line, not the first textual match (which is the comment).
@@ -85,152 +77,140 @@ test('writeDefaultApiBaseConfig rewrites the declaration, not a matching comment
     assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/');
     // The decoy comment is untouched.
     assert.ok(written.includes("// build-release.js rewrites the `const DEFAULT_QURL_API_BASE = '...';` declaration below."));
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('writeDefaultApiBaseConfig preserves $ and apostrophes in the replacement URL', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
     buildRelease.writeDefaultApiBaseConfig("https://custom.example.com/path/$1/o'connor", releaseRoot);
     assert.equal(readConfigBase(releaseRoot), "https://custom.example.com/path/$1/o'connor/");
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('writeDefaultApiBaseConfig leaves the base value unchanged when the override matches', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
     assert.doesNotThrow(function () {
       buildRelease.writeDefaultApiBaseConfig('https://getqurllink.layerv.ai', releaseRoot);
     });
     assert.equal(readConfigBase(releaseRoot), 'https://getqurllink.layerv.ai/');
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('applyBuildOverrides rewrites both the config default and the manifest host permission', function () {
-  const releaseRoot = makeTempReleaseRoot();
-  const originalLog = console.log;
-  console.log = function () {};
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
+    const originalLog = console.log;
+    console.log = function () {};
 
-  try {
-    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
-    // rewriteManifestHostPermission derives the entry to replace from the PROJECT config
-    // (the real production default), so the manifest must carry that production pattern.
-    fs.writeFileSync(
-      path.join(releaseRoot, 'manifest.json'),
-      JSON.stringify({
-        host_permissions: [
-          'https://mail.google.com/*',
-          'https://getqurllink.layerv.ai/*',
-        ],
-      }, null, 2)
-    );
+    try {
+      writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+      // rewriteManifestHostPermission derives the entry to replace from the PROJECT config
+      // (the real production default), so the manifest must carry that production pattern.
+      fs.writeFileSync(
+        path.join(releaseRoot, 'manifest.json'),
+        JSON.stringify({
+          host_permissions: [
+            'https://mail.google.com/*',
+            'https://getqurllink.layerv.ai/*',
+          ],
+        }, null, 2)
+      );
 
-    buildRelease.applyBuildOverrides({
-      qurlApiBase: 'https://custom.example.com/api/upload',
-    }, releaseRoot);
+      buildRelease.applyBuildOverrides({
+        qurlApiBase: 'https://custom.example.com/api/upload',
+      }, releaseRoot);
 
-    const manifest = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'manifest.json'), 'utf8'));
+      const manifest = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'manifest.json'), 'utf8'));
 
-    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/');
-    assert.deepEqual(manifest.host_permissions, [
-      'https://mail.google.com/*',
-      'https://custom.example.com/*',
-    ]);
-  } finally {
-    console.log = originalLog;
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+      assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/');
+      assert.deepEqual(manifest.host_permissions, [
+        'https://mail.google.com/*',
+        'https://custom.example.com/*',
+      ]);
+    } finally {
+      console.log = originalLog;
+    }
+  });
 });
 
 test('applyBuildOverrides drops a port from the manifest pattern but keeps it in the config base', function () {
-  const releaseRoot = makeTempReleaseRoot();
-  const originalLog = console.log;
-  console.log = function () {};
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
+    const originalLog = console.log;
+    console.log = function () {};
 
-  try {
-    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
-    fs.writeFileSync(
-      path.join(releaseRoot, 'manifest.json'),
-      JSON.stringify({
-        host_permissions: [
-          'https://mail.google.com/*',
-          'https://getqurllink.layerv.ai/*',
-        ],
-      }, null, 2)
-    );
+    try {
+      writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+      fs.writeFileSync(
+        path.join(releaseRoot, 'manifest.json'),
+        JSON.stringify({
+          host_permissions: [
+            'https://mail.google.com/*',
+            'https://getqurllink.layerv.ai/*',
+          ],
+        }, null, 2)
+      );
 
-    buildRelease.applyBuildOverrides({
-      qurlApiBase: 'https://self.hosted.example:8443',
-    }, releaseRoot);
+      buildRelease.applyBuildOverrides({
+        qurlApiBase: 'https://self.hosted.example:8443',
+      }, releaseRoot);
 
-    const manifest = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'manifest.json'), 'utf8'));
+      const manifest = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'manifest.json'), 'utf8'));
 
-    // Chrome match patterns reject ports, so the manifest pattern must be port-less...
-    assert.deepEqual(manifest.host_permissions, [
-      'https://mail.google.com/*',
-      'https://self.hosted.example/*',
-    ]);
-    // ...while the upload base URL retains the port so requests reach the right endpoint.
-    assert.equal(readConfigBase(releaseRoot), 'https://self.hosted.example:8443/');
-  } finally {
-    console.log = originalLog;
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+      // Chrome match patterns reject ports, so the manifest pattern must be port-less...
+      assert.deepEqual(manifest.host_permissions, [
+        'https://mail.google.com/*',
+        'https://self.hosted.example/*',
+      ]);
+      // ...while the upload base URL retains the port so requests reach the right endpoint.
+      assert.equal(readConfigBase(releaseRoot), 'https://self.hosted.example:8443/');
+    } finally {
+      console.log = originalLog;
+    }
+  });
 });
 
 test('applyBuildOverrides keeps the release bundle self-consistent end to end', function () {
-  const releaseRoot = makeTempReleaseRoot();
-  const originalLog = console.log;
-  console.log = function () {};
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
+    const originalLog = console.log;
+    console.log = function () {};
 
-  try {
-    writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
-    fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
-    fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
-    fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
-    fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
-    fs.writeFileSync(
-      path.join(releaseRoot, 'manifest.json'),
-      JSON.stringify({
-        manifest_version: 3,
-        action: { default_popup: 'popup/popup.html' },
-        host_permissions: [
-          'https://mail.google.com/*',
-          'https://getqurllink.layerv.ai/*',
-        ],
-      }, null, 2)
-    );
+    try {
+      writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
+      fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
+      fs.mkdirSync(path.join(releaseRoot, 'popup'), { recursive: true });
+      fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
+      fs.writeFileSync(path.join(releaseRoot, 'popup', 'popup.html'), '');
+      fs.writeFileSync(
+        path.join(releaseRoot, 'manifest.json'),
+        JSON.stringify({
+          manifest_version: 3,
+          action: { default_popup: 'popup/popup.html' },
+          host_permissions: [
+            'https://mail.google.com/*',
+            'https://getqurllink.layerv.ai/*',
+          ],
+        }, null, 2)
+      );
 
-    buildRelease.applyBuildOverrides({
-      qurlApiBase: 'https://custom.example.com/base/api/upload',
-    }, releaseRoot);
+      buildRelease.applyBuildOverrides({
+        qurlApiBase: 'https://custom.example.com/base/api/upload',
+      }, releaseRoot);
 
-    assert.doesNotThrow(function () {
-      buildRelease.validateReleaseManifest(releaseRoot);
-    });
+      assert.doesNotThrow(function () {
+        buildRelease.validateReleaseManifest(releaseRoot);
+      });
 
-    // The regenerated config module still loads and exposes the override base.
-    assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/base/');
-  } finally {
-    console.log = originalLog;
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+      // The regenerated config module still loads and exposes the override base.
+      assert.equal(readConfigBase(releaseRoot), 'https://custom.example.com/base/');
+    } finally {
+      console.log = originalLog;
+    }
+  });
 });
 
 test('rewriteManifestHostPermission rewrites the bundled host entry derived from the config default', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     // The function reads the bundled default from the project config to decide which entry to
     // replace, so the manifest must carry the real production pattern.
     fs.writeFileSync(
@@ -250,15 +230,11 @@ test('rewriteManifestHostPermission rewrites the bundled host entry derived from
       'https://mail.google.com/*',
       'https://custom.example.com/*',
     ]);
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('validateReleaseManifest fails when localized messages are missing', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     fs.writeFileSync(
       path.join(releaseRoot, 'manifest.json'),
       JSON.stringify({
@@ -270,15 +246,11 @@ test('validateReleaseManifest fails when localized messages are missing', functi
     assert.throws(function () {
       buildRelease.validateReleaseManifest(releaseRoot);
     }, /_locales\/en\/messages\.json/);
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('validateReleaseManifest fails when the bundled host permission drifts from the config default', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     writeConfigFixture(releaseRoot, 'https://getqurllink.layerv.ai/');
     fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
     fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
@@ -299,29 +271,22 @@ test('validateReleaseManifest fails when the bundled host permission drifts from
     assert.throws(function () {
       buildRelease.validateReleaseManifest(releaseRoot);
     }, /host permission mismatch/);
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('parseDotEnv strips simple wrapping quotes from values', function () {
-  const tempDir = makeTempReleaseRoot();
-  const dotEnvPath = path.join(tempDir, '.env');
+  withTempDirSync('qurl-release-test-', function (tempDir) {
+    const dotEnvPath = path.join(tempDir, '.env');
 
-  try {
     fs.writeFileSync(dotEnvPath, 'QURL_API_BASE="https://custom.example.com"\n');
     assert.deepEqual(buildRelease.parseDotEnv(dotEnvPath), {
       QURL_API_BASE: 'https://custom.example.com',
     });
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
+  });
 });
 
 test('validateReleaseManifest fails when a referenced manifest asset is missing', function () {
-  const releaseRoot = makeTempReleaseRoot();
-
-  try {
+  withTempDirSync('qurl-release-test-', function (releaseRoot) {
     fs.mkdirSync(path.join(releaseRoot, '_locales', 'en'), { recursive: true });
     fs.writeFileSync(path.join(releaseRoot, '_locales', 'en', 'messages.json'), '{}\n');
     fs.writeFileSync(
@@ -342,9 +307,7 @@ test('validateReleaseManifest fails when a referenced manifest asset is missing'
     assert.throws(function () {
       buildRelease.validateReleaseManifest(releaseRoot);
     }, /manifest asset: popup\/popup\.html/);
-  } finally {
-    fs.rmSync(releaseRoot, { recursive: true, force: true });
-  }
+  });
 });
 
 test('logo.png is excluded from the release bundle and nothing at runtime loads it', function () {
@@ -382,14 +345,11 @@ test('logo.png is excluded from the release bundle and nothing at runtime loads 
   // and check what lands. Asserting only that excludePaths contains the entry would still pass
   // if copyRecursive changed how it derives the relative path (projectRoot drift, a
   // path.resolve vs path.join mismatch) and shipped the file anyway.
-  const stagingRoot = makeTempReleaseRoot();
-  try {
+  withTempDirSync('qurl-release-test-', function (stagingRoot) {
     buildRelease.copyRecursive(path.join(projectRoot, 'icons'), path.join(stagingRoot, 'icons'));
 
     const copied = fs.readdirSync(path.join(stagingRoot, 'icons')).sort();
     assert.ok(!copied.includes('logo.png'), `logo.png reached the bundle: ${copied.join(', ')}`);
-    assert.deepEqual(copied, ['icon128.png', 'icon16.png', 'icon48.png']);
-  } finally {
-    fs.rmSync(stagingRoot, { recursive: true, force: true });
-  }
+    assert.deepEqual(copied, EXPECTED_ICON_FILES);
+  });
 });
