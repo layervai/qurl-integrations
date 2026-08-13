@@ -55,7 +55,10 @@ repos:
         entry: scripts/check-main-ci-notification-payload.sh
         language: system
         pass_filenames: false
-        files: '^(\.github/workflows/main-ci-notifications\.yml|scripts/check-main-ci-notification-payload\.sh)$'
+        # The check now reads every workflow's `on:` block, not just the
+        # notifier's, so adding an app workflow has to run it locally too --
+        # that addition is the exact case it exists to catch.
+        files: '^(\.github/workflows/.*\.ya?ml|scripts/check-main-ci-notification-payload\.sh)$'
 
       - id: validated-base-resolver
         name: validated-base resolver tests
