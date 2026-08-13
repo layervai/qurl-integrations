@@ -1,6 +1,6 @@
 # Developer guide
 
-Building, testing, packaging, and releasing the qURL File Upload extension.
+Building, testing, packaging, and releasing the qURL Agent extension.
 If you just want to **use** the extension in Gmail, see the
 [README](../README.md) instead.
 
@@ -44,8 +44,7 @@ exact steps and `.env.example` for the template.
 
 ## Icons
 
-Regenerate the PNG icons from the SVG sources in `icons/` (the SVGs are
-canonical — see [DESIGN.md](./DESIGN.md#extension-icons)):
+Regenerate the PNG icons from the shared `icons/logo.png` source:
 
 ```bash
 npm run icons
