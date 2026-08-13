@@ -2023,7 +2023,10 @@ const agentHistoryTestFollowupTS = "100.2"
 //
 // The note travels with the caption rather than relying on the refusal reply beside
 // it: repeated uploads in one conversation are capped (claimMediaNotice) and post no
-// reply at all, so an annotated caption can be the only surviving evidence.
+// reply at all, so a caption can outlive the reply that explained it — as long as a
+// later exchange completes. A caption with no completed exchange after it is dropped
+// by the pre-existing window rules instead, which is the other safe direction; see
+// TestLoadAgentThreadHistory_UnrepliedAttachmentNeverReachesTheModel.
 func TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn(t *testing.T) {
 	const caption = "protect everything in this"
 	h := NewHandler(Config{
@@ -2084,6 +2087,97 @@ func TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone(t *tes
 	if !reflect.DeepEqual(history, want) {
 		t.Fatalf("history = %#v, want %#v", history, want)
 	}
+}
+
+// TestLoadAgentThreadHistory_UnrepliedAttachmentNeverReachesTheModel pins where
+// the annotation STOPS mattering, so the note is not mistaken for a guarantee that
+// every caption survives. Two pre-existing window rules outrank it, and both were
+// already in place before uploads were refused at all:
+//
+//   - a thread with no completed exchange returns no history (lastAssistant < 0);
+//   - a caption after the last qURL response is an incomplete tail and is dropped.
+//
+// #1045 caps repeated unsupported-media replies, so an upload really can sit in a
+// thread with no reply beside it — which is exactly when a reader might expect the
+// note to be doing the work. It is not: in both shapes the caption reaches the model
+// neither annotated nor bare, which is the other safe direction. The value of pinning
+// it is that a future change to the tail rules cannot quietly turn "dropped" into
+// "replayed bare" without a red test.
+func TestLoadAgentThreadHistory_UnrepliedAttachmentNeverReachesTheModel(t *testing.T) {
+	const caption = "protect everything in this"
+	load := func(t *testing.T, raw []AgentThreadMessage) []agent.Message {
+		t.Helper()
+		h := NewHandler(Config{
+			AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+				return raw, nil
+			},
+		})
+		e := env(slackEventTypeMessage, "channel", "U1", "", "", "ok do it")
+		e.APIAppID = "A1"
+		e.Event.ThreadTS = agentPoolTestThreadTS
+		e.Event.TS = agentHistoryTestFollowupTS
+
+		history, _, err := h.loadAgentThreadHistory(context.Background(), e)
+		if err != nil {
+			t.Fatalf("load history: %v", err)
+		}
+		return history
+	}
+	// The two dropped shapes are checked by absence rather than by an expected
+	// slice, so the assertion stays true to what actually matters: the caption is
+	// gone in EVERY form, annotated or bare.
+	mustNotMentionCaption := func(t *testing.T, history []agent.Message) {
+		t.Helper()
+		for _, msg := range history {
+			if strings.Contains(msg.Text, caption) {
+				t.Fatalf("an un-replied caption must not reach the model at all; history = %#v", history)
+			}
+		}
+	}
+
+	t.Run("capped upload with no completed exchange yields no history", func(t *testing.T) {
+		got := load(t, []AgentThreadMessage{
+			{UserID: "U1", Text: caption, TS: agentPoolTestThreadTS, HasFiles: true},
+		})
+		mustNotMentionCaption(t, got)
+		if len(got) != 0 {
+			t.Fatalf("history = %#v, want none", got)
+		}
+	})
+
+	t.Run("capped upload trailing a completed exchange is dropped as an incomplete tail", func(t *testing.T) {
+		got := load(t, []AgentThreadMessage{
+			{UserID: "U1", Text: "what can I reach?", TS: agentPoolTestThreadTS},
+			{AppID: "A1", Text: "answer", TS: "100.1"},
+			{UserID: "U1", Text: caption, TS: "100.15", HasFiles: true},
+		})
+		mustNotMentionCaption(t, got)
+		want := []agent.Message{
+			{Role: "user", Text: "what can I reach?"},
+			{Role: "assistant", Text: "answer"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("history = %#v, want %#v", got, want)
+		}
+	})
+
+	// The contrast case, in the same test so the boundary is readable from one
+	// place: once an exchange completes after it, the caption is back inside the
+	// window — and it arrives annotated, merged into the adjacent user turn.
+	t.Run("a caption followed by a completed exchange survives, annotated", func(t *testing.T) {
+		got := load(t, []AgentThreadMessage{
+			{UserID: "U1", Text: caption, TS: agentPoolTestThreadTS, HasFiles: true},
+			{UserID: "U1", Text: "what can I reach?", TS: "100.1"},
+			{AppID: "A1", Text: "answer", TS: "100.15"},
+		})
+		want := []agent.Message{
+			{Role: "user", Text: caption + " " + agentHistoryAttachmentNote + "\nwhat can I reach?"},
+			{Role: "assistant", Text: "answer"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("history = %#v, want %#v", got, want)
+		}
+	})
 }
 
 // TestProcessAgentEvent_EarlierAttachmentTurnReachesModelAnnotated is the
