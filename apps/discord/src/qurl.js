@@ -174,7 +174,12 @@ function isPrivateHost(host) {
   // leaving the wrong group count backtracks into the next — their order is
   // immaterial. Requiring exactly two groups keeps every match an EXACT decode;
   // a lone hextet (`::a`) can only denote 0.0.0.0/8 or 255.255.0.0/16, never a
-  // sensitive range, so leaving it unmatched is safe.
+  // sensitive range, so leaving it unmatched is safe — as is the dotted branch
+  // reading an all-digit lone hextet (`::1234`) as decimal, since both the
+  // decimal and hex readings land in those same two ranges.
+  // The dotted branch covers only `::`/`::ffff:` on purpose: the SIIT and NAT64
+  // dotted spellings never arrive, because the URL leg re-serializes them to hex
+  // and inet_ntop renders only the mapped block dotted.
   const embeddedDotted = h.match(/^::(?:ffff:)?([0-9.]+)$/);
   if (embeddedDotted) return isPrivateHost(embeddedDotted[1]);
   const embeddedHex = h.match(/^(?:::ffff:0:|::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
