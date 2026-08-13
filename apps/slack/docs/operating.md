@@ -634,10 +634,11 @@ key, mappings and channel policies until someone finishes the purge by hand.
 Drift converts into an accumulating manual-cleanup queue, not a one-off.
 
 Two log lines carry it. The refusal line is intentionally **un-latched**, so each
-affected workspace is visible rather than collapsed into the first:
+affected workspace and Slack delivery is visible rather than collapsed into the
+first:
 
 ```text
-fields @timestamp, event_type, drift_field, has_team_id, has_enterprise_id, has_event_id
+fields @timestamp, event_type, drift_field, team_id, enterprise_id, event_id
 | filter @message like /lifecycle event NOT purged/
 ```
 
@@ -651,10 +652,15 @@ fields @timestamp, drift_field, envelope_type, inner_event_type, team_id, event_
 ```
 
 Alert on the first query, not the second: a single `NOT purged` line means one
-workspace needs the purge run against it manually (or a re-delivered teardown),
-and a burst means Slack changed a shape and the retention backlog is growing.
-`drift_field` names the first field that moved — every drifted field is zeroed,
-but only the first is reported, so treat it as a lead, not an inventory.
+workspace needs teardown **investigation**, and a burst means Slack changed a
+shape and the retention backlog may be growing. Treat the line as a queue for
+reconciliation, never as authorization to purge: first confirm from Slack install
+state that the workspace or org was actually uninstalled, then re-deliver the
+teardown or run the manual purge. This matters especially when bot-token rotation
+is enabled, where a drifted `tokens_revoked` can describe a still-installed
+workspace, and for a non-`event_callback` envelope that merely carried a lifecycle
+inner type. `drift_field` names the first field that moved — every drifted field
+is zeroed, but only the first is reported, so treat it as a lead, not an inventory.
 
 ## Endpoints
 

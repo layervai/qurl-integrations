@@ -356,10 +356,10 @@ func TestHandleEvent_DroppedTeardownSaysSoAtWarn(t *testing.T) {
 	if strings.Contains(got, "drift tolerated") {
 		t.Fatalf("refusal emitted the generic drift line too, which claims the opposite: %q", got)
 	}
-	// Enough to act on: which teardown, which field moved, and whether there was
-	// an id to chase. The ids themselves are not logged in the clear here, which
-	// matches the surrounding lifecycle lines.
-	for _, want := range []string{"event_type=app_uninstalled", "drift_field=team_id", "has_team_id=false", "has_enterprise_id=true", "has_event_id=true"} {
+	// Enough to act on: which teardown, which field moved, which surviving
+	// partition id identifies the retained workspace, and which Slack delivery
+	// needs reconciliation. Presence flags alone are not actionable.
+	for _, want := range []string{"event_type=app_uninstalled", "drift_field=team_id", `team_id=""`, "enterprise_id=" + testEnterpriseID, "event_id=EvDropWarn", "has_team_id=false", "has_enterprise_id=true", "has_event_id=true"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("refusal log missing %q, got %q", want, got)
 		}
@@ -372,7 +372,7 @@ func TestHandleEvent_DroppedTeardownSaysSoAtWarn(t *testing.T) {
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, clean, clean))
 	h.Wait()
-	for _, want := range []string{"drift_field=event_time", "has_team_id=true", "has_enterprise_id=false"} {
+	for _, want := range []string{"drift_field=event_time", "team_id=" + testAdminTeamID, "event_id=EvDropWarn2", "has_team_id=true", "has_enterprise_id=false"} {
 		if !strings.Contains(logBuf.String(), want) {
 			t.Errorf("refusal log missing %q, got %q", want, logBuf.String())
 		}
@@ -475,14 +475,14 @@ func TestHandleEvent_CleanUninstallStillPurges(t *testing.T) {
 	}
 }
 
-// TestShouldDispatchAgentEvent_OwnPostDroppedWithADriftedBotID covers the one
-// guard that routing partial envelopes genuinely weakens. bot_id is the sole
-// thing standing between the agent and answering its own reply, and drift
-// zeroes it — so app_id carries the guard when it does. This is the failure
-// that compounds rather than costing one turn: each self-reply is another
-// message event, and the per-turn rate limiter is a cost backstop that fails
-// open.
-func TestShouldDispatchAgentEvent_OwnPostDroppedWithADriftedBotID(t *testing.T) {
+// TestShouldDispatchAgentEvent_AppPostDroppedWithADriftedBotID covers the guard
+// that routing partial envelopes genuinely weakens. Drift can zero bot_id and
+// api_app_id in the same payload while reporting only the first error, so the
+// app_id guard must reject app-authored messages without depending on either.
+// This is the failure that compounds rather than costing one turn: each
+// self-reply is another message event, and the per-turn rate limiter is a cost
+// backstop that fails open.
+func TestShouldDispatchAgentEvent_AppPostDroppedWithADriftedBotID(t *testing.T) {
 	ownPost := func() *slackEventEnvelope {
 		e := env(slackEventTypeMessage, slackChannelTypeIM, "U_BOT", "", "", "here's what you can reach")
 		e.APIAppID = "A1"
@@ -510,24 +510,35 @@ func TestShouldDispatchAgentEvent_OwnPostDroppedWithADriftedBotID(t *testing.T) 
 		t.Fatal("human DM dropped by the app_id guard")
 	}
 
-	// Another app's post is still judged on bot_id alone; app_id only speaks for
-	// messages this app itself sent.
+	// Another app's post is a bot post too. The admission gate is human-only, so
+	// app_id rejects it even if bot_id and api_app_id are absent.
 	otherApp := ownPost()
 	otherApp.Event.AppID = "A_OTHER"
-	if !shouldDispatchAgentEvent(otherApp, false) {
-		t.Fatal("app_id guard fired for a different app's id")
+	otherApp.APIAppID = ""
+	if shouldDispatchAgentEvent(otherApp, false) {
+		t.Fatal("different app's post admitted without bot_id")
 	}
 }
 
-// TestHandleEvent_OwnPostWithDriftedBotIDIsNotAnswered is the end-to-end half of
-// the unit test above, driven through the real decoder so the zeroed bot_id
-// comes from encoding/json rather than from a hand-built struct.
-func TestHandleEvent_OwnPostWithDriftedBotIDIsNotAnswered(t *testing.T) {
+// TestHandleEvent_AppPostWithDriftedBotAndAPIAppIDsIsNotAnswered is the
+// end-to-end half of the unit test above. It drives both type mismatches through
+// the real decoder: encoding/json reports api_app_id first but still zeroes the
+// later bot_id, reproducing the compound-drift hole the app_id guard closes.
+func TestHandleEvent_AppPostWithDriftedBotAndAPIAppIDsIsNotAnswered(t *testing.T) {
 	h, posts, mu := newAgentEventHandler(t, testAgentReachStagingReply)
 
-	body := `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"EvSelfLoop",` +
+	body := `{"type":"event_callback","team_id":"T1","api_app_id":42,"event_id":"EvSelfLoop",` +
 		`"event":{"type":"message","channel_type":"im","user":"U_BOT","channel":"D1","ts":"100.3",` +
 		`"text":"here's what you can reach","bot_id":42,"app_id":"A1"}}`
+	var decoded slackEventEnvelope
+	err := json.Unmarshal([]byte(body), &decoded)
+	if field, ok := jsonFieldTypeDrift(err); !ok || field != "api_app_id" {
+		t.Fatalf("compound drift classified as field=%q drift=%v err=%v, want api_app_id first", field, ok, err)
+	}
+	if decoded.APIAppID != "" || decoded.Event.BotID != "" || decoded.Event.AppID != "A1" {
+		t.Fatalf("compound drift decoded as api_app_id=%q bot_id=%q app_id=%q, want both identifiers zero and app_id intact",
+			decoded.APIAppID, decoded.Event.BotID, decoded.Event.AppID)
+	}
 	w := httptest.NewRecorder()
 	h.handleEvent(w, []byte(body))
 	if w.Code != http.StatusOK {
@@ -538,7 +549,7 @@ func TestHandleEvent_OwnPostWithDriftedBotIDIsNotAnswered(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*posts) != 0 {
-		t.Fatalf("the agent answered its own post through a drifted bot_id: %d replies", len(*posts))
+		t.Fatalf("the agent answered an app post after bot_id and api_app_id both drifted: %d replies", len(*posts))
 	}
 }
 

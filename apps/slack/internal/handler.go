@@ -2469,12 +2469,18 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 		// is recoverable by an operator; a misdirected one is not.
 		//
 		// Un-latched, unlike the generic drift line, and deliberately: this one
-		// reports a specific workspace whose teardown needs finishing by hand,
-		// so collapsing repeats would hide the second workspace. Teardowns are
-		// rare enough that the volume argument does not apply to them.
+		// reports a specific workspace whose teardown needs investigation, so
+		// collapsing repeats would hide the second workspace. Teardowns are rare
+		// enough that the volume argument does not apply to them. The ids are data
+		// fields in the production JSON log handler (which escapes control bytes),
+		// not message text; without them the runbook cannot identify the retained
+		// workspace or the Slack delivery that needs reconciliation.
 		slog.Warn(lifecycleDropDriftReason,
 			"event_type", lifecycleEventTypeForLog(env.Event.Type),
 			"drift_field", driftField,
+			"team_id", env.TeamID,
+			"enterprise_id", env.EnterpriseID,
+			"event_id", env.EventID,
 			"has_team_id", env.TeamID != "",
 			"has_enterprise_id", env.EnterpriseID != "",
 			"has_event_id", env.EventID != "",

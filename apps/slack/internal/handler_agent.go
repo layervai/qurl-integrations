@@ -298,8 +298,8 @@ type slackInnerEvent struct {
 	SourceTeam string `json:"source_team,omitempty"`
 	BotID      string `json:"bot_id"`
 	// AppID is the app that posted the message, present only on app-authored
-	// messages. It exists solely as the SECOND self-loop guard next to BotID —
-	// see shouldDispatchAgentEvent for why one is not enough.
+	// messages. It is an independent bot-post guard next to BotID — see
+	// shouldDispatchAgentEvent for why neither may depend on api_app_id surviving.
 	AppID       string `json:"app_id,omitempty"`
 	Subtype     string `json:"subtype"`
 	Text        string `json:"text"`
@@ -875,18 +875,16 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	e := &env.Event
 	// Drop bot posts and the agent's own messages before considering event shape.
 	//
-	// The app_id half is redundant with bot_id on every payload Slack sends
-	// today, and that redundancy is the point: handleEvent now routes an
-	// envelope whose fields drifted in type, and a drifted string decodes to ""
-	// — so a bot_id that ever arrived as a non-string would turn the self-loop
-	// guard off. Answering our own post is the failure worth extra strands,
-	// because each self-reply is another message event; the per-turn rate
-	// limiter caps that, but it fails OPEN on a counter error rather than
-	// closed. Note the strands are not independent EVENTS — one payload can
-	// drift several fields at once, and only the first is reported — so this is
-	// depth, not a probability argument. e.User == "" is a third strand: an
-	// app-authored post that omits `user` is dropped whether or not either id
-	// survived.
+	// app_id is redundant with bot_id on every payload Slack sends today, and
+	// that redundancy is the point: handleEvent now routes an envelope whose
+	// fields drifted in type, and a drifted string decodes to "". Reject any
+	// non-empty app_id directly rather than comparing it with api_app_id: one
+	// payload can drift both bot_id and api_app_id, and encoding/json would zero
+	// both while reporting only the first. Making this guard depend on the
+	// envelope id would therefore reopen the self-reply loop. Other apps are bot
+	// posts too, so rejecting them is the human-only policy this function already
+	// promises. e.User == "" remains another strand for an app post that omits
+	// `user`.
 	//
 	// It only ever ADDS a drop, and cannot silence a member: the install flow
 	// requests bot scopes only (no user_scope — see slackinstall.DefaultBotScopes),
@@ -896,12 +894,12 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	// message events and ONLY on those. Both directions matter and they fail
 	// differently: if app_id stops arriving, the guard goes inert and falls back
 	// to bot_id (degradation); if it ever appeared on a human-authored event, the
-	// guard would silence that member (breakage). isOwnAppPost is also used by
-	// loadAgentThreadHistory, so the same assumption is load-bearing there.
+	// guard would silence that member (breakage). isOwnAppPost separately uses
+	// api_app_id to classify this app's replies in loadAgentThreadHistory.
 	// The bot-scopes-only argument is what makes the breakage direction
 	// unreachable, so adding user_scope to the install flow is the specific
 	// change that would put it back in play — revisit here if that happens.
-	if e.BotID != "" || e.User == "" || isOwnAppPost(e.AppID, env.APIAppID) {
+	if e.BotID != "" || e.AppID != "" || e.User == "" {
 		return false
 	}
 	switch e.Type {
