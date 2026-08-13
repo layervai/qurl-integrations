@@ -20,7 +20,33 @@ jobs:
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
-          deny-licenses: GPL-3.0, AGPL-3.0
+          # Allow-list rather than `deny-licenses`, which is deprecated upstream for
+          # removal in the next major release (actions/dependency-review-action#997).
+          # The two options are mutually exclusive, so this replaces the previous
+          # `deny-licenses: GPL-3.0, AGPL-3.0` outright: anything not listed here
+          # fails, which keeps GPL-3.0/AGPL-3.0 blocked and makes a dependency
+          # arriving under an unreviewed license fail loudly instead of slipping by.
+          # Only `runtime`-scope deps reach this check (`fail-on-scopes` default),
+          # so dev-only copyleft (sharp/libvips, LGPL-3.0-or-later) is out of scope.
+          # The LicenseRef- entry is what ClearlyDefined reports for golang.org/x/*.
+          allow-licenses: >-
+            0BSD,
+            Apache-2.0,
+            BSD-2-Clause,
+            BSD-2-Clause-Views,
+            BSD-3-Clause,
+            BlueOak-1.0.0,
+            CC-BY-4.0,
+            CC0-1.0,
+            ISC,
+            MIT,
+            MIT-0,
+            MITNFA,
+            MPL-2.0,
+            Python-2.0,
+            Unlicense,
+            Zlib,
+            LicenseRef-scancode-google-patent-license-golang
           # TruffleHog is AGPL-3.0 but runs only in CI (secret scanning),
           # not in distributed code. AGPL obligations don't apply to tools
           # you execute — only to code you distribute or expose as a service.
