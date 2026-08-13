@@ -64,8 +64,13 @@ for deploying and operating the Secure Access Agent.
 # Install pre-commit hooks
 pip install pre-commit && pre-commit install
 
-# Run all checks (lint, vet, test)
+# Run all checks for the Go apps, shared/, and the repo itself (fmt, vet, lint, test)
 make check
+
+# The Node.js apps are opt-in — run the one you changed
+# (check-chrome-extension | check-edge-extension | check-discord | check-teams,
+#  or check-node for all four)
+make check-chrome-extension
 
 # Run all tests
 go test ./...

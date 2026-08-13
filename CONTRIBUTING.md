@@ -16,6 +16,10 @@ pip install pre-commit && pre-commit install
 make check
 ```
 
+`make check` covers the Go apps, `shared/`, and the repo-wide checks. It does
+**not** run the Node.js app suites — those are opt-in targets, see
+[Node.js apps](#nodejs-apps) below.
+
 `make check` shells out to `python3` for the repo-consistency checks
 (`scripts/check-release-please-sync.sh`, `scripts/check-extension-lockstep.sh`).
 Both fail with an explicit install message rather than silently passing if it is
@@ -64,13 +68,40 @@ git checkout main && git pull
 git checkout -b feat/slack-thread-replies
 
 # 3. Write code, then verify
-make check                    # Full CI parity: fmt + vet + lint + test
+make check                    # Go apps, shared/, and repo-wide checks
+make check-chrome-extension   # Node.js apps are opt-in — run the one you changed
 make build-slack              # Verify Lambda binary compiles (adjust for your app)
 
 # 4. Push and open a PR
 git push -u origin feat/slack-thread-replies
 gh pr create --title "feat(slack): add thread replies"
 ```
+
+### Node.js apps
+
+`make check` stops at the Go boundary. Each Node.js app installs from its own
+lockfile and pins its own Node in `.nvmrc`, so folding them into `make check`
+would put four `npm ci` runs on the target every Go contributor executes. Run
+the one matching your change:
+
+| Target | App | Mirrors |
+|--------|-----|---------|
+| `make check-chrome-extension` | `apps/chrome-extension/` | `chrome-extension / build and test` |
+| `make check-edge-extension` | `apps/edge-extension/` | `edge-extension / build and test` |
+| `make check-discord` | `apps/discord/` | `discord / build and test` |
+| `make check-teams` | `apps/teams/` | `teams / build and test` |
+| `make check-node` | all four | — |
+
+Each target mirrors its app's CI gate minus the steps that need the network or
+a Docker daemon (`npm audit`, the Discord image build) or that write release
+artifacts (`npm run package:release`); the Makefile comments say which and why.
+A green run predicts the app's `*/ required` aggregate, but CI remains the gate.
+
+The Chrome↔Edge lockstep check is not in these targets — `make check` runs
+`check-extension-lockstep` for every change already.
+
+`e2e/` has no target. Its suite drives live qURL and Discord systems and needs
+credentials from `e2e/.env`; see [e2e/README.md](e2e/README.md).
 
 ## PR Requirements
 
@@ -164,6 +195,8 @@ If you need something that doesn't exist in `shared/`, start by putting it in yo
 4. **Adding large dependencies** — Dependency review will flag high-severity or GPL deps.
 5. **Hardcoding secrets** — Use environment variables. `detect-private-key` hook catches some of this.
 6. **Skipping `make check`** — CI runs the same checks. Save yourself the round-trip.
+7. **Assuming `make check` covered a Node.js app** — it doesn't. Run
+   `make check-<app>` too (see [Node.js apps](#nodejs-apps)).
 
 ## Getting Help
 
