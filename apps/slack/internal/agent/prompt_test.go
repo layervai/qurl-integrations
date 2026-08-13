@@ -74,6 +74,27 @@ func TestSystemPrompt_Invariants(t *testing.T) {
 		t.Error("prompt must align free-text answers with the standard-Markdown delivery path")
 	}
 
+	// A canvas, doc, or file shared as a LINK is ordinary message text — no files
+	// entry, no file_share subtype — so no deterministic layer catches it, and none
+	// was added: a text-side detector would have refused every message containing a
+	// Slack URL, including the protect request pinned above (see agentEventHasUpload
+	// in the internal package). That leaves this clause as the only thing between
+	// "summarize this canvas <link>" and an ungrounded answer.
+	//
+	// Pin both halves. A deny-only rewrite would keep the deny phrases green while
+	// turning the clause into the blanket refusal that detector was rejected for,
+	// and the PROTECTING URLS pins above stay green through it — they sit in a
+	// different section, so they cannot see a contradiction raised in this one.
+	for _, want := range []string{
+		"A link is a URL, not content",
+		"cannot see what is behind a link rather than describing it",
+		"Propose actions against the URL as usual", // the allow half
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing linked-document guard %q", want)
+		}
+	}
+
 	// Per-turn context is injected.
 	if !strings.Contains(p, testChannel) || !strings.Contains(p, "U1") {
 		t.Error("prompt must inject the channel and user context")
