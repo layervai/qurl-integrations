@@ -22,16 +22,19 @@ Each integration lives in `apps/{name}/`. Shared libraries live in `shared/`.
 
 ```
 apps/
-  slack/          # Slack integration
-    cmd/main.go   # Lambda entry point
-    internal/     # App-private code — put your logic here
+  slack/             # Slack integration
+    cmd/main.go      # Lambda entry point
+    internal/        # App-private code — put your logic here
     README.md
-  teams/          # Microsoft Teams OAuth core (TypeScript, not yet shipped)
-  discord/        # Discord bot
-  cli/            # CLI tool
+  teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
+  discord/           # Discord bot
+  chrome-extension/  # Chrome MV3 extension for Gmail
+  cli/               # CLI tool
+  zapier/            # Zapier integration (placeholder, no implementation yet)
 origins/
   s3-static-connector/ # Reusable private S3 static origin image
-shared/           # Shared libraries used by all integrations
+shared/              # Shared Go libraries used by the Go apps
+e2e/                 # TypeScript end-to-end tests (Jest)
 ```
 
 ## Boundaries

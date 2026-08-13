@@ -4,7 +4,7 @@ name: "teams: Build and Test"
 # A workflow skipped by a path filter never reports its checks, so a
 # `teams / required` branch-protection rule would block every PR that
 # doesn't touch apps/teams. The detector + always-running aggregate keeps
-# the check reporting on every PR — matching slack/discord/chrome-extension.
+# the check reporting on every PR — matching slack/discord/chrome-extension/shared.
 on:
   push:
     branches: [main]
