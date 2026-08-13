@@ -490,8 +490,13 @@ function showResults(results, errors, insertionError) {
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
   if (results.length > 0) {
-    copyArea.classList.remove('hidden');
-    copyBtn.disabled = !hasCopyableLinks;
+    // Only offer the copy fallback when it can actually hand the user something. A visible but
+    // permanently disabled button raises a question it doesn't answer — especially under the
+    // green all-success banner, where nothing else on screen explains why it is greyed out.
+    if (hasCopyableLinks) {
+      copyArea.classList.remove('hidden');
+      copyBtn.disabled = false;
+    }
     resultArea.classList.remove('hidden');
     const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
     // Two different things get counted here, so they use two different counts. The "inserted"

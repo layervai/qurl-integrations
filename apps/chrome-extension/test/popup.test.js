@@ -772,7 +772,7 @@ test('showResults uses insertion-aware success summaries', function () {
   assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL links.');
 });
 
-test('showResults disables copy when no accessible links are available', function () {
+test('showResults withholds the copy fallback when no accessible links are available', function () {
   const popup = loadPopup(
     function () {
       return Promise.resolve({ success: true });
@@ -797,12 +797,23 @@ test('showResults disables copy when no accessible links are available', functio
     'Active tab is not Gmail.'
   );
 
-  assert.equal(popup.__testElements.get('copyArea').classList.contains('hidden'), false);
+  // Nothing is copyable, so the fallback is withheld rather than shown greyed out.
+  assert.equal(popup.__testElements.get('copyArea').classList.contains('hidden'), true);
   assert.equal(popup.__testElements.get('copyBtn').disabled, true);
   assert.equal(
     popup.__testElements.get('errorArea').children[0].textContent,
     'Upload completed successfully, but no accessible qURL link is available to copy.'
   );
+
+  // The same holds on the green path the review flagged: uploads and insertion both fine, but
+  // no result carries an https link, so there is no dead button under the success banner.
+  popup.showResults(
+    [{ filename: 'a.txt', link: 'http://files.example.com/a', expiry: null }],
+    [],
+    null
+  );
+  assert.equal(popup.__testElements.get('copyArea').classList.contains('hidden'), true);
+  assert.equal(popup.__testElements.get('copyBtn').disabled, true);
 });
 
 test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay', function () {
