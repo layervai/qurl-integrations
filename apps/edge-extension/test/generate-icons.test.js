@@ -17,9 +17,9 @@ const EXPECTED_SIZES = [16, 48, 128];
 const EXPECTED_ICON_FILES = EXPECTED_SIZES.map(function (size) { return `icon${size}.png`; }).sort();
 
 // Derived, not hard-coded: this file is byte-identical in both extensions, so a literal app
-// directory is necessarily wrong in one of them — which is exactly what shipped, with the Edge
-// copy telling developers to run `npm run icons` in apps/chrome-extension. Deriving it also lets
-// the lockstep check compare these lines instead of masking them away (see CLAUDE.md).
+// directory is necessarily wrong in one of them — which is exactly what shipped, with one copy
+// pointing developers at the other extension's directory. Deriving it also lets the lockstep
+// check compare these lines instead of masking them away (see CLAUDE.md).
 const APP_DIR = `apps/${path.basename(generateIcons.projectRoot)}`;
 
 function sha256(buffer) {
