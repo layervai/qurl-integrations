@@ -335,6 +335,29 @@ function takeGatewayHandoffHmac() {
 const sendCooldownMs = intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true });
 const detectCooldownMs = intEnv('QURL_DETECT_COOLDOWN_MS', sendCooldownMs, { minPositive: true });
 
+// Env-extendable additions to connector.js's non-prod detect-tunnel
+// allowlist (DETECT_TUNNEL_NON_PROD_QURL_ENDPOINT_HOSTS /
+// DETECT_TUNNEL_NON_PROD_HOST_SUFFIXES). Those built-ins are hardcoded and
+// public; real sandbox/staging qURL-tunnel hostnames are infra-owned and
+// must not be committed to this public repo. These two comma-separated env
+// vars let the private infra repo inject them at deploy time — connector.js
+// merges them into the built-in sets. Same shape as ALLOWED_GITHUB_ORGS:
+// split on comma, trim, lowercase, drop empties.
+const detectExtraNonProdEndpointHosts = (process.env.DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const detectExtraNonProdHostSuffixes = (process.env.DETECT_EXTRA_NON_PROD_HOST_SUFFIXES || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+// Fail fast (same posture as the DDB_TEST_ENDPOINT guard above): a suffix
+// entry missing the leading '.' would never match a hostname suffix check
+// (detectTunnelHostSuffixesForEndpoint does `host.endsWith(suffix)`),
+// silently no-op'ing the operator's intended grant. Reject at config load
+// instead of shipping a quietly-inert allowlist entry.
+for (const suffix of detectExtraNonProdHostSuffixes) {
+  if (!suffix.startsWith('.')) {
+    throw new Error(`DETECT_EXTRA_NON_PROD_HOST_SUFFIXES entry '${suffix}' must start with '.' (e.g. '.tunnel.example.internal') — fix the env var before booting.`);
+  }
+}
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -473,6 +496,12 @@ module.exports = {
   // configured-error (resolveDetectTarget throws) rather than silently failing.
   // Set at detect activation, the same gated step that flips DETECT_COMMAND_ENABLED.
   DETECT_TUNNEL_SLUG: process.env.DETECT_TUNNEL_SLUG,
+
+  // Env-extendable additions to connector.js's non-prod detect-tunnel
+  // allowlist — see the parsing + fail-fast validation above. Empty
+  // arrays when unset (no behavior change from today).
+  DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS: detectExtraNonProdEndpointHosts,
+  DETECT_EXTRA_NON_PROD_HOST_SUFFIXES: detectExtraNonProdHostSuffixes,
 
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL
