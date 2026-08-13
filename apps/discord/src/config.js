@@ -372,7 +372,12 @@ module.exports = {
 
   // qURL. In production we fall back to the real endpoints; in dev we fall
   // back to localhost so a missing .env file doesn't silently hit prod APIs.
-  // index.js enforces that both env vars are set when NODE_ENV=production.
+  //
+  // Neither is a boot blocker. QURL_ENDPOINT can't be missing — the
+  // ternary below always yields a value. QURL_API_KEY is only the
+  // global fallback for /qurl send + /qurl map; every deployment shape
+  // configures a per-guild key through /qurl setup, so it is
+  // deliberately absent from prodRequired() in boot-requirements.js.
   QURL_API_KEY: process.env.QURL_API_KEY,
   QURL_ENDPOINT: process.env.QURL_ENDPOINT
     || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),

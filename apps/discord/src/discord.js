@@ -228,8 +228,9 @@ client.on('guildDelete', (guild) => {
 // Returns `{ ok, channelId, messageId }`. The refs feed the /qURL
 // revoke path (see buildRevokedDMPayload + editDM in discord-rest.js)
 // so it can edit the recipient's DM in place after a successful
-// revoke. Fire-and-forget callers (welcome DMs, OAuth callbacks)
-// can keep awaiting and discarding the result.
+// revoke — that is the send path in commands.js, which awaits and
+// persists the result. The qURL OAuth callback (routes/qurl-oauth.js)
+// is fire-and-forget and can keep discarding the return value.
 async function sendDM(discordId, message) {
   try {
     const user = await client.users.fetch(discordId);
