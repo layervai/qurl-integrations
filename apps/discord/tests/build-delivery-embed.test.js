@@ -108,13 +108,9 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: [],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
   isMultiTenant: false,
-  ENABLE_OPENNHP_FEATURES: false,
-  isOpenNHPActive: false,
 }));
 
 jest.mock('../src/logger', () => ({

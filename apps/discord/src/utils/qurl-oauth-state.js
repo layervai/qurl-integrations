@@ -31,16 +31,15 @@ const { createStateSigner } = require('./oauth-state');
 const STATE_KIND = 'qurl-oauth';
 const STATE_TTL_SECONDS = 5 * 60;
 
-// Secret precedence (highest first): QURL_OAUTH_STATE_SECRET — flow-
-// dedicated, lets ops rotate the qURL OAuth signer without invalidating
-// in-flight GitHub OAuth links (preferred going forward) — then
-// OAUTH_STATE_SECRET, the legacy shared secret (qURL + GitHub).
-// kind-binding on the state token already prevents cross-purpose
-// forgery, so sharing was secure; the precedence here is purely
-// operational hygiene per PR #177 review (issue #184). The
-// GITHUB_CLIENT_SECRET last-ditch fallback, the 32-char minimum secret
-// length, the jest-only random fallback, and the rotation playbook all
-// live in the shared signer — see utils/oauth-state.js.
+// Secret precedence (highest first): QURL_OAUTH_STATE_SECRET — the
+// flow-dedicated key, preferred going forward so ops can rotate this
+// signer on its own schedule — then OAUTH_STATE_SECRET, the legacy
+// shared secret. kind-binding on the state token already prevents
+// cross-purpose forgery, so sharing was secure; the precedence here is
+// purely operational hygiene per PR #177 review (issue #184). The
+// 32-char minimum secret length, the jest-only random fallback, and
+// the rotation playbook all live in the shared signer — see
+// utils/oauth-state.js.
 const qurlOAuthStateSigner = createStateSigner({
   flowLabel: 'qURL OAuth state',
   secretConfigKeys: ['QURL_OAUTH_STATE_SECRET', 'OAUTH_STATE_SECRET'],
