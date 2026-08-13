@@ -144,8 +144,9 @@ test('generateIcons refuses to run without an explicit outDir', async function (
 // it: `check-extension-lockstep.sh` masks `apps/(chrome|edge)-extension` on both sides, so the same
 // wrong literal in both copies normalizes to a match — verified by mutation, which the whole suite
 // and the lockstep check both pass. `ownAppDir` is derived from this file's own location rather
-// than from `generateIcons.projectRoot`, so it is an independent check and not a restatement of the
-// expression under test.
+// than from `generateIcons.projectRoot` — a different file, so a literal re-hard-coded in either
+// copy fails here. Different derivation path, not a different value: both resolve under the same
+// app root, so a rename that moves script and test together stays green, which is what we want.
 test('the drift remediation names this extension, not its counterpart', function () {
   const ownAppDir = `apps/${path.basename(path.resolve(__dirname, '..'))}`;
 
