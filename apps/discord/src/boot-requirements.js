@@ -67,46 +67,17 @@ function missingKekRequiredKeys(env) {
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
 }
 
-// BASE_URL https guardrail. The qURL guided setup flow builds an absolute
-// OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
-// (commands.js) and the /oauth/qurl/callback redirect_uri
-// (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
-// and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
-// localhost BASE_URL silently dead-ends setup at the redirect — in plain
-// single-guild and multi-tenant deploys alike (#619). The Stage-2 Discord
-// install callback (routes/discord-install.js) embeds BASE_URL too, but
-// isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
-// isQurlOAuthConfigured gate already covers it.
-//
-// The check parses BASE_URL (new URL) rather than prefix-matching: parsing
-// normalizes the case-insensitive scheme (RFC 3986) and rejects a bare
-// "https://" with no host that would still build a broken redirect. OAuth
-// needs a public bare origin because the code composes
-// `${BASE_URL}/oauth/qurl/callback`; embedded paths, query strings, userinfo,
-// or obvious local-only IP literals either miss the registered mux route or
-// can't serve the external Auth0 browser redirect. We intentionally do NOT
-// resolve DNS at boot — reachability belongs in deploy smoke tests — but we
-// can reject localhost/loopback/private IP literals cheaply.
-//
-// Intentionally NOT gated on: the per-guild webhook bridge
-// (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
-// BASE_URL, but it's fire-and-forget and non-fatal — a wrong bridge URL
-// degrades qURL view-count delivery from push to the existing poll
-// fallback, it doesn't dead-end a user flow. Blocking boot on it would
-// force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
-// ignore it.
-//
-// Outside the qURL setup flow BASE_URL is unused for redirects, but a stale
-// explicit http:// value is still rejected (the original canary).
-// `baseUrlExplicitlySet` (caller-computed from process.env, treating
-// "" / whitespace-only as unset) separates "operator set a bad value" from
-// "fell back to the localhost default" so an empty SSM param doesn't
-// false-positive. Caller gates on NODE_ENV==='production'; string-or-null
-// mirrors unsupportedRoleShipperCombo et al.
 function isPrivateIPv4Literal(hostname) {
   const parts = hostname.split('.');
   if (parts.length !== 4) return false;
   const octets = parts.map(part => Number(part));
+  // The String(octet) round-trip is NOT a leading-zero/octal defense — WHATWG
+  // already canonicalizes those inside new URL() (`010.0.0.1` arrives as
+  // `8.0.0.1`). It rejects labels that Number() accepts but the URL spec's
+  // IPv4 parser does not, which therefore arrive as ordinary DOMAIN
+  // hostnames: `Number('1e2')` is 100, so without it a public host like
+  // 10.2.3.1e2 or 192.168.0.1e1 would read as a private literal and
+  // crash-loop a legitimate deploy at boot.
   if (octets.some((octet, idx) => !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== parts[idx])) {
     return false;
   }
@@ -144,6 +115,9 @@ function isLocalOnlyHost(hostname) {
   return host === 'localhost'
     || host.endsWith('.localhost')
     || isPrivateIPv4Literal(host)
+    // The colon test is load-bearing, not a fast path: parseInt() below is a
+    // lenient prefix parse, so parseInt('fc00.example.com', 16) is 0xfc00 and
+    // the unique-local mask would misread real public hosts as link-local.
     || (host.includes(':') && isLocalOnlyIPv6(host));
 }
 
@@ -174,6 +148,42 @@ function baseUrlForError(rawBaseUrl) {
   return stripUserinfo(rawBaseUrl);
 }
 
+// BASE_URL https guardrail. The qURL guided setup flow builds an absolute
+// OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
+// (commands.js) and the /oauth/qurl/callback redirect_uri
+// (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
+// and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
+// localhost BASE_URL silently dead-ends setup at the redirect — in plain
+// single-guild and multi-tenant deploys alike (#619). The Stage-2 Discord
+// install callback (routes/discord-install.js) embeds BASE_URL too, but
+// isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
+// isQurlOAuthConfigured gate already covers it.
+//
+// The check parses BASE_URL (new URL) rather than prefix-matching: parsing
+// normalizes the case-insensitive scheme (RFC 3986) and rejects a bare
+// "https://" with no host that would still build a broken redirect. OAuth
+// needs a public bare origin because the code composes
+// `${BASE_URL}/oauth/qurl/callback`; embedded paths, query strings, userinfo,
+// or obvious local-only IP literals either miss the registered mux route or
+// can't serve the external Auth0 browser redirect. We intentionally do NOT
+// resolve DNS at boot — reachability belongs in deploy smoke tests — but we
+// can reject localhost/loopback/private IP literals cheaply.
+//
+// Intentionally NOT gated on: the per-guild webhook bridge
+// (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
+// BASE_URL, but it's fire-and-forget and non-fatal — a wrong bridge URL
+// degrades qURL view-count delivery from push to the existing poll
+// fallback, it doesn't dead-end a user flow. Blocking boot on it would
+// force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
+// ignore it.
+//
+// Outside the qURL setup flow BASE_URL is unused for redirects, but a stale
+// explicit http:// value is still rejected (the original canary).
+// `baseUrlExplicitlySet` (caller-computed from process.env, treating
+// "" / whitespace-only as unset) separates "operator set a bad value" from
+// "fell back to the localhost default" so an empty SSM param doesn't
+// false-positive. Caller gates on NODE_ENV==='production'; string-or-null
+// mirrors unsupportedRoleShipperCombo et al.
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
   let parsed = null;
   try {
@@ -196,7 +206,7 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
       && parsed.host
       && !parsed.username
       && !parsed.password
-      && (!parsed.pathname || parsed.pathname === '/')
+      && parsed.pathname === '/'
       && !parsed.search
       && !parsed.hash
   );
