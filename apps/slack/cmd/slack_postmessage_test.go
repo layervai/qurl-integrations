@@ -25,7 +25,7 @@ func staticTokenLookup(token string) slackBotTokenLookup {
 // Keep httptest traffic off http.DefaultTransport. Server.Close calls
 // http.DefaultTransport.CloseIdleConnections, so parallel server cleanups can abort
 // another test's in-flight POST when a nil client selects the production default.
-// Every server-backed constructor in this file must receive srv.Client().
+// Every server-backed constructor in this package must receive its server's client.
 
 func TestSlackPostMessageFuncPostsThreadedPayload(t *testing.T) {
 	t.Parallel()
