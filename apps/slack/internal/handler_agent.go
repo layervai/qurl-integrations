@@ -646,6 +646,15 @@ const agentFollowupGateTimeout = 5 * time.Second
 // and lets SIGTERM still drain in-flight delivery.
 const agentDeliveryBudget = 15 * time.Second
 
+// agentEventHasUpload reports whether this event carries an attachment. The
+// file_share subtype is evidence on its own: Slack stamps it on every upload,
+// while the files array can be absent for a file this app cannot see. Treating
+// the subtype as sufficient keeps an upload from falling through to silence,
+// and answering "I can't read attached files" is still correct when it does.
+func agentEventHasUpload(e *slackInnerEvent) bool {
+	return len(e.Files) > 0 || e.Subtype == slackMessageSubtypeFileShare
+}
+
 // shouldDispatchAgentEvent filters out everything that isn't a human asking the
 // agent something: non-mention/DM events, bot and system/edited messages (the
 // self-loop guard), authorless events, top-level channel messages, and events
@@ -667,21 +676,24 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	}
 	switch e.Type {
 	case slackEventTypeAppMention:
-		// Channel @-mention — always a deliberate address.
-		if e.Subtype != "" {
+		// Channel @-mention — always a deliberate address. Tolerate the one human
+		// subtype for the same reason the message branches do: app_mention is known to
+		// carry a subtype in the wild, and a stamped mention-with-upload must not fall
+		// back into the silence this surface is here to avoid.
+		if e.Subtype != "" && e.Subtype != slackMessageSubtypeFileShare {
 			return false
 		}
 	case slackEventTypeMessage:
 		if e.ChannelType == slackChannelTypeIM {
 			// Slack delivers uploaded files as file_share messages. Admit that one
-			// human subtype only when its files array is present; other subtypes remain
-			// system/bot/edit-like noise from this surface's perspective.
-			if e.Subtype != "" && (e.Subtype != slackMessageSubtypeFileShare || len(e.Files) == 0) {
+			// human subtype; other subtypes remain system/bot/edit-like noise from this
+			// surface's perspective.
+			if e.Subtype != "" && e.Subtype != slackMessageSubtypeFileShare {
 				return false
 			}
 		} else {
 			if e.Subtype != "" && e.Subtype != slackMessageSubtypeThreadBroadcast &&
-				(e.Subtype != slackMessageSubtypeFileShare || len(e.Files) == 0) {
+				e.Subtype != slackMessageSubtypeFileShare {
 				return false
 			}
 			// A channel message reaches the follow-up pipeline only when channel
@@ -694,7 +706,7 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	default:
 		return false
 	}
-	return len(e.Files) > 0 || strings.TrimSpace(stripBotMention(e.Text)) != ""
+	return agentEventHasUpload(e) || strings.TrimSpace(stripBotMention(e.Text)) != ""
 }
 
 // isAgentChannelFollowup reports whether this event is a non-@mention reply in a
@@ -994,16 +1006,17 @@ func (h *Handler) processAdmittedAgentEvent(ctx context.Context, log *slog.Logge
 // without the LLM, and whether one applies. message is the caller's already-
 // stripped text so it isn't recomputed here.
 //
-// Callers run this after dedupe and before rate limiting, history, and the model:
-// every reply here is free to serve, so none consumes a limiter slot and none is
-// persisted in conversation history.
+// Callers run this after dedupe and before rate limiting, the model, and — on the
+// direct @mention/DM path — the thread-history read. A channel follow-up has
+// already paid its history read in the admission gate. Every reply here is free to
+// serve, so none consumes a limiter slot and none is persisted as conversation.
 //
 // The attachment case comes first. qURL conversation mode is text-only, so an
 // upload must never draw an answer that silently ignores it — not even when its
 // caption happens to read as one of the text keywords below.
 func agentDeterministicReply(e *slackInnerEvent, message string) (reply string, ok bool) {
 	switch {
-	case len(e.Files) > 0:
+	case agentEventHasUpload(e):
 		return agentUnsupportedMediaReply, true
 	// Keep help literal-only: punctuation or extra words stay on the normal agent path.
 	case strings.EqualFold(message, "help"):
@@ -1050,6 +1063,13 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 
 	message := stripBotMention(env.Event.Text)
 	if reply, deterministic := agentDeterministicReply(&env.Event, message); deterministic {
+		if agentEventHasUpload(&env.Event) {
+			// The only terminal path in this function with no log line otherwise, and the
+			// one operators need to size demand for real file support. file_count only —
+			// names, ids, and mimetypes are user content and stay out of the log.
+			log.Info("agent: unsupported media; replied with the text-only limitation",
+				"file_count", len(env.Event.Files))
+		}
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
 		return
 	}

@@ -195,7 +195,9 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
 		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
 		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true},
-		{"file_share dm without files ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, false},
+		{"file_share dm without files still admitted (subtype is proof)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, true},
+		{"file_share subtype on a mention admitted", withFile(env(slackEventTypeAppMention, "channel", "U2", "", slackMessageSubtypeFileShare, "<@U12345678>")), false, true},
+		{"non-upload subtype on a mention ignored", env(slackEventTypeAppMention, "channel", "U2", "", "message_changed", "<@U12345678> hi"), false, false},
 		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
 
 		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
@@ -209,7 +211,7 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"channel thread file reply reaches continuity gate", withFile(chReply("", agentPoolTestThreadTS)), true, true},
 		{"file_share channel thread reaches continuity gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, true},
 		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
-		{"file_share channel message without files ignored", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
+		{"file_share channel message without files still admitted (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, true},
 		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), false, false},
 		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
@@ -220,6 +222,40 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := shouldDispatchAgentEvent(tt.env, tt.followups); got != tt.want {
 				t.Fatalf("shouldDispatchAgentEvent = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAgentDeterministicReply pins the feature switch itself: which turns are
+// answered without the model, and which fall through to it.
+func TestAgentDeterministicReply(t *testing.T) {
+	oneFile := []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+	tests := []struct {
+		name  string
+		event slackInnerEvent
+		text  string
+		want  string // "" means the turn should reach the model
+	}{
+		{"attachment beats a keyword caption", slackInnerEvent{Files: oneFile}, "help", agentUnsupportedMediaReply},
+		{"file_share with no files array is still an upload", slackInnerEvent{Subtype: slackMessageSubtypeFileShare}, "", agentUnsupportedMediaReply},
+		{"empty files array is not an upload", slackInnerEvent{Files: []json.RawMessage{}}, "help", agentHelpReply},
+		{"literal help", slackInnerEvent{}, "help", agentHelpReply},
+		{"ordinary request reaches the model", slackInnerEvent{}, "what can I reach?", ""},
+		{"ordinary request with an attachment does not", slackInnerEvent{Files: oneFile}, "what can I reach?", agentUnsupportedMediaReply},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := tt.event
+			reply, ok := agentDeterministicReply(&event, tt.text)
+			if tt.want == "" {
+				if ok {
+					t.Fatalf("want the turn to reach the model, got deterministic reply %q", reply)
+				}
+				return
+			}
+			if !ok || reply != tt.want {
+				t.Fatalf("reply = %q ok = %v, want %q", reply, ok, tt.want)
 			}
 		})
 	}
@@ -815,21 +851,34 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
+		// wantThread is where the reply must land: threaded under the upload itself,
+		// never loose in the channel.
+		wantThread string
 	}{
 		{
-			name: "file-only channel mention",
-			body: unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+			name:       "file-only channel mention",
+			body:       unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+			wantThread: "400.1",
 		},
 		{
-			name: "captioned DM file",
-			body: unsupportedMediaBody("EvFileCaption", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			name:       "captioned DM file",
+			body:       unsupportedMediaBody("EvFileCaption", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			wantThread: "400.2",
 		},
 		{
 			// The media case runs ahead of the deterministic text short-circuits, so a
 			// caption that reads as a keyword still never gets an answer that silently
 			// ignores the attachment.
-			name: "upload captioned with a deterministic keyword",
-			body: unsupportedMediaBody("EvFileHelp", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.4","text":"help","files":[{"id":"F4"}]}`),
+			name:       "upload captioned with a deterministic keyword",
+			body:       unsupportedMediaBody("EvFileHelp", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.4","text":"help","files":[{"id":"F4"}]}`),
+			wantThread: "400.4",
+		},
+		{
+			// A file_share whose files array never arrived is still an upload; the
+			// subtype alone must keep it out of the silent-drop path.
+			name:       "file_share with no files array",
+			body:       unsupportedMediaBody("EvFileBare", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.5","text":""}`),
+			wantThread: "400.5",
 		},
 	}
 	for _, tt := range tests {
@@ -855,6 +904,9 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			defer mu.Unlock()
 			if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
 				t.Fatalf("unsupported media should post one deterministic reply without calling the LLM, got %+v", *posts)
+			}
+			if got := (*posts)[0].threadTS; got != tt.wantThread {
+				t.Fatalf("reply threadTS = %q, want %q (the limitation must thread under the upload)", got, tt.wantThread)
 			}
 		})
 	}
@@ -884,6 +936,48 @@ func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
 		t.Fatalf("overlapping mention/file_share events should post one media reply, got %+v", *posts)
+	}
+	if got := (*posts)[0].threadTS; got != agentPoolTestThreadTS {
+		t.Fatalf("reply threadTS = %q, want %q (an in-thread upload must answer in that thread)", got, agentPoolTestThreadTS)
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaConsumesNoRateSlot pins the third claim in this
+// PR's contract. The other two — no model call, no history read — are pinned by
+// panicAgentLLM and countingThreadHistory; without this one, moving the media
+// branch below the limiter would leave every other test green while a few
+// screenshots silently burned a member's whole hourly budget.
+func TestHandleEvent_UnsupportedMediaConsumesNoRateSlot(t *testing.T) {
+	mem := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+		AgentThreadHistory: (&countingThreadHistory{}).read, AgentDefaultEnabled: true,
+		// A cap of 1 means a consumed slot would visibly cost the second upload its
+		// reply, so this fails loudly rather than by counter arithmetic alone.
+		AgentMaxTurnsPerUserPerHour: 1,
+	})
+	t.Cleanup(h.Wait)
+
+	for _, ts := range []string{"900.1", "900.2"} {
+		h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvRate"+ts,
+			`{"type":"app_mention","user":"U2","channel":"C1","ts":"`+ts+`","text":"<@U12345678>","files":[{"id":"F1"}]}`)))
+		h.Wait()
+	}
+
+	if mem.hasRateItems() {
+		t.Fatal("an unsupported-media turn must not bump the turn-rate counter (BumpTurnCount not called)")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 2 {
+		t.Fatalf("both uploads should be answered, got %+v", *posts)
+	}
+	for i, p := range *posts {
+		if p.text != testAgentUnsupportedMedia {
+			t.Fatalf("reply %d = %q, want the media reply (a rate-limited reply means the media branch moved below the limiter)", i, p.text)
+		}
 	}
 }
 
