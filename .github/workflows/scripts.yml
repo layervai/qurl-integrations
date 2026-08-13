@@ -24,24 +24,36 @@ permissions:
 # token — adding secrets or write permissions here would turn it into an
 # exfiltration path. Keep it that way.
 
+# Every check below is independent, so each one is guarded to run even after
+# an earlier failure. Without that the first red check hides the rest, and a
+# check that stops running looks exactly like a check that passes.
+#
+# One consequence: timeout-minutes below is now a whole-suite budget rather
+# than "until the first failure". The suite runs in about 8s against the 5m
+# cap, so there is room, but a slow new check spends everyone's margin.
 jobs:
   scripts:
     name: Lint and test scripts
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: shellcheck scripts/*.sh
 
       - name: Test install.sh
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-install.sh
 
       - name: Check release-please config/manifest sync
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-release-please-sync.sh
 
       - name: Check Chrome/Edge extension lockstep
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-extension-lockstep.sh
 
       # The jq <= 1.7 parse check is only meaningful on a runner whose jq
@@ -49,10 +61,20 @@ jobs:
       # eventually here) accepts the form it rejects. The script reports
       # which half it actually enforced.
       - name: Check main CI notification payload builds
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-main-ci-notification-payload.sh
 
       # The resolver decides whether app CI runs at all on main, and its
       # failure mode is silence rather than a red run, so every branch of it
       # is exercised here against a fixture repo and a stub `gh`.
       - name: Test validated-base resolver
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-resolve-validated-base.sh
+
+      # The report step only runs once the Claude review has already failed, so
+      # a defect in it ships green and surfaces exactly when it is needed. This
+      # pins that every branch still annotates — a bare echo there would restore
+      # the silent pass the step exists to remove.
+      - name: Test Claude review budget report
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: scripts/test-claude-review-budget-report.sh
