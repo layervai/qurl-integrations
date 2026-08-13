@@ -9,6 +9,8 @@ const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
+const { isPrivateHost } = require('./utils/private-host');
+
 /**
  * qURL API client for the bot's link create / status / revoke calls, backed by
  * the @layervai/qurl SDK. This is the bot's single qURL client (issue #830 —
@@ -126,104 +128,10 @@ async function callQurl(method, path, fn) {
   }
 }
 
-// Reject hostnames that resolve (by syntax) to loopback, link-local, or
-// RFC1918 private ranges. Defense-in-depth against a caller passing
-// `http://169.254.169.254/latest/meta-data/...` or similar; even if the
-// downstream qURL API is the one that actually fetches, we block at our
-// own input validation layer.
-function isPrivateHost(host) {
-  if (!host) return true;
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '0.0.0.0' || h === '::' || h === '::1') return true;
-  if (h.startsWith('[') && h.endsWith(']')) {
-    // Bracketed IPv6 literal — strip and check.
-    return isPrivateHost(h.slice(1, -1));
-  }
-  // IPv6 locals reach here bracket-stripped, so they always contain a ':':
-  // unique-local fc00::/7 (fc/fd), link-local fe80::/10, and deprecated
-  // site-local fec0::/10 — the latter two span first-hextet fe80–feff, i.e.
-  // `fe[89a-f][0-9a-f]:` (a real /10 literal always writes the full 4-digit
-  // hextet). Gate on the ':' so a PUBLIC DNS name that merely starts with these
-  // letters (e.g. `fd-cdn.example.com`, reaching here UNbracketed) is NOT
-  // misclassified as an IPv6 local literal — DNS names never contain a colon.
-  if (h.includes(':')) {
-    if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
-    if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
-  }
-  // IPv4-in-IPv6 embeddings — each carries an IPv4 in the low 32 bits, so each
-  // is another way to spell a private IPv4:
-  //   ::ffff:X:Y     IPv4-mapped     (::ffff:0:0/96)
-  //   ::X:Y          IPv4-compatible (::/96, deprecated by RFC 4291)
-  //   ::ffff:0:X:Y   IPv4-translated (SIIT)
-  //   64:ff9b::X:Y   NAT64 well-known prefix (RFC 6052)
-  // DECODE the embedded IPv4 and re-check it rather than reasoning about which
-  // notations the host stack happens to route: only the mapped form routes on a
-  // stock host, but an IPv6-only subnet with DNS64/NAT64 (a supported AWS VPC
-  // config) makes 64:ff9b:: route for real, which would flip the answer without
-  // this file changing.
-  //
-  // The two SPELLINGS below each serve a different leg, so neither is dead code:
-  //   - dotted `::ffff:127.0.0.1` — what inet_ntop (hence dns.lookup) renders,
-  //     so it is what assertNotPrivateAfterResolve feeds back in; reachable from
-  //     attacker-controlled DNS via a hostile AAAA.
-  //   - hex `::ffff:7f00:1` — what WHATWG re-serializes a dotted literal to, so
-  //     it is what `new URL(...).hostname` yields. Matching dotted-only checked
-  //     a form that never arrives on that leg (#1035).
-  // Groups are {1,4} because IPv6 serialization suppresses each hextet's leading
-  // zeros (`::ffff:a00:1` = 10.0.0.1). Both ends are anchored, so an alternative
-  // leaving the wrong group count backtracks into the next — their order is
-  // immaterial. Requiring exactly two groups keeps every match an EXACT decode;
-  // a lone hextet (`::a`) can only denote 0.0.0.0/8 or 255.255.0.0/16, never a
-  // sensitive range, so leaving it unmatched is safe — as is the dotted branch
-  // reading an all-digit lone hextet (`::1234`) as decimal, since both the
-  // decimal and hex readings land in those same two ranges.
-  // The dotted branch covers only `::`/`::ffff:` on purpose: the SIIT and NAT64
-  // dotted spellings never arrive, because the URL leg re-serializes them to hex
-  // and inet_ntop renders only the mapped block dotted.
-  const embeddedDotted = h.match(/^::(?:ffff:)?([0-9.]+)$/);
-  if (embeddedDotted) return isPrivateHost(embeddedDotted[1]);
-  const embeddedHex = h.match(/^(?:::ffff:0:|::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (embeddedHex) {
-    const [hi, lo] = embeddedHex.slice(1).map((g) => parseInt(g, 16));
-    return isPrivateHost([(hi >>> 8) & 0xFF, hi & 0xFF, (lo >>> 8) & 0xFF, lo & 0xFF].join('.'));
-  }
-  // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
-  // Node's URL does too. Convert to dotted-quad.
-  if (/^\d+$/.test(h)) {
-    const n = Number(h);
-    if (n >= 0 && n <= 0xFFFFFFFF) {
-      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
-      return isPrivateHost(dotted);
-    }
-    return true; // out-of-range numeric host: reject outright
-  }
-  // Hex IPv4 literal (e.g. `0x7f000001` = 127.0.0.1)
-  if (/^0x[0-9a-f]+$/.test(h)) {
-    const n = Number(h);
-    if (Number.isFinite(n) && n >= 0 && n <= 0xFFFFFFFF) {
-      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
-      return isPrivateHost(dotted);
-    }
-    return true;
-  }
-  // Octal-prefixed IPv4 (e.g. `0177.0.0.1`) — treat any leading-zero component
-  // as suspicious and reject conservatively.
-  if (/^0\d/.test(h) && /^[0-9.]+$/.test(h)) return true;
-  // Standard IPv4 dotted-quad
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = v4.slice(1).map(Number);
-    if (a === 10) return true;                          // 10.0.0.0/8
-    if (a === 127) return true;                         // 127.0.0.0/8
-    if (a === 169 && b === 254) return true;            // 169.254.0.0/16 (link-local, IMDS)
-    if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;            // 192.168.0.0/16
-    if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 (CGNAT)
-    if (a === 0) return true;                           // 0.0.0.0/8
-    if (a >= 224) return true;                          // multicast + reserved
-  }
-  return false;
-}
+// The syntactic private/loopback/link-local screen lives in utils/private-host.js
+// so the boot path can consume the same range table without pulling in the
+// @layervai/qurl SDK, constants.js and `dns` that this module requires. Re-exported
+// here (see module.exports) because connector.js imports it from qurl.js.
 
 // Resolve all A/AAAA records for a hostname and reject if ANY of them point
 // to a private/internal range. Defense against DNS rebinding: a malicious
