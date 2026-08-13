@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const childProcess = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const generateIcons = require('../scripts/generate-icons.js');
@@ -11,10 +10,8 @@ const generateIcons = require('../scripts/generate-icons.js');
 const generateIconsModulePath = require.resolve('../scripts/generate-icons.js');
 const sharpModulePath = require.resolve('sharp');
 
-// Spelled out here rather than derived from `generateIcons.sizes`: assertions built from the value
-// under test go vacuously green if that value ever becomes empty.
-const EXPECTED_SIZES = [16, 48, 128];
-const EXPECTED_ICON_FILES = EXPECTED_SIZES.map(function (size) { return `icon${size}.png`; }).sort();
+const { withTempDir } = require('./helpers/temp-dir.js');
+const { EXPECTED_ICON_SIZES, EXPECTED_ICON_FILES } = require('./helpers/icons.js');
 
 // Derived, not hard-coded: this file is byte-identical in both extensions, so a literal app
 // directory is necessarily wrong in one of them — which is exactly what shipped, with one copy
@@ -42,7 +39,7 @@ function committedIconPath(size) {
 function committedIconFingerprints() {
   const fingerprints = {};
 
-  for (const size of EXPECTED_SIZES) {
+  for (const size of EXPECTED_ICON_SIZES) {
     const iconPath = committedIconPath(size);
 
     fingerprints[size] = {
@@ -54,27 +51,15 @@ function committedIconFingerprints() {
   return fingerprints;
 }
 
-// `await run(...)` inside the try, not `return run(...)`: the callback is async, and returning its
-// pending promise would let `finally` delete the directory while sharp was still writing into it.
-async function withTempDir(prefix, run) {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-
-  try {
-    return await run(tempDir);
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-}
-
 // `sizes` alone would just restate the module's own constant. The coupling that can actually break
 // is with manifest.json, which declares the icon sizes twice: a size declared there but never
 // generated ships an icon path the browser resolves to nothing and renders blank.
 test('manifest icon declarations match the generated sizes', function () {
-  assert.deepEqual(generateIcons.sizes, EXPECTED_SIZES);
+  assert.deepEqual(generateIcons.sizes, EXPECTED_ICON_SIZES);
 
   const manifestPath = path.join(generateIcons.projectRoot, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  const expectedKeys = EXPECTED_SIZES.map(String).sort();
+  const expectedKeys = EXPECTED_ICON_SIZES.map(String).sort();
 
   const declarations = [
     ['icons', manifest.icons],
@@ -176,7 +161,7 @@ test('committed icons match a fresh "npm run icons"', async function () {
     // the loop with no iterations and this test vacuously green.
     assert.deepEqual(fs.readdirSync(tempDir).sort(), EXPECTED_ICON_FILES);
 
-    for (const size of EXPECTED_SIZES) {
+    for (const size of EXPECTED_ICON_SIZES) {
       const committedPath = committedIconPath(size);
 
       // Without this, a deleted icon fails as a bare ENOENT stack rather than the remediation below.

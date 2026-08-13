@@ -13,31 +13,11 @@
  * don't bleed across tests.
  */
 
-function withFreshConfig(envValue, run) {
-  jest.isolateModules(() => {
-    const prev = process.env.GATEWAY_HANDOFF_HMAC;
-    if (envValue === undefined) {
-      delete process.env.GATEWAY_HANDOFF_HMAC;
-    } else {
-      process.env.GATEWAY_HANDOFF_HMAC = envValue;
-    }
-    try {
-      const config = require('../src/config');
-      run(config);
-    } finally {
-      if (prev === undefined) {
-        delete process.env.GATEWAY_HANDOFF_HMAC;
-      } else {
-        process.env.GATEWAY_HANDOFF_HMAC = prev;
-      }
-    }
-  });
-}
-
+const { withFreshConfig } = require('./helpers/fresh-config');
 describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
   it('returns the raw env value on first call', () => {
     const raw = '{"current":"' + 'a'.repeat(64) + '"}';
-    withFreshConfig(raw, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: raw }, (config) => {
       expect(config.takeGatewayHandoffHmac()).toBe(raw);
     });
   });
@@ -48,7 +28,7 @@ describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
     // captures the config object at require-time and re-reads later
     // would get undefined, NOT a stale captured copy.
     const raw = '{"current":"' + 'b'.repeat(64) + '"}';
-    withFreshConfig(raw, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: raw }, (config) => {
       expect(config.takeGatewayHandoffHmac()).toBe(raw);
       expect(config.takeGatewayHandoffHmac()).toBeUndefined();
       expect(config.takeGatewayHandoffHmac()).toBeUndefined();
@@ -56,7 +36,7 @@ describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
   });
 
   it('returns undefined immediately when env var is unset', () => {
-    withFreshConfig(undefined, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: undefined }, (config) => {
       expect(config.takeGatewayHandoffHmac()).toBeUndefined();
     });
   });
@@ -67,7 +47,7 @@ describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
     // doesn't filter empty strings. Pin the contract so a future
     // refactor that adds empty-string filtering here doesn't
     // silently shift the "missing" semantic.
-    withFreshConfig('', (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: '' }, (config) => {
       expect(config.takeGatewayHandoffHmac()).toBe('');
       expect(config.takeGatewayHandoffHmac()).toBeUndefined();
     });
@@ -79,7 +59,7 @@ describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
     // future contributor would grep for, and finding it would
     // silently re-open the redundant-reference hazard.
     const raw = '{"current":"' + 'c'.repeat(64) + '"}';
-    withFreshConfig(raw, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: raw }, (config) => {
       expect(Object.prototype.hasOwnProperty.call(config, 'GATEWAY_HANDOFF_HMAC')).toBe(false);
       expect(config.GATEWAY_HANDOFF_HMAC).toBeUndefined();
     });
@@ -87,13 +67,13 @@ describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
 
   it('hasGatewayHandoffHmac reflects env-var presence without exposing the value', () => {
     const raw = '{"current":"' + 'd'.repeat(64) + '"}';
-    withFreshConfig(raw, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: raw }, (config) => {
       expect(config.hasGatewayHandoffHmac).toBe(true);
     });
-    withFreshConfig(undefined, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: undefined }, (config) => {
       expect(config.hasGatewayHandoffHmac).toBe(false);
     });
-    withFreshConfig('', (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: '' }, (config) => {
       expect(config.hasGatewayHandoffHmac).toBe(false);
     });
   });
@@ -105,7 +85,7 @@ describe('config.takeGatewayHandoffHmac (one-shot getter)', () => {
     // semantic is intentional. Pinning so a future refactor that
     // flips the flag on take() flags itself as a behavior change.
     const raw = '{"current":"' + 'e'.repeat(64) + '"}';
-    withFreshConfig(raw, (config) => {
+    withFreshConfig({ GATEWAY_HANDOFF_HMAC: raw }, (config) => {
       expect(config.hasGatewayHandoffHmac).toBe(true);
       config.takeGatewayHandoffHmac();
       expect(config.hasGatewayHandoffHmac).toBe(true);
