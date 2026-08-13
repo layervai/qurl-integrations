@@ -11,7 +11,8 @@ Brief description of changes.
 - [ ] `apps/discord/`
 - [ ] `apps/cli/`
 - [ ] `apps/zapier/`
-- [ ] `apps/chrome-extension/`
+- [ ] `apps/chrome-extension/` (lockstep with Edge — CI enforces the two stay in sync)
+- [ ] `apps/edge-extension/` (lockstep with Chrome — CI enforces the two stay in sync)
 - [ ] `origins/` (connector image — also triggers Slack CI)
 - [ ] `shared/` (triggers tests for ALL apps — coordinate with maintainers)
 - [ ] `.github/` (requires maintainer review)
