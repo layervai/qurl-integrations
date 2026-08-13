@@ -47,15 +47,22 @@ const iterationCapMessage = "I wasn't able to work that out — could you rephra
 // tool_result), so a later turn in the same thread is a valid request.
 const proposalAckResult = "Proposed to the user for confirmation."
 
-// ActionKind names the mutation an agent [Proposal] represents. Each maps to an
-// existing deterministic slash operation that the confirm path executes after a
-// human click + admin re-check.
+// ActionKind names the action an agent [Proposal] represents. Each maps to a
+// deterministic operation the confirm path executes after a human click (+ an
+// admin re-check for the admin-gated kinds). Most mirror a slash command;
+// ActionInspect is the exception — it has no slash verb, but it still fetches
+// protected content (a network-access grant), so it takes the same confirm gate.
 type ActionKind string
 
 // Recognized proposal actions.
 const (
 	// ActionGet mints a one-time access link for a tunnel slug or channel alias.
 	ActionGet ActionKind = "get"
+	// ActionInspect fetches the page behind a channel-reachable token and posts a
+	// compact summary (title, description, section headings). Fetching mints a
+	// short-lived internal qURL — a network-access grant — so, like ActionGet, it
+	// runs only after a human confirm and never on the model's say-so alone.
+	ActionInspect ActionKind = "inspect"
 	// ActionRevoke revokes a protected resource (and all its qURLs).
 	ActionRevoke ActionKind = "revoke"
 	// ActionSetAlias binds a channel alias to a tunnel slug.

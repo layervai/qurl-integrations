@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2094  # false positive: fail() takes $file as an
+# argument for the error message; nothing writes the file being read.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"

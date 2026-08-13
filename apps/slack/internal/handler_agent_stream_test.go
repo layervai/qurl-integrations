@@ -38,6 +38,7 @@ type recordingStreamPort struct {
 	starts     []AgentStreamStart
 	appends    []string
 	stops      int
+	stopBlocks []any
 }
 
 func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamStart) (string, error) {
@@ -59,8 +60,9 @@ func (r *recordingStreamPort) AppendStream(_ context.Context, _, _, _, _, markdo
 	return nil
 }
 
-func (r *recordingStreamPort) StopStream(context.Context, string, string, string, string) error {
+func (r *recordingStreamPort) StopStream(_ context.Context, _, _, _, _ string, blocks []any) error {
 	r.stops++
+	r.stopBlocks = blocks
 	return nil
 }
 
@@ -110,11 +112,25 @@ func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	if port.startCalls != 1 || port.stops != 1 {
 		t.Fatalf("expected one start + one stop, got start=%d stop=%d", port.startCalls, port.stops)
 	}
-	if port.appended() != reply {
-		t.Fatalf("appends must reassemble the reply\n got: %q\nwant: %q", port.appended(), reply)
+	want := agentLLMReplyWithDisclaimer(reply)
+	if port.appended() != want {
+		t.Fatalf("appends must reassemble the reply and footer\n got: %q\nwant: %q", port.appended(), want)
 	}
 	if len(port.appends) >= len(reply) {
 		t.Fatalf("coalescing should yield far fewer appends than deltas, got %d", len(port.appends))
+	}
+}
+
+func TestAgentStreamer_WhitespaceOnlyReplyDoesNotAddDisclaimer(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	s.onDelta("   ")
+
+	if !s.finalizeReply(&agent.Result{Reply: "   "}) {
+		t.Fatal("an opened healthy stream must remain the delivered reply")
+	}
+	if got := port.appended(); got != "   " {
+		t.Fatalf("whitespace-only stream = %q, want no standalone disclaimer", got)
 	}
 }
 
@@ -130,7 +146,7 @@ func TestAgentStreamer_MaskedLinkSplitAcrossDeltas_RevealsDestination(t *testing
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Use Click here (https://evil.example/login) now."
+	want := agentLLMReplyWithDisclaimer("Use Click here (https://evil.example/login) now.")
 	if port.appended() != want {
 		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
 	}
@@ -148,7 +164,7 @@ func TestAgentStreamer_BufferedLinkPrefixDoesNotOpenStream(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: "[Click here](https://evil.example/login)"}) {
 		t.Fatal("completed link should stream once destination is known")
 	}
-	want := "Click here (https://evil.example/login)"
+	want := agentLLMReplyWithDisclaimer("Click here (https://evil.example/login)")
 	if port.appended() != want {
 		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
 	}
@@ -165,7 +181,7 @@ func TestAgentStreamer_UnclosedCodeSpanHardensFollowingLinks(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Intro: ` then click me (https://evil.example/phish)"
+	want := agentLLMReplyWithDisclaimer("Intro: ` then click me (https://evil.example/phish)")
 	if port.appended() != want {
 		t.Fatalf("streamed markdown = %q, want %q", port.appended(), want)
 	}
@@ -182,7 +198,7 @@ func TestAgentStreamer_RoundBoundaryReferenceDefinitionEscaped(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Use [click here][evil].\\[evil]: https://evil.example/login"
+	want := agentLLMReplyWithDisclaimer("Use [click here][evil].\\[evil]: https://evil.example/login")
 	if got := port.appended(); got != want {
 		t.Fatalf("streamed markdown = %q, want %q", got, want)
 	}
@@ -205,7 +221,7 @@ func TestAgentStreamer_ReconcileAcceptsChunkBoundaryEscapedReply(t *testing.T) {
 	if !s.finalizeReply(&agent.Result{Reply: reply}) {
 		t.Fatal("a streamed reply must be delivered by the stream")
 	}
-	want := "Use [click here][evil]. \\[evil]: https://evil.example/login"
+	want := agentLLMReplyWithDisclaimer("Use [click here][evil]. \\[evil]: https://evil.example/login")
 	if got := port.appended(); got != want {
 		t.Fatalf("streamed markdown = %q, want %q", got, want)
 	}
@@ -248,6 +264,9 @@ func TestAgentStreamer_Proposal_StopsButCallerPostsCard(t *testing.T) {
 	}
 	if port.stops != 1 {
 		t.Fatalf("the narration stream must still be stopped, got stops=%d", port.stops)
+	}
+	if strings.Contains(port.appended(), agentLLMReplyDisclaimer) {
+		t.Fatalf("proposal narration must not receive the free-text reply disclaimer: %q", port.appended())
 	}
 }
 
@@ -344,6 +363,24 @@ func TestAgentStreamer_AppendFailureAtFinalize_FallsBackToPost(t *testing.T) {
 	}
 	if len(port.appends) != 0 {
 		t.Fatalf("the only (failing) append records nothing, got %v", port.appends)
+	}
+}
+
+func TestAgentStreamer_ReconcileFailureLeavesNoBufferedDisclaimer(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	streamed := strings.Repeat("x", agentStreamFlushBytes)
+	s.onDelta(streamed)
+	port.appendErr = errors.New("reconcile appendStream 500")
+
+	if s.finalizeReply(&agent.Result{Reply: "synthesized final reply"}) {
+		t.Fatal("a reconcile append failure must fall back to the posted reply")
+	}
+	if !s.broken || s.pending.Len() != 0 {
+		t.Fatalf("broken stream must keep pending empty, got broken=%v pending=%q", s.broken, s.pending.String())
+	}
+	if got := port.appended(); got != streamed {
+		t.Fatalf("delivered stream = %q, want no footer after reconcile failure", got)
 	}
 }
 
@@ -484,7 +521,7 @@ func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
 	e.Event.UserTeam = "T_user"
 	h.processAgentEvent(context.Background(), slog.Default(), e)
 
-	if port.startCalls != 1 || port.stops != 1 || port.appended() != reply {
+	if port.startCalls != 1 || port.stops != 1 || port.appended() != agentLLMReplyWithDisclaimer(reply) {
 		t.Fatalf("channel mention should stream and stop once, got start=%d stop=%d appended=%q", port.startCalls, port.stops, port.appended())
 	}
 	mu.Lock()

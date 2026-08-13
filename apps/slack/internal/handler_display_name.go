@@ -190,8 +190,13 @@ func (h *Handler) handleSetDisplayName(w http.ResponseWriter, values url.Values)
 		return
 	}
 
+	// channel_id lets the resolve step honor a `$alias` bound in THIS channel,
+	// not just the connector's own slug; "" is tolerated (alias lookup skipped,
+	// slug-only — see resolveTunnelByID).
+	channelID := strings.TrimSpace(values.Get(fieldChannelID))
+
 	h.runAsync(w, "set_display_name", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.resolveAndSetTunnelDisplayName(ctx, log, teamID, id, name)
+		msg := h.resolveAndSetTunnelDisplayName(ctx, log, teamID, channelID, id, name)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }
@@ -220,8 +225,10 @@ func (h *Handler) handleUnsetDisplayName(w http.ResponseWriter, values url.Value
 		return
 	}
 
+	channelID := strings.TrimSpace(values.Get(fieldChannelID))
+
 	h.runAsync(w, "unset_display_name", values, func(ctx context.Context, log *slog.Logger) {
-		msg := h.resolveAndResetTunnelDisplayName(ctx, log, teamID, id)
+		msg := h.resolveAndResetTunnelDisplayName(ctx, log, teamID, channelID, id)
 		_ = h.postResponse(log, values.Get(fieldResponseURL), msg)
 	})
 }
@@ -255,8 +262,8 @@ func (h *Handler) displayNameValidate(w http.ResponseWriter, values url.Values, 
 
 // resolveAndSetTunnelDisplayName resolves the tunnel by id, then PATCHes its
 // description to the Display Name, and renders the admin-facing result.
-func (h *Handler) resolveAndSetTunnelDisplayName(ctx context.Context, log *slog.Logger, teamID, id, name string) string {
-	c, resource, msg := h.resolveTunnelByID(ctx, log, teamID, id)
+func (h *Handler) resolveAndSetTunnelDisplayName(ctx context.Context, log *slog.Logger, teamID, channelID, id, name string) string {
+	c, resource, msg := h.resolveTunnelByID(ctx, log, teamID, channelID, id)
 	if msg != "" {
 		return msg
 	}
@@ -274,14 +281,15 @@ func (h *Handler) resolveAndSetTunnelDisplayName(ctx context.Context, log *slog.
 // because a tunnel always has a Display Name (the description field doubles
 // as it). Reusing the install-default constructor keeps the reset value
 // identical to what a fresh install would have produced.
-func (h *Handler) resolveAndResetTunnelDisplayName(ctx context.Context, log *slog.Logger, teamID, id string) string {
-	c, resource, msg := h.resolveTunnelByID(ctx, log, teamID, id)
+func (h *Handler) resolveAndResetTunnelDisplayName(ctx context.Context, log *slog.Logger, teamID, channelID, id string) string {
+	c, resource, msg := h.resolveTunnelByID(ctx, log, teamID, channelID, id)
 	if msg != "" {
 		return msg
 	}
-	// Revert using the resolved slug (resolveTunnelByID guarantees
-	// r.Slug == id) so the value provably matches what install wrote with
-	// args.Slug, without depending on that invariant holding at a distance.
+	// Revert to the install default built from the connector's OWN slug
+	// (resource.Slug) — what install wrote. Correct whether `id` was the slug
+	// itself or a channel `$alias` resolving to it: the alias name and the
+	// connector slug can differ, so reset off the resolved resource, not id.
 	reset := defaultTunnelDisplayName(resource.Slug)
 	if _, err := c.UpdateResource(ctx, resource.ResourceID, &client.UpdateResourceInput{Description: &reset}); err != nil {
 		log.Error("unset-display-name update failed", "error", err, "team_id", teamID, "id", id, "resource_id", resource.ResourceID)
@@ -291,11 +299,29 @@ func (h *Handler) resolveAndResetTunnelDisplayName(ctx context.Context, log *slo
 	return fmt.Sprintf("✅ Display Name reset for `%s`.", id)
 }
 
-// resolveTunnelByID looks up the active tunnel whose id (slug) is `id` and
-// returns an authenticated client plus the resolved resource. On any
-// failure it returns (nil, nil, userMsg) with msg set to the ephemeral copy
-// to surface; callers `if msg != "" { return msg }`.
-func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamID, id string) (c *client.Client, resource *client.Resource, userMsg string) {
+// resolveTunnelByID resolves the active tunnel the admin referenced by `id`,
+// accepting EITHER the connector's own slug OR a channel `$alias` bound in
+// channelID. The slug is tried first: it's a server-side `?slug=` filter, works
+// from any channel, and — unlike the alias path's resource scan — isn't bounded
+// by listResourcesScanLimit, so existing slug-targeted calls keep their exact
+// behavior. On a slug miss it falls back to a `$alias` bound in THIS channel —
+// the same alias_bindings entry `/qurl get` and `/qurl-admin revoke` resolve —
+// so an admin who knows a resource only by an alias whose name differs from the
+// connector slug (e.g. an alias re-attached to a re-created connector) can still
+// target it.
+//
+// Precedence is slug-FIRST here — the reverse of `/qurl get` / `/qurl-admin
+// revoke`, which resolve the alias first. Deliberate: it preserves the `?slug=`
+// filter and the unbounded-by-listResourcesScanLimit behavior for existing slug
+// calls. The only observable difference is a token that is BOTH a live slug AND
+// a channel alias bound to a DIFFERENT resource — it resolves to the slug here
+// vs the alias in `/qurl get`. Pathological in practice: install binds
+// alias==slug→the same resource, so the orders agree for the common case.
+//
+// channelID == "" or an unwired AdminStore skips the alias fallback (slug-only).
+// On any failure it returns (nil, nil, userMsg); callers
+// `if msg != "" { return msg }`.
+func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamID, channelID, id string) (c *client.Client, resource *client.Resource, userMsg string) {
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("display-name: failed to get API key", "error", err, "team_id", teamID, "id", id)
@@ -316,6 +342,93 @@ func (h *Handler) resolveTunnelByID(ctx context.Context, log *slog.Logger, teamI
 			return c, r, ""
 		}
 	}
+
+	// Slug miss: try a channel `$alias` bound here. Resolves the same
+	// alias_bindings entry `/qurl get` reads, then recovers the full resource so
+	// the Type==Tunnel / Status==Active guard and unset's slug both still hold.
+	if channelID != "" && h.cfg.AdminStore != nil {
+		boundID, found, lookupErr := h.cfg.AdminStore.LookupChannelAlias(ctx, teamID, channelID, id)
+		switch {
+		case lookupErr != nil:
+			// channel_policies is a DIFFERENT table from the workspace_mappings the
+			// admin gate read, so it can be unavailable while the gate passes. Surface
+			// the service-unavailable signal (matching resolveTokenForGet) rather than
+			// falling through to the "no such id" copy, which would misdiagnose an
+			// outage as a typo.
+			log.Warn("display-name: channel alias lookup failed", "error", lookupErr, "team_id", teamID, "channel_id", channelID, "id", id)
+			return nil, nil, serviceUnreachableMessage
+		case found:
+			// Legacy guard, mirroring resolveTokenForGet: a pre-resource set-alias
+			// row stored a raw URL, not an opaque resource id. It can't resolve to a tunnel, so
+			// refuse with the same re-bind hint `/qurl get` gives — and skip the
+			// resource scan it could never match (which, in a >first-page workspace,
+			// would otherwise misreport it as a lookup limit).
+			if isLegacyDirectURLBinding(boundID) {
+				log.Warn("display-name: channel alias bound to a non-resource-id target", "team_id", teamID, "channel_id", channelID, "id", id)
+				return nil, nil, legacyAliasBindingMessage(id)
+			}
+			r, msg := h.resolveActiveTunnelByResourceID(ctx, log, c, teamID, id, boundID)
+			if msg != "" {
+				return nil, nil, msg
+			}
+			return c, r, ""
+		}
+	}
+
 	log.Info("display-name: no active tunnel for id", "team_id", teamID, "id", id)
 	return nil, nil, fmt.Sprintf("No qURL Connector with id `%s` was found. Run `/qurl list` to see your qURL Connector ids.", id)
+}
+
+// resolveActiveTunnelByResourceID recovers the full resource a channel alias
+// pointed at and asserts it's an active tunnel before it becomes a PATCH
+// target. qurl-service has no get-by-id, so it scans the first ListResources
+// page (the same bounded scan `/qurl list` and protect use) and matches on
+// resource_id. On no active-tunnel match it returns a friendly message, never a
+// PATCH against the wrong/dead target. It distinguishes no-match cases by what
+// the scan can prove: a seen non-tunnel resource gets connector-only copy, a
+// seen inactive tunnel gets the unset-alias hint, and a resourceID NOT seen
+// while more pages remain (HasMore) gets a non-destructive lookup-limit message
+// because it may be a live alias on a later page. Callers pre-filter direct-URL
+// bindings, so resourceID is always an opaque resource id
+// here. Returns (resource, "") on success or (nil, userMsg).
+func (h *Handler) resolveActiveTunnelByResourceID(ctx context.Context, log *slog.Logger, c *client.Client, teamID, id, resourceID string) (resource *client.Resource, userMsg string) {
+	page, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesScanLimit})
+	if err != nil {
+		log.Error("display-name: resource lookup by id failed", "error", err, "team_id", teamID, "id", id, "resource_id", resourceID)
+		return nil, sanitizeAPIError(err, "Failed to look up the qURL Connector")
+	}
+	// Track whether resourceID was SEEN on this page, separately from whether it
+	// matched as an active tunnel. A seen-but-dead target (revoked, or a URL
+	// resource) is definitively stale even when more pages exist, so it must get
+	// the unset-alias hint — only a genuine "not seen at all + more pages remain"
+	// miss is the inconclusive scan-window case.
+	seen := false
+	for i := range page.Resources {
+		r := &page.Resources[i]
+		if r.ResourceID != resourceID {
+			continue
+		}
+		seen = true
+		if r.Type != client.ResourceTypeTunnel {
+			log.Info("display-name: channel alias points at non-tunnel resource", "team_id", teamID, "id", id, "resource_id", resourceID, "resource_type", r.Type)
+			return nil, fmt.Sprintf("`%s` is an alias in this channel, but Display Names apply only to qURL Connectors, not URL resources. Run `/qurl list` to see active connectors.", id)
+		}
+		if r.Status == client.StatusActive {
+			return r, ""
+		}
+	}
+	if !seen && page.HasMore {
+		// Not found on the first page AND more pages exist — we CANNOT conclude the
+		// alias is stale (its connector may be on a later page). Must not recommend
+		// unset-alias: following that hint would unbind a possibly-live alias. Same
+		// listResourcesScanLimit bound `/qurl list` carries (tracked by #590); the
+		// difference is this is a mutation verb, so the copy stays non-destructive.
+		log.Info("display-name: channel alias target not on first resource page; more pages exist", "team_id", teamID, "id", id, "resource_id", resourceID, "scan_limit", listResourcesScanLimit)
+		return nil, fmt.Sprintf("Couldn't locate the qURL Connector bound to `%s` among the first %d resources, and your workspace has more — this is a lookup limit, not necessarily a stale alias.", id, listResourcesScanLimit)
+	}
+	// Either a seen-but-inactive tunnel, or a complete scan (no more pages) without
+	// a match — both definitively mean the alias no longer resolves to an active
+	// connector, so the unset-alias hint is correct.
+	log.Info("display-name: channel alias points at no active tunnel", "team_id", teamID, "id", id, "resource_id", resourceID, "seen_on_first_page", seen)
+	return nil, fmt.Sprintf("`%s` is an alias in this channel but no longer points at an active qURL Connector. Run `/qurl list` to see active connectors, or `/qurl-admin unset-alias $%s` to clear the alias.", id, id)
 }

@@ -3,6 +3,7 @@ package slackdata
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,9 @@ func TestCheckRateLimit_UsesSyntheticCounterItemAndResetsWindow(t *testing.T) {
 	if got, want := readNumber(ddb.items[counterKey], attrRateLimitExpiresAt), now.Truncate(time.Hour).Add(2*time.Hour).Unix(); got != want {
 		t.Fatalf("counter expires_at = %d, want %d", got, want)
 	}
+	if got, want := readNumber(ddb.items[counterKey], attrUpdatedAtNano), now.UnixNano(); got != want {
+		t.Fatalf("counter updated_at_unix_nano = %d, want %d", got, want)
+	}
 }
 
 func TestCheckRateLimit_RepairsConcurrentInitializeRace(t *testing.T) {
@@ -156,6 +160,161 @@ func TestCheckRateLimit_WorkspaceNotBoundDoesNotCreateCounter(t *testing.T) {
 	if len(ddb.updateKeys) != 0 {
 		t.Fatalf("unbound workspace created/updated counters: %v", ddb.updateKeys)
 	}
+}
+
+func TestPurgeTeamRateLimitCountersBefore(t *testing.T) {
+	t.Run("disabled skips full-table scan", func(t *testing.T) {
+		scanned := false
+		store := newRateLimitStore(&stubDDB{
+			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+				scanned = true
+				return &dynamodb.ScanOutput{}, nil
+			},
+		})
+
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("PurgeTeamRateLimitCountersBefore disabled: %v", err)
+		}
+		if scanned {
+			t.Fatal("disabled rate-limit purge issued a full-table scan")
+		}
+	})
+
+	t.Run("scans prefix and deletes paged counters with cutoff guard", func(t *testing.T) {
+		cutoff := time.Date(2026, 7, 8, 12, 0, 0, 123, time.UTC)
+		prefix := rateLimitTeamPrefix("T1")
+		var scans []*dynamodb.ScanInput
+		var deleted []string
+		store := newRateLimitStore(&stubDDB{
+			scanFn: func(in *dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+				scans = append(scans, in)
+				if aws.ToString(in.TableName) != "workspace_mappings" {
+					t.Fatalf("Scan table = %q, want workspace_mappings", aws.ToString(in.TableName))
+				}
+				if got := aws.ToString(in.FilterExpression); got != "begins_with(#tid, :prefix)" {
+					t.Fatalf("Scan FilterExpression = %q", got)
+				}
+				if got := aws.ToString(in.ProjectionExpression); got != "#tid" {
+					t.Fatalf("Scan ProjectionExpression = %q", got)
+				}
+				if got := in.ExpressionAttributeNames["#tid"]; got != attrSlackTeamID {
+					t.Fatalf("Scan #tid = %q, want %q", got, attrSlackTeamID)
+				}
+				if got := readString(map[string]ddbtypes.AttributeValue{attrSlackTeamID: in.ExpressionAttributeValues[":prefix"]}, attrSlackTeamID); got != prefix {
+					t.Fatalf("Scan :prefix = %q, want %q", got, prefix)
+				}
+				switch len(scans) {
+				case 1:
+					if len(in.ExclusiveStartKey) != 0 {
+						t.Fatalf("first scan ExclusiveStartKey = %v, want empty", in.ExclusiveStartKey)
+					}
+					return &dynamodb.ScanOutput{
+						Items: []map[string]ddbtypes.AttributeValue{
+							{attrSlackTeamID: stringAttr(prefix + "user-a")},
+						},
+						LastEvaluatedKey: map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(prefix + "user-a")},
+					}, nil
+				case 2:
+					if got := readString(in.ExclusiveStartKey, attrSlackTeamID); got != prefix+"user-a" {
+						t.Fatalf("second scan ExclusiveStartKey = %q, want first page key", got)
+					}
+					return &dynamodb.ScanOutput{
+						Items: []map[string]ddbtypes.AttributeValue{
+							{attrSlackTeamID: stringAttr(prefix + "user-b")},
+						},
+					}, nil
+				default:
+					t.Fatalf("unexpected scan call %d", len(scans))
+					return nil, errors.New("unexpected scan call")
+				}
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				key := readString(in.Key, attrSlackTeamID)
+				deleted = append(deleted, key)
+				if got := aws.ToString(in.ConditionExpression); got != purgeCutoffCondition {
+					t.Fatalf("Delete ConditionExpression = %q", got)
+				}
+				if got := in.ExpressionAttributeNames["#updated_at_nano"]; got != attrUpdatedAtNano {
+					t.Fatalf("Delete #updated_at_nano = %q, want %q", got, attrUpdatedAtNano)
+				}
+				if got, want := readNumber(in.ExpressionAttributeValues, ":purge_cutoff_nano"), cutoff.UnixNano(); got != want {
+					t.Fatalf("Delete cutoff = %d, want %d", got, want)
+				}
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		store.RateLimitEnabled = true
+
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", cutoff); err != nil {
+			t.Fatalf("PurgeTeamRateLimitCountersBefore: %v", err)
+		}
+		wantDeleted := []string{prefix + "user-a", prefix + "user-b"}
+		if strings.Join(deleted, ",") != strings.Join(wantDeleted, ",") {
+			t.Fatalf("deleted = %v, want %v", deleted, wantDeleted)
+		}
+	})
+
+	t.Run("delete errors do not stop remaining counters", func(t *testing.T) {
+		prefix := rateLimitTeamPrefix("T1")
+		var deleted []string
+		store := newRateLimitStore(&stubDDB{
+			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+				return &dynamodb.ScanOutput{
+					Items: []map[string]ddbtypes.AttributeValue{
+						{attrSlackTeamID: stringAttr(prefix + "fail")},
+						{attrSlackTeamID: stringAttr(prefix + "ok")},
+					},
+				}, nil
+			},
+			deleteItemFn: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				key := readString(in.Key, attrSlackTeamID)
+				deleted = append(deleted, key)
+				if strings.HasSuffix(key, "fail") {
+					return nil, errors.New("ddb delete down")
+				}
+				return &dynamodb.DeleteItemOutput{}, nil
+			},
+		})
+		store.RateLimitEnabled = true
+
+		err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Time{})
+		if err == nil {
+			t.Fatal("PurgeTeamRateLimitCountersBefore: want joined delete error")
+		}
+		var storeErr *Error
+		if !errors.As(err, &storeErr) || storeErr.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("PurgeTeamRateLimitCountersBefore err = %v, want joined 503 *Error", err)
+		}
+		wantDeleted := []string{prefix + "fail", prefix + "ok"}
+		if strings.Join(deleted, ",") != strings.Join(wantDeleted, ",") {
+			t.Fatalf("deleted = %v, want %v", deleted, wantDeleted)
+		}
+	})
+
+	t.Run("guarded delete skips counters updated after cutoff", func(t *testing.T) {
+		var deletes int
+		store := newRateLimitStore(&stubDDB{
+			scanFn: func(*dynamodb.ScanInput) (*dynamodb.ScanOutput, error) {
+				return &dynamodb.ScanOutput{
+					Items: []map[string]ddbtypes.AttributeValue{
+						{attrSlackTeamID: stringAttr(rateLimitTeamPrefix("T1") + "new")},
+					},
+				}, nil
+			},
+			deleteItemFn: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
+				deletes++
+				return nil, &ddbtypes.ConditionalCheckFailedException{}
+			},
+		})
+		store.RateLimitEnabled = true
+
+		if err := store.PurgeTeamRateLimitCountersBefore(context.Background(), "T1", time.Now()); err != nil {
+			t.Fatalf("PurgeTeamRateLimitCountersBefore newer row err = %v, want nil", err)
+		}
+		if deletes != 1 {
+			t.Fatalf("DeleteItem calls = %d, want 1", deletes)
+		}
+	})
 }
 
 func newRateLimitStore(client DynamoDBClient) *Store {
@@ -236,12 +395,14 @@ func (f *rateLimitDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInpu
 		item = map[string]ddbtypes.AttributeValue{attrSlackTeamID: stringAttr(key)}
 	}
 	switch aws.ToString(in.UpdateExpression) {
-	case "ADD #count :one":
+	case "SET #updated_at_nano = :now_nano ADD #count :one":
 		item[attrRateLimitCount] = numberAttr(readNumber(item, attrRateLimitCount) + 1)
-	case "SET #window = :window, #count = :one, #expires_at = :expires_at":
+		item[attrUpdatedAtNano] = in.ExpressionAttributeValues[":now_nano"]
+	case "SET #window = :window, #count = :one, #expires_at = :expires_at, #updated_at_nano = :now_nano":
 		item[attrRateLimitWindow] = in.ExpressionAttributeValues[":window"]
 		item[attrRateLimitCount] = in.ExpressionAttributeValues[":one"]
 		item[attrRateLimitExpiresAt] = in.ExpressionAttributeValues[":expires_at"]
+		item[attrUpdatedAtNano] = in.ExpressionAttributeValues[":now_nano"]
 	default:
 		return nil, errors.New("unexpected UpdateExpression: " + aws.ToString(in.UpdateExpression))
 	}

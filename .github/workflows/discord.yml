@@ -30,7 +30,7 @@ jobs:
     steps:
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'push'
         with:
           fetch-depth: 0
@@ -55,10 +55,10 @@ jobs:
       run:
         working-directory: apps/discord
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: apps/discord/.nvmrc
           cache: 'npm'
@@ -89,7 +89,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.discord == 'true'
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify Dockerfile builds
         working-directory: apps/discord
@@ -168,7 +168,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@f9a4ab4e4697980ebd21efed7d643441f0ea0993 # v0.7.0
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@1536c698add5777aa08c781bc674d1eba469b32d # v0.9.0
     with:
       target_repo: qurl-integrations-infra
       # `event_type` must match the receiver's `repository_dispatch.types` at

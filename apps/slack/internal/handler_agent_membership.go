@@ -129,8 +129,8 @@ func (h *Handler) resolveChannelMembership(ctx context.Context, log *slog.Logger
 // checked (no ChannelMembership seam), when there's no stored context, when the store read
 // fails, or when the user is not a confirmed member of the context channel
 // (resolveChannelMembership is fail-closed). On a hit it refreshes the context's TTL so
-// channel-awareness lives as long as the conversation stays active (SaveConversation
-// similarly bumps the transcript each turn), then returns the channel. Only meaningful for
+// channel-awareness lives for the same short metadata window used by assistant
+// pane context, then returns the channel. Only meaningful for
 // im turns; the caller gates on that. The store key/partition match Slice 3a's write
 // exactly (agentEventThreadKey delegates to agentThreadKey; partition is the team id).
 func (h *Handler) paneContextChannel(ctx context.Context, log *slog.Logger, env *slackEventEnvelope) string {

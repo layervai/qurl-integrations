@@ -73,6 +73,7 @@ Get started:
 	cmd.AddCommand(
 		createCmd(opts),
 		resolveCmd(opts),
+		enterCmd(opts),
 		listCmd(opts),
 		getCmd(opts),
 		deleteCmd(opts),

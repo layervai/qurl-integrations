@@ -92,6 +92,10 @@ func logInteractionReceived(payload *interactionPayload) {
 // opens a modal (views.open) inside Slack's trigger window — see
 // handleListEditClick.
 func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interactionPayload) {
+	if act, ok := findActionByID(payload.Actions, agentFeedbackActionID); ok {
+		h.handleAgentFeedbackClick(w, payload, act)
+		return
+	}
 	// Conversation-mode confirm card (distinct action_ids, so order is immaterial
 	// — a click yields exactly one matching action_id).
 	if act, ok := findActionByID(payload.Actions, agentConfirmApproveActionID); ok {
@@ -123,6 +127,17 @@ func (h *Handler) handleBlockActions(w http.ResponseWriter, payload *interaction
 	// opener rather than the mint when Edit is the clicked element.
 	if editAction, ok := findActionByID(payload.Actions, listEditTunnelActionID); ok {
 		h.handleListEditClick(w, payload, editAction)
+		return
+	}
+	// The Enter Portal button on a minted qURL is a Slack URL button: the click
+	// opens the qURL directly in the user's browser, so there is NO server work.
+	// Slack still POSTs a block_actions interaction, which we ack 200 and drop.
+	// Handled explicitly (not via the catch-all below) so a legitimate click — now
+	// the primary CTA of every successful get — doesn't fire the "no recognized
+	// action" breadcrumb, keeping that log reserved for a button genuinely rendered
+	// but never wired.
+	if _, ok := findActionByID(payload.Actions, enterPortalActionID); ok {
+		respondJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
 	action, ok := findActionByID(payload.Actions, listCreateQurlActionID)
@@ -192,7 +207,7 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		_ = h.postResponse(log, responseURL, ":warning: "+channelRequiredMessage)
 		return
 	}
-	text, err := h.getWork(ctx, log, &getWorkArgs{
+	res, err := h.getWork(ctx, log, &getWorkArgs{
 		cmd:          cmd,
 		teamID:       teamID,
 		enterpriseID: enterpriseID,
@@ -200,7 +215,7 @@ func (h *Handler) processButtonGet(ctx context.Context, log *slog.Logger, respon
 		userID:       userID,
 		triggerID:    triggerID,
 	})
-	h.finishGet(log, responseURL, text, err)
+	h.finishGet(log, responseURL, res, err)
 }
 
 // findActionByID returns the first action in a block_actions payload whose

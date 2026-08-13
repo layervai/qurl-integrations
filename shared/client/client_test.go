@@ -1041,6 +1041,25 @@ func TestCreateSessionDurationOnWire(t *testing.T) {
 	}
 }
 
+func TestCreateForPublicResourceID(t *testing.T) {
+	const publicResourceID = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEN4yvBX3yjAvYl9qagkStIWB1ie2gp_LF2Jy0w5AdxXefsTNLn9nrOlA4umKRiIQeGfvad9OFVoWa3PAIxcy4qg"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": publicResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{ResourceID: publicResourceID}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wantPath := "/v1/resources/" + publicResourceID + "/qurls"
+	if gotPath != wantPath {
+		t.Fatalf("request path = %q, want %q", gotPath, wantPath)
+	}
+}
+
 // TestCreateSessionDurationOmittedWhenEmpty pins the omitempty contract so a
 // zero SessionDuration inherits the server/plan default rather than forcing 0.
 func TestCreateSessionDurationOmittedWhenEmpty(t *testing.T) {
@@ -1427,13 +1446,13 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 
 func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	var gotHeader string
-	var gotBody CreateAPIKeyInput
+	var gotWire map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/api-keys" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		gotHeader = r.Header.Get(HeaderIdempotencyKey)
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&gotWire); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
@@ -1442,7 +1461,7 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 			"name":        testTunnelSlug + " bootstrap",
 			"scopes":      []string{"qurl:agent", "qurl:write"},
 			"status":      StatusActive,
-			"purpose":     APIKeyPurposeTunnelBootstrap,
+			"key_type":    APIKeyTypeTunnelBootstrap,
 			"tunnel_slug": testTunnelSlug,
 			"expires_at":  "2026-05-28T00:00:00Z",
 		})
@@ -1453,7 +1472,7 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	got, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
 		Name:           testTunnelSlug + " bootstrap",
 		Scopes:         []string{"qurl:agent", "qurl:write"},
-		Purpose:        APIKeyPurposeTunnelBootstrap,
+		KeyType:        APIKeyTypeTunnelBootstrap,
 		TunnelSlug:     testTunnelSlug,
 		ExpiresIn:      "24h",
 		IdempotencyKey: "bootstrap-key-12345678901234567890",
@@ -1464,10 +1483,13 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	if gotHeader != "bootstrap-key-12345678901234567890" {
 		t.Errorf("Idempotency-Key = %q", gotHeader)
 	}
-	if gotBody.Purpose != APIKeyPurposeTunnelBootstrap || gotBody.TunnelSlug != testTunnelSlug {
-		t.Errorf("body = %+v, want tunnel bootstrap fields", gotBody)
+	if gotWire["key_type"] != APIKeyTypeTunnelBootstrap || gotWire["tunnel_slug"] != testTunnelSlug {
+		t.Errorf("body = %+v, want tunnel bootstrap fields", gotWire)
 	}
-	if got.APIKey != "lv_live_secret" || got.Purpose != APIKeyPurposeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
+	if _, ok := gotWire["purpose"]; ok {
+		t.Errorf("body contained deprecated purpose field: %+v", gotWire)
+	}
+	if got.APIKey != "lv_live_secret" || got.KeyType != APIKeyTypeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
 		t.Errorf("decoded key = %+v", got)
 	}
 	if got.ExpiresAt == nil {
@@ -1581,8 +1603,8 @@ func TestDeleteResourceEscapesIDPathSegment(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	// A resolved resource_id is always `r_…`, but defend the path segment the
-	// same way RevokeAPIKey/UpdateResource do: a stray slash must not escape
+	// Defend the opaque path segment the same way RevokeAPIKey/UpdateResource do:
+	// a stray slash must not escape
 	// the /v1/resources/ collection.
 	if err := c.DeleteResource(context.Background(), "r_a/b"); err != nil {
 		t.Fatalf("DeleteResource: %v", err)
@@ -2174,8 +2196,7 @@ func TestUpdateResourceNilInputRejected(t *testing.T) {
 
 // TestUpdateResourceEscapesIDPathSegment pins the path-escape contract
 // for UpdateResource's resource-id path segment.
-// Server-side resource_id format is `^r_[a-z0-9_-]{11}$` so reserved
-// bytes won't reach this method via normal flows; the test is
+// Current server-generated IDs contain no reserved bytes; the test remains
 // defensive for direct programmatic callers and keeps a future
 // `url.PathEscape` removal from tripping silently.
 func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {

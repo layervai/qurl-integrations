@@ -65,11 +65,11 @@ func TestValidateResourceID(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", "r_abc123", false},
-		{"valid long", "r_k8xqp9h2sj9lx7r4a", false},
-		{"wrong prefix", "x_abc", true},
-		{"no prefix", "abc123", true},
-		{"too short", "r_a", true},
-		{"just prefix", "r_", true},
+		{"public opaque id", "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE-public", false},
+		{"server owns syntax", "abc123", false},
+		{"legacy id passes through", "r_", false},
+		{"empty", "", true},
+		{"whitespace", "  ", true},
 	}
 
 	for _, tt := range tests {

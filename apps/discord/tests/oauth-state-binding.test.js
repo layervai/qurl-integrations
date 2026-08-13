@@ -1,11 +1,20 @@
 /**
  * Tests for generateState/verifyStateBinding in commands.js — OAuth state
  * HMAC binding to discord user id (round 28 defense-in-depth).
+ *
+ * The mocked config deliberately omits OAUTH_STATE_SECRET, so the shared
+ * signer (src/utils/oauth-state.js) resolves the GITHUB_CLIENT_SECRET
+ * fallback — deterministic regardless of what other suites in the same
+ * worker leave in process.env. The fixture must clear the signer's
+ * 32-char MIN_STATE_SECRET_LENGTH floor, which now applies to the
+ * GitHub OAuth flow too (it used to accept any length).
  */
+
+const mockGithubClientSecret = 'test-client-secret-0123456789abcdef';
 
 jest.mock('../src/config', () => ({
   GITHUB_CLIENT_ID: 'client',
-  GITHUB_CLIENT_SECRET: 'test-client-secret',
+  GITHUB_CLIENT_SECRET: mockGithubClientSecret,
   ALLOWED_GITHUB_ORGS: ['opennhp'],
   QURL_SEND_MAX_RECIPIENTS: 10,
   PENDING_LINK_EXPIRY_MINUTES: 10,
@@ -28,7 +37,7 @@ const crypto = require('crypto');
 
 // Re-implement generateState locally so we can sign test states without
 // going through the full /link command path.
-function makeState(discordId, secret = 'test-client-secret') {
+function makeState(discordId, secret = mockGithubClientSecret) {
   const nonce = crypto.randomBytes(16).toString('hex');
   const sig = crypto.createHmac('sha256', secret)
     .update(`${discordId}:${nonce}`).digest('hex');
@@ -68,5 +77,29 @@ describe('verifyStateBinding', () => {
   it('rejects state signed with a different secret', () => {
     const state = makeState('12345', 'other-secret');
     expect(verifyStateBinding(state, '12345')).toBe(false);
+  });
+
+  it('throws (not false) on a well-formed state when the resolved secret is under the floor', () => {
+    // Pins the headline behavior change at the surface the /auth
+    // callback route actually calls (routes/oauth.js): a sub-32-char
+    // secret makes verifyStateBinding THROW once the state passes the
+    // format gates. The call sits BEFORE the route's own try block
+    // (which wraps only the token-exchange section), so the throw
+    // escapes the async handler and Express 5 forwards it to the
+    // error middleware in server.js, which renders the 500 page.
+    // Previously it silently verified against the short secret.
+    // The signer resolves config lazily per call, so mutating the
+    // mocked config object here is observed.
+    const config = require('../src/config');
+    const saved = config.GITHUB_CLIENT_SECRET;
+    config.GITHUB_CLIENT_SECRET = 'shrt';
+    try {
+      const state = makeState('12345', 'shrt');
+      expect(() => verifyStateBinding(state, '12345')).toThrow(
+        /Refusing to mint OAuth state: GITHUB_CLIENT_SECRET is shorter than 32 chars/,
+      );
+    } finally {
+      config.GITHUB_CLIENT_SECRET = saved;
+    }
   });
 });

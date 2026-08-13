@@ -41,6 +41,10 @@ const (
 	// copy is self-contained — it does not promise a detail message that a rare mint-fail +
 	// delivery-fail double fault may never have delivered.
 	agentConfirmGetFailedReply = "Couldn't generate the access link — check the request and ask me again."
+	// agentConfirmInspectFailedReply covers a HARD read failure while summarizing
+	// (auth/store/scope) — the backend logs the detail; the public card stays a
+	// neutral failure with no token echo, matching the get-failed posture.
+	agentConfirmInspectFailedReply = "Couldn't read that page to summarize it — check the request and ask me again."
 	// agentConfirmGetUnsupportedSurfaceReply is a pre-mint boundary for confirmed
 	// group DMs. A normal post would leak the link to other members, and until mpim
 	// ephemerals are proven visible we refuse instead of minting a credential that
@@ -161,7 +165,8 @@ func confirmValidProtectURL(rawURL, rawAlias string) (args *resourceExposeArgs, 
 // via executeAgentAction, protect-connector via openAgentConnectorModal (the modal
 // path). Keep in lockstep with both of those.
 func confirmExecutable(kind agent.ActionKind) bool {
-	return kind == agent.ActionGet || kind == agent.ActionRevoke ||
+	return kind == agent.ActionGet || kind == agent.ActionInspect ||
+		kind == agent.ActionRevoke ||
 		kind == agent.ActionSetAlias || kind == agent.ActionUnsetAlias ||
 		kind == agent.ActionProtectURL || kind == agent.ActionProtectConnector
 }
@@ -191,10 +196,16 @@ func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, 
 	}
 	// The agent's own answer posts as standard Markdown rendered by Slack, with
 	// masked links neutralized before either the channel or pane surface sees them.
-	// A proposal summary must NOT route here: it is LLM-distilled, so it stays escaped
-	// mrkdwn on the text seam (injection defense) — as does the blank-reply error fallback.
+	// A proposal summary must NOT route here: it is LLM-distilled, so each output
+	// renderer receives its own hardened representation (see
+	// postAgentProposalPreview). The blank-reply error fallback stays fixed text.
 	if result.Proposal == nil && strings.TrimSpace(result.Reply) != "" {
-		h.postAgentMarkdownReply(log, env, threadTS, hardenAgentMarkdown(result.Reply))
+		reply := hardenAgentMarkdown(result.Reply)
+		h.postAgentMarkdownReply(log, env, threadTS, agentLLMReplyWithDisclaimer(reply))
+		return
+	}
+	if result.Proposal != nil && strings.TrimSpace(result.Proposal.Summary) != "" {
+		h.postAgentProposalPreview(log, env, threadTS, result.Proposal.Summary)
 		return
 	}
 	h.postAgentReply(log, env, threadTS, agentReplyText(result))
@@ -228,9 +239,12 @@ func (h *Handler) confirmDeliverable(prop *agent.Proposal) bool {
 
 // adminGatedFor is the SINGLE source of truth for whether an action needs an
 // admin re-check at confirm time, used both when snapshotting a proposal and at
-// click time. An unrecognized kind fails closed (gated).
+// click time. An unrecognized kind fails closed (gated). Get and inspect are the
+// only non-gated kinds: both are channel-member reads of a channel-reachable
+// resource (inspect reveals strictly less than the link get hands out), so both
+// match /qurl get's "any channel member" posture rather than the admin verbs.
 func adminGatedFor(kind agent.ActionKind) bool {
-	return kind != agent.ActionGet
+	return kind != agent.ActionGet && kind != agent.ActionInspect
 }
 
 // askerOnly reports whether a kind may be approved ONLY by the member who requested
@@ -238,6 +252,13 @@ func adminGatedFor(kind agent.ActionKind) bool {
 // one-time access credential delivered ephemerally to the clicker, so only the asker
 // may approve+receive it. Named like adminGatedFor so the confirm authorization model
 // reads as one vocabulary; get is the only asker-only kind today.
+//
+// inspect is deliberately NOT asker-only even though it also mints: its result is a
+// PUBLIC channel summary, not a per-clicker credential, so there is no wrong-recipient
+// risk to guard against — and any channel member could self-serve the same summary by
+// proposing it themselves, so restricting to the asker would add friction without a
+// security benefit. The mint it triggers consumes quota like a get, but that is
+// human-paced and audited to the approver either way.
 func askerOnly(kind agent.ActionKind) bool {
 	return kind == agent.ActionGet
 }
@@ -280,14 +301,11 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		return
 	}
 	reason := protectConnectorConfirmReason(prop)
-	// Escaped: the preview posts as mrkdwn on any fallback path (same reasoning as
-	// the card fallback below and agentReplyText).
-	preview := agentProposalPreviewPrefix + escapeMrkdwnText(summary)
 
 	id, err := newPendingActionID()
 	if err != nil {
 		log.Error("agent confirm: id generation failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 	blob, err := json.Marshal(pendingAction{
@@ -304,7 +322,7 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	})
 	if err != nil {
 		log.Error("agent confirm: marshal pending action failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 
@@ -312,16 +330,20 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 	defer cancel()
 	if err := h.cfg.AgentStore.PutPendingAction(ctx, env.TeamID, id, blob); err != nil {
 		log.Error("agent confirm: store pending action failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 	// Card text renders as plain_text (safe), but the fallback is the message's
 	// top-level text — mrkdwn by default — so LLM-distilled summary/reason must be
 	// escaped there too, or prompt-injected markup would surface in push previews
 	// and non-block clients.
-	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, buildAgentConfirmBlocks(summary, reason, id), agentConfirmFallbackText(summary, reason)); err != nil {
+	blocks := buildAgentConfirmBlocks(summary, reason, id)
+	if h.agentFeedbackEnabled() {
+		blocks = append(blocks, agentFeedbackBlock())
+	}
+	if err := h.cfg.PostMessageBlocks(ctx, env.TeamID, env.EnterpriseID, env.Event.Channel, threadTS, blocks, agentConfirmFallbackText(summary, reason)); err != nil {
 		log.Error("agent confirm: post card failed", "error", err)
-		h.postAgentReply(log, env, threadTS, preview)
+		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
 }
@@ -340,10 +362,18 @@ func buildAgentConfirmBlocks(summary, reason, id string) []any {
 	if reason = strings.TrimSpace(reason); reason != "" {
 		blocks = append(blocks, plainTextSectionBlock("Reason: "+reason))
 	}
-	blocks = append(blocks, actionsBlock(
-		primaryButtonElement("Approve", agentConfirmApproveActionID, id),
-		dangerButtonElement("Reject", agentConfirmRejectActionID, id),
-	))
+	// AI-provenance context line: reminds the approver this proposal came from the AI
+	// agent before they act on it. Rendered plain_text (plainTextContextBlock), keeping
+	// the card's "no mrkdwn next to the Approve button" injection-defense invariant that
+	// the summary/reason above also hold — the copy is fixed product text, but staying
+	// plain_text keeps the whole card uniformly non-mrkdwn.
+	blocks = append(blocks,
+		plainTextContextBlock(agentConfirmAIDisclosure),
+		actionsBlock(
+			primaryButtonElement("Approve", agentConfirmApproveActionID, id),
+			dangerButtonElement("Reject", agentConfirmRejectActionID, id),
+		),
+	)
 	return blocks
 }
 
@@ -696,6 +726,18 @@ func newAttributedPrivateActionResult(success bool, cardText, ephemeralText, aud
 	return res
 }
 
+// newAttributedPrivateActionResultBlocks is [newAttributedPrivateActionResult]
+// for a private payload that renders as Block Kit — the get success case, whose
+// minted link is delivered as an "Enter Portal" URL button. ephemeralText is the
+// notification / non-block fallback (it still carries the raw URL). Failures stay
+// on the text-only constructor: their ephemeralText is an error string, not a
+// link, so it must NOT become a button.
+func newAttributedPrivateActionResultBlocks(success bool, cardText, ephemeralText string, ephemeralBlocks []any, auditDisplay string) actionResult {
+	res := newAttributedPrivateActionResult(success, cardText, ephemeralText, auditDisplay)
+	res.ephemeralBlocks = ephemeralBlocks
+	return res
+}
+
 // actionResult is the terminal outcome of a claimed action. cardText replaces the
 // PUBLIC confirm card. ephemeralText, when non-empty, is delivered PRIVATELY to the
 // clicker (response_url ephemeral) — used for sensitive output that must not be
@@ -705,6 +747,12 @@ func newAttributedPrivateActionResult(success bool, cardText, ephemeralText, aud
 type actionResult struct {
 	cardText      string
 	ephemeralText string
+	// ephemeralBlocks, when non-nil, is the Block Kit rendering of the private
+	// payload (the get success's Enter Portal button). deliverConfirmPrivate posts
+	// blocks when present, with ephemeralText as the fallback; otherwise it posts
+	// ephemeralText as plain text. Only the get SUCCESS path sets it — failure
+	// detail stays text-only.
+	ephemeralBlocks []any
 	// attributed marks a card that reflects an approved action reaching execution
 	// (including a clean core failure), so the click path appends the on-behalf
 	// attribution footer and records it for review. Pre-execution rejections
@@ -814,30 +862,72 @@ func (h *Handler) getDeliverySurfaceUnsupported(ctx context.Context, log *slog.L
 //     card-replace overwrites). Confirmed group DMs are refused before minting;
 //     unclassified group DMs fall back here and may hide the link, but do not post it
 //     to shared history.
-func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, text string) bool {
+//
+// A get SUCCESS carries blocks (the Enter Portal URL button) delivered via the
+// Block Kit seam, with text as the notification/non-block fallback; a get FAILURE
+// (or any text-only payload) has blocks nil and posts as plain text through the
+// original text seam. Split per-surface so each leg stays within the complexity
+// budget.
+//
+// A block payload commits to its Block Kit seam: if that seam is nil or errors,
+// this reports false (the terminal card downgrades to "could not be delivered")
+// rather than falling back to the text seam. Deliberate — production always wires
+// both seams, and a silent block→text fallback would change how the credential is
+// rendered without the operator knowing.
+func (h *Handler) deliverConfirmPrivate(ctx context.Context, log *slog.Logger, pa *pendingAction, payload *interactionPayload, text string, blocks []any) bool {
 	if isDirectMessageChannel(payload.Channel.ID) {
-		if h.cfg.PostMessage == nil {
-			log.Warn("agent confirm: PostMessage seam is nil — cannot deliver the get result in a DM")
-			return false
-		}
-		if err := h.cfg.PostMessage(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, pa.ThreadTS, text); err != nil {
-			log.Warn("agent confirm: in-DM get delivery failed", "error", err)
-			return false
-		}
-		return true
+		return h.deliverConfirmDM(ctx, log, payload, pa.ThreadTS, text, blocks)
 	}
 	// channel / private channel / unclassified group DM: a standalone ephemeral via
 	// chat.postEphemeral (decoupled from the click's response_url, so the
 	// card-replace can't overwrite it), threaded to the card.
-	if h.cfg.PostEphemeral == nil {
-		log.Warn("agent confirm: PostEphemeral seam is nil — cannot deliver the get result in a channel")
+	return h.deliverConfirmEphemeral(ctx, log, payload, pa.ThreadTS, text, blocks)
+}
+
+// deliverConfirmSeam runs one private-delivery seam and reports success: it logs
+// and returns false when the seam is unwired (wired == false) or the post errors —
+// so the caller can downgrade the terminal card — and true on a delivered post.
+// seam labels the seam in logs (its name already implies the surface + block/text
+// leg, e.g. PostMessageBlocks = a DM link, PostEphemeral = a channel text detail).
+func deliverConfirmSeam(log *slog.Logger, seam string, wired bool, post func() error) bool {
+	if !wired {
+		log.Warn("agent confirm: private get delivery seam is nil", "seam", seam)
 		return false
 	}
-	if err := h.cfg.PostEphemeral(ctx, payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, pa.ThreadTS, payload.User.ID, text); err != nil {
-		log.Warn("agent confirm: channel ephemeral get delivery failed", "error", err)
+	if err := post(); err != nil {
+		log.Warn("agent confirm: private get delivery failed", "seam", seam, "error", err)
 		return false
 	}
 	return true
+}
+
+// deliverConfirmDM posts the private payload into a 1:1 DM conversation: the Enter
+// Portal blocks via PostMessageBlocks when present, else the text via PostMessage.
+func (h *Handler) deliverConfirmDM(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
+	team, ent, channel := payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID
+	if blocks != nil {
+		return deliverConfirmSeam(log, "PostMessageBlocks", h.cfg.PostMessageBlocks != nil, func() error {
+			return h.cfg.PostMessageBlocks(ctx, team, ent, channel, threadTS, blocks, text)
+		})
+	}
+	return deliverConfirmSeam(log, "PostMessage", h.cfg.PostMessage != nil, func() error {
+		return h.cfg.PostMessage(ctx, team, ent, channel, threadTS, text)
+	})
+}
+
+// deliverConfirmEphemeral posts the private payload as a standalone in-channel
+// ephemeral: the Enter Portal blocks via PostEphemeralBlocks when present, else
+// the text via PostEphemeral.
+func (h *Handler) deliverConfirmEphemeral(ctx context.Context, log *slog.Logger, payload *interactionPayload, threadTS, text string, blocks []any) bool {
+	team, ent, channel, user := payload.Team.ID, payload.Enterprise.ID, payload.Channel.ID, payload.User.ID
+	if blocks != nil {
+		return deliverConfirmSeam(log, "PostEphemeralBlocks", h.cfg.PostEphemeralBlocks != nil, func() error {
+			return h.cfg.PostEphemeralBlocks(ctx, team, ent, channel, threadTS, user, blocks, text)
+		})
+	}
+	return deliverConfirmSeam(log, "PostEphemeral", h.cfg.PostEphemeral != nil, func() error {
+		return h.cfg.PostEphemeral(ctx, team, ent, channel, threadTS, user, text)
+	})
 }
 
 // finalizeConfirmedAction executes a claimed action, delivers any sensitive get output
@@ -853,10 +943,10 @@ func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger,
 	// delivered stays true and the card is used as-is.
 	delivered := true
 	if res.ephemeralText != "" {
-		delivered = h.deliverConfirmPrivate(ctx, log, pa, payload, res.ephemeralText)
+		delivered = h.deliverConfirmPrivate(ctx, log, pa, payload, res.ephemeralText, res.ephemeralBlocks)
 	}
-	res = confirmResultForDelivery(res, delivered)
-	_ = h.replaceOriginalResponse(log, responseURL, composeConfirmCard(res, pa.Asker, payload.User.ID))
+	confirmResultForDelivery(&res, delivered)
+	_ = h.replaceOriginalResponse(log, responseURL, composeConfirmCard(&res, pa.Asker, payload.User.ID))
 
 	// Best-effort: record the confirmed action attempt for the App Home review surface, keyed to
 	// the approver who ran it. Done AFTER the card swap so the audit PutItem adds no latency
@@ -865,26 +955,26 @@ func (h *Handler) finalizeConfirmedAction(ctx context.Context, log *slog.Logger,
 	// protect-connector never reaches here — it routes to the modal (confirmModalRouted)
 	// and its execution + audit are deferred to the modal-submit path (#701).
 	if res.attributed {
-		h.recordAgentAudit(ctx, log, payload, pa, res)
+		h.recordAgentAudit(ctx, log, payload, pa, &res)
 	}
 }
 
 // confirmResultForDelivery adjusts a successful get when the private delivery leg
 // failed. The action minted a link, but the user did not receive it, so both the
-// public terminal card and App Home result must read as a failure.
-func confirmResultForDelivery(res actionResult, delivered bool) actionResult {
+// public terminal card and App Home result must read as a failure. Mutates res in
+// place (pointer arg: actionResult is heavy enough that gocritic flags a copy).
+func confirmResultForDelivery(res *actionResult, delivered bool) {
 	if !delivered && res.cardText == agentConfirmGetDeliveredReply {
 		res.cardText = agentConfirmGetDeliveryFailedReply
 		res.audit = actionAuditResult{display: agentConfirmGetDeliveryFailedAudit, success: false}
 	}
-	return res
 }
 
 // composeConfirmCard builds the public terminal card text for an executed action.
 // Delivery-sensitive get outcomes are normalized by confirmResultForDelivery before
 // this point, so this helper only appends attribution when execution actually ran.
 // Pre-execution rejections aren't attributed, so their generic copy stays byte-exact.
-func composeConfirmCard(res actionResult, asker, approver string) string {
+func composeConfirmCard(res *actionResult, asker, approver string) string {
 	card := res.cardText
 	if res.attributed {
 		card = agentConfirmAttributedCard(card, asker, approver)
@@ -912,7 +1002,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			flags["reason"] = pa.Reason
 		}
 		cmd := &Command{Subcommand: SubcmdGet, Alias: pa.Token, Flags: flags, Raw: "get $" + pa.Token}
-		text, err := h.getWork(ctx, log, &getWorkArgs{
+		res, err := h.getWork(ctx, log, &getWorkArgs{
 			cmd:          cmd,
 			teamID:       payload.Team.ID,
 			enterpriseID: payload.Enterprise.ID,
@@ -934,7 +1024,50 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 		// conversation and thread the user approved in (see deliverConfirmPrivate), and
 		// keep the public card neutral. The asker-only gate (processAgentConfirm) ensures
 		// the clicker IS the asker, so the private delivery reaches the right person.
-		return newAttributedPrivateActionResult(true, agentConfirmGetDeliveredReply, text, "Access link was sent privately to the approver.")
+		//
+		// INVARIANT: cmd carries no dm flag (flags only ever holds "reason" above), so
+		// getWork takes the in-channel render branch and res.blocks is ALWAYS non-nil
+		// here — deliverConfirmPrivate posts the Enter Portal button. The guard below
+		// ENFORCES it rather than only documenting it: if a future change set dm:true on
+		// this path, res.blocks would be nil and the "Sent to your DM." status string
+		// would otherwise be delivered as the private payload while the card reported the
+		// link delivered. Fail loud (neutral failure card + generic private detail)
+		// instead of silently mis-delivering a credential.
+		if res.blocks == nil {
+			log.Error("agent get: getWork returned no blocks on the confirm path — dm-less invariant broken", "token", pa.Token)
+			return newAttributedPrivateActionResult(false, agentConfirmGetFailedReply, ":warning: "+commonGetMintFailedMessage, "Access link could not be generated.")
+		}
+		return newAttributedPrivateActionResultBlocks(true, agentConfirmGetDeliveredReply, res.text, res.blocks, "Access link was sent privately to the approver.")
+	case agent.ActionInspect:
+		// Summarizing FETCHES the page behind the token — minting a short-lived internal
+		// qURL is a network-access grant — so it runs only HERE, after the human Confirm,
+		// re-resolving in the CLICK's channel (channel scope enforced at execute exactly
+		// like a typed read). The fetched page signals are UNTRUSTED third-party content:
+		// InspectToken escapes them for mrkdwn and returns a compact card body that is
+		// posted straight to the channel. It never enters the model's context, so there
+		// is no prompt-injection surface to defend on this path.
+		// Only TeamID/ChannelID are consulted here (InspectToken's channel scoping); the
+		// remaining fields are set for parity. CallerIsAdmin is deliberately left zero —
+		// inspect is not admin-gated, so no code on this path reads it.
+		tc := &agent.TurnContext{
+			TeamID:       payload.Team.ID,
+			EnterpriseID: payload.Enterprise.ID,
+			ChannelID:    payload.Channel.ID,
+			UserID:       payload.User.ID,
+		}
+		summary, summarized, err := h.newAgentBackend(log).InspectToken(ctx, tc, pa.Token)
+		if err != nil {
+			// Hard read failure (auth/store/scope): the detail is logged inside the
+			// backend; the public card stays a neutral failure with no token echo.
+			return newAttributedActionResult(false, agentConfirmInspectFailedReply, "Website summary could not be generated.")
+		}
+		// summary is user-facing and mrkdwn-escaped. The audit DISPLAY is outcome-neutral
+		// ("Ran ...lookup.") because the same non-error return covers a real summary, a
+		// protected-download report, and an unresolvable-token note — the card carries the
+		// specific result. Audit SUCCESS, though, tracks whether a summary actually landed
+		// (summarized): a soft no-match / protected / open-failure outcome records
+		// success=false per actionAuditResult's contract, not a false win.
+		return newAttributedActionResult(summarized, summary, "Ran website summary lookup.")
 	case agent.ActionRevoke:
 		resourceID, err := h.resolveTokenForGet(ctx, log, payload.Team.ID, payload.Channel.ID, payload.User.ID, pa.Token)
 		if err != nil {
@@ -1003,7 +1136,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 // nil store (pre-enablement) or a write error is swallowed after logging, since the
 // mutation already happened and the audit log is never an authority. res.cardText is
 // the legacy public-card outcome; res.audit is the clean result App Home renders.
-func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, res actionResult) {
+func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payload *interactionPayload, pa *pendingAction, res *actionResult) {
 	var resultSuccess *bool
 	if res.audit.display != "" {
 		success := res.audit.success
@@ -1038,7 +1171,7 @@ func (h *Handler) recordAgentAuditEntry(ctx context.Context, log *slog.Logger, t
 // as untrusted echo by the render surface (see [slackdata.AuditEntry]).
 func auditTargetFor(pa *pendingAction) string {
 	switch pa.Action {
-	case agent.ActionGet, agent.ActionRevoke, agent.ActionProtectConnector:
+	case agent.ActionGet, agent.ActionInspect, agent.ActionRevoke, agent.ActionProtectConnector:
 		return pa.Token
 	case agent.ActionSetAlias:
 		return pa.Alias + " → " + pa.Target

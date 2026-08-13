@@ -42,10 +42,10 @@ const (
 	// labels are truncated to it so a long target URL or display name can't 400
 	// the view at views.open.
 	slackOptionTextMaxRunes = 75
-	// slackOptionValueMaxChars is Slack's per-option value cap. URL picker values
-	// carry resource_id, so skip overlong IDs rather than rendering a modal Slack
-	// will reject.
-	slackOptionValueMaxChars = 75
+	// slackOptionValueMaxChars is Slack's per-option value cap. This differs
+	// from the 75-character label cap; option values allow 150 characters.
+	// Public qURL resource IDs are 122-character P-256 keys and fit here.
+	slackOptionValueMaxChars = 150
 )
 
 // exposeOpenFailedMessage is the ephemeral shown (via the chooser's

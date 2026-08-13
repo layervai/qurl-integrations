@@ -129,6 +129,21 @@ at the OAuth-callback bind layer.
   Enterprise Grid org-level installs are also supported: the enterprise-scoped
   bot token is stored under the Slack `enterprise_id`, while qURL API keys and
   admin state remain scoped to each invoking workspace's `team_id`.
+- **Owner handoff:** `/qurl-admin transfer-ownership @user` is owner-only
+  and rewrites only `workspace_mappings.owner_id`, adding the new owner to
+  `admin_slack_user_ids` if needed. The previous owner remains an admin until
+  someone removes them with `/qurl-admin remove @user`. The transfer does
+  **not** mutate qurl-service `workspace_keys` or the current `auth0_subject`;
+  the credential remains on the existing qURL account until the new owner runs
+  `/qurl setup`, where the normal rotate/repoint flow either refreshes on the
+  same account or routes a cross-account move to operator assistance. Existing
+  Slack installs must re-run the Slack install flow before this command can
+  verify targets, because ownership transfer requires the `users:read` bot
+  scope on a workspace-level bot token. The command intentionally does not fall
+  back to an Enterprise Grid org-level token: Slack `users.info` has no
+  workspace selector, so the org token would prove org visibility rather than
+  membership in the invoking workspace. qurl-integrations#877 tracks safe
+  Grid support for ownership transfer.
 - **Connector onboarding:** `/qurl-admin protect-connector` provisions a qURL
   Connector sidecar.
   - **Entry points** — a guided modal (opens with the bot token for the
@@ -546,7 +561,13 @@ AUTH0_AUDIENCE=https://api.layerv.ai \
 SLACK_BASE_URL=https://slack-bot.example \
 OAUTH_STATE_SECRET=$(openssl rand -hex 32) \
   go run ./apps/slack/cmd/
+```
 
+`AUTH0_EXPECTED_AUDIENCE` is optional for local runs; set it to the expected
+Auth0 audience when you want the same drift check that managed deployments
+receive from infra.
+
+```bash
 # Build the production container (linux/arm64 to match the deploy target)
 docker buildx build --platform linux/arm64 \
   -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
@@ -676,8 +697,8 @@ that accidentally carried a numeric value.
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, and deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
-| `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Production multi-customer installs should not depend on this fallback. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
+| `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Must include `users:read` if ownership transfer should work before Slack install OAuth captures a per-workspace token. Production multi-customer installs should not depend on this fallback. |
 | `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
 | `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
 | `SLACK_MARKDOWN_VALIDATION_ACK_PERSISTENT_MESSAGES` | Validation | Set to `true` to acknowledge that live renderer validation posts persistent evidence messages. Can also be set with `--ack-persistent-messages`. |
@@ -694,7 +715,8 @@ that accidentally carried a numeric value.
 | `AUTH0_DOMAIN` | OAuth | Auth0 tenant FQDN, e.g. `layerv.us.auth0.com`. Scheme prefix and trailing slash are stripped at config-load. |
 | `AUTH0_CLIENT_ID` | OAuth | Auth0 application client_id for the Secure Access Agent |
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
-| `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API |
+| `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API. Must not contain surrounding whitespace. |
+| `AUTH0_EXPECTED_AUDIENCE` | No | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
 | `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
@@ -703,6 +725,7 @@ that accidentally carried a numeric value.
 | `QURL_CONNECTOR_IMAGE` | Yes in production | Container image reference rendered by `/qurl-admin protect-connector`. Production must set this to a specific non-latest release tag or lowercase SHA-256 digest, for example `ghcr.io/layervai/qurl-connector@sha256:<digest>`; pin **v0.3.0 or newer**, since the rendered snippets emit the v0.3.0 client contract (route `id` / `QURL_CONNECTOR_ID`) that older sidecar clients won't read. Empty values, omitted tags, `:latest` in any case, uppercase registry/repository paths, malformed digests, or characters outside the narrow image-reference allowlist fail startup validation. Use a digest pin when byte-for-byte image immutability is required. |
 | `QURL_CONNECTOR_IMAGE_FALLBACK` | No | Set `dev-sandbox` (case-insensitive) to allow an empty `QURL_CONNECTOR_IMAGE` to render the `ghcr.io/layervai/qurl-connector:latest` fallback in local or sandbox deployments. Leave unset in production; production should fail startup unless `QURL_CONNECTOR_IMAGE` is pinned. |
 | `QURL_SLACK_RATE_LIMIT_ENABLED` | No | Set `true` to enable the DDB-backed in-bot per-user gate for `/qurl get` and `/qurl aliases`. Empty or malformed values leave the gate off for sandbox/open-gate deployments. |
+| `QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED` | No | Set `true` only if Slack bot-token rotation is enabled for the app. When true, `tokens_revoked` bot-token callbacks are acknowledged but not treated as uninstall teardowns; `app_uninstalled` still purges workspace data. Empty preserves the current Marketplace cleanup behavior. Malformed values fail startup because silently choosing either mode can suppress cleanup or make routine token rotation destructive. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Secure Access Agent is busy` acks; tune down if memory pressure during retry storms is observed. |
 | `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_GATE_ASYNC` | No | Pool cap for the short **channel thread follow-up admission gate**: workspace-toggle read plus "is this already an agent thread?" transcript read. Empty/0 uses the built-in default (10). Each gate attempt has a 5s fail-closed budget; slow reads log as `agent: thread-continuity lookup failed; dropping channel reply`. During staged enablement, watch that line plus `agent: follow-up gate pool saturated — dropping channel reply`, and tune from observed DynamoDB latency and read volume. |
 | `QURL_SLACK_MAX_CONCURRENT_FOLLOWUP_ASYNC` | No | Pool cap for in-flight **admitted channel thread follow-up turns** — separate from `QURL_SLACK_MAX_CONCURRENT_ASYNC` so a busy channel's follow-up work can't saturate the main pool that `@mention`/DM/slash/interaction work shares. Empty/0 uses the built-in default (same as the main pool, 50). During staged enablement, watch `agent: follow-up turn pool saturated — dropping admitted channel reply`; main-pool isolation holds at any size. |
@@ -728,7 +751,10 @@ production manifest is intentionally managed outside this public repository.
 
 The `Slack install` group is required for low-friction customer onboarding.
 Without it, a deployment can still use a manually supplied `SLACK_BOT_TOKEN`
-fallback, but customers cannot self-install the Secure Access Agent.
+fallback, but customers cannot self-install the Secure Access Agent. That
+fallback token must include `users:read` for `/qurl-admin transfer-ownership`
+to verify target users; Enterprise Grid org-level fallback tokens are
+intentionally not used for ownership transfer.
 
 The `OAuth` group is required only to serve the
 `/oauth/qurl/{start,callback}` surface. Without it the Secure Access Agent still serves
@@ -743,10 +769,17 @@ For customer Slack installs, configure the Slack app with:
 - Customer install link: `https://<SLACK_BASE_URL host>/oauth/slack/install`
 - Slash command request URL: `https://<SLACK_BASE_URL host>/slack/commands`
 - Interactivity request URL: `https://<SLACK_BASE_URL host>/slack/interactions`
-- Bot scopes: `commands,chat:write,im:write` plus any extra scopes from
+- Bot scopes: `commands,chat:write,im:write,users:read` plus any extra scopes from
   `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
   `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
-  `dm:true` and qURL Connector bootstrap-key delivery)
+  `dm:true` and qURL Connector bootstrap-key delivery; `users:read` lets
+  `/qurl-admin transfer-ownership` verify the target user before owner_id changes)
+  - Existing installs created before `users:read` was required must re-run this
+    Slack install flow before `/qurl-admin transfer-ownership` can verify a
+    target user.
+  - Enterprise Grid org-level tokens are not enough for ownership transfer until
+    qurl-integrations#877 adds workspace-member verification or an in-product
+    recovery path.
   - Conversation-mode installs should include `reactions:write` so the agent can
     add and clear the working-on-it reaction on admitted channel turns and DM
     turns that still use the reaction fallback before assistant-pane status is

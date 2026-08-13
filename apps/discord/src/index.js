@@ -41,6 +41,7 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
@@ -204,14 +205,13 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-  // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). Require it only when that surface is live.
-  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
-    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
-    // rotating GitHub's client secret would invalidate all in-flight
-    // OAuth states and vice versa. A prod deploy must set this explicitly.
-    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+  // Presence + length-floor policy for the OAuth state-signing secrets
+  // lives in boot-requirements.js (invalidStateSecretValues) so it's
+  // unit-testable; this is just the log-and-exit plumbing, same
+  // pattern as the hot-standby value checks below.
+  const stateSecretProblems = invalidStateSecretValues(config);
+  if (stateSecretProblems.length > 0) {
+    stateSecretProblems.forEach(problem => logger.error(problem));
     process.exit(1);
   }
 }
