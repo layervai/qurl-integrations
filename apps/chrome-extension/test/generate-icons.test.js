@@ -16,6 +16,12 @@ const sharpModulePath = require.resolve('sharp');
 const EXPECTED_SIZES = [16, 48, 128];
 const EXPECTED_ICON_FILES = EXPECTED_SIZES.map(function (size) { return `icon${size}.png`; }).sort();
 
+// Derived, not hard-coded: this file is byte-identical in both extensions, so a literal app
+// directory is necessarily wrong in one of them — which is exactly what shipped, with the Edge
+// copy telling developers to run `npm run icons` in apps/chrome-extension. Deriving it also lets
+// the lockstep check compare these lines instead of masking them away (see CLAUDE.md).
+const APP_DIR = `apps/${path.basename(generateIcons.projectRoot)}`;
+
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
@@ -56,7 +62,7 @@ async function withTempDir(prefix, run) {
 
 // `sizes` alone would just restate the module's own constant. The coupling that can actually break
 // is with manifest.json, which declares the icon sizes twice: a size declared there but never
-// generated ships an icon path Chrome resolves to nothing and renders blank.
+// generated ships an icon path the browser resolves to nothing and renders blank.
 test('manifest icon declarations match the generated sizes', function () {
   assert.deepEqual(generateIcons.sizes, EXPECTED_SIZES);
 
@@ -153,7 +159,7 @@ test('committed icons match a fresh "npm run icons"', async function () {
       // Without this, a deleted icon fails as a bare ENOENT stack rather than the remediation below.
       assert.ok(
         fs.existsSync(committedPath),
-        `icons/icon${size}.png is missing. Fix: run \`npm run icons\` in apps/chrome-extension and commit the result.`
+        `icons/icon${size}.png is missing. Fix: run \`npm run icons\` in ${APP_DIR} and commit the result.`
       );
 
       const committed = fs.readFileSync(committedPath);
@@ -165,7 +171,7 @@ test('committed icons match a fresh "npm run icons"', async function () {
           `icons/icon${size}.png is stale: it does not match what "npm run icons" generates from icons/logo.png.\n` +
           `  committed: ${committed.length} bytes, sha256 ${sha256(committed)}\n` +
           `  generated: ${fresh.length} bytes, sha256 ${sha256(fresh)}\n` +
-          'Fix: run `npm run icons` in apps/chrome-extension and commit the result.\n' +
+          `Fix: run \`npm run icons\` in ${APP_DIR} and commit the result.\n` +
           'If you did not touch icons/logo.png, the encoder changed under you — most likely a sharp\n' +
           'upgrade, or a sharp built against a different libvips (musl/Alpine, or a global-libvips\n' +
           'build). Regenerating and committing is still the fix (see #1046).'
