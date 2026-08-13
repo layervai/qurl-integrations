@@ -100,9 +100,11 @@ const GATEWAY_INTENTS_BITFIELD = intents.reduce((acc, bit) => acc | bit, 0);
 // watch — and every reader checks for that.
 let guild = null;
 
-// Refresh the cached guild handle. Concurrent callers (boot init plus
-// the http-only periodic refresh) would otherwise issue overlapping
-// fetches; coalesce into a single in-flight refresh.
+// Refresh the cached guild handle. Today's two callers — the `ready`
+// handler below and initHttpOnly — are mutually exclusive by process
+// role, so nothing actually races; the in-flight coalescing is kept
+// because refreshCache is exported, and a future caller that overlaps
+// with boot init should get one fetch rather than two.
 //
 // Return shape: the function resolves to `undefined` regardless of
 // mode. In multi-tenant mode it short-circuits immediately (no work,
@@ -268,5 +270,12 @@ module.exports = {
   // level invocations above are the load-bearing assertions.
   assertIntent,
   assertNoIntent,
+  // Test-only today, and the http tier depends on it staying that way.
+  // `guild` is refreshed exactly once, at boot — http-only replicas run
+  // no periodic refresh because no request path reads this handle (see
+  // the module header in src/http-only-init.js). A request-time consumer
+  // added here would silently reintroduce the staleness window that
+  // refresh used to cover, so give it its own refresh path rather than
+  // reading the boot-time snapshot.
   getGuild: () => guild,
 };
