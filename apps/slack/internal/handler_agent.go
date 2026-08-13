@@ -848,6 +848,10 @@ func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
 // subtype, because an upload is a turn this surface answers (with the text-only
 // limitation) rather than ignores. Everything else — edits, joins, bot posts — is
 // system noise from here.
+//
+// Admitting the subtype is not admitting the message: a channel upload is dropped
+// a few lines later regardless of subtype (see shouldDispatchAgentEvent), so what
+// this whitelist unlocks for file_share is the @mention and DM surfaces.
 func agentAdmitsSubtype(subtype string) bool {
 	return subtype == "" || subtype == slackMessageSubtypeFileShare
 }
@@ -856,12 +860,14 @@ func agentAdmitsSubtype(subtype string) bool {
 // agent something: non-mention/DM events, bot and system/edited messages (the
 // self-loop guard), authorless events, top-level channel messages, and events
 // with neither text nor an attached file. File-only deliberate messages are
-// admitted so processAgentEventWithAdmission can explain the text-only boundary.
+// admitted on the @mention and DM surfaces so processAgentEventWithAdmission can
+// explain the text-only boundary; a channel message carrying an upload is dropped
+// instead, and the branch below is where that trade is argued.
 //
-// When channelFollowupsEnabled is true, a channel message that is a thread REPLY is
-// also admitted — so a follow-up in a thread the agent is already in continues the
-// conversation without a re-@mention. Slack's thread_broadcast subtype follows that
-// same path when a user also sends the thread reply to the channel.
+// When channelFollowupsEnabled is true, a channel message that is a TEXT thread
+// REPLY is also admitted — so a follow-up in a thread the agent is already in
+// continues the conversation without a re-@mention. Slack's thread_broadcast subtype
+// follows that same path when a user also sends the thread reply to the channel.
 // runAgentFollowupPipeline then confirms it's the agent's OWN thread (it has saved
 // history) before answering; a top-level channel message is never admitted, so we never
 // respond to un-addressed channel chatter.
@@ -915,29 +921,48 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			if !agentAdmitsSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
 				return false
 			}
+			// A channel message carrying an upload is dropped here, ahead of the gate,
+			// and not conditioned on the flag. The limitation reply answers turns that
+			// ADDRESS the agent; a file dropped into a channel mid-conversation is not
+			// one, and replying would make the bot interject on people talking to each
+			// other — the louder failure. (With follow-ups off the next check drops it
+			// anyway, so today this only moves which line says no.)
+			//
+			// Keeping that reply is what costs, because "did we join this thread?" IS
+			// the conversations.replies read (loadAgentThreadHistory). Answering an
+			// upload therefore means routing every thread upload through the gate: a
+			// followupGateSem slot and a Slack read before dedupe, for threads the agent
+			// never joined too, drivable by any member of any channel the bot is in with
+			// no @mention — and that pool's saturation path drops legitimate TEXT
+			// follow-ups. Skipping the gate and replying anyway is worse still: it turns
+			// that read into an outbound post in threads the agent was never part of.
+			//
+			// What is given up is narrower than it first looks. On THIS arm the reply
+			// could never create an agent thread — agentChannelFollowupDropped admits
+			// the event only where loadAgentThreadHistory already reported joined — it
+			// could only REFRESH one, since joined-ness is recomputed over a sliding
+			// agentHistoryWindow. So the reply kept a lapsing thread admissible; the
+			// shape that JOINS a thread is the @mention, which is unchanged and is now
+			// the only route to this reply in a channel. That makes the
+			// TODO(upstream-contract) on the app_mention arm load-bearing rather than
+			// redundant: its failure mode is silence.
+			//
+			// One collateral to name, since nothing else records it. agentEventHasUpload
+			// fails toward refusal on a files value it cannot decode, so a pure-TEXT
+			// follow-up carrying an unrecognized files shape is dropped here silently —
+			// where it used to draw claimMediaNotice's files_field_present=true /
+			// files_visible=0 log, the pair that comment designates as the "the agent
+			// refused my message" alert. The DM and @mention surfaces still raise it, so
+			// the signal survives; this surface stops contributing to it.
+			//
+			// Keyed on agentEventHasUpload, not the subtype: an upload whose files array
+			// arrives without file_share must not slip past into the gate.
+			if agentEventHasUpload(e) {
+				return false
+			}
 			// A channel message reaches the follow-up pipeline only when channel
 			// follow-ups are enabled AND it's a thread reply. The pipeline then checks
 			// whether this is already an agent thread, using store access.
-			//
-			// An upload is deliberately not special-cased here. With follow-ups off it
-			// is dropped like any other follow-up, which reads oddly against "never
-			// disappear silently" — but the limitation reply answers turns that ADDRESS
-			// the agent, and a file dropped into a channel mid-conversation is not one.
-			// Replying to it would make the bot interject on people talking to each
-			// other, which is the louder failure.
-			//
-			// Two costs come with admitting it rather than dropping it at this filter,
-			// both inert while AgentChannelFollowups is off:
-			//   - a thread upload now pays a followupGateSem slot and a
-			//     conversations.replies read before dedupe, even for threads the agent
-			//     never joined — and that pool's saturation path drops legitimate text
-			//     follow-ups. An upload can only ever produce the fixed limitation, so
-			//     it never needs history; short-circuiting it before the gate read is
-			//     the fix if that flag ships.
-			//   - answering an upload marks the thread as one the agent joined (see
-			//     loadAgentThreadHistory), so later replies there reach the model. That
-			//     mechanism predates uploads — help and the invalid-alias replies do it
-			//     too — but an upload is a new way to trigger it.
 			if !channelFollowupsEnabled || e.ThreadTS == "" {
 				return false
 			}
