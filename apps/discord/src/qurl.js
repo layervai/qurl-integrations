@@ -150,8 +150,8 @@ function isPrivateHost(host) {
     if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
     if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
   }
-  // IPv4-in-IPv6 embeddings — every one of these carries an IPv4 in the low 32
-  // bits, so each is another way to spell a private IPv4:
+  // IPv4-in-IPv6 embeddings — each carries an IPv4 in the low 32 bits, so each
+  // is another way to spell a private IPv4:
   //   ::ffff:X:Y     IPv4-mapped     (::ffff:0:0/96)
   //   ::X:Y          IPv4-compatible (::/96, deprecated by RFC 4291)
   //   ::ffff:0:X:Y   IPv4-translated (SIIT)
@@ -159,32 +159,28 @@ function isPrivateHost(host) {
   // DECODE the embedded IPv4 and re-check it rather than reasoning about which
   // notations the host stack happens to route: only the mapped form routes on a
   // stock host, but an IPv6-only subnet with DNS64/NAT64 (a supported AWS VPC
-  // config) makes 64:ff9b:: route for real, and that would flip the answer
-  // without this file changing. Decoding also means we do NOT over-block — a
-  // NAT64 address for a PUBLIC target (64:ff9b::808:808 = 8.8.8.8) stays
-  // allowed, which a blanket prefix reject would have broken.
+  // config) makes 64:ff9b:: route for real, which would flip the answer without
+  // this file changing.
   //
-  // BOTH spellings below are load-bearing — they serve different legs, so
-  // neither is dead code:
-  //   - dotted `::ffff:127.0.0.1` — what inet_ntop (hence dns.lookup) renders a
-  //     mapped address as, so it is what assertNotPrivateAfterResolve feeds back
-  //     in. Reachable from attacker-controlled DNS: an AAAA of
-  //     `::ffff:169.254.169.254` arrives here in this form. Do NOT drop this
-  //     branch as "no parser emits it" — the resolve leg does.
+  // The two SPELLINGS below each serve a different leg, so neither is dead code:
+  //   - dotted `::ffff:127.0.0.1` — what inet_ntop (hence dns.lookup) renders,
+  //     so it is what assertNotPrivateAfterResolve feeds back in; reachable from
+  //     attacker-controlled DNS via a hostile AAAA.
   //   - hex `::ffff:7f00:1` — what WHATWG re-serializes a dotted literal to, so
-  //     it is what `new URL(...).hostname` yields and therefore what the
-  //     URL-target guards receive. Matching dotted-only meant checking a form
-  //     that never arrives on that path, letting every private IPv4 through as
-  //     hex (#1035).
-  // Groups are {1,4} because a zero high byte serializes unpadded
-  // (`::ffff:0:1` = 0.0.0.1). Prefix alternatives are ordered longest-first so
-  // `::ffff:0:` wins over `::ffff:` over `::`.
+  //     it is what `new URL(...).hostname` yields. Matching dotted-only checked
+  //     a form that never arrives on that leg (#1035).
+  // Groups are {1,4} because IPv6 serialization suppresses each hextet's leading
+  // zeros (`::ffff:a00:1` = 10.0.0.1). Both ends are anchored, so an alternative
+  // leaving the wrong group count backtracks into the next — their order is
+  // immaterial. Requiring exactly two groups keeps every match an EXACT decode;
+  // a lone hextet (`::a`) can only denote 0.0.0.0/8 or 255.255.0.0/16, never a
+  // sensitive range, so leaving it unmatched is safe.
   const embeddedDotted = h.match(/^::(?:ffff:)?([0-9.]+)$/);
   if (embeddedDotted) return isPrivateHost(embeddedDotted[1]);
   const embeddedHex = h.match(/^(?:::ffff:0:|::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
   if (embeddedHex) {
     const [hi, lo] = embeddedHex.slice(1).map((g) => parseInt(g, 16));
-    return isPrivateHost([(hi >> 8) & 0xFF, hi & 0xFF, (lo >> 8) & 0xFF, lo & 0xFF].join('.'));
+    return isPrivateHost([(hi >>> 8) & 0xFF, hi & 0xFF, (lo >>> 8) & 0xFF, lo & 0xFF].join('.'));
   }
   // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
   // Node's URL does too. Convert to dotted-quad.

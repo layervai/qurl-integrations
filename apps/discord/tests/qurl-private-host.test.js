@@ -143,9 +143,9 @@ describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
     expect(isPrivateHost('::ffff:6440:1')).toBe(true);     // 100.64.0.1 CGNAT
   });
 
-  // A group whose high byte is zero serializes without padding, so the hex
-  // branch has to accept 1-4 digits per group rather than a fixed 4.
-  it('handles zero-compressed groups', () => {
+  // IPv6 serialization suppresses each hextet's LEADING ZEROS (RFC 5952 4.1),
+  // so the hex branch must accept 1-4 digits per group rather than a fixed 4.
+  it('handles hextets with suppressed leading zeros', () => {
     expect(new URL('https://[::ffff:0.0.0.1]').hostname).toBe('[::ffff:0:1]');
     expect(new URL('https://[::ffff:0.0.0.0]').hostname).toBe('[::ffff:0:0]');
     expect(isPrivateHost('::ffff:0:1')).toBe(true);        // 0.0.0.1, in 0.0.0.0/8
@@ -164,7 +164,8 @@ describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
   });
 
   // Pins the toLowerCase() at the top of isPrivateHost, which the [0-9a-f]
-  // class depends on. Without it this whole describe still passes.
+  // class depends on. Delete that call and every OTHER case in this describe
+  // still passes — only this one catches it.
   it('is case-insensitive on the hex groups', () => {
     expect(isPrivateHost('::FFFF:7F00:1')).toBe(true);      // 127.0.0.1
     expect(isPrivateHost('::FFFF:A9FE:A9FE')).toBe(true);   // 169.254.169.254
@@ -173,7 +174,7 @@ describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
   // The ranges are decided by the reconstructed octets, so a mis-masked byte in
   // a future rewrite would show up here first. Only ac10/6440 are exercised
   // above, and neither pins an edge.
-  it('respects the RFC1918 / CGNAT boundaries through the hex branch', () => {
+  it('respects the RFC1918 / CGNAT boundaries and full-width groups', () => {
     expect(isPrivateHost('::ffff:ac0f:ffff')).toBe(false);  // 172.15.255.255, below /12
     expect(isPrivateHost('::ffff:ac1f:ffff')).toBe(true);   // 172.31.255.255, top of /12
     expect(isPrivateHost('::ffff:ac20:1')).toBe(false);     // 172.32.0.1, above /12
@@ -212,7 +213,7 @@ describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
   });
 
   // The generalized prefix alternation must not swallow ordinary IPv6.
-  it('does NOT misread an ordinary IPv6 address as an embedding', () => {
+  it('leaves ordinary IPv6 alone — public stays public, ULA/link-local stays private', () => {
     expect(isPrivateHost('2001:db8::1')).toBe(false);
     expect(isPrivateHost('2606:4700:4700::1111')).toBe(false);  // public resolver
     expect(isPrivateHost('fd00::1')).toBe(true);                // still ULA
