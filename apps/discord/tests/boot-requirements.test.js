@@ -236,6 +236,18 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
+  it('redacts surgically — the host survives so the error stays diagnosable', () => {
+    // The absence assertions above would all pass if redaction returned ''.
+    // An operator needs to see WHICH value was wrong, so pin that everything
+    // except the credential is echoed intact, on the malformed path too.
+    const msg = baseUrlHttpsProblem(
+      cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://svc:hunter2@bot.example.com:port' }),
+      true,
+    );
+    expect(msg).toContain('Got: https://bot.example.com:port');
+    expect(msg).not.toMatch(/hunter2/);
+  });
+
   it('rejects qURL OAuth configured + local-only BASE_URL host literals', () => {
     for (const bad of [
       'https://localhost',

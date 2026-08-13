@@ -94,6 +94,11 @@ function isPrivateIPv4Literal(hostname) {
 // parser hands back IPv4-mapped addresses in hex (`::ffff:127.0.0.1`
 // serializes as `::ffff:7f00:1`), so the dotted form never survives to a
 // string compare and has to be mapped back to octets.
+// Deliberately common-forms-only, matching the cheap-literal scope of the
+// screen as a whole: the deprecated IPv4-COMPATIBLE form (`::127.0.0.1`,
+// which serializes to `::7f00:1`) and site-local `fec0::/10` both fall
+// through. Both address classes are dead in practice, `::1` covers realistic
+// loopback, and reachability is not knowable at boot anyway.
 function isLocalOnlyIPv6(host) {
   if (host === '::' || host === '::1') return true;
   const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
