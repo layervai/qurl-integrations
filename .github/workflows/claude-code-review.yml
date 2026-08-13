@@ -26,7 +26,20 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.base.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # GitHub cancels the whole job at this cap and a cancelled job carries no
+    # annotation, so a kill here still reads like an infra blip or a passing
+    # review. Treat this as the outer backstop only: the review is expected to
+    # run out of CLAUDE_REVIEW_BUDGET_MINUTES first, because a step-level kill
+    # fails one step and leaves the job alive to report why.
+    #
+    # PR #981 (5,000+ line diff, 35+ files) sat exactly on the previous 8-minute
+    # cap: run 31702806041 killed at 8m15s, its rerun killed at 8m16s, and the
+    # last run that finished (commit 9cc2e2ac) took 7m25s.
+    timeout-minutes: 15
+    env:
+      # Deliberately under the job cap. The remaining headroom covers checkout,
+      # origin preparation, and this job's own reporting and verification steps.
+      CLAUDE_REVIEW_BUDGET_MINUTES: 13
     permissions:
       contents: read
       pull-requests: write
@@ -127,11 +140,24 @@ jobs:
             echo "ready=true"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Start Claude review clock
+        id: review_clock
+        if: |
+          steps.checkout.outcome == 'success' &&
+          steps.review_origin.outputs.ready == 'true'
+        run: echo "started_at=$(date +%s)" >> "${GITHUB_OUTPUT}"
+
       - name: Run Claude Code Review
         id: claude-review
         if: |
           steps.checkout.outcome == 'success' &&
           steps.review_origin.outputs.ready == 'true'
+        # Bounding the review below the job cap is what makes an overrun
+        # reportable: the runner fails this step and continues the job instead
+        # of cancelling it. actions/runner#599 applies this to the whole
+        # composite action step; actions/runner#1979 (timeouts on steps *inside*
+        # a composite action) is a different, still-unsupported case.
+        timeout-minutes: ${{ fromJSON(env.CLAUDE_REVIEW_BUDGET_MINUTES) }}
         # v1.0.180 contains upstream #1496: a terminal SDK result with
         # `subtype: success` plus `is_error: true` fails instead of producing a
         # false-green review check.
@@ -179,6 +205,30 @@ jobs:
           # comment. It receives the repository token but not the Anthropic key.
           # Local, network, delegation, and GitHub file-write tools stay denied.
           claude_args: '--model claude-opus-4-8 --disallowed-tools "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file" --allowed-tools "mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_files,mcp__github__get_pull_request_review_comments,mcp__github__get_pull_request_reviews,mcp__github__get_pull_request_status,mcp__github__get_file_contents,mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__search_issues,mcp__github__search_pull_requests,mcp__github__list_issues,mcp__github__list_pull_requests,mcp__github__add_issue_comment"'
+
+      - name: Report exhausted Claude review budget
+        # The review step's own failure already fails the job, and the
+        # verification step below is skipped by its success() guard, so this
+        # runs only to name the cause. It exits 0 on purpose: a second red step
+        # would bury the annotation under a confusing double failure.
+        if: failure() && steps.claude-review.outcome == 'failure'
+        env:
+          BUDGET_MINUTES: ${{ env.CLAUDE_REVIEW_BUDGET_MINUTES }}
+          STARTED_AT: ${{ steps.review_clock.outputs.started_at }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${STARTED_AT}" =~ ^[0-9]+$ || ! "${BUDGET_MINUTES}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Claude review did not complete and its elapsed time could not be measured; read the review step log before trusting this check."
+            exit 0
+          fi
+
+          elapsed=$(( $(date +%s) - STARTED_AT ))
+          if (( elapsed >= BUDGET_MINUTES * 60 )); then
+            echo "::error::Claude review exceeded its ${BUDGET_MINUTES}-minute time budget after ${elapsed}s and was stopped before it published a review. This pull request has NOT been reviewed. Rerun the job, or split the pull request if the diff genuinely needs a longer budget."
+          else
+            echo "Claude review failed after ${elapsed}s, inside its ${BUDGET_MINUTES}-minute budget; see the review step log for the cause."
+          fi
 
       - name: Verify terminal Claude review
         if: success() && steps.claude-review.outcome == 'success'
