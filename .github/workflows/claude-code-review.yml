@@ -35,10 +35,23 @@ jobs:
     # CLAUDE_REVIEW_BUDGET_MINUTES, so it runs out first and fails a single step
     # rather than cancelling the job — a cancelled job runs nothing further and
     # so can never explain itself.
-    timeout-minutes: 15
+    #
+    # Nothing reports on the cancelled path, deliberately: `concurrency` above
+    # cancels superseded runs, so an `if: cancelled()` reporter would claim a
+    # missing review every time a new push replaces an in-flight one.
+    #
+    # The cap has to cover the budget plus everything around it, not just the
+    # review. Worst case is a review that finishes just inside its budget and
+    # then pays full price for verification: ~30s of setup, checkout and origin
+    # preparation (checkout's internal retry can add ~60s more), 780s of review,
+    # then a verify step whose two `timeout 30s` gh calls can burn ~62s. That
+    # reaches ~15.7m, so #1049's 15m cap could cancel the job mid-verify and
+    # restore the silent no-annotation failure this workflow now reports on.
+    timeout-minutes: 17
     env:
-      # Deliberately under the job cap. The remaining headroom covers checkout,
-      # origin preparation, and this job's own reporting and verification steps.
+      # Deliberately under the job cap, with enough headroom that the review
+      # step always loses the race first — that is what converts an overrun from
+      # a cancelled job into a failed step something can report on.
       CLAUDE_REVIEW_BUDGET_MINUTES: 13
     permissions:
       contents: read
@@ -135,17 +148,17 @@ jobs:
             echo "::error::Claude review fetch proof installed a Git credential."
             exit 1
           fi
+          # started_at rides in the same block as ready=true so a review that
+          # ran always has a clock. It must stay the last thing recorded here,
+          # and no step may be inserted before the review below: the report step
+          # reads the span from this point to the review's death as review time,
+          # so anything added in between is counted against the budget and turns
+          # an ordinary failure into a false timeout report.
           {
             echo "trusted_sha=${trusted_head}"
             echo "ready=true"
+            echo "started_at=$(date +%s)"
           } >> "${GITHUB_OUTPUT}"
-
-      - name: Start Claude review clock
-        id: review_clock
-        if: |
-          steps.checkout.outcome == 'success' &&
-          steps.review_origin.outputs.ready == 'true'
-        run: echo "started_at=$(date +%s)" >> "${GITHUB_OUTPUT}"
 
       - name: Run Claude Code Review
         id: claude-review
@@ -206,28 +219,40 @@ jobs:
           # Local, network, delegation, and GitHub file-write tools stay denied.
           claude_args: '--model claude-opus-4-8 --disallowed-tools "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file" --allowed-tools "mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_files,mcp__github__get_pull_request_review_comments,mcp__github__get_pull_request_reviews,mcp__github__get_pull_request_status,mcp__github__get_file_contents,mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__search_issues,mcp__github__search_pull_requests,mcp__github__list_issues,mcp__github__list_pull_requests,mcp__github__add_issue_comment"'
 
-      - name: Report exhausted Claude review budget
-        # The review step's own failure already fails the job, and the
-        # verification step below is skipped by its success() guard, so this
-        # runs only to name the cause. It exits 0 on purpose: a second red step
-        # would bury the annotation under a confusing double failure.
+      - name: Report unfinished Claude review
+        # Whichever way the review ended, the verification step below is skipped
+        # by its success() guard, so this step is the only thing that can say a
+        # review is missing. Every branch annotates: an ordinary failure leaves
+        # the pull request just as unreviewed as an overrun does, and a green
+        # step here beside a red review step would read as "budget was fine".
+        #
+        # Elapsed time is the only signal separating an overrun from an ordinary
+        # failure, since both surface as outcome == 'failure'. It decides the
+        # explanation, never whether the missing review is reported — so a
+        # misclassification costs a wrong cause, not a silent pass.
+        #
+        # Exits 0 on purpose: the review step's own failure already fails the
+        # job, and a second red step would bury the annotation.
         if: failure() && steps.claude-review.outcome == 'failure'
         env:
           BUDGET_MINUTES: ${{ env.CLAUDE_REVIEW_BUDGET_MINUTES }}
-          STARTED_AT: ${{ steps.review_clock.outputs.started_at }}
+          STARTED_AT: ${{ steps.review_origin.outputs.started_at }}
         run: |
           set -euo pipefail
 
+          # Both are expanded in an arithmetic context below, where unvalidated
+          # input would be evaluated as an expression rather than read as a
+          # number.
           if [[ ! "${STARTED_AT}" =~ ^[0-9]+$ || ! "${BUDGET_MINUTES}" =~ ^[0-9]+$ ]]; then
-            echo "::error::Claude review did not complete and its elapsed time could not be measured; read the review step log before trusting this check."
+            echo "::error title=Claude review did not finish::The review failed and its elapsed time could not be measured, so a timeout cannot be ruled out; do not treat this check as a completed review."
             exit 0
           fi
 
           elapsed=$(( $(date +%s) - STARTED_AT ))
           if (( elapsed >= BUDGET_MINUTES * 60 )); then
-            echo "::error::Claude review exceeded its ${BUDGET_MINUTES}-minute time budget after ${elapsed}s and was stopped before it published a review. This pull request has NOT been reviewed. Rerun the job, or split the pull request if the diff genuinely needs a longer budget."
+            echo "::error title=Claude review ran out of time::The review was stopped at its ${BUDGET_MINUTES}-minute budget after ${elapsed}s; do not treat this check as a completed review. Rerun the job; if it times out again, raise CLAUDE_REVIEW_BUDGET_MINUTES in this workflow."
           else
-            echo "Claude review failed after ${elapsed}s, inside its ${BUDGET_MINUTES}-minute budget; see the review step log for the cause."
+            echo "::error title=Claude review failed::The review failed after ${elapsed}s, inside its ${BUDGET_MINUTES}-minute budget, so this was not a timeout; do not treat this check as a completed review. See the Run Claude Code Review step log."
           fi
 
       - name: Verify terminal Claude review
