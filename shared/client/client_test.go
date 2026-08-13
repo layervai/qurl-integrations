@@ -1444,7 +1444,7 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 	}
 }
 
-func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
+func TestCreateAPIKeyConnectorEnrollmentToken(t *testing.T) {
 	var gotHeader string
 	var gotWire map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1456,24 +1456,25 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 			t.Fatalf("decode body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"key_id":      "key_abc123DEF456",
-			"api_key":     "lv_live_secret",
-			"name":        testTunnelSlug + " bootstrap",
-			"scopes":      []string{"qurl:agent", "qurl:write"},
-			"status":      StatusActive,
-			"key_type":    APIKeyTypeTunnelBootstrap,
-			"tunnel_slug": testTunnelSlug,
-			"expires_at":  "2026-05-28T00:00:00Z",
+			"key_id":     "key_abc123DEF456",
+			"api_key":    "lv_live_secret",
+			"name":       testTunnelSlug + " enrollment",
+			"scopes":     []string{"qurl:agent", "qurl:write"},
+			"status":     StatusActive,
+			"kind":       CredentialKindEnrollmentToken,
+			"target":     CredentialTargetConnector,
+			"claims":     []map[string]string{{"type": CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			"expires_at": "2026-05-28T00:00:00Z",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	got, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
-		Name:           testTunnelSlug + " bootstrap",
-		Scopes:         []string{"qurl:agent", "qurl:write"},
-		KeyType:        APIKeyTypeTunnelBootstrap,
-		TunnelSlug:     testTunnelSlug,
+		Name:           testTunnelSlug + " enrollment",
+		Kind:           CredentialKindEnrollmentToken,
+		Target:         CredentialTargetConnector,
+		Claims:         []CredentialClaim{{Type: CredentialClaimTypeConnector, ID: testTunnelSlug}},
 		ExpiresIn:      "24h",
 		IdempotencyKey: "bootstrap-key-12345678901234567890",
 	})
@@ -1483,17 +1484,98 @@ func TestCreateAPIKeyTunnelBootstrap(t *testing.T) {
 	if gotHeader != "bootstrap-key-12345678901234567890" {
 		t.Errorf("Idempotency-Key = %q", gotHeader)
 	}
-	if gotWire["key_type"] != APIKeyTypeTunnelBootstrap || gotWire["tunnel_slug"] != testTunnelSlug {
-		t.Errorf("body = %+v, want tunnel bootstrap fields", gotWire)
+	if gotWire["kind"] != CredentialKindEnrollmentToken || gotWire["target"] != CredentialTargetConnector {
+		t.Errorf("body = %+v, want connector enrollment fields", gotWire)
 	}
-	if _, ok := gotWire["purpose"]; ok {
-		t.Errorf("body contained deprecated purpose field: %+v", gotWire)
+	for _, legacy := range []string{"key_type", "tunnel_slug", "scopes", "purpose"} {
+		if _, ok := gotWire[legacy]; ok {
+			t.Errorf("body contained retired %s field: %+v", legacy, gotWire)
+		}
 	}
-	if got.APIKey != "lv_live_secret" || got.KeyType != APIKeyTypeTunnelBootstrap || got.TunnelSlug != testTunnelSlug {
+	// Type-check each step so a wrong-shaped body reports a readable failure
+	// rather than panicking the test binary on the assertion itself.
+	claims, ok := gotWire["claims"].([]any)
+	if !ok || len(claims) != 1 {
+		t.Fatalf("body claims = %v, want exactly one claim; body=%+v", gotWire["claims"], gotWire)
+	}
+	claim, ok := claims[0].(map[string]any)
+	if !ok {
+		t.Fatalf("body claims[0] = %v, want a JSON object; body=%+v", claims[0], gotWire)
+	}
+	if claim["type"] != CredentialClaimTypeConnector || claim["id"] != testTunnelSlug {
+		t.Errorf("body claim = %+v, want {type:%q, id:%q}", claim, CredentialClaimTypeConnector, testTunnelSlug)
+	}
+	if got.APIKey != "lv_live_secret" || got.Kind != CredentialKindEnrollmentToken || got.Target != CredentialTargetConnector || len(got.Claims) != 1 || got.Claims[0].ID != testTunnelSlug {
 		t.Errorf("decoded key = %+v", got)
 	}
 	if got.ExpiresAt == nil {
 		t.Fatal("ExpiresAt should decode")
+	}
+}
+
+// TestCreateAPIKeyMissingKindRejected pins the client-side fail-fast for the
+// kind-first contract: `kind` is required server-side, so a caller that omits
+// it would otherwise learn from an opaque 400. Asserts no HTTP request is
+// issued — the guard must run before the round-trip, not after it.
+func TestCreateAPIKeyMissingKindRejected(t *testing.T) {
+	t.Parallel()
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits++
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	// Table without t.Run: the shared hits counter below is only meaningful if
+	// every case has already run, and parallel subtests would race it.
+	for _, tc := range []struct {
+		name string
+		kind string
+	}{
+		{"empty", ""},
+		{"whitespace only", " \t "},
+	} {
+		_, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
+			Name: "connector enrollment",
+			Kind: tc.kind,
+		})
+		if !errors.Is(err, ErrCreateAPIKeyMissingKind) {
+			t.Errorf("%s kind: expected ErrCreateAPIKeyMissingKind, got %v", tc.name, err)
+		}
+	}
+	if hits != 0 {
+		t.Errorf("guard must fail before the round-trip; server saw %d requests", hits)
+	}
+}
+
+// TestCreateAPIKeyMissingKindBeatsInvalidIdempotencyKey pins the validation
+// order: kind presence (a structural error) is checked before the
+// idempotency-key bytes (a request-decoration error). Mirrors
+// TestCreateNoTargetBeatsInvalidIdempotencyKey on the qURL-create path.
+func TestCreateAPIKeyMissingKindBeatsInvalidIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateAPIKey(context.Background(), &CreateAPIKeyInput{
+		Name: "connector enrollment",
+		// No Kind AND a key with a control byte (would also fail
+		// validateIdempotencyKey). The kind check runs first.
+		IdempotencyKey: "bad\nkey",
+	})
+	if !errors.Is(err, ErrCreateAPIKeyMissingKind) {
+		t.Fatalf("expected ErrCreateAPIKeyMissingKind (kind beats idempotency), got %v", err)
+	}
+}
+
+// TestCreateAPIKeyNilInputBeatsMissingKind completes the guard-ordering set:
+// a nil input is reported as nil, not as a missing kind.
+func TestCreateAPIKeyNilInputBeatsMissingKind(t *testing.T) {
+	t.Parallel()
+
+	c := testClient("http://example.invalid", "test-key")
+	if _, err := c.CreateAPIKey(context.Background(), nil); !errors.Is(err, ErrCreateAPIKeyNilInput) {
+		t.Fatalf("expected ErrCreateAPIKeyNilInput, got %v", err)
 	}
 }
 
