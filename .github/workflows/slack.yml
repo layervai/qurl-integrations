@@ -170,8 +170,10 @@ jobs:
           fi
           # Resolve without pulling so an unpublished pin is distinguished from
           # a broken contract rather than surfacing as an opaque `docker run`
-          # exit 125.
-          if docker manifest inspect "$pins" >/dev/null 2>&1; then
+          # exit 125. imagetools (not `docker manifest`) matches how every other
+          # registry read in this repo and in qurl-connector resolves a ref, and
+          # it needs no experimental CLI flag.
+          if docker buildx imagetools inspect "$pins" >/dev/null 2>&1; then
             bash "$script"
           elif [ "$CONNECTOR_RELEASE_IMAGE_REQUIRED" = "true" ]; then
             echo "::error::pinned Connector release image $pins does not resolve and CONNECTOR_RELEASE_IMAGE_REQUIRED=true"
