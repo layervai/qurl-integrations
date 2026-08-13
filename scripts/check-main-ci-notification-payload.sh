@@ -45,6 +45,20 @@ STEP_NAME = "Post Slack notification"
 # Emitted by the `*)` arm of the workflow's impact case statement.
 FALLBACK_IMPACT_PREFIX = "Main CI failed before the repository reached"
 
+# Stand-in for the workflow_run context the step reads from its env: block.
+STUB = {
+    "SLACK_WEBHOOK_URL": "https://hooks.example.invalid/stub",
+    "REPOSITORY": "layervai/qurl-integrations",
+    "REPOSITORY_URL": "https://github.com/layervai/qurl-integrations",
+    "EVENT": "push",
+    "CONCLUSION": "failure",
+    "HEAD_SHA": "8d0bf8686e2904c3dcdef76a077c226070a52ea1",
+    "RUN_NUMBER": "3837",
+    "RUN_URL": "https://github.com/layervai/qurl-integrations/actions/runs/1",
+    "DEFAULT_BRANCH": "main",
+    "ACTOR": "octocat",
+}
+
 def die(msg):
     raise SystemExit("%s: %s" % (WORKFLOW, msg))
 
@@ -123,19 +137,10 @@ try:
 
     def run(env_overrides):
         env = dict(os.environ)
+        env.update(STUB)
         env.update({
             "PATH": bindir + os.pathsep + os.environ.get("PATH", ""),
             "PAYLOAD_OUT": out,
-            "SLACK_WEBHOOK_URL": "https://hooks.example.invalid/stub",
-            "REPOSITORY": "layervai/qurl-integrations",
-            "REPOSITORY_URL": "https://github.com/layervai/qurl-integrations",
-            "EVENT": "push",
-            "CONCLUSION": "failure",
-            "HEAD_SHA": "8d0bf8686e2904c3dcdef76a077c226070a52ea1",
-            "RUN_NUMBER": "3837",
-            "RUN_URL": "https://github.com/layervai/qurl-integrations/actions/runs/1",
-            "DEFAULT_BRANCH": "main",
-            "ACTOR": "octocat",
         })
         env.update(env_overrides)
         if os.path.exists(out):
@@ -146,32 +151,64 @@ try:
         return proc, (open(out).read() if os.path.exists(out) else None)
 
     # Every trigger, plus an unlisted name to prove the fallback arm works.
-    for workflow in triggers + ["Some Unlisted Workflow"]:
+    cases = [(w, {}) for w in triggers + ["Some Unlisted Workflow"]]
+    # Two branches unreachable by varying WORKFLOW_NAME alone: a scheduled run
+    # relabels the actor, and a missing actor must fall back rather than render
+    # an empty field.
+    cases.append((triggers[0], {"EVENT": "schedule"}))
+    cases.append((triggers[0], {"ACTOR": ""}))
+
+    for workflow, extra in cases:
         listed = workflow in triggers
-        proc, payload = run({"WORKFLOW_NAME": workflow})
+        env = {"WORKFLOW_NAME": workflow}
+        env.update(extra)
+        label = "%s%s" % (workflow, (" " + str(extra)) if extra else "")
+        proc, payload = run(env)
         if proc.returncode != 0:
-            die("step failed for %r (exit %d)\n%s"
-                % (workflow, proc.returncode, proc.stderr.strip()))
+            die("step failed for %s (exit %d)\n%s"
+                % (label, proc.returncode, proc.stderr.strip()))
         if payload is None:
-            die("step posted nothing for %r" % workflow)
+            die("step posted nothing for %s" % label)
         try:
             obj = json.loads(payload)
         except ValueError as exc:
-            die("invalid JSON payload for %r: %s" % (workflow, exc))
+            die("invalid JSON payload for %s: %s" % (label, exc))
 
         if set(obj) != {"text", "blocks"}:
-            die("payload keys changed for %r: %s" % (workflow, sorted(obj)))
+            die("payload keys changed for %s: %s" % (label, sorted(obj)))
         if len(obj["blocks"]) != 4:
-            die("expected 4 Slack blocks for %r, got %d"
-                % (workflow, len(obj["blocks"])))
-        if len(obj["blocks"][1]["fields"]) != 4:
-            die("expected 4 fields for %r" % workflow)
+            die("expected 4 Slack blocks for %s, got %d"
+                % (label, len(obj["blocks"])))
+        fields = obj["blocks"][1]["fields"]
+        if len(fields) != 4:
+            die("expected 4 fields for %s" % label)
+
+        # Compare each field in full. A substring probe is not enough: the
+        # repository slug also occurs inside the repository URL, so wiring the
+        # label to the wrong --arg still contains the expected text. Exact
+        # equality is the payload contract -- an intentional reword updates
+        # this list, and the mismatch message shows both sides.
+        ctx = dict(STUB)
+        ctx.update(extra)
+        actor = ("schedule" if ctx["EVENT"] == "schedule"
+                 else (ctx["ACTOR"] or "unknown"))
+        expected = [
+            "*Repository*\n<%s|%s>" % (ctx["REPOSITORY_URL"], ctx["REPOSITORY"]),
+            "*Commit*\n<%s/commit/%s|`%s`>"
+            % (ctx["REPOSITORY_URL"], ctx["HEAD_SHA"], ctx["HEAD_SHA"][:7]),
+            "*Triggered by*\n%s" % actor,
+            "*Run*\n<%s|#%s>" % (ctx["RUN_URL"], ctx["RUN_NUMBER"]),
+        ]
+        for i, want in enumerate(expected):
+            if fields[i]["text"] != want:
+                die("field %d rendered wrong for %s\n  expected: %r\n"
+                    "  actual:   %r" % (i, label, want, fields[i]["text"]))
+
         for block in obj["blocks"]:
             for text in ([block["text"]["text"]] if "text" in block else []) + \
                         [f["text"] for f in block.get("fields", [])]:
-                if "null" in text or text.strip() in ("", "*Impact*"):
-                    die("empty or null-rendered text for %r: %r"
-                        % (workflow, text))
+                if text.strip() in ("", "*Impact*"):
+                    die("empty text rendered for %s: %r" % (label, text))
 
         impact = obj["blocks"][2]["text"]["text"]
         generic = FALLBACK_IMPACT_PREFIX in impact
@@ -208,5 +245,6 @@ if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
     )
 
 print("main CI notification payload builds on %s for all %d triggers "
-      "(+ fallback); webhook guard fails loudly" % (version, len(triggers)))
+      "(+ fallback, schedule, missing actor); webhook guard fails loudly"
+      % (version, len(triggers)))
 EOF

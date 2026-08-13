@@ -124,7 +124,7 @@ check-discord:
 ## Full check (Go + repo checks, matching the Go CI path; app suites
 ## run via their own CI gates or make check-discord)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync check-notification-payload lint test-race
 
 ## Cleanup
 
