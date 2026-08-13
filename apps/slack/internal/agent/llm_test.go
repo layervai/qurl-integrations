@@ -72,7 +72,7 @@ func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 		SystemStable:  "RULES",
 		SystemPerTurn: "ctx",
 		Tools:         toolSpecs(),
-		Messages:      []Message{{Role: roleUser, Text: "hi"}},
+		Messages:      []Message{{Role: RoleUser, Text: "hi"}},
 	})
 	// Message-level breakpoint (auto-places on the last message block).
 	if cc, _ := json.Marshal(params.CacheControl); !strings.Contains(string(cc), "ephemeral") {
@@ -87,9 +87,9 @@ func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 func TestBuildParams_ToolChoiceMatchesTheRound(t *testing.T) {
 	l := &anthropicLLM{}
 	msgs := []Message{
-		{Role: roleUser, Text: "hi"},
-		{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "tu_1", Name: toolListResources}}},
-		{Role: roleUser, ToolResults: []ToolResult{{ToolUseID: "tu_1", Content: "none"}}},
+		{Role: RoleUser, Text: "hi"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "tu_1", Name: toolListResources}}},
+		{Role: RoleUser, ToolResults: []ToolResult{{ToolUseID: "tu_1", Content: "none"}}},
 	}
 
 	gathering := l.buildParams(&Request{Tools: toolSpecs(), Messages: msgs})
@@ -139,14 +139,14 @@ func TestSystemBlocks_ReassembleToSystemPrompt(t *testing.T) {
 // this translation, so it's verified here by marshaling to the wire shape.
 func TestToSDKMessages_PreservesToolUseAndResult(t *testing.T) {
 	history := []Message{
-		{Role: roleUser, Text: "what can I reach?"},
-		{Role: roleAssistant, Text: "Let me check.", ToolCalls: []ToolCall{
+		{Role: RoleUser, Text: "what can I reach?"},
+		{Role: RoleAssistant, Text: "Let me check.", ToolCalls: []ToolCall{
 			{ID: "tu_1", Name: toolListResources, Input: json.RawMessage(`{}`)},
 		}},
-		{Role: roleUser, ToolResults: []ToolResult{
+		{Role: RoleUser, ToolResults: []ToolResult{
 			{ToolUseID: "tu_1", Content: "staging-dash (r_1)", IsError: false},
 		}},
-		{Role: roleAssistant, Text: "You can reach staging-dash."},
+		{Role: RoleAssistant, Text: "You can reach staging-dash."},
 	}
 
 	params := toSDKMessages(history)
@@ -175,8 +175,8 @@ func TestToSDKMessages_SkipsEmptyAssistantTurn(t *testing.T) {
 	// An assistant message with neither text nor tool calls produces no blocks
 	// and must be skipped (the SDK rejects empty-content messages).
 	params := toSDKMessages([]Message{
-		{Role: roleAssistant},
-		{Role: roleUser, Text: "hi"},
+		{Role: RoleAssistant},
+		{Role: RoleUser, Text: "hi"},
 	})
 	if len(params) != 1 {
 		t.Fatalf("expected the empty assistant turn to be skipped, got %d messages", len(params))
@@ -194,14 +194,14 @@ func TestToSDKMessages_KeepsConsecutiveUserTurnsAfterProposal(t *testing.T) {
 	// Full cross-turn shape: turn 1 (user ask → assistant propose tool_use →
 	// persisted propose ack tool_result) followed by turn 2's prepended user text.
 	history := []Message{
-		{Role: roleUser, Text: "protect the staging connector"},
-		{Role: roleAssistant, ToolCalls: []ToolCall{
+		{Role: RoleUser, Text: "protect the staging connector"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
 			{ID: proposeID, Name: toolProposeProtectConnector, Input: json.RawMessage(`{}`)},
 		}},
-		{Role: roleUser, ToolResults: []ToolResult{
+		{Role: RoleUser, ToolResults: []ToolResult{
 			{ToolUseID: proposeID, Content: proposalAckResult},
 		}},
-		{Role: roleUser, Text: "actually, revoke it instead"},
+		{Role: RoleUser, Text: "actually, revoke it instead"},
 	}
 
 	params := toSDKMessages(history)

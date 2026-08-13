@@ -67,6 +67,7 @@ LOCKSTEP_FILES = [
     "test/background.test.js",
     "test/build-release.test.js",
     "test/bump-version.test.js",
+    "test/generate-icons.test.js",
     "test/gmail-compose.test.js",
     "test/i18n-coverage.test.js",
     "test/package-release.test.js",

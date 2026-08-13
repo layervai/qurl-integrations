@@ -131,6 +131,26 @@ async function callQurl(method, path, fn) {
 // `http://169.254.169.254/latest/meta-data/...` or similar; even if the
 // downstream qURL API is the one that actually fetches, we block at our
 // own input validation layer.
+//
+// OBSERVABILITY (this function stays pure — it never logs; the note lives here
+// because it governs every caller that acts on its verdict): both reject paths
+// that consume it — createOneTimeLink and assertNotPrivateAfterResolve — warn
+// the host that tripped it before throwing. Their caller-facing message is
+// deliberately identical for every private shape, so without the breadcrumb an
+// operator sees only THAT a target was blocked — not whether it was a real
+// IMDS/loopback attempt or a false positive, e.g. a public DNS name
+// misclassified by the fc/fd ULA prefix check (the class the "IPv6 ULA prefix
+// vs. public DNS" block in tests/qurl-private-host.test.js exists to guard).
+// That distinction is the whole triage question, so the host has to reach the
+// log. connector.js's detect guard consumes the same verdict and breadcrumbs it
+// separately, at its own call site.
+//
+// Logging the host verbatim is safe even though the target is user-supplied:
+// `new URL()` strips tab/CR/LF while parsing (`https://exa\nmple.com/x` yields
+// hostname `example.com`), so a caller cannot forge a log line through it, and
+// logger.js JSON-encodes meta on top of that. Length is bounded too — every
+// shape this function calls private is a short literal, and the oversized
+// numeric/octal forms throw at `new URL()` before they can reach a log.
 function isPrivateHost(host) {
   if (!host) return true;
   const h = host.toLowerCase();
@@ -253,6 +273,16 @@ async function assertNotPrivateAfterResolve(hostname) {
   }
   for (const { address } of addrs) {
     if (isPrivateHost(address)) {
+      // Name the resolved address as well as the host: on this leg the hostname
+      // alone doesn't explain the rejection (it looked public syntactically), so
+      // the address is the only thing that distinguishes a rebinding attempt
+      // from a name that legitimately points inside. dns.lookup() returns an
+      // inet_ntop-rendered IP string, so it is log-safe for the same reasons the
+      // hostname is (see isPrivateHost above).
+      logger.warn('Target URL rejected by SSRF guard (DNS resolved to a private address)', {
+        hostname,
+        address,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
   }
@@ -265,6 +295,22 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
       throw new Error('Only http/https URLs are allowed');
     }
     if (isPrivateHost(parsed.hostname)) {
+      // Distinct message from the DNS leg's so an operator can tell which of the
+      // two guards fired straight from the log line — a syntactic reject points
+      // at isPrivateHost's own classification, which is where the false
+      // positives live.
+      //
+      // WARN, deliberately, even though this leg is user-driven and a plain
+      // `http://localhost:3000` typo trips it: a typo and an SSRF probe are
+      // INDISTINGUISHABLE here, and telling them apart is the only reason this
+      // line exists — demoting it to info/debug would keep the signal off the
+      // dashboards that would surface the probe. Same posture (and same
+      // attacker-reachable, rate-limited shape) as the webhook verification
+      // failure warn in routes/qurl-webhook.js. Volume is bounded by Discord's
+      // command rate limits, and the payload is one short host.
+      logger.warn('Target URL rejected by SSRF guard (private host literal)', {
+        hostname: parsed.hostname,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
     await assertNotPrivateAfterResolve(parsed.hostname);
