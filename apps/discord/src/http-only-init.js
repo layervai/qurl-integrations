@@ -30,10 +30,15 @@
 // `client.once('ready')`, which never fires here because login() is
 // skipped, and the `getGuild()` export has no production consumers. A
 // timer would spend a REST call per interval refreshing a value no
-// request path reads. The single boot-time refreshCache() below earns
-// its keep on different grounds: it is fatal on failure, so it proves
-// the token, GUILD_ID, and Discord reachability before this replica is
-// allowed to serve traffic.
+// request path reads.
+//
+// What still proves this replica can reach Discord before it serves
+// traffic is the `client.user` seed below: `GET /users/@me` runs in
+// both modes and is fatal on failure, so it covers the token and
+// Discord reachability. The single boot-time refreshCache() adds the
+// single-guild half — that GUILD_ID actually resolves to a guild this
+// bot is in — which is why it, and not the reachability check, is the
+// part multi-tenant replicas skip.
 
 /**
  * Initialize a process running under `PROCESS_ROLE=http` so its
