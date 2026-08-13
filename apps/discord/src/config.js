@@ -101,7 +101,11 @@ function deriveInstanceIp() {
 }
 
 function normalizeBaseUrl(raw) {
-  const value = (raw || 'http://localhost:3000').trim();
+  // Trim BEFORE applying the default: `(raw || default).trim()` turns a
+  // whitespace-only env var into '', breaking the "BASE_URL is always
+  // truthy" invariant that boot-requirements.js relies on for its
+  // diagnostics.
+  const value = (raw ?? '').trim() || 'http://localhost:3000';
   try {
     const url = new URL(value);
     if (!url.username && !url.password && url.pathname === '/' && !url.search && !url.hash) {

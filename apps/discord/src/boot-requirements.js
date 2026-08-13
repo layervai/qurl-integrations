@@ -111,19 +111,51 @@ function isPrivateIPv4Literal(hostname) {
     return false;
   }
   const [a, b] = octets;
-  return a === 10
+  return a === 0 //                              0.0.0.0/8 "this network"
+    || a === 10
     || a === 127
     || (a === 169 && b === 254)
     || (a === 172 && b >= 16 && b <= 31)
     || (a === 192 && b === 168);
 }
 
+// The v6 half of the same cheap literal screen. Kept separate because the
+// parser hands back IPv4-mapped addresses in hex (`::ffff:127.0.0.1`
+// serializes as `::ffff:7f00:1`), so the dotted form never survives to a
+// string compare and has to be mapped back to octets.
+function isLocalOnlyIPv6(host) {
+  if (host === '::' || host === '::1') return true;
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (mapped) {
+    const [hi, lo] = mapped.slice(1).map(group => parseInt(group, 16));
+    return isPrivateIPv4Literal([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'));
+  }
+  const firstGroup = parseInt(host.split(':')[0], 16);
+  if (!Number.isInteger(firstGroup)) return false;
+  return (firstGroup & 0xfe00) === 0xfc00 //  fc00::/7  unique-local
+    || (firstGroup & 0xffc0) === 0xfe80; //   fe80::/10 link-local
+}
+
 function isLocalOnlyHost(hostname) {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  // Strip the brackets the parser keeps around an IPv6 literal, and the
+  // trailing dot of an absolute FQDN — `localhost.` resolves the same as
+  // `localhost`, so it must not slip past the name compares below.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   return host === 'localhost'
     || host.endsWith('.localhost')
-    || host === '::1'
-    || isPrivateIPv4Literal(host);
+    || isPrivateIPv4Literal(host)
+    || (host.includes(':') && isLocalOnlyIPv6(host));
+}
+
+// Textual userinfo strip, for values `new URL` can't parse into a
+// username/password (a malformed origin, or an opaque `scheme:host` form).
+// Those still carry the credential as raw text, so the parsed-only redaction
+// below would put it in the boot log verbatim. WHATWG treats the LAST `@`
+// before the path as the userinfo separator, so the greedy match is correct;
+// `[^/?#]*` keeps it inside the authority, leaving a later `/path@thing`
+// alone.
+function stripUserinfo(value) {
+  return value.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?)[^/?#]*@/, '$1');
 }
 
 function baseUrlForError(rawBaseUrl) {
@@ -135,9 +167,11 @@ function baseUrlForError(rawBaseUrl) {
       return parsed.href;
     }
   } catch {
-    // Preserve malformed values exactly; they cannot carry parsed userinfo.
+    // Fall through to the textual strip — a value that fails to parse can
+    // still be carrying `user:pass@`, and a hand-edited SSM param is exactly
+    // the input most likely to be both malformed and credential-bearing.
   }
-  return rawBaseUrl;
+  return stripUserinfo(rawBaseUrl);
 }
 
 function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {

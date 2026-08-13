@@ -168,6 +168,20 @@ describe('baseUrlHttpsProblem', () => {
     expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: HTTPS }), true)).toBeNull();
   });
 
+  it('accepts public origins that the local-only screen must not false-positive', () => {
+    // A 4-label FQDN is the shape most at risk from isPrivateIPv4Literal's
+    // dotted-quad parse, and 172.32 / public IPv6 sit just outside the
+    // private ranges the screen rejects.
+    for (const good of [
+      'https://bot.eu.example.com',
+      'https://bot.example.com:8443',
+      'https://172.32.0.1',
+      'https://[2001:db8::1]',
+    ]) {
+      expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: good }), true)).toBeNull();
+    }
+  });
+
   it('accepts an uppercase HTTPS:// scheme (URL scheme is case-insensitive)', () => {
     // The parse-based check normalizes the scheme, so a valid HTTPS:// origin
     // isn't falsely rejected at boot (the pre-#619 prefix check was case-sensitive).
@@ -182,7 +196,10 @@ describe('baseUrlHttpsProblem', () => {
     // pass a prefix check.
     const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://' }), true);
     expect(msg).not.toBeNull();
-    expect(msg).toContain('https://');
+    // Pin the OAuth-aware branch and the echoed value. A bare toContain('https://')
+    // would pass on either branch's static prose, so it could never fail.
+    expect(msg).toContain('public bare https:// origin');
+    expect(msg).toContain('Got: https://.');
   });
 
   it('rejects qURL OAuth configured + BASE_URL with path/query/fragment/userinfo', () => {
@@ -198,15 +215,25 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
-  it('redacts BASE_URL userinfo from boot errors', () => {
-    const msg = baseUrlHttpsProblem(
-      cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://user:pass@bot.example.com' }),
-      true,
-    );
-    expect(msg).not.toBeNull();
-    expect(msg).toContain('public bare https:// origin');
-    expect(msg).toContain('https://bot.example.com/');
-    expect(msg).not.toContain('user:pass');
+  it('redacts BASE_URL userinfo from boot errors — malformed values too', () => {
+    // A hand-edited SSM param is the input most likely to be BOTH malformed
+    // and credential-bearing, so the values new URL() cannot parse into a
+    // username/password matter more here than the well-formed one. A
+    // distinctive secret is used so the assertion can't pass on a partial
+    // leak (username alone, or a password that happens to share a substring
+    // with the static prose).
+    for (const bad of [
+      'https://svc:hunter2@bot.example.com', //      parses -> URL-level redaction
+      'https://svc:hunter2@bot.example.com:port', // invalid port -> parse throws
+      'https://svc:hunter2@', //                    host-less -> parse throws
+      'https://:hunter2@bot.example.com', //         password-only branch
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).not.toMatch(/hunter2/);
+      expect(msg).not.toMatch(/svc/);
+    }
   });
 
   it('rejects qURL OAuth configured + local-only BASE_URL host literals', () => {
@@ -217,7 +244,13 @@ describe('baseUrlHttpsProblem', () => {
       'https://10.0.3.4',
       'https://172.16.0.2',
       'https://192.168.1.20',
+      'https://169.254.169.254', // link-local / cloud instance metadata
+      'https://0.0.0.0', //         unspecified address
+      'https://localhost.', //      absolute-FQDN form of localhost
       'https://[::1]',
+      'https://[::ffff:127.0.0.1]', // IPv4-mapped loopback (serializes as ::ffff:7f00:1)
+      'https://[fd00::1]', //          unique-local, fc00::/7
+      'https://[fe80::1]', //          link-local, fe80::/10
     ]) {
       const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
       expect(msg).not.toBeNull();
