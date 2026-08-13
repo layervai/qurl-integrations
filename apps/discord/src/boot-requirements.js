@@ -182,6 +182,15 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
     // Malformed BASE_URL (incl. a host-less "https://") is not usable.
   }
   const usesHttps = parsed?.protocol === 'https:';
+  // TODO(upstream-contract): qurl-integrations-infra's `base_url` variable
+  // (qurl-bot-discord/terraform/variables.tf) validates
+  // `^https://[^[:space:]/]+(/[^/]+)*$`, which deliberately admits a path
+  // prefix — its own error text advertises "host + zero-or-more `/segment`
+  // parts". This rejects any path, so a plan-passing value like
+  // https://host/discord-bot would crash-loop the bot instead. The bot's
+  // shape is the correct one (server.js mounts the qURL OAuth router at the
+  // root, so a prefixed redirect_uri never matches); tighten the terraform
+  // side to the bare-origin regex it already uses for `qurl_endpoint`.
   const isBareOrigin = Boolean(
     parsed
       && parsed.host
