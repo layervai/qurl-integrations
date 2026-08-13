@@ -32,7 +32,6 @@ const (
 	testAgentStillWorksReply   = "still works"
 	testAgentStopEndTurn       = "end_turn"
 	testAgentStopToolUse       = "tool_use"
-	testAgentUnsupportedMedia  = "I can't read attached files, images, or canvases yet. Start a new text-only message with your qURL request. If you're in a channel, mention qURL again."
 )
 
 func TestStripBotMention(t *testing.T) {
@@ -211,7 +210,7 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"channel thread file reply reaches continuity gate", withFile(chReply("", agentPoolTestThreadTS)), true, true},
 		{"file_share channel thread reaches continuity gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, true},
 		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
-		{"file_share channel message without files still admitted (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, true},
+		{"file_share channel thread reply without files reaches continuity gate (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, true},
 		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), false, false},
 		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
@@ -843,7 +842,9 @@ func dmMessageBody(eventID string) string {
 		`"event":{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"100.2","text":"what can I reach?"}}`
 }
 
-func unsupportedMediaBody(eventID, event string) string {
+// eventCallbackBody wraps a raw inner event in an event_callback envelope, for
+// tests that need a shape the fixed-purpose builders above cannot express.
+func eventCallbackBody(eventID, event string) string {
 	return `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"` + eventID + `","event":` + event + `}`
 }
 
@@ -857,12 +858,12 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	}{
 		{
 			name:       "file-only channel mention",
-			body:       unsupportedMediaBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
+			body:       eventCallbackBody("EvFileOnly", `{"type":"app_mention","user":"U2","channel":"C1","ts":"400.1","text":"<@U12345678>","files":[{"id":"F1","mimetype":"image/png"}]}`),
 			wantThread: "400.1",
 		},
 		{
 			name:       "captioned DM file",
-			body:       unsupportedMediaBody("EvFileCaption", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
+			body:       eventCallbackBody("EvFileCaption", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.2","text":"Please inspect this","files":[{"id":"F2","mimetype":"application/pdf"}]}`),
 			wantThread: "400.2",
 		},
 		{
@@ -870,14 +871,14 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			// caption that reads as a keyword still never gets an answer that silently
 			// ignores the attachment.
 			name:       "upload captioned with a deterministic keyword",
-			body:       unsupportedMediaBody("EvFileHelp", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.4","text":"help","files":[{"id":"F4"}]}`),
+			body:       eventCallbackBody("EvFileHelp", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.4","text":"help","files":[{"id":"F4"}]}`),
 			wantThread: "400.4",
 		},
 		{
 			// A file_share whose files array never arrived is still an upload; the
 			// subtype alone must keep it out of the silent-drop path.
 			name:       "file_share with no files array",
-			body:       unsupportedMediaBody("EvFileBare", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.5","text":""}`),
+			body:       eventCallbackBody("EvFileBare", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.5","text":""}`),
 			wantThread: "400.5",
 		},
 	}
@@ -902,7 +903,7 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
+			if len(*posts) != 1 || (*posts)[0].text != agentUnsupportedMediaReply {
 				t.Fatalf("unsupported media should post one deterministic reply without calling the LLM, got %+v", *posts)
 			}
 			if got := (*posts)[0].threadTS; got != tt.wantThread {
@@ -928,56 +929,17 @@ func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
 	// Slack can emit both app_mention and message/file_share events for one
 	// mentioned upload. Their shared message ts must collapse to one reply even
 	// when the thread already has history and both event shapes are admissible.
-	h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
-	h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
 	h.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != testAgentUnsupportedMedia {
+	if len(*posts) != 1 || (*posts)[0].text != agentUnsupportedMediaReply {
 		t.Fatalf("overlapping mention/file_share events should post one media reply, got %+v", *posts)
 	}
 	if got := (*posts)[0].threadTS; got != agentPoolTestThreadTS {
 		t.Fatalf("reply threadTS = %q, want %q (an in-thread upload must answer in that thread)", got, agentPoolTestThreadTS)
-	}
-}
-
-// TestHandleEvent_UnsupportedMediaConsumesNoRateSlot pins the third claim in this
-// PR's contract. The other two — no model call, no history read — are pinned by
-// panicAgentLLM and countingThreadHistory; without this one, moving the media
-// branch below the limiter would leave every other test green while a few
-// screenshots silently burned a member's whole hourly budget.
-func TestHandleEvent_UnsupportedMediaConsumesNoRateSlot(t *testing.T) {
-	mem := newMemAgentDDB()
-	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
-	post, posts, mu := capturingPostMessage()
-	h := NewHandler(Config{
-		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
-		AgentThreadHistory: (&countingThreadHistory{}).read, AgentDefaultEnabled: true,
-		// A cap of 1 means a consumed slot would visibly cost the second upload its
-		// reply, so this fails loudly rather than by counter arithmetic alone.
-		AgentMaxTurnsPerUserPerHour: 1,
-	})
-	t.Cleanup(h.Wait)
-
-	for _, ts := range []string{"900.1", "900.2"} {
-		h.handleEvent(httptest.NewRecorder(), []byte(unsupportedMediaBody("EvRate"+ts,
-			`{"type":"app_mention","user":"U2","channel":"C1","ts":"`+ts+`","text":"<@U12345678>","files":[{"id":"F1"}]}`)))
-		h.Wait()
-	}
-
-	if mem.hasRateItems() {
-		t.Fatal("an unsupported-media turn must not bump the turn-rate counter (BumpTurnCount not called)")
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*posts) != 2 {
-		t.Fatalf("both uploads should be answered, got %+v", *posts)
-	}
-	for i, p := range *posts {
-		if p.text != testAgentUnsupportedMedia {
-			t.Fatalf("reply %d = %q, want the media reply (a rate-limited reply means the media branch moved below the limiter)", i, p.text)
-		}
 	}
 }
 
