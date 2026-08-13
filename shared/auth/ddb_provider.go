@@ -860,12 +860,12 @@ func (p *DDBProvider) SlackBotToken(ctx context.Context, workspaceID string) (st
 // configuredBy field is informational (the Slack user_id of the admin who
 // completed /oauth/qurl/callback) and is persisted plaintext. qurlAccountID is
 // the qURL account (Auth0 sub) that minted the key, stored for cross-account
-// --repoint detection; it is best-effort (the sandbox/no-verifier path has no
-// verified sub) so an empty value is tolerated and simply leaves any prior
-// provenance untouched rather than erasing it. UpdateItem is used instead of
-// PutItem so Slack app install metadata in the same row is preserved. The
-// apiKey value is stored exactly as minted by qurl-service; APIKey returns the
-// same plaintext without trimming.
+// --repoint detection; it is best-effort (the admin-storage-disabled path can
+// proceed without a usable sub) so an empty value is tolerated and simply
+// leaves any prior provenance untouched rather than erasing it. UpdateItem is
+// used instead of PutItem so Slack app install metadata in the same row is
+// preserved. The apiKey value is stored exactly as minted by qurl-service;
+// APIKey returns the same plaintext without trimming.
 func (p *DDBProvider) SetAPIKeyWithMetadata(ctx context.Context, workspaceID, apiKey, keyID, keyPrefix, qurlAccountID, configuredBy string) error {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
@@ -913,7 +913,7 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		":now_nano":   unixNanoAttr(now),
 	}
 	// Only write qurl_account_id when we have a verified qURL account. An empty
-	// value (sandbox / no-verifier path) is omitted so it never erases the
+	// value (admin-storage-disabled path) is omitted so it never erases the
 	// provenance a prior verified mint recorded.
 	if qurlAccountID = strings.TrimSpace(qurlAccountID); qurlAccountID != "" {
 		setParts = append(setParts, attrQURLAccountID+" = :account_id")

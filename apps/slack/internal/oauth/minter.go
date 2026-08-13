@@ -276,7 +276,8 @@ func (m *HTTPAPIKeyMinter) ValidateAPIKey(ctx context.Context, apiKey string) er
 // owner (pinned in qurl-service's APIKeyIdempotencyPKWithPurpose tests), so
 // another qURL principal cannot replay this workspace's plaintext.
 // qurl-service also assigns provider scopes server-side; Slack bindings are
-// pinned to the same qurl:read/qurl:write set requested by the legacy fallback.
+// pinned to the same qurl:read/qurl:write/qurl:agent set requested by the legacy
+// fallback.
 // After that replay window, the existing binding owns recovery: qurl-service
 // returns already_exists until the binding is rotated or revoked.
 func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken, teamID string) (WorkspaceAPIKeyMint, error) {
@@ -380,7 +381,7 @@ func bindingMintFromResponse(body []byte) (WorkspaceAPIKeyMint, error) {
 // It deliberately does not hit the external binding create endpoint: a healthy
 // existing binding owns first-setup replay and returns already_exists here.
 // qURL request authorization only checks the API key and scopes, so this
-// standalone qurl:read/write/resolve key is a valid workspace credential after
+// standalone qurl:read/write/agent key is a valid workspace credential after
 // Slack stores it.
 func (m *HTTPAPIKeyMinter) MintWorkspaceReplacementAPIKey(ctx context.Context, accessToken, teamID, oldKeyID string) (WorkspaceAPIKeyMint, error) {
 	teamID = strings.TrimSpace(teamID)

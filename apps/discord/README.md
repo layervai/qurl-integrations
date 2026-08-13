@@ -98,6 +98,8 @@ setup) means required to use that feature.
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
 | `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
 | `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect` qURLs |
+| `DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` | No | Comma-separated extra non-prod `QURL_ENDPOINT` hosts for `/qurl detect` (extends the built-in set below) |
+| `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES` | No | Comma-separated extra `qurl_site` suffixes granted for the hosts above; each entry must start with `.` |
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
@@ -112,6 +114,13 @@ non-prod suffix. Unknown endpoint hosts, including unlisted `.local` hosts, fail
 closed to production tunnel suffixes. If tunnel infra adds regional/sharded host
 labels or a path-based `qurl_site`, update the detect host-pin/path contract and
 tests before flipping `DETECT_COMMAND_ENABLED=true`.
+The built-in non-prod set above can be extended via
+`DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS` and `DETECT_EXTRA_NON_PROD_HOST_SUFFIXES`
+(comma-separated, trimmed, lowercased; suffixes must start with `.`) — e.g.
+`DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS=api.sandbox.example` paired with
+`DETECT_EXTRA_NON_PROD_HOST_SUFFIXES=.tunnel.sandbox.example` — so a private
+deploy can grant its own non-prod tunnel suffix without a code change to this
+public repo. A malformed suffix (missing the leading `.`) fails the bot at boot.
 The bot lists the detect resource by slug only and filters active resources
 client-side because the live API rejects combining `slug` and `status`; the SDK
 auto-paginator walks historical revoked rows for this single dark-launch slug.

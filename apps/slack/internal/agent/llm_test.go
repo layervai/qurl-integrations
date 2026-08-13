@@ -84,6 +84,41 @@ func TestBuildParams_SetsBothCacheBreakpoints(t *testing.T) {
 	}
 }
 
+func TestBuildParams_ToolChoiceMatchesTheRound(t *testing.T) {
+	l := &anthropicLLM{}
+	msgs := []Message{
+		{Role: roleUser, Text: "hi"},
+		{Role: roleAssistant, ToolCalls: []ToolCall{{ID: "tu_1", Name: toolListResources}}},
+		{Role: roleUser, ToolResults: []ToolResult{{ToolUseID: "tu_1", Content: "none"}}},
+	}
+
+	gathering := l.buildParams(&Request{Tools: toolSpecs(), Messages: msgs})
+	if gathering.ToolChoice.OfAuto == nil {
+		t.Fatal("a gathering round must send tool_choice: auto")
+	}
+	if !gathering.ToolChoice.OfAuto.DisableParallelToolUse.Value {
+		t.Fatal("parallel tool use must stay disabled: the loop assumes one call per round")
+	}
+
+	final := l.buildParams(&Request{Tools: toolSpecs(), Messages: msgs, TextOnly: true})
+	if final.ToolChoice.OfNone == nil {
+		t.Fatal("the final round must send tool_choice: none")
+	}
+	if final.ToolChoice.OfAuto != nil {
+		t.Fatal("tool_choice must be exactly one of auto/none")
+	}
+	// Load-bearing: the Messages API rejects a transcript containing
+	// tool_use/tool_result blocks when the request defines no tools, and by the time
+	// a turn finalizes the transcript virtually always contains them. `none` is what
+	// makes "no tool calls" expressible without dropping the definitions.
+	if len(final.Tools) != len(toolSpecs()) {
+		t.Fatalf("the final round must still define every tool, got %d", len(final.Tools))
+	}
+	if raw, _ := json.Marshal(final.ToolChoice); !strings.Contains(string(raw), `"none"`) {
+		t.Fatalf("tool_choice did not marshal as none: %s", raw)
+	}
+}
+
 // TestSystemBlocks_ReassembleToSystemPrompt locks the two-block split to the
 // single-string systemPrompt that the prompt-invariant tests assert on, so a
 // future edit can't make the cached blocks diverge from what those tests check.
