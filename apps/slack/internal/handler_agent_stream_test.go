@@ -38,6 +38,7 @@ type recordingStreamPort struct {
 	starts     []AgentStreamStart
 	appends    []string
 	stops      int
+	stopBlocks []any
 }
 
 func (r *recordingStreamPort) StartStream(_ context.Context, start *AgentStreamStart) (string, error) {
@@ -59,8 +60,9 @@ func (r *recordingStreamPort) AppendStream(_ context.Context, _, _, _, _, markdo
 	return nil
 }
 
-func (r *recordingStreamPort) StopStream(context.Context, string, string, string, string) error {
+func (r *recordingStreamPort) StopStream(_ context.Context, _, _, _, _ string, blocks []any) error {
 	r.stops++
+	r.stopBlocks = blocks
 	return nil
 }
 
@@ -94,6 +96,17 @@ func TestAgentStreamer_NoDeltas_NotHandled(t *testing.T) {
 	}
 	if port.startCalls != 0 || port.stops != 0 {
 		t.Fatalf("no stream should have opened, got start=%d stop=%d", port.startCalls, port.stops)
+	}
+}
+
+func TestAgentStreamer_NoNarrationProposalDoesNotOpenDisclaimerStream(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	if s.finalizeReply(&agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke}}) {
+		t.Fatal("a proposal must still be delivered by the caller")
+	}
+	if port.startCalls != 0 || port.stops != 0 || port.appended() != "" {
+		t.Fatalf("no-narration proposal must not open an orphan disclaimer stream: %+v", port)
 	}
 }
 
@@ -253,18 +266,19 @@ func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	}
 }
 
-func TestAgentStreamer_Proposal_StopsButCallerPostsCard(t *testing.T) {
+func TestAgentStreamer_ProposalNarrationGetsDisclaimerAndCallerPostsCard(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
-	s.onDelta("Sure — I'll revoke that token; confirm below.")
+	const narration = "Sure — I'll revoke that token; confirm below."
+	s.onDelta(narration)
 	if s.finalizeReply(&agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke}}) {
 		t.Fatal("a proposal must NOT be marked delivered — the caller still posts the confirm card")
 	}
 	if port.stops != 1 {
 		t.Fatalf("the narration stream must still be stopped, got stops=%d", port.stops)
 	}
-	if strings.Contains(port.appended(), agentLLMReplyDisclaimer) {
-		t.Fatalf("proposal narration must not receive the free-text reply disclaimer: %q", port.appended())
+	if got, want := port.appended(), agentLLMReplyWithDisclaimer(narration); got != want {
+		t.Fatalf("proposal narration and footer\n got: %q\nwant: %q", got, want)
 	}
 }
 
@@ -532,8 +546,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
 func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *testing.T) {
 	port := &recordingStreamPort{}
 	blocks := &blocksRecorder{}
+	const narration = "I can revoke that token; confirm below."
 	llm := &handlerStreamingLLM{responses: []agent.Response{{
-		Text:       "I can revoke that token; confirm below.",
+		Text:       narration,
 		ToolCalls:  []agent.ToolCall{{ID: "p1", Name: testAgentStreamProposeRevoke, Input: json.RawMessage(`{"token":"staging"}`)}},
 		StopReason: testAgentStreamToolUse,
 	}}}
@@ -545,6 +560,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *test
 
 	if port.startCalls != 1 || port.stops != 1 {
 		t.Fatalf("proposal narration should stream and stop once, got start=%d stop=%d", port.startCalls, port.stops)
+	}
+	if got, want := port.appended(), agentLLMReplyWithDisclaimer(narration); got != want {
+		t.Fatalf("proposal narration and footer\n got: %q\nwant: %q", got, want)
 	}
 	if len(blocks.calls) != 1 {
 		t.Fatalf("proposal must still post one confirm card, got %d", len(blocks.calls))
@@ -571,5 +589,35 @@ func TestProcessAgentEvent_ChannelMentionStreamingPartialErrorNoDoublePost(t *te
 	defer mu.Unlock()
 	if len(*posts) != 0 {
 		t.Fatalf("healthy partial stream owns the error outcome; got posted fallback %+v", *posts)
+	}
+}
+
+// A turn cut short after streaming narration from a round it then abandoned must
+// NOT reconcile by appending: the stream is append-only, so the abandoned fragment
+// and the real answer would run together into one garbled message. finalizeReply
+// takes the broken-stream fallback so the caller posts the complete answer as its
+// own message. Pairs with
+// agent.TestRun_AbandonedStreamedRoundKeepsTheFinalAnswerOffTheSink, which pins
+// the producing side.
+func TestAgentStreamer_DiscardedStreamTextFallsBackToAPostedReply(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	// Long enough to pass agentStreamFlushBytes, so the fragment has really reached
+	// Slack and cannot be retracted — the case the fallback exists for.
+	const abandoned = "Let me look that up for you across this channel's res"
+	s.onDelta(abandoned)
+
+	const reply = "I couldn't finish checking $docs in this channel."
+	if s.finalizeReply(&agent.Result{Reply: reply, Cutoff: agent.CutoffBudget, DiscardedStreamText: true}) {
+		t.Fatal("a turn that discarded streamed text must not claim the stream delivered the reply")
+	}
+	if port.stops != 1 {
+		t.Fatalf("the partial stream must still be stopped, got stop=%d", port.stops)
+	}
+	if got := port.appended(); strings.Contains(got, reply) {
+		t.Fatalf("the final answer must not be appended onto the abandoned fragment, got %q", got)
+	}
+	if got := port.appended(); got != abandoned {
+		t.Fatalf("only the already-delivered fragment should have reached Slack, got %q", got)
 	}
 }

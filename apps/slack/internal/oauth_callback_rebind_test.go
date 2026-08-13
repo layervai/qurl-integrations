@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,7 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 	// Only AdminStore needs the real slackdata.Store here; the API-key
 	// provider/minter are stubs so any call into them is caught by counters.
 	workspaceStore := &oauthRebindWorkspaceStore{}
+	stateStore := &oauthRebindStateStore{items: map[string]oauth.StoredState{}}
 	minter := &oauthRebindMinter{}
 	secret := []byte("01234567890123456789012345678901")
 	cfg := oauth.Config{
@@ -44,6 +46,7 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 		Auth0Audience:     "aud",
 		SlackBaseURL:      "https://slack.example.test",
 		OAuthStateSecret:  secret,
+		StateStore:        stateStore,
 		Provider:          workspaceStore,
 		IDTokenVerifier:   oauthRebindIDTokenVerifier{},
 		Minter:            minter,
@@ -53,9 +56,9 @@ func TestOAuthCallbackRefusesNonOwnerRebindWithRealWorkspaceStore(t *testing.T) 
 		Now:               func() time.Time { return now },
 	}
 
-	state, err := oauth.MintState(secret, oauthRebindTestTeamID, oauthRebindOtherUserID, now)
+	state, err := oauth.MintStoredStateWithEmailMode(context.Background(), stateStore, oauthRebindTestTeamID, oauthRebindOtherUserID, oauthRebindAdminEmail, oauth.SetupModeReuse, now)
 	if err != nil {
-		t.Fatalf("MintState: %v", err)
+		t.Fatalf("MintStoredStateWithEmailMode: %v", err)
 	}
 	oauthBasePath := oauthRebindOAuthBasePath(t)
 
@@ -200,12 +203,42 @@ func (m *oauthRebindMinter) APIKeyRevoked(context.Context, string, string) (bool
 
 type oauthRebindIDTokenVerifier struct{}
 
-func (oauthRebindIDTokenVerifier) VerifyEmail(context.Context, string) (string, error) {
-	return oauthRebindAdminEmail, nil
+func (oauthRebindIDTokenVerifier) VerifySetupClaims(context.Context, string, string) (oauth.IDTokenClaims, error) {
+	return oauth.IDTokenClaims{Email: oauthRebindAdminEmail, Sub: "auth0|issue-526"}, nil
 }
 
-func (oauthRebindIDTokenVerifier) VerifySub(context.Context, string) (string, error) {
-	return "auth0|issue-526", nil
+type oauthRebindStateStore struct {
+	items   map[string]oauth.StoredState
+	started map[string]bool
+}
+
+func (s *oauthRebindStateStore) PutState(_ context.Context, handle string, state oauth.StoredState) error { //nolint:gocritic // test fake mirrors the StateStore value signature.
+	if _, exists := s.items[handle]; exists {
+		return errors.New("duplicate OAuth state")
+	}
+	s.items[handle] = state
+	return nil
+}
+
+func (s *oauthRebindStateStore) StartState(_ context.Context, handle string, now time.Time) (oauth.VerifiedState, error) {
+	state, ok := s.items[handle]
+	if !ok || !now.Before(state.ExpiresAt) {
+		return oauth.VerifiedState{}, errors.New("OAuth state unavailable")
+	}
+	if s.started == nil {
+		s.started = map[string]bool{}
+	}
+	s.started[handle] = true
+	return state.VerifiedState, nil
+}
+
+func (s *oauthRebindStateStore) ConsumeState(_ context.Context, handle string, now time.Time) (oauth.VerifiedState, error) {
+	state, ok := s.items[handle]
+	if !ok || !s.started[handle] || !now.Before(state.ExpiresAt) {
+		return oauth.VerifiedState{}, errors.New("OAuth state unavailable")
+	}
+	delete(s.items, handle)
+	return state.VerifiedState, nil
 }
 
 type oauthRebindTokenTransport struct{}

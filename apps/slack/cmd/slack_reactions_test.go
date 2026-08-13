@@ -20,7 +20,11 @@ import (
 )
 
 // testBearerXoxb is the Authorization header for staticTokenLookup("xoxb-test").
-const testBearerXoxb = "Bearer xoxb-test"
+const (
+	testBearerXoxb    = "Bearer xoxb-test"
+	testTokenXoxbOrg  = "xoxb-org"
+	testBearerXoxbOrg = "Bearer " + testTokenXoxbOrg
+)
 
 type capturedReaction struct {
 	path, auth string
@@ -122,13 +126,13 @@ func TestSlackReactionPort_GridFallback(t *testing.T) {
 		if ownerID == "T1" {
 			return "", auth.ErrSlackBotTokenNotConfigured
 		}
-		return "xoxb-org", nil
+		return testTokenXoxbOrg, nil
 	}, srv.URL+"/add", srv.URL+"/remove")
 
 	if err := port.Add(context.Background(), "T1", "E1", "C1", "100.1", "eyes"); err != nil {
 		t.Fatalf("Add with Grid fallback: %v", err)
 	}
-	if len(*got) != 1 || (*got)[0].auth != "Bearer xoxb-org" {
+	if len(*got) != 1 || (*got)[0].auth != testBearerXoxbOrg {
 		t.Fatalf("fallback should post with the org-install token, got %+v", *got)
 	}
 }

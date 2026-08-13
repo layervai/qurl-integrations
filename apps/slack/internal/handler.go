@@ -28,9 +28,13 @@ import (
 const (
 	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
 	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. Run `/qurl setup <email>` to connect it."
-	// qurlContactURL is where users are pointed when a deployment can't serve a
-	// command itself (a feature isn't configured on this deployment). Replaces
-	// the dead-end "Contact the operator." tail so the user has a real next step.
+	// setupStateMintBudget combines with adminGateBudget on /qurl setup's
+	// synchronous path. 800ms + 1.5s leaves at least 700ms of Slack's 3s ack
+	// window for parsing, response encoding, and network overhead. The OAuth
+	// package retains its own broader 2s store ceiling for non-handler callers.
+	setupStateMintBudget = 1500 * time.Millisecond
+	// qurlContactURL is the public support path used by proactive help surfaces
+	// and by deployment-specific error fallbacks that need a real next step.
 	qurlContactURL = "https://layerv.ai/contact"
 )
 
@@ -84,6 +88,15 @@ func NewSlackRateLimitError(retryAfter string) error {
 
 // OpenViewFunc posts a Slack modal through `views.open`.
 type OpenViewFunc func(ctx context.Context, teamID, triggerID string, viewJSON []byte) error
+
+// SlackUserLookupFunc reports whether userID is an active Slack user visible to
+// the app token used for the team. Used by ownership transfer so a manually
+// pasted `<@U...>` shape cannot move owner_id to a malformed, deleted, bot, or
+// invisible account. The enterpriseID parameter is reserved for future
+// Enterprise Grid support; the production users.info adapter intentionally does
+// not fall back to an org token because that proves org visibility, not
+// workspace membership (qurl-integrations#877).
+type SlackUserLookupFunc func(ctx context.Context, teamID, enterpriseID, userID string) (bool, error)
 
 // PostFeedbackFunc delivers a `/qurl feedback` submission to the internal
 // feedback Slack channel by POSTing a Block Kit payload to a Slack incoming
@@ -337,9 +350,15 @@ type Config struct {
 	// AdminStore is the DDB-direct facade for workspace_mappings +
 	// channel_policies. When nil, the admin verbs short-circuit to a
 	// graceful "admin features are not configured" reply — fine for
-	// sandbox / no-DDB tests. Production wires one in cmd/main.go
+	// admin-storage-disabled tests. Production wires one in cmd/main.go
 	// from the QURL_*_TABLE env vars (see slackdata.NewStore).
 	AdminStore *slackdata.Store
+
+	// SlackUserLookup verifies an ownership-transfer target against Slack's
+	// users.info API before owner_id is rewritten. Nil keeps transfer
+	// fail-closed with a "not configured" reply; production wires it in
+	// cmd/main.go.
+	SlackUserLookup SlackUserLookupFunc
 
 	// OpenView posts a `views.open` Slack web API call to display a
 	// modal in response to a slash command. The token owner parameter is
@@ -398,9 +417,17 @@ type Config struct {
 	// factory. Nil disables conversation mode.
 	AgentLLM agent.LLM
 
-	// AgentStore persists per-thread conversation history and Slack event-id
-	// dedupe. Nil disables conversation mode.
+	// AgentStore persists metadata-only conversation state: Slack event dedupe,
+	// pending confirmations, pane context, rate counters, and audit entries. Slack
+	// message content is reconstructed from Slack in real time instead of stored.
+	// Nil disables conversation mode.
 	AgentStore *slackdata.AgentStore
+
+	// AgentThreadHistory reads the current Slack thread via conversations.replies.
+	// Nil keeps direct turns single-turn and channel follow-ups fail-closed, which is
+	// useful in tests; production wires this so conversation continuity remains
+	// zero-copy.
+	AgentThreadHistory AgentThreadHistoryFunc
 
 	// PostMessage posts a chat.postMessage reply (threaded on threadTS) using
 	// the per-workspace bot token, the same token seam as OpenView/PostDM.
@@ -636,7 +663,7 @@ type AgentStreamStart struct {
 type AgentStreamPort interface {
 	StartStream(ctx context.Context, start *AgentStreamStart) (streamTS string, err error)
 	AppendStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS, markdownText string) error
-	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string) error
+	StopStream(ctx context.Context, teamID, enterpriseID, channelID, streamTS string, blocks []any) error
 }
 
 // ResolveChannelNameFunc resolves a channel id to its human name via
@@ -659,6 +686,22 @@ type ConversationInfo struct {
 // resolution). It returns an error on a missing scope, unknown conversation, or
 // transport/decode failure; callers choose whether that is best-effort or fail-closed.
 type ResolveConversationInfoFunc func(ctx context.Context, teamID, enterpriseID, channelID string) (ConversationInfo, error)
+
+// AgentThreadMessage is the narrow Slack message slice needed to rebuild model
+// context in memory. AppID and UserID identify this app's own replies; BotID lets
+// the handler reject messages from other bots.
+type AgentThreadMessage struct {
+	AppID  string
+	BotID  string
+	UserID string
+	Text   string
+	TS     string
+}
+
+// AgentThreadHistoryFunc retrieves a thread from Slack in real time. oldestTS
+// bounds the request to the same recent-context window the agent previously used;
+// implementations must return messages oldest-first.
+type AgentThreadHistoryFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]AgentThreadMessage, error)
 
 // ChannelMembershipFunc reports whether userID is a member of channelID via
 // conversations.members on the per-workspace bot token (enterpriseID for Grid token
@@ -816,7 +859,7 @@ func (h *Handler) SetAliasStore(store AliasStore) {
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
 // /qurl setup slash command. Must be called exactly once, before
-// srv.Serve. Empty/short secret or empty base URL is a no-op
+// srv.Serve. An empty base URL or nil state store is a no-op
 // (/qurl setup will reply that OAuth is not configured). A second call
 // panics — the field is read without synchronization on the request
 // hot path, and the only safe write window is before any goroutine can
@@ -825,18 +868,9 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	if h.oauthSetup != nil {
 		panic("SetOAuthSetup called twice — must be called once before Serve")
 	}
-	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
+	if cfg.SlackBaseURL == "" || cfg.StateStore == nil {
 		return
 	}
-	if len(cfg.StateSecret) < oauth.StateMinSecret {
-		// Fail-fast at startup: MintState would reject this later, but
-		// the operator-facing failure is more discoverable here.
-		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
-	}
-	// Defensive copy: the field is read on the request hot path without
-	// a lock. A caller mutating the original byte slice would silently
-	// poison every subsequent MintState call.
-	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
 }
 
@@ -1169,25 +1203,29 @@ const (
 	adminVerbProtectURL       = "protect-url"
 	// adminVerbAgent is `/qurl-admin agent on|off` — the per-workspace
 	// conversation-mode toggle (bare `agent` shows the current state).
-	adminVerbAgent = "agent"
+	adminVerbAgent             = "agent"
+	adminVerbAdd               = "add"
+	adminVerbRemove            = "remove"
+	adminVerbAdmins            = "admins"
+	adminVerbTransferOwnership = "transfer-ownership"
 )
 
 // Used to redirect a user who typed an admin verb on `/qurl` and to
 // classify the wrong-surface case. `set-alias`/`unset-alias` carry both
 // spellings because slashVerb accepts the dash-free historical form too.
-// `add`/`remove`/`admins`/`revoke` are the flat membership + revoke verbs;
+// `add`/`remove`/`admins`/`transfer-ownership`/`revoke` are the flat admin verbs;
 // `admin` is retained only so the deprecated `admin <verb>` prefix still
 // classifies here (it gets a redirect in dispatchAdminCommand). `setup` is
 // deliberately NOT here — it lives on `/qurl` (see handleSetup) so the first
 // claimant of an unbound workspace can reach it.
 //
-// Adding an admin verb touches three places that must stay in sync: this
-// list (wrong-surface classification), a dispatch case in
+// Adding an admin verb touches four places that must stay in sync: this
+// list (wrong-surface classification), Parse, a dispatch case in
 // dispatchAdminCommand, and — if it's user-facing — adminHelpMessage.
 //
 // Immutable: read-only on the request hot path (slashVerb ranges it); a
 // var only because Go has no const slice. Do not mutate at runtime.
-var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", "add", "remove", "admins", "revoke"}
+var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtectConnector, adminVerbProtectURL, adminVerbAgent, "set-alias", string(SubcmdSetAlias), "unset-alias", string(SubcmdUnsetAlias), "set-display-name", "unset-display-name", adminVerbAdd, adminVerbRemove, adminVerbAdmins, adminVerbTransferOwnership, string(SubcmdRevoke)}
 
 // userVerbs are the leading verb words that belong to `/qurl`. Used to
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
@@ -1440,12 +1478,13 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 
 // dispatchAdminCommand routes the admin-facing `/qurl-admin` verbs:
 // tunnel install, set-alias, unset-alias, set-display-name,
-// unset-display-name, the flat membership verbs add/remove/admins, revoke,
+// unset-display-name, the flat membership/ownership verbs
+// add/remove/admins/transfer-ownership, revoke,
 // and help. User verbs typed on `/qurl-admin` — including `setup`, which is a
 // `/qurl` verb (first-come-claims; see handleSetup) — get a redirect to
 // `/qurl` so a user who fat-fingers the command gets a direct correction.
 //
-// The membership verbs are flat (`/qurl-admin add @user`, not `admin add`):
+// The membership/ownership verbs are flat (`/qurl-admin add @user`, not `admin add`):
 // the whole command is already admin-scoped, so the `admin` sub-word was
 // redundant. Listing admins is `admins` (a plural noun) rather than `list` so
 // it doesn't collide with `/qurl list` (which lists resources). The legacy
@@ -1473,9 +1512,9 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// per-link kill. Runs async (multi-hop resolve+delete); see
 		// handleRevoke.
 		h.handleRevoke(w, values)
-	case slashSubcommand(text, "add"), slashSubcommand(text, "remove"), slashSubcommand(text, "admins"):
-		// Flat bot-admin membership verbs. handleAdmin parses the flat form
-		// (Parse maps add/remove/admins → SubcmdAdmin + AdminAction) and gates
+	case slashSubcommand(text, adminVerbAdd), slashSubcommand(text, adminVerbRemove), slashSubcommand(text, adminVerbAdmins), slashSubcommand(text, adminVerbTransferOwnership):
+		// Flat bot-admin membership/ownership verbs. handleAdmin parses the flat form
+		// (Parse maps add/remove/admins/transfer-ownership → SubcmdAdmin + AdminAction) and gates
 		// each in its own handler (requireAdminSync). Bare `add`/`remove`
 		// surface ErrMissingUserMention; `admins` takes no args.
 		h.handleAdmin(w, values)
@@ -1483,7 +1522,7 @@ func (h *Handler) dispatchAdminCommand(w http.ResponseWriter, command, text stri
 		// Deprecated `admin <verb>` prefix — the word is redundant on an
 		// already-admin command. Redirect to the flat verbs rather than
 		// silently accepting it, so muscle-memory users learn the new grammar.
-		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
+		respondSlack(w, fmt.Sprintf("The `admin` prefix isn't needed anymore — use `%[1]s add @user`, `%[1]s remove @user`, `%[1]s transfer-ownership @user`, `%[1]s admins`, or `%[1]s revoke $<id>` directly.", command))
 	// protect-connector / protect-url precede the bare `protect` chooser. slashVerb
 	// matches an exact token or a `verb ` (space) prefix, so `protect` can't
 	// shadow the hyphenated verbs regardless of order; the adjacency is for
@@ -1650,7 +1689,7 @@ func setupModeAction(mode oauth.SetupMode) string {
 // non-owners don't get a setup URL minted in their name at all (cleaner
 // audit, no half-completed OAuth flows).
 //
-// AdminStore=nil (sandbox / no-DDB) permits first-time setup but rejects
+// AdminStore=nil (admin storage disabled) permits first-time setup but rejects
 // explicit rotation because rotation must prove the caller is the workspace
 // owner before revoking a stored key. That is a separate short-circuit from
 // the oauthSetup==nil check below, which is the branch that returns "qURL
@@ -1672,7 +1711,7 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		return
 	}
 	// Owner gate. AdminStore==nil only reaches here for first-time/reuse setup
-	// (sandbox/no-DDB); explicit rotation/repoint was rejected above because it
+	// (admin storage disabled); explicit rotation/repoint was rejected above because it
 	// cannot skip the owner check. Otherwise check whether the workspace has an owner
 	// and whether it's the invoking user. CheckAdmin returns (isAdmin, ownerID,
 	// err); we only consume ownerID here — the admin-set membership
@@ -1723,10 +1762,10 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 			// into a `<@%s>` mention. BindWorkspace writes owner_id
 			// from the OAuth callback (a different code path than the
 			// parser), and a pre-pivot row holds an Auth0 sub, not a
-			// Slack ID. Mirrors the looksLikeSlackUserID guard in
-			// handleAdminList so a malformed value can't break out of
+			// Slack ID. Use slackdata.LooksLikeSlackUserID, the same
+			// shape guard as admin renders, so a malformed value can't break out of
 			// the mention surface.
-			if looksLikeSlackUserID(ownerID) {
+			if slackdata.LooksLikeSlackUserID(ownerID) {
 				slog.Warn("/qurl setup: rebind refused at slash-command gate — caller is not the workspace owner", "team_id", teamID, "caller_user_id", userID, "owner_user_id", ownerID)
 				respondSlack(w, fmt.Sprintf("`/qurl setup <email>` can only be re-run by the person who first connected qURL to this workspace (<@%s>). This stops anyone else from re-pointing it at a different qURL account, so ask them to re-run it. For admin tasks that don't need re-connecting, use the `/qurl-admin` commands.", ownerID))
 				return
@@ -1752,9 +1791,9 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 	// request shield: the owner gate above still runs first so refused setup
 	// attempts do not consume quota. That means repeat non-owner attempts can
 	// still spend the owner-gate read; avoiding that would need a separate
-	// request shield above this gate. The quota is consumed before MintState so
-	// repeated local mint failures still get throttled instead of retrying
-	// without bound.
+	// request shield above this gate. The quota is consumed before state storage
+	// so repeated local failures still get throttled instead of retrying without
+	// bound.
 	now := h.now()
 	if ok, retry := h.setupLinkRateLimiter.allow(teamID, userID, now); !ok {
 		slog.Info("/qurl setup: setup-link mint rate limited", "team_id", teamID, "caller_user_id", userID, "retry_after", retry.String())
@@ -1765,9 +1804,11 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 		respondSlack(w, fmt.Sprintf(":warning: You have generated several qURL setup links recently. Wait %s, then run %s again.", humanizeRetry(retry), retryCommand))
 		return
 	}
-	state, err := oauth.MintStateWithEmailMode(h.oauthSetup.StateSecret, teamID, userID, setupCmd.email, setupCmd.mode, now)
+	mintCtx, mintCancel := context.WithTimeout(h.baseCtx, setupStateMintBudget)
+	defer mintCancel()
+	state, err := oauth.MintStoredStateWithEmailMode(mintCtx, h.oauthSetup.StateStore, teamID, userID, setupCmd.email, setupCmd.mode, now)
 	if err != nil {
-		slog.Error("/qurl setup: MintStateWithEmailMode failed", "error", err)
+		slog.Error("/qurl setup: mint OAuth state failed", "error", err)
 		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
 		return
 	}
@@ -2156,7 +2197,7 @@ func (h *Handler) requireUninstallAdminOrOwner(w http.ResponseWriter, teamID, us
 		// from this recoverable local disconnect; log it for operator cleanup.
 		if ownerID == "" {
 			slog.Warn("/qurl uninstall: admin allowed with missing owner_id", "team_id", teamID, "caller_user_id", userID)
-		} else if !looksLikeSlackUserID(ownerID) {
+		} else if !slackdata.LooksLikeSlackUserID(ownerID) {
 			slog.Warn("/qurl uninstall: admin allowed with shape-bad owner_id", "team_id", teamID, "caller_user_id", userID, "owner_id_len", len(ownerID))
 		}
 		return true
@@ -2231,7 +2272,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	// setup is a user verb (first-come-claims), so it leads the user
 	// surface. The owner semantics only exist when AdminStore is wired; on
-	// the sandbox/no-DDB path the owner gate in handleSetup is skipped and
+	// the admin-storage-disabled path the owner gate in handleSetup is skipped and
 	// the OAuth callback still owns key reuse/replacement. Append the owner
 	// parenthetical only there so the help text matches the deployment's
 	// actual behavior.
@@ -2286,7 +2327,7 @@ func (h *Handler) userHelpMessage(command string) string {
 	}
 	if h.cfg.PostFeedback != nil {
 		// feedback needs no AdminStore/setup — only the PostFeedback seam —
-		// so it gates on that alone and shows even on no-DDB deploys.
+		// so it gates on that alone and shows even when admin storage is disabled.
 		lines = append(lines,
 			"• `/qurl feedback` — Send a bug report or feature request to the qURL team",
 		)
@@ -2412,6 +2453,7 @@ func (h *Handler) adminHelpMessage(command string) string {
 		lines = append(lines,
 			"• `/qurl-admin add @user` — Promote a Slack user to admin",
 			"• `/qurl-admin remove @user` — Demote a Slack user from admin",
+			"• `/qurl-admin transfer-ownership @user` — Owner-only: hand off who may reconnect qURL for this workspace",
 			"• `/qurl-admin admins` — List who connected qURL (the owner) and the current admins",
 		)
 		appendSectionHeader("*Conversation mode*")
