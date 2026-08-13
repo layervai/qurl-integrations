@@ -25,24 +25,10 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
-  // This suite exercises every slash command (both /qurl and the OpenNHP
-  // ones). registerCommands + handleCommand filter to the customer-safe
-  // allowlist unless config.isOpenNHPActive is true — set it here to
-  // keep the full-command coverage. The flag=false dispatch-filter
-  // behavior is covered in multi-tenant.test.js.
-  ENABLE_OPENNHP_FEATURES: true,
-  isOpenNHPActive: true,
-  STAR_MILESTONES: [10, 25, 50, 100],
-  CONTRIBUTOR_ROLE_NAME: 'Contributor',
-  ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
-  CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
-  CHAMPION_ROLE_NAME: 'Champion',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -206,11 +192,6 @@ jest.mock('../src/discord', () => ({
   sendDM: mockSendDM,
 }));
 
-jest.mock('../src/utils/admin', () => ({
-  requireAdmin: jest.fn(async () => true),
-  isAdmin: jest.fn(() => true),
-}));
-
 const mockUploadToConnector = jest.fn();
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
@@ -292,7 +273,6 @@ const {
   sendCooldowns, handleAddRecipients,
 } = _test;
 
-const { requireAdmin } = require('../src/utils/admin');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -346,6 +326,21 @@ beforeEach(() => {
   jest.clearAllMocks();
   embedInstances.length = 0;
   sendCooldowns.clear();
+});
+
+// handleCommand's error/audit branches need a command whose execute()
+// can be made to throw on demand. /qurl is the only command the bot
+// ships, so its executor is swapped for the duration of a test rather
+// than reaching through to a real subcommand handler. Restored in
+// afterEach so a throwing stub can't leak into the /qurl suites below.
+const qurlCommand = commands.find(c => c.data.name === 'qurl');
+const realQurlExecute = qurlCommand.execute;
+function stubQurlExecute(impl) {
+  qurlCommand.execute = jest.fn(impl);
+  return qurlCommand.execute;
+}
+afterEach(() => {
+  qurlCommand.execute = realQurlExecute;
 });
 
 describe('commands module exports', () => {
@@ -415,9 +410,8 @@ describe('handleCommand', () => {
   });
 
   it('handles errors gracefully when command throws and not deferred', async () => {
-    // Find the stats command and make it throw
-    const interaction = makeInteraction({ commandName: 'stats' });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+    stubQurlExecute(() => { throw new Error('db crash'); });
+    const interaction = makeInteraction({ commandName: 'qurl' });
 
     await handleCommand(interaction);
 
@@ -427,11 +421,11 @@ describe('handleCommand', () => {
   });
 
   it('uses followUp when reply already sent', async () => {
+    stubQurlExecute(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
-      commandName: 'stats',
+      commandName: 'qurl',
       replied: true,
     });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
 
     await handleCommand(interaction);
 
@@ -441,11 +435,11 @@ describe('handleCommand', () => {
   });
 
   it('uses followUp when deferred', async () => {
+    stubQurlExecute(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
-      commandName: 'stats',
+      commandName: 'qurl',
       deferred: true,
     });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
 
     await handleCommand(interaction);
 
@@ -453,11 +447,11 @@ describe('handleCommand', () => {
   });
 
   it('handles reply failure in error handler', async () => {
+    stubQurlExecute(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
-      commandName: 'stats',
+      commandName: 'qurl',
       reply: jest.fn().mockRejectedValue(new Error('cannot reply')),
     });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
 
     await handleCommand(interaction);
     // Should not throw, just log
@@ -483,12 +477,13 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   });
 
   it('emits success=true when command executes cleanly', async () => {
-    const interaction = makeInteraction({ commandName: 'stats' });
+    stubQurlExecute(async () => {});
+    const interaction = makeInteraction({ commandName: 'qurl' });
     await handleCommand(interaction);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
       expect.objectContaining({
-        command_name: 'stats',
+        command_name: 'qurl',
         success: true,
         failure_type: null,
         handler_duration_ms: expect.any(Number),
@@ -497,23 +492,23 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
   });
 
   it('emits failure_type=handler_error when execute() throws', async () => {
-    const interaction = makeInteraction({ commandName: 'stats' });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+    stubQurlExecute(() => { throw new Error('db crash'); });
+    const interaction = makeInteraction({ commandName: 'qurl' });
     await handleCommand(interaction);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
-      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'handler_error' }),
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: 'handler_error' }),
     );
   });
 
   it('emits failure_type=ack_timeout on Discord 10062 (Unknown interaction)', async () => {
-    const interaction = makeInteraction({ commandName: 'stats' });
     const ackErr = Object.assign(new Error('Unknown interaction'), { code: 10062 });
-    mockDb.getStats.mockImplementationOnce(() => { throw ackErr; });
+    stubQurlExecute(() => { throw ackErr; });
+    const interaction = makeInteraction({ commandName: 'qurl' });
     await handleCommand(interaction);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
-      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'ack_timeout' }),
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: 'ack_timeout' }),
     );
   });
 
@@ -618,15 +613,15 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     // dashboard signal. A future refactor that flips the asymmetry
     // would silently change failure-type attribution; this test
     // catches it.
+    stubQurlExecute(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
-      commandName: 'stats',
+      commandName: 'qurl',
       reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
     });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
     await handleCommand(interaction);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
-      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'handler_error' }),
+      expect.objectContaining({ command_name: 'qurl', success: false, failure_type: 'handler_error' }),
     );
   });
 
@@ -659,661 +654,6 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     await handleCommand(interaction);
     const calls = logger.audit.mock.calls.filter(c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED);
     expect(calls).toHaveLength(0);
-  });
-});
-
-describe('/link command', () => {
-  it('replies with OAuth link embed when not linked', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue(null);
-    const cmd = commands.find(c => c.data.name === 'link');
-    const interaction = makeInteraction({ commandName: 'link' });
-
-    await cmd.execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ ephemeral: true }),
-    );
-    expect(mockDb.createPendingLink).toHaveBeenCalled();
-  });
-
-  it('replies with re-link embed when already linked', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue({ github_username: 'olduser' });
-    const cmd = commands.find(c => c.data.name === 'link');
-    const interaction = makeInteraction({ commandName: 'link' });
-
-    await cmd.execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalled();
-    expect(mockDb.createPendingLink).toHaveBeenCalled();
-  });
-});
-
-describe('/unlink command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'unlink');
-
-  it('replies not-linked when no existing link', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue(null);
-    const interaction = makeInteraction({ commandName: 'unlink' });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining("don't have a GitHub"),
-        ephemeral: true,
-      }),
-    );
-  });
-
-  it('shows confirmation and unlinks on confirm', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue({ github_username: 'testuser' });
-    const buttonInteraction = {
-      customId: `unlink_confirm_${MOCK_NONCE}`,
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-    const response = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(buttonInteraction),
-    };
-    const interaction = makeInteraction({
-      commandName: 'unlink',
-      reply: jest.fn().mockResolvedValue(response),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(buttonInteraction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Unlinked') }),
-    );
-    expect(mockDb.deleteLink).toHaveBeenCalledWith('user-1');
-  });
-
-  it('cancels unlink on cancel button', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue({ github_username: 'testuser' });
-    const buttonInteraction = {
-      customId: 'unlink_cancel',
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-    const response = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(buttonInteraction),
-    };
-    const interaction = makeInteraction({
-      commandName: 'unlink',
-      reply: jest.fn().mockResolvedValue(response),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(buttonInteraction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('cancelled') }),
-    );
-  });
-
-  it('handles confirmation timeout', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue({ github_username: 'testuser' });
-    const response = {
-      awaitMessageComponent: jest.fn().mockRejectedValue(new Error('timeout')),
-    };
-    const interaction = makeInteraction({
-      commandName: 'unlink',
-      reply: jest.fn().mockResolvedValue(response),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('timed out') }),
-    );
-  });
-});
-
-describe('/whois command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'whois');
-
-  it('shows link info when user is linked', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue({
-      github_username: 'ghuser',
-      linked_at: '2025-01-01T00:00:00Z',
-    });
-    mockDb.getContributions.mockReturnValue([
-      { repo: 'OpenNHP/opennhp', pr_number: 1, pr_title: 'Fix stuff' },
-    ]);
-    mockDb.getBadges.mockReturnValue([{ badge_type: 'first_pr', earned_at: '2025-01-01' }]);
-    mockDb.getStreak.mockReturnValue({ current_streak: 2, longest_streak: 3 });
-
-    const interaction = makeInteraction({
-      commandName: 'whois',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => null),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ ephemeral: true }),
-    );
-  });
-
-  it('shows not-linked message for self when not linked', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue(null);
-    const interaction = makeInteraction({
-      commandName: 'whois',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => null),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining('/link'),
-        ephemeral: true,
-      }),
-    );
-  });
-
-  it('shows not-linked message for another user', async () => {
-    mockDb.getLinkByDiscord.mockReturnValue(null);
-    const otherUser = { id: 'other-1', username: 'OtherUser' };
-    const interaction = makeInteraction({
-      commandName: 'whois',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => otherUser),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining('OtherUser'),
-      }),
-    );
-  });
-});
-
-describe('/contributions command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'contributions');
-
-  it('shows no contributions message when empty', async () => {
-    mockDb.getContributions.mockReturnValue([]);
-    const interaction = makeInteraction({
-      commandName: 'contributions',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => null),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('don\'t have any') }),
-    );
-  });
-
-  it('shows contribution embed when contributions exist', async () => {
-    mockDb.getContributions.mockReturnValue([
-      { repo: 'OpenNHP/opennhp', pr_number: 1, pr_title: 'Add feature' },
-      { repo: 'OpenNHP/opennhp', pr_number: 2, pr_title: 'Fix bug' },
-      { repo: 'OpenNHP/StealthDNS', pr_number: 3, pr_title: 'Update docs' },
-    ]);
-    const interaction = makeInteraction({
-      commandName: 'contributions',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => null),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ ephemeral: true }),
-    );
-  });
-});
-
-describe('/stats command', () => {
-  it('shows stats embed', async () => {
-    mockDb.getStats.mockReturnValue({
-      linkedUsers: 5, totalContributions: 10, uniqueContributors: 3,
-      byRepo: [{ repo: 'OpenNHP/opennhp', count: 8 }],
-    });
-    mockDb.getTopContributors.mockReturnValue([
-      { discord_id: 'user-1', count: 5 },
-      { discord_id: 'user-2', count: 3 },
-    ]);
-
-    const cmd = commands.find(c => c.data.name === 'stats');
-    const interaction = makeInteraction({ commandName: 'stats' });
-
-    await cmd.execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ ephemeral: true }),
-    );
-  });
-});
-
-describe('/leaderboard command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'leaderboard');
-
-  it('shows no-contributions message when empty', async () => {
-    mockDb.getTopContributors.mockReturnValue([]);
-    const interaction = makeInteraction({ commandName: 'leaderboard' });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('No contributions') }),
-    );
-  });
-
-  it('shows leaderboard with entries', async () => {
-    mockDb.getTopContributors.mockReturnValue([
-      { discord_id: 'u1', count: 10 },
-      { discord_id: 'u2', count: 8 },
-      { discord_id: 'u3', count: 5 },
-      { discord_id: 'u4', count: 3 },
-    ]);
-    const interaction = makeInteraction({ commandName: 'leaderboard' });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ embeds: expect.any(Array) }),
-    );
-  });
-});
-
-describe('/forcelink command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'forcelink');
-
-  it('force-links a user', async () => {
-    mockDb.getLinkByGithub.mockReturnValue(null);
-    const targetUser = { id: 'target-1' };
-    const interaction = makeInteraction({
-      commandName: 'forcelink',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => targetUser),
-        getString: jest.fn(() => '@ghuser'),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(mockDb.forceLink).toHaveBeenCalledWith('target-1', 'ghuser');
-    expect(interaction.reply).toHaveBeenCalled();
-  });
-
-  it('rejects when github already linked to another user', async () => {
-    mockDb.getLinkByGithub.mockReturnValue({ discord_id: 'other-1', github_username: 'ghuser' });
-    const targetUser = { id: 'target-1' };
-    const interaction = makeInteraction({
-      commandName: 'forcelink',
-      options: {
-        ...makeInteraction().options,
-        getUser: jest.fn(() => targetUser),
-        getString: jest.fn(() => 'ghuser'),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('already linked') }),
-    );
-  });
-
-  it('returns early when requireAdmin returns false', async () => {
-    requireAdmin.mockResolvedValueOnce(false);
-    const interaction = makeInteraction({ commandName: 'forcelink' });
-
-    await findCmd().execute(interaction);
-
-    expect(mockDb.forceLink).not.toHaveBeenCalled();
-  });
-});
-
-describe('/bulklink command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'bulklink');
-
-  it('bulk links multiple users', async () => {
-    mockDb.getLinkByGithub.mockReturnValue(null);
-    const interaction = makeInteraction({
-      commandName: 'bulklink',
-      options: {
-        ...makeInteraction().options,
-        getString: jest.fn(() => '11111111111111111:userA,22222222222222222:userB'),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(mockDb.forceLink).toHaveBeenCalledTimes(2);
-    expect(interaction.reply).toHaveBeenCalled();
-  });
-
-  it('handles invalid format pairs', async () => {
-    const interaction = makeInteraction({
-      commandName: 'bulklink',
-      options: {
-        ...makeInteraction().options,
-        getString: jest.fn(() => 'invalid,also_bad,:'),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalled();
-  });
-});
-
-describe('/backfill-milestones command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'backfill-milestones');
-
-  it('backfills milestones for a repo', async () => {
-    mockDb.hasMilestoneBeenAnnounced.mockReturnValue(false);
-    mockDb.recordMilestone.mockReturnValue(true);
-    const interaction = makeInteraction({
-      commandName: 'backfill-milestones',
-      options: {
-        ...makeInteraction().options,
-        getString: jest.fn(() => 'OpenNHP/opennhp'),
-        getInteger: jest.fn(() => 150),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.reply).toHaveBeenCalled();
-    // Stars >= 10, 25, 50, 100 should be backfilled (4 milestones)
-    expect(mockDb.recordMilestone).toHaveBeenCalledTimes(4);
-  });
-
-  it('skips already announced milestones', async () => {
-    mockDb.hasMilestoneBeenAnnounced.mockReturnValue(true);
-    const interaction = makeInteraction({
-      commandName: 'backfill-milestones',
-      options: {
-        ...makeInteraction().options,
-        getString: jest.fn(() => 'OpenNHP/opennhp'),
-        getInteger: jest.fn(() => 50),
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(mockDb.recordMilestone).not.toHaveBeenCalled();
-  });
-});
-
-describe('/unlinked command', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'unlinked');
-
-  // /unlinked now reads from guild.members.cache after routing through
-  // the REST prewarm helper. Helper to build a Collection-shaped cache
-  // (Map + filter) plus a no-op list() that lets the prewarm complete.
-  const makeUnlinkedGuild = (memberCache, { contributorRole = { id: 'role-1', name: 'Contributor' } } = {}) => {
-    if (memberCache && typeof memberCache.filter !== 'function') {
-      memberCache.filter = function (fn) {
-        const result = new Map();
-        for (const [k, v] of this) { if (fn(v, k)) result.set(k, v); }
-        return result;
-      };
-    }
-    return {
-      members: {
-        cache: memberCache,
-        list: jest.fn(async () => new Map()), // prewarm no-op; cache already populated
-      },
-      roles: { cache: { find: jest.fn(() => contributorRole) } },
-    };
-  };
-
-  it('reports unlinked contributors', async () => {
-    const member1 = {
-      id: 'u1',
-      user: { tag: 'User1#0001' },
-      roles: { cache: { has: jest.fn(() => true) } },
-    };
-    const cache = new Map([['u1', member1]]);
-
-    mockDb.getLinkedDiscordIds.mockReturnValue(new Set());
-
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: makeUnlinkedGuild(cache),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalled();
-  });
-
-  it('handles missing contributor role', async () => {
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: makeUnlinkedGuild(new Map(), { contributorRole: null }),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Could not find role') }),
-    );
-  });
-
-  it('handles all contributors linked', async () => {
-    const member1 = {
-      id: 'u1',
-      user: { tag: 'User1' },
-      roles: { cache: { has: jest.fn(() => true) } },
-    };
-    const cache = new Map([['u1', member1]]);
-
-    mockDb.getLinkedDiscordIds.mockReturnValue(new Set(['u1']));
-
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: makeUnlinkedGuild(cache),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('All contributors') }),
-    );
-  });
-
-  it('prewarm leaves empty cache → user sees explicit degraded message, not silent "all linked"', async () => {
-    // Pre-PR behavior: a fetch() rejection threw out of the try block
-    // and the catch surfaced an error. Post-PR: prewarm swallows REST
-    // failures (correct for /qurl send), which would leave the cache
-    // empty and `/unlinked` would falsely report ✓ All contributors
-    // linked — strictly worse signal than the old failure. Pin the
-    // explicit empty-cache branch to defend against re-introducing
-    // the false positive.
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: makeUnlinkedGuild(new Map()),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
-    );
-  });
-
-  it('prewarm list() rejection (REST 429) → degraded message surfaces', async () => {
-    // End-to-end pin of the "REST failure swallowed → degraded
-    // message" path: the empty-cache test above pins the BRANCH but
-    // not the original failure trigger. Here `members.list()` rejects
-    // with a 429-shaped error (the most likely real-world cause); the
-    // prewarm swallows it, cache stays empty, and the degraded check
-    // surfaces the message.
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: {
-        members: {
-          cache: new Map(),
-          list: jest.fn(async () => {
-            const err = new Error('rate limited'); err.code = 429; throw err;
-          }),
-        },
-        roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
-    );
-  });
-
-  it('prewarm partial cache (mid-pagination failure) → degraded message surfaces', async () => {
-    // Round-4 cr regression-pin: a mid-pagination failure leaves the
-    // cache non-empty but incomplete. `size === 0` alone wouldn't
-    // catch this — the tolerance check on
-    // `cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD`
-    // does. The two adjacent tests (`prewarm list() rejection` above
-    // and this one) inline the guild rather than using
-    // `makeUnlinkedGuild` because they need to override `list` and set
-    // `memberCount`, both of which the helper hides.
-    const member1 = {
-      id: 'u1', user: { tag: 'User1' },
-      roles: { cache: { has: jest.fn(() => true) } },
-    };
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: {
-        // Cache has 1 member, but the guild reports 100 — clearly partial.
-        members: {
-          cache: new Map([['u1', member1]]),
-          list: jest.fn(async () => new Map()),
-        },
-        roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
-        memberCount: 100,
-      },
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
-    );
-  });
-
-  it('completeness threshold boundary: cache=89/100 → degraded; cache=91/100 → proceeds', async () => {
-    // Pin the 0.9 boundary explicitly. Without these, a future tweak
-    // of `UNLINKED_CACHE_COMPLETENESS_THRESHOLD` shifts admin-visible
-    // behavior silently. The two cases bracket the threshold at
-    // memberCount=100: 89 must trigger degraded, 91 must proceed.
-    const { UNLINKED_CACHE_COMPLETENESS_THRESHOLD } = require('../src/constants');
-    expect(UNLINKED_CACHE_COMPLETENESS_THRESHOLD).toBe(0.9); // anchor the boundary cases to the constant
-
-    const mkMember = (id) => ({
-      id, user: { tag: id },
-      roles: { cache: { has: jest.fn(() => false) } }, // no contributor role on these
-    });
-
-    const mkCache = (n) => {
-      const cache = new Map();
-      for (let i = 0; i < n; i++) cache.set(`u${i}`, mkMember(`u${i}`));
-      // /unlinked uses `guild.members.cache.filter(...)`; discord.js
-      // Collection has `filter` but plain Map does not.
-      cache.filter = function (fn) {
-        const r = new Map();
-        for (const [k, v] of this) { if (fn(v, k)) r.set(k, v); }
-        return r;
-      };
-      return cache;
-    };
-
-    // Below boundary → degraded.
-    {
-      const interaction = makeInteraction({
-        commandName: 'unlinked',
-        guild: {
-          members: { cache: mkCache(89), list: jest.fn(async () => new Map()) },
-          roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
-          memberCount: 100,
-        },
-      });
-      await findCmd().execute(interaction);
-      expect(interaction.editReply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('Could not load complete member list') }),
-      );
-    }
-
-    // EXACT boundary → proceeds (the check uses `<`, not `<=`).
-    // A future refactor flipping the operator would silently change
-    // admin-visible behavior; this case locks the direction.
-    {
-      mockDb.getLinkedDiscordIds.mockResolvedValue(new Set());
-      const interaction = makeInteraction({
-        commandName: 'unlinked',
-        guild: {
-          members: { cache: mkCache(90), list: jest.fn(async () => new Map()) },
-          roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
-          memberCount: 100,
-        },
-      });
-      await findCmd().execute(interaction);
-      expect(interaction.editReply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('All contributors') }),
-      );
-    }
-
-    // Above boundary → proceeds. With no contributors found,
-    // /unlinked reports "All contributors have linked".
-    {
-      mockDb.getLinkedDiscordIds.mockResolvedValue(new Set());
-      const interaction = makeInteraction({
-        commandName: 'unlinked',
-        guild: {
-          members: { cache: mkCache(91), list: jest.fn(async () => new Map()) },
-          roles: { cache: { find: jest.fn(() => ({ id: 'role-1', name: 'Contributor' })) } },
-          memberCount: 100,
-        },
-      });
-      await findCmd().execute(interaction);
-      expect(interaction.editReply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('All contributors') }),
-      );
-    }
-  });
-
-  it('handles error after prewarm — db query failure surfaces to user', async () => {
-    // prewarm swallows REST errors (degraded-mode fallback), so a
-    // members.list() rejection no longer reaches the /unlinked
-    // try/catch. A db.getLinkedDiscordIds rejection does — pin that
-    // path as the live error surface. Cache must be non-empty to get
-    // past the new empty-cache degraded-message guard.
-    const member1 = {
-      id: 'u1', user: { tag: 'User1' },
-      roles: { cache: { has: jest.fn(() => true) } },
-    };
-    mockDb.getLinkedDiscordIds.mockRejectedValue(new Error('db fail'));
-
-    const interaction = makeInteraction({
-      commandName: 'unlinked',
-      guild: makeUnlinkedGuild(new Map([['u1', member1]])),
-    });
-
-    await findCmd().execute(interaction);
-
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('error') }),
-    );
   });
 });
 

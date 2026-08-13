@@ -1,22 +1,18 @@
-// Shared OAuth state-signing machinery for the two HMAC-signed state
-// flows: the GitHub OAuth binding in commands.js (state = `nonce.sig`
-// over `${discordId}:${nonce}`) and the qURL OAuth setup flow in
-// utils/qurl-oauth-state.js (state = `b64url(JSON).sig`). The payload
-// shapes stay distinct at each call site by design — the differing
-// payloads plus the qURL side's HMAC-covered `kind` field make
-// cross-purpose forgery impossible. What was drifting between them was
-// the SECRET-RESOLUTION machinery (env precedence, test-harness
-// fallback, warn-once), so that lives here exactly once.
+// Shared OAuth state-signing machinery for HMAC-signed state flows.
+// Today the qURL OAuth setup flow (utils/qurl-oauth-state.js, state =
+// `b64url(JSON).sig`) is the only consumer; the factory shape is kept
+// because the SECRET-RESOLUTION machinery (env precedence, test-harness
+// fallback, warn-once) is the part worth centralizing, and a second
+// flow should inherit it rather than hand-roll a copy. A future flow's
+// payload must stay distinct from the qURL side's — its HMAC-covered
+// `kind` field is what makes cross-purpose forgery impossible.
 //
 // Each flow constructs its own signer via createStateSigner(), passing:
 //   flowLabel        — human prose for error/warn messages, e.g.
-//                      'qURL OAuth state' (brand spelling) or 'OAuth state'.
+//                      'qURL OAuth state' (brand spelling).
 //   secretConfigKeys — ordered config-key precedence for the flow's
-//                      dedicated secret(s), highest first. The first
-//                      truthy value wins. GITHUB_CLIENT_SECRET is
-//                      appended internally as the always-last fallback
-//                      (env-parity with the original GitHub OAuth
-//                      signer) — callers cannot omit or reorder it.
+//                      secret(s), highest first. The first truthy
+//                      value wins.
 //
 // Secrets are read through config (src/config.js snapshots process.env
 // at load) rather than raw process.env — config is the validating
@@ -35,13 +31,8 @@ const { verifyHmacSha256 } = require('./webhook-hardening');
 // 64-char values the documented generator (`openssl rand -hex 32`)
 // and the `0`.repeat(64) test fixture produce. A 4-char accidental
 // value would HMAC just fine with no security; reject upfront. Applies
-// to whichever key in the resolution order wins — dedicated secrets
-// and the GITHUB_CLIENT_SECRET fallback alike (Auth0 / GitHub
-// provision 32+ char client secrets by default, but a manual
-// /placeholder env on a misconfigured dev box would slip past
-// otherwise). Historically only the qURL flow enforced this; the
-// GitHub flow silently accepted any length — extracting the shared
-// resolver closed that drift.
+// to whichever key in the resolution order wins (a manual/placeholder
+// env on a misconfigured dev box would otherwise slip past).
 const MIN_STATE_SECRET_LENGTH = 32;
 
 // Build a signer for one OAuth state flow. Returns { sign, verify }
@@ -60,17 +51,14 @@ const MIN_STATE_SECRET_LENGTH = 32;
 //                          someone notices.
 //
 // Secret precedence (highest first):
-//   1. secretConfigKeys, in order — flow-dedicated secrets, so ops can
-//      rotate one flow's signer without invalidating the other's
-//      in-flight states (blast-radius isolation; see #184 for the qURL
-//      chain). Rotation playbook: provision the new var in SSM, deploy
-//      (the dual-read happens automatically); once every replica has
-//      the new var, drop the old one. The state TTL bounds the "old
+//   1. secretConfigKeys, in order — the flow-dedicated secret first,
+//      then any legacy shared secret it supersedes (see #184 for the
+//      qURL chain). Rotation playbook: provision the new var in SSM,
+//      deploy (the dual-read happens automatically); once every replica
+//      has the new var, drop the old one. The state TTL bounds the "old
 //      links don't validate against the new key" window — no separate
 //      dual-key reader needed.
-//   2. GITHUB_CLIENT_SECRET — last-ditch fallback for backward-compat
-//      with deployments that predate the dedicated secrets.
-//   3. Test fallback — per-SIGNER random secret for jest only. Random
+//   2. Test fallback — per-SIGNER random secret for jest only. Random
 //      (not static) so even inside the harness there's no key that, if
 //      accidentally shipped, would be forgeable; per-signer so the two
 //      flows can't accidentally verify each other's fallback-signed
@@ -80,14 +68,15 @@ const MIN_STATE_SECRET_LENGTH = 32;
 //      env doesn't enable the forgeable key — everywhere else throws
 //      hard so a misconfig is loud.
 function createStateSigner({ flowLabel, secretConfigKeys }) {
-  // A missing/empty key list would silently resolve straight to
-  // GITHUB_CLIENT_SECRET — a precedence change, not a cosmetic bug —
-  // so it fails loudly at construction. flowLabel only feeds message
-  // prose; a bad value surfaces legibly in the first error string.
+  // A missing/empty key list would leave nothing to resolve, so every
+  // sign/verify would fall through to the throw (or, inside jest, to
+  // the random test fallback) — fail loudly at construction instead.
+  // flowLabel only feeds message prose; a bad value surfaces legibly in
+  // the first error string.
   if (!Array.isArray(secretConfigKeys) || secretConfigKeys.length === 0) {
     throw new TypeError('createStateSigner: secretConfigKeys must be a non-empty array');
   }
-  const resolutionOrder = [...secretConfigKeys, 'GITHUB_CLIENT_SECRET'];
+  const resolutionOrder = [...secretConfigKeys];
   let warnedFallback = false;
   // Computed eagerly at construction even where it's never read
   // (production, where a real secret always resolves) — two signers
