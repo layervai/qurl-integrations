@@ -32,3 +32,8 @@ jobs:
 
       - name: Check release-please config/manifest sync
         run: scripts/check-release-please-sync.sh
+
+      # Authoritative here and nowhere else: this runner's jq is 1.7, and
+      # jq 1.8 (typical locally) accepts the parse error this catches.
+      - name: Check main CI notification payload builds
+        run: scripts/check-main-ci-notification-payload.sh
