@@ -47,6 +47,18 @@ func slogTestLogger(_ *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// assertConnectorEnrollmentKind pins the kind/target pair that makes the
+// minted credential a Connector-bound enrollment token rather than an ordinary
+// key. Callers with extra per-path expectations (an expires_in, say) assert
+// those separately.
+func assertConnectorEnrollmentKind(t *testing.T, body map[string]any) {
+	t.Helper()
+	if body["kind"] != client.CredentialKindEnrollmentToken || body["target"] != client.CredentialTargetConnector {
+		t.Errorf("api key body = %+v, want kind=%q target=%q",
+			body, client.CredentialKindEnrollmentToken, client.CredentialTargetConnector)
+	}
+}
+
 // assertSingleConnectorClaim pins the decoded `POST /v1/api-keys` body to
 // exactly one Connector claim bound to slug. Every step is type-checked so a
 // wrong-shaped body reports a readable failure instead of panicking the test

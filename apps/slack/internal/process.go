@@ -185,9 +185,15 @@ func withRequestIDAttr(requestID string, attrs ...any) []any {
 // withAPIErrorAttrs expands a *client.APIError into log attributes —
 // request ID, status, code, detail, and any per-field validation messages.
 // APIError.Error() renders only "Title (Status): Detail", so a contract
-// rejection's actionable part (invalid_fields naming the offending key) is
-// parsed and then dropped on the floor at every log site that passes the bare
-// error. Non-API errors pass through untouched.
+// rejection's actionable part — invalid_fields, naming the offending key — is
+// parsed and then dropped by any site that logs the bare error. Non-API errors
+// pass through untouched.
+//
+// The get/list handlers hand-roll a narrower version of this shape inline
+// (errors.As then withRequestIDAttr with status/code/detail); they predate this
+// helper and are left alone here to keep the credential-mint change scoped.
+// Converting them is a mechanical follow-up that would also gain them
+// invalid_fields.
 func withAPIErrorAttrs(err error, attrs ...any) []any {
 	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) {

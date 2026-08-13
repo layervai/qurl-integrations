@@ -140,6 +140,11 @@ func (e *DependencyAuthFailureError) Error() string {
 // " code=… request_id=…". Non-auth-class rejections discard both by default,
 // which makes a 400 surface in CloudWatch as only "returned 400" — the least
 // debuggable form of the most likely kind-first cutover failure.
+//
+// The sentinel guard is for the raw-parse callers, which pass fields.Code
+// straight through; the auth-class path pre-strips it in
+// dependencyAuthFailureError so DependencyAuthFailureError.Code can be read
+// structurally by the audit event.
 func errorEnvelopeSuffix(code, requestID string) string {
 	var msg string
 	if code != "" && code != structuredErrorEnvelopeCode {
@@ -362,7 +367,8 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceAPIKey(ctx context.Context, accessToken,
 		if authErr := dependencyAuthFailureError(http.MethodPost, externalBindingPath, resp.StatusCode, code, fields.RequestID); authErr != nil {
 			return WorkspaceAPIKeyMint{}, authErr
 		}
-		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d", externalBindingPath, resp.StatusCode)
+		return WorkspaceAPIKeyMint{}, fmt.Errorf("qurl-service %s returned %d%s",
+			externalBindingPath, resp.StatusCode, errorEnvelopeSuffix(code, fields.RequestID))
 	}
 	// Success bodies never participate in fallback; reject oversized responses
 	// before parsing the api_key payload.
