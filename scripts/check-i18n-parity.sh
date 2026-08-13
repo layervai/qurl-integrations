@@ -109,6 +109,8 @@ MANIFEST_KEY = re.compile(r"__MSG_([A-Za-z0-9_]+)__")
 # popup.html renders the extension name twice before chrome.i18n resolves: the
 # static <title>, and the header div that data-i18n later overwrites. Both must
 # already hold this app's own ext_name or the popup visibly swaps names on open.
+# Only the FIRST match of each pattern is checked; each appears exactly once
+# today, and a second copy of either would be a markup bug of its own.
 POPUP_MIRRORS = (
     ("<title>", re.compile(r"<title>(.*?)</title>", re.DOTALL)),
     (
@@ -296,8 +298,11 @@ for name, root in APPS.items():
                 "or the markup changed shape."
             )
             continue
+        # Stripped on both sides: surrounding whitespace in the markup is not
+        # rendered, so comparing it against a raw catalog value would report a
+        # difference the user could never see.
         actual = html.unescape(match.group(1)).strip()
-        if actual != expected:
+        if actual != expected.strip():
             failures.append(
                 f"{popup}: {label} reads {actual!r} but this app's ext_name is "
                 f"{expected!r}\n"

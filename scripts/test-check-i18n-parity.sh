@@ -9,6 +9,11 @@
 # caught rather than reading as thorough.
 set -euo pipefail
 
+command -v python3 >/dev/null 2>&1 || {
+  echo "Error: python3 is required (fixture mutation); install python3 and retry" >&2
+  exit 1
+}
+
 repo_root="$(git rev-parse --show-toplevel)"
 checker="$repo_root/scripts/check-i18n-parity.sh"
 tmp_parent="$(mktemp -d)"
