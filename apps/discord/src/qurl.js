@@ -132,6 +132,12 @@ async function callQurl(method, path, fn) {
 // so the boot path can consume the same range table without pulling in the
 // @layervai/qurl SDK, constants.js and `dns` that this module requires. Re-exported
 // here (see module.exports) because connector.js imports it from qurl.js.
+//
+// The classifier stays pure. Each rejection site below logs the host that
+// triggered it before returning the deliberately shape-independent error to the
+// caller; connector.js does the same for its detect guard. URL parsing strips
+// CR/LF from hostname input, and logger.js JSON-encodes metadata, so those
+// breadcrumbs cannot forge log lines.
 
 // Resolve all A/AAAA records for a hostname and reject if ANY of them point
 // to a private/internal range. Defense against DNS rebinding: a malicious
@@ -161,6 +167,15 @@ async function assertNotPrivateAfterResolve(hostname) {
   }
   for (const { address } of addrs) {
     if (isPrivateHost(address)) {
+      // Name the resolved address as well as the host: on this leg the hostname
+      // alone doesn't explain the rejection (it looked public syntactically), so
+      // the address distinguishes a rebinding attempt from a name that
+      // legitimately points inside. dns.lookup() returns an inet_ntop-rendered
+      // IP string, so it is safe to include in structured log metadata.
+      logger.warn('Target URL rejected by SSRF guard (DNS resolved to a private address)', {
+        hostname,
+        address,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
   }
@@ -173,6 +188,12 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
       throw new Error('Only http/https URLs are allowed');
     }
     if (isPrivateHost(parsed.hostname)) {
+      // Keep this distinct from the DNS-leg message so operators can tell which
+      // guard fired. Warn deliberately: a typo and an SSRF probe are
+      // indistinguishable here, and Discord's command rate limits bound volume.
+      logger.warn('Target URL rejected by SSRF guard (private host literal)', {
+        hostname: parsed.hostname,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
     await assertNotPrivateAfterResolve(parsed.hostname);

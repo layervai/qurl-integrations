@@ -25,10 +25,12 @@ import (
 )
 
 // Conversation roles. Kept as constants so the loop and the SDK translation
-// layer agree on the exact wire values.
+// layer agree on the exact wire values. Exported because Role is a field on the
+// exported Message type: the Slack handler rebuilds thread history into Messages
+// and has to spell the same values (see internal.loadAgentThreadHistory).
 const (
-	roleUser      = "user"
-	roleAssistant = "assistant"
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
 )
 
 // defaultMaxIterations bounds the read-tool gathering loop. A natural-language
@@ -404,7 +406,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 	// Copy history so we never mutate the caller's slice; append the new turn.
 	msgs := make([]Message, 0, len(history)+1)
 	msgs = append(msgs, history...)
-	msgs = append(msgs, Message{Role: roleUser, Text: userText})
+	msgs = append(msgs, Message{Role: RoleUser, Text: userText})
 
 	var usage Usage
 	for range a.maxIterations {
@@ -442,7 +444,7 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 
 		// Record the assistant turn before acting on it, so the persisted
 		// history stays a faithful transcript.
-		msgs = append(msgs, Message{Role: roleAssistant, Text: resp.Text, ToolCalls: resp.ToolCalls})
+		msgs = append(msgs, Message{Role: RoleAssistant, Text: resp.Text, ToolCalls: resp.ToolCalls})
 
 		if len(resp.ToolCalls) == 0 {
 			// Guard against the model returning neither text nor a tool call —
@@ -475,14 +477,14 @@ func (a *Agent) Run(ctx context.Context, tc *TurnContext, history []Message, use
 				for _, rest := range resp.ToolCalls[i+1:] {
 					results = append(results, ToolResult{ToolUseID: rest.ID, Content: proposalAckResult})
 				}
-				msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
+				msgs = append(msgs, Message{Role: RoleUser, ToolResults: results})
 				return Result{Proposal: prop, Usage: usage}, msgs, nil
 			default:
 				content, isErr := a.executeBoundedRead(ctx, tc, call)
 				results = append(results, ToolResult{ToolUseID: call.ID, Content: content, IsError: isErr})
 			}
 		}
-		msgs = append(msgs, Message{Role: roleUser, ToolResults: results})
+		msgs = append(msgs, Message{Role: RoleUser, ToolResults: results})
 	}
 
 	// Out of iterations, not out of time — so there is budget to say something
@@ -548,7 +550,7 @@ func (a *Agent) finalAnswer(ctx context.Context, perTurn string, tools []ToolSpe
 	//   - TextOnly forbids tool calls, but appending one anyway (from a future model
 	//     or transport that ignored it) would leave a tool_use with no matching
 	//     tool_result and poison every later turn.
-	msgs = append(msgs, Message{Role: roleAssistant, Text: reply})
+	msgs = append(msgs, Message{Role: RoleAssistant, Text: reply})
 	return Result{Reply: reply, Usage: usage, Cutoff: why, DiscardedStreamText: discardedStream}, msgs, nil
 }
 

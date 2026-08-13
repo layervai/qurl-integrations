@@ -71,6 +71,9 @@ jobs:
               - 'shared/**'
               - '.github/workflows/discord.yml'
 
+  # Mirrored locally by `make check-discord`, so a contributor can run this gate
+  # before pushing. Adding or removing a step here means updating that target
+  # too; it documents which steps it deliberately omits and why.
   build-and-test:
     name: discord / build and test
     runs-on: ubuntu-latest

@@ -100,6 +100,47 @@ func TestAgentThreadHistorySeam_GridFallback(t *testing.T) {
 	}
 }
 
+// TestAgentThreadHistorySeam_ReportsAttachments pins that the seam carries the
+// attachment signal through, not just the text. The upload's own turn is refused
+// with the text-only limitation, so a caption whose HasFiles is lost here comes
+// back on the next turn in that thread as an ordinary message. Both signals Slack
+// can send are checked, because it does not promise to send both, and a shape the
+// classifier cannot count must still report an attachment rather than fall through
+// to "text only".
+func TestAgentThreadHistorySeam_ReportsAttachments(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"messages":[` +
+			`{"user":"U1","text":"plain","ts":"100.1"},` +
+			`{"user":"U1","text":"files array","ts":"100.2","files":[{"id":"F1"}]},` +
+			`{"user":"U1","text":"subtype only","ts":"100.3","subtype":"file_share"},` +
+			`{"user":"U1","text":"uncountable shape","ts":"100.4","files":{"id":"F1"}},` +
+			`{"user":"U1","text":"empty array","ts":"100.5","files":[]},` +
+			`{"user":"U1","text":"null files","ts":"100.6","files":null}` +
+			`]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	messages, err := read(context.Background(), "T1", "", "C1", "100.0", "")
+	if err != nil {
+		t.Fatalf("read history: %v", err)
+	}
+	want := []bool{false, true, true, true, false, false}
+	if len(messages) != len(want) {
+		t.Fatalf("messages = %#v, want %d", messages, len(want))
+	}
+	for i, wantFiles := range want {
+		if messages[i].HasFiles != wantFiles {
+			t.Errorf("message %q HasFiles = %v, want %v", messages[i].Text, messages[i].HasFiles, wantFiles)
+		}
+		if messages[i].Text == "" {
+			t.Errorf("message %d lost its text alongside the files decode: %#v", i, messages[i])
+		}
+	}
+}
+
 func TestAgentThreadHistorySeam_RejectsSlackErrorAndUnboundedHistory(t *testing.T) {
 	t.Parallel()
 

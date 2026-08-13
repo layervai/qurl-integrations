@@ -45,7 +45,56 @@ function createSelectionHarness() {
   };
 }
 
-test('findComposeBodyAsync observes documentElement when document.body is not ready', async function () {
+// The content script arms real timers that intentionally outlive an insertion: a 30s response
+// cache per completed INSERT_LINKS (INSERT_REQUEST_CACHE_TTL_MS) and a 4s toast auto-dismiss.
+// Both are correct in a browser, but a sandbox wired straight to Node's global setTimeout keeps
+// the whole test process alive until they fire — this file used to spend 30s doing 6ms of work.
+//
+// Sandboxes that want real timers take these tracked wrappers. The after() hook clears whatever
+// is still armed, but first asserts the survivors are exactly the ones the test declared: that
+// hang was the only signal this class of bug ever produced, so quietly sweeping up leftovers
+// would retire it for good. A timer some future path forgets to clear fails here instead, named
+// by its delay. expectedArmed maps a delay to how many of that delay the test means to leave
+// behind; omit it for the usual case of none.
+//
+// The timers stay real — no fake clock, and deliberately no unref(): an unref'd timer still
+// fires, which would make running the content script's callbacks depend on how long the rest of
+// the suite happens to take.
+function createTimerHarness(t, expectedArmed) {
+  const armed = new Map();
+
+  t.after(function () {
+    const survivors = {};
+    armed.forEach(function (delay, timerId) {
+      survivors[delay] = (survivors[delay] || 0) + 1;
+      globalThis.clearTimeout(timerId);
+    });
+    armed.clear();
+    // Asserted after clearing, so a failure reports instead of hanging on the very timers it names.
+    assert.deepEqual(
+      survivors,
+      expectedArmed || {},
+      'timers left armed at teardown should be only the ones this test means to outlive'
+    );
+  });
+
+  return {
+    clearTimeout(timerId) {
+      armed.delete(timerId);
+      globalThis.clearTimeout(timerId);
+    },
+    setTimeout(callback, delay, ...args) {
+      const timerId = globalThis.setTimeout(function () {
+        armed.delete(timerId);
+        callback(...args);
+      }, delay);
+      armed.set(timerId, delay);
+      return timerId;
+    },
+  };
+}
+
+test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
   const observerCalls = [];
   let composeBodies = [];
   let messageListener = null;
@@ -90,6 +139,7 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
     }
   }
 
+  const timers = createTimerHarness(t);
   const sandbox = {
     chrome: {
       i18n: {
@@ -106,7 +156,7 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -148,7 +198,7 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
       callback();
       return 1;
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -198,7 +248,7 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
   assert.equal(observerInstance.disconnected, true);
 });
 
-test('findComposeBodyAsync performs an immediate post-observe lookup on the next frame', async function () {
+test('findComposeBodyAsync performs an immediate post-observe lookup on the next frame', async function (t) {
   let composeBodies = [];
   let messageListener = null;
   const rafCallbacks = [];
@@ -221,6 +271,7 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
     },
   };
 
+  const timers = createTimerHarness(t);
   const sandbox = {
     chrome: {
       i18n: {
@@ -237,7 +288,7 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -274,7 +325,7 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
       rafCallbacks.push(callback);
       return rafCallbacks.length;
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -310,7 +361,7 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
   assert.equal(response.success, true);
 });
 
-test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function () {
+test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function (t) {
   let composeBodies = [];
   let messageListener = null;
   let observerInstance = null;
@@ -345,6 +396,7 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
     disconnect() {}
   }
 
+  const timers = createTimerHarness(t, { 30000: 1 });
   const sandbox = {
     chrome: {
       i18n: {
@@ -361,7 +413,7 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -397,7 +449,7 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
       callback();
       return 1;
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -478,6 +530,8 @@ test('completed requests are retained (under the cap) so retries replay instead 
         },
       },
     },
+    // Timers are stubbed rather than tracked through createTimerHarness: this test needs the 30s
+    // response cache to stay un-expirable across all 33 requests, which a real timer cannot give it.
     clearTimeout() {},
     console: {
       warn() {},
@@ -567,7 +621,7 @@ test('completed requests are retained (under the cap) so retries replay instead 
   assert.equal(execInsertCount, 33);
 });
 
-test('Selection API fallback inserts at the end when execCommand is unavailable', async function () {
+test('Selection API fallback inserts at the end when execCommand is unavailable', async function (t) {
   let messageListener = null;
   const insertedFragments = [];
   const startAfterCalls = [];
@@ -590,6 +644,7 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
     },
   };
 
+  const timers = createTimerHarness(t);
   const sandbox = {
     chrome: {
       i18n: {
@@ -606,7 +661,7 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -643,7 +698,7 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
       observe() {}
       disconnect() {}
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -676,7 +731,7 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
   assert.deepEqual(startAfterCalls, ['LAST']);
 });
 
-test('Selection API fallback runs when execCommand reports insertion failure', async function () {
+test('Selection API fallback runs when execCommand reports insertion failure', async function (t) {
   let messageListener = null;
   const execCalls = [];
   const insertedFragments = [];
@@ -699,6 +754,7 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
     },
   };
 
+  const timers = createTimerHarness(t);
   const sandbox = {
     chrome: {
       i18n: {
@@ -715,7 +771,7 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -753,7 +809,7 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
       observe() {}
       disconnect() {}
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -790,7 +846,7 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
   assert.deepEqual(insertedFragments, ['<p>links</p>']);
 });
 
-test('findComposeBody prefers the topmost visible compose body when none is focused', async function () {
+test('findComposeBody prefers the topmost visible compose body when none is focused', async function (t) {
   let messageListener = null;
   const caretMoves = [];
   const focusCalls = [];
@@ -834,6 +890,7 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
     },
   };
 
+  const timers = createTimerHarness(t);
   const sandbox = {
     chrome: {
       i18n: {
@@ -850,7 +907,7 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -889,7 +946,7 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
       observe() {}
       disconnect() {}
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -925,7 +982,7 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
   assert.deepEqual(caretMoves, [foregroundCompose]);
 });
 
-test('pending INSERT_LINKS requests are not evicted before they complete', function () {
+test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
   let messageListener = null;
   const observerInstances = [];
   let composeBodies = [];
@@ -959,6 +1016,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
     disconnect() {}
   }
 
+  const timers = createTimerHarness(t, { 30000: 33 });
   const sandbox = {
     chrome: {
       i18n: {
@@ -975,7 +1033,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -1009,7 +1067,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
       callback();
       return 1;
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -1052,7 +1110,7 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
   });
 });
 
-test('insertAdjacentHTML is the last resort when selection insertion fails', async function () {
+test('insertAdjacentHTML is the last resort when selection insertion fails', async function (t) {
   let messageListener = null;
   const insertAdjacentCalls = [];
   const selectionHarness = createSelectionHarness();
@@ -1077,6 +1135,7 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
     },
   };
 
+  const timers = createTimerHarness(t);
   const sandbox = {
     chrome: {
       i18n: {
@@ -1093,7 +1152,7 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn() {},
     },
@@ -1127,7 +1186,7 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
       observe() {}
       disconnect() {}
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -1162,7 +1221,7 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
   }]);
 });
 
-test('a missing compose formatter reports failure instead of inserting nothing', async function () {
+test('a missing compose formatter reports failure instead of inserting nothing', async function (t) {
   let messageListener = null;
   const insertAdjacentCalls = [];
   const execCalls = [];
@@ -1189,6 +1248,7 @@ test('a missing compose formatter reports failure instead of inserting nothing',
     },
   };
 
+  const timers = createTimerHarness(t, { 4000: 1 });
   const sandbox = {
     chrome: {
       i18n: {
@@ -1205,7 +1265,7 @@ test('a missing compose formatter reports failure instead of inserting nothing',
         },
       },
     },
-    clearTimeout,
+    clearTimeout: timers.clearTimeout,
     console: {
       warn(message) {
         notified.push(String(message));
@@ -1241,7 +1301,7 @@ test('a missing compose formatter reports failure instead of inserting nothing',
       observe() {}
       disconnect() {}
     },
-    setTimeout,
+    setTimeout: timers.setTimeout,
   };
 
   sandbox.window = sandbox;
@@ -1310,6 +1370,8 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
         },
       },
     },
+    // Timers are stubbed rather than tracked through createTimerHarness: this test fires the 4s
+    // discovery timeout by hand (timeoutCallbacks below), which a real timer would stretch to 4s.
     clearTimeout() {},
     console: {
       warn() {},

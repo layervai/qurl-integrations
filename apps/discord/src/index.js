@@ -86,16 +86,16 @@ const { LOG_KINDS } = require('./constants');
 // http-only mode (`PROCESS_ROLE=http`) needs two things login()
 // would otherwise do for free: (1) a token on `client.rest` so
 // REST helpers (sendDM, channels.X.send, member.roles.add) can
-// authenticate, and (2) an initial `refreshCache()` so the
-// route handlers find a populated guild/roles/channels cache on
-// the first OAuth callback or webhook. Both are seeded
-// explicitly in start() below — see the `if (isHttp && !isGateway)`
-// branch (runs BEFORE startServer so the ALB can't route a
-// request through a half-initialized replica).
+// authenticate, and (2) an initial `refreshCache()`, which both warms
+// the cached guild handle and doubles as a fatal reachability check
+// before this replica is allowed to serve. Both are seeded explicitly
+// in start() below — see the `if (isHttp && !isGateway)` branch (runs
+// BEFORE startServer so the ALB can't route a request through a
+// half-initialized replica).
 //
-// http-only replicas have no Gateway connection, so the cached
-// guild handle is refreshed on a timer instead of by events —
-// see initHttpOnly's periodic refreshCache().
+// That refresh is one-shot: no request path reads the cached guild
+// handle, so there is nothing for a periodic re-fetch to keep fresh.
+// See the module header in src/http-only-init.js.
 
 // Resolve PROCESS_ROLE via the helper in boot-requirements.js so the
 // invalid-value path is unit-testable without a child-process spawn.
@@ -658,7 +658,6 @@ process.on('uncaughtException', error => {
 
 // Graceful shutdown
 let httpServer = null;
-let httpRefreshTimer = null;
 let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
@@ -705,14 +704,6 @@ async function gracefulShutdown(code = 0) {
       viewUpdateConsumer.stop(),
       viewUpdatePublisher.stop(),
     ]);
-    // Periodic REST refreshCache in http-only mode is .unref()ed so it
-    // wouldn't block exit on its own, but clearing explicitly keeps
-    // shutdown symmetric with the other intervals (server.js, oauth.js
-    // rateLimitStore sweep, webhooks.js badSig sweep) and avoids one
-    // last refresh firing mid-teardown.
-    if (httpRefreshTimer) {
-      clearInterval(httpRefreshTimer);
-    }
     // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
     // heartbeat tick during client.destroy() would race with the
     // WebSocketShard teardown and surface as a confusing "Sampler
@@ -1043,14 +1034,13 @@ async function start() {
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-  // Pure http-only mode: seed the REST token + warm the cache BEFORE
-  // opening the listener. Otherwise there's a race window where the
-  // ALB can route OAuth callbacks / webhooks to a replica whose
-  // `client.rest` has no token and whose channel/role cache is cold —
-  // the request would 401 inside sendDM / assignContributorRole.
-  // See src/http-only-init.js for the full rationale (token + cache
-  // + periodic-REST-refresh that compensates for missing roleDelete /
-  // channelDelete events). Failures are fatal — propagated through
+  // Pure http-only mode: seed the REST token BEFORE opening the
+  // listener. Otherwise there's a race window where the ALB can route
+  // OAuth callbacks / webhooks to a replica whose `client.rest` has no
+  // token — the request would 401 inside sendDM. See
+  // src/http-only-init.js for the full rationale (REST token +
+  // client.user seed + boot-time cache warm, and why there is no
+  // periodic refresh). Failures are fatal — propagated through
   // start().catch() into gracefulShutdown(1) so a Discord-unreachable
   // replica crash-loops instead of silently serving 5xx.
   //
@@ -1063,18 +1053,7 @@ async function start() {
   // init-before-listen pattern to combined mode if the health-gate
   // assumption ever weakens.
   if (isHttp && !isGateway) {
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
-    // Tight race: SIGTERM during the await above runs gracefulShutdown,
-    // which clears `httpRefreshTimer` (still null) and proceeds. The
-    // setInterval inside initHttpOnly then registers AFTER the
-    // clearInterval already happened. Guard against that here so a stray
-    // refreshCache() doesn't fire mid-teardown. (.unref() means it can't
-    // block exit either way; this just keeps the log noise clean.)
-    if (isShuttingDown && timer) {
-      clearInterval(timer);
-    } else {
-      httpRefreshTimer = timer;
-    }
+    await initHttpOnly({ client, config, refreshCache, logger });
   }
 
   // HTTP listener.
@@ -1253,8 +1232,7 @@ async function start() {
     // Shutdown-race guard: if SIGTERM landed during client.login() above,
     // gracefulShutdown has already cleared the (still-null) timer locals
     // and is racing to exit. Skip starting new timers in that case so we
-    // don't register a setInterval that no one will ever clear. Mirrors
-    // the httpRefreshTimer guard pattern at line 393.
+    // don't register a setInterval that no one will ever clear.
     if (!isShuttingDown) {
       gatewayHeartbeatTimer = startGatewayHeartbeat(client);
       activeGuildCountTimer = startActiveGuildCount(client);

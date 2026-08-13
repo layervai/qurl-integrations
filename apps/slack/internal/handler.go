@@ -706,11 +706,23 @@ type AgentThreadMessage struct {
 	UserID string
 	Text   string
 	TS     string
+	// HasFiles reports that Slack described this message as carrying an
+	// attachment. Presence only, exactly like the live-event path: no name, type,
+	// size, or content survives the decode (see SlackMessageHasUpload).
+	//
+	// It exists because an upload's own turn is refused with
+	// agentUnsupportedMediaReply, but the caption stays in the Slack thread and is
+	// rebuilt into model context on every LATER turn. Without this flag that
+	// caption replays as an ordinary message — "protect everything in this" with
+	// nothing saying a file was ever involved — which is the same misrepresentation
+	// the refusal exists to prevent, one turn later.
+	HasFiles bool
 }
 
 // AgentThreadHistoryFunc retrieves a thread from Slack in real time. oldestTS
 // bounds the request to the same recent-context window the agent previously used;
-// implementations must return messages oldest-first.
+// implementations must return messages oldest-first, and must set HasFiles for any
+// message Slack described as carrying an attachment.
 type AgentThreadHistoryFunc func(ctx context.Context, teamID, enterpriseID, channelID, threadTS, oldestTS string) ([]AgentThreadMessage, error)
 
 // ChannelMembershipFunc reports whether userID is a member of channelID via
