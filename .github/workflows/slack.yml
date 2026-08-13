@@ -159,9 +159,10 @@ jobs:
           fi
           echo "image=$pins" >> "$GITHUB_OUTPUT"
 
-      # The script owns the pin, the resolvability preflight, and the
-      # warn-vs-fail decision, so a local run behaves exactly like CI. It reads
-      # CONNECTOR_RELEASE_IMAGE_REQUIRED from the job env above.
+      # The script owns the pin, the resolvability preflight, the warn-vs-fail
+      # decision, and the linux/amd64 + linux/arm64 sweep, so a local run
+      # behaves exactly like CI. It reads CONNECTOR_RELEASE_IMAGE_REQUIRED from
+      # the job env above.
       - name: Verify released Connector S3 route
         run: bash origins/s3-static-connector/test/qurl_connector_release_contract.sh
 
