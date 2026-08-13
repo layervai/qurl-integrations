@@ -152,7 +152,6 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
             HEAD SHA: ${{ github.event.pull_request.head.sha }}
             BASE SHA: ${{ github.event.pull_request.base.sha }}
-            REVIEW MARKER: <!-- claude-review:${{ github.repository }}:${{ github.event.pull_request.number }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.event.pull_request.head.sha }} -->
 
             Review exactly HEAD SHA against BASE SHA using only the allowed
             GitHub MCP tools. Do not use moving branches or local workspace
@@ -174,17 +173,18 @@ jobs:
             deliberately withholds repository execution tools. State any
             verification limits. Be constructive and helpful in your feedback.
 
-            Publish the final review as a pull-request comment with the allowed
-            GitHub add_issue_comment tool. End that comment with the REVIEW
-            MARKER exactly as shown, on its own final line. Do not put the
-            marker in any other comment.
+            Return the complete review as your final message, formatted as
+            GitHub Markdown. Do not call any comment tool and do not publish
+            anything yourself: this workflow publishes that final message
+            verbatim as this run's pull-request comment.
 
-          # Use only the action's GitHub MCP subprocess for reads and the final
-          # comment. It receives the repository token but not the Anthropic key.
-          # Local, network, delegation, and GitHub file-write tools stay denied.
-          claude_args: '--model claude-opus-4-8 --disallowed-tools "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file" --allowed-tools "mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_files,mcp__github__get_pull_request_review_comments,mcp__github__get_pull_request_reviews,mcp__github__get_pull_request_status,mcp__github__get_file_contents,mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__search_issues,mcp__github__search_pull_requests,mcp__github__list_issues,mcp__github__list_pull_requests,mcp__github__add_issue_comment"'
+          # Use the action's GitHub MCP subprocess for reads only. It receives
+          # the repository token but not the Anthropic key. Local, network,
+          # delegation, and GitHub write tools stay denied: the publish step
+          # below emits the review, so Claude needs no comment tool at all.
+          claude_args: '--model claude-opus-4-8 --disallowed-tools "Bash,Read,Glob,Grep,LS,Task,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github__create_or_update_file,mcp__github__push_files,mcp__github__delete_file,mcp__github__add_issue_comment" --allowed-tools "mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_files,mcp__github__get_pull_request_review_comments,mcp__github__get_pull_request_reviews,mcp__github__get_pull_request_status,mcp__github__get_file_contents,mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__search_issues,mcp__github__search_pull_requests,mcp__github__list_issues,mcp__github__list_pull_requests"'
 
-      - name: Verify terminal Claude review
+      - name: Publish and verify terminal Claude review
         if: success() && steps.claude-review.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -292,29 +292,66 @@ jobs:
             echo "::error::Claude review publication marker is unavailable."
             exit 1
           fi
-          # The action can report a successful SDK execution without using the
-          # required comment tool. Bound the paginated read with timeout and
-          # require this run's marker on the final line of a workflow-bot comment.
-          if ! review_comments="$(timeout 30s gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100")"; then
-            echo "::error::Claude review publication could not refresh pull request comments."
+
+          # Claude used to publish the review itself and retype this marker on
+          # the final line. A model-transcribed 40-character hex head SHA is
+          # not reproducible: on #1047 two consecutive attempts skipped from
+          # `f8e9` to `ccce`, dropping 11 characters and failing a review that
+          # had otherwise completed. Publish the terminal message from here so
+          # the marker is emitted by the workflow rather than retyped, and keep
+          # proving that this run published this review.
+          if ! review_body="$(jq -er '
+            [ .[]? | select(.type == "result" and .subtype == "success" and .is_error != true) ] |
+            last | .result // empty
+          ' "${EXECUTION_FILE}")"; then
+            echo "::error::Claude produced no terminal review message; failing closed."
             exit 1
           fi
-          if ! jq -e --arg marker "${EXPECTED_REVIEW_MARKER}" '
-            [
-              .[][]? |
-              select(.user.login == "github-actions[bot]") |
-              (.body // "" | sub("[\\r\\n]+$"; "")) as $body |
-              select(
-                ($body | endswith("\n" + $marker)) and
-                (($body |
-                  rtrimstr("\n" + $marker) |
-                  gsub("[[:space:]]"; "") |
-                  length) > 0)
-              )
-            ] |
-            length > 0
-          ' <<<"${review_comments}" >/dev/null; then
+          if [[ -z "${review_body//[[:space:]]/}" ]]; then
+            echo "::error::Claude produced an empty terminal review message; failing closed."
+            exit 1
+          fi
+
+          # GitHub rejects issue comments longer than 65536 characters. Trim the
+          # review instead of losing the whole publication to a hard API error;
+          # the marker stays on the final line either way.
+          marker_block=$'\n\n'"${EXPECTED_REVIEW_MARKER}"
+          max_review_length=$(( 65536 - ${#marker_block} - 64 ))
+          if (( ${#review_body} > max_review_length )); then
+            review_body="${review_body:0:max_review_length}"$'\n\n_Review truncated to fit the comment size limit._'
+          fi
+
+          if ! published_comment_id="$(jq -n --arg body "${review_body}${marker_block}" '{body: $body}' |
+            timeout 30s gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method POST --input - --jq '.id // empty')"; then
+            echo "::error::Claude review could not be published as a pull request comment."
+            exit 1
+          fi
+          if [[ ! "${published_comment_id}" =~ ^[0-9]+$ ]]; then
+            echo "::error::The published Claude review comment has no usable identity."
+            exit 1
+          fi
+
+          # Read the published comment back from the API: require this run's
+          # marker on the final line of a workflow-bot comment that is attached
+          # to this pull request and still carries review text above the marker.
+          if ! published_comment="$(timeout 30s gh api \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${published_comment_id}")"; then
+            echo "::error::Claude review publication could not be read back."
+            exit 1
+          fi
+          if ! jq -e \
+            --arg marker "${EXPECTED_REVIEW_MARKER}" \
+            --arg issue "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}" '
+            select(.user.login == "github-actions[bot]") |
+            select((.issue_url // "") == $issue) |
+            (.body // "" | sub("[\\r\\n]+$"; "")) as $body |
+            ($body | endswith("\n" + $marker)) and
+            (($body |
+              rtrimstr("\n" + $marker) |
+              gsub("[[:space:]]"; "") |
+              length) > 0)
+          ' <<<"${published_comment}" >/dev/null; then
             echo "::error::Claude review did not publish the run-specific pull request comment."
             exit 1
           fi
