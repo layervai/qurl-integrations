@@ -297,6 +297,16 @@
       });
     }
 
+    // Armed before the observer and the first lookup, so the guard is already in place when
+    // anything it guards can settle. Both schedulers above are asynchronous today, so finish()
+    // cannot run before this line is reached; arming last would nonetheless mean a synchronous
+    // scheduler let finish() clear a still-null timeoutId, leaving this timer to fire a full
+    // findComposeBody() sweep — querySelectorAll plus a forced layout — for a lookup that
+    // already completed. Defense in depth against a scheduler swap, not a reachable bug.
+    timeoutId = window.setTimeout(function () {
+      finish(findComposeBody());
+    }, COMPOSE_BODY_DISCOVERY_TIMEOUT_MS);
+
     observer = new MutationObserver(function () {
       queueLookup();
     });
@@ -305,10 +315,6 @@
       subtree: true,
     });
     queueLookup();
-
-    timeoutId = window.setTimeout(function () {
-      finish(findComposeBody());
-    }, COMPOSE_BODY_DISCOVERY_TIMEOUT_MS);
   }
 
   /**
