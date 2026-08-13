@@ -99,6 +99,17 @@ func TestAgentStreamer_NoDeltas_NotHandled(t *testing.T) {
 	}
 }
 
+func TestAgentStreamer_NoNarrationProposalDoesNotOpenDisclaimerStream(t *testing.T) {
+	port := &recordingStreamPort{}
+	s := newTestStreamer(port)
+	if s.finalizeReply(&agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke}}) {
+		t.Fatal("a proposal must still be delivered by the caller")
+	}
+	if port.startCalls != 0 || port.stops != 0 || port.appended() != "" {
+		t.Fatalf("no-narration proposal must not open an orphan disclaimer stream: %+v", port)
+	}
+}
+
 func TestAgentStreamer_NormalReply_StreamsCoalescedAndStops(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
@@ -255,18 +266,19 @@ func TestAgentStreamer_SyntheticReply_AppendedNotDoubled(t *testing.T) {
 	}
 }
 
-func TestAgentStreamer_Proposal_StopsButCallerPostsCard(t *testing.T) {
+func TestAgentStreamer_ProposalNarrationGetsDisclaimerAndCallerPostsCard(t *testing.T) {
 	port := &recordingStreamPort{}
 	s := newTestStreamer(port)
-	s.onDelta("Sure — I'll revoke that token; confirm below.")
+	const narration = "Sure — I'll revoke that token; confirm below."
+	s.onDelta(narration)
 	if s.finalizeReply(&agent.Result{Proposal: &agent.Proposal{Action: agent.ActionRevoke}}) {
 		t.Fatal("a proposal must NOT be marked delivered — the caller still posts the confirm card")
 	}
 	if port.stops != 1 {
 		t.Fatalf("the narration stream must still be stopped, got stops=%d", port.stops)
 	}
-	if strings.Contains(port.appended(), agentLLMReplyDisclaimer) {
-		t.Fatalf("proposal narration must not receive the free-text reply disclaimer: %q", port.appended())
+	if got, want := port.appended(), agentLLMReplyWithDisclaimer(narration); got != want {
+		t.Fatalf("proposal narration and footer\n got: %q\nwant: %q", got, want)
 	}
 }
 
@@ -534,8 +546,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingSkipsReplyPost(t *testing.T) {
 func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *testing.T) {
 	port := &recordingStreamPort{}
 	blocks := &blocksRecorder{}
+	const narration = "I can revoke that token; confirm below."
 	llm := &handlerStreamingLLM{responses: []agent.Response{{
-		Text:       "I can revoke that token; confirm below.",
+		Text:       narration,
 		ToolCalls:  []agent.ToolCall{{ID: "p1", Name: testAgentStreamProposeRevoke, Input: json.RawMessage(`{"token":"staging"}`)}},
 		StopReason: testAgentStreamToolUse,
 	}}}
@@ -547,6 +560,9 @@ func TestProcessAgentEvent_ChannelMentionStreamingProposalStillPostsCard(t *test
 
 	if port.startCalls != 1 || port.stops != 1 {
 		t.Fatalf("proposal narration should stream and stop once, got start=%d stop=%d", port.startCalls, port.stops)
+	}
+	if got, want := port.appended(), agentLLMReplyWithDisclaimer(narration); got != want {
+		t.Fatalf("proposal narration and footer\n got: %q\nwant: %q", got, want)
 	}
 	if len(blocks.calls) != 1 {
 		t.Fatalf("proposal must still post one confirm card, got %d", len(blocks.calls))
