@@ -48,6 +48,10 @@ LOCKSTEP_FILES = [
     "lib/qurl-i18n.js",
     "content/gmail-compose.js",
     "popup/popup.js",
+    # popup.css carries no logic, but popup.js toggles classes defined only
+    # here (`.error-area.notice`), so a rule present in one copy and not the
+    # other is a silent visual bug in one browser. Identical today; keep it so.
+    "popup/popup.css",
     "background.js",
     # Build/release: build-release.js re-implements the runtime's https-only and
     # credential-stripping normalization (it cannot require() the runtime module)

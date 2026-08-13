@@ -30,7 +30,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 
 | Group | Files | Why it must match |
 |-------|-------|-------------------|
-| Runtime | `lib/qurl-api.js`, `lib/qurl-compose-format.js`, `lib/qurl-config.js`, `lib/qurl-i18n.js`, `content/gmail-compose.js`, `popup/popup.js`, `background.js` | Upload sanitizers, HTTPS-only normalization, permission handling, Gmail DOM insertion, per-file size cap |
+| Runtime | `lib/qurl-api.js`, `lib/qurl-compose-format.js`, `lib/qurl-config.js`, `lib/qurl-i18n.js`, `content/gmail-compose.js`, `popup/popup.js`, `popup/popup.css`, `background.js` | Upload sanitizers, HTTPS-only normalization, permission handling, Gmail DOM insertion, per-file size cap; `popup.css` because `popup.js` toggles classes defined only there |
 | Build/release | `scripts/build-release.js`, `scripts/bump-version.js`, `scripts/generate-icons.js`, `scripts/package-release.js`, `scripts/package-all.sh` | `build-release.js` re-implements the runtime's https-only and credential-stripping normalization — it can't `require()` the runtime module — and decides the bundled default origin and host permission |
 | Tests | `test/*.test.js` (all ten) | They are the guard on everything above; a browser-specific assertion should be a documented divergence, not a drift |
 
@@ -43,6 +43,7 @@ Accepted blind spot: because browser names are masked symmetrically, a comment n
 Intentional differences (do **not** sync these):
 - `manifest.json` / `package.json` `version` — separate release-please tracks (`chrome-extension-v*` vs `edge-extension-v*`), so the two versions move independently. This is the *only* manifest delta; Edge Add-ons hosts updates itself, so the Edge manifest carries no `update_url` (that key is the self-hosted Chrome mechanism — don't add it).
 - `_locales/en/messages.json` — `ext_name` ("qURL Agent" vs "qURL File Upload for Edge"), and `permission_request_confirm`, which names the host browser showing the prompt ("Chrome will show…" vs "Edge will show…").
+- `popup/popup.html` — the two hard-coded mirrors of `ext_name` (the static `<title>` and the header `div`), which is why it is not a lockstep file. Each copy's pair must match its own `ext_name`, or the popup renders one name and swaps to the other once `chrome.i18n` resolves.
 - Inside lockstep files, the masked tokens above: `lib/qurl-api.js` names the host browser whose minimum version guarantees `crypto.getRandomValues`; `popup/popup.js` names the browser that will show the permission prompt; `lib/qurl-config.js` points at its own app directory for the packaging `.env`. All prose; the code is identical.
 - Store-facing docs and assets: `docs/chrome-web-store-review.md` vs `docs/edge-add-ons-review.md` / `docs/edge-add-ons-submission-guide.md`. The `icons/` are *not* a delta: both apps generate them from the same `icons/logo.png` with `scripts/generate-icons.js`, so all four PNGs are byte-identical and must stay that way.
 

@@ -61,7 +61,7 @@
     if (results.length === 0) {
       sendResponse({
         success: false,
-        error: getMessage('compose_insert_no_results_error', 'No results to insert'),
+        error: getMessage('compose_insert_no_results_error', 'No results to insert.'),
       });
       return false;
     }
