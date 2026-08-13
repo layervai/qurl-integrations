@@ -647,12 +647,23 @@ const agentFollowupGateTimeout = 5 * time.Second
 const agentDeliveryBudget = 15 * time.Second
 
 // agentEventHasUpload reports whether this event carries an attachment. The
-// file_share subtype is evidence on its own: Slack stamps it on every upload,
-// while the files array can be absent for a file this app cannot see. Treating
-// the subtype as sufficient keeps an upload from falling through to silence,
-// and answering "I can't read attached files" is still correct when it does.
+// file_share subtype is evidence on its own, so an upload cannot fall through to
+// silence when the files array is absent — and answering "I can't read attached
+// files" stays correct when it does.
+// TODO(upstream-contract): relies on Slack stamping the file_share subtype on
+// every upload, and on the files array being omittable for a file this app
+// cannot see.
 func agentEventHasUpload(e *slackInnerEvent) bool {
 	return len(e.Files) > 0 || e.Subtype == slackMessageSubtypeFileShare
+}
+
+// agentHumanMessageSubtype reports whether a subtype still represents a deliberate
+// human message. Only file_share joins the empty subtype: it is an upload, which
+// this surface answers rather than ignores. Everything else — edits, joins, bot
+// posts — is system noise from here. thread_broadcast is a channel-only exception
+// and stays at its call site.
+func agentHumanMessageSubtype(subtype string) bool {
+	return subtype == "" || subtype == slackMessageSubtypeFileShare
 }
 
 // shouldDispatchAgentEvent filters out everything that isn't a human asking the
@@ -676,24 +687,19 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	}
 	switch e.Type {
 	case slackEventTypeAppMention:
-		// Channel @-mention — always a deliberate address. Tolerate the one human
-		// subtype for the same reason the message branches do: app_mention is known to
-		// carry a subtype in the wild, and a stamped mention-with-upload must not fall
-		// back into the silence this surface is here to avoid.
-		if e.Subtype != "" && e.Subtype != slackMessageSubtypeFileShare {
+		// Channel @-mention — always a deliberate address.
+		// TODO(upstream-contract): app_mention is known to carry a subtype in the wild,
+		// so a stamped mention-with-upload must not fall back into silence here.
+		if !agentHumanMessageSubtype(e.Subtype) {
 			return false
 		}
 	case slackEventTypeMessage:
 		if e.ChannelType == slackChannelTypeIM {
-			// Slack delivers uploaded files as file_share messages. Admit that one
-			// human subtype; other subtypes remain system/bot/edit-like noise from this
-			// surface's perspective.
-			if e.Subtype != "" && e.Subtype != slackMessageSubtypeFileShare {
+			if !agentHumanMessageSubtype(e.Subtype) {
 				return false
 			}
 		} else {
-			if e.Subtype != "" && e.Subtype != slackMessageSubtypeThreadBroadcast &&
-				e.Subtype != slackMessageSubtypeFileShare {
+			if !agentHumanMessageSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
 				return false
 			}
 			// A channel message reaches the follow-up pipeline only when channel
@@ -1063,12 +1069,14 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 
 	message := stripBotMention(env.Event.Text)
 	if reply, deterministic := agentDeterministicReply(&env.Event, message); deterministic {
-		if agentEventHasUpload(&env.Event) {
-			// The only terminal path in this function with no log line otherwise, and the
-			// one operators need to size demand for real file support. file_count only —
-			// names, ids, and mimetypes are user content and stay out of the log.
+		if reply == agentUnsupportedMediaReply {
+			// A media turn returns before "agent: turn complete", so without this it is
+			// invisible in every existing dashboard — and this is the demand signal for
+			// building real file support. files_visible is a count, not an inventory:
+			// names, ids and mimetypes are user content and stay out of the log. It is 0
+			// for an upload Slack described only by its subtype.
 			log.Info("agent: unsupported media; replied with the text-only limitation",
-				"file_count", len(env.Event.Files))
+				"files_visible", len(env.Event.Files))
 		}
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
 		return
