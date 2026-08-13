@@ -200,100 +200,137 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.Files = filesFromJSON(t, raw)
 		return e
 	}
+	// withBot / withoutUser restamp an otherwise-admissible event as one the author
+	// guard rejects, so the rows below can pin that the guard runs BEFORE the
+	// channel-upload branch — i.e. neither shape reaches the demand log.
+	withBot := func(e *slackEventEnvelope) *slackEventEnvelope {
+		e.Event.BotID = "B9"
+		return e
+	}
+	withoutUser := func(e *slackEventEnvelope) *slackEventEnvelope {
+		e.Event.User = ""
+		return e
+	}
+	// wantDrop is the refusal REASON, checked on every row including admitted ones
+	// (where agentDropSilent is what an admitted event carries). It is what the caller
+	// logs off, so a row that stops reporting agentDropChannelUpload is an upload that
+	// silently stops counting as demand — invisible in `want` alone, since both
+	// reasons produce the same false.
 	tests := []struct {
 		name      string
 		env       *slackEventEnvelope
 		followups bool
 		want      bool
+		wantDrop  agentDispatchDrop
 	}{
 		// @mentions and DMs are deliberate addresses — admitted regardless of the flag.
-		{"app_mention human", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), false, true},
-		{"app_mention still works with followups on", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), true, true},
-		{"dm human", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi"), false, true},
-		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U12345678> hi"), false, false},
-		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false, false},
-		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false, false},
+		{"app_mention human", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), false, true, agentDropSilent},
+		{"app_mention still works with followups on", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678> hi"), true, true, agentDropSilent},
+		{"dm human", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "hi"), false, true, agentDropSilent},
+		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U12345678> hi"), false, false, agentDropSilent},
+		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false, false, agentDropSilent},
+		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false, false, agentDropSilent},
 		// The authorless guard runs before the type/subtype switch, so it covers an
 		// upload too. Load-bearing for agentEventMediaNoticeKey: an empty user would
 		// collapse the latch key to "channel:" — one shared bucket that silences every
 		// member after the channel's first upload.
-		{"authorless upload ignored", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "", "", slackMessageSubtypeFileShare, "")), false, false},
-		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
-		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
-		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
+		{"authorless upload ignored", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "", "", slackMessageSubtypeFileShare, "")), false, false, agentDropSilent},
+		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false, agentDropSilent},
+		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true, agentDropSilent},
+		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true, agentDropSilent},
 		// file_share is admissible now, so the ONLY thing stopping a bot's upload from
 		// drawing a reply (and looping) is the author/bot guard ahead of the subtype
 		// switch. That guard is not in this PR's diff, which is exactly why it is
 		// pinned here.
-		{"bot file upload ignored (author guard, not the subtype filter)", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "B1", slackMessageSubtypeFileShare, "")), false, false},
-		{"authorless file upload ignored", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "", "", slackMessageSubtypeFileShare, "")), false, false},
-		{"me_message dm ignored (named in the policy doc, not admitted)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "me_message", "hi"), false, false},
-		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true},
-		{"file_share dm without files still admitted (subtype is proof)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, true},
-		{"file_share subtype on a mention admitted", withFile(env(slackEventTypeAppMention, "channel", "U2", "", slackMessageSubtypeFileShare, "<@U12345678>")), false, true},
-		{"non-upload subtype on a mention ignored", env(slackEventTypeAppMention, "channel", "U2", "", "message_changed", "<@U12345678> hi"), false, false},
-		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
+		{"bot file upload ignored (author guard, not the subtype filter)", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "B1", slackMessageSubtypeFileShare, "")), false, false, agentDropSilent},
+		{"authorless file upload ignored", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "", "", slackMessageSubtypeFileShare, "")), false, false, agentDropSilent},
+		{"me_message dm ignored (named in the policy doc, not admitted)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "me_message", "hi"), false, false, agentDropSilent},
+		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true, agentDropSilent},
+		{"file_share dm without files still admitted (subtype is proof)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, true, agentDropSilent},
+		{"file_share subtype on a mention admitted", withFile(env(slackEventTypeAppMention, "channel", "U2", "", slackMessageSubtypeFileShare, "<@U12345678>")), false, true, agentDropSilent},
+		{"non-upload subtype on a mention ignored", env(slackEventTypeAppMention, "channel", "U2", "", "message_changed", "<@U12345678> hi"), false, false, agentDropSilent},
+		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false, agentDropSilent},
 
 		// Channel follow-ups: a TEXT thread reply is admitted ONLY when the flag is on;
 		// a top-level channel message is never admitted (no un-addressed chatter).
-		{"channel thread reply, followups off", chReply("hi", agentPoolTestThreadTS), false, false},
-		{"channel thread reply, followups on", chReply("hi", agentPoolTestThreadTS), true, true},
-		{"top-level channel message, followups off", chReply("hi", ""), false, false},
-		{"top-level channel message, followups on", chReply("hi", ""), true, false},
-		{"top-level channel file ignored", withFile(chReply("", "")), true, false},
-		{"channel thread reply empty text, followups on", chReply("   ", agentPoolTestThreadTS), true, false},
+		{"channel thread reply, followups off", chReply("hi", agentPoolTestThreadTS), false, false, agentDropSilent},
+		{"channel thread reply, followups on", chReply("hi", agentPoolTestThreadTS), true, true, agentDropSilent},
+		{"top-level channel message, followups off", chReply("hi", ""), false, false, agentDropSilent},
+		{"top-level channel message, followups on", chReply("hi", ""), true, false, agentDropSilent},
+		{"top-level channel file ignored", withFile(chReply("", "")), true, false, agentDropChannelUpload},
+		{"channel thread reply empty text, followups on", chReply("   ", agentPoolTestThreadTS), true, false, agentDropSilent},
 
 		// Channel uploads: never admitted, on any channel path. This is what keeps a
 		// thread upload off followupGateSem and out of conversations.replies, so the
 		// rows below are the whole cost fix — a regression here is silent, because the
 		// admitted event still ends in the same limitation reply.
-		{"channel thread file reply dropped before the gate", withFile(chReply("", agentPoolTestThreadTS)), true, false},
-		{"file_share channel thread dropped before the gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, false},
-		{"file_share channel thread reply without files dropped (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
-		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
+		{"channel thread file reply dropped before the gate", withFile(chReply("", agentPoolTestThreadTS)), true, false, agentDropChannelUpload},
+		{"file_share channel thread dropped before the gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, false, agentDropChannelUpload},
+		{"file_share channel thread reply without files dropped (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false, agentDropChannelUpload},
+		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false, agentDropChannelUpload},
 		// A caption does not buy the message back in. The turn is refused wholesale
 		// either way (see processAgentEventWithAdmission), so the text was never the
 		// reason it would have been answered.
-		{"captioned channel thread file reply dropped", withFile(chReply("more please", agentPoolTestThreadTS)), true, false},
-		{"thread_broadcast channel thread file reply dropped", withFile(chReplySubtype("look", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast)), true, false},
+		{"captioned channel thread file reply dropped", withFile(chReply("more please", agentPoolTestThreadTS)), true, false, agentDropChannelUpload},
+		{"thread_broadcast channel thread file reply dropped", withFile(chReplySubtype("look", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast)), true, false, agentDropChannelUpload},
 		// Captioned AND file_share with no files array. The row above it proves the
 		// subtype is honored when the text is empty; this one proves it independently of
 		// the empty-text guard at the end of the function, which cannot reach a message
 		// that HAS text.
-		{"captioned file_share channel thread reply without files dropped", chReplySubtype("here you go", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
+		{"captioned file_share channel thread reply without files dropped", chReplySubtype("here you go", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false, agentDropChannelUpload},
 		// A files value the decoder cannot count reads as present, so this pure-TEXT
 		// follow-up is refused as an upload. That is the intended fail-toward-refusal
-		// posture (see slackEventFiles.UnmarshalJSON), and pinning it here is what keeps
-		// the collateral named at the branch honest: on this surface the refusal is now
-		// silent, where a DM or @mention would still raise claimMediaNotice's log.
-		{"channel thread text reply with an uncountable files value dropped", withRawFiles(chReply("and revoke it too", agentPoolTestThreadTS), `{}`), true, false},
-		// Regression pin on the flag-off path. It does NOT distinguish an unconditional
-		// drop from a flag-conditioned one — nothing can, because the gate below drops
-		// this row either way when the flag is off. Unconditionality is a readability
-		// choice here, not an observable one.
-		{"channel thread file reply dropped with followups off too (flag gate drops it anyway)", withFile(chReply("", agentPoolTestThreadTS)), false, false},
+		// posture (see slackEventFiles.UnmarshalJSON). The member still gets no reply,
+		// so the reason is what carries the "the agent refused my message" report out —
+		// this row is the one where the refusal may be WRONG, and agentDropSilent here
+		// would leave the reporting member and on-call both with nothing.
+		{"channel thread text reply with an uncountable files value dropped", withRawFiles(chReply("and revoke it too", agentPoolTestThreadTS), `{}`), true, false, agentDropChannelUpload},
+		// Regression pin on the flag-off path. `want` alone cannot distinguish an
+		// unconditional drop from a flag-conditioned one — the gate below drops this row
+		// either way when the flag is off — but the reason can, and it must not depend
+		// on the flag: an upload is demand whether or not follow-ups have shipped, and
+		// the flag is dark today, so a flag-conditioned reason would report zero for as
+		// long as the signal is the only thing telling us to build file support.
+		{"channel thread file reply dropped with followups off too (flag gate drops it anyway)", withFile(chReply("", agentPoolTestThreadTS)), false, false, agentDropChannelUpload},
+		// The author guard runs ahead of the upload branch, so neither of these becomes
+		// demand: a bot's upload would count the agent's own traffic as members asking
+		// for file support, and an authorless one has no user_id to join a complaint to.
+		{"bot channel thread upload ignored, and not counted as demand", withBot(withFile(chReply("", agentPoolTestThreadTS))), true, false, agentDropSilent},
+		{"authorless channel thread upload ignored, and not counted as demand", withoutUser(withFile(chReply("", agentPoolTestThreadTS))), true, false, agentDropSilent},
+		// An edit is not an upload arriving. The subtype guard runs first, so a
+		// message_changed carrying files stays out of the count — otherwise every edit
+		// of an old upload would re-report it as new demand.
+		{"edited channel message with files ignored, and not counted as demand", withFile(chReplySubtype("hi", agentPoolTestThreadTS, "message_changed")), true, false, agentDropSilent},
 		// The arm is every non-IM channel_type, not just "channel": a private channel and
 		// a group DM land here too. Called out because the "people talking to each other"
 		// rationale is weakest in an mpim, where the bot was deliberately invited — worth
 		// revisiting when the flag ships, but the cost argument is unchanged.
-		{"private channel thread file reply dropped", withFile(chReplyIn(slackChannelTypeGroup, "", agentPoolTestThreadTS)), true, false},
-		{"group DM thread file reply dropped", withFile(chReplyIn(slackChannelTypeMPIM, "", agentPoolTestThreadTS)), true, false},
-		{"private channel thread text reply still admitted", chReplyIn(slackChannelTypeGroup, "hi", agentPoolTestThreadTS), true, true},
+		{"private channel thread file reply dropped", withFile(chReplyIn(slackChannelTypeGroup, "", agentPoolTestThreadTS)), true, false, agentDropChannelUpload},
+		{"group DM thread file reply dropped", withFile(chReplyIn(slackChannelTypeMPIM, "", agentPoolTestThreadTS)), true, false, agentDropChannelUpload},
+		{"private channel thread text reply still admitted", chReplyIn(slackChannelTypeGroup, "hi", agentPoolTestThreadTS), true, true, agentDropSilent},
 		// ...and the route out stays open: an @mention is a different event type, so it
 		// carries an upload through from inside a channel thread. This is the only
 		// channel upload the surface still answers, and the limitation text names it.
-		{"file-only mention inside a channel thread still admitted", withFile(mentionInThread("<@U12345678>", agentPoolTestThreadTS)), true, true},
+		{"file-only mention inside a channel thread still admitted", withFile(mentionInThread("<@U12345678>", agentPoolTestThreadTS)), true, true, agentDropSilent},
 
-		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), false, false},
-		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), true, true},
-		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
-		{"thread_broadcast dm ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeThreadBroadcast, "hi"), true, false},
-		{"other channel thread subtype ignored", chReplySubtype("hi", agentPoolTestThreadTS, "message_changed"), true, false},
+		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), false, false, agentDropSilent},
+		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), true, true, agentDropSilent},
+		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false, agentDropSilent},
+		{"thread_broadcast dm ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeThreadBroadcast, "hi"), true, false, agentDropSilent},
+		{"other channel thread subtype ignored", chReplySubtype("hi", agentPoolTestThreadTS, "message_changed"), true, false, agentDropSilent},
+	}
+	dropNames := map[agentDispatchDrop]string{
+		agentDropSilent:        "agentDropSilent",
+		agentDropChannelUpload: "agentDropChannelUpload",
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldDispatchAgentEvent(tt.env, tt.followups); got != tt.want {
+			got, drop := shouldDispatchAgentEvent(tt.env, tt.followups)
+			if got != tt.want {
 				t.Fatalf("shouldDispatchAgentEvent = %v, want %v", got, tt.want)
+			}
+			if drop != tt.wantDrop {
+				t.Fatalf("shouldDispatchAgentEvent drop = %v, want %v", dropNames[drop], dropNames[tt.wantDrop])
 			}
 		})
 	}
@@ -1790,6 +1827,167 @@ func TestAgentUnsupportedMediaLogContract_SuppressedRepeat(t *testing.T) {
 		if strings.Contains(lines[i], "F1") || strings.Contains(lines[i], "F2") {
 			t.Fatalf("line %d leaked file ids: %s", i, lines[i])
 		}
+	}
+}
+
+// TestHandleEvent_ChannelUploadLogsWithoutDispatching is the observability half of
+// the channel-upload drop: the member hears nothing, so the log line is the ONLY
+// record that the upload happened at all. Two things ride on it — the count of
+// "someone tried to send a file", which is the demand signal for building real file
+// support, and the files_field_present=true / files_visible=0 pair on-call alerts on
+// — and both would read as zero on this surface without it (see
+// logAgentChannelUploadUnanswered).
+//
+// It goes through handleEvent rather than calling the emitter, because what can
+// break is the WIRING: the drop happens in a pure filter that cannot log, so a
+// refusal that stops being reported to the caller is invisible in
+// TestShouldDispatchAgentEvent's verdict and invisible to the member by design.
+// The negative cases are the other half — this must not become a line per message on
+// the message.channels firehose, which is chatter, not demand.
+func TestHandleEvent_ChannelUploadLogsWithoutDispatching(t *testing.T) {
+	// Spelled out rather than referenced as agentUnsupportedMediaMsg, like the sibling
+	// contract tests: an operator query consumes this exact string, and it is the SAME
+	// string claimMediaNotice emits — one exact-$.msg filter has to total both.
+	const mediaLogMsg = "agent: unsupported media"
+
+	const joinedThread = agentPoolTestThreadTS
+	tests := []struct {
+		name             string
+		followups        bool
+		event            string
+		wantLog          bool
+		wantVisible      float64
+		wantFieldPresent bool
+		wantSubtype      bool
+	}{
+		{
+			name:             "channel thread upload",
+			followups:        true,
+			event:            `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"` + joinedThread + `","ts":"700.1","text":"","files":[{"id":"F1"}]}`,
+			wantLog:          true,
+			wantVisible:      1,
+			wantFieldPresent: true,
+			wantSubtype:      true,
+		},
+		{
+			// Demand is not conditional on the flag, and the flag is dark: a line that
+			// only fired with follow-ups on would report zero for exactly as long as
+			// this count is the thing arguing for file support.
+			name:             "channel thread upload with follow-ups off",
+			followups:        false,
+			event:            `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"` + joinedThread + `","ts":"700.2","text":"","files":[{"id":"F1"},{"id":"F2"}]}`,
+			wantLog:          true,
+			wantVisible:      2,
+			wantFieldPresent: true,
+			wantSubtype:      true,
+		},
+		{
+			// The alertable pair, on the surface that stopped raising it: a pure-TEXT
+			// follow-up carrying a files value the decoder cannot count is refused as an
+			// upload, and this is the one shape where that refusal may be WRONG.
+			name:             "text follow-up with an uncountable files value",
+			followups:        true,
+			event:            `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"` + joinedThread + `","ts":"700.3","text":"and revoke it too","files":{"id":"F1"}}`,
+			wantLog:          true,
+			wantVisible:      0,
+			wantFieldPresent: true,
+		},
+		{
+			// Chatter, not demand. A top-level channel message is refused by a different
+			// branch and must stay silent — this is the shape the firehose is made of.
+			name:      "top-level channel chatter",
+			followups: true,
+			event:     `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","ts":"700.4","text":"morning all"}`,
+		},
+		{
+			// Admitted, then dropped downstream for not being the agent's thread. Also
+			// not demand: nothing about it was an upload.
+			name:      "text thread reply in a thread the agent never joined",
+			followups: true,
+			event:     `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"700.0","ts":"700.5","text":"more please"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			post, posts, mu := capturingPostMessage()
+			h := NewHandler(Config{
+				AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+				AgentThreadHistory:    (&countingThreadHistory{}).read,
+				AgentChannelFollowups: tt.followups, AgentDefaultEnabled: true,
+			})
+			t.Cleanup(h.Wait)
+
+			// handleAgentEvent logs off the DEFAULT logger — the drop happens before any
+			// per-turn logger exists — so capture that, through the production redacting
+			// handler at the level a deployment actually ships.
+			var buf bytes.Buffer
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(observability.NewRedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+			h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvChanUpload", tt.event)))
+			h.Wait()
+
+			var rec map[string]any
+			for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+				var candidate map[string]any
+				if err := json.Unmarshal(line, &candidate); err != nil {
+					continue
+				}
+				if candidate["msg"] == mediaLogMsg {
+					rec = candidate
+					break
+				}
+			}
+			// Either way the member hears nothing: this surface refuses channel uploads
+			// silently, and the log is what replaces the reply — never joins it.
+			mu.Lock()
+			gotPosts := len(*posts)
+			mu.Unlock()
+			if gotPosts != 0 {
+				t.Fatalf("channel refusal should post nothing, got %d messages", gotPosts)
+			}
+			if !tt.wantLog {
+				if rec != nil {
+					t.Fatalf("chatter must not be counted as file demand, got %v", rec)
+				}
+				return
+			}
+			if rec == nil {
+				t.Fatalf("no %q record; this line is the only trace a refused channel upload leaves. got %s", mediaLogMsg, buf.String())
+			}
+			if rec["level"] != "INFO" {
+				t.Fatalf("level = %v, want INFO (Debug would not survive to the operator query)", rec["level"])
+			}
+			if rec["files_visible"] != tt.wantVisible {
+				t.Fatalf("files_visible = %v, want %v", rec["files_visible"], tt.wantVisible)
+			}
+			if rec["files_field_present"] != tt.wantFieldPresent {
+				t.Fatalf("files_field_present = %v, want %v", rec["files_field_present"], tt.wantFieldPresent)
+			}
+			if rec["file_share_subtype"] != tt.wantSubtype {
+				t.Fatalf("file_share_subtype = %v, want %v", rec["file_share_subtype"], tt.wantSubtype)
+			}
+			if rec["user_id"] != "U2" {
+				t.Fatalf("user_id = %v, want U2 (needed to join this record to a complaining member)", rec["user_id"])
+			}
+			// The discriminator: this upload drew no reply and ran no turn.
+			if rec["channel_upload_unanswered"] != true {
+				t.Fatalf("channel_upload_unanswered = %v, want true", rec["channel_upload_unanswered"])
+			}
+			// ...and NOT by overloading notice_posted, which on claimMediaNotice's line
+			// means "counted, but a repeat we suppressed" — a conversation that did hear
+			// the limitation. Emitting it here would merge two different outcomes.
+			if _, ok := rec["notice_posted"]; ok {
+				t.Fatalf("notice_posted must be absent; false there means a suppressed repeat, not silence: %v", rec)
+			}
+			// The identifying fields are the turn's own (see agentEventLogger): an
+			// operator who finds this line pivots on them to the rest of the surface.
+			if rec["channel_id"] != "C1" || rec["event_id"] != "EvChanUpload" || rec["surface"] != "agent" {
+				t.Fatalf("record is missing the shared event identity: %v", rec)
+			}
+		})
 	}
 }
 
