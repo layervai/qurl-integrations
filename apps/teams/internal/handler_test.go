@@ -260,6 +260,9 @@ func TestHandleProtectConnectorRevokesBootstrapKeyWhenDMFails(t *testing.T) {
 			switch {
 			case strings.Contains(expr, "allowed_resource_ids"):
 				return &dynamodb.UpdateItemOutput{}, nil
+			case strings.Contains(expr, "SET alias_bindings = :empty_map"):
+				// Seed write that makes the nested alias path writable.
+				return &dynamodb.UpdateItemOutput{}, nil
 			case strings.Contains(expr, "REMOVE alias_bindings.#alias"):
 				return nil, &ddbtypes.ConditionalCheckFailedException{}
 			case strings.Contains(expr, "alias_bindings.#alias = :rid"):
