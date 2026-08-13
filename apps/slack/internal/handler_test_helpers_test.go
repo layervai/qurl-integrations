@@ -1,8 +1,11 @@
 package internal
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -46,6 +49,43 @@ const (
 func slogTestLogger(_ *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
+
+// capturedLogs is a concurrency-safe sink for the default slog logger. The
+// install path logs from a pool goroutine, so the buffer is read from a
+// different goroutine than the one that wrote it.
+type capturedLogs struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *capturedLogs) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *capturedLogs) contains(substr string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Contains(c.buf.String(), substr)
+}
+
+// captureDefaultSlog redirects the default slog logger for one test and
+// restores it on cleanup. Async install work logs through slog.With off the
+// default logger, so this is the only seam that sees those records.
+func captureDefaultSlog(t *testing.T) *capturedLogs {
+	t.Helper()
+	logs := &capturedLogs{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return logs
+}
+
+// kindFirstWarning is the message logged when a mint response does not confirm
+// the kind-first contract. Shared so the fires/silent assertions cannot drift
+// apart from each other.
+const kindFirstWarning = "tunnel install: minted credential did not confirm the kind-first contract"
 
 // assertConnectorEnrollmentKind pins the kind/target pair that makes the
 // minted credential a Connector-bound enrollment token rather than an ordinary

@@ -513,6 +513,12 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
 	now := fixedNow
 
+	// This test's mint stub returns the pre-cutover envelope (no kind/target),
+	// which is exactly the case the rollout warning exists to surface. Capture
+	// the default logger so the warning's emission is asserted end to end, not
+	// just its predicate.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -592,6 +598,9 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if !logs.contains(kindFirstWarning) {
+		t.Error("a legacy-shaped mint response must raise the kind-first rollout warning")
+	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
 	}
@@ -1346,6 +1355,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := fixedNow
 	modalCreatedAt := now.Add(-10 * time.Minute)
 
+	// Counterpart to the slash-path assertion: this test's mint stub returns
+	// the kind-first envelope, so the rollout warning must stay silent. Without
+	// this direction, a warning that fired unconditionally would still pass.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -1432,6 +1446,9 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	assertConnectorEnrollmentKind(t, apiKeyBody)
 	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if logs.contains(kindFirstWarning) {
+		t.Error("a kind-first mint response must not raise the rollout warning")
+	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
 	}

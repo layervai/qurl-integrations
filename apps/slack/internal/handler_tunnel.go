@@ -32,9 +32,9 @@ const (
 	// submissions inside that window so async install errors can still reach
 	// the admin after Slack accepts the view submission. This is intentionally
 	// shorter than tunnelBootstrapTTL so any submitted modal still leaves setup
-	// headroom after the one-shot enrollment token is minted; a modal submitted at
-	// the end of this window still leaves roughly 35 minutes on the bootstrap
-	// key for the operator to start the sidecar.
+	// headroom after the one-shot enrollment token is minted; a modal submitted
+	// at the end of this window still leaves roughly 35 minutes on the
+	// enrollment token for the operator to start the sidecar.
 	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
 	// ack now happens before views.open; the call budget below leaves room for
