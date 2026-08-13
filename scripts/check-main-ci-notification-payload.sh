@@ -164,7 +164,10 @@ try:
         proc = subprocess.run(
             ["bash", script], env=env, capture_output=True, text=True
         )
-        return proc, (open(out).read() if os.path.exists(out) else None)
+        if not os.path.exists(out):
+            return proc, None
+        with open(out) as fh:
+            return proc, fh.read()
 
     # Every trigger, plus an unlisted name to prove the fallback arm works.
     cases = [(w, {}) for w in triggers + ["Some Unlisted Workflow"]]
