@@ -8,13 +8,13 @@
 # shows the divergence — and the failure mode is a security bug that only affects
 # one browser's users. See the Chrome<->Edge lockstep table in CLAUDE.md.
 #
-# The two copies are byte-identical except for the host browser's name in prose
-# and comments, so this masks the capitalized prose tokens `Chrome` and `Edge` on
-# BOTH sides before demanding an exact match. Masking both sides rather than
-# rewriting Edge -> Chrome keeps an ordinary comment about an "Edge case" from
-# reading as drift. The lowercase `chrome.*` extension API namespace is spelled
-# the same in both browsers and is deliberately NOT masked, so a real change to
-# an API call can never be hidden by the normalization.
+# The two copies are byte-identical except for the host browser's name and each
+# copy's own app directory, so this masks those tokens on BOTH sides before
+# demanding an exact match. Masking both sides rather than rewriting Edge ->
+# Chrome keeps an ordinary comment about an "Edge case" from reading as drift.
+# The lowercase `chrome.*` extension API namespace is spelled the same in both
+# browsers and is deliberately NOT masked, so a real change to an API call can
+# never be hidden by the normalization.
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
@@ -37,7 +37,10 @@ EDGE = pathlib.Path("apps/edge-extension")
 LOCKSTEP_FILES = [
     "lib/qurl-api.js",
     "lib/qurl-compose-format.js",
+    "lib/qurl-config.js",
+    "lib/qurl-i18n.js",
     "content/gmail-compose.js",
+    "popup/popup.js",
     "background.js",
 ]
 
@@ -45,7 +48,22 @@ LOCKSTEP_FILES = [
 # Word-boundary anchored and case-sensitive so the lowercase `chrome.*` API
 # namespace is left untouched.
 BROWSER_PROSE = re.compile(r"\b(?:Chrome|Edge)\b")
-BROWSER_MASK = "<browser>"
+
+# Each copy names its own app directory when pointing at sibling files (e.g. the
+# `.env` path in lib/qurl-config.js's doc comment). Narrow by construction: it
+# only matches this exact directory pair, so the trade-off is that a copy-pasted
+# reference to the *other* extension's directory would be masked rather than
+# reported. That is a doc-comment-level mistake, and masking it is worth having
+# these files checked at all rather than excluded outright.
+APP_DIR = re.compile(r"apps/(?:chrome|edge)-extension")
+
+MASKS = ((BROWSER_PROSE, "<browser>"), (APP_DIR, "apps/<browser>-extension"))
+
+
+def normalize(text):
+    for pattern, replacement in MASKS:
+        text = pattern.sub(replacement, text)
+    return text
 
 failures = []
 
@@ -61,8 +79,8 @@ for rel in LOCKSTEP_FILES:
         )
         continue
 
-    chrome_text = BROWSER_PROSE.sub(BROWSER_MASK, chrome_path.read_text())
-    edge_text = BROWSER_PROSE.sub(BROWSER_MASK, edge_path.read_text())
+    chrome_text = normalize(chrome_path.read_text())
+    edge_text = normalize(edge_path.read_text())
 
     if chrome_text == edge_text:
         continue
@@ -71,8 +89,8 @@ for rel in LOCKSTEP_FILES:
         difflib.unified_diff(
             chrome_text.splitlines(keepends=True),
             edge_text.splitlines(keepends=True),
-            fromfile=f"{chrome_path} (browser name masked)",
-            tofile=f"{edge_path} (browser name masked)",
+            fromfile=f"{chrome_path} (normalized)",
+            tofile=f"{edge_path} (normalized)",
         )
     )
     failures.append(f"{rel}: copies have diverged:\n{diff}")

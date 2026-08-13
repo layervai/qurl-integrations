@@ -31,15 +31,20 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 |---------------------------|---------------------------|----------------------------------------|
 | `lib/qurl-api.js`         | `lib/qurl-api.js`         | Upload logic, sanitizers, permissions  |
 | `lib/qurl-compose-format.js` | `lib/qurl-compose-format.js` | Link formatting for Gmail insertion |
+| `lib/qurl-config.js`      | `lib/qurl-config.js`      | Default API base, origin normalization |
+| `lib/qurl-i18n.js`        | `lib/qurl-i18n.js`        | Message lookup and placeholder substitution |
 | `content/gmail-compose.js`| `content/gmail-compose.js`| Gmail DOM manipulation                 |
+| `popup/popup.js`          | `popup/popup.js`          | Permission confirmation flow, per-file size cap |
 | `background.js`           | `background.js`           | Service worker message handling        |
 
-`scripts/check-extension-lockstep.sh` enforces this on every PR (via the Scripts workflow): it masks the capitalized prose words `Chrome`/`Edge` on both sides and then requires an exact match, so drift fails CI instead of relying on a reviewer noticing. The lowercase `chrome.*` extension API namespace is spelled the same in both browsers and is deliberately not masked, so a real change to an API call still trips the check. When a deliberate divergence is added, document it below **and** update that script.
+`scripts/check-extension-lockstep.sh` enforces this on every PR (via the Scripts workflow), so drift fails CI instead of relying on a reviewer noticing. It masks two token classes on both sides and then requires an exact match: the capitalized prose words `Chrome`/`Edge`, and each copy's own app directory (`apps/chrome-extension` / `apps/edge-extension`, which appears in doc comments pointing at sibling files). The lowercase `chrome.*` extension API namespace is spelled the same in both browsers and is deliberately **not** masked, so a real change to an API call still trips the check. When a deliberate divergence is added, document it below **and** update that script.
+
+`_locales/en/messages.json` is deliberately **not** in the table — it carries two sanctioned wording deltas (below). Its keys still have to be added to both copies by hand; a key used by a lockstep file but missing from `messages.json` silently falls back to the hard-coded English literal in `getMessage`'s second argument rather than failing.
 
 Intentional differences (do **not** sync these):
 - `manifest.json` / `package.json` `version` — separate release-please tracks (`chrome-extension-v*` vs `edge-extension-v*`), so the two versions move independently. This is the *only* manifest delta; Edge Add-ons hosts updates itself, so the Edge manifest carries no `update_url` (that key is the self-hosted Chrome mechanism — don't add it).
 - `_locales/en/messages.json` — `ext_name` ("qURL File Upload" vs "qURL File Upload for Edge"), and `ask_origin_permission`, which names the host browser showing the prompt ("Chrome will show…" vs "Edge will show…").
-- `lib/qurl-api.js` — one comment names the host browser whose minimum version guarantees `crypto.getRandomValues`. Prose only; the code is identical.
+- Inside lockstep files, the masked tokens above: `lib/qurl-api.js` names the host browser whose minimum version guarantees `crypto.getRandomValues`; `popup/popup.js` names the browser that will show the permission prompt; `lib/qurl-config.js` points at its own app directory for the packaging `.env`. All prose; the code is identical.
 - Store-facing docs and assets: `docs/chrome-web-store-review.md` vs `docs/edge-add-ons-review.md` / `docs/edge-add-ons-submission-guide.md`, plus per-store branded `icons/`.
 
 ## Commit format
