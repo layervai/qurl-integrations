@@ -294,7 +294,7 @@ func TestHandleEvent_DriftNeverDrivesTheWorkspacePurge(t *testing.T) {
 		{
 			name:          "envelope type drifted away from event_callback",
 			body:          `{"type":123,"team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftB","event":{"type":"app_uninstalled"}}`,
-			wouldHaveDone: "nothing; every route is gated on env.Type, which drift zeroes",
+			wouldHaveDone: "nothing; every PURGE route is gated on env.Type, which drift zeroes — but see TestHandleEvent_DriftedEnvelopeTypeStillNamesTheLostTeardown: this is the case that would otherwise vanish unannounced",
 		},
 	}
 	for _, tt := range tests {
@@ -495,5 +495,78 @@ func TestHandleEvent_OwnPostWithDriftedBotIDIsNotAnswered(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 0 {
 		t.Fatalf("the agent answered its own post through a drifted bot_id: %d replies", len(*posts))
+	}
+}
+
+// TestHandleEvent_DriftWarnLatchesPerField pins the flood control, which until
+// now rested only on prose. A schema change drifts EVERY event, so an unlatched
+// Warn would bury the operator at request volume in exactly the incident it
+// exists to report.
+func TestHandleEvent_DriftWarnLatchesPerField(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	// Debug so the demoted repeats are visible; at Warn they would be invisible
+	// either way and the test could not tell dropping from demoting.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h, _, _ := newAgentEventHandler(t, testAgentReachStagingReply)
+	mention := func(eventID string) string {
+		return `{"type":"event_callback","team_id":"T1","event_id":"` + eventID + `",` +
+			`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"100.1","text":"<@U12345678> hi"},"event_time":"nope"}`
+	}
+	// Distinct event ids: same drifted FIELD, different deliveries, so dedupe
+	// cannot be what suppresses the second line.
+	h.handleEvent(httptest.NewRecorder(), []byte(mention("EvLatch1")))
+	h.handleEvent(httptest.NewRecorder(), []byte(mention("EvLatch2")))
+	h.handleEvent(httptest.NewRecorder(), []byte(mention("EvLatch3")))
+	h.Wait()
+
+	got := logBuf.String()
+	if warns := strings.Count(got, `level=WARN msg="event JSON field type drift`); warns != 1 {
+		t.Fatalf("same drifted field logged %d Warns across 3 events, want exactly 1: %q", warns, got)
+	}
+	// Demoted, not dropped — the repeats stay recoverable at Debug.
+	if debugs := strings.Count(got, `level=DEBUG msg="event JSON field type drift`); debugs != 2 {
+		t.Fatalf("repeat drifts logged %d Debug lines, want 2 (demoted, not discarded): %q", debugs, got)
+	}
+
+	// A DIFFERENT field is news again, and must not be swallowed by the latch.
+	logBuf.Reset()
+	h.handleEvent(httptest.NewRecorder(), []byte(`{"type":"event_callback","team_id":"T1","event_id":"EvLatch4",`+
+		`"event":{"type":"app_mention","user":"U2","channel":"C1","ts":"100.1","text":"<@U12345678> hi","bot_id":42}}`))
+	h.Wait()
+	if !strings.Contains(logBuf.String(), "level=WARN") || !strings.Contains(logBuf.String(), "drift_field=event.bot_id") {
+		t.Fatalf("a newly-drifted field must Warn on its own first sighting; got %q", logBuf.String())
+	}
+}
+
+// TestHandleEvent_DriftedEnvelopeTypeStillNamesTheLostTeardown closes the one
+// observability hole the refusal would otherwise leave. When the ENVELOPE type
+// is the field that drifted, no purge route can match — so without this the
+// event would exit under the generic "routing on the fields that decoded" line,
+// and an operator would never learn a teardown had been dropped.
+func TestHandleEvent_DriftedEnvelopeTypeStillNamesTheLostTeardown(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h, provider, _ := newLifecycleTestHandler(t)
+	body := `{"type":123,"team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvLostTeardown","event":{"type":"app_uninstalled"}}`
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	h.Wait()
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "NOT purged") || !strings.Contains(got, "event_type=app_uninstalled") {
+		t.Fatalf("a teardown lost to envelope-type drift must be named, not left to the generic line; got %q", got)
+	}
+	// Still refused, of course — the wider recognition is for the log only.
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("recognizing the teardown must not purge it: %d deletes", provider.deleteStateCalls)
 	}
 }

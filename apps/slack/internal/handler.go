@@ -2374,7 +2374,13 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	// the purge never reads is refused too, so that workspace's data persists
 	// until an operator acts on the Warn below. Fail-safe and observable beats
 	// the alternative, which is deleting the wrong tenant's install.
-	lifecycleRefused := drifted && env.Type == slackEnvelopeTypeEventCallback && isLifecycleEventType(env.Event.Type)
+	// Deliberately NOT gated on env.Type == event_callback. This branch only
+	// logs, so it costs nothing to recognize a teardown whose ENVELOPE type is
+	// the field that drifted — and that is the case an operator would otherwise
+	// never hear about, since the generic line would say "routing on the fields
+	// that decoded" while a teardown quietly matched no route at all.
+	// url_verification keeps precedence by sitting earlier in the switch.
+	lifecycleRefused := drifted && isLifecycleEventType(env.Event.Type)
 	// The refusal branch logs its own, more specific line; emitting the generic
 	// one too would tell an operator we were "routing on the fields that
 	// decoded" immediately before saying we refused to.
@@ -2402,7 +2408,16 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 		// Warn that the sibling routing layer already uses for the same failure
 		// (see handleInteraction). It sat at Debug, invisible in prod, which is
 		// how the bug this function now fixes stayed hidden for so long.
+		//
+		// Un-latched, unlike the drift line above, and deliberately: drift is
+		// systematic by nature (a schema change moves EVERY event), while a
+		// body Slack signed but did not encode validly is a one-off. There is
+		// also no stable key to latch on — a syntax error names an offset, not
+		// a field.
 		slog.Warn("event JSON parse failed", "error", err, "body_length", len(body))
+	case env.Type == "url_verification":
+		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
+		return
 	case lifecycleRefused:
 		// Ack it (Slack must not retry) but do not purge. See the CONSEQUENCE
 		// paragraph above: the inner event type decoded cleanly, so we know a
@@ -2416,9 +2431,6 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 			"has_enterprise_id", env.EnterpriseID != "",
 			"has_event_id", env.EventID != "",
 		)
-	case env.Type == "url_verification":
-		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
-		return
 	case env.Type == slackEnvelopeTypeEventCallback && h.cfg.SlackBotTokenRotationEnabled && isBotTokensRevokedEvent(&env.Event):
 		// In token-rotation deployments this callback can mean "Slack rotated the
 		// bot token" rather than "workspace uninstalled the app". Ack it, but do
