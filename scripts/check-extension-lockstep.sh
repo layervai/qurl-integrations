@@ -84,6 +84,11 @@ LOCKSTEP_FILES = [
     "test/qurl-api.test.js",
     "test/qurl-compose-format.test.js",
     "test/qurl-i18n.test.js",
+    # Test helpers: shared scaffolding the suites above import. Not suites
+    # themselves — `node --test test/*.test.js` globs the top level only — but
+    # drift here silently changes what every importing suite asserts.
+    "test/helpers/icons.js",
+    "test/helpers/temp-dir.js",
 ]
 
 # Store names are whole phrases rather than a swapped word, so they are masked

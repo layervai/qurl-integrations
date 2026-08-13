@@ -5,6 +5,13 @@
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
 const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
+const {
+  IPV4_LITERAL_RE,
+  parseIPv4Octets,
+  ipv4LocalScope,
+  ipv6LocalScope,
+  unwrapIPv4Mapped,
+} = require('./utils/private-host');
 
 // Required at boot in EVERY environment.
 //
@@ -64,68 +71,48 @@ function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
 }
 
-function isPrivateIPv4Literal(hostname) {
-  const parts = hostname.split('.');
-  if (parts.length !== 4) return false;
-  const octets = parts.map(part => Number(part));
-  // The String(octet) round-trip is NOT a leading-zero/octal defense — WHATWG
-  // already canonicalizes those inside new URL() (`010.0.0.1` arrives as
-  // `8.0.0.1`). It rejects labels that Number() accepts but the URL spec's
-  // IPv4 parser does not, which therefore arrive as ordinary DOMAIN
-  // hostnames: `Number('1e2')` is 100, so without it a public host like
-  // 10.2.3.1e2 or 192.168.0.1e1 would read as a private literal and
-  // crash-loop a legitimate deploy at boot.
-  if (octets.some((octet, idx) => !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== parts[idx])) {
-    return false;
-  }
-  // CGNAT 100.64.0.0/10 is deliberately NOT screened: unlike the ranges below
-  // it can front a legitimately reachable origin, so rejecting it would fail
-  // a valid deploy. Same reasoning excludes the TEST-NET blocks — the screen
-  // rejects hosts that CANNOT serve a public OAuth redirect, not every host
-  // that merely looks unusual.
-  const [a, b] = octets;
-  return a === 0 //                              0.0.0.0/8 "this network"
-    || a === 10
-    || a === 127
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168);
-}
-
-// The v6 half of the same cheap literal screen. Kept separate because the
-// parser hands back IPv4-mapped addresses in hex (`::ffff:127.0.0.1`
-// serializes as `::ffff:7f00:1`), so the dotted form never survives to a
-// string compare and has to be mapped back to octets.
-// Deliberately common-forms-only, matching the cheap-literal scope of the
-// screen as a whole: the deprecated IPv4-COMPATIBLE form (`::127.0.0.1`,
-// which serializes to `::7f00:1`) and site-local `fec0::/10` both fall
-// through. Both address classes are dead in practice, `::1` covers realistic
-// loopback, and reachability is not knowable at boot anyway.
-function isLocalOnlyIPv6(host) {
-  if (host === '::' || host === '::1') return true;
-  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
-  if (mapped) {
-    const [hi, lo] = mapped.slice(1).map(group => parseInt(group, 16));
-    return isPrivateIPv4Literal([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'));
-  }
-  const firstGroup = parseInt(host.split(':')[0], 16);
-  if (!Number.isInteger(firstGroup)) return false;
-  return (firstGroup & 0xfe00) === 0xfc00 //  fc00::/7  unique-local
-    || (firstGroup & 0xffc0) === 0xfe80; //   fe80::/10 link-local
-}
+// The syntactic range table lives in utils/private-host.js so this boot-path
+// screen and qurl.js's SSRF guard can't drift apart — the failure mode a
+// second copy invites is one of them gaining a range the other lacks. That
+// module is dependency-free, so requiring it costs the earliest phase of
+// startup nothing.
+//
+// The question here is narrower than the SSRF guard's "is this private?": it
+// is "can this origin serve a PUBLIC OAuth redirect?". Hence the scope
+// decisions kept at this call site rather than pushed into the table:
+//
+//   - `.localhost` and a trailing-dot FQDN are name forms that only matter
+//     for an operator-typed BASE_URL, not for a fetch target.
+//   - CGNAT (100.64.0.0/10) is deliberately NOT screened: unlike the ranges
+//     the table always screens, it can front a legitimately reachable origin,
+//     so rejecting it would fail a valid deploy. The same reasoning excludes
+//     multicast/reserved and the deprecated site-local fec0::/10 — this
+//     rejects hosts that CANNOT serve a public origin, not every host that
+//     merely looks unusual.
+//
+// Input is always `new URL().hostname`, i.e. already canonicalized: WHATWG
+// resolves alternate IPv4 literal forms (`010.0.0.1` arrives as `8.0.0.1`)
+// and re-serializes `::ffff:127.0.0.1` to the hex form `::ffff:7f00:1`, which
+// is why the mapped unwrap has to understand the hex tail.
+const LOCAL_ONLY_IPV6_SCOPES = ['unspecified', 'loopback', 'unique-local', 'link-local'];
 
 function isLocalOnlyHost(hostname) {
   // Strip the brackets the parser keeps around an IPv6 literal, and the
   // trailing dot of an absolute FQDN — `localhost.` resolves the same as
   // `localhost`, so it must not slip past the name compares below.
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  return host === 'localhost'
-    || host.endsWith('.localhost')
-    || isPrivateIPv4Literal(host)
-    // The colon test is load-bearing, not a fast path: parseInt() below is a
-    // lenient prefix parse, so parseInt('fc00.example.com', 16) is 0xfc00 and
-    // the unique-local mask would misread real public hosts as link-local.
-    || (host.includes(':') && isLocalOnlyIPv6(host));
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  // parseIPv4Octets rejects labels Number() accepts but the URL spec's IPv4
+  // parser does not, which therefore arrive as ordinary DOMAIN hostnames:
+  // Number('1e2') is 100, so without it a public host like 10.2.3.1e2 would
+  // read as private and crash-loop a valid deploy.
+  const octets = parseIPv4Octets(unwrapIPv4Mapped(host) || host);
+  if (octets) return Boolean(ipv4LocalScope(octets));
+  // The colon test is load-bearing, not a fast path: ipv6LocalScope's parseInt
+  // is a lenient prefix parse, so parseInt('fc00.example.com', 16) is 0xfc00
+  // and the unique-local mask would misread real public hosts as link-local.
+  if (!host.includes(':')) return false;
+  return LOCAL_ONLY_IPV6_SCOPES.includes(ipv6LocalScope(host));
 }
 
 // Textual userinfo strip, for values `new URL` can't parse into a
@@ -476,12 +463,13 @@ function missingHotStandbyKeys(cfg) {
 // octal under some resolvers); each octet is `0` alone, `1-9`, or
 // `1[0-9]-25[0-5]` with no leading zero. ECS task-def injection
 // produces canonical no-leading-zero v4 strings; this just closes
-// the operator-typo door.
+// the operator-typo door. That is the same shape the private/local
+// host screen needs, so both use IPV4_LITERAL_RE from
+// utils/private-host.js rather than keeping two copies in this file.
 //
 // Returns an array of operator-facing message strings (one per
 // problem) or [] when all values are well-shaped. Hot-standby off
 // → skip entirely.
-const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/;
 function invalidHotStandbyValues(cfg) {
   if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
   const problems = [];
@@ -491,7 +479,7 @@ function invalidHotStandbyValues(cfg) {
       'INSTANCE_ID is derived from os.hostname() by default; an env override here was set to an unresolved placeholder.'
     );
   }
-  if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {
+  if (cfg.INSTANCE_IP && !IPV4_LITERAL_RE.test(cfg.INSTANCE_IP)) {
     problems.push(
       `INSTANCE_IP must be a valid IPv4 address (got '${cfg.INSTANCE_IP}'). ` +
       'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today. ' +
@@ -504,7 +492,7 @@ function invalidHotStandbyValues(cfg) {
   // the same reason. Common operator paste-error: copying the ECS
   // task-metadata endpoint URL (169.254.170.2 / 169.254.172.2) out
   // of AWS docs.
-  if (cfg.INSTANCE_IP && IPV4_RE.test(cfg.INSTANCE_IP) && cfg.INSTANCE_IP.startsWith('169.254.')) {
+  if (cfg.INSTANCE_IP && IPV4_LITERAL_RE.test(cfg.INSTANCE_IP) && cfg.INSTANCE_IP.startsWith('169.254.')) {
     problems.push(
       `INSTANCE_IP is link-local (got '${cfg.INSTANCE_IP}'). ` +
       '169.254.0.0/16 is RFC 3927 link-local and not routable peer-to-peer; push-handoff would POST to an unreachable address. ' +
