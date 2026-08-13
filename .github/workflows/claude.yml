@@ -208,13 +208,15 @@ jobs:
             exit 1
           fi
 
-          # v1.0.180 preserves PR-authored startup-sensitive paths under
-          # .claude-pr/ with dereferencing enabled before restoring the base
-          # copies. A symlink such as .claude/settings.json ->
-          # /proc/self/environ would therefore materialize this secrets-bearing
-          # action process's environment into a file Claude can read. Inspect
-          # the authorized tree object without checking it out and accept only
-          # ordinary executable/non-executable blobs at every preserved path.
+          # The pinned action preserves PR-authored startup-sensitive paths
+          # under .claude-pr/ with dereferencing enabled before restoring the
+          # base copies; that behavior was observed at v1.0.180. A symlink
+          # such as .claude/settings.json -> /proc/self/environ would therefore
+          # materialize this secrets-bearing action process's environment into
+          # a file Claude can read. This guard is unconditional rather than
+          # version-gated: inspect the authorized tree object without checking
+          # it out and accept only ordinary executable/non-executable blobs at
+          # every preserved path.
           sensitive_paths=(
             .claude
             .mcp.json
@@ -309,8 +311,10 @@ jobs:
       - name: Run Claude Code
         id: claude
         if: success()
-        # v1.0.180 keeps interactive commands on the same fail-closed runner as
-        # automatic review and avoids the v1.0.140/141 issue-comment crash.
+        # Requires v1.0.180 or newer: from that version interactive commands
+        # run on the same fail-closed runner as automatic review, and it is past
+        # the v1.0.140/141 issue-comment crash. Moving the pin forward keeps
+        # both; do not pin below that floor.
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -324,7 +328,8 @@ jobs:
           # Keep comment-triggered analysis on the same proven model as the
           # automatic PR review. The action's implicit default may select the
           # 1M-context variant, which this repository credential cannot start.
-          # scripts/check-claude-model-lockstep.py enforces this coupling.
+          # Nothing enforces this coupling: when claude-code-review.yml's
+          # --model changes, change this one in the same pull request.
           # Do not add extra allowed tools by default: the action's base GitHub
           # tools are sufficient here. The automatic review workflow uses a
           # narrow GitHub MCP allowlist because its explicit prompt needs PR

@@ -171,9 +171,10 @@ jobs:
         # composite action step; actions/runner#1979 (timeouts on steps *inside*
         # a composite action) is a different, still-unsupported case.
         timeout-minutes: ${{ fromJSON(env.CLAUDE_REVIEW_BUDGET_MINUTES) }}
-        # v1.0.180 contains upstream #1496: a terminal SDK result with
-        # `subtype: success` plus `is_error: true` fails instead of producing a
-        # false-green review check.
+        # Requires v1.0.180 or newer, which carries upstream #1496: a terminal
+        # SDK result with `subtype: success` plus `is_error: true` fails instead
+        # of producing a false-green review check. Moving the pin forward keeps
+        # that guarantee; do not pin below that floor.
         uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
