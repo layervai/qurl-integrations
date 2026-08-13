@@ -182,6 +182,31 @@ func withRequestIDAttr(requestID string, attrs ...any) []any {
 	return append(out, attrs...)
 }
 
+// withAPIErrorAttrs expands a *client.APIError into log attributes —
+// request ID, status, code, detail, and any per-field validation messages.
+// APIError.Error() renders only "Title (Status): Detail", so a contract
+// rejection's actionable part (invalid_fields naming the offending key) is
+// parsed and then dropped on the floor at every log site that passes the bare
+// error. Non-API errors pass through untouched.
+func withAPIErrorAttrs(err error, attrs ...any) []any {
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) {
+		return attrs
+	}
+	out := withRequestIDAttr(apiErr.RequestID, attrs...)
+	out = append(out, "status", apiErr.StatusCode)
+	if apiErr.Code != "" {
+		out = append(out, "code", apiErr.Code)
+	}
+	if apiErr.Detail != "" {
+		out = append(out, "detail", apiErr.Detail)
+	}
+	if len(apiErr.InvalidFields) > 0 {
+		out = append(out, "invalid_fields", apiErr.InvalidFields)
+	}
+	return out
+}
+
 // postResponse POSTs an ephemeral follow-up to Slack's response_url.
 // Errors are logged, never retried. The bool tells sensitive callers whether
 // they should add extra audit context after a failed delivery.
