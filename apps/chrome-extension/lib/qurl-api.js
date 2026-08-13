@@ -553,17 +553,16 @@ function _parseExpiry(payload) {
     // Treat exactly 1e12 as milliseconds (year 2001 in ms vs year ~33658 in seconds).
     const ms = raw >= 1e12 ? raw : raw * 1000;
 
-    // ECMAScript time values are capped at +/-8.64e15 ms; beyond that new Date(ms) is an
-    // Invalid Date and toISOString() throws a RangeError. A backend that switched expires_at
-    // to nanoseconds (Go's UnixNano is ~1.7e18) would land here, and because this call sits
-    // inside uploadFile's success return the throw would be caught by its catch and reported
-    // as a failed upload for a file the server had already stored. Report "no usable expiry"
-    // the same way the string branch does instead.
-    if (Math.abs(ms) > 8.64e15) {
+    // A nanosecond timestamp (Go's UnixNano is ~1.7e18) overflows the Date range, and the
+    // RangeError toISOString() throws would reach uploadFile's catch as a failed upload for a
+    // file the server had already stored. Signal "no usable expiry" like the string branch.
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) {
+      console.warn('[qURL] Ignoring out-of-range expires_at:', raw);
       return null;
     }
 
-    return new Date(ms).toISOString();
+    return date.toISOString();
   }
 
   if (typeof raw === 'string') {

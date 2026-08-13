@@ -196,12 +196,9 @@ test('_extractPayload and _parseExpiry support wrapped and timestamp values', fu
 });
 
 test('_parseExpiry returns null for numeric timestamps outside the Date range', function () {
-  // A backend emitting nanoseconds (Go's UnixNano is ~1.7e18) overshoots the +/-8.64e15 ms
-  // ECMAScript time-value range. Before the range check, toISOString() threw a RangeError.
+  // A backend emitting nanoseconds (Go's UnixNano is ~1.7e18) overshoots the 8.64e15 ms
+  // ECMAScript time-value limit. Before the range check, toISOString() threw a RangeError.
   assert.equal(qurlApi._parseExpiry({ expires_at: 1.7e18 }), null);
-
-  // Values below the 1e12 boundary are multiplied by 1000 first, so the seconds branch
-  // overflows a thousand times sooner -- and negatives overflow the same way.
   assert.equal(qurlApi._parseExpiry({ expires_at: -1e18 }), null);
 
   // The largest representable time value still parses; one millisecond past it does not.
@@ -210,6 +207,16 @@ test('_parseExpiry returns null for numeric timestamps outside the Date range', 
     new Date(8.64e15).toISOString()
   );
   assert.equal(qurlApi._parseExpiry({ expires_at: 8.64e15 + 1 }), null);
+
+  // Negatives never satisfy `raw >= 1e12`, so they always take the seconds branch and can
+  // only overflow after the *1000 — which puts their limit at -8.64e12 in input space, not
+  // -8.64e15. Only a boundary this tight pins the guard to the post-multiply value: a guard
+  // written against `raw` instead of `ms` passes every other case in this file.
+  assert.equal(
+    qurlApi._parseExpiry({ expires_at: -8.64e12 }),
+    new Date(-8.64e15).toISOString()
+  );
+  assert.equal(qurlApi._parseExpiry({ expires_at: -8.64e12 - 1 }), null);
 });
 
 test('_get returns the first populated candidate key', function () {
@@ -353,7 +360,7 @@ test('uploadFile succeeds when the server returns an out-of-range expires_at', a
   // The upload itself worked and the link is usable, so an unrepresentable expiry must not
   // sink the whole result: _parseExpiry runs inside the success return, so the RangeError it
   // used to throw was swallowed by uploadFile's catch and surfaced as
-  // { success: false, error: 'Invalid time value' } -- no link in the popup, nothing inserted
+  // { success: false, error: 'Invalid time value' } — no link in the popup, nothing inserted
   // into the Gmail draft, and no way left for the user to reach the file they just uploaded.
   global.chrome = undefined;
   global.fetch = async function () {
