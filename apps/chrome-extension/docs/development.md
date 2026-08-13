@@ -51,6 +51,11 @@ Regenerate the PNG icons from the shared `icons/logo.png` source:
 npm run icons
 ```
 
+CI verifies the committed PNGs are byte-identical to a fresh `npm run icons`
+(`test/generate-icons.test.js`), so upgrading `sharp` means regenerating and
+committing the icons in the same PR — its PNG encoder decides the bytes. See
+[#1046](https://github.com/layervai/qurl-integrations/issues/1046).
+
 ## Packaging for the Chrome Web Store
 
 For most release and local-validation workflows, one command bumps the
