@@ -724,9 +724,9 @@ test('showResults uses insertion-aware success summaries', function () {
       chromeMessages: {
         result_n_inserted: 'Inserted $1 qURL links into your Gmail draft',
         result_n_uploaded: '$1 files uploaded successfully',
-        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible qURL link.',
-        result_insertion_only_failed_plural: 'Upload completed successfully. Use the copy button below to get the accessible qURL links.',
-        result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
+        result_insertion_only_failed: 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL link.',
+        result_insertion_only_failed_plural: 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL links.',
+        result_insertion_only_failed_no_copy: 'Couldn\'t insert into your Gmail draft, and no accessible qURL link is available to copy.',
       },
     }
   );
@@ -769,7 +769,7 @@ test('showResults uses insertion-aware success summaries', function () {
     '2 files uploaded successfully'
   );
   assert.equal(uploadOnlySummary.className, 'result-summary partial');
-  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL links.');
+  assert.equal(errorArea.children[0].textContent, 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL links.');
 });
 
 test('showResults withholds the copy fallback when no accessible links are available', function () {
@@ -802,7 +802,7 @@ test('showResults withholds the copy fallback when no accessible links are avail
   assert.equal(popup.__testElements.get('copyBtn').disabled, true);
   assert.equal(
     popup.__testElements.get('errorArea').children[0].textContent,
-    'Upload completed successfully, but no accessible qURL link is available to copy.'
+    'Couldn\'t insert into your Gmail draft, and no accessible qURL link is available to copy.'
   );
 
   // The same holds on the green path the review flagged: uploads and insertion both fine, but
@@ -1145,9 +1145,9 @@ test('the insertion-only message agrees with the copy button about how many link
       chromeMessages: {
         copy_btn: 'Copy the qURL link',
         copy_btn_plural: 'Copy the qURL links',
-        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible qURL link.',
-        result_insertion_only_failed_plural: 'Upload completed successfully. Use the copy button below to get the accessible qURL links.',
-        result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
+        result_insertion_only_failed: 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL link.',
+        result_insertion_only_failed_plural: 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL links.',
+        result_insertion_only_failed_no_copy: 'Couldn\'t insert into your Gmail draft, and no accessible qURL link is available to copy.',
       },
     }
   );
@@ -1164,7 +1164,7 @@ test('the insertion-only message agrees with the copy button about how many link
     [],
     'Active tab is not Gmail.'
   );
-  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL link.');
+  assert.equal(errorArea.children[0].textContent, 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL link.');
   assert.equal(copyBtn.textContent, 'Copy the qURL link');
 
   popup.showResults(
@@ -1175,7 +1175,7 @@ test('the insertion-only message agrees with the copy button about how many link
     [],
     'Active tab is not Gmail.'
   );
-  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL links.');
+  assert.equal(errorArea.children[0].textContent, 'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL links.');
   assert.equal(copyBtn.textContent, 'Copy the qURL links');
 
   // Nothing copyable: the message must not point at a button that has nothing to give.
@@ -1184,7 +1184,7 @@ test('the insertion-only message agrees with the copy button about how many link
     [],
     'Active tab is not Gmail.'
   );
-  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully, but no accessible qURL link is available to copy.');
+  assert.equal(errorArea.children[0].textContent, 'Couldn\'t insert into your Gmail draft, and no accessible qURL link is available to copy.');
   assert.equal(copyBtn.disabled, true);
 });
 
