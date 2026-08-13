@@ -111,8 +111,8 @@ function applyOverrides(target, source) {
 // Every test below drives the content script through the same shape of vm sandbox: an object that
 // is its own window/globalThis/self, a chrome.runtime.onMessage listener to capture, a document
 // stub deep enough for compose discovery plus all three insertion paths, and a formatter that
-// yields '<p>links</p>'. Hand-writing that eleven times made every cross-cutting change an
-// eleven-way edit — createSelectionHarness was one such change, createTimerHarness another — so it
+// yields '<p>links</p>'. Hand-writing it at every call site made every cross-cutting change a
+// many-way edit — createSelectionHarness was one such change, createTimerHarness another — so it
 // lives here once and the genuinely per-test parts arrive as `config`:
 //
 //   expectedArmed  forwarded to createTimerHarness for timers the test means to outlive it
@@ -398,9 +398,7 @@ test('findComposeBodyAsync leaves no discovery timeout behind when the first loo
   // and it would fire a full findComposeBody() sweep. createTimerHarness declares no surviving
   // timers, so that leak fails this test at teardown.
   let composeBodies = [];
-  let messageListener = null;
   let rafCalls = 0;
-  const selectionHarness = createSelectionHarness();
   const composeBody = {
     classList: {
       contains(name) {
@@ -419,84 +417,23 @@ test('findComposeBodyAsync leaves no discovery timeout behind when the first loo
     },
   };
 
-  const timers = createTimerHarness(t);
-  const sandbox = {
-    chrome: {
-      i18n: {
-        getMessage() {
-          return '';
-        },
-      },
-      runtime: {
-        lastError: null,
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-    },
-    clearTimeout: timers.clearTimeout,
-    console: {
-      warn() {},
-    },
+  const { messageListener } = createComposeSandbox(t, {
     document: {
-      body: {},
-      documentElement: { nodeName: 'HTML' },
-      createElement() {
-        return {
-          setAttribute() {},
-          style: {},
-          remove() {},
-        };
-      },
-      execCommand() {
-        return true;
-      },
-      createRange() {
-        return selectionHarness.createRange();
-      },
-      queryCommandSupported() {
-        return true;
-      },
       querySelectorAll() {
         return composeBodies;
       },
-      addEventListener() {},
-      removeEventListener() {},
     },
-    MutationObserver: class {
-      observe() {}
-      disconnect() {}
+    globals: {
+      requestAnimationFrame(callback) {
+        rafCalls += 1;
+        // The compose body appears exactly between the initial miss and this first queued lookup,
+        // so finish() runs inside findComposeBodyAsync rather than on a later frame.
+        composeBodies = [composeBody];
+        callback();
+        return rafCalls;
+      },
     },
-    requestAnimationFrame(callback) {
-      rafCalls += 1;
-      // The compose body appears exactly between the initial miss and this first queued lookup,
-      // so finish() runs inside findComposeBodyAsync rather than on a later frame.
-      composeBodies = [composeBody];
-      callback();
-      return rafCalls;
-    },
-    setTimeout: timers.setTimeout,
-  };
-
-  sandbox.window = sandbox;
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.getComputedStyle = function () {
-    return { display: 'block', visibility: 'visible' };
-  };
-  sandbox.getSelection = function () {
-    return selectionHarness.selection;
-  };
-  sandbox.QURLComposeFormatter = {
-    buildLinkHtml() {
-      return '<p>links</p>';
-    },
-  };
-
-  vm.createContext(sandbox);
-  vm.runInContext(contentScriptSource, sandbox);
+  });
 
   // No requestId, so this takes the no-dedup path and the discovery timeout is the only timer
   // findComposeBodyAsync's caller can leave armed.
@@ -997,6 +934,9 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
         return timeoutCallbacks.length;
       },
     },
+    // Preserve the browser fallback path this test covered before the shared factory existed:
+    // without requestAnimationFrame, compose lookups schedule through setTimeout(fn, 16).
+    globals: { requestAnimationFrame: undefined },
   });
 
   const responsePromise = new Promise(function (resolve) {
@@ -1010,6 +950,10 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
     return entry.delay === 4000;
   });
   assert.ok(composeTimeout);
+  assert.ok(
+    timeoutCallbacks.some(function (entry) { return entry.delay === 16; }),
+    'the requestAnimationFrame fallback should schedule a 16ms lookup'
+  );
   composeTimeout.callback();
 
   const response = await responsePromise;
