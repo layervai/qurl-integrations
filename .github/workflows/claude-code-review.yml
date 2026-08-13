@@ -197,6 +197,11 @@ jobs:
           EXPECTED_REVIEW_MARKER: <!-- claude-review:${{ github.repository }}:${{ github.event.pull_request.number }}:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.event.pull_request.head.sha }} -->
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
           LOCAL_ORIGIN: ${{ runner.temp }}/claude-review-origin-${{ github.run_id }}-${{ github.run_attempt }}.git
+          # Runners leave LANG unset, so ${#var} and ${var:0:n} below would
+          # count bytes. GitHub's comment limit is in characters, and a byte
+          # slice can cut a multi-byte character in half and make the published
+          # body invalid UTF-8. Count what GitHub counts.
+          LC_ALL: C.UTF-8
         run: |
           set -euo pipefail
 
