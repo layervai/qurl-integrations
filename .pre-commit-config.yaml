@@ -50,6 +50,13 @@ repos:
         pass_filenames: false
         files: '^(release-please-config\.json|\.release-please-manifest\.json|scripts/check-release-please-sync\.sh)$'
 
+      - id: main-ci-notification-payload
+        name: main CI notification payload builds
+        entry: scripts/check-main-ci-notification-payload.sh
+        language: system
+        pass_filenames: false
+        files: '^(\.github/workflows/main-ci-notifications\.yml|scripts/check-main-ci-notification-payload\.sh)$'
+
       - id: go-fmt
         name: go fmt
         entry: gofmt -w
