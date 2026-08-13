@@ -19,9 +19,9 @@ const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
 //     17-20 digit value. Re-checking truthiness here would never catch
 //     a missing GUILD_ID — the upstream check is the authority.
 //   - BASE_URL: config.js supplies an unconditional "http://localhost:3000"
-//     default, so `cfg.BASE_URL` is always truthy. The real enforcement
-//     is the https-startswith check in index.js, which runs regardless
-//     of this required-list membership.
+//     default, so `cfg.BASE_URL` is always truthy. The real enforcement is
+//     baseUrlHttpsProblem (below), called from index.js's production block,
+//     which runs regardless of this required-list membership.
 // Listing either would be decorative — the downstream checks are the
 // authority. Keeping this list to the keys whose absence is actually a
 // boot blocker.
@@ -65,6 +65,177 @@ function missingProdKeys(env, isOpenNHPActive) {
 function missingKekRequiredKeys(env) {
   if (!env.GITHUB_CLIENT_SECRET) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
+}
+
+function isPrivateIPv4Literal(hostname) {
+  const parts = hostname.split('.');
+  if (parts.length !== 4) return false;
+  const octets = parts.map(part => Number(part));
+  // The String(octet) round-trip is NOT a leading-zero/octal defense — WHATWG
+  // already canonicalizes those inside new URL() (`010.0.0.1` arrives as
+  // `8.0.0.1`). It rejects labels that Number() accepts but the URL spec's
+  // IPv4 parser does not, which therefore arrive as ordinary DOMAIN
+  // hostnames: `Number('1e2')` is 100, so without it a public host like
+  // 10.2.3.1e2 or 192.168.0.1e1 would read as a private literal and
+  // crash-loop a legitimate deploy at boot.
+  if (octets.some((octet, idx) => !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== parts[idx])) {
+    return false;
+  }
+  // CGNAT 100.64.0.0/10 is deliberately NOT screened: unlike the ranges below
+  // it can front a legitimately reachable origin, so rejecting it would fail
+  // a valid deploy. Same reasoning excludes the TEST-NET blocks — the screen
+  // rejects hosts that CANNOT serve a public OAuth redirect, not every host
+  // that merely looks unusual.
+  const [a, b] = octets;
+  return a === 0 //                              0.0.0.0/8 "this network"
+    || a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168);
+}
+
+// The v6 half of the same cheap literal screen. Kept separate because the
+// parser hands back IPv4-mapped addresses in hex (`::ffff:127.0.0.1`
+// serializes as `::ffff:7f00:1`), so the dotted form never survives to a
+// string compare and has to be mapped back to octets.
+// Deliberately common-forms-only, matching the cheap-literal scope of the
+// screen as a whole: the deprecated IPv4-COMPATIBLE form (`::127.0.0.1`,
+// which serializes to `::7f00:1`) and site-local `fec0::/10` both fall
+// through. Both address classes are dead in practice, `::1` covers realistic
+// loopback, and reachability is not knowable at boot anyway.
+function isLocalOnlyIPv6(host) {
+  if (host === '::' || host === '::1') return true;
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (mapped) {
+    const [hi, lo] = mapped.slice(1).map(group => parseInt(group, 16));
+    return isPrivateIPv4Literal([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.'));
+  }
+  const firstGroup = parseInt(host.split(':')[0], 16);
+  if (!Number.isInteger(firstGroup)) return false;
+  return (firstGroup & 0xfe00) === 0xfc00 //  fc00::/7  unique-local
+    || (firstGroup & 0xffc0) === 0xfe80; //   fe80::/10 link-local
+}
+
+function isLocalOnlyHost(hostname) {
+  // Strip the brackets the parser keeps around an IPv6 literal, and the
+  // trailing dot of an absolute FQDN — `localhost.` resolves the same as
+  // `localhost`, so it must not slip past the name compares below.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  return host === 'localhost'
+    || host.endsWith('.localhost')
+    || isPrivateIPv4Literal(host)
+    // The colon test is load-bearing, not a fast path: parseInt() below is a
+    // lenient prefix parse, so parseInt('fc00.example.com', 16) is 0xfc00 and
+    // the unique-local mask would misread real public hosts as link-local.
+    || (host.includes(':') && isLocalOnlyIPv6(host));
+}
+
+// Textual userinfo strip, for values `new URL` can't parse into a
+// username/password (a malformed origin, or an opaque `scheme:host` form).
+// Those still carry the credential as raw text, so the parsed-only redaction
+// below would put it in the boot log verbatim. WHATWG treats the LAST `@`
+// before the path as the userinfo separator, so the greedy match is correct;
+// `[^/?#]*` keeps it inside the authority, leaving a later `/path@thing`
+// alone.
+function stripUserinfo(value) {
+  return value.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?)[^/?#]*@/, '$1');
+}
+
+function baseUrlForError(rawBaseUrl) {
+  try {
+    const parsed = new URL(rawBaseUrl);
+    if (parsed.username || parsed.password) {
+      parsed.username = '';
+      parsed.password = '';
+      return parsed.href;
+    }
+  } catch {
+    // Fall through to the textual strip — a value that fails to parse can
+    // still be carrying `user:pass@`, and a hand-edited SSM param is exactly
+    // the input most likely to be both malformed and credential-bearing.
+  }
+  return stripUserinfo(rawBaseUrl);
+}
+
+// BASE_URL https guardrail. The qURL guided setup flow builds an absolute
+// OAuth redirect from config.BASE_URL — the /oauth/qurl/start link
+// (commands.js) and the /oauth/qurl/callback redirect_uri
+// (routes/qurl-oauth.js). That router mounts UNCONDITIONALLY in server.js,
+// and /qurl setup takes the OAuth path whenever isQurlOAuthConfigured, so a
+// localhost BASE_URL silently dead-ends setup at the redirect — in plain
+// single-guild and multi-tenant deploys alike (#619). The Stage-2 Discord
+// install callback (routes/discord-install.js) embeds BASE_URL too, but
+// isDiscordInstallConfigured ⟹ isQurlOAuthConfigured (config.js), so the
+// isQurlOAuthConfigured gate already covers it.
+//
+// The check parses BASE_URL (new URL) rather than prefix-matching: parsing
+// normalizes the case-insensitive scheme (RFC 3986) and rejects a bare
+// "https://" with no host that would still build a broken redirect. OAuth
+// needs a public bare origin because the code composes
+// `${BASE_URL}/oauth/qurl/callback`; embedded paths, query strings, userinfo,
+// or obvious local-only IP literals either miss the registered mux route or
+// can't serve the external Auth0 browser redirect. We intentionally do NOT
+// resolve DNS at boot — reachability belongs in deploy smoke tests — but we
+// can reject localhost/loopback/private IP literals cheaply.
+//
+// Intentionally NOT gated on: the per-guild webhook bridge
+// (guild-webhook-link.js → `${BASE_URL}/webhooks/qurl`) also embeds
+// BASE_URL, but it's fire-and-forget and non-fatal — a wrong bridge URL
+// degrades qURL view-count delivery from push to the existing poll
+// fallback, it doesn't dead-end a user flow. Blocking boot on it would
+// force BASE_URL onto the plain qURL-sharing deploys #619 keeps free to
+// ignore it.
+//
+// Outside the qURL setup flow BASE_URL is unused for redirects, but a stale
+// explicit http:// value is still rejected (the original canary).
+// `baseUrlExplicitlySet` (caller-computed from process.env, treating
+// "" / whitespace-only as unset) separates "operator set a bad value" from
+// "fell back to the localhost default" so an empty SSM param doesn't
+// false-positive. Caller gates on NODE_ENV==='production'; string-or-null
+// mirrors unsupportedRoleShipperCombo et al.
+function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
+  let parsed = null;
+  try {
+    parsed = new URL(cfg.BASE_URL);
+  } catch {
+    // Malformed BASE_URL (incl. a host-less "https://") is not usable.
+  }
+  const usesHttps = parsed?.protocol === 'https:';
+  // TODO(upstream-contract): qurl-integrations-infra's `base_url` variable
+  // (qurl-bot-discord/terraform/variables.tf) validates
+  // `^https://[^[:space:]/]+(/[^/]+)*$`, which deliberately admits a path
+  // prefix — its own error text advertises "host + zero-or-more `/segment`
+  // parts". This rejects any path, so a plan-passing value like
+  // https://host/discord-bot would crash-loop the bot instead. The bot's
+  // shape is the correct one (server.js mounts the qURL OAuth router at the
+  // root, so a prefixed redirect_uri never matches); tighten the terraform
+  // side to the bare-origin regex it already uses for `qurl_endpoint`.
+  const isBareOrigin = Boolean(
+    parsed
+      && parsed.host
+      && !parsed.username
+      && !parsed.password
+      && parsed.pathname === '/'
+      && !parsed.search
+      && !parsed.hash
+  );
+  const isPublicOrigin = Boolean(parsed && !isLocalOnlyHost(parsed.hostname));
+  const usableOAuthOrigin = usesHttps && isBareOrigin && isPublicOrigin;
+  if (usableOAuthOrigin) return null;
+  const displayBaseUrl = baseUrlForError(cfg.BASE_URL);
+  if (cfg.isQurlOAuthConfigured) {
+    return (
+      'BASE_URL must be a public bare https:// origin in production ' +
+      '— the qURL guided setup flow builds its OAuth redirect from it, and a ' +
+      `non-public or non-origin value dead-ends setup at the redirect. Got: ${displayBaseUrl}. ` +
+      "Set BASE_URL to the bot's public https:// origin in the deployment template."
+    );
+  }
+  if (baseUrlExplicitlySet && !usesHttps) {
+    return `BASE_URL must use https:// in production (got ${displayBaseUrl})`;
+  }
+  return null;
 }
 
 // QURL_BOT_EVENTS_QUEUE_URL is the load-bearing piece of the event-
@@ -539,6 +710,7 @@ module.exports = {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
   missingViewUpdatePushKeys,
   unsupportedRoleShipperCombo,

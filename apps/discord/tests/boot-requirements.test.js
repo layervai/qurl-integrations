@@ -16,6 +16,7 @@ const {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  baseUrlHttpsProblem,
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
@@ -143,6 +144,205 @@ describe('missingKekRequiredKeys', () => {
     expect(
       missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: 'k' })
     ).toEqual([]);
+  });
+});
+
+describe('baseUrlHttpsProblem', () => {
+  // Mirrors the shape index.js passes: a parsed config object (BASE_URL is
+  // already defaulted to http://localhost:3000 in config.js when unset),
+  // plus the caller-computed `baseUrlExplicitlySet` boolean. Default cfg is
+  // a plain non-consuming deploy with BASE_URL unset (the localhost
+  // fallback); each test overrides the mode flags / BASE_URL it exercises.
+  const LOCALHOST = 'http://localhost:3000'; // config.js BASE_URL default
+  function cfg(overrides = {}) {
+    return {
+      isQurlOAuthConfigured: false,
+      BASE_URL: LOCALHOST,
+      ...overrides,
+    };
+  }
+
+  it('accepts a bare https:// BASE_URL origin (the good prod case)', () => {
+    const HTTPS = 'https://bot.example.com';
+    expect(baseUrlHttpsProblem(cfg({ BASE_URL: HTTPS }), true)).toBeNull();
+    expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: HTTPS }), true)).toBeNull();
+  });
+
+  it('accepts public origins that the local-only screen must not false-positive', () => {
+    // A 4-label FQDN is the shape most at risk from isPrivateIPv4Literal's
+    // dotted-quad parse, and 172.32 / public IPv6 sit just outside the
+    // private ranges the screen rejects.
+    for (const good of [
+      'https://bot.eu.example.com',
+      'https://bot.example.com:8443',
+      'https://172.32.0.1',
+      'https://[2001:db8::1]',
+    ]) {
+      expect(baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: good }), true)).toBeNull();
+    }
+  });
+
+  it('accepts an uppercase HTTPS:// scheme (URL scheme is case-insensitive)', () => {
+    // The parse-based check normalizes the scheme, so a valid HTTPS:// origin
+    // isn't falsely rejected at boot (the pre-#619 prefix check was case-sensitive).
+    expect(
+      baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'HTTPS://bot.example.com' }), true),
+    ).toBeNull();
+  });
+
+  it('rejects a host-less "https://" BASE_URL (would build a broken redirect)', () => {
+    // new URL('https://') throws — a scheme with no host can't be a usable
+    // redirect base, so a consuming deploy must still fail fast rather than
+    // pass a prefix check.
+    const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://' }), true);
+    expect(msg).not.toBeNull();
+    // Pin the OAuth-aware branch and the echoed value. A bare toContain('https://')
+    // would pass on either branch's static prose, so it could never fail.
+    expect(msg).toContain('public bare https:// origin');
+    expect(msg).toContain('Got: https://.');
+  });
+
+  it('rejects qURL OAuth configured + BASE_URL with path/query/fragment/userinfo', () => {
+    for (const bad of [
+      'https://bot.example.com/prefix',
+      'https://bot.example.com?debug=true',
+      'https://bot.example.com#callback',
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).toContain(bad);
+    }
+  });
+
+  it('redacts BASE_URL userinfo from boot errors — malformed values too', () => {
+    // A hand-edited SSM param is the input most likely to be BOTH malformed
+    // and credential-bearing, so the values new URL() cannot parse into a
+    // username/password matter more here than the well-formed one. A
+    // distinctive secret is used so the assertion can't pass on a partial
+    // leak (username alone, or a password that happens to share a substring
+    // with the static prose).
+    for (const bad of [
+      'https://svc:hunter2@bot.example.com', //      parses -> URL-level redaction
+      'https://svc:hunter2@bot.example.com:port', // invalid port -> parse throws
+      'https://svc:hunter2@', //                    host-less -> parse throws
+      'https://:hunter2@bot.example.com', //         password-only branch
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).not.toMatch(/hunter2/);
+      expect(msg).not.toMatch(/svc/);
+    }
+  });
+
+  it('redacts surgically — the host survives so the error stays diagnosable', () => {
+    // The absence assertions above would all pass if redaction returned ''.
+    // An operator needs to see WHICH value was wrong, so pin that everything
+    // except the credential is echoed intact, on the malformed path too.
+    const msg = baseUrlHttpsProblem(
+      cfg({ isQurlOAuthConfigured: true, BASE_URL: 'https://svc:hunter2@bot.example.com:port' }),
+      true,
+    );
+    expect(msg).toContain('Got: https://bot.example.com:port');
+    expect(msg).not.toMatch(/hunter2/);
+  });
+
+  it('rejects qURL OAuth configured + local-only BASE_URL host literals', () => {
+    for (const bad of [
+      'https://localhost',
+      'https://bot.localhost',
+      'https://127.0.0.1',
+      'https://10.0.3.4',
+      'https://172.16.0.2',
+      'https://192.168.1.20',
+      'https://169.254.169.254', // link-local / cloud instance metadata
+      'https://0.0.0.0', //         unspecified address
+      'https://localhost.', //      absolute-FQDN form of localhost
+      'https://[::1]',
+      'https://[::ffff:127.0.0.1]', // IPv4-mapped loopback (serializes as ::ffff:7f00:1)
+      'https://[fd00::1]', //          unique-local, fc00::/7
+      'https://[fe80::1]', //          link-local, fe80::/10
+    ]) {
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+      expect(msg).toContain(bad);
+    }
+  });
+
+  it('lets a non-consuming deploy keep a non-origin https BASE_URL', () => {
+    // Without AUTH0_*, nothing builds an OAuth redirect from BASE_URL, so the
+    // origin-shape rules deliberately do not apply — only the stale-http://
+    // canary does. Pins the boundary: a path-prefixed https value boots here
+    // but is rejected the moment the same deploy configures qURL OAuth.
+    const nonConsuming = { isQurlOAuthConfigured: false, BASE_URL: 'https://bot.example.com/prefix' };
+    expect(baseUrlHttpsProblem(nonConsuming, true)).toBeNull();
+    expect(baseUrlHttpsProblem({ ...nonConsuming, isQurlOAuthConfigured: true }, true)).not.toBeNull();
+  });
+
+  it('rejects alternate IPv4 encodings of a local-only host', () => {
+    // isPrivateIPv4Literal reads parsed.hostname, which WHATWG has already
+    // re-serialized to dotted-decimal for a special scheme — that
+    // canonicalization is the only reason hex/decimal/octal/short forms are
+    // caught, and nothing else in the suite pins it. Without these cases a
+    // future parser change (or a move off new URL) could silently reopen the
+    // loopback and 169.254.169.254 metadata holes with every other test green.
+    for (const bad of [
+      'https://0x7f000001', // hex      -> 127.0.0.1
+      'https://2130706433', // decimal  -> 127.0.0.1
+      'https://0177.0.0.1', // octal    -> 127.0.0.1
+      'https://127.1', //     short     -> 127.0.0.1
+    ]) {
+      expect(new URL(bad).hostname).toBe('127.0.0.1');
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+    }
+  });
+
+  // The #619 headline regression: a deploy with the qURL OAuth setup flow
+  // configured (AUTH0_* set) but BASE_URL left unset silently falls back to
+  // localhost and dead-ends /qurl setup at the OAuth redirect. Boot must
+  // reject — fail-fast at deploy, not at setup time.
+  it('rejects qURL OAuth configured + BASE_URL unset (localhost fallback)', () => {
+    const msg = baseUrlHttpsProblem(
+      cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }),
+      false, // not explicitly set — fell back to the localhost default
+    );
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/BASE_URL/);
+    expect(msg).toMatch(/https:\/\//);
+    expect(msg).toMatch(/qURL/);
+    // Echoes the offending value so an operator pasting the log line sees it.
+    expect(msg).toContain(LOCALHOST);
+  });
+
+  // The non-consuming false-positive guard: a plain single-guild / multi-
+  // tenant deploy with no OAuth surface ignores BASE_URL, so the localhost
+  // default (unset, not explicitly set) must NOT fail boot.
+  it('does not false-positive a non-consuming deploy with BASE_URL unset', () => {
+    expect(baseUrlHttpsProblem(cfg({ BASE_URL: LOCALHOST }), false)).toBeNull();
+  });
+
+  // ...but a stale explicit http:// value in a non-consuming deploy is still
+  // rejected — the original canary, in case a future code path re-enables use.
+  it('rejects a stale explicit http:// BASE_URL even when no surface consumes it', () => {
+    const msg = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://stale.example.com' }), true);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('http://stale.example.com');
+  });
+
+  // The two non-https rejections carry distinct messages: the consuming-
+  // surface message explains why BASE_URL matters (operator remediation);
+  // the non-consuming path keeps the terse legacy canary message. Pin the
+  // distinction so a refactor can't collapse them and strip the guidance.
+  it('uses the OAuth-aware message for consuming surfaces and the terse canary otherwise', () => {
+    const consuming = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: LOCALHOST }), false);
+    const canary = baseUrlHttpsProblem(cfg({ BASE_URL: 'http://x.example.com' }), true);
+    expect(consuming).toMatch(/OAuth redirect/);
+    expect(canary).not.toMatch(/OAuth redirect/);
+    expect(canary).toMatch(/BASE_URL must use https:\/\/ in production/);
   });
 });
 
