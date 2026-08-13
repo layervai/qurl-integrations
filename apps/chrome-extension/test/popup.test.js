@@ -925,8 +925,8 @@ test('showResults styles an insertion-only failure as a notice, not an error', f
   const results = [{ filename: 'a.txt', link: 'https://files.example.com/a', expiry: null }];
   const errorArea = popup.__testElements.get('errorArea');
 
-  // Uploads all fine, only the Gmail insertion failed: the box carries a success-toned message
-  // and a pointer at the copy fallback, so it must not render in the error-red styling.
+  // Uploads all fine, only the Gmail insertion failed: the box names that failure but pairs it
+  // with a pointer at the copy fallback, so it must not render in the error-red styling.
   popup.showResults(results, [], 'Active tab is not Gmail.');
   assert.equal(errorArea.classList.contains('notice'), true);
 
