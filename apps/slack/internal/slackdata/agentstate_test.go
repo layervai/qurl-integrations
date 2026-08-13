@@ -779,6 +779,34 @@ func TestMarkMediaNoticeSent_PreTokenMarkerStillSuppresses(t *testing.T) {
 	}
 }
 
+// TestMarkerWrittenBy exercises the comparison directly. The store-level tests
+// cannot reach its empty-token branch — rand.Text never returns empty, so every
+// path through putMarker compares a real token, and a real token is already
+// unequal to the "" a pre-token marker reads back. The guard is there for a
+// refactor that changes where the token comes from, and this is the only thing
+// holding it.
+func TestMarkerWrittenBy(t *testing.T) {
+	mine := map[string]ddbtypes.AttributeValue{attrWriterToken: stringAttr("tok-a")}
+	// A marker written before attrWriterToken existed: no token at all.
+	preToken := map[string]ddbtypes.AttributeValue{attrAgentPK: stringAttr("T1")}
+
+	if !markerWrittenBy(mine, "tok-a") {
+		t.Error("this call's own token must match: that is the lost-response recovery")
+	}
+	if markerWrittenBy(mine, "tok-b") {
+		t.Error("another writer's token must not match")
+	}
+	if markerWrittenBy(preToken, "tok-a") {
+		t.Error("a pre-token marker must not match a real token")
+	}
+	if markerWrittenBy(preToken, "") {
+		t.Error("an empty token must not match a marker that carries none; that would hand the latch to every caller at once")
+	}
+	if markerWrittenBy(nil, "tok-a") {
+		t.Error("a condition failure that returned no item must not match")
+	}
+}
+
 // TestMarkMediaNoticeSent_ErrorSurfaces pins that a store failure reaches the
 // caller rather than being swallowed into a false "already sent" — the handler
 // fails OPEN on this error, and it can only do that if it sees one.

@@ -346,10 +346,13 @@ func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl ti
 // marker from another writer, one written before this attribute existed, or a
 // response that carried no item back at all.
 //
-// The empty-token guard is load-bearing, not defensive. A marker written by a
-// deployment that predates attrWriterToken reads back as "", so an empty token on
-// this side would match every one of them and hand the latch to every caller at
-// once — during a rolling deploy, precisely when both shapes are in the table.
+// The token != "" guard changes no outcome today: rand.Text never returns empty,
+// and a real token already compares unequal to the "" a pre-token marker reads
+// back. It is here for the refactor that moves where the token comes from — an
+// empty token would then match every marker written before attrWriterToken
+// existed, handing the latch to every caller at once during a rolling deploy.
+// [TestMarkerWrittenBy] pins it directly, because no store-level test can reach
+// that branch.
 func markerWrittenBy(stored map[string]ddbtypes.AttributeValue, token string) bool {
 	return token != "" && readString(stored, attrWriterToken) == token
 }
