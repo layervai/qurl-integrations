@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-discord test-discord pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-notification-payload check-discord test-discord pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -88,6 +88,9 @@ test-install-script:
 check-release-please-sync:
 	scripts/check-release-please-sync.sh
 
+check-notification-payload:
+	scripts/check-main-ci-notification-payload.sh
+
 ## Pre-commit
 
 pre-commit-install:
@@ -121,7 +124,7 @@ check-discord:
 ## Full check (Go + repo checks, matching the Go CI path; app suites
 ## run via their own CI gates or make check-discord)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync check-notification-payload lint test-race
 
 ## Cleanup
 
