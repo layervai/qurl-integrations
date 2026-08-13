@@ -59,7 +59,10 @@
   function handleInsertLinksMessage(message, sendResponse) {
     const results = message.results || [];
     if (results.length === 0) {
-      sendResponse({ success: false, error: 'No results to insert' });
+      sendResponse({
+        success: false,
+        error: getMessage('compose_insert_no_results_error', 'No results to insert'),
+      });
       return false;
     }
 

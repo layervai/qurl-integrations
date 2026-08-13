@@ -271,6 +271,10 @@
     "message": "Insertion is taking longer than expected — check the draft before retrying.",
     "description": "Shown when a pending insertion request is evicted; the insertion may have succeeded"
   },
+  "compose_insert_no_results_error": {
+    "message": "No results to insert.",
+    "description": "Returned when an insertion request arrives with an empty result list"
+  },
   "expiry_suffix": {
     "message": " (Expires: $EXPIRY$)",
     "description": "Suffix shown after a link when the server returns an expiry timestamp",

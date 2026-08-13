@@ -33,4 +33,7 @@ async function generateIcons() {
   }
 }
 
-generateIcons().catch(console.error);
+generateIcons().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

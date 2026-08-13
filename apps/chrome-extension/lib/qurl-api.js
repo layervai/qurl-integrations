@@ -58,7 +58,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
     const result = await withTimeout(
       preflight,
       UPLOAD_PREFLIGHT_TIMEOUT_MS,
-      getMessage('upload_preflight_timeout_error', 'Timed out preparing the upload. Please try again.')
+      apiGetMessage('upload_preflight_timeout_error', 'Timed out preparing the upload. Please try again.')
     );
     baseUrl = result.resolvedBase;
     hasPermission = result.granted;
@@ -79,7 +79,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
       qurl_link: null,
       resource_url: null,
       expires_at: null,
-      error: getMessage(
+      error: apiGetMessage(
         'permission_missing_error',
         'Permission to access the configured qURL server is missing. Open settings and save the server URL again.'
       ),
@@ -128,7 +128,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage(
+        error: apiGetMessage(
           'api_invalid_json_error',
           'Invalid JSON response: $1',
           [text.substring(0, 200)]
@@ -147,7 +147,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage(
+        error: apiGetMessage(
           'api_invalid_payload_error',
           'Invalid API response payload.'
         ),
@@ -181,7 +181,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage(
+        error: apiGetMessage(
           'api_missing_link_error',
           'Server returned success but no download link was provided.'
         ),
@@ -204,7 +204,7 @@ async function uploadFile(fileBuffer, filename, contentType) {
         qurl_link: null,
         resource_url: null,
         expires_at: null,
-        error: getMessage('upload_timeout_error', 'Upload timed out after 5 minutes.'),
+        error: apiGetMessage('upload_timeout_error', 'Upload timed out after 5 minutes.'),
       };
     }
     return {
@@ -282,7 +282,7 @@ async function setStoredQurlApiBase(value, options) {
   if (normalized) {
     const granted = await ensureQurlHostPermission(normalized, !resolvedOptions.skipPermissionRequest);
     if (!granted) {
-      throw new Error(getMessage(
+      throw new Error(apiGetMessage(
         'permission_request_denied_error',
         'Permission to access this qURL server was not granted.'
       ));
@@ -624,14 +624,14 @@ function normalizeQurlApiBase(value) {
   try {
     parsed = new URL(trimmed);
   } catch (err) {
-    throw new Error(getMessage(
+    throw new Error(apiGetMessage(
       'config_invalid_url_error',
       'qURL server URL must be a valid http(s) URL.'
     ));
   }
 
   if (parsed.protocol !== 'https:') {
-    throw new Error(getMessage(
+    throw new Error(apiGetMessage(
       'config_https_required_error',
       'qURL server URL must start with https://'
     ));
@@ -693,7 +693,12 @@ function isDefaultQurlOrigin(baseUrl) {
   }
 }
 
-function getMessage(key, fallback, substitutions) {
+// Named apiGetMessage rather than getMessage on purpose. popup.html loads this
+// file and popup.js as classic scripts into one shared global scope, so a
+// top-level `function getMessage` here and in popup.js would be the same
+// binding, with the last-loaded file silently winning for both. Keep the name
+// distinct so the two cannot capture each other.
+function apiGetMessage(key, fallback, substitutions) {
   if (QURLI18n && typeof QURLI18n.getMessage === 'function') {
     return QURLI18n.getMessage(key, fallback, substitutions);
   }
@@ -717,7 +722,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getQurlApiBase,
     getQurlHostPermissionPattern,
     getStoredQurlApiBase,
-    getMessage,
+    apiGetMessage,
     isDefaultQurlOrigin,
     normalizeQurlApiBase,
     requestQurlHostPermission,
