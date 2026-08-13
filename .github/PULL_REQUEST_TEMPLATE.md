@@ -11,6 +11,8 @@ Brief description of changes.
 - [ ] `apps/discord/`
 - [ ] `apps/cli/`
 - [ ] `apps/zapier/`
+- [ ] `apps/chrome-extension/`
+- [ ] `origins/` (connector image — also triggers Slack CI)
 - [ ] `shared/` (triggers tests for ALL apps — coordinate with maintainers)
 - [ ] `.github/` (requires maintainer review)
 
