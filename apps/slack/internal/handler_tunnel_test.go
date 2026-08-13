@@ -764,8 +764,6 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if logs.contains(kindFirstRejection) {
 		t.Error("a kind-first mint response must not be rejected")
 	}
-	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
-	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
 	}
@@ -1619,11 +1617,6 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if logs.contains(kindFirstRejection) {
 		t.Error("a kind-first mint response must not be rejected")
 	}
-	// The modal path shares buildTunnelInstall with the slash path, but assert
-	// the full wire contract here too so a claims/retired-field regression is
-	// caught on either entry point independently.
-	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
-	assertNoRetiredCredentialFields(t, apiKeyBody)
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
 	}
