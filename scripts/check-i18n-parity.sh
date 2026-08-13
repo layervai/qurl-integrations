@@ -18,7 +18,8 @@
 #
 # Six rules, in the order they are reported:
 #   1. The two catalogs declare the same key set.
-#   2. Every key outside SANCTIONED_DELTAS is byte-identical in both catalogs.
+#   2. Every key outside SANCTIONED_DELTAS is structurally identical in both
+#      catalogs.
 #   3. Every key inside SANCTIONED_DELTAS has a genuinely different `message`.
 #      Without this the allowlist silently becomes a hole: setting Edge's
 #      ext_name to Chrome's value passes rules 2 and 4 (it is exempt from 2, and
@@ -42,7 +43,7 @@
 #      that app's own ext_name. popup.html is not a lockstep file precisely
 #      because of these, so nothing else pins them.
 #
-# Two accepted limits, both in the sanctioned keys, which are the only place a
+# Three accepted limits, all in the sanctioned keys, which are the only place a
 # browser name lives:
 #   - Rule 4 rejects the OTHER fork's name, so a mistarget to a THIRD browser
 #     ("Safari will show…" in Edge's copy) clears every rule. Asserting each
@@ -173,25 +174,33 @@ chrome, edge = catalogs["chrome"], catalogs["edge"]
 manifests = {name: load_json(root / "manifest.json") for name, root in APPS.items()}
 popups = {name: load_text(root / "popup/popup.html") for name, root in APPS.items()}
 
-# Input gate, before any rule runs. Two jobs: every catalog entry must be an
-# object carrying a string `message` — a valid-JSON-but-wrong-shape entry would
-# otherwise throw an AttributeError out of rule 2's set(), a non-zero exit but a
-# traceback rather than a curated failure — and every file loaded above must
-# have been readable. A missing or unparseable input is an infrastructure
-# problem, not drift, so it bails under CANNOT_RUN rather than being reported
-# beneath the drift banner. Everything past this point is known-good.
+# Input gate, before any rule runs. Every catalog must be an object whose entries
+# are objects carrying a string `message`, every manifest must be an object, and
+# every file loaded above must have been readable. A valid-JSON-but-wrong-shape
+# input would otherwise throw out of the parity rules: a non-zero exit, but a
+# traceback rather than a curated failure. A missing or unparseable input is an
+# infrastructure problem, not drift, so it bails under CANNOT_RUN rather than
+# being reported beneath the drift banner. Everything past this point is
+# known-good.
 for name, catalog in (("chrome", chrome), ("edge", edge)):
-    for key in sorted(catalog):
-        entry = catalog[key]
-        if not isinstance(entry, dict):
-            failures.append(
-                f"{APPS[name] / CATALOG}: {key} is {type(entry).__name__}, not an "
-                "object. Every entry must be {\"message\": ..., \"description\": ...}."
-            )
-        elif not isinstance(entry.get("message"), str):
-            failures.append(
-                f"{APPS[name] / CATALOG}: {key} has no string `message`."
-            )
+    if not isinstance(catalog, dict):
+        failures.append(
+            f"{APPS[name] / CATALOG}: top level is "
+            f"{type(catalog).__name__}, not an object."
+        )
+    else:
+        for key in sorted(catalog):
+            entry = catalog[key]
+            if not isinstance(entry, dict):
+                failures.append(
+                    f"{APPS[name] / CATALOG}: {key} is {type(entry).__name__}, not an "
+                    "object. Every entry must be "
+                    "{\"message\": ..., \"description\": ...}."
+                )
+            elif not isinstance(entry.get("message"), str):
+                failures.append(
+                    f"{APPS[name] / CATALOG}: {key} has no string `message`."
+                )
 
     # Same gate for the manifest: rules 4 and 5 iterate it as a mapping, so a
     # valid-JSON-but-wrong-shape document (a list, say) would throw rather than

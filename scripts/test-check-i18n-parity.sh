@@ -304,6 +304,9 @@ run_case catalog-missing 1 "missing" \
 run_case catalog-invalid-json 1 "invalid JSON" \
   python3 -c 'open("apps/edge-extension/_locales/en/messages.json", "w").write("{ not json")'
 
+run_case catalog-not-an-object 1 "messages.json: top level is list, not an object" \
+  python3 -c 'import json; json.dump([1, 2], open("apps/edge-extension/_locales/en/messages.json", "w"))'
+
 # A wrong-shape-but-valid-JSON entry must produce a curated failure, not an
 # AttributeError traceback out of rule 2.
 run_case entry-not-an-object 1 "copy_btn is str, not an object" \
