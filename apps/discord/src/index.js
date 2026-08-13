@@ -42,6 +42,7 @@ const {
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
   invalidHotStandbyValues,
+  invalidStateSecretValues,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
@@ -193,14 +194,13 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
-  // unless OpenNHP mode is active (the only mode that mounts /auth +
-  // /webhook routes). Require it only when that surface is live.
-  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
-    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
-    // rotating GitHub's client secret would invalidate all in-flight
-    // OAuth states and vice versa. A prod deploy must set this explicitly.
-    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+  // Presence + length-floor policy for the OAuth state-signing secrets
+  // lives in boot-requirements.js (invalidStateSecretValues) so it's
+  // unit-testable; this is just the log-and-exit plumbing, same
+  // pattern as the hot-standby value checks below.
+  const stateSecretProblems = invalidStateSecretValues(config);
+  if (stateSecretProblems.length > 0) {
+    stateSecretProblems.forEach(problem => logger.error(problem));
     process.exit(1);
   }
 }
@@ -1214,23 +1214,13 @@ async function start() {
     eventPublisher.start();
   }
 
-  // View-update SQS plumbing (feat #60, sub-second view counter).
-  // Independent of the event-shipper gates above; gated only on
-  // `config.ENABLE_VIEW_UPDATE_PUSH` AND `isHttp` (the tier that
-  // owns BOTH the webhook receiver — publisher — and the
-  // monitorLinkStatus instances — consumer). Same shutdown-race
-  // guard as the event-shipper sibling above.
-  //
-  // Combined mode is intentionally NOT rejected here (unlike
-  // ENABLE_EVENT_SHIPPER): there's no in-process direct-dispatch
-  // path competing with the SQS round-trip — both paths converge
-  // in consumer → registry → monitor. Combined mode just means
-  // the publisher and consumer live in the same process; messages
-  // still round-trip through SQS, and registry dispatch + status
-  // === 'opened' guards handle any race or redelivery.
+  // View-update SQS plumbing is superseded by the interaction-token
+  // fast-path. The webhook no longer publishes to SQS, so starting this
+  // loop would only burn empty receives. Follow-up #875 removes the dead
+  // publisher/consumer/registry wiring; until then, keep the flag as an
+  // explicit no-op so operator config fails quiet instead of starting cost.
   if (config.ENABLE_VIEW_UPDATE_PUSH && isHttp && !isShuttingDown) {
-    viewUpdatePublisher.start();
-    viewUpdateConsumer.start({ onFatal: () => gracefulShutdown(1) });
+    logger.info('ENABLE_VIEW_UPDATE_PUSH set but the SQS view-update path is superseded by the webhook fast-path — not starting the (producer-less) publisher/consumer; see index.js');
   }
 
   // Open the Discord gateway WebSocket. Two disjoint paths:

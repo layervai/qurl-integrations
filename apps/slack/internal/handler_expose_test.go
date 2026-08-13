@@ -951,7 +951,7 @@ func TestParseExposeURLModalArgs(t *testing.T) {
 		{name: "valid", resourceValue: testResourceExposeID, aliasValue: "$docs", wantResource: testResourceExposeID, wantAlias: "docs"},
 		{name: "alias without sigil", resourceValue: testResourceExposeID, aliasValue: "docs", wantResource: testResourceExposeID, wantAlias: "docs"},
 		{name: "missing resource", resourceValue: "", aliasValue: "$docs", wantErrBlock: exposeURLBlockResource},
-		{name: "non-resource-id value", resourceValue: "not-an-id", aliasValue: "$docs", wantErrBlock: exposeURLBlockResource},
+		{name: "opaque resource id", resourceValue: "not-an-id", aliasValue: "$docs", wantResource: "not-an-id", wantAlias: "docs"},
 		{name: "overlong resource id value", resourceValue: "r_" + strings.Repeat("x", slackOptionValueMaxChars), aliasValue: "$docs", wantErrBlock: exposeURLBlockResource},
 		{name: "missing alias", resourceValue: testResourceExposeID, aliasValue: "", wantErrBlock: exposeURLBlockAlias},
 		{name: "invalid alias", resourceValue: testResourceExposeID, aliasValue: "$Bad Alias", wantErrBlock: exposeURLBlockAlias},

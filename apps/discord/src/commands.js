@@ -21,7 +21,21 @@ const db = require('./store');
 const logger = require('./logger');
 const viewUpdateRegistry = require('./view-update-registry');
 const { createHandleViewUpdate } = require('./view-update-handler');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
+const {
+  COLORS,
+  TIMEOUTS,
+  RESOURCE_TYPES,
+  DM_STATUS,
+  MAX_FILE_SIZE,
+  MAX_CONCURRENT_MONITORS,
+  DISCORD_MEMBERS_PAGE_SIZE,
+  PREWARM_MAX_PAGES,
+  UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
+  AUDIT_EVENTS,
+  TRUST,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
+} = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -34,6 +48,7 @@ const {
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
+const { createStateSigner } = require('./utils/oauth-state');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
@@ -160,11 +175,19 @@ function emitMintFailureAudit(error, { sendId, kind }) {
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
 const { sendDM } = require('./discord');
 const { editDM, sendChannelMessage } = require('./discord-rest');
+// renderViewCounter lives in its own leaf module so the cross-replica
+// webhook fast-path (routes/qurl-webhook.js) can import the SAME pure
+// renderer without pulling commands.js (+ discord.js) into the HTTP
+// receiver's require graph. The monitor's buildStatusMsg() below + the
+// fast-path both call it, so the confirmation body stays byte-identical
+// across replicas. Still re-exported via _test (see module.exports) so
+// the byte-identity unit test reads it where it always did.
+const { renderViewCounter } = require('./view-counter-render');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
 //
-// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(OAUTH_STATE_SECRET,
+// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(stateSecret,
 // `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
 // discord_id pulled from consumePendingLink(); a mismatch means the state
 // was tampered with or replayed across users, even if the random nonce
@@ -173,44 +196,19 @@ const { editDM, sendChannelMessage } = require('./discord-rest');
 // Defense-in-depth only — the primary binding is the single-use DB row
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
-let _warnedStateSecretFallback = false;
-// Random per-process fallback so even inside the Jest harness there's no
-// static key that, if accidentally shipped, would be forgeable. Regenerated
-// on every process start; tests that need a stable secret should set
-// OAUTH_STATE_SECRET explicitly in their own mocks.
-const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-function stateSecret() {
-  // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
-  // can be rotated without also invalidating in-flight OAuth state tokens —
-  // and vice versa. Blast-radius isolation: leaking one doesn't enable
-  // forgery of the other's use cases. Fall back to GITHUB_CLIENT_SECRET for
-  // backward-compat with existing deployments.
-  const dedicated = process.env.OAUTH_STATE_SECRET;
-  if (dedicated) return dedicated;
-  if (!config.GITHUB_CLIENT_SECRET) {
-    // Only use the static fallback inside Jest (NODE_ENV=test AND either
-    // JEST_WORKER_ID set by Jest, or CI=true). This raises the bar: merely
-    // setting NODE_ENV=test by accident in a deployed env doesn't enable
-    // the forgeable key. Everywhere else throws hard so a misconfig is loud.
-    const inTestHarness = process.env.NODE_ENV === 'test'
-      && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
-    if (!inTestHarness) {
-      throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
-    }
-    if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
-      _warnedStateSecretFallback = true;
-    }
-    return _testFallbackSecret;
-  }
-  return config.GITHUB_CLIENT_SECRET;
-}
+//
+// Secret resolution, the 32-char length floor, and the jest-only
+// random fallback live in the shared signer — see utils/oauth-state.js.
+// The payload shape here is deliberately distinct from the qURL OAuth
+// state's; see utils/qurl-oauth-state.js for the cross-purpose forgery
+// analysis.
+const githubOAuthStateSigner = createStateSigner({
+  flowLabel: 'OAuth state',
+  secretConfigKeys: ['OAUTH_STATE_SECRET'],
+});
 function generateState(discordId) {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const sig = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  return `${nonce}.${sig}`;
+  return `${nonce}.${githubOAuthStateSigner.sign(`${discordId}:${nonce}`)}`;
 }
 function verifyStateBinding(state, discordId) {
   if (typeof state !== 'string') return false;
@@ -218,12 +216,7 @@ function verifyStateBinding(state, discordId) {
   if (parts.length !== 2) return false;
   const [nonce, sig] = parts;
   if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  } catch { return false; }
+  return githubOAuthStateSigner.verify(`${discordId}:${nonce}`, sig);
 }
 
 // --- QURL send helpers ---
@@ -561,6 +554,14 @@ function isAllowedFileType(contentType) {
 // collector instances (e.g. flow_state RESUME on a bot restart loading
 // unfinished sends).
 const addRecipientsLocks = new Set();
+// Same-process per-send Revoke lock. Collector-local `revokeInFlight`
+// handles duplicate clicks inside one management collector; this Set lets
+// another collector in the same process see a Revoke already mutating the
+// send. Cross-process safety relies on revoked_at plus the guarded
+// recordQURLSendBatch transaction.
+const revokingSendLocks = new Set();
+const ADD_RECIPIENTS_IN_PROGRESS_MSG = 'Already processing an "Add Recipients" action.';
+const ALREADY_REVOKING_SEND_MSG = 'Already revoking links for this send.';
 
 const sendCooldowns = new Map();
 
@@ -1248,7 +1249,7 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
 
 // --- Link status monitor ---
 // Track live monitors so a burst of `/qurl send` + `/qurl map` commands
-// can't stack more than MAX_CONCURRENT_MONITORS setIntervals. When we
+// can't stack more than MAX_CONCURRENT_MONITORS poll loops. When we
 // cross the cap, the oldest monitor is stopped to make room (the user
 // can still `/qurl revoke`; they just stop seeing live status updates in
 // the original message).
@@ -1259,14 +1260,14 @@ const activeMonitors = new Set();
 // not via bot-token channel PATCH. Both /qurl send and /qurl map
 // deferReply ephemeral, so the confirmation is unreachable once the
 // token expires. There's no cross-token fallback — we just cap the
-// monitor below the 15-min cliff so we don't waste setIntervals
+// monitor below the 15-min cliff so we don't waste poll loops
 // against a dead token.
 
 function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered) {
   // Rebind params as closure-mutable so stop() can null them out for GC.
   // Long-running monitors (up to MAX_MONITOR_DURATION_MS ×
   // MAX_CONCURRENT_MONITORS=50) otherwise pin interaction/recipients/
-  // buttonRow in the setInterval closure.
+  // buttonRow in the poll-loop closure.
   let interaction = interactionArg;
   let qurlLinks = qurlLinksArg;
   let recipients = recipientsArg;
@@ -1332,12 +1333,12 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     safeEdit,
     onAllDone: () => {
       allDone = true;
-      clearInterval(timer);
+      clearTimeout(timer);
     },
     logger,
   });
   // Hoist the flag read once per monitor — registerViewUpdateFor
-  // is called up to QURL_SEND_MAX_RECIPIENTS times (50 today) on
+  // is called up to QURL_SEND_MAX_RECIPIENTS times (default 20000) on
   // construction + once per /qurl add. Re-reading config on every
   // call is negligible but the hoist reads cleaner.
   const viewUpdatePushEnabled = config.ENABLE_VIEW_UPDATE_PUSH;
@@ -1398,34 +1399,38 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         }
       }
       trackingGeneration++;
-      // If the monitor had already settled (all initial recipients viewed
-      // → setInterval cleared), re-arm it so the new recipients' views
-      // get a chance to flip. Without this, /qurl add on an already-
-      // resolved send leaves the counter frozen for the rest of the
-      // monitor lifetime. Reset pollCount too — the throttling decay
-      // (every-other / every-4th) is meant for an idle send; /qurl add
-      // is the explicit signal that the send is NOT steady-state.
-      // Re-uses the construction-time setTimeout→setInterval pattern
-      // so the first post-add tick fires at FIRST_POLL_DELAY_MS (3s),
-      // not at pollInterval (15-60s) — the same sub-second-click
-      // catching rationale applies to /qurl add recipients too.
+      // /qurl add is an explicit signal the send is NOT idle, so re-enter
+      // the dense early phase. Refreshing earlyPhaseUntil (NOT startTime,
+      // which governs the 14-min life cap) speeds the cadence back up
+      // without extending the monitor's lifetime. nextPollDelay() reads
+      // this at the NEXT reschedule.
+      earlyPhaseUntil = Date.now() + EARLY_POLL_WINDOW_MS;
+      // Two cases:
+      //   - Monitor already settled (all initial recipients viewed → the
+      //     loop stopped rescheduling on allDone): re-arm via arm() so the
+      //     new recipients' views can flip — without this, /qurl add on a
+      //     resolved send leaves the counter frozen for the monitor's life.
+      //     First post-add tick fires at FIRST_POLL_DELAY_MS (3s).
+      //   - Monitor still pending (loop still running): we deliberately do
+      //     NOT clearTimeout+re-arm. The live tick already owns `timer`;
+      //     restarting would either fire a redundant extra tick or (if a
+      //     tick is mid-await) need the loopGen guard to avoid orphaning a
+      //     timer. The running loop already picks up the refreshed
+      //     earlyPhaseUntil at its next reschedule, so a /qurl add past the
+      //     90s window waits at most one in-flight steady interval (≤60s)
+      //     before the dense cadence resumes — an accepted, bounded
+      //     asymmetry vs. paying the double-timer complexity for the rarer
+      //     pending-add case.
       if (allDone && !stopped) {
         allDone = false;
-        pollCount = 0;
-        clearInterval(timer);
-        timer = setTimeout(async () => {
-          await runTick();
-          if (isTerminated()) return;
-          timer = setInterval(runTick, pollInterval);
-          if (timer && timer.unref) timer.unref();
-        }, FIRST_POLL_DELAY_MS);
-        if (timer && timer.unref) timer.unref();
+        clearTimeout(timer);
+        arm(FIRST_POLL_DELAY_MS);
       }
     },
     stop() {
       if (stopped) return;
       stopped = true;
-      clearInterval(timer);
+      clearTimeout(timer);
       activeMonitors.delete(control);
       // Unregister the shared callback from every tracked qurl_id so
       // the registry doesn't pin this monitor's closure state past
@@ -1453,7 +1458,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // webhook token expires at ~15 min from interaction creation; both
   // /qurl send + /qurl map deferReply ephemeral, and ephemeral
   // messages can't be edited via any other token. Past the cap the
-  // setInterval would only burn cycles against a dead token. Store-
+  // poll loop would only burn cycles against a dead token. Store-
   // side view recording (recordQurlView) is unaffected — webhooks
   // keep landing for the link's full lifetime; the sender's confirm-
   // message counter just freezes after the cap. Links themselves
@@ -1461,11 +1466,46 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   const MAX_MONITOR_DURATION_MS = 14 * 60 * 1000;
   const maxMonitorMs = Math.min(expiryMs + 60000, MAX_MONITOR_DURATION_MS);
 
-  const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
+  // Steady-state cadence once a send has been live past the early
+  // window — bounds the sustained cost of an idle monitor (one DDB
+  // BatchGet per tick). Floored at 15s, capped at 60s, scaled to 1/10
+  // of the link's expiry so short-lived links poll more often.
+  const steadyPollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
   // Fast first tick catches sub-second self-destruct sends where the
-  // recipient burns the link before the standard interval would fire.
+  // recipient burns the link before any interval would fire.
   const FIRST_POLL_DELAY_MS = 3000;
+  // Dense early-poll phase. The webhook fast-path
+  // (routes/qurl-webhook.js) owns normal sub-second latency, but the
+  // cross-replica PATCH primitive is live-only. Keep #839's 5s dense
+  // backstop until that primitive is verified so a bad fast-path
+  // assumption cannot regress send counters below the pre-PR fallback.
+  // The poll also self-heals failed edits and restores expand/collapse
+  // content-only flicker.
+  //
+  // Cost: this replaces the old pollCount decay (which throttled an idle
+  // monitor toward every-4th-tick), so the steady phase is a flat
+  // steadyPollInterval (≤60s). Discord-edit volume does NOT scale with
+  // poll rate: runTick edits ONLY on a real pending→opened transition
+  // (`changed`) and each link flips once, so total edits over the
+  // monitor's life are bounded by the count of distinct recipient views
+  // (≤ QURL_SEND_MAX_RECIPIENTS, default 20000 — NOT 50), spread across
+  // the link's whole lifetime. At ≥5s spacing in the early window this is
+  // still far under Discord's editReply rate limit. (The webhook
+  // fast-path, which fires per-view rather than per-tick, is the path
+  // that needs the burst coalescing above; this poll is naturally rate-
+  // limited by its own poll tick spacing.)
+  const EARLY_POLL_INTERVAL_MS = 5000;
+  const EARLY_POLL_WINDOW_MS = 90000;
   const startTime = Date.now();
+  // Anchor for the dense early phase. Distinct from startTime (which
+  // governs the 14-min life cap via maxMonitorMs) so addRecipients can
+  // refresh the dense phase for newly-added recipients WITHOUT extending
+  // the monitor's life past the interaction-token TTL.
+  let earlyPhaseUntil = startTime + EARLY_POLL_WINDOW_MS;
+  // Delay until the next tick: dense while inside the early window,
+  // steady after. Read at each reschedule so a mid-life addRecipients
+  // re-entry into the dense phase takes effect immediately.
+  const nextPollDelay = () => (Date.now() < earlyPhaseUntil ? EARLY_POLL_INTERVAL_MS : steadyPollInterval);
   const isTerminated = () => stopped || allDone || Date.now() - startTime > maxMonitorMs;
 
   // Best-effort edit through the interaction webhook token. After the
@@ -1473,9 +1513,19 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // logIgnoredDiscordErr swallows it. Recipients see status from
   // their DM, so the sender's frozen counter past cap is just a
   // dashboard nicety, not a load-bearing surface.
+  // Returns true ONLY when the edit confirmed. The runTick counter path
+  // gates its monotonic-floor advance (tryAdvanceRenderedCount) on this —
+  // commit-after-edit, same invariant the webhook fast-path holds — so a
+  // failed render must NOT advance the floor (else the fast-path's N<=L
+  // skip would strand a count that was never displayed: stuck-counter).
+  // The terminal/expand callers ignore the return, so this stays
+  // non-breaking for them.
   async function safeEdit(payload) {
-    if (!interaction) return;
-    await interaction.editReply(payload).catch(logIgnoredDiscordErr);
+    if (!interaction) return false;
+    return interaction.editReply(payload).then(() => true).catch((err) => {
+      logIgnoredDiscordErr(err);
+      return false;
+    });
   }
 
   // `viewed` already declared above the createHandleViewUpdate factory
@@ -1490,32 +1540,31 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   // expired explicitly via upstream polling; the webhook-only world
   // can't observe expiration without a separate qurl.expired
   // subscription (out of scope).
-  function buildStatusMsg() {
-    if (viewCounterDegraded) return currentBaseMsg;
-    const pending = Math.max(0, expectedCount - viewed);
-    return `${currentBaseMsg}\n👀 ${viewed} viewed / ${pending} pending`;
+  // Delegates to the pure renderViewCounter so the monitor's render and
+  // PR-B's off-monitor fast-path render stay byte-identical. The closure
+  // still owns the LIVE inputs (currentBaseMsg/viewed/expectedCount
+  // mutate across ticks + addRecipients; viewCounterDegraded can flip
+  // mid-life) — buildStatusMsg snapshots them at call time and hands them
+  // to the pure fn.
+  function buildStatusMsg(viewedOverride = viewed) {
+    return renderViewCounter({
+      baseMsg: currentBaseMsg,
+      viewed: viewedOverride,
+      expectedCount,
+      degraded: viewCounterDegraded,
+    });
   }
 
-  let pollCount = 0;
-  // Concurrent-tick safety: runTick has one `await` (db.getQurlViews).
-  // Two ticks queued from setInterval can both be in-flight, both
-  // iterating `views` after their respective resolves. The
-  // `if (current.status === 'opened') continue;` guard at the flip
-  // site is synchronous JS, so the second tick observes the first
-  // tick's flip and no-ops — `viewed++` doesn't double-count, the
-  // BatchGet path is idempotent on already-flipped status.
+  // Non-overlapping ticks: arm()/tick() below reschedule the NEXT tick
+  // only after the current runTick (including its single `await
+  // db.getQurlViews`) resolves, so two ticks can never be in flight at
+  // once — the self-destruct-era setInterval concurrency race is gone.
+  // The synchronous `status === 'opened'` guard at the flip site stays
+  // as defense-in-depth (and to no-op the view-update push path racing
+  // a poll), so `viewed++` still can't double-count.
   const runTick = async () => {
-    pollCount++;
-    // Decay tick rate to bound sustained cost of an idle monitor.
-    //   pollCount 1–5:    every tick fires (fast ramp)
-    //   pollCount 6–20:   every other tick (even-only)
-    //   pollCount 21+:    every 4th tick (multiple-of-4)
-    // The else-if chain reads in the same order: 21+ throttle first,
-    // then 6–20 throttle.
-    if (pollCount > 20 && pollCount % 4 !== 0) return;
-    else if (pollCount > 5 && pollCount % 2 !== 0) return;
     if (isTerminated()) {
-      clearInterval(timer);
+      clearTimeout(timer);
       if (!interaction) return;
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
       await safeEdit({ content: finalMsg, components: [] });
@@ -1542,41 +1591,84 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         changed = true;
       }
       if (changed) {
-        const pending = Math.max(0, expectedCount - viewed);
-        // Render-order analysis: two concurrent ticks both reaching
-        // this branch is bounded by the `=== 'opened' continue` guard
-        // at the flip site. A slower tick whose snapshot pre-dates a
-        // faster tick's flip can't double-flip the same qurl_id, so
-        // `viewed` never regresses across ticks. A truly stale tick
-        // would observe all-opened and exit with `changed=false`
-        // (no safeEdit). The remaining theoretical flicker — DDB
-        // eventual-consistency returning newer data to the older
-        // tick than to the newer one — is sub-ms in practice and
-        // self-corrects on the next tick. Acceptable cost for not
-        // adding a render-generation counter on top of the existing
-        // trackingGeneration.
-        await safeEdit({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] });
-        if (pending === 0) { allDone = true; clearInterval(timer); }
+        // Clamp poll renders to the persisted display floor. The fast-path
+        // can strongly read/render N before this replica's eventual
+        // getQurlViews catches up; rendering below last_rendered_count would
+        // create a visible N -> lower -> N flicker.
+        let rendered = viewed;
+        try {
+          rendered = Math.max(rendered, await db.getSendRenderedCount(sendId));
+        } catch (floorErr) {
+          logger.debug('Monitor floor-read failed; rendering local poll count', { sendId, error: floorErr.message });
+        }
+        const pending = Math.max(0, expectedCount - rendered);
+        const ok = await safeEdit({ content: buildStatusMsg(rendered), components: pending > 0 ? [buttonRow] : [] });
+        if (pending === 0) { allDone = true; clearTimeout(timer); }
+        // Share the monotonic floor with the webhook fast-path. The poll
+        // is now a first-class renderer of the settled count (coalescing
+        // makes the burst tail poll-only), so advance last_rendered_count
+        // to what we just DISPLAYED — only on a confirmed edit (`ok`),
+        // mirroring the fast-path's commit-after-edit. Without this the
+        // fast-path could read a stale lower N after the poll showed a
+        // higher count and step the display BACKWARDS until the next tick.
+        // CCFE is the normal "a concurrent fast-path already advanced
+        // higher" case (returns false, ignored). Best-effort + wrapped so
+        // a non-CCFE DDB throw can't surface as a misleading "poll failed"
+        // or skip the allDone bookkeeping above. (tryAdvanceRenderedCount
+        // also stamps last_rendered_at, arming the coalesce clock — so a
+        // genuine NEW view landing within QURL_VIEW_COUNTER_COALESCE_MS
+        // after this tick is coalesced by the fast-path's step 4b and
+        // rendered by the webhook trailing flush, not stranded for the
+        // next poll.) NOT advanced on the degraded
+        // early-return or the terminal-freeze render — neither displays a
+        // live counter, so advancing would strand it.
+        if (ok) {
+          try {
+            await db.tryAdvanceRenderedCount(sendId, rendered);
+          } catch (advErr) {
+            logger.debug('Monitor floor-advance failed (non-CCFE); fast-path/poll self-heal on next tick', { sendId, error: advErr.message });
+          }
+        }
       }
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });
     }
   };
-  // Two-phase scheduling: fast first tick at FIRST_POLL_DELAY_MS, then
-  // standard setInterval cadence. clearInterval in Node handles both
-  // setTimeout and setInterval handles (Timeout objects share a class),
-  // so control.stop()'s existing clearInterval(timer) cancels either
-  // phase. The post-tick isTerminated() re-check skips the setInterval
-  // when the first tick already terminated the monitor (e.g., all
-  // links resolved instantly) — otherwise we'd create an interval that
-  // immediately self-clears on its first fire.
-  timer = setTimeout(async () => {
-    await runTick();
-    if (isTerminated()) return;
-    timer = setInterval(runTick, pollInterval);
+  // Self-rescheduling poll loop. A single `setTimeout` handle (never a
+  // setInterval) reschedules the NEXT tick only after the current one
+  // resolves — that's what makes ticks non-overlapping (see runTick's
+  // comment) and lets the cadence shift between the dense early phase
+  // and the steady phase at each reschedule via nextPollDelay(). One
+  // handle means control.stop()'s clearTimeout(timer) always cancels
+  // the live timer; the post-tick isTerminated() guard skips
+  // rescheduling when a tick already terminated the monitor (e.g. all
+  // links resolved instantly). `arm()` is the single .unref() site,
+  // shared by construction, the first tick's reschedule, and the
+  // addRecipients re-arm.
+  //
+  // loopGen makes the single-handle invariant hold across an await.
+  // arm() bumps it and the scheduled tick captures it; a tick that
+  // resumes from `await runTick()` only reschedules if its capture still
+  // matches. Without this, an addRecipients re-arm (which calls arm() →
+  // a fresh timer) landing while a tick is suspended in its await would
+  // leave the resumed stale tick to arm() a SECOND chain — two
+  // concurrent poll loops (≈2× the BatchGet rate) until stop()/the
+  // 14-min cap. It self-heals (stop() nulls interaction + linkStatus, so
+  // the orphan's next runTick short-circuits and doesn't re-arm), so
+  // there's no leak past stop — the guard just keeps the single-handle
+  // invariant exact instead of relying on that self-heal.
+  let loopGen = 0;
+  function arm(delayMs) {
+    const gen = ++loopGen;
+    timer = setTimeout(() => tick(gen), delayMs);
     if (timer && timer.unref) timer.unref();
-  }, FIRST_POLL_DELAY_MS);
-  if (timer && timer.unref) timer.unref();
+  }
+  async function tick(gen) {
+    await runTick();
+    if (isTerminated() || gen !== loopGen) return;
+    arm(nextPollDelay());
+  }
+  arm(FIRST_POLL_DELAY_MS);
 
   // Register this monitor in the global set. If we're over the cap, stop
   // the oldest-inserted monitor first (Set iteration order = insertion
@@ -2021,6 +2113,10 @@ async function executeSendPipeline(interaction, {
       error: error.message,
       apiCode: error.apiCode,
       status: error.status,
+      ...(error.partialLinkCount ? {
+        partial_link_count: error.partialLinkCount,
+        partial_qurl_ids: error.partialQurlIds,
+      } : {}),
       sendId,
     });
     clearCooldown(interaction.user.id); // allow retry on failure
@@ -2282,6 +2378,77 @@ async function executeSendPipeline(interaction, {
     throw err;
   }
 
+  // Arm the cross-replica view-counter fast-path. The webhook receiver
+  // (routes/qurl-webhook.js) edits THIS ephemeral confirmation from any
+  // replica using the persisted interaction token, so a view lands on
+  // the sender's "👀 N viewed" within sub-second latency regardless of
+  // which replica hosts the in-memory monitor. Persisted only AFTER the
+  // editReply landed: before that, the @original message doesn't exist
+  // for the fast-path's PATCH to target, and confirmMsg/delivered exist
+  // only here (saveSendConfig ran earlier, before they were computed).
+  //
+  // Gate: delivered > 0 (no monitor / no counter otherwise) AND a token
+  // is present AND the send is NOT view-counter-degraded. Best-effort +
+  // logged-swallowed exactly like saveSendConfig — a failure here just
+  // leaves the fast-path inert (the poll backstop still renders), it must
+  // not break a send whose DMs already delivered.
+  //
+  // DEGRADED GATE: when any link is missing its qurl_id the monitor
+  // suppresses the counter entirely (renders bare baseMsg — a partial-
+  // attribution "N viewed" would mislead worse than no counter). The
+  // fast-path renders from qurl_views and CANNOT see that degrade (it
+  // hardcodes degraded:false), so arming it on a degraded send would let
+  // a view stamp the very partial counter the monitor suppresses, then
+  // the poll would flip it back to bare — a forbidden flicker. So we
+  // simply DON'T arm the fast-path on a degraded send; its (bare) poll
+  // render is the sole renderer, matching today's behavior. Mirrors the
+  // monitor's own construction-time degrade check.
+  //
+  // SECURITY: interaction.token is a live bearer cred — NEVER log it. The
+  // catch below logs only sendId + err.message, never the token.
+  // applicationId is the standard discord.js Interaction property (set on
+  // the reconstructed worker interaction too, from the raw gateway
+  // application_id); no `client` fallback needed.
+  const counterDegraded = qurlLinks.some(l => !l.qurlId);
+  if (delivered > 0 && interaction.token && !counterDegraded) {
+    try {
+      await db.saveSendConfirmState(sendId, {
+        interactionToken: interaction.token,
+        interactionAppId: interaction.applicationId,
+        expectedCount: delivered,
+        // The COLLAPSED base — exactly the string the monitor uses as
+        // baseMsg, WITHOUT the "👀 …" counter line (confirmMsg is that
+        // base; monitor.getFullMsg() would double-stamp the counter).
+        confirmBaseMsg: confirmMsg,
+        // Optional inline qurl_id fallback cache. saveSendConfirmState
+        // caps large sends to [] before writing so qurl_send_configs
+        // never approaches DDB's item-size limit; the normal path renders
+        // from the sharded aggregate, and rare fallback reads recipient
+        // rows via getSendItems. Filter falsy — legacy/non-guild links may
+        // omit qurlId.
+        confirmQurlIds: qurlLinks.map(l => l.qurlId).filter(Boolean),
+        viewedCount: 0,
+        // Epoch seconds. Aligned to the real Discord interaction-token TTL
+        // (~15 min), NOT a minute past it: getSendRenderState self-defends
+        // by treating a past value as absent, so setting this to ~15 min
+        // makes the fast-path stop trusting the token right when Discord
+        // kills it — closing the dead-token retry window where a view
+        // between token-death and self-defense would fire a PATCH that
+        // 401s. Kept ABOVE the 14-min monitor cap so the fast-path stays
+        // live for the whole window the token is actually valid (a value
+        // ≤14 min would self-defend while the monitor + token are still
+        // good). This also bounds the sensitive token's at-rest life until
+        // the qurl-bot-ddb DDB TTL on confirm_expires_at lands
+        // (qurl-integrations-infra#1227) to physically reap the row.
+        confirmExpiresAt: Math.floor(Date.now() / 1000) + 15 * 60,
+      });
+    } catch (err) {
+      logger.error('saveSendConfirmState failed; webhook view-counter fast-path disabled for this send (poll backstop still renders)', {
+        sendId, error: err.message,
+      });
+    }
+  }
+
   // Non-ephemeral channel notification when sending to @everyone or the
   // voice-channel population. Recipients on voice or scrolling on mobile
   // miss the DM ping otherwise — this post is the only chat signal that
@@ -2322,6 +2489,10 @@ async function executeSendPipeline(interaction, {
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
   if (monitor) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
+    // Running union of the send's qurl_ids (original + every /qurl add)
+    // so the fast-path re-persist always writes the COMPLETE set, not
+    // just the latest batch. Seeded from the original send links.
+    const allQurlIds = qurlLinks.map(l => l.qurlId).filter(Boolean);
     // Single source of truth for the "adding recipients" lock: the global
     // addRecipientsLocks Set keyed by sendId. Acquire at the top of the
     // collect handler, release in a single outer finally{} so any throw
@@ -2330,7 +2501,7 @@ async function executeSendPipeline(interaction, {
 
     // Collector arms AFTER the editReply (it needs `response` as anchor).
     // On collector-setup throw we must stop the already-running monitor
-    // — without that the setInterval would leak the interaction +
+    // — without that the poll loop would leak the interaction +
     // recipients + buttonRow closure for up to an hour.
     let collector;
     try {
@@ -2348,7 +2519,11 @@ async function executeSendPipeline(interaction, {
 
     // `revokeInFlight` dedups concurrent Revoke clicks. `revokeSucceeded`
     // guards the on('end') re-render so a Failed message isn't overwritten
-    // by a stale "Revoked 0/0".
+    // by a stale "Revoked 0/0". These flags are collector-local UX gates;
+    // revokingSendLocks handles same-process cross-collector Revoke only
+    // while work is active. After the lock releases, and across processes,
+    // revoked_at is the correctness boundary; recordQURLSendBatch enforces
+    // it again in the same transaction as any later Add Recipients rows.
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
     // Authoritative DDB strict-success count. Tracked separately from
@@ -2359,6 +2534,7 @@ async function executeSendPipeline(interaction, {
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
+    let revokeResultKnown = false;
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
@@ -2367,6 +2543,14 @@ async function executeSendPipeline(interaction, {
         // buildConfirmMsg now returns {content, attachmentText, needsExpand};
         // extract content for the monitor + editReply (string-only).
         confirmMsg = buildConfirmMsg(showAllRecipients).content;
+        // The expand/collapse choice lives in the IN-MEMORY monitor only
+        // (updateBaseMsg → the poll re-renders the expanded list). It is
+        // deliberately NOT persisted: the webhook fast-path always renders
+        // the persisted COLLAPSED base (content-only edit), so right after
+        // an expand a concurrent fast-path counter edit can briefly show
+        // the collapsed list — the next early poll tick (≤5s) restores the
+        // expanded view off the updated in-memory base. Accepted minor
+        // toggle-flicker (option c); the poll is the self-heal floor.
         monitor.updateBaseMsg(confirmMsg);
         const fullMsg = monitor.getFullMsg();
         const updatedRow = new ActionRowBuilder().addComponents(
@@ -2390,15 +2574,48 @@ async function executeSendPipeline(interaction, {
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
         // Sync dedup before any await (Node single-threaded).
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        if (revokingSendLocks.has(sendId)) {
+          await btnInteraction.reply({ content: ALREADY_REVOKING_SEND_MSG, ephemeral: true }).catch(logIgnoredDiscordErr);
+          return;
+        }
+        if (addRecipientsLocks.has(sendId)) {
+          await btnInteraction.reply({ content: `${ADD_RECIPIENTS_IN_PROGRESS_MSG} Finish the current selection or try again in a moment.`, ephemeral: true }).catch(logIgnoredDiscordErr);
+          return;
+        }
         revokeInFlight = true;
-        // Stop monitor BEFORE any editReply — its setInterval can
+        revokingSendLocks.add(sendId);
+        // Keep this lock owned by the revoke work, not the collector lifetime:
+        // if delete I/O hangs, Add stays blocked until that work settles (or
+        // the process restarts) rather than minting while revoke may still run.
+        // Stop monitor BEFORE any editReply — its poll loop can
         // overwrite the revoke-result message otherwise. Bare call
         // (no `if (monitor)`) — we're inside the `if (monitor) { ... }`
         // collector-setup block; the guard above already proved truthy.
-        monitor.stop();
-        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
+          monitor.stop();
+          await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+          let persistedSendConfig;
+          try {
+            persistedSendConfig = await db.getSendConfig(sendId, interaction.user.id);
+          } catch (err) {
+            logger.warn('Could not pre-check send revoked state before button revoke', { sendId, error: err.message });
+          }
+          if (persistedSendConfig?.revoked_at) {
+            // Stale collectors do not share revokeSucceeded, so persisted
+            // revoked_at is their terminal gate after another collector wins.
+            revokeResultUserNames = [];
+            revokeResultTotal = 0;
+            revokeResultSuccess = 0;
+            revokeShowAll = false;
+            revokeResultKnown = false;
+            // Keep revokeInFlight true after success as the collector-local
+            // terminal gate for duplicate Revoke clicks; revokingSendLocks only
+            // covers in-progress work across same-process collectors.
+            revokeSucceeded = true;
+            await interaction.editReply({ content: 'Links for this send have already been revoked.', components: [] }).catch(logIgnoredDiscordErr);
+            return;
+          }
+          await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
           // Iterate `recipients` (canonical send-confirmation order)
           // and filter by membership — `successUserIds` walks Set
@@ -2411,37 +2628,72 @@ async function executeSendPipeline(interaction, {
           revokeResultTotal = revoked.total;
           revokeResultSuccess = revoked.success;
           revokeShowAll = false;
+          revokeResultKnown = true;
           const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
+          // Keep revokeInFlight true after success as the collector-local
+          // terminal gate for duplicate Revoke clicks; revokingSendLocks only
+          // covers in-progress work across same-process collectors.
           revokeSucceeded = true;
+          // Freeze the confirmation display so a late webhook fast-path
+          // edit can't resurrect a live-looking "👀 N viewed" counter
+          // over this "Revoked X/Y" terminal copy (getSendRenderState
+          // reads confirm_terminal → terminal, which the fast-path checks
+          // FIRST and skips on). Best-effort + logged-swallowed: a miss
+          // narrows to a cosmetic race (a view landing in the tens-of-ms
+          // before the flag lands could re-render the counter once); the
+          // monitor.stop() above already halts the poll, so this is the
+          // only remaining off-monitor editor to fence.
+          db.markConfirmTerminal(sendId).catch((err) => {
+            logger.warn('markConfirmTerminal (revoke) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
+          });
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
           await interaction.editReply({
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
-          // Reset so the dedup flag isn't sticky if the failure UI
-          // ever changes to retain the Revoke button.
+          // Links still exist after a failed revoke, so Add Recipients can
+          // reopen. Keep only successful revokes sticky.
           revokeInFlight = false;
+        } finally {
+          revokingSendLocks.delete(sendId);
         }
         // Collector keeps running for the post-revoke expand toggle;
         // its `time:` window auto-expires.
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
         // =====================================================================
-        // CRITICAL SECTION — do NOT add any `await` between the three lines
-        // below and the next `return` path. Node.js is single-threaded: if
-        // check+set+cooldown all happen synchronously, a second button click
-        // dispatched to the same handler cannot observe the unlocked state.
-        // The `await` in the rejection branches is fine because we've already
-        // committed to rejecting at that point.
+        // CRITICAL SECTION — every path that can reach addRecipientsLocks.add()
+        // must stay synchronous until the lock is claimed. Node.js is
+        // single-threaded: if check+claim happen synchronously, a second button
+        // click dispatched to the same handler cannot observe the unlocked
+        // state. Awaiting in rejection branches is fine because they return.
         // =====================================================================
         // Check-and-claim are now adjacent: if the flag is unset, grab it
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
+        if (revokingSendLocks.has(sendId) || revokeSucceeded) {
+          // Completed revokes set revoked_at before DELETE attempts, even if
+          // individual deletes later fail, so stale Add clicks stay disabled.
+          let content = ALREADY_REVOKING_SEND_MSG;
+          if (revokeSucceeded) {
+            if (!revokeResultKnown) {
+              content = 'This send has already been revoked. Add Recipients is disabled.';
+            } else if (revokeResultTotal === 0) {
+              content = 'No live links remain for this send.';
+            } else if (revokeResultSuccess < revokeResultTotal) {
+              content = 'Revoke already ran for this send. Add Recipients is disabled.';
+            } else {
+              content = 'Links for this send have already been revoked.';
+            }
+          }
+          await btnInteraction.reply({ content, ephemeral: true }).catch(logIgnoredDiscordErr);
+          return;
+        }
         if (addRecipientsLocks.has(sendId)) {
-          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(logIgnoredDiscordErr);
+          await btnInteraction.reply({ content: `${ADD_RECIPIENTS_IN_PROGRESS_MSG} Finish the current selection or try again in a moment.`, ephemeral: true }).catch(logIgnoredDiscordErr);
           return;
         }
         addRecipientsLocks.add(sendId);
@@ -2455,7 +2707,7 @@ async function executeSendPipeline(interaction, {
             await btnInteraction.reply({
               content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
               ephemeral: true,
-            });
+            }).catch(logIgnoredDiscordErr);
             return;
           }
           if (isOnCooldown(interaction.user.id)) {
@@ -2507,11 +2759,43 @@ async function executeSendPipeline(interaction, {
             if (addResult.delivered > 0) {
               addRecipientsCount += addResult.delivered;
               monitor.addRecipients(addResult.delivered, addResult.newLinks);
+              // Extend the running qurl_id union with this batch's links.
+              for (const l of (addResult.newLinks || [])) {
+                if (l?.qurlId) allQurlIds.push(l.qurlId);
+              }
               const totalSent = delivered + addRecipientsCount;
               confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
               monitor.updateBaseMsg(confirmMsg);
               await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
+              // Mid-life degrade: an added link missing its qurl_id flips
+              // the send to view-counter-degraded (the monitor renders bare
+              // baseMsg from here on). The fast-path can't see that, so
+              // DISARM it by marking the confirmation terminal — its
+              // terminal guard then skips, leaving the (bare) poll render
+              // as the sole renderer. Matches the send-time degraded gate.
+              if ((addResult.newLinks || []).some(l => !l?.qurlId)) {
+                db.markConfirmTerminal(sendId).catch((err) => {
+                  logger.warn('markConfirmTerminal (add-recipients degrade) failed; fast-path could briefly stamp a partial counter until poll re-renders bare', { sendId, error: err.message });
+                });
+              } else {
+                // Re-arm the fast-path with the post-add totals so a view
+                // landing after /qurl add renders against the new base +
+                // count + optional inline qurl_id fallback cache. PARTIAL
+                // update — omitting
+                // interactionToken/appId leaves them untouched
+                // (saveSendConfirmState skips undefined keys) so it can't
+                // null the live token. Best-effort + logged-swallowed.
+                db.saveSendConfirmState(sendId, {
+                  expectedCount: totalSent,
+                  confirmBaseMsg: confirmMsg,
+                  confirmQurlIds: allQurlIds,
+                }).catch((err) => {
+                  logger.warn('saveSendConfirmState (add-recipients re-persist) failed; fast-path renders pre-add totals until poll catches up', {
+                    sendId, error: err.message,
+                  });
+                });
+              }
             }
 
             await selectInteraction.editReply({ content: addResult.msg, components: [] });
@@ -2544,6 +2828,13 @@ async function executeSendPipeline(interaction, {
         // message ("Failed to revoke links…") isn't overwritten with
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
+          if (!revokeResultKnown) {
+            interaction.editReply({
+              content: 'Links for this send have already been revoked.',
+              components: [],
+            }).catch(logIgnoredDiscordErr);
+            return;
+          }
           // Terminal state: re-render content (Show Recipients may have
           // toggled), strip components. Omit `files`/`attachments`
           // so Discord keeps the existing revoked-users.txt without
@@ -2554,11 +2845,77 @@ async function executeSendPipeline(interaction, {
         }
         // Revoke attempted but failed — leave the failure message.
         if (revokeInFlight) return;
+        // Management window closed — this is the confirmation's terminal
+        // render. Freeze it so a webhook fast-path edit arriving after the
+        // collector ended can't re-animate the counter over the
+        // window-closed banner. Fire-and-forget .catch in this sync 'end'
+        // handler (best-effort, logged-swallowed); the monitor.stop()
+        // above froze the poll, leaving the fast-path as the only
+        // off-monitor editor to fence. Expired is intentionally NOT fenced
+        // here — the qurl.expired handler edits the recipient DM, never
+        // this sender confirmation, so it needs no terminal mark.
+        db.markConfirmTerminal(sendId).catch((err) => {
+          logger.warn('markConfirmTerminal (window-closed) failed; a late fast-path edit could briefly re-render the counter', { sendId, error: err.message });
+        });
         interaction.editReply({
           content: monitor.getFullMsg() + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
         }).catch(logIgnoredDiscordErr);
       }
+    });
+  }
+}
+
+async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+  const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
+  const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
+  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
+  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
+    // Unreachable by construction for today's Add Recipients flow: oversized
+    // batches fail before DDB, and revoked errors only come from a single
+    // transaction. If a future caller violates that invariant, still revoke
+    // the freshly minted qURLs; rows may point at deleted resources, but no DMs
+    // have been sent and the grants fail closed.
+    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
+      sendId,
+      send_count: batchSends.length,
+      txn_actions: txnActionCount,
+    });
+  }
+
+  // Called when no recipient rows landed, or when a terminal guarded
+  // transaction failure is ambiguous enough that deleting freshly minted qURLs
+  // is the fail-closed outcome (no DMs have been sent yet).
+  const resourceIds = [...new Set(
+    batchSends
+      .map(s => s.resourceId)
+      .filter(id => typeof id === 'string' && id.length > 0),
+  )];
+  if (resourceIds.length === 0) return;
+
+  const results = await batchSettled(resourceIds, async (resourceId) => {
+    await deleteLink(resourceId, apiKey);
+    return resourceId;
+  }, 5);
+  const failed = [];
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      failed.push({ resourceId: resourceIds[index], error: result.reason?.message });
+    }
+  });
+  if (failed.length > 0) {
+    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+      sendId,
+      reason: cleanupReason,
+      failed_count: failed.length,
+      total: resourceIds.length,
+      failures: failed,
+    });
+  } else {
+    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+      sendId,
+      reason: cleanupReason,
+      total: resourceIds.length,
     });
   }
 }
@@ -2572,6 +2929,17 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newLinks: [], delivered: 0, failed: 0, newRecipients: [] };
+  }
+
+  // getSendConfig runs after the user-select await, so revoked_at catches
+  // button, slash-command, and out-of-band revokes that landed while the
+  // Add Recipients picker was open. recordQURLSendBatch repeats this guard
+  // in the recipient-row transaction to close the post-read write window.
+  if (sendConfig.revoked_at) {
+    return {
+      msg: 'Cannot add recipients — this send has already been revoked.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
   }
 
   // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
@@ -2603,11 +2971,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
   // {id, username} returned on every path after this point so the
-  // caller can extend its recipients[] (post-Add revoke shows
-  // names). The success path is the only one where this is load-
-  // bearing; failure paths return it for contract consistency, and
-  // the caller's `successSet.has(r.id)` filter excludes phantom
-  // IDs from any path that didn't write qurl_sends rows.
+  // caller can extend its recipients[] after a successful add. Most
+  // non-revoked failure paths return it for contract consistency; revoked
+  // paths return [] so the post-revoke render cannot show phantom grants.
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2617,33 +2983,54 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  const hasFile = sendConfig.connector_resource_id;
-  const hasLocation = sendConfig.actual_url;
+  // connector_resource_id exists for file AND location sends because maps are
+  // uploaded as JSON resources before minting. Classify by the persisted
+  // payload shape instead, or a location send would look like a mixed send and
+  // produce duplicate (send_id, recipient_id) rows.
+  const hasFilePayload = Boolean(sendConfig.attachment_url);
+  const hasLocation = Boolean(sendConfig.actual_url);
+  if (hasFilePayload && hasLocation) {
+    // Normal saveSendConfig callers persist one payload shape. Seeing both
+    // means a stale/corrupt mixed row; reject it instead of minting duplicate
+    // (send_id, recipient_id) rows that qurl_sends cannot represent cleanly.
+    logger.warn('addRecipients refused mixed file/location send config', { sendId });
+    return {
+      msg: 'Cannot add recipients — mixed file and location sends are not supported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (hasFilePayload && sendConfig.resource_type && sendConfig.resource_type !== RESOURCE_TYPES.FILE) {
+    logger.warn('addRecipients refused non-file send config with file payload', {
+      sendId,
+      resource_type: sendConfig.resource_type,
+    });
+    return {
+      msg: 'Cannot add recipients — stored send configuration is unsupported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  const hasLegacyFileMarker = !sendConfig.resource_type
+    && Boolean(sendConfig.connector_resource_id)
+    && !hasLocation;
+  const hasFile = hasFilePayload
+    || ((sendConfig.resource_type === RESOURCE_TYPES.FILE || hasLegacyFileMarker) && !hasLocation);
 
   if (!hasFile && !hasLocation) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Tracks which prep paths actually completed so we can emit a single
-  // upload_success per send (not one per kind). A sendConfig with both
-  // file + location would otherwise fire two events for the same send,
-  // which double-counts UploadCount in CloudWatch unless the metric
-  // filter dimensions on `kind` (it doesn't, currently — see
-  // qurl-integrations-infra#309). The collapsed event keeps UploadCount
-  // = "number of fully-prepared sends" regardless of kind composition.
+  // Tracks which prep path completed so upload_success can name the kind
+  // after the shared try/catch. Mixed configs are rejected above because
+  // qurl_sends cannot represent two rows for one send/recipient pair.
   const preparedKinds = [];
   // Inherit the original send's self-destruct timer so additional
   // recipients see the same vanish behavior. Persisted as a REAL/Number
   // column; both stores return null when unset. Hoisted above the file/
-  // location branches because both pull the same value — the branches
-  // can both fire for a sendConfig that had both kinds, and a per-branch
-  // recompute would invite drift.
+  // location branches because both pull the same value.
   const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
   // activeKind tracks which branch is in-flight when the outer catch
-  // fires. The inner file try/catch returns on file failure, so by the
-  // time we reach the outer catch the failure was NOT in the file
-  // branch — `hasFile ? 'file' : 'location'` would mis-label mixed
-  // sends. Per-branch assignment is the durable fix.
+  // fires. A future refactor that throws before either branch sets it
+  // lands kind=null, which is discoverable in CloudWatch.
   let activeKind = null;
   try {
     if (hasFile) {
@@ -2710,7 +3097,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', {
-          sendId, error: err.message, apiCode: err.apiCode, status: err.status, isExpired,
+          sendId,
+          error: err.message,
+          apiCode: err.apiCode,
+          status: err.status,
+          ...(err.partialLinkCount ? {
+            partial_link_count: err.partialLinkCount,
+            partial_qurl_ids: err.partialQurlIds,
+          } : {}),
+          isExpired,
         });
         // Always emit — every failure here (CDN re-download, connector
         // re-upload, or mint) is a "couldn't create links" event. A rare,
@@ -2782,7 +3177,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', {
-      sendId, error: error.message, apiCode: error.apiCode, status: error.status,
+      sendId,
+      error: error.message,
+      apiCode: error.apiCode,
+      status: error.status,
+      ...(error.partialLinkCount ? {
+        partial_link_count: error.partialLinkCount,
+        partial_qurl_ids: error.partialQurlIds,
+      } : {}),
     });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
@@ -2795,9 +3197,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Single emission per send. `kind` carries the composition so a future
-  // CloudWatch dimension on it can break the count down per kind without
-  // double-counting mixed sends. Values: 'file' | 'location' | 'mixed'.
+  // Single emission per send. Values: 'file' | 'location'. The fallback is
+  // defensive only; mixed configs are rejected before any prep path runs.
   if (preparedKinds.length > 0) {
     const kind = preparedKinds.length === 1 ? preparedKinds[0] : 'mixed';
     logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind });
@@ -2856,14 +3257,50 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-  // Same guarantee as executeSendPipeline: if the DB write fails, abort
-  // BEFORE any DMs go out so we don't leave live QURL links with no
-  // local record.
+  if (!ddbSendConfigGuardFitsTransaction(batchSends)) {
+    logger.error('addRecipients refused oversized guarded write before DDB persistence', {
+      sendId,
+      send_count: batchSends.length,
+      txn_actions: ddbSendConfigGuardActionCount(batchSends),
+    });
+    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+      rowsMayHavePersisted: false,
+      reason: 'pre_persistence_oversized_batch',
+    });
+    return {
+      msg: 'Cannot add recipients — too many recipients selected. Try fewer recipients.',
+      newLinks: [], newRecipients: [],
+      delivered: 0,
+      failed: 0,
+    };
+  }
+  // Same dispatch guarantee as executeSendPipeline: if the DB write fails,
+  // abort BEFORE any DMs go out. The revoked-race branch below also deletes
+  // freshly minted resources because those rows deliberately never land.
   try {
-    await db.recordQURLSendBatch(batchSends);
+    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true });
   } catch (err) {
+    if (err?.code === 'SEND_CONFIG_REVOKED') {
+      logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
+        sendId, error: err.message, linkCount: batchSends.length,
+      });
+      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      return {
+        msg: 'Cannot add recipients — this send has already been revoked.',
+        newLinks: [], newRecipients: [],
+        delivered: 0,
+        failed: 0,
+      };
+    }
     logger.error('recordQURLSendBatch failed in addRecipients; aborting before DMs', {
       sendId, error: err.message, linkCount: batchSends.length,
+    });
+    // Normal transaction failures are atomic, so no rows landed. If the final
+    // retry actually committed but its response was lost, this cleanup can
+    // leave rows pointing at deleted resources; that is still fail-closed
+    // because no DMs were sent and the qURLs no longer grant access.
+    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+      reason: 'guarded_transaction_failed',
     });
     return {
       msg: 'Failed to save link records. Recipients were not messaged. Please try again.',
@@ -4366,8 +4803,8 @@ function formatPersonalMessagePreview(message) {
   // backslash backoff. The early-return at 80 codepoints avoids the
   // `…` ellipsis when there's nothing to truncate.
   //
-  // Caveat: codepoint-aware ≠ grapheme-aware. ZWJ-joined emoji
-  // sequences (e.g. 👨‍👩‍👧 = man + ZWJ + woman + ZWJ + girl, three
+  // Caveat: codepoint-aware != grapheme-aware. ZWJ-joined emoji
+  // sequences (e.g. man + ZWJ + woman + ZWJ + girl, three
   // codepoints + two joiners = 5 codepoints) can be sliced mid-cluster
   // and render only the first segment. Acceptable: the preview is
   // an 80-codepoint truncation indicator (followed by `…`), so a
@@ -7852,6 +8289,17 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     byResource.set(item.resource_id, list);
   }
   const resourceEntries = [...byResource.entries()];
+  const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
+
+  // Record the user's revocation intent before side-effecting DELETEs.
+  // If this write fails, no qURL resource has been deleted yet, so callers
+  // can safely treat the revoke as failed and leave Add Recipients available.
+  // Do not emit revoke_success/revoke_failed before this point: those audit
+  // events describe qURL DELETE outcomes, and no DELETE has happened yet.
+  // Mark regardless of per-link success: partial failures surface in the
+  // reply ("Revoked X/Y"), and re-picking the same send would not help.
+  await db.markSendRevoked(sendId, senderDiscordId);
+
   const successUserIds = [];
   const failureUserIds = [];
 
@@ -7882,23 +8330,19 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   }
   for (const id of seenFailure) failureUserIds.push(id);
 
-  const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
   const success = successUserIds.length;
   const total = totalUsers;
   // Audit metric is per-resource (DELETE call), not per-recipient.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
 
-  // Record the user's revocation intent so this send stops appearing in
-  // the /qurl revoke dropdown. Mark regardless of per-link success —
-  // partial failures surface in the reply ("Revoked X/Y"), and re-
-  // picking the same send wouldn't help anyway. Emit audit BEFORE
-  // markSendRevoked so a DB write throw can't suppress the metric.
+  // Emit audit after DELETE attempts so the tally reflects actual qURL API
+  // outcomes. The revocation-intent write happened above, before any
+  // destructive side effect.
   if (total > 0) {
     const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
     logger.audit(event, { send_id: sendId, success: auditSuccess, total: auditTotal });
   }
-  await db.markSendRevoked(sendId, senderDiscordId);
 
   // Top-level `success/total` are per-resource (matches the audit
   // event); per-recipient counts surface in nested `users`.
@@ -9679,6 +10123,7 @@ module.exports = {
       isOnCooldown,
       setCooldown,
       clearCooldown,
+      revokingSendLocks,
       batchSettled,
       expiryToISO,
       sendCooldowns,
@@ -9714,6 +10159,13 @@ module.exports = {
       revokeAllLinks,
       renderRevokeMsg,
       renderSendConfirm,
+      // Pure view-counter render, re-exported (defined in
+      // ./view-counter-render) so the wording/floor contract is pinned
+      // directly (degraded→baseMsg, normal→counter line, pending floors
+      // at 0) rather than only via the monitor closure. The webhook
+      // fast-path imports the same module function; the unit test is the
+      // byte-identity anchor both render sites lean on.
+      renderViewCounter,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
       activeMonitors,

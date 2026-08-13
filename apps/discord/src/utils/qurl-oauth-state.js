@@ -11,7 +11,7 @@
 // Format:
 //   state = base64url(JSON({k: 'qurl-oauth', g: guildId, u: discordUserId,
 //                           n: nonce, e: expirySec})) + '.' + sigHex
-//   sig   = HMAC-SHA256(stateSecret(), payload).hex
+//   sig   = HMAC-SHA256(state secret, payload).hex
 //
 // 5-minute TTL. After Auth0 redirects back, the callback re-verifies the
 // signature, parses the payload, checks `kind === 'qurl-oauth'`, and asserts
@@ -26,68 +26,25 @@
 // state is NOT a one-shot token; it's an integrity envelope. PR copy and
 // route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
-const config = require('../config');
+const { createStateSigner } = require('./oauth-state');
 
 const STATE_KIND = 'qurl-oauth';
 const STATE_TTL_SECONDS = 5 * 60;
 
-let _warnedFallback = false;
-const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-
-// Secret precedence (highest first):
-//   1. QURL_OAUTH_STATE_SECRET — flow-dedicated, lets ops rotate the
-//      qURL OAuth signer without invalidating in-flight GitHub OAuth
-//      links. Preferred going forward.
-//   2. OAUTH_STATE_SECRET     — legacy shared secret (qURL + GitHub).
-//      kind-binding on the state token already prevents cross-purpose
-//      forgery, so sharing was secure; the precedence here is purely
-//      operational hygiene per PR #177 review (issue #184).
-//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for env-parity with
-//      the GitHub OAuth flow's signer.
-//   4. Test fallback          — per-process random secret for jest only.
-//
-// Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM, deploy
-// (the dual-read happens automatically); once every replica has the
-// new var, drop OAUTH_STATE_SECRET. The 5-minute state TTL bounds the
-// "old links don't validate against the new key" window — no separate
-// dual-key reader needed.
-// Minimum acceptable secret length — per round-9 #4. 32 chars is the
-// floor for an HMAC-SHA256 secret with adequate entropy (matches the
-// `0`.repeat(64) test fixture's order of magnitude, well below the
-// 128-char hex secrets ops actually provisions). A 4-char accidental
-// value would HMAC just fine with no security; reject upfront.
-const MIN_STATE_SECRET_LENGTH = 32;
-
-function stateSecret() {
-  const dedicated = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
-  if (dedicated) {
-    if (dedicated.length < MIN_STATE_SECRET_LENGTH) {
-      throw new Error(`Refusing to mint qURL OAuth state: state-signing secret is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${dedicated.length}). Provision a 64+ char value in SSM.`);
-    }
-    return dedicated;
-  }
-  if (!config.GITHUB_CLIENT_SECRET) {
-    const inTestHarness = process.env.NODE_ENV === 'test'
-      && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
-    if (!inTestHarness) {
-      throw new Error('Refusing to mint qURL OAuth state: QURL_OAUTH_STATE_SECRET or OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
-    }
-    if (!_warnedFallback) {
-      // eslint-disable-next-line no-console
-      console.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
-      _warnedFallback = true;
-    }
-    return _testFallbackSecret;
-  }
-  // GITHUB_CLIENT_SECRET fallback is also length-checked — Auth0 /
-  // GitHub provision 32+ char client secrets by default, but a manual
-  // /placeholder env on a misconfigured dev box would slip past
-  // otherwise.
-  if (config.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
-    throw new Error(`Refusing to mint qURL OAuth state: GITHUB_CLIENT_SECRET fallback is shorter than ${MIN_STATE_SECRET_LENGTH} chars.`);
-  }
-  return config.GITHUB_CLIENT_SECRET;
-}
+// Secret precedence (highest first): QURL_OAUTH_STATE_SECRET — flow-
+// dedicated, lets ops rotate the qURL OAuth signer without invalidating
+// in-flight GitHub OAuth links (preferred going forward) — then
+// OAUTH_STATE_SECRET, the legacy shared secret (qURL + GitHub).
+// kind-binding on the state token already prevents cross-purpose
+// forgery, so sharing was secure; the precedence here is purely
+// operational hygiene per PR #177 review (issue #184). The
+// GITHUB_CLIENT_SECRET last-ditch fallback, the 32-char minimum secret
+// length, the jest-only random fallback, and the rotation playbook all
+// live in the shared signer — see utils/oauth-state.js.
+const qurlOAuthStateSigner = createStateSigner({
+  flowLabel: 'qURL OAuth state',
+  secretConfigKeys: ['QURL_OAUTH_STATE_SECRET', 'OAUTH_STATE_SECRET'],
+});
 
 function b64urlEncode(buf) {
   return Buffer.from(buf).toString('base64')
@@ -117,16 +74,18 @@ function signQurlOAuthState(guildId, discordUserId) {
     e: expirySec,
   };
   const encoded = b64urlEncode(JSON.stringify(payload));
-  const sig = crypto.createHmac('sha256', stateSecret())
-    .update(encoded)
-    .digest('hex');
-  return `${encoded}.${sig}`;
+  return `${encoded}.${qurlOAuthStateSigner.sign(encoded)}`;
 }
 
 // Returns { ok: true, payload } on success, or { ok: false, reason } on
 // failure. Reasons are intentionally coarse-grained on the wire ("invalid",
 // "expired") so a probing attacker can't distinguish "wrong format" from
 // "wrong signature" — caller logs the granular reason for triage.
+//
+// Not total over misconfiguration: a missing or sub-floor signing secret
+// THROWS (same contract as signing — see utils/oauth-state.js) rather
+// than returning { ok: false }. Boot-time enforcement rules that out in
+// production; in dev the route's error handling turns it into a 500.
 function verifyQurlOAuthState(state) {
   if (typeof state !== 'string') return { ok: false, reason: 'not_a_string' };
   const parts = state.split('.');
@@ -135,16 +94,12 @@ function verifyQurlOAuthState(state) {
   if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[0-9a-f]{64}$/.test(sig)) {
     return { ok: false, reason: 'malformed_chars' };
   }
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(encoded)
-    .digest('hex');
-  let sigOk = false;
-  try {
-    sigOk = crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  } catch {
-    return { ok: false, reason: 'sig_compare_threw' };
+  // The shared verify folds a comparison-shape failure (the old
+  // 'sig_compare_threw' reason) into `false` — unreachable anyway now
+  // that the charset regex above guarantees equal-length hex buffers.
+  if (!qurlOAuthStateSigner.verify(encoded, sig)) {
+    return { ok: false, reason: 'sig_mismatch' };
   }
-  if (!sigOk) return { ok: false, reason: 'sig_mismatch' };
 
   let payload;
   try {

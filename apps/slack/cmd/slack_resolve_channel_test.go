@@ -88,7 +88,7 @@ func TestResolveChannelNameSeam_GridFallback(t *testing.T) {
 		if ownerID == "T1" {
 			return "", auth.ErrSlackBotTokenNotConfigured // workspace itself has no bot token
 		}
-		return "xoxb-org", nil
+		return testTokenXoxbOrg, nil
 	}
 	resolveInfo := newSlackResolveConversationInfoFuncWithTokenLookup(lookup, "qurl-slack/test", srv.URL, srv.Client())
 	resolve := slackResolveChannelNameFromConversationInfo(resolveInfo)

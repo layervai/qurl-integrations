@@ -13,6 +13,7 @@
 // proxy, Teams, etc.) won't silently inherit this cookie. Per
 // Justin's PR #177 round-9 item #2.
 const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
+const QURL_OAUTH_PKCE_COOKIE = 'qurl_setup_pkce';
 const QURL_OAUTH_COOKIE_PATH = '/oauth/qurl';
 const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
 
@@ -22,8 +23,8 @@ const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
 // in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
 // — flipping that off would silently downgrade prod cookies. Keeping
 // the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
-function setQurlOAuthCookie(res, req, value) {
-  res.cookie(QURL_OAUTH_SESSION_COOKIE, value, {
+function setCookie(res, req, name, value) {
+  res.cookie(name, value, {
     httpOnly: true,
     secure: req.protocol === 'https',
     sameSite: 'lax',
@@ -32,16 +33,33 @@ function setQurlOAuthCookie(res, req, value) {
   });
 }
 
+function setQurlOAuthCookie(res, req, value) {
+  setCookie(res, req, QURL_OAUTH_SESSION_COOKIE, value);
+}
+
+// PKCE verifier cookie. Kept out of `state`: qURL OAuth state is signed
+// for integrity, not encrypted, and it travels in browser/Auth0 URLs.
+function setQurlOAuthPkceCookie(res, req, codeVerifier) {
+  setCookie(res, req, QURL_OAUTH_PKCE_COOKIE, codeVerifier);
+}
+
 // Path MUST match the Set-Cookie path or the browser keeps the cookie
 // alive until TTL — locking the path here removes that footgun.
 function clearQurlOAuthCookie(res) {
   res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
 }
 
+function clearQurlOAuthPkceCookie(res) {
+  res.clearCookie(QURL_OAUTH_PKCE_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
+}
+
 module.exports = {
   QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_PKCE_COOKIE,
   QURL_OAUTH_COOKIE_PATH,
   QURL_OAUTH_COOKIE_TTL_SECONDS,
   setQurlOAuthCookie,
+  setQurlOAuthPkceCookie,
   clearQurlOAuthCookie,
+  clearQurlOAuthPkceCookie,
 };

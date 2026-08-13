@@ -357,18 +357,19 @@ func (h *Handler) handleExposeURLSubmission(w http.ResponseWriter, payload *View
 }
 
 // parseExposeURLModalArgs validates the URL-protect modal's submitted state: the
-// chosen resource_id (the selected dropdown option's value — our own option set
-// only ever carries an `r_…` resource_id, so a non-`r_` value is a crafted
-// submission and is rejected) and the channel alias (required, validated against
-// the shared alias contract; a leading `$` is optional). Returns a per-field
-// error map on any problem.
+// chosen resource_id (the selected dropdown option's opaque value) and the
+// channel alias (required, validated against the shared alias contract; a
+// leading `$` is optional). The async bind path re-resolves the selected ID
+// against the current active URL-resource list, which is the authenticity check;
+// duplicating qurl-service's ID syntax here would break coordinated ID cutovers.
+// Returns a per-field error map on any problem.
 func parseExposeURLModalArgs(values map[string]map[string]interactionStateValue) (resourceID, channelAlias string, fieldErrors map[string]string) {
 	fieldErrors = map[string]string{}
 
 	resourceID = strings.TrimSpace(interactionStateText(values, exposeURLBlockResource, exposeURLActionResource))
 	if resourceID == "" {
 		fieldErrors[exposeURLBlockResource] = "Pick a URL resource to protect."
-	} else if !strings.HasPrefix(resourceID, "r_") || len(resourceID) > slackOptionValueMaxChars {
+	} else if len(resourceID) > slackOptionValueMaxChars {
 		fieldErrors[exposeURLBlockResource] = "Pick a URL resource from the list."
 	}
 

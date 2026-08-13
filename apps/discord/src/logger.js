@@ -59,6 +59,15 @@ const AUDIT_SECRET_KEYS = new Set([
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
   'auth_token', 'access_token', 'refresh_token', 'bearer_token',
   'session_token', 'private_key', 'client_secret', 'webhook_secret',
+  // The Discord interaction-webhook token persisted on qurl_send_configs
+  // (PR-B view counter) is a live ~15-min bearer cred. The audit path is
+  // EXACT-match (not substring like REDACT_SUBSTRINGS), so the bare
+  // 'token' entry above does NOT cover 'interaction_token' — name it so a
+  // send-config row accidentally audit-shipped has it redacted. Defense-
+  // in-depth: getSendConfig already strips it from its return, and the
+  // info/warn/debug path's substring redactor catches it; this closes the
+  // audit serializer too.
+  'interaction_token',
   // Content-derived hash names — see REDACT_EXACT_KEYS above for rationale.
   // Kept in sync by hand today; consolidation tracked in #221.
   'hash', 'md5', 'sha1', 'sha256', 'sha512',

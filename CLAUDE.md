@@ -17,9 +17,10 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
 - `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
+- `origins/s3-static-connector/` — reusable private S3 static origin image
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
-- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`)
+- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it
 
 ## Commit format
 
@@ -27,7 +28,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 <type>(<scope>): <description>
 
 type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
-scope: slack | teams | discord | cli | zapier | chrome-extension | shared | ci
+scope: slack | teams | discord | cli | zapier | chrome-extension | origins | shared | ci
 ```
 
 > Keep this type list aligned with CONTRIBUTING.md and `.github/workflows/pr-title.yml`'s `types:` block.

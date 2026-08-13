@@ -210,6 +210,23 @@ describe('logger', () => {
       expect(parsed.audit.send_id).toBe('s1');
     });
 
+    it('redacts interaction_token (the PR-B view-counter bearer cred) in the audit path', () => {
+      // The audit path is EXACT-match, so the bare 'token' entry does NOT
+      // cover 'interaction_token' — it's named explicitly. Defense-in-depth
+      // for a send-config row accidentally audit-shipped (getSendConfig
+      // already strips it from its return).
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('upload_success', { send_id: 's1', interaction_token: 'tok-LIVE-bearer' });
+
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('interaction_token');
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.interaction_token).toBe('[REDACTED]');
+      expect(JSON.stringify(parsed)).not.toContain('tok-LIVE-bearer');
+      expect(parsed.audit.send_id).toBe('s1');
+    });
+
     it('redacts non-empty string values; non-string secret values pass through', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');

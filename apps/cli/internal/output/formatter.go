@@ -11,6 +11,8 @@ import (
 
 	"github.com/fatih/color"
 
+	qurlsdk "github.com/layervai/qurl-go/qurl"
+
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -20,12 +22,34 @@ const (
 	FormatJSON  = "json"
 )
 
+// EnterOutput is the repo-owned JSON shape for `qurl enter`. It projects the
+// qurl-go ResourceHandle into a stable, explicitly-tagged contract this repo
+// controls, so an SDK type change cannot silently alter `enter -o json` output.
+// It deliberately mirrors ALL ResourceHandle fields (RedirectURL, OpenSeconds) —
+// the handle exposes nothing else. The `target_url` key matches resolve's JSON
+// output, and open_seconds carries omitempty because the SDK reports 0 as "not
+// provided".
+type EnterOutput struct {
+	Target string `json:"target_url"`
+	// TODO(upstream-contract): open_seconds==0 mirrors qurl-go ResourceHandle's "0 == not provided" godoc; if the SDK ever uses 0 for a genuinely closed/expired window, revisit this omitempty and FormatEnter's >0 guard.
+	OpenSeconds uint32 `json:"open_seconds,omitempty"`
+}
+
+// enterOutputFrom projects a qurl-go ResourceHandle into the repo-owned shape.
+func enterOutputFrom(handle *qurlsdk.ResourceHandle) EnterOutput {
+	return EnterOutput{
+		Target:      handle.RedirectURL,
+		OpenSeconds: handle.OpenSeconds,
+	}
+}
+
 // Formatter is the interface for output formatters.
 type Formatter interface {
 	FormatQURL(w io.Writer, qurl *client.QURL) error
 	FormatCreate(w io.Writer, output *client.CreateOutput) error
 	FormatList(w io.Writer, output *client.ListOutput) error
 	FormatResolve(w io.Writer, output *client.ResolveOutput) error
+	FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error
 	FormatMint(w io.Writer, output *client.MintOutput) error
 	FormatQuota(w io.Writer, output *client.QuotaOutput) error
 }
@@ -150,6 +174,19 @@ func (f TableFormatter) FormatResolve(w io.Writer, output *client.ResolveOutput)
 	return wr.flush(tw)
 }
 
+// FormatEnter formats a qv2 portal-entry result as a key-value table.
+func (f TableFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	wr := &errWriter{w: tw}
+	wr.printf("%s\n\n", f.green.Sprint("Portal entered"))
+	wr.printf("%s\t%s\n", f.bold.Sprint("Target:"), handle.RedirectURL)
+	// TODO(upstream-contract): see EnterOutput — 0 means "not provided" per qurl-go, not a 0-second grant.
+	if handle.OpenSeconds > 0 {
+		wr.printf("%s\t%ds\n", f.bold.Sprint("Access:"), handle.OpenSeconds)
+	}
+	return wr.flush(tw)
+}
+
 // FormatMint formats a mint response.
 func (f TableFormatter) FormatMint(w io.Writer, output *client.MintOutput) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -220,6 +257,12 @@ func (JSONFormatter) FormatList(w io.Writer, output *client.ListOutput) error {
 // FormatResolve formats a resolve result as JSON.
 func (JSONFormatter) FormatResolve(w io.Writer, output *client.ResolveOutput) error {
 	return writeJSON(w, output)
+}
+
+// FormatEnter formats a qv2 portal-entry result as JSON using the repo-owned
+// EnterOutput shape rather than the raw SDK type.
+func (JSONFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle) error {
+	return writeJSON(w, enterOutputFrom(handle))
 }
 
 // FormatMint formats a mint response as JSON.

@@ -180,13 +180,13 @@ func TestGetCommand(t *testing.T) {
 	}
 }
 
-func TestGetCommandInvalidID(t *testing.T) {
+func TestGetCommandEmptyID(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	err := runCmdErr(t, srv, "get", "bad_id")
+	err := runCmdErr(t, srv, "get", "   ")
 	if err == nil {
-		t.Fatal("expected error for invalid resource ID")
+		t.Fatal("expected error for empty resource ID")
 	}
 }
 

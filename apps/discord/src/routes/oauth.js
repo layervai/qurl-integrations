@@ -3,7 +3,6 @@ const express = require('express');
 const config = require('../config');
 const db = require('../store');
 const logger = require('../logger');
-const { renderPage } = require('../templates/page');
 const { sendDM, assignContributorRole, notifyBadgeEarned } = require('../discord');
 const { verifyStateBinding } = require('../commands');
 
@@ -175,7 +174,7 @@ router.get('/github', rateLimit, async (req, res) => {
   const { state } = req.query;
 
   if (!state || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(state)) {
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Invalid Link',
       icon: '❌',
       heading: 'Invalid Link',
@@ -186,7 +185,7 @@ router.get('/github', rateLimit, async (req, res) => {
 
   const pending = await db.getPendingLink(state);
   if (!pending) {
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Link Expired',
       icon: '⏰',
       heading: 'Link Expired',
@@ -226,7 +225,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
   if (error) {
     logger.warn('GitHub OAuth denied', { error, error_description });
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Authorization Denied',
       icon: '🚫',
       heading: 'Authorization Denied',
@@ -241,7 +240,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
   }
 
   if (!code || !state || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(state)) {
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Invalid Request',
       icon: '❌',
       heading: 'Invalid Request',
@@ -259,7 +258,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     logger.warn('OAuth callback rejected: session cookie missing or mismatched', { hasCookie: !!cookieState });
     // Clear any stale cookie.
     res.setHeader('Set-Cookie', `${OAUTH_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/auth/; Max-Age=0`);
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Invalid Session',
       icon: '🚫',
       heading: 'Invalid Session',
@@ -274,7 +273,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
   // request with the same state gets no row back and is rejected.
   const pending = await db.consumePendingLink(state);
   if (!pending) {
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Link Expired',
       icon: '⏰',
       heading: 'Session Expired',
@@ -292,7 +291,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     logger.error('OAuth state HMAC mismatch; refusing to complete link', {
       discordId: pending.discord_id,
     });
-    return res.status(400).send(renderPage({
+    return res.status(400).send(res.renderPage({
       title: 'Invalid Session',
       icon: '🚫',
       heading: 'Invalid Session',
@@ -324,7 +323,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
     if (tokenData.error) {
       logger.error('GitHub OAuth error', { error: tokenData.error_description });
-      return res.status(400).send(renderPage({
+      return res.status(400).send(res.renderPage({
         title: 'GitHub Error',
         icon: '❌',
         heading: 'GitHub Error',
@@ -348,7 +347,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     const userData = await userResponse.json();
 
     if (!userData.login) {
-      return res.status(400).send(renderPage({
+      return res.status(400).send(res.renderPage({
         title: 'Failed',
         icon: '❌',
         heading: 'Failed to Get User Info',
@@ -363,7 +362,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     // be reflected into embeds / search queries.
     if (!/^[a-zA-Z0-9-]{1,39}$/.test(userData.login)) {
       logger.error('Refusing createLink: malformed GitHub login', { discordId: pending.discord_id });
-      return res.status(400).send(renderPage({
+      return res.status(400).send(res.renderPage({
         title: 'Invalid Profile',
         icon: '❌',
         heading: 'Invalid GitHub Profile',
@@ -433,7 +432,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       responseSubtext = `Found ${historical.count} past contribution(s)! You've been credited and assigned roles.`;
     }
 
-    res.send(renderPage({
+    res.send(res.renderPage({
       title: 'Success',
       icon: '✅',
       heading: 'Linked Successfully!',
@@ -445,7 +444,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
   } catch (error) {
     logger.error('OAuth callback error', { error: error.message });
-    res.status(500).send(renderPage({
+    res.status(500).send(res.renderPage({
       title: 'Error',
       icon: '💥',
       heading: 'Something Went Wrong',

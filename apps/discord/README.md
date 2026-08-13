@@ -96,9 +96,32 @@ setup) means required to use that feature.
 | `KEY_ENCRYPTION_KEY` | Production | 32 random bytes, base64 — encrypts stored keys at rest |
 | `METRICS_TOKEN` | Production | Bearer token guarding the `/metrics` endpoint |
 | `MAP_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl map` (default off) |
+| `DETECT_COMMAND_ENABLED` | No | Set to `true` to enable `/qurl detect` (default off) |
+| `DETECT_TUNNEL_SLUG` | `/qurl detect` | qURL tunnel resource slug used to mint short-lived `/api/detect` qURLs |
 | `GOOGLE_MAPS_API_KEY` | `/qurl map` | Google Maps key for location autocomplete (needed when map is enabled) |
 | `GUILD_ID` | No | Scope commands to a single server; unset runs the multi-tenant public bot |
 | `PORT` | No | HTTP listen port (default 3000) |
+
+When enabling `/qurl detect`, the minted `qurl_site` must be host-only, and the
+host must be the tunnel resource id (`r_<id>`) under a supported qURL tunnel
+suffix. Production `QURL_ENDPOINT` accepts only `*.qurl.site`; sandbox/staging
+tunnel suffixes are accepted as a non-prod set only for explicit non-prod qURL API hosts
+(`localhost`, `127.0.0.1`, `[::1]`, `api.test.local`,
+`api.staging.layerv.ai`); the endpoint host does not bind to one specific
+non-prod suffix. Unknown endpoint hosts, including unlisted `.local` hosts, fail
+closed to production tunnel suffixes. If tunnel infra adds regional/sharded host
+labels or a path-based `qurl_site`, update the detect host-pin/path contract and
+tests before flipping `DETECT_COMMAND_ENABLED=true`.
+The bot lists the detect resource by slug only and filters active resources
+client-side because the live API rejects combining `slug` and `status`; the SDK
+auto-paginator walks historical revoked rows for this single dark-launch slug.
+If a tunnel rotation creates more than one active resource for the slug, detect
+fails closed instead of guessing which tunnel should receive the Bearer-carrying
+image POST. Persistent hard failures arm a short process-wide retry backoff for
+the single dark-launch slug so a broken tunnel does not re-walk the full slug
+history on every detect attempt. Before broad enablement, keep the detect slug's
+revoked-resource history trimmed or add upstream server-side active filtering;
+cold-cache and backoff-recovery scans grow with accumulated historical rows.
 
 Generate `KEY_ENCRYPTION_KEY` with:
 

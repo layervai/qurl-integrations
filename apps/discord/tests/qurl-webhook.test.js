@@ -27,9 +27,22 @@ jest.mock('../src/discord', () => ({
   sendDM: jest.fn(),
 }));
 
-const mockRecordQurlView = jest.fn(async () => 'recorded');
+const mockRecordQurlView = jest.fn(async () => ({ result: 'recorded', firstView: true }));
+// Fast-path (PR-B) store fns. The recorded-view block now calls
+// editSenderCounterInBackground instead of the SQS publisher; its first
+// step is findSendsByQurlId, so the gate (recorded → fast-path enters;
+// non-recorded → it doesn't) is observed via that call. Default
+// findSendsByQurlId returns no row so the fast-path short-circuits at
+// step 1 (the deep fast-path behavior is exercised in
+// qurl-webhook-counter.test.js); here we only pin the gate.
+const mockFindSendsByQurlId = jest.fn(async () => []);
 jest.mock('../src/store', () => ({
   recordQurlView: mockRecordQurlView,
+  findSendsByQurlId: (...args) => mockFindSendsByQurlId(...args),
+  getSendRenderState: jest.fn(async () => null),
+  getSendItems: jest.fn(async () => []),
+  getQurlViews: jest.fn(async () => new Map()),
+  tryAdvanceRenderedCount: jest.fn(),
   // No-op stubs for the other store methods server.js touches at boot
   // (healthCheck via /health) so the request flow doesn't reach for
   // real DDB credentials.
@@ -37,15 +50,14 @@ jest.mock('../src/store', () => ({
   getStats: jest.fn(() => ({})),
 }));
 
-// Mock the view-update publisher (feat #60) so the route's
-// `if (result === 'recorded') publish(...)` gate is observable.
-// Without this mock, publish() would no-op against an unstarted
-// publisher and the gate would be untestable.
-const mockViewUpdatePublish = jest.fn();
-jest.mock('../src/view-update-publisher', () => ({
-  publish: mockViewUpdatePublish,
-  start: jest.fn(),
-  stop: jest.fn(),
+// discord-rest's editInteractionReply is the fast-path's edit primitive
+// (editDM is the consumed/expired path's). Stub both so the route module
+// loads and the fast-path is observable.
+const mockEditInteractionReply = jest.fn(async () => ({ ok: true }));
+jest.mock('../src/discord-rest', () => ({
+  editDM: jest.fn(async () => ({ ok: true })),
+  editInteractionReply: (...args) => mockEditInteractionReply(...args),
+  sendChannelMessage: jest.fn(),
 }));
 
 // Multi-secret subscription registry. The receiver now looks up the
@@ -134,8 +146,9 @@ const VALID_PAYLOAD = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockRecordQurlView.mockImplementation(async () => 'recorded');
-  mockViewUpdatePublish.mockReset();
+  mockRecordQurlView.mockImplementation(async () => ({ result: 'recorded', firstView: true }));
+  mockFindSendsByQurlId.mockImplementation(async () => []);
+  mockEditInteractionReply.mockImplementation(async () => ({ ok: true }));
   // Reset cache-state mocks to "primed + the usr_test owner is known"
   // so each test starts from a predictable baseline. Tests that need
   // the unprimed / unknown-owner / sibling-lag branches flip these
@@ -146,13 +159,14 @@ beforeEach(() => {
   mockOwnerSecrets.set('usr_test', 'test-qurl-secret');
 });
 
-describe('POST /webhooks/qurl — view-update push gate (feat #60)', () => {
-  // The route calls viewUpdatePublisher.publish() ONLY when
-  // recordQurlView returns the literal 'recorded' (real new view) —
-  // NOT on dedup hits or any other status. A regression that flipped
-  // to truthy-check (`if (result)`) would send SQS messages for every
-  // dedup replay too, exhausting the queue + amplifying CloudWatch
-  // costs on a high-replay-rate qurl.
+describe('POST /webhooks/qurl — sender view-counter fast-path gate (feat #60, PR-B)', () => {
+  // PR-B replaced the SQS view-update push with the cross-replica
+  // editSenderCounterInBackground fast-path. The route enters that
+  // fast-path ONLY when recordQurlView returns result='recorded'
+  // (a real new view) — NOT on dedup hits or any other status.
+  //
+  // The fast-path is fire-and-forget off the 200, so each assertion
+  // drains the deferred microtask chain first.
   const signedRequest = (payload) => {
     const raw = JSON.stringify(payload);
     return request(app)
@@ -162,34 +176,42 @@ describe('POST /webhooks/qurl — view-update push gate (feat #60)', () => {
       .send(raw);
   };
 
-  it('publishes on result === "recorded"', async () => {
-    mockRecordQurlView.mockImplementation(async () => 'recorded');
+  // Drain the fire-and-forget chain. The default findSendsByQurlId → []
+  // returns at step 1, so a fixed-tick drain (no terminal verdict to
+  // poll for in the not-entered cases) is the uniform wait here.
+  const drain = async (n = 8) => {
+    for (let i = 0; i < n; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  it('enters the fast-path on result === "recorded"', async () => {
+    mockRecordQurlView.mockImplementation(async () => ({ result: 'recorded', firstView: true }));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
-    expect(mockViewUpdatePublish).toHaveBeenCalledTimes(1);
-    expect(mockViewUpdatePublish).toHaveBeenCalledWith({
-      qurlId: VALID_PAYLOAD.data.qurl_id,
-      accessCount: VALID_PAYLOAD.data.access_count,
-      eventId: VALID_PAYLOAD.id,
-    });
+    await drain();
+    expect(mockFindSendsByQurlId).toHaveBeenCalledTimes(1);
+    expect(mockFindSendsByQurlId).toHaveBeenCalledWith(VALID_PAYLOAD.data.qurl_id);
   });
 
-  it('does NOT publish on dedup result (e.g. "deduped")', async () => {
-    mockRecordQurlView.mockImplementation(async () => 'deduped');
+  it('does NOT enter the fast-path on dedup result', async () => {
+    mockRecordQurlView.mockImplementation(async () => ({ result: 'dedup', firstView: false }));
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
-    expect(mockViewUpdatePublish).not.toHaveBeenCalled();
+    await drain();
+    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
   });
 
-  it('does NOT publish on any non-"recorded" result', async () => {
+  it('does NOT enter the fast-path on any non-"recorded" result', async () => {
     // Strict-equality guard catches a future store regression that
-    // returned 'updated' or other truthy strings — those should NOT
-    // trigger a push.
+    // returned 'updated' or other truthy strings — those must NOT
+    // trigger an edit.
     for (const result of ['updated', 'noop', 'replayed', '', null, undefined]) {
       jest.clearAllMocks();
-      mockRecordQurlView.mockImplementation(async () => result);
+      mockRecordQurlView.mockImplementation(async () => ({ result, firstView: false }));
       await signedRequest(VALID_PAYLOAD);
-      expect(mockViewUpdatePublish).not.toHaveBeenCalled();
+      await drain();
+      expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
     }
   });
 });
@@ -373,12 +395,12 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(res.body).toEqual({ status: 'invalid-payload' });
   });
 
-  it('returns 200 invalid-payload when access_count is 0 (parity with publisher gate)', async () => {
+  it('returns 200 invalid-payload when access_count is 0 (rejected at the wire boundary)', async () => {
     // qurl.accessed events always carry access_count >= 1 by
     // contract. Rejecting 0 here keeps the wire boundary as the
-    // single source of truth — without this gate, a 0-count event
-    // would record in DDB and then trip the publisher's
-    // "invalid accessCount" warn, producing an asymmetric log pair.
+    // single source of truth — a 0-count event is dropped before
+    // recordQurlView, so neither the view record nor the sender
+    // view-counter fast-path runs.
     const payload = {
       id: 'evt-zero', type: 'qurl.accessed', owner_id: 'usr_test',
       data: { qurl_id: 'q_aaaaaaaaaa1', access_count: 0, consumed: false },
@@ -392,11 +414,11 @@ describe('POST /webhooks/qurl — payload handling', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'invalid-payload' });
     expect(mockRecordQurlView).not.toHaveBeenCalled();
-    expect(mockViewUpdatePublish).not.toHaveBeenCalled();
+    expect(mockFindSendsByQurlId).not.toHaveBeenCalled();
   });
 
   it('surfaces store dedup result on replay', async () => {
-    mockRecordQurlView.mockResolvedValueOnce('dedup');
+    mockRecordQurlView.mockResolvedValueOnce({ result: 'dedup', firstView: false });
     const raw = JSON.stringify(VALID_PAYLOAD);
     const res = await request(app)
       .post('/webhooks/qurl')

@@ -5,9 +5,9 @@
 // require graph (Discord REST, view-update-registry, flow-state,
 // etc.) at module-init time during tests.
 //
-// Today only buildExpiredDMPayload lives here. buildRevokedDMPayload
-// stays in commands.js next to its sole caller (the /qurl revoke
-// editTargets loop) until a second consumer needs it.
+// Today buildExpiredDMPayload + buildConsumedDMPayload live here.
+// buildRevokedDMPayload stays in commands.js next to its sole caller
+// (the /qurl revoke editTargets loop) until a second consumer needs it.
 //
 // CONTRACT: every builder MUST pass `components: []` explicitly.
 // Discord's PATCH /messages does NOT clear fields that aren't
@@ -48,4 +48,38 @@ function buildExpiredDMPayload({ expiresAtSeconds }) {
   return { embeds: [embed], components: [] };
 }
 
-module.exports = { buildExpiredDMPayload };
+// Companion to buildExpiredDMPayload for the qurl.accessed webhook path
+// when `data.consumed === true`: the recipient opened a one-time qURL
+// and the content has been served, so for THEM the door has already
+// closed — the link is dead even though its 30m expiry hasn't elapsed.
+//
+// The "one-time qURL" wording is a contract assumption: qurl-service
+// sets `consumed: true` ONLY on the one-time-use branch (resolve_service
+// commitConsume → publishAccessEvent); a multi-use link hitting its
+// final allowed access increments the use counter and emits
+// `consumed: false`, never true. So consumed===true strictly implies a
+// one-time link here. If that emit-side invariant ever changes, this
+// copy must change with it.
+// TODO(upstream-contract): consumed===true implies the one-time-use
+// branch in qurl-service; keep this copy in lockstep if that changes.
+//
+// COPY IS DELIBERATELY MARKER-FREE (past/perfect tense, no <t:N:R>):
+// at consumption time the link's `expires_at` is still ~minutes in the
+// FUTURE. Rendering it through Discord's relative-time marker (as the
+// expired payload does) would read "expired in 25 minutes" — a
+// future-tense "expired", exactly the confusing state this whole change
+// kills. Static copy is the fix: no time anchor that could re-render
+// future-tense. (This is the single canonical home for the marker-free
+// rationale; the route + test comments point here.)
+//
+// UX choices (whole-embed replacement, QURL_BRAND color, `components: []`
+// to clear the now-dead Step Through button) mirror buildExpiredDMPayload
+// — see that function's comment for the why.
+function buildConsumedDMPayload() {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.QURL_BRAND)
+    .setDescription('🔒 You opened this one-time qURL.\nIt has been used and is no longer active.');
+  return { embeds: [embed], components: [] };
+}
+
+module.exports = { buildExpiredDMPayload, buildConsumedDMPayload };

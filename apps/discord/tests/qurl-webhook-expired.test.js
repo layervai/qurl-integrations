@@ -33,7 +33,7 @@ jest.mock('../src/store', () => ({
   clearExpiredDMEdited: (...args) => mockClearExpiredDMEdited(...args),
   isSendRevoked: (...args) => mockIsSendRevoked(...args),
   // qurl.accessed flow stubs (server boot touches healthCheck).
-  recordQurlView: jest.fn(async () => 'recorded'),
+  recordQurlView: jest.fn(async () => ({ result: 'recorded', firstView: true })),
   healthCheck: jest.fn(),
   getStats: jest.fn(() => ({})),
 }));
@@ -233,6 +233,19 @@ describe('POST /webhooks/qurl — qurl.expired short-circuits', () => {
     const res = await signedRequest(VALID_PAYLOAD);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: 'already-edited' });
+    expect(mockEditDM).not.toHaveBeenCalled();
+  });
+
+  it('200/sibling-already-flipped when the consumed-flip already closed the DM (cross-marker skip)', async () => {
+    // A one-time qURL was consumed (consumed_edited_at set) and THEN its
+    // TTL elapsed, so qurl-service still emits qurl.expired. Don't
+    // overwrite the more-accurate "you opened it" consumed copy with a
+    // generic "expired N ago" marker.
+    mockFindSendsByQurlId.mockResolvedValue([{ ...READY_ROW, consumed_edited_at: '2026-05-19T12:05:00.000Z' }]);
+    const res = await signedRequest(VALID_PAYLOAD);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'sibling-already-flipped' });
+    expect(mockMarkExpiredDMEdited).not.toHaveBeenCalled();
     expect(mockEditDM).not.toHaveBeenCalled();
   });
 

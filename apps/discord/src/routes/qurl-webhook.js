@@ -23,13 +23,14 @@
 
 const express = require('express');
 const db = require('../store');
+const config = require('../config');
 const logger = require('../logger');
 const { AUDIT_EVENTS, QURL_WEBHOOK_EVENTS, DM_STATUS } = require('../constants');
 const { createBadSigLimiter, verifyHmacSha256 } = require('../utils/webhook-hardening');
 const subs = require('../webhook-subscriptions');
-const viewUpdatePublisher = require('../view-update-publisher');
-const { editDM } = require('../discord-rest');
-const { buildExpiredDMPayload } = require('../dm-payloads');
+const { editDM, editInteractionReply } = require('../discord-rest');
+const { buildExpiredDMPayload, buildConsumedDMPayload } = require('../dm-payloads');
+const { renderViewCounter } = require('../view-counter-render');
 const { parseExpiryMs } = require('../utils/time');
 
 const router = express.Router();
@@ -195,47 +196,48 @@ function rowExpiresAtSeconds(row) {
   return Math.floor((createdMs + ms) / 1000);
 }
 
-// qurl.expired handler — the upstream fires this when a qURL reaches
-// expires_at without being revoked. The bot looks the
-// recipient row up via the qurl_id-index GSI and PATCHes the DM body
-// so Discord's <t:UNIX:R> relative-time marker flips tense from
-// "Closes in N" to "Closed N ago" without further edits.
+// Shared recipient-DM tense-flip core for both close-the-door webhook
+// paths (qurl.expired and qurl.accessed-with-consumed). The flip
+// sequence is identical — GSI lookup of the recipient row, editability
+// gate, sibling-marker cross-check (don't clobber the OTHER path's more-
+// specific copy), revoke guard, idempotency-marker claim, editDM, and
+// marker rollback on transient failure — only the marker attribute, the
+// payload, and the log label differ. This helper RETURNS a verdict and
+// never touches `res`: each caller owns its HTTP-status mapping (the
+// expired path maps to 200/503 so the upstream's webhook retry can
+// recover; the consumed path runs fire-and-forget off the already-sent
+// 200 and ignores the verdict beyond logging).
 //
-// Status policy:
-//   - 200 on permanent can't-action conditions (no matching row, send
-//     was revoked first, DM was already edited, dm_status not SENT,
-//     hard shape-mismatch, recipient blocked the bot / deleted the
-//     DM, marker-rollback failed).
-//   - 503 on transient infra failures that a retry can recover from:
-//     PRE-marker GSI Query throw, PRE-marker UpdateItem throw on the
-//     idempotency marker, POST-marker transient editDM failure
-//     (ok:false && expected:false, or thrown error) WITH a successful
-//     marker rollback. 503 trips the upstream's 5-attempt retry
-//     (1+2+4+8+16=31s backoff).
-// editDM's `expected` discriminator (set on the not-ok path) drives
-// the post-edit branch: expected:true means "recipient-side
-// permanent" (200 keep marker), expected:false means "Discord-side
-// transient" (rollback marker + 503).
-async function handleQurlExpired(req, res, { data, eventId }) {
-  if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
-    logger.warn('qURL webhook qurl.expired missing qurl_id', {
-      qurl_id: data?.qurl_id, resource_id: data?.resource_id, event_id: eventId,
-    });
-    return res.status(200).json({ status: 'invalid-payload' });
-  }
-
+// Verdict shape: { status, transient }. `transient: true` is the only
+// retry-worthy outcome (PRE-marker GSI/mark throw, or POST-marker
+// transient editDM failure WITH a successful marker rollback). Every
+// other status is a permanent can't-or-needn't-action condition.
+//
+// Options:
+//   - opts.label         human log label (e.g. 'qurl.expired')
+//   - opts.skipIfAttr    sibling marker attribute name to honor; if the
+//                        row already carries it, the OTHER path flipped
+//                        the DM first — skip so we don't overwrite its
+//                        more-specific copy. (expired skips when
+//                        consumed_edited_at is set, and vice versa.)
+//   - opts.buildPayload(row) → payload | null. null means "cannot
+//                        render for this row" (e.g. expiry couldn't be
+//                        reconstructed); the helper skips the edit.
+//   - opts.markEdited / opts.clearEdited  the path's own idempotency
+//                        marker claim + rollback.
+async function flipRecipientDMToClosed({ qurlId, eventId, label, skipIfAttr, buildPayload, markEdited, clearEdited }) {
   let rows;
   try {
-    rows = await db.findSendsByQurlId(data.qurl_id);
+    rows = await db.findSendsByQurlId(qurlId);
   } catch (err) {
-    // 503 (pre-marker transient): the marker hasn't been claimed yet,
-    // so the upstream's retry can re-enter cleanly and recover the
-    // edit on the next attempt. DDB throttle / transient AWS-side
-    // 5xx is exactly the recoverable case.
-    logger.error('qURL webhook qurl.expired: GSI lookup failed', {
-      error: err.message, qurl_id: data.qurl_id, event_id: eventId,
+    // Pre-marker transient: the marker hasn't been claimed yet, so a
+    // retry (the upstream's for the expired path, a redelivery for the
+    // consumed path) can re-enter cleanly. DDB throttle / transient
+    // AWS-side 5xx is exactly the recoverable case.
+    logger.error(`qURL webhook ${label}: GSI lookup failed`, {
+      error: err.message, qurl_id: qurlId, event_id: eventId,
     });
-    return res.status(503).json({ status: 'lookup-error' });
+    return { status: 'lookup-error', transient: true };
   }
 
   if (rows.length === 0) {
@@ -256,20 +258,20 @@ async function handleQurlExpired(req, res, { data, eventId }) {
     // Count=0 miss can never be a not-yet-propagated row — every
     // mint that qualifies for expiry has had time to land in the
     // GSI hundreds of times over.
-    logger.debug('qURL webhook qurl.expired: no recipient row for qurl_id (pre-rollout or missing-from-mint)', {
-      qurl_id: data.qurl_id, event_id: eventId,
+    logger.debug(`qURL webhook ${label}: no recipient row for qurl_id (pre-rollout or missing-from-mint)`, {
+      qurl_id: qurlId, event_id: eventId,
     });
-    return res.status(200).json({ status: 'no-recipient-row' });
+    return { status: 'no-recipient-row' };
   }
   if (rows.length > 1) {
     // DDB doesn't enforce GSI hash-key uniqueness; the write-path
     // invariant should keep this at 1. Log + skip rather than blind-
     // index [0] so the regression is greppable and we don't edit a
     // wrong recipient's DM.
-    logger.warn('qURL webhook qurl.expired: GSI returned multiple rows for one qurl_id', {
-      qurl_id: data.qurl_id, count: rows.length, event_id: eventId,
+    logger.warn(`qURL webhook ${label}: GSI returned multiple rows for one qurl_id`, {
+      qurl_id: qurlId, count: rows.length, event_id: eventId,
     });
-    return res.status(200).json({ status: 'ambiguous-recipient' });
+    return { status: 'ambiguous-recipient' };
   }
 
   const row = rows[0];
@@ -278,141 +280,155 @@ async function handleQurlExpired(req, res, { data, eventId }) {
   // DM never made it — no message exists to PATCH. Same skip set the
   // revoke editTargets loop uses (commands.js:7251).
   if (dmStatus !== DM_STATUS.SENT || !channelId || !messageId) {
-    logger.debug('qURL webhook qurl.expired: row not editable', {
-      qurl_id: data.qurl_id, send_id: sendId, dm_status: dmStatus, event_id: eventId,
+    logger.debug(`qURL webhook ${label}: row not editable`, {
+      qurl_id: qurlId, send_id: sendId, dm_status: dmStatus, event_id: eventId,
     });
-    return res.status(200).json({ status: 'dm-not-editable' });
+    return { status: 'dm-not-editable' };
   }
 
-  const expiresAtSeconds = rowExpiresAtSeconds(row);
-  if (expiresAtSeconds === null) {
-    // expires_in is sourced from the closed EXPIRY_LABELS set at write
-    // time, so this branch is defense-in-depth against a future
-    // migration / manual repair that landed an off-set value on the
-    // row. Skip rather than render a wrong-time marker.
-    logger.warn('qURL webhook qurl.expired: cannot reconstruct expires_at from row', {
-      qurl_id: data.qurl_id, send_id: sendId,
+  // Sibling-path cross-check: the OTHER close path already flipped this
+  // DM to its (more-specific) copy. The consumed copy ("you opened it")
+  // and the expired marker ("expired N ago") describe the same dead
+  // door, but whichever landed first is the truthful one for the
+  // recipient — re-editing would overwrite it with a redundant or
+  // less-accurate message. `findSendsByQurlId` projects ALL (the
+  // qurl_id-index GSI, see ddb-store.js), so the sibling marker is
+  // already on `row` (zero extra read) — same pre-existing dependency
+  // the expired path leans on for created_at/dm_status. If that GSI's
+  // projection ever narrows to KEYS_ONLY/INCLUDE, this cross-check
+  // silently always-misses and starts clobbering the sibling copy. Read
+  // straight off the row rather than the marker function so a redelivery
+  // sees a marker the local UpdateItem already wrote.
+  //
+  // TOCTOU window (same shape as the revoke race below): if the
+  // consumed and expired events run their GSI lookup before EITHER
+  // marker is written, both pass this check, both claim their own
+  // (distinct) marker, and both editDM — last writer wins. End state is
+  // still "closed" either way, just possibly the less-specific copy.
+  // Vanishingly rare here: a one-time link is consumed well before its
+  // 30m TTL fires qurl.expired, so the two events are almost never
+  // in-flight together. (A single shared marker would serialize the two
+  // paths at the conditional write and close this, but that's a schema
+  // migration of the pre-existing expired_edited_at attribute; not worth
+  // it for a race whose worst case is the less-specific copy.)
+  if (skipIfAttr && row[skipIfAttr]) {
+    logger.debug(`qURL webhook ${label}: sibling path already flipped the DM; skipping`, {
+      qurl_id: qurlId, send_id: sendId, skip_attr: skipIfAttr, event_id: eventId,
+    });
+    return { status: 'sibling-already-flipped' };
+  }
+
+  // buildPayload is the one synchronous caller-supplied step in this
+  // helper. Guard it so a throw becomes a permanent skip rather than
+  // rejecting up to the caller — on the expired path handleQurlExpired
+  // awaits this OUTSIDE its try (the route's try wraps recordQurlView,
+  // not the expired delegation), so an unguarded throw here would escape
+  // into Express v4, which doesn't catch async rejections. The consumed
+  // path is already insulated by flipConsumedDMInBackground's .catch;
+  // guarding here covers both callers at the seam rather than per-caller.
+  // Realistically defensive — the expired builder validates and returns
+  // null (not throws) on bad input, and the consumed builder is static.
+  let payload;
+  try {
+    payload = buildPayload(row);
+  } catch (err) {
+    logger.error(`qURL webhook ${label}: buildPayload threw — skipping`, {
+      error: err.message, qurl_id: qurlId, send_id: sendId, event_id: eventId,
+    });
+    return { status: 'payload-build-error' };
+  }
+  if (!payload) {
+    // The caller's renderer declined (e.g. the expired path couldn't
+    // reconstruct expires_at from a corrupt row). Skip rather than ship
+    // a malformed/wrong-time marker. Checked BEFORE the marker claim so
+    // a future repair of the row lets the next event render cleanly.
+    logger.warn(`qURL webhook ${label}: cannot build DM payload for row`, {
+      qurl_id: qurlId, send_id: sendId,
       created_at: row.created_at, expires_in: row.expires_in,
       event_id: eventId,
     });
-    return res.status(200).json({ status: 'cannot-reconstruct-expiry' });
+    return { status: 'cannot-reconstruct-expiry' };
   }
 
   // Sender revoked first — the DM already says "Alice closed the door".
-  // Re-editing to "Closed N ago" would overwrite the more specific
-  // revoke copy with a less informative timeline marker.
+  // Re-editing would overwrite the more specific revoke copy.
   //
   // TOCTOU race window: between `isSendRevoked` returning false and
   // `editDM` landing, a concurrent /qurl revoke could PATCH the DM
-  // to "closed the door" and we'd then clobber it with "Closed N ago".
-  // Window is tens of ms (one DDB GetItem + one Discord PATCH). The
-  // resulting state is still correct ("closed"), just less specific
-  // than the revoke copy. Out-of-scope to close — pessimistically
-  // locking would need a leader election the bot doesn't have today,
-  // and the worst case is bounded by the EXPIRY_LABELS max window
-  // (7d) plus the scanner's bucket cadence.
+  // to "closed the door" and we'd then clobber it. Window is tens of ms
+  // (one DDB GetItem + one Discord PATCH). The resulting state is still
+  // correct ("closed"), just less specific than the revoke copy. Out-of-
+  // scope to close — pessimistically locking would need a leader
+  // election the bot doesn't have today.
   try {
     if (await db.isSendRevoked(sendId)) {
-      logger.debug('qURL webhook qurl.expired: send was revoked; skipping DM edit', {
-        qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+      logger.debug(`qURL webhook ${label}: send was revoked; skipping DM edit`, {
+        qurl_id: qurlId, send_id: sendId, event_id: eventId,
       });
-      return res.status(200).json({ status: 'send-revoked' });
+      return { status: 'send-revoked' };
     }
   } catch (err) {
     // 5xx-style here would tempt the upstream to retry; the revoked-
     // check is best-effort. Logging + continuing is preferred to
-    // dead-lettering an expiry event over a transient GetItem failure.
+    // dead-lettering the event over a transient GetItem failure.
     //
-    // Failure-mode asymmetry: if the send WAS revoked (DM reads
-    // "Alice closed the door") and `isSendRevoked` throws transiently,
-    // continuing claims the marker, edits the DM to "Closed N ago",
-    // and the marker is now permanent — so the revoke copy is
-    // permanently lost. End state is still correct ("closed"), just
-    // less specific. Rare (requires (a) revoke already happened AND
-    // (b) the very next isSendRevoked GetItem throws), and the
-    // alternative (dead-letter every expiry over a GetItem blip) is
-    // strictly worse.
-    logger.warn('qURL webhook qurl.expired: revoke-check failed; continuing', {
-      error: err.message, qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    // Failure-mode asymmetry: if the send WAS revoked and isSendRevoked
+    // throws transiently, continuing claims the marker, edits the DM,
+    // and the revoke copy is permanently lost. End state is still
+    // correct ("closed"), just less specific. Rare, and the alternative
+    // (dead-letter over a GetItem blip) is strictly worse.
+    logger.warn(`qURL webhook ${label}: revoke-check failed; continuing`, {
+      error: err.message, qurl_id: qurlId, send_id: sendId, event_id: eventId,
     });
   }
 
-  // Idempotency marker — first call wins, repeats short-circuit. The
-  // qurl.expired path has no separate delivery-dedup log (the view-
-  // counter path's eventId dedup is view-specific and doesn't flow
-  // here), so this marker is the sole idempotency layer. Sufficient:
-  // a duplicate scanner fire / wire retry both pass the same qurl_id
-  // here and the conditional UpdateItem short-circuits the second.
+  // Idempotency marker — first call wins, repeats short-circuit. Each
+  // path has its OWN marker (expired_edited_at / consumed_edited_at) so
+  // a redelivery / dual-emission of the same event re-enters and the
+  // conditional UpdateItem short-circuits the second.
   //
   // At-most-once gap (claim-before-act): if the process dies between
-  // the marker write and the edit attempt — or a non-Discord layer
-  // 5xxs at exactly that interleave — the rollback below never runs.
-  // The retry then short-circuits at `already-edited` and the edit
-  // is permanently lost. Bounded by the 8-day S3 lifecycle (same
-  // mitigation as the rollback-failed terminal case below).
+  // the marker write and the edit attempt, the rollback below never
+  // runs. A retry then short-circuits at `already-edited` and the edit
+  // is lost. For the consumed path this also suppresses the qurl.expired
+  // backstop (the marker IS set, so the expired handler's
+  // sibling-already-flipped skip honors it), so the DM never flips at
+  // all in that narrow window. Bounded by the 8-day S3 lifecycle, same
+  // as the expired path's own gap — and far rarer than a clean failure,
+  // which DOES roll back.
   let claimed;
   try {
-    claimed = await db.markExpiredDMEdited(sendId, recipientId);
+    claimed = await markEdited(sendId, recipientId);
   } catch (err) {
-    // 503 (pre-marker transient): same rationale as `lookup-error` —
-    // the marker hasn't been claimed yet (UpdateItem threw before the
-    // write landed for a non-CCFE reason like ProvisionedThroughput
-    // exceeded), so an upstream retry can re-enter cleanly. CCFE
-    // ("already edited") is NOT routed here — markExpiredDMEdited
-    // returns false on CCFE and we treat that as the permanent
-    // already-edited skip below.
-    logger.error('qURL webhook qurl.expired: markExpiredDMEdited failed', {
-      error: err.message, qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    // Pre-marker transient: UpdateItem threw before the write landed
+    // for a non-CCFE reason (e.g. ProvisionedThroughput exceeded), so a
+    // retry can re-enter cleanly. CCFE ("already edited") is NOT routed
+    // here — markEdited returns false on CCFE, handled as already-edited
+    // below.
+    logger.error(`qURL webhook ${label}: marker claim failed`, {
+      error: err.message, qurl_id: qurlId, send_id: sendId, event_id: eventId,
     });
-    return res.status(503).json({ status: 'mark-error' });
+    return { status: 'mark-error', transient: true };
   }
   if (!claimed) {
-    logger.debug('qURL webhook qurl.expired: already edited', {
-      qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    logger.debug(`qURL webhook ${label}: already edited`, {
+      qurl_id: qurlId, send_id: sendId, event_id: eventId,
     });
-    return res.status(200).json({ status: 'already-edited' });
-  }
-
-  const payload = buildExpiredDMPayload({ expiresAtSeconds });
-  if (!payload) {
-    // Defensive — buildExpiredDMPayload validated the same way above
-    // via rowExpiresAtSeconds. If we got here, the two validators
-    // drifted out of sync. Roll back the marker on the way out so a
-    // future drift that actually trips this branch lets the next
-    // retry recover instead of permanently losing the edit; same
-    // rollback contract as the transient-edit path below. Best-
-    // effort — a rollback failure here is itself recoverable on the
-    // next event but should never happen in practice.
-    logger.error('qURL webhook qurl.expired: buildExpiredDMPayload returned null after validation', {
-      qurl_id: data.qurl_id, expires_at: expiresAtSeconds, event_id: eventId,
-    });
-    try {
-      await db.clearExpiredDMEdited(sendId, recipientId);
-    } catch (rollbackErr) {
-      logger.error('qURL webhook qurl.expired: marker rollback failed on payload-build-failed', {
-        error: rollbackErr.message, qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
-      });
-    }
-    return res.status(200).json({ status: 'payload-build-failed' });
+    return { status: 'already-edited' };
   }
 
   // editDM returns {ok, expected} on failure and {ok: true} on success.
-  // The `expected` discriminator drives the retry decision:
-  //   - ok:true                          → 200 edited (success)
-  //   - ok:false, expected:true          → 200 edit-failed-expected
+  //   - ok:true                          → edited (success)
+  //   - ok:false, expected:true          → edit-failed-expected
   //         (permanent — recipient blocked the bot / deleted the DM;
-  //          a retry can't recover, so keep the marker and return 200)
-  //   - ok:false, expected:false / throw → 503 edit-failed-transient
-  //         (transient — Discord 5xx or network; roll back the marker
-  //          and return 503 so the upstream's 5-attempt backoff can
-  //          recover the edit on the next attempt)
+  //          a retry can't recover, so keep the marker)
+  //   - ok:false, expected:false / throw → edit-failed-transient
+  //         (transient — Discord 5xx or network; roll back the marker so
+  //          a retry can recover the edit on the next attempt)
   //
-  // Marker rollback is best-effort: if `clearExpiredDMEdited` itself
-  // throws, the marker stays in place, the next retry short-circuits
-  // at `already-edited`, and the missed edit falls back to the 8-day
-  // S3 lifecycle — same blast radius as the prior always-200 design.
-  // Treats the rollback failure as the genuinely terminal case rather
-  // than another layer of retry to compound atop.
+  // Marker rollback is best-effort: if clearEdited itself throws, the
+  // marker stays, the next retry short-circuits at `already-edited`, and
+  // the missed edit falls back to the 8-day S3 lifecycle.
   let editRes;
   try {
     editRes = await editDM(channelId, messageId, payload);
@@ -420,37 +436,567 @@ async function handleQurlExpired(req, res, { data, eventId }) {
     editRes = { ok: false, expected: false, threwErr: err };
   }
   if (editRes.ok) {
-    logger.info('qURL webhook qurl.expired: DM edited', {
-      qurl_id: data.qurl_id, send_id: sendId, ok: true, event_id: eventId,
+    logger.info(`qURL webhook ${label}: DM edited`, {
+      qurl_id: qurlId, send_id: sendId, ok: true, event_id: eventId,
     });
-    return res.status(200).json({ status: 'edited' });
+    return { status: 'edited' };
   }
   if (editRes.expected) {
-    logger.info('qURL webhook qurl.expired: DM edit failed-expected', {
-      qurl_id: data.qurl_id, send_id: sendId, ok: false, expected: true, event_id: eventId,
+    logger.info(`qURL webhook ${label}: DM edit failed-expected`, {
+      qurl_id: qurlId, send_id: sendId, ok: false, expected: true, event_id: eventId,
     });
-    return res.status(200).json({ status: 'edit-failed-expected' });
+    return { status: 'edit-failed-expected' };
   }
-  // Transient — roll back the marker so the upstream's retry can recover.
+  // Transient — roll back the marker so a retry can recover.
   const transientLog = {
-    qurl_id: data.qurl_id, send_id: sendId, ok: false, expected: false, event_id: eventId,
+    qurl_id: qurlId, send_id: sendId, ok: false, expected: false, event_id: eventId,
   };
   if (editRes.threwErr) transientLog.error = editRes.threwErr.message;
-  logger.warn('qURL webhook qurl.expired: transient editDM failure — rolling back marker for retry', transientLog);
+  logger.warn(`qURL webhook ${label}: transient editDM failure — rolling back marker for retry`, transientLog);
   try {
-    await db.clearExpiredDMEdited(sendId, recipientId);
+    await clearEdited(sendId, recipientId);
   } catch (rollbackErr) {
     // Marker rollback failed → next retry will short-circuit at
     // `already-edited`. Edit is permanently missed; 8-day S3 lifecycle
-    // bounds the blast radius. Return 200 here (not 503) so the retry
-    // backoff doesn't loop on the doomed event.
-    logger.error('qURL webhook qurl.expired: marker rollback failed — missed edit', {
-      qurl_id: data.qurl_id, send_id: sendId, event_id: eventId,
+    // bounds the blast radius. Report non-transient so the caller's
+    // retry backoff doesn't loop on the doomed event.
+    logger.error(`qURL webhook ${label}: marker rollback failed — missed edit`, {
+      qurl_id: qurlId, send_id: sendId, event_id: eventId,
       error: rollbackErr.message,
     });
-    return res.status(200).json({ status: 'edit-failed-rollback-failed' });
+    return { status: 'edit-failed-rollback-failed' };
   }
-  return res.status(503).json({ status: 'edit-failed-transient' });
+  return { status: 'edit-failed-transient', transient: true };
+}
+
+// qurl.expired handler — the upstream fires this when a qURL reaches
+// expires_at (regardless of prior revoke/consume state). The bot looks
+// the recipient row up via the qurl_id-index GSI and PATCHes the DM body
+// so Discord's <t:UNIX:R> relative-time marker flips tense from
+// "Closes in N" to "Closed N ago" without further edits.
+//
+// Status policy:
+//   - 200 on permanent can't-action conditions (no matching row, send
+//     was revoked first, consumed-flip already closed the DM, DM was
+//     already edited, dm_status not SENT, hard shape-mismatch, recipient
+//     blocked the bot / deleted the DM, marker-rollback failed).
+//   - 503 on transient infra failures that a retry can recover from
+//     (verdict.transient — pre-marker throws, or a transient editDM
+//     failure with a successful marker rollback). 503 trips the
+//     upstream's 5-attempt retry (1+2+4+8+16=31s backoff).
+async function handleQurlExpired(req, res, { data, eventId }) {
+  if (!data || typeof data.qurl_id !== 'string' || !data.qurl_id) {
+    logger.warn('qURL webhook qurl.expired missing qurl_id', {
+      qurl_id: data?.qurl_id, resource_id: data?.resource_id, event_id: eventId,
+    });
+    return res.status(200).json({ status: 'invalid-payload' });
+  }
+
+  const verdict = await flipRecipientDMToClosed({
+    qurlId: data.qurl_id,
+    eventId,
+    label: 'qurl.expired',
+    // Don't overwrite the consumed-flip copy ("you opened it") with a
+    // less-accurate "expired N ago" once a one-time link was consumed.
+    skipIfAttr: 'consumed_edited_at',
+    // Reconstruct the absolute expiry instant from the row and render
+    // the <t:N:R> marker. Returns null (→ cannot-reconstruct-expiry) on
+    // a corrupt/off-set row. buildExpiredDMPayload re-validates the same
+    // way, so a null from it after a finite reconstruction would mean
+    // the two validators drifted — handled by the null-skip in the
+    // helper, same as a failed reconstruction.
+    buildPayload: (row) => {
+      const expiresAtSeconds = rowExpiresAtSeconds(row);
+      if (expiresAtSeconds === null) return null;
+      return buildExpiredDMPayload({ expiresAtSeconds });
+    },
+    markEdited: db.markExpiredDMEdited,
+    clearEdited: db.clearExpiredDMEdited,
+  });
+
+  return res.status(verdict.transient ? 503 : 200).json({ status: verdict.status });
+}
+
+// Consumed-flip for the qurl.accessed path: when a recipient opens a
+// ONE-TIME qURL and consumes it (`data.consumed === true`), the link is
+// dead for them even though its 30m TTL hasn't elapsed. Flip their DM
+// from the present-tense "🕐 Closes <t:...:R>" embed to the past-tense
+// "🔒 You opened this one-time qURL … no longer active" copy so they
+// don't see "Closes in ~25m" on a link they can no longer reach.
+//
+// FIRE-AND-FORGET by design (mirrors the view-counter publish above, NOT
+// handleQurlExpired's response coupling): the view is already recorded
+// and the 200 already returned to qurl-service. Surfacing a flip failure
+// as a 503 would lie about the primary op (the view DID record) and make
+// qurl-service retry the whole accessed event. The flip's own backstops
+// make blocking the response unnecessary:
+//   - a REDELIVERED qurl.accessed re-enters here (we gate on
+//     `consumed === true`, not `dbResult === 'recorded'`, and the
+//     consumed_edited_at marker short-circuits the redundant edit); and
+//   - the eventual qurl.expired event (which fires regardless of prior
+//     consume state — see the EventQurlExpired contract) is the
+//     last-resort flip, skipping only when consumed_edited_at is set.
+// So a transiently-failed flip that rolls its marker back is recovered
+// with the consumed copy on the next delivery. The one degraded case is
+// a process bounce (deploy/crash) after the 200 but before the deferred
+// flip runs: the consumed marker was never claimed, so the qurl.expired
+// backstop is what eventually flips the DM — to the less-specific
+// "expired" copy, not "you opened it". Self-heals to a correct "closed"
+// state either way; only the copy specificity degrades, bounded by the
+// 30m TTL.
+function flipConsumedDMInBackground({ qurlId, eventId }) {
+  // Defer into the microtask queue so a future sync-throw refactor of
+  // the flip surfaces as a rejection instead of escaping the handler.
+  Promise.resolve()
+    .then(() => flipRecipientDMToClosed({
+      qurlId,
+      eventId,
+      label: 'qurl.accessed-consumed',
+      // Don't overwrite a sender-revoke or expired flip already on the DM.
+      skipIfAttr: 'expired_edited_at',
+      // Static past-tense copy — no expiry marker (see buildConsumedDMPayload for why).
+      buildPayload: () => buildConsumedDMPayload(),
+      markEdited: db.markConsumedDMEdited,
+      clearEdited: db.clearConsumedDMEdited,
+    }))
+    .then((verdict) => {
+      // Verdict is for observability only on this path — there's no
+      // HTTP response left to map it to. The redelivery + expired
+      // backstop recover anything `transient`.
+      logger.debug('qURL webhook qurl.accessed-consumed: flip verdict', {
+        qurl_id: qurlId, event_id: eventId, status: verdict.status, transient: Boolean(verdict.transient),
+      });
+    })
+    .catch((err) => {
+      logger.error('qURL webhook qurl.accessed-consumed: flip threw', {
+        error: err?.message, qurl_id: qurlId, event_id: eventId,
+      });
+    });
+}
+
+// Terminal verdict log message for the sender view-counter fast-path.
+// Mirrors flipConsumedDMInBackground's verdict line — the single
+// guaranteed end signal on EVERY branch (skip, edited, edit-failed) so a
+// fire-and-forget caller and the unit tests have a uniform drain anchor.
+const COUNTER_VERDICT_MSG = 'qURL webhook sender-counter: fast-path verdict';
+const SENDER_COUNTER_CACHE_SWEEP_MS = 250;
+const senderCounterFlushTimers = new Map();
+const senderCounterRenderStateCache = new Map();
+const senderCounterLocalAttemptAt = new Map();
+
+function senderCounterRenderStateCacheTtlMs() {
+  // Keep this much shorter than the edit coalesce window: it collapses a
+  // same-replica webhook burst onto one strong render-state read without
+  // extending terminal/revoke/expiry staleness by more than a request-scale
+  // interval.
+  return Math.max(1, Math.min(50, Math.floor(config.QURL_VIEW_COUNTER_COALESCE_MS / 4) || 1));
+}
+
+function cacheSenderCounterRenderState(sendId, state, now = Date.now()) {
+  if (!sendId) return;
+  if (!state) {
+    // Do not cache misses: a send can be armed just after the first webhook.
+    senderCounterRenderStateCache.delete(sendId);
+    return;
+  }
+  senderCounterRenderStateCache.set(sendId, {
+    state,
+    expiresAt: now + senderCounterRenderStateCacheTtlMs(),
+  });
+}
+
+async function getSenderCounterRenderState(sendId) {
+  const now = Date.now();
+  const cached = senderCounterRenderStateCache.get(sendId);
+  if (cached && cached.expiresAt > now) {
+    if (cached.state) return { state: cached.state, cached: true };
+    if (cached.promise) return { state: await cached.promise, cached: true };
+  } else if (cached) {
+    senderCounterRenderStateCache.delete(sendId);
+  }
+
+  let promise;
+  promise = db.getSendRenderState(sendId)
+    .then((state) => {
+      cacheSenderCounterRenderState(sendId, state);
+      return state;
+    })
+    .catch((err) => {
+      const current = senderCounterRenderStateCache.get(sendId);
+      if (current && current.promise === promise) {
+        senderCounterRenderStateCache.delete(sendId);
+      }
+      throw err;
+    });
+  senderCounterRenderStateCache.set(sendId, {
+    promise,
+    expiresAt: now + config.QURL_VIEW_COUNTER_COALESCE_MS,
+  });
+  return { state: await promise, cached: false };
+}
+
+function patchCachedSenderCounterRenderState(sendId, patch) {
+  const cached = senderCounterRenderStateCache.get(sendId);
+  if (!cached || !cached.state) return;
+  cacheSenderCounterRenderState(sendId, { ...cached.state, ...patch });
+}
+
+function getSenderCounterLocalAttemptAt(sendId) {
+  const attemptedAt = senderCounterLocalAttemptAt.get(sendId) || 0;
+  if (!attemptedAt) return 0;
+  if (Date.now() - attemptedAt >= config.QURL_VIEW_COUNTER_COALESCE_MS) {
+    senderCounterLocalAttemptAt.delete(sendId);
+    return 0;
+  }
+  return attemptedAt;
+}
+
+function stampSenderCounterLocalAttempt(sendId) {
+  const now = Date.now();
+  senderCounterLocalAttemptAt.set(sendId, now);
+  patchCachedSenderCounterRenderState(sendId, { lastRenderedAt: now });
+}
+
+function sweepSenderCounterCaches(now = Date.now()) {
+  for (const [sendId, cached] of senderCounterRenderStateCache.entries()) {
+    if (!cached || cached.expiresAt <= now) {
+      senderCounterRenderStateCache.delete(sendId);
+    }
+  }
+  for (const [sendId, attemptedAt] of senderCounterLocalAttemptAt.entries()) {
+    if (!attemptedAt || now - attemptedAt >= config.QURL_VIEW_COUNTER_COALESCE_MS) {
+      senderCounterLocalAttemptAt.delete(sendId);
+    }
+  }
+}
+
+const senderCounterCacheSweepTimer = setInterval(
+  () => sweepSenderCounterCaches(),
+  SENDER_COUNTER_CACHE_SWEEP_MS,
+);
+if (typeof senderCounterCacheSweepTimer.unref === 'function') senderCounterCacheSweepTimer.unref();
+
+// Sub-second sender view-counter fast-path (feat #60, PR-B). On a real
+// new view (dbResult === 'recorded'), edits the sender's "/qurl send"
+// confirmation to "👀 N viewed / M pending" from ANY replica using the
+// persisted interaction-webhook token — no Gateway, no in-memory monitor
+// needed.
+//
+// FIRE-AND-FORGET (mirrors flipConsumedDMInBackground): the view is
+// already recorded and the 200 already returned, so a counter-edit miss
+// must not make qurl-service retry the whole accessed event. Everything
+// runs inside the deferred chain and a .catch keeps a throw out of
+// Express.
+//
+function scheduleSenderCounterFlush({
+  sendId, qurlId, delayMs, repairFloor = false, forceSource = false,
+}) {
+  const existing = senderCounterFlushTimers.get(sendId);
+  const shouldForceSource = forceSource || existing?.forceSource === true;
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    senderCounterFlushTimers.delete(sendId);
+    editSenderCounterInBackground({
+      qurlId, force: true, repairFloor, forceSource: shouldForceSource,
+    });
+  }, Math.max(0, delayMs));
+  if (typeof timer.unref === 'function') timer.unref();
+  senderCounterFlushTimers.set(sendId, { timer, forceSource: shouldForceSource });
+}
+
+// COALESCING (step 4b): leading-edge debounce per send. It bounds
+// Discord edits; distinct first-view aggregate writes are sharded across
+// qurl_views counter rows (scaled by expected fan-out) so high-fanout
+// sends avoid a single hot DDB item while small sends keep a one-key
+// read. If a shard write fails inside the debounce window, the trailing
+// flush is forced to count source qurl_views so the fallback stays
+// coalesced instead of amplifying load.
+// Before the expensive count read/PATCH, a DDB-conditional shared attempt
+// claim collapses the distributed leading edge too: only one replica per
+// send/window renders, and the trailing flush displays the settled value
+// inside the sub-second window.
+//
+// SECURITY: state.interactionToken is a live bearer cred — NEVER log it.
+// Only sendId / qurlId / counts appear in the verdict log.
+//
+// ORDERING IS LOAD-BEARING — DO NOT REORDER. The advance-the-count step
+// (8) commits ONLY after a confirmed edit (7). Advancing before the edit
+// would re-introduce the stuck-counter regression: on a transient edit
+// failure last_rendered_count would move forward without the display
+// moving, and the poll backstop's pre-read compare would then skip the
+// re-render forever. Each step's skip is intentional defense — see the
+// inline notes.
+function editSenderCounterInBackground({
+  qurlId, firstView = false, force = false, repairFloor = false, forceSource = false,
+}) {
+  // Defer into the microtask queue so a future sync-throw refactor
+  // surfaces as a rejection instead of escaping the handler (same shape
+  // as flipConsumedDMInBackground).
+  Promise.resolve()
+    .then(async () => {
+      // Repeat accesses on an already-viewed qurl_id cannot change the
+      // sender's DISTINCT viewed count. Skip before the send lookup so
+      // multi-use link reopens don't pay a GSI Query + render-state Get
+      // only to end in N<=L. The poll backstop handles any rare self-heal
+      // from a previous missed first-view edit; force=true trailing/repair
+      // flushes still render.
+      if (!firstView && !force) {
+        logger.debug('qURL webhook sender-counter: skip — no distinct-view advance', { qurl_id: qurlId });
+        return { status: 'no-distinct-view' };
+      }
+
+      // 1. GSI lookup → the single send owning this qurl_id. Defensive
+      //    skip on != 1 (0 = pre-rollout / no persisted send; > 1 =
+      //    ambiguous duplicate key) — same shape as the expired handler.
+      const rows = await db.findSendsByQurlId(qurlId);
+      if (rows.length !== 1) {
+        logger.debug('qURL webhook sender-counter: skip — row count != 1', {
+          qurl_id: qurlId, count: rows.length,
+        });
+        return { status: 'no-single-send' };
+      }
+      const sendId = rows[0].send_id;
+      const senderId = rows[0].sender_discord_id;
+
+      // 2. Render state for this send. Absent means legacy/unarmed send;
+      //    the poll backstop is the renderer. A first view that lands
+      //    before saveSendConfirmState arms this row is still recorded in
+      //    source qurl_views; the poll advances the displayed floor from
+      //    source, while the shard aggregate remains a fast-path cache.
+      let { state, cached: renderStateCached } = await getSenderCounterRenderState(sendId);
+      if (!state) {
+        logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'no-state' };
+      }
+
+      // 3. TERMINAL CHECK FIRST. A revoked / window-closed / otherwise
+      //    frozen confirmation must NOT be resurrected by a late view
+      //    edit — checked before anything else so we never even read the
+      //    send items for a dead display.
+      if (state.terminal) {
+        logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'terminal' };
+      }
+
+      // 4. ABSENT-GUARD. No token / app id / base means this send predates
+      //    the persistence window (or the token TTL'd away).
+      if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
+        logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
+        return { status: 'absent' };
+      }
+
+      let aggregateWriteFailed = forceSource === true;
+      if (firstView) {
+        try {
+          // Intentional two-write split: recordQurlView is the source of
+          // truth; this shard ADD is only the fast aggregate. A crash here
+          // leaves the poll/floor path to reconcile from qurl_views rows.
+          // Load-bearing: recordQurlView's `firstView` contract is what
+          // makes this exactly one shard increment per distinct qurl_id.
+          await db.incrementSendViewedCount(sendId, qurlId, state.expectedCount);
+        } catch (err) {
+          aggregateWriteFailed = true;
+          // Best-effort aggregate: recordQurlView already persisted the
+          // source qurl_views row. Fall through to the source-of-truth
+          // fallback so a replica without the original monitor can still
+          // repair this render immediately.
+          logger.warn('qURL webhook sender-counter: sharded aggregate increment failed; falling back to qurl views', {
+            qurl_id: qurlId, send_id: sendId, error: err?.message,
+          });
+        }
+      }
+
+      // 4b. COALESCE (leading-edge debounce). A high-fan-out send (cap
+      //    QURL_SEND_MAX_RECIPIENTS, default 20000) fires one
+      //    qurl.accessed per recipient's first view; un-coalesced each
+      //    would PATCH this confirmation. Skip the edit if the last
+      //    CONFIRMED edit is younger than the cooldown. Placed before the
+      //    legacy getQurlViews fallback and before the shard sum so
+      //    normal coalesced events stay constant-shape: a first
+      //    distinct view already advanced its shard above, and the
+      //    delayed flush reads the aggregate. Leading-edge keeps the
+      //    counter visibly live; the trailing flush renders rapid
+      //    followers inside the same sub-second window.
+      const coalesceClockAt = Math.max(state.lastRenderedAt, getSenderCounterLocalAttemptAt(sendId));
+      const sinceLastEditMs = Date.now() - coalesceClockAt;
+      if (!force && sinceLastEditMs < config.QURL_VIEW_COUNTER_COALESCE_MS) {
+        const delayMs = config.QURL_VIEW_COUNTER_COALESCE_MS - sinceLastEditMs;
+        scheduleSenderCounterFlush({
+          sendId, qurlId, delayMs, forceSource: aggregateWriteFailed,
+        });
+        logger.debug('qURL webhook sender-counter: coalesced — scheduled trailing flush', {
+          qurl_id: qurlId, send_id: sendId, since_last_edit_ms: sinceLastEditMs, delay_ms: delayMs, force_source: aggregateWriteFailed,
+        });
+        return { status: 'coalesced' };
+      }
+
+      // 4c. DISTRIBUTED CLAIM. Step 4b is an advisory local/row-clock
+      // read; this conditional write is the cross-replica arbiter. Place
+      // it before the shard-sum read so losing replicas skip both the
+      // Discord PATCH and the expensive count read for this window.
+      if (!repairFloor) {
+        const claimed = await db.tryClaimRenderAttempt(
+          sendId,
+          Date.now() - config.QURL_VIEW_COUNTER_COALESCE_MS,
+        );
+        if (!claimed) {
+          scheduleSenderCounterFlush({
+            sendId, qurlId, delayMs: config.QURL_VIEW_COUNTER_COALESCE_MS, forceSource: aggregateWriteFailed,
+          });
+          logger.debug('qURL webhook sender-counter: coalesced — distributed edit attempt already fresh', {
+            qurl_id: qurlId, send_id: sendId, delay_ms: config.QURL_VIEW_COUNTER_COALESCE_MS, force_source: aggregateWriteFailed,
+          });
+          return { status: 'coalesced' };
+        }
+      }
+      // Mirror the shared claim locally before any downstream await, so
+      // tightly clustered first-views on this replica skip without paying
+      // another store read.
+      stampSenderCounterLocalAttempt(sendId);
+
+      // 5. Compute N — the count of DISTINCT viewed qurl_ids across the
+      //    WHOLE send (NOT this event's per-qurl access_count). New rows
+      //    render from a strongly-consistent shard sum in qurl_views,
+      //    scaled by expectedCount and advanced only when recordQurlView
+      //    proves this qurl_id's first recorded view. That keeps a
+      //    20k-recipient burst sub-second without making small sends pay
+      //    64 reads or funnelling every first-view write into one
+      //    qurl_send_configs item. The old BatchGet-all-qurl_ids path is
+      //    now a legacy / no-inline-cache fallback for live rows created
+      //    before the aggregate existed or large rows whose inline cache
+      //    is intentionally capped to [].
+      let N = null;
+      if (!aggregateWriteFailed) {
+        try {
+          const shardedCount = await db.getSendViewedCount(sendId, state.expectedCount);
+          const legacyFloor = typeof state.viewedCount === 'number' ? state.viewedCount : 0;
+          N = Math.max(shardedCount, legacyFloor);
+        } catch (err) {
+          logger.warn('qURL webhook sender-counter: sharded aggregate read failed; falling back to qurl views', {
+            qurl_id: qurlId, send_id: sendId, error: err?.message,
+          });
+        }
+      }
+      const haveAggregateSignal = typeof N === 'number'
+        && (N > 0 || typeof state.viewedCount === 'number');
+      if (!haveAggregateSignal) {
+        // New armed sends seed viewedCount=0, so shardSum=0 still counts
+        // as an aggregate signal. This BatchGet-all fallback is for
+        // legacy/no-floor rows, large sends whose inline qurl_id cache is
+        // capped to [], or explicit shard-read failure above.
+        let qurlIds;
+        if (state.qurlIds.length > 0) {
+          qurlIds = state.qurlIds;
+        } else if (!senderId) {
+          logger.debug('qURL webhook sender-counter: skip — no aggregate/qurlIds and senderId missing (GSI projection narrowed?)', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'no-count-source' };
+        } else {
+          qurlIds = (await db.getSendItems(sendId, senderId)).map(i => i.qurl_id).filter(Boolean);
+        }
+        const views = await db.getQurlViews(qurlIds);
+        N = qurlIds.filter(id => views.get(id)?.accessCount > 0).length;
+      }
+
+      // 6. PRE-READ COMPARE (advisory dedup — NOT a commit). If N is no
+      //    higher than the last count we confirmed-rendered, skip: this is
+      //    a redelivery, or a concurrent multi-recipient view already
+      //    rendered an equal-or-higher count. Prevents a backwards flicker
+      //    without a write; the authoritative monotonic guard is the CAS
+      //    in step 8.
+      const L = state.lastRenderedCount;
+      if (N <= L && !(repairFloor && N === L && N > 0)) {
+        logger.debug('qURL webhook sender-counter: skip — N <= last rendered (redelivery / already-rendered)', {
+          qurl_id: qurlId, send_id: sendId, n: N, last_rendered: L,
+        });
+        return { status: 'no-advance', n: N };
+      }
+
+      if (renderStateCached) {
+        const latestState = await db.getSendRenderState(sendId);
+        if (!latestState) {
+          senderCounterRenderStateCache.delete(sendId);
+          logger.debug('qURL webhook sender-counter: skip — no render state', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'no-state' };
+        }
+        cacheSenderCounterRenderState(sendId, latestState);
+        state = latestState;
+        renderStateCached = false;
+        if (state.terminal) {
+          logger.debug('qURL webhook sender-counter: skip — terminal', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'terminal' };
+        }
+        if (!state.interactionToken || !state.interactionAppId || typeof state.baseMsg !== 'string') {
+          logger.debug('qURL webhook sender-counter: skip — render state absent/partial (legacy or pre-TTL)', { qurl_id: qurlId, send_id: sendId });
+          return { status: 'absent' };
+        }
+        const latestL = state.lastRenderedCount;
+        if (N <= latestL && !(repairFloor && N === latestL && N > 0)) {
+          logger.debug('qURL webhook sender-counter: skip — N <= last rendered (redelivery / already-rendered)', {
+            qurl_id: qurlId, send_id: sendId, n: N, last_rendered: latestL,
+          });
+          return { status: 'no-advance', n: N };
+        }
+      }
+
+      // 7. Render the SAME pure body the monitor renders (byte-identical),
+      //    then edit CONTENT ONLY. Per the verified Discord API behavior,
+      //    PATCH .../messages/@original is a PARTIAL update: OMITTING
+      //    `components` PRESERVES the existing Add/Revoke buttons. So we
+      //    send `{content}` alone — NO components key — and the buttons
+      //    stay. (Sending components:[] would clear them.)
+      const content = renderViewCounter({
+        baseMsg: state.baseMsg,
+        viewed: N,
+        expectedCount: state.expectedCount,
+        degraded: false,
+      });
+      const r = await editInteractionReply(state.interactionAppId, state.interactionToken, { content });
+
+      // 8. COMMIT AFTER SUCCESS ONLY. Advance last_rendered_count only when
+      //    Discord confirmed the edit; a failed edit must not move the floor.
+      //    Still refresh last_rendered_at on failed attempts so an outage
+      //    burst remains coalesced while the poll backstop repairs display.
+      if (!r.ok) {
+        try {
+          await db.touchRenderedAt(sendId);
+          patchCachedSenderCounterRenderState(sendId, { lastRenderedAt: Date.now() });
+        } catch (touchErr) {
+          logger.debug('qURL webhook sender-counter: touchRenderedAt failed (coalesce clock not refreshed; rate limiter is the floor)', {
+            qurl_id: qurlId, send_id: sendId, error: touchErr?.message,
+          });
+        }
+        return { status: 'edit-failed', n: N };
+      }
+      const advanced = await db.tryAdvanceRenderedCount(sendId, N);
+      if (advanced) {
+        patchCachedSenderCounterRenderState(sendId, {
+          lastRenderedCount: N,
+          lastRenderedAt: Date.now(),
+        });
+      } else {
+        senderCounterRenderStateCache.delete(sendId);
+      }
+      if (!repairFloor && !advanced && N < state.expectedCount) {
+        // One-shot repair may be a redundant PATCH when another replica
+        // already displayed N, but the same CCFE also covers the stale-edit
+        // case where this replica raced a higher display backwards.
+        scheduleSenderCounterFlush({ sendId, qurlId, delayMs: 0, repairFloor: true });
+      }
+      return { status: 'edited', n: N };
+    })
+    .then((verdict) => {
+      // Observability-only terminal verdict (no HTTP response to map to).
+      // The single uniform end signal across every branch — the unit
+      // tests poll for this line to drain the deferred chain.
+      logger.debug(COUNTER_VERDICT_MSG, { qurl_id: qurlId, status: verdict.status });
+    })
+    .catch((err) => {
+      // NEVER log the token; err.message from the store/edit fns carries
+      // none. A throw here is swallowed — the poll backstop renders.
+      logger.error('qURL webhook sender-counter: fast-path threw', {
+        error: err?.message, qurl_id: qurlId,
+      });
+    });
 }
 
 router.post('/qurl', async (req, res) => {
@@ -592,30 +1138,42 @@ router.post('/qurl', async (req, res) => {
   const consumed = data.consumed === true;
 
   try {
-    const dbResult = await db.recordQurlView({
+    const viewRecord = await db.recordQurlView({
       qurlId: data.qurl_id,
       accessCount,
       consumed,
       eventId,
     });
+    const { result: dbResult, firstView } = viewRecord;
     logger.info('qURL view recorded', { qurl_id: data.qurl_id, access_count: accessCount, consumed, result: dbResult });
     logger.audit(AUDIT_EVENTS.QURL_WEBHOOK_RECEIVED, { result: dbResult });
-    // Sub-second view counter (feat #60): publish to SQS only on
-    // result === 'recorded' (a real new view, not a per-event dedup
-    // replay). Fire-and-log — the polling fallback in
-    // monitorLinkStatus catches anything the publisher drops. No
-    // await: the HTTP response must come back to qurl-service
-    // promptly so it doesn't retry on its own.
+    // Sub-second view counter (feat #60, PR-B): on a real new view
+    // (result === 'recorded', NOT a per-event dedup replay) edit the
+    // sender's confirmation to "👀 N viewed" directly from this replica
+    // via the persisted interaction token. Fire-and-forget off the
+    // already-decided 200 — the polling backstop in monitorLinkStatus
+    // re-renders anything this edit misses.
+    //
+    // Keep the old SQS view-update path off; #875 removes that dead wiring.
     if (dbResult === 'recorded') {
-      // Defer into the microtask queue so a future sync-throw refactor
-      // of publish() surfaces as a rejection instead of escaping.
-      Promise.resolve().then(() => viewUpdatePublisher.publish({
-        qurlId: data.qurl_id,
-        accessCount,
-        eventId,
-      })).catch((err) => {
-        logger.error('viewUpdatePublisher.publish threw', { error: err?.message, qurl_id: data.qurl_id });
-      });
+      editSenderCounterInBackground({ qurlId: data.qurl_id, firstView });
+    }
+    // One-time link consumed → flip the recipient's DM to "closed".
+    // Fire-and-forget off the already-decided 200 (see
+    // flipConsumedDMInBackground). Gated on `consumed`, NOT on
+    // dbResult === 'recorded': the flip's own consumed_edited_at marker
+    // is the idempotency layer, so attempting on any consumed event lets
+    // a redelivery recover a transiently-missed flip while the marker
+    // short-circuits the redundant edit.
+    //
+    // Reached only after the access_count gate above (a consumed event
+    // with a malformed/zero access_count short-circuits at
+    // invalid-payload and never flips here — by contract a consumed
+    // qurl.accessed always carries access_count >= 1, so that's
+    // theoretical; if it ever weren't, the qurl.expired backstop still
+    // flips the DM, just with the less-specific copy).
+    if (consumed) {
+      flipConsumedDMInBackground({ qurlId: data.qurl_id, eventId });
     }
     return res.status(200).json({ status: dbResult });
   } catch (err) {
@@ -630,5 +1188,10 @@ router.post('/qurl', async (req, res) => {
 router.stopIntervals = function stopIntervals() {
   badSigLimiter.stopSweep();
   unknownOwnerLimiter.stopSweep();
+  clearInterval(senderCounterCacheSweepTimer);
+  for (const { timer } of senderCounterFlushTimers.values()) clearTimeout(timer);
+  senderCounterFlushTimers.clear();
+  senderCounterRenderStateCache.clear();
+  senderCounterLocalAttemptAt.clear();
 };
 module.exports = router;
