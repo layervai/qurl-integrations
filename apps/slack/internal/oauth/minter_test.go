@@ -964,6 +964,36 @@ func TestHTTPAPIKeyMinterReplacementMintBadRequestCarriesContext(t *testing.T) {
 	}
 }
 
+// TestHTTPAPIKeyMinterBindingBadRequestCarriesContext is the binding-route
+// counterpart to the /v1/api-keys test above. This path cannot produce a
+// kind-first 400 — bindingRequest sends no `kind` — but it discarded the same
+// parsed envelope context, so a non-auth rejection there was equally opaque.
+// 400 is chosen deliberately: it is neither auth-class nor a
+// shouldFallbackToLegacyMint trigger, so it exercises the plain error return.
+func TestHTTPAPIKeyMinterBindingBadRequestCarriesContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_field","title":"Bad Request","detail":"external_id malformed"},"meta":{"request_id":"req_bind"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil {
+		t.Fatal("400 from the binding endpoint must be an error")
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("400 must not be classified as dependency auth failure: %+v", authErr)
+	}
+	for _, want := range []string{externalBindingPath, "400", "code=invalid_field", "request_id=req_bind"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q so the rejection is debuggable", err.Error(), want)
+		}
+	}
+}
+
 // TestErrorEnvelopeSuffixOmitsInternalSentinel keeps the internal
 // structured-envelope sentinel out of operator-facing error text; it is a
 // classification marker, not a qurl-service error code.

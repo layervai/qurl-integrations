@@ -676,6 +676,12 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
 	now := fixedNow
 
+	// This test's mint stub returns the pre-cutover envelope (no kind/target),
+	// which is exactly the case the rollout warning exists to surface. Capture
+	// the default logger so the warning's emission is asserted end to end, not
+	// just its predicate.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -750,8 +756,14 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
-		t.Errorf("api key body = %+v, want bound Connector enrollment token", apiKeyBody)
+	assertConnectorEnrollmentKind(t, apiKeyBody)
+	if apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
+		t.Errorf("api key body expires_in = %v, want %q", apiKeyBody[testKeyExpiresIn], tunnelBootstrapTTL)
+	}
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if !logs.contains(kindFirstWarning) {
+		t.Error("a legacy-shaped mint response must raise the kind-first rollout warning")
 	}
 	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
@@ -1514,6 +1526,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := fixedNow
 	modalCreatedAt := now.Add(-10 * time.Minute)
 
+	// Counterpart to the slash-path assertion: this test's mint stub returns
+	// the kind-first envelope, so the rollout warning must stay silent. Without
+	// this direction, a warning that fired unconditionally would still pass.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -1537,15 +1554,20 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&apiKeyBody); err != nil {
 			t.Fatalf("decode api key body: %v", err)
 		}
+		// Post-cutover response shape. The slash-path fixtures deliberately
+		// keep the legacy envelope so both shapes stay covered on the Slack
+		// side through the rollout window; this one exercises the kind-first
+		// response the producer will actually send afterwards.
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelModalKey,
-			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetConnector,
+			"claims":         []map[string]string{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -1590,8 +1612,14 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
-	if apiKeyBody["kind"] != client.CredentialKindEnrollmentToken || apiKeyBody["target"] != client.CredentialTargetConnector {
-		t.Errorf("api key body = %+v, want Connector enrollment token", apiKeyBody)
+	// The modal path shares buildTunnelInstall with the slash path, but assert
+	// the full wire contract here too so a claims/retired-field regression is
+	// caught on either entry point independently.
+	assertConnectorEnrollmentKind(t, apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if logs.contains(kindFirstWarning) {
+		t.Error("a kind-first mint response must not raise the rollout warning")
 	}
 	// The modal path shares buildTunnelInstall with the slash path, but assert
 	// the full wire contract here too so a claims/retired-field regression is
@@ -4862,4 +4890,58 @@ func tunnelInstallViewSubmissionBodyWithIdentity(t *testing.T, meta *TunnelInsta
 		t.Fatalf("marshal private_metadata: %v", err)
 	}
 	return viewSubmissionBody(t, "V_test_tunnel", callbackIDTunnelInstall, string(pm), payloadTeamID, payloadUserID, values)
+}
+
+// TestCredentialConfirmsKindFirst pins the response-confirmation semantics the
+// rollout warning keys off. The two cases that matter most are the ones that
+// pull in opposite directions: a pre-cutover producer (no `kind` at all) must
+// warn, because it silently minted a broader credential than requested; a
+// post-cutover producer that echoes `kind` but omits the corroborating
+// `target` must NOT warn, or the signal becomes permanent noise.
+func TestCredentialConfirmsKindFirst(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		key  *client.APIKey
+		want bool
+	}{
+		{
+			name: "kind and target both confirmed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetConnector},
+			want: true,
+		},
+		{
+			name: "kind confirmed, target not echoed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken},
+			want: true,
+		},
+		{
+			name: "kind confirmed but target disagrees",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: "workspace"},
+			want: false,
+		},
+		{
+			name: "pre-cutover producer echoes nothing",
+			key:  &client.APIKey{KeyType: client.APIKeyTypeTunnelBootstrap, TunnelSlug: testTunnelSlug},
+			want: false,
+		},
+		{
+			name: "producer minted an ordinary api key",
+			key:  &client.APIKey{Kind: client.CredentialKindAPIKey},
+			want: false,
+		},
+		{
+			name: "nil key",
+			key:  nil,
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := credentialConfirmsKindFirst(tc.key); got != tc.want {
+				t.Errorf("credentialConfirmsKindFirst(%+v) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
 }

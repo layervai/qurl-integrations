@@ -173,7 +173,11 @@ const (
 	// CredentialKindEnrollmentToken is the one-shot credential kind used for
 	// headless enrollment.
 	CredentialKindEnrollmentToken = "enrollment_token"
-	// CredentialKindAPIKey is the ordinary, long-lived credential kind.
+	// CredentialKindAPIKey is the ordinary, long-lived credential kind. No
+	// in-repo caller passes it today — the one CreateAPIKey call site mints
+	// enrollment tokens — but it is kept so the `kind` enum this client now
+	// requires is documented in one place, and so the Slack minter's unexported
+	// copy has a named counterpart to stay in lockstep with.
 	CredentialKindAPIKey = "api_key"
 	// CredentialTargetConnector constrains an enrollment token to Connector
 	// enrollment.
@@ -916,6 +920,12 @@ func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*A
 	// Kind presence is structural, so it is checked before the
 	// idempotency-key bytes (a request-decoration error) — a caller missing
 	// both should learn about the missing kind first.
+	//
+	// Checked trimmed but sent as given: unlike RevokeAPIKey/DeleteResource,
+	// which normalize their own string parameters, input is a caller-owned
+	// pointer and writing back would mutate the caller's struct. A padded kind
+	// is a caller bug the server will reject on its own; the guard only has to
+	// catch the empty case.
 	if strings.TrimSpace(input.Kind) == "" {
 		return nil, ErrCreateAPIKeyMissingKind
 	}

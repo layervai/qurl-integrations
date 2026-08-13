@@ -222,19 +222,24 @@ at the OAuth-callback bind layer.
 
 The bot mints credentials with the kind-first `POST /v1/api-keys` contract:
 Connector enrollment sends `kind=enrollment_token` with `target=connector`, and
-the workspace key mint sends `kind=api_key`. There is no dual-send fallback, so
+the workspace key mint sends `kind=api_key` on the two paths that reach
+`/v1/api-keys` — the legacy fallback (taken when the binding route 404s without
+a code, or returns 503 `bindings_disabled`) and the replacement/rotation mint.
+The primary workspace path posts to `/v1/external-identity-bindings`, which is
+not kind-gated and is unaffected. There is no dual-send fallback, so
 **qurl-service must accept kind-first bodies in every API environment Slack
 talks to before this build is deployed there.**
 
 Symptoms of a deploy-order violation, and what to check:
 
-- **`/qurl setup` or guided Connector setup fails immediately with a 400.** The
-  producer predates the cutover. Connector enrollment logs `tunnel install:
-  enrollment token mint failed` with `status`, `code`, `detail`, and
-  `invalid_fields` naming the rejected key; the workspace mint surfaces
-  `qurl-service /v1/api-keys returned 400 code=… request_id=…`. Quote the
-  `request_id` when escalating. The fix is to roll the producer forward, not to
-  retry — 400 is not retried by the shared client.
+- **Guided Connector setup fails immediately with a 400.** The producer
+  predates the cutover. Connector enrollment logs `tunnel install: enrollment
+  token mint failed` with `status`, `code`, `detail`, and `invalid_fields`
+  naming the rejected key. The workspace mint hits this only on its
+  `/v1/api-keys` paths above, surfacing `qurl-service /v1/api-keys returned 400
+  code=… request_id=…`. Quote the `request_id` when escalating. The fix is to
+  roll the producer forward, not to retry — 400 is not retried by the shared
+  client.
 - **Enrollment succeeds but logs `tunnel install: minted credential did not
   confirm the kind-first contract`.** The producer returned 200 without echoing
   `kind`/`target`, so the bot cannot confirm it minted a one-shot enrollment

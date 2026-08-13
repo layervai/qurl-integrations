@@ -32,9 +32,9 @@ const (
 	// submissions inside that window so async install errors can still reach
 	// the admin after Slack accepts the view submission. This is intentionally
 	// shorter than tunnelBootstrapTTL so any submitted modal still leaves setup
-	// headroom after the one-shot enrollment token is minted; a modal submitted at
-	// the end of this window still leaves roughly 35 minutes on the bootstrap
-	// key for the operator to start the sidecar.
+	// headroom after the one-shot enrollment token is minted; a modal submitted
+	// at the end of this window still leaves roughly 35 minutes on the
+	// enrollment token for the operator to start the sidecar.
 	tunnelInstallModalTTL = 25 * time.Minute
 	// Slack trigger_ids expire after roughly three seconds. The slash-command
 	// ack now happens before views.open; the call budget below leaves room for
@@ -733,16 +733,13 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), err
 	}
 	mintedKey = key
-	// The response fields are the only in-band signal that the producer
-	// honored the kind-first request. A pre-cutover producer that ignored
-	// `kind`/`target` mints an ordinary workspace-scoped key instead of a
-	// one-shot enrollment token — same 200, far broader credential. Warn
-	// rather than fail closed: the deploy-order gate is the real control, and
-	// a producer that omits these fields on an otherwise-valid token must not
-	// break enrollment.
-	if key.Kind != client.CredentialKindEnrollmentToken || key.Target != client.CredentialTargetConnector {
+	if !credentialConfirmsKindFirst(key) {
+		// Correlate on resource_id/key_id rather than the caller-supplied
+		// slug: both identify the resource and credential just as precisely,
+		// and keeping user-controlled input out of this line avoids adding a
+		// new go/log-injection finding for a log statement this PR introduces.
 		log.Warn("tunnel install: minted credential did not confirm the kind-first contract — verify qurl-service is on the kind-first API",
-			"slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID,
+			"resource_id", resource.ResourceID, "key_id", key.KeyID,
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
 			"got_target", key.Target, "want_target", client.CredentialTargetConnector)
 	}
@@ -990,6 +987,24 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 		return errors.New("tunnel install DM delivery is not configured")
 	}
 	return h.cfg.PostDM(ctx, teamID, enterpriseID, userID, msg)
+}
+
+// credentialConfirmsKindFirst reports whether a mint response echoes back the
+// kind-first contract the request asked for. The response is the only in-band
+// signal that the producer honored the request: a pre-cutover producer that
+// ignored `kind` mints an ordinary workspace-scoped key instead of a one-shot
+// enrollment token — same 200, far broader credential.
+//
+// Target is corroborating, not required. Keying "unconfirmed" off Kind alone
+// means a producer that honors the request but does not echo `target` stays
+// silent; treating a missing `target` as a mismatch would fire this warning on
+// every enrollment forever and train operators to ignore it. A `target` that
+// is present and wrong is still a real disagreement and does warn.
+func credentialConfirmsKindFirst(key *client.APIKey) bool {
+	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
+		return false
+	}
+	return key.Target == "" || key.Target == client.CredentialTargetConnector
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
