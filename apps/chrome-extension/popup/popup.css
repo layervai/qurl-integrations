@@ -511,6 +511,19 @@ body {
   color: #c5221f;
 }
 
+/* Uploads all succeeded and only the Gmail insertion failed. The copy fallback still gets the
+   user their links, so tone the box down from error red to the same amber the "partial" result
+   summary uses — a success-worded message in a red container reads as a contradiction. */
+.error-area.notice {
+  background: var(--warning-bg);
+  border-color: #f5d98a;
+}
+
+.error-area.notice .error-title,
+.error-area.notice .error-msg {
+  color: #7d4f00;
+}
+
 /* ===================== Footer ===================== */
 .footer {
   font-size: 11px;

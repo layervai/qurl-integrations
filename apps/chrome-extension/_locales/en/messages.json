@@ -149,6 +149,10 @@
     "message": "Copy the qURL link",
     "description": "Copy only the accessible qURL URL"
   },
+  "copy_btn_plural": {
+    "message": "Copy the qURL links",
+    "description": "Copy button label when more than one accessible qURL URL will be copied"
+  },
   "copy_done": {
     "message": "Copied",
     "description": "Copy success state"

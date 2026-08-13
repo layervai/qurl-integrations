@@ -871,3 +871,90 @@ test('getMessage fallbacks stay in sync with _locales/en/messages.json', functio
   assert.ok(checked.length >= 40, `expected to check most getMessage call sites, saw ${checked.length}`);
   assert.ok(checked.includes('result_one_success') && checked.includes('result_n_success'));
 });
+
+test('showResults styles an insertion-only failure as a notice, not an error', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const results = [{ filename: 'a.txt', link: 'https://files.example.com/a', expiry: null }];
+  const errorArea = popup.__testElements.get('errorArea');
+
+  // Uploads all fine, only the Gmail insertion failed: the box carries a success-toned message
+  // and a pointer at the copy fallback, so it must not render in the error-red styling.
+  popup.showResults(results, [], 'Active tab is not Gmail.');
+  assert.equal(errorArea.classList.contains('notice'), true);
+
+  // A real upload failure alongside the insertion failure is an error again.
+  popup.showResults(results, [{ filename: 'b.txt', error: 'boom' }], 'Active tab is not Gmail.');
+  assert.equal(errorArea.classList.contains('notice'), false);
+
+  // And the modifier must not survive into the next run.
+  popup.showResults(results, [], 'Active tab is not Gmail.');
+  assert.equal(errorArea.classList.contains('notice'), true);
+  popup.showResults(results, [], null);
+  assert.equal(errorArea.classList.contains('notice'), false);
+});
+
+test('showResults labels the copy button for the number of links it copies', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        copy_btn: 'Copy the qURL link',
+        copy_btn_plural: 'Copy the qURL links',
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const copyBtn = popup.__testElements.get('copyBtn');
+
+  popup.showResults([{ filename: 'a.txt', link: 'https://files.example.com/a', expiry: null }], [], null);
+  assert.equal(copyBtn.textContent, 'Copy the qURL link');
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+  assert.equal(copyBtn.textContent, 'Copy the qURL links');
+
+  // Two results but only one is an accessible https link — the label follows the copyable
+  // count, not the result count.
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'http://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+  assert.equal(copyBtn.textContent, 'Copy the qURL link');
+});

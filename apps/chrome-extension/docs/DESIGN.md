@@ -295,7 +295,7 @@ npm run icons
 
 `icons/logo.png` is the canonical source. Never edit `icon16.png`, `icon48.png`, or `icon128.png` directly — they will be overwritten.
 
-`logo.png` is both the icon source *and* a shipped runtime asset: the popup header renders it directly (`popup.html` → `../icons/logo.png`), so `build-release.js` copying the whole `icons/` directory into the bundle is intended, not stray payload. The generator resizes with `fit: 'contain'` so the non-square source is padded rather than cropped.
+`logo.png` is a build-time source only — nothing in the packaged extension loads it. The manifest and the popup header both reference generated `icon*.png` files (the header uses `icon128.png`, which is right-sized for its 26px slot rather than decoding the full-resolution source), so `build-release.js` excludes `icons/logo.png` from the release bundle. The generator resizes with `fit: 'contain'` so the non-square source is padded rather than cropped.
 
 ---
 

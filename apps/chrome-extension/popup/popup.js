@@ -480,16 +480,22 @@ function showResults(results, errors, insertionError) {
   errorArea.innerHTML = '';
   resultArea.classList.add('hidden');
   errorArea.classList.add('hidden');
+  errorArea.classList.remove('notice');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
   copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
-  const hasCopyableLinks = Boolean(buildCopyUrlText(results));
+  const copyableLinks = collectCopyableLinks(results);
+  const hasCopyableLinks = copyableLinks.length > 0;
 
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
   if (results.length > 0) {
     copyArea.classList.remove('hidden');
     copyBtn.disabled = !hasCopyableLinks;
+    // The button copies every accessible link, so label it for the count it will actually copy.
+    if (copyableLinks.length > 1) {
+      copyBtn.textContent = getMessage('copy_btn_plural', 'Copy the qURL links');
+    }
     resultArea.classList.remove('hidden');
     const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
     const summaryText = results.length === 1
@@ -533,6 +539,10 @@ function showResults(results, errors, insertionError) {
 
   if (errors.length > 0 || insertionError) {
     errorArea.classList.remove('hidden');
+    // Every upload worked and only the Gmail insertion failed, so this box carries a
+    // success-toned message plus a pointer at the copy fallback — style it as a notice
+    // rather than an error.
+    errorArea.classList.toggle('notice', Boolean(insertionError) && errors.length === 0);
     const title = document.createElement('div');
     title.className = 'error-title';
     // Pick the title by upload-error count; the insertion failure (if any) is always listed
@@ -568,6 +578,7 @@ function clearResults() {
   progressArea.classList.add('hidden');
   resultArea.innerHTML = '';
   resultArea.classList.add('hidden');
+  errorArea.classList.remove('notice');
   errorArea.innerHTML = '';
   errorArea.classList.add('hidden');
   copyArea.classList.add('hidden');
@@ -768,31 +779,31 @@ function normalizeAllowedLink(link) {
   return getComposeFormatter().normalizeAllowedLink(link);
 }
 
-function buildCopyUrlText(results) {
+// The one place that decides which links are copyable. Both clipboard flavors and the button's
+// enabled/label state read from this, so none of them can disagree about what counts as an
+// accessible qURL.
+function collectCopyableLinks(results) {
   if (!results || results.length === 0) {
-    return '';
+    return [];
   }
 
   return results
     .map(function (result) {
       return normalizeAllowedLink(result.link);
     })
-    .filter(Boolean)
-    .join('\n');
+    .filter(Boolean);
+}
+
+function buildCopyUrlText(results) {
+  return collectCopyableLinks(results).join('\n');
 }
 
 // Deliberately plainer than the formatter's buildLinkHtml: that one styles the anchor with
 // Gmail's link blue because it renders inside a Gmail draft, whereas this HTML lands in an
 // unknown rich-text target, so leaving it unstyled lets it inherit the destination's own link
-// styling. Derived from buildCopyUrlText so both clipboard flavors carry the same https-only set.
+// styling.
 function buildCopyUrlHtml(results) {
-  const text = buildCopyUrlText(results);
-  if (!text) {
-    return '';
-  }
-
-  return text
-    .split('\n')
+  return collectCopyableLinks(results)
     .map(function (link) {
       const escaped = getComposeFormatter().escapeHtml(link);
       return `<a href="${escaped}">${escaped}</a>`;
