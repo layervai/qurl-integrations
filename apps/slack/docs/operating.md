@@ -188,6 +188,31 @@ at the OAuth-callback bind layer.
     enrollment token remains bounded by its one-hour TTL; revoke it manually if
     logs show `tunnel_bootstrap_cleanup_failed`.
 
+### Kind-first credential cutover
+
+The bot mints credentials with the kind-first `POST /v1/api-keys` contract:
+Connector enrollment sends `kind=enrollment_token` with `target=connector`, and
+the workspace key mint sends `kind=api_key`. There is no dual-send fallback, so
+**qurl-service must accept kind-first bodies in every API environment Slack
+talks to before this build is deployed there.**
+
+Symptoms of a deploy-order violation, and what to check:
+
+- **`/qurl setup` or guided Connector setup fails immediately with a 400.** The
+  producer predates the cutover. Connector enrollment logs `tunnel install:
+  enrollment token mint failed` with `status`, `code`, `detail`, and
+  `invalid_fields` naming the rejected key; the workspace mint surfaces
+  `qurl-service /v1/api-keys returned 400 code=… request_id=…`. Quote the
+  `request_id` when escalating. The fix is to roll the producer forward, not to
+  retry — 400 is not retried by the shared client.
+- **Enrollment succeeds but logs `tunnel install: minted credential did not
+  confirm the kind-first contract`.** The producer returned 200 without echoing
+  `kind`/`target`, so the bot cannot confirm it minted a one-shot enrollment
+  token rather than an ordinary workspace-scoped key. Treat the minted
+  credential as potentially over-scoped: verify it in the qURL dashboard and
+  revoke it if it is not a Connector-bound enrollment token. This warning is
+  expected to be silent once every environment is on the kind-first API.
+
 ### Enrollment-token DM live smoke
 
 Run this smoke before relying on Connector enrollment-token DM delivery in a new
