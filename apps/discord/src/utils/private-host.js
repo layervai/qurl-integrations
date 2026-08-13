@@ -107,6 +107,13 @@ function ipv4LocalScope(octets, { includeCgnat = false, includeMulticast = false
  * tail is the form callers actually pass. Screening only the dotted tail lets
  * `::ffff:a9fe:a9fe` (169.254.169.254, the IMDS address) read as public.
  *
+ * The returned string is NOT validated as a well-formed quad — the dotted
+ * branch hands back its raw capture, so `::ffff:1.2.3.4.5` yields
+ * "1.2.3.4.5". Both callers re-validate downstream (the SSRF path recurses
+ * through isPrivateHost, the boot path runs it through strict
+ * parseIPv4Octets); a future composer must do the same rather than treat this
+ * as a canonical address.
+ *
  * Deliberately common-forms-only: the deprecated IPv4-COMPATIBLE form
  * (`::127.0.0.1`, which serializes to `::7f00:1`) falls through, as it is
  * dead in practice and `::1` covers realistic loopback.

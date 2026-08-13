@@ -25,9 +25,11 @@ describe('private-host module is dependency-free', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../src/utils/private-host.js'), 'utf8'
     );
-    // Strip the test-only require in this file's own doc comments; the module
-    // itself must not require anything at module scope.
-    expect(src).not.toMatch(/^\s*(?:const|let|var).*require\(/m);
+    // Deliberately broad: a const/let/var-bound require is the likely form,
+    // but a bare side-effecting `require('x')` or `module.exports =
+    // require(...)` would break the boot-path guarantee just as thoroughly.
+    // The module has no legitimate `require(` at all, so match them all.
+    expect(src).not.toMatch(/\brequire\s*\(/);
   });
 });
 
