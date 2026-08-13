@@ -68,6 +68,16 @@ describe('createOneTimeLink SSRF / private-host blocklist', () => {
     await expectBlocked('http://[fd00::1]/x');
   });
 
+  // End-to-end proof of the #1035 bypass: a bracketed IPv4-mapped literal used
+  // to clear BOTH guards — isPrivateHost saw the re-serialized hex form its
+  // regex didn't match, and assertNotPrivateAfterResolve early-returns on any
+  // '['-prefixed host — so the target reached the qURL API.
+  it('rejects IPv4-mapped IPv6 literals (bracketed, as callers pass them)', async () => {
+    await expectBlocked('http://[::ffff:127.0.0.1]:8080/x');
+    await expectBlocked('http://[::ffff:10.0.0.1]/x');
+    await expectBlocked('http://[::ffff:169.254.169.254]/latest/meta-data/');
+  });
+
 });
 
 // isPrivateHost is now exported (consumed by connector.js's detect-tunnel SSRF
@@ -93,5 +103,54 @@ describe('isPrivateHost — IPv6 ULA prefix vs. public DNS', () => {
     expect(isPrivateHost('fcdn.example.com')).toBe(false);
     expect(isPrivateHost('feb-cdn.example.com')).toBe(false);  // 'feb' prefix, but no colon
     expect(isPrivateHost('detect-tunnel.qurl.link')).toBe(false);
+  });
+});
+
+// IPv4-mapped IPv6 (::ffff:0:0/96) — regression cover for the #1035 SSRF
+// bypass. WHATWG URL parsing re-serializes a dotted IPv4-mapped literal to
+// COMPRESSED HEX, so the hex spelling is the ONLY one the production callers
+// (createOneTimeLink, connector.js's detect-tunnel guard) ever receive: both
+// pass `new URL(...).hostname`. The original guard matched `::ffff:[0-9.]+`,
+// i.e. a dotted form that never arrives, so every private IPv4 smuggled
+// through a check whose entire purpose was rejecting them.
+describe('isPrivateHost - IPv4-mapped IPv6 (::ffff:)', () => {
+  // This is the bug in one assertion, and the reason the hex branch must exist.
+  it('documents that the parser rewrites the dotted literal to hex', () => {
+    expect(new URL('https://[::ffff:127.0.0.1]').hostname).toBe('[::ffff:7f00:1]');
+    expect(new URL('https://[::ffff:10.0.0.1]').hostname).toBe('[::ffff:a00:1]');
+    expect(new URL('https://[::ffff:169.254.169.254]').hostname).toBe('[::ffff:a9fe:a9fe]');
+  });
+
+  it('classifies the compressed-hex form callers actually receive as private', () => {
+    expect(isPrivateHost('::ffff:7f00:1')).toBe(true);     // 127.0.0.1 loopback
+    expect(isPrivateHost('::ffff:a00:1')).toBe(true);      // 10.0.0.1 RFC1918
+    expect(isPrivateHost('::ffff:a9fe:a9fe')).toBe(true);  // 169.254.169.254 IMDS
+    expect(isPrivateHost('::ffff:c0a8:101')).toBe(true);   // 192.168.1.1 RFC1918
+    expect(isPrivateHost('::ffff:ac10:1')).toBe(true);     // 172.16.0.1 RFC1918
+    expect(isPrivateHost('::ffff:6440:1')).toBe(true);     // 100.64.0.1 CGNAT
+  });
+
+  // A group whose high byte is zero serializes without padding, so the hex
+  // branch has to accept 1-4 digits per group rather than a fixed 4.
+  it('handles zero-compressed groups', () => {
+    expect(new URL('https://[::ffff:0.0.0.1]').hostname).toBe('[::ffff:0:1]');
+    expect(new URL('https://[::ffff:0.0.0.0]').hostname).toBe('[::ffff:0:0]');
+    expect(isPrivateHost('::ffff:0:1')).toBe(true);        // 0.0.0.1, in 0.0.0.0/8
+    expect(isPrivateHost('::ffff:0:0')).toBe(true);        // 0.0.0.0
+  });
+
+  // Retained alongside the hex branch: reachable only via a hand-built string
+  // (no parser emits it), but cheap defense-in-depth for a non-URL caller.
+  it('still classifies the dotted spelling as private', () => {
+    expect(isPrivateHost('::ffff:127.0.0.1')).toBe(true);
+    expect(isPrivateHost('::ffff:169.254.169.254')).toBe(true);
+  });
+
+  // The mirror-image failure: over-blocking would break legitimate targets.
+  it('does NOT over-block a mapped PUBLIC IPv4', () => {
+    expect(new URL('https://[::ffff:8.8.8.8]').hostname).toBe('[::ffff:808:808]');
+    expect(isPrivateHost('::ffff:808:808')).toBe(false);   // 8.8.8.8
+    expect(isPrivateHost('::ffff:101:101')).toBe(false);   // 1.1.1.1
+    expect(isPrivateHost('::ffff:1.1.1.1')).toBe(false);   // dotted spelling
   });
 });

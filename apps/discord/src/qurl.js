@@ -150,10 +150,24 @@ function isPrivateHost(host) {
     if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
     if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
   }
-  // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
-  // prefix (URL parsing already stripped the brackets) and re-check.
-  const mapped = h.match(/^::ffff:([0-9.]+)$/);
-  if (mapped) return isPrivateHost(mapped[1]);
+  // IPv4-mapped IPv6 literal (::ffff:0:0/96). Both spellings reach here already
+  // bracket-stripped (by the branch above), and the one production callers
+  // actually pass is the SECOND:
+  //   - dotted `::ffff:127.0.0.1` — only ever from a hand-built string
+  //   - hex    `::ffff:7f00:1`    — what WHATWG re-serializes the dotted
+  //     literal to, so it is what `new URL(...).hostname` yields and therefore
+  //     what createOneTimeLink and connector.js's detect-tunnel guard receive
+  // Matching dotted-only meant checking a form that never arrives, letting
+  // every private IPv4 smuggle through as hex (#1035). Re-check the embedded
+  // IPv4 in both spellings. Groups are {1,4} because a zero high byte
+  // serializes unpadded (`::ffff:0:1` = 0.0.0.1).
+  const mappedDotted = h.match(/^::ffff:([0-9.]+)$/);
+  if (mappedDotted) return isPrivateHost(mappedDotted[1]);
+  const mappedHex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const [hi, lo] = mappedHex.slice(1).map((g) => parseInt(g, 16));
+    return isPrivateHost([(hi >> 8) & 0xFF, hi & 0xFF, (lo >> 8) & 0xFF, lo & 0xFF].join('.'));
+  }
   // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
   // Node's URL does too. Convert to dotted-quad.
   if (/^\d+$/.test(h)) {
