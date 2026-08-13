@@ -15,10 +15,8 @@ jest.mock('../src/config', () => ({
 // rejected BEFORE a client is ever built, so `create` must never be called.
 const mockClient = { create: jest.fn() };
 jest.mock('@layervai/qurl', () => ({
+  ...jest.requireActual('@layervai/qurl'),
   QURLClient: jest.fn().mockImplementation(() => mockClient),
-  ERROR_CODE_NETWORK: 'network_error',
-  ERROR_CODE_TIMEOUT: 'timeout',
-  ERROR_CODE_CLIENT_VALIDATION: 'client_validation',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -121,14 +119,14 @@ describe('isPrivateHost — IPv6 ULA prefix vs. public DNS', () => {
   });
 });
 
-// IPv4-mapped IPv6 (::ffff:0:0/96) — regression cover for the #1035 SSRF
-// bypass. WHATWG URL parsing re-serializes a dotted IPv4-mapped literal to
-// COMPRESSED HEX, so the hex spelling is the ONLY one the production callers
-// (createOneTimeLink, connector.js's detect-tunnel guard) ever receive: both
-// pass `new URL(...).hostname`. The original guard matched `::ffff:[0-9.]+`,
-// i.e. a dotted form that never arrives, so every private IPv4 smuggled
-// through a check whose entire purpose was rejecting them.
-describe('isPrivateHost — IPv4-mapped IPv6 (::ffff:)', () => {
+// IPv4-in-IPv6 embeddings — regression cover for the #1035 SSRF bypass. WHATWG
+// URL parsing re-serializes a dotted IPv4-mapped literal to COMPRESSED HEX, so
+// the hex spelling is what the URL-target callers receive (they pass
+// `new URL(...).hostname`), while the resolve leg receives the dotted form from
+// dns.lookup. The original guard matched `::ffff:[0-9.]+` only — a form that
+// never arrives on the URL leg — so every private IPv4 smuggled through a check
+// whose entire purpose was rejecting them.
+describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
   // This is the bug in one assertion, and the reason the hex branch must exist.
   it('documents that the parser rewrites the dotted literal to hex', () => {
     expect(new URL('https://[::ffff:127.0.0.1]').hostname).toBe('[::ffff:7f00:1]');
@@ -191,5 +189,33 @@ describe('isPrivateHost — IPv4-mapped IPv6 (::ffff:)', () => {
     expect(isPrivateHost('::ffff:808:808')).toBe(false);   // 8.8.8.8
     expect(isPrivateHost('::ffff:101:101')).toBe(false);   // 1.1.1.1
     expect(isPrivateHost('::ffff:1.1.1.1')).toBe(false);   // dotted spelling
+  });
+
+  // The sibling embeddings. These do not route to the embedded IPv4 on a stock
+  // host, but that is a property of the RUNTIME, not of the address: an
+  // IPv6-only subnet with DNS64/NAT64 (a supported AWS VPC config) makes
+  // 64:ff9b:: route for real. Decode them rather than depend on host routing.
+  it('decodes the sibling IPv4-in-IPv6 embeddings', () => {
+    expect(isPrivateHost('::7f00:1')).toBe(true);            // ::127.0.0.1, v4-compatible
+    expect(isPrivateHost('::a9fe:a9fe')).toBe(true);         // v4-compatible IMDS
+    expect(isPrivateHost('::127.0.0.1')).toBe(true);         // v4-compatible, dotted
+    expect(isPrivateHost('::ffff:0:7f00:1')).toBe(true);     // v4-translated (SIIT)
+    expect(isPrivateHost('64:ff9b::7f00:1')).toBe(true);     // NAT64 loopback
+    expect(isPrivateHost('64:ff9b::a9fe:a9fe')).toBe(true);  // NAT64 IMDS
+  });
+
+  // Decoding (not blanket prefix-rejection) is what keeps these allowed — a
+  // NAT64 host reaching a PUBLIC IPv4 is legitimate traffic.
+  it('does NOT over-block a PUBLIC IPv4 in a sibling embedding', () => {
+    expect(isPrivateHost('64:ff9b::808:808')).toBe(false);   // NAT64 -> 8.8.8.8
+    expect(isPrivateHost('::808:808')).toBe(false);          // v4-compatible -> 8.8.8.8
+  });
+
+  // The generalized prefix alternation must not swallow ordinary IPv6.
+  it('does NOT misread an ordinary IPv6 address as an embedding', () => {
+    expect(isPrivateHost('2001:db8::1')).toBe(false);
+    expect(isPrivateHost('2606:4700:4700::1111')).toBe(false);  // public resolver
+    expect(isPrivateHost('fd00::1')).toBe(true);                // still ULA
+    expect(isPrivateHost('fe80::1')).toBe(true);                // still link-local
   });
 });
