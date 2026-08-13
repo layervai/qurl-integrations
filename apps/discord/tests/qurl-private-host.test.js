@@ -27,7 +27,21 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
+// Mock dns.lookup so the rebinding leg never hits the network. Every case above
+// the observability block is rejected syntactically and returns before this is
+// reached; only the rebinding test drives it (with a private answer).
+const mockDnsLookup = jest.fn();
+jest.mock('dns', () => ({
+  promises: { lookup: (...args) => mockDnsLookup(...args) },
+}));
+
 const { createOneTimeLink, isPrivateHost } = require('../src/qurl');
+const logger = require('../src/logger');
+
+beforeEach(() => {
+  logger.warn.mockClear();
+  mockDnsLookup.mockReset().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+});
 
 async function expectBlocked(url) {
   mockClient.create.mockClear();
@@ -218,5 +232,75 @@ describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
     expect(isPrivateHost('2606:4700:4700::1111')).toBe(false);  // public resolver
     expect(isPrivateHost('fd00::1')).toBe(true);                // still ULA
     expect(isPrivateHost('fe80::1')).toBe(true);                // still link-local
+  });
+});
+
+// Every case above proves the guard REJECTS. None of them prove an operator can
+// find out why: both legs throw the same caller-facing message, and #1043 left
+// them logging nothing at all. So the log line is the only thing that separates
+// a real IMDS attempt from the false positive the ULA block above worries about
+// — a distinction you otherwise cannot make without reproducing the call.
+const SYNTACTIC_REJECT = 'Target URL rejected by SSRF guard (private host literal)';
+const RESOLVED_REJECT = 'Target URL rejected by SSRF guard (DNS resolved to a private address)';
+
+describe('SSRF rejection observability — the blocked host reaches the log', () => {
+  it('names an IPv4-mapped IPv6 literal in the re-serialized form it was judged by', async () => {
+    // Deliberately the #1035 shape: the operator sees the SAME hex spelling
+    // isPrivateHost classified, so the log corroborates the verdict instead of
+    // showing a dotted form that no longer matches what the guard reasoned about.
+    await expect(createOneTimeLink('http://[::ffff:169.254.169.254]/latest/meta-data/', '1h', 't', 'k'))
+      .rejects.toThrow(/private\/internal/);
+    expect(logger.warn).toHaveBeenCalledWith(SYNTACTIC_REJECT, { hostname: '[::ffff:a9fe:a9fe]' });
+  });
+
+  it('names a plain RFC1918 host, and does not masquerade as the resolve leg', async () => {
+    await expect(createOneTimeLink('http://10.0.0.5/x', '1h', 't', 'k'))
+      .rejects.toThrow(/private\/internal/);
+    expect(logger.warn).toHaveBeenCalledWith(SYNTACTIC_REJECT, { hostname: '10.0.0.5' });
+    // The two messages are distinct precisely so a log reader knows WHICH check
+    // classified the host; a syntactic reject must also never reach dns.lookup.
+    expect(logger.warn).not.toHaveBeenCalledWith(RESOLVED_REJECT, expect.anything());
+    expect(mockDnsLookup).not.toHaveBeenCalled();
+  });
+
+  it('cannot be used to forge a log line with a newline in the target URL', async () => {
+    // Log-injection guard for a payload built from user-supplied input: WHATWG
+    // parsing strips tab/CR/LF before the host is extracted, so the embedded
+    // newline is gone by the time isPrivateHost sees `127.0.0.1` — the logged
+    // value is control-char-free without any explicit scrubbing. (logger.js
+    // JSON-encodes meta as well, so this is the inner of two layers.)
+    await expect(createOneTimeLink('http://127.0.0\n.1/x', '1h', 't', 'k'))
+      .rejects.toThrow(/private\/internal/);
+    expect(logger.warn).toHaveBeenCalledWith(SYNTACTIC_REJECT, { hostname: '127.0.0.1' });
+    const [, meta] = logger.warn.mock.calls.find(([msg]) => msg === SYNTACTIC_REJECT);
+    // eslint-disable-next-line no-control-regex
+    expect(meta.hostname).not.toMatch(/[\x00-\x1f\x7f]/);
+  });
+
+  it('names the host AND the offending resolved address on the rebinding leg', async () => {
+    // A syntactically public name that resolves inside — the leg where the
+    // hostname alone cannot explain the rejection, so the address has to be in
+    // the payload or the line is unactionable.
+    mockDnsLookup.mockResolvedValue([{ address: '169.254.169.254', family: 4 }]);
+    await expect(createOneTimeLink('http://rebind.example.com/x', '1h', 't', 'k'))
+      .rejects.toThrow(/private\/internal/);
+    expect(logger.warn).toHaveBeenCalledWith(RESOLVED_REJECT, {
+      hostname: 'rebind.example.com',
+      address: '169.254.169.254',
+    });
+    expect(logger.warn).not.toHaveBeenCalledWith(SYNTACTIC_REJECT, expect.anything());
+  });
+
+  it('reports the mapped address dns.lookup actually returned, not the name', async () => {
+    // The dotted spelling is what inet_ntop renders, so this is the form an
+    // operator will see for a hostile AAAA — and the reason the dotted branch in
+    // isPrivateHost is load-bearing on this leg.
+    mockDnsLookup.mockResolvedValue([{ address: '::ffff:169.254.169.254', family: 6 }]);
+    await expect(createOneTimeLink('http://rebind-v6.example.com/x', '1h', 't', 'k'))
+      .rejects.toThrow(/private\/internal/);
+    expect(logger.warn).toHaveBeenCalledWith(RESOLVED_REJECT, {
+      hostname: 'rebind-v6.example.com',
+      address: '::ffff:169.254.169.254',
+    });
   });
 });

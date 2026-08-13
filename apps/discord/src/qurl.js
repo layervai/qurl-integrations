@@ -131,6 +131,22 @@ async function callQurl(method, path, fn) {
 // `http://169.254.169.254/latest/meta-data/...` or similar; even if the
 // downstream qURL API is the one that actually fetches, we block at our
 // own input validation layer.
+//
+// OBSERVABILITY: both reject paths below breadcrumb the host that tripped this
+// (logger.warn) before throwing. The caller-facing message is deliberately
+// identical for every private shape, so without the breadcrumb an operator sees
+// only THAT a target was blocked — not whether it was a real IMDS/loopback
+// attempt or a false positive, e.g. a public DNS name misclassified by the
+// fc/fd ULA prefix check (the class the "IPv6 ULA prefix vs. public DNS" block
+// in tests/qurl-private-host.test.js exists to guard). That distinction is the
+// whole triage question for this guard, so the host has to reach the log.
+//
+// Logging the host verbatim is safe even though the target is user-supplied:
+// `new URL()` strips tab/CR/LF while parsing (`https://exa\nmple.com/x` yields
+// hostname `example.com`), so a caller cannot forge a log line through it, and
+// logger.js JSON-encodes meta on top of that. Length is bounded too — every
+// shape this function calls private is a short literal, and the oversized
+// numeric/octal forms throw at `new URL()` before they can reach a log.
 function isPrivateHost(host) {
   if (!host) return true;
   const h = host.toLowerCase();
@@ -253,6 +269,16 @@ async function assertNotPrivateAfterResolve(hostname) {
   }
   for (const { address } of addrs) {
     if (isPrivateHost(address)) {
+      // Name the resolved address as well as the host: on this leg the hostname
+      // alone doesn't explain the rejection (it looked public syntactically), so
+      // the address is the only thing that distinguishes a rebinding attempt
+      // from a name that legitimately points inside. dns.lookup() returns an
+      // inet_ntop-rendered IP string, so it is log-safe for the same reasons the
+      // hostname is (see isPrivateHost above).
+      logger.warn('Target URL rejected by SSRF guard (DNS resolved to a private address)', {
+        hostname,
+        address,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
   }
@@ -265,6 +291,13 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
       throw new Error('Only http/https URLs are allowed');
     }
     if (isPrivateHost(parsed.hostname)) {
+      // Distinct message from the DNS leg's so an operator can tell which of the
+      // two guards fired straight from the log line — a syntactic reject points
+      // at isPrivateHost's own classification, which is where the false
+      // positives live.
+      logger.warn('Target URL rejected by SSRF guard (private host literal)', {
+        hostname: parsed.hostname,
+      });
       throw new Error('Target URL points to a private/internal address');
     }
     await assertNotPrivateAfterResolve(parsed.hostname);
