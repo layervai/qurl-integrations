@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,9 +73,25 @@ func (f *agentFakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ .
 	return &dynamodb.PutItemOutput{}, nil
 }
 
-// evalCond models the create-if-absent conditions AgentStore emits.
-func (f *agentFakeDDB) evalCond(_ string, _ map[string]ddbtypes.AttributeValue, present bool, _ map[string]ddbtypes.AttributeValue) bool {
-	return !present
+// evalCond models the create-if-absent conditions AgentStore emits. It really
+// evaluates them: a stub that ignored the condition would make every
+// conditional-write branch unreachable and the latch tests vacuous.
+func (f *agentFakeDDB) evalCond(cond string, existing map[string]ddbtypes.AttributeValue, present bool, values map[string]ddbtypes.AttributeValue) bool {
+	if !present {
+		return true
+	}
+	// putMarkerIfExpired: "attribute_not_exists(pk) OR #ttl <= :now" also wins
+	// against a marker whose window has already closed.
+	if strings.Contains(cond, "#ttl <= :now") {
+		// DynamoDB evaluates a comparison against a NONEXISTENT attribute as false,
+		// so a marker with no ttl counts as live. readNumber returns 0 for an absent
+		// attribute, which would invert that — check presence first.
+		if _, ok := existing[attrAgentTTL]; !ok {
+			return false
+		}
+		return readNumber(existing, attrAgentTTL) <= readNumber(values, ":now")
+	}
+	return false
 }
 
 func (f *agentFakeDDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
@@ -503,4 +520,172 @@ func TestPurgeWorkspaceAgentState_ValidationAndErrors(t *testing.T) {
 			t.Fatalf("DeleteItem calls = %d, want 0 for malformed key", fake.deleteCalls)
 		}
 	})
+}
+
+// TestMarkMediaNoticeSent_LatchesPerConversation pins the outbound cap behind the
+// unsupported-media reply: the first upload in a conversation wins the notice, the
+// rest of the burst loses it, and neither another conversation nor another
+// workspace is affected.
+func TestMarkMediaNoticeSent_LatchesPerConversation(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	ctx := context.Background()
+
+	first, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil || !first {
+		t.Fatalf("first upload must win the notice: first=%v err=%v", first, err)
+	}
+	// The rest of one member's drag-and-drop burst: distinct messages, distinct
+	// event ids, so dedupe passes every one — this latch is what collapses them.
+	for i := range 3 {
+		again, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+		if err != nil || again {
+			t.Fatalf("burst upload %d must be suppressed: again=%v err=%v", i, again, err)
+		}
+	}
+	// Another member in the same channel was never told the limitation.
+	otherUser, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U3")
+	if err != nil || !otherUser {
+		t.Fatalf("another member's first upload must still be answered: %v %v", otherUser, err)
+	}
+	// Same member, different conversation.
+	otherChannel, err := s.MarkMediaNoticeSent(ctx, "T1", "D9:U2")
+	if err != nil || !otherChannel {
+		t.Fatalf("the same member in another conversation must still be answered: %v %v", otherChannel, err)
+	}
+	// A different workspace shares neither the partition nor the latch.
+	otherTeam, err := s.MarkMediaNoticeSent(ctx, "T2", "C1:U2")
+	if err != nil || !otherTeam {
+		t.Fatalf("another workspace must not inherit this latch: %v %v", otherTeam, err)
+	}
+}
+
+func TestMarkMediaNoticeSent_TTL(t *testing.T) {
+	f := newAgentFakeDDB()
+	s := newTestAgentStore(f)
+	if _, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2"); err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	// There is no read-time check: the stamped epoch IS the window, and
+	// putMarkerIfExpired enforces it at WRITE time by comparing against it (see
+	// TestMarkMediaNoticeSent_WindowReopensOnExpiry). So a wrong epoch silently
+	// resizes the suppression window — the reaper is cleanup, not the clock.
+	wantSK := mediaNoticeSKPrefix + "C1:U2"
+	want := strconv.FormatInt(s.now().Add(defaultMediaNoticeTTL).Unix(), 10)
+	if got := f.lastPutAt[wantSK]; got != want {
+		t.Fatalf("marker ttl = %q, want %q", got, want)
+	}
+
+	f2 := newAgentFakeDDB()
+	s2 := newTestAgentStore(f2)
+	s2.MediaNoticeTTL = 90 * time.Second
+	if _, err := s2.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2"); err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	want2 := strconv.FormatInt(s2.now().Add(90*time.Second).Unix(), 10)
+	if got := f2.lastPutAt[wantSK]; got != want2 {
+		t.Fatalf("override ttl = %q, want %q", got, want2)
+	}
+}
+
+// TestMarkMediaNoticeSent_WindowReopensOnExpiry is the point of routing this
+// marker through putMarkerIfExpired. DynamoDB's TTL reaper is documented to delete
+// "within a few days", so an absent-only condition would hold the latch for however
+// long the sweep takes — turning a 5-minute cap into days of silence, which is the
+// very failure the notice exists to prevent. The window has to close on the clock.
+func TestMarkMediaNoticeSent_WindowReopensOnExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	f := newAgentFakeDDB()
+	// The fake never reaps: the marker written below is still present for every
+	// call here, so anything that wins later did so on the TTL comparison alone.
+	s := &AgentStore{Client: f, TableName: "agent_state", Now: func() time.Time { return now }}
+	ctx := context.Background()
+
+	first, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil || !first {
+		t.Fatalf("first notice: first=%v err=%v", first, err)
+	}
+	// One second short of the window: still suppressed.
+	now = now.Add(defaultMediaNoticeTTL - time.Second)
+	if again, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2"); err != nil || again {
+		t.Fatalf("inside the window the notice must stay suppressed: again=%v err=%v", again, err)
+	}
+	// Past it: the member hears the limitation again even though the reaper has
+	// not touched the item.
+	now = now.Add(2 * time.Second)
+	reopened, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2")
+	if err != nil || !reopened {
+		t.Fatalf("the window must reopen on the clock, not on the reaper: reopened=%v err=%v", reopened, err)
+	}
+	// Reclaiming re-stamps the deadline, so the next window is a full one rather
+	// than an item stuck permanently in the past.
+	wantTTL := strconv.FormatInt(now.Add(defaultMediaNoticeTTL).Unix(), 10)
+	if got := f.lastPutAt[mediaNoticeSKPrefix+"C1:U2"]; got != wantTTL {
+		t.Fatalf("reclaimed marker ttl = %q, want %q", got, wantTTL)
+	}
+	if suppressed, err := s.MarkMediaNoticeSent(ctx, "T1", "C1:U2"); err != nil || suppressed {
+		t.Fatalf("the fresh window must suppress again: suppressed=%v err=%v", suppressed, err)
+	}
+}
+
+// TestPutMarkerIfAbsent_IgnoresExpiry is the contrast: the dedupe and claim latches
+// deliberately do NOT reopen, because for them a late expiry only means suppressing
+// a duplicate again. Guards against "fixing" them the same way.
+func TestPutMarkerIfAbsent_IgnoresExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := &AgentStore{Client: newAgentFakeDDB(), TableName: "agent_state", Now: func() time.Time { return now }}
+	ctx := context.Background()
+	if first, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil || !first {
+		t.Fatalf("first sighting: %v %v", first, err)
+	}
+	now = now.Add(30 * 24 * time.Hour) // long past the dedupe TTL; the fake never reaps
+	if again, err := s.MarkEventSeen(ctx, "T1", "Ev1"); err != nil || again {
+		t.Fatalf("an unreaped dedupe marker must still suppress: again=%v err=%v", again, err)
+	}
+}
+
+// TestMarkMediaNoticeSent_TTLlessMarkerCountsAsLive pins the invariant
+// putMarkerIfExpired's doc comment leans on. A marker with no ttl attribute must
+// fail the comparison and so suppress, not win — the opposite of what a fake
+// reading an absent attribute as 0 would report.
+func TestMarkMediaNoticeSent_TTLlessMarkerCountsAsLive(t *testing.T) {
+	f := newAgentFakeDDB()
+	s := newTestAgentStore(f)
+	f.items["T1|"+mediaNoticeSKPrefix+"C1:U2"] = map[string]ddbtypes.AttributeValue{
+		attrAgentPK: stringAttr("T1"),
+		attrAgentSK: stringAttr(mediaNoticeSKPrefix + "C1:U2"),
+		// deliberately no ttl
+	}
+	sent, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2")
+	if err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+	if sent {
+		t.Fatal("a marker with no ttl must count as live (DynamoDB compares a nonexistent attribute as false)")
+	}
+}
+
+func TestMarkMediaNoticeSent_Validation(t *testing.T) {
+	s := newTestAgentStore(newAgentFakeDDB())
+	if _, err := s.MarkMediaNoticeSent(context.Background(), "", "C1:U2"); err == nil {
+		t.Error("expected validation error for empty partition")
+	}
+	if _, err := s.MarkMediaNoticeSent(context.Background(), "T1", ""); err == nil {
+		t.Error("expected validation error for empty conversation key")
+	}
+}
+
+// TestMarkMediaNoticeSent_ErrorSurfaces pins that a store failure reaches the
+// caller rather than being swallowed into a false "already sent" — the handler
+// fails OPEN on this error, and it can only do that if it sees one.
+func TestMarkMediaNoticeSent_ErrorSurfaces(t *testing.T) {
+	f := newAgentFakeDDB()
+	f.putErr = errors.New("ddb down")
+	s := newTestAgentStore(f)
+	sent, err := s.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2")
+	if err == nil {
+		t.Fatal("expected the store error to surface")
+	}
+	if sent {
+		t.Fatal("a failed write must not report a won latch")
+	}
 }

@@ -191,6 +191,11 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"bot message ignored", env(slackEventTypeAppMention, "channel", "U2", "B9", "", "<@U12345678> hi"), false, false},
 		{"subtype (edit/system) ignored", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "message_changed", "hi"), false, false},
 		{"authorless ignored", env(slackEventTypeAppMention, "channel", "", "", "", "<@U12345678> hi"), false, false},
+		// The authorless guard runs before the type/subtype switch, so it covers an
+		// upload too. Load-bearing for agentEventMediaNoticeKey: an empty user would
+		// collapse the latch key to "channel:" — one shared bucket that silences every
+		// member after the channel's first upload.
+		{"authorless upload ignored", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "", "", slackMessageSubtypeFileShare, "")), false, false},
 		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
 		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
 		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
@@ -644,6 +649,27 @@ type memAgentDDB struct {
 	updateErr error // when set, UpdateItem (turn-rate counter) fails
 	getCalls  int
 	putErr    error // when set, PutItem fails
+	// putErrSKPrefix scopes putErr to one item family, so a test can fail (say) the
+	// media-notice latch while event dedupe still works. Empty means putErr applies
+	// to every PutItem.
+	putErrSKPrefix string
+	// putSKs records the sk of every PutItem ATTEMPT, including ones the
+	// create-if-absent condition rejects, so a test can assert which writes the
+	// handler reached rather than only which ones stuck.
+	putSKs []string
+}
+
+// putAttempts counts recorded PutItem attempts whose sk carries prefix.
+func (f *memAgentDDB) putAttempts(prefix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, sk := range f.putSKs {
+		if strings.HasPrefix(sk, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 func newMemAgentDDB() *memAgentDDB {
@@ -672,12 +698,19 @@ func (f *memAgentDDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ..
 func (f *memAgentDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.putErr != nil {
+	// A missing/non-string sk is a caller bug, not a condition to model: surface it
+	// as a readable error rather than panicking on a nil deref.
+	sk, ok := in.Item["sk"].(*ddbtypes.AttributeValueMemberS)
+	if !ok {
+		return nil, fmt.Errorf("memAgentDDB.PutItem: item has no string sk: %v", in.Item)
+	}
+	f.putSKs = append(f.putSKs, sk.Value)
+	if f.putErr != nil && strings.HasPrefix(sk.Value, f.putErrSKPrefix) {
 		return nil, f.putErr
 	}
 	k := memKey(in.Item)
-	_, present := f.items[k]
-	if cond := aws.ToString(in.ConditionExpression); cond != "" && present {
+	existing, present := f.items[k]
+	if cond := aws.ToString(in.ConditionExpression); cond != "" && present && !memCondWins(cond, existing, in.ExpressionAttributeValues) {
 		return nil, &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
 	}
 	f.items[k] = in.Item
@@ -714,6 +747,28 @@ func (f *memAgentDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInput
 		"turn_count": item["turn_count"],
 		"ttl":        item["ttl"],
 	}}, nil
+}
+
+// memCondWins evaluates the conditions AgentStore emits against an item that is
+// already present. Only putMarkerIfExpired's expiry clause can win there — the
+// plain attribute_not_exists form never can. Modeled rather than stubbed: a fake
+// that waved conditions through would make the media latch look reclaimable when
+// it is not, and one that always failed them would hide the expiry branch.
+func memCondWins(cond string, existing, values map[string]ddbtypes.AttributeValue) bool {
+	if !strings.Contains(cond, "#ttl <= :now") {
+		return false
+	}
+	// DynamoDB evaluates a comparison against a NONEXISTENT attribute as false, so
+	// a marker carrying no ttl counts as live. Reading it as 0 (what a bare
+	// memNumberValue would give) would invert that and let every write win.
+	// "ttl" mirrors slackdata's unexported attrAgentTTL, which this package cannot
+	// reference. If that constant's VALUE ever changes, this lookup silently misses
+	// and the fake stops modeling the expiry branch — the latch tests would still
+	// pass while no longer exercising reopen. Keep the two in step.
+	if _, ok := existing["ttl"].(*ddbtypes.AttributeValueMemberN); !ok {
+		return false
+	}
+	return memNumberValue(existing["ttl"]) <= memNumberValue(values[":now"])
 }
 
 func memNumberValue(av ddbtypes.AttributeValue) int64 {
@@ -1135,6 +1190,208 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	}
 }
 
+// mediaUploadBody builds one deliberate upload. Each call is a DISTINCT message —
+// its own event id and its own ts — so every one clears event dedupe on its own.
+// That is the burst shape: dedupe cannot cap it, which is why the notice latch has
+// to.
+func mediaUploadBody(eventID, channelType, channel, user, ts string) string {
+	return eventCallbackBody(eventID, `{"type":"message","subtype":"file_share","channel_type":"`+channelType+
+		`","user":"`+user+`","channel":"`+channel+`","ts":"`+ts+`","text":"","files":[{"id":"F`+ts+`"}]}`)
+}
+
+// newMediaNoticeHandler wires a handler whose only reachable reply is the media
+// notice: panicAgentLLM fails the test loudly if a turn ever reaches the model.
+func newMediaNoticeHandler(t *testing.T, mem *memAgentDDB) (*Handler, *[]capturedReply, *sync.Mutex) {
+	t.Helper()
+	return newMediaNoticeHandlerAt(t, mem, nil)
+}
+
+// newMediaNoticeHandlerAt is newMediaNoticeHandler with the store clock pinned, for
+// the tests that step past the notice window. A nil now keeps the store default.
+func newMediaNoticeHandlerAt(t *testing.T, mem *memAgentDDB, now func() time.Time) (*Handler, *[]capturedReply, *sync.Mutex) {
+	t.Helper()
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM: panicAgentLLM{}, PostMessage: post, AgentDefaultEnabled: true,
+		AgentStore: &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: now},
+	})
+	t.Cleanup(h.Wait)
+	return h, posts, mu
+}
+
+// TestMediaMarkerShapeMatchesFake closes the one coupling memCondWins cannot
+// express in code. It reads the literals "ttl" and "media#" because slackdata's
+// attrAgentTTL and mediaNoticeSKPrefix are unexported and cross-package — and a
+// change to either VALUE would silently stop the fake from modeling the expiry
+// branch, leaving every latch test green while none of them still exercised
+// reopen. Drive the real store once and assert the shape, so that drift fails
+// loudly here instead of going quiet everywhere.
+func TestMediaMarkerShapeMatchesFake(t *testing.T) {
+	mem := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	if _, err := store.MarkMediaNoticeSent(context.Background(), "T1", "C1:U2"); err != nil {
+		t.Fatalf("MarkMediaNoticeSent: %v", err)
+	}
+
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	item, ok := mem.items["T1|media#C1:U2"]
+	if !ok {
+		keys := make([]string, 0, len(mem.items))
+		for k := range mem.items {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		t.Fatalf(`no marker at "T1|media#C1:U2" — the sk prefix memCondWins keys on has drifted. wrote: %v`, keys)
+	}
+	if _, ok := item["ttl"]; !ok {
+		t.Fatal(`marker carries no "ttl" attribute — memCondWins reads that key, so the expiry branch is no longer modeled`)
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaNoticeCapsBurst is the point of the latch: one
+// member dragging in a pile of files must cost one reply, not one per file.
+//
+// Every upload here is a top-level DM message, which is what a drag-and-drop burst
+// actually produces — and top-level messages carry no thread_ts, so agentEventRootTS
+// resolves the "thread" to each message's OWN ts. A latch keyed on the thread would
+// therefore be unique per upload and cap nothing; this test fails against that key.
+func TestHandleEvent_UnsupportedMediaNoticeCapsBurst(t *testing.T) {
+	mem := newMemAgentDDB()
+	h, posts, mu := newMediaNoticeHandler(t, mem)
+
+	for i, ts := range []string{"700.1", "700.2", "700.3", "700.4", "700.5"} {
+		fireTurn(t, h, mediaUploadBody("EvBurst"+strconv.Itoa(i), slackChannelTypeIM, "D1", "U2", ts))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 {
+		t.Fatalf("a 5-file burst must draw ONE notice, got %d: %+v", len(*posts), *posts)
+	}
+	if (*posts)[0].text != agentUnsupportedMediaReply {
+		t.Fatalf("reply = %q, want the media reply", (*posts)[0].text)
+	}
+	// The notice threads under the upload that won the latch. It is "700.1" here only
+	// because fireTurn drains each event before the next; production dispatches the
+	// pool concurrently, so in a real burst the winner — and therefore the message
+	// the notice hangs under — is whichever upload gets there first. That is fine:
+	// the reply is identical either way. What must hold is that it threads under an
+	// upload at all rather than landing loose.
+	if got := (*posts)[0].threadTS; got != "700.1" {
+		t.Fatalf("reply threadTS = %q, want %q (the notice must answer the upload that won the latch)", got, "700.1")
+	}
+	// Every upload still deduped and still reached the latch: the cap is the latch's
+	// doing, not an accident of some earlier gate swallowing the burst.
+	if got := mem.putAttempts("evt#"); got != 5 {
+		t.Fatalf("dedupe writes = %d, want 5 (each upload is its own message)", got)
+	}
+	if got := mem.putAttempts("media#"); got != 5 {
+		t.Fatalf("latch attempts = %d, want 5 (every upload must consult the latch)", got)
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaNoticeReopensAfterWindow is the end-to-end half
+// of TestMarkMediaNoticeSent_WindowReopensOnExpiry: the cap must be a pause, not a
+// mute. memAgentDDB never reaps, so the marker written by the first burst is still
+// sitting there when the second one arrives — only the write-time TTL comparison
+// can let it through.
+func TestHandleEvent_UnsupportedMediaNoticeReopensAfterWindow(t *testing.T) {
+	now := fixedNow
+	mem := newMemAgentDDB()
+	h, posts, mu := newMediaNoticeHandlerAt(t, mem, func() time.Time { return now })
+
+	fireTurn(t, h, mediaUploadBody("EvWin1", slackChannelTypeIM, "D1", "U2", "740.1"))
+	fireTurn(t, h, mediaUploadBody("EvWin2", slackChannelTypeIM, "D1", "U2", "740.2"))
+	now = now.Add(6 * time.Minute) // past defaultMediaNoticeTTL
+	fireTurn(t, h, mediaUploadBody("EvWin3", slackChannelTypeIM, "D1", "U2", "740.3"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 2 {
+		t.Fatalf("want 2 notices (one per window), got %d: %+v", len(*posts), *posts)
+	}
+	for i, want := range []string{"740.1", "740.3"} {
+		if got := (*posts)[i].threadTS; got != want {
+			t.Fatalf("notice %d answered %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaNoticeScope pins that the cap is narrow enough to
+// keep its promise: everyone who has not just been told the limitation still hears
+// it. A latch keyed on the channel alone (or on the workspace) fails this.
+func TestHandleEvent_UnsupportedMediaNoticeScope(t *testing.T) {
+	mem := newMemAgentDDB()
+	h, posts, mu := newMediaNoticeHandler(t, mem)
+
+	fireTurn(t, h, mediaUploadBody("EvScope1", slackChannelTypeIM, "D1", "U2", "710.1"))
+	// Same member, same conversation — suppressed.
+	fireTurn(t, h, mediaUploadBody("EvScope2", slackChannelTypeIM, "D1", "U2", "710.2"))
+	// A different member in the same conversation was never told.
+	fireTurn(t, h, mediaUploadBody("EvScope3", slackChannelTypeIM, "D1", "U3", "710.3"))
+	// The same member in a different conversation.
+	fireTurn(t, h, mediaUploadBody("EvScope4", slackChannelTypeIM, "D2", "U2", "710.4"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 3 {
+		t.Fatalf("want 3 notices (U2/D1, U3/D1, U2/D2), got %d: %+v", len(*posts), *posts)
+	}
+	for i, want := range []string{"710.1", "710.3", "710.4"} {
+		if got := (*posts)[i].threadTS; got != want {
+			t.Fatalf("notice %d answered %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaNoticeFailsOpen: the latch is a volume cap, not a
+// correctness guard, so a store blip must not turn an upload back into the silence
+// this notice exists to replace. Contrast the dedupe write, which fails CLOSED.
+func TestHandleEvent_UnsupportedMediaNoticeFailsOpen(t *testing.T) {
+	mem := newMemAgentDDB()
+	mem.putErr = errors.New("ddb down")
+	mem.putErrSKPrefix = "media#" // dedupe still works; only the latch is broken
+	h, posts, mu := newMediaNoticeHandler(t, mem)
+
+	for i, ts := range []string{"720.1", "720.2"} {
+		fireTurn(t, h, mediaUploadBody("EvOpen"+strconv.Itoa(i), slackChannelTypeIM, "D1", "U2", ts))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 2 {
+		t.Fatalf("a broken latch must fall back to answering every upload, got %+v", *posts)
+	}
+	for i, p := range *posts {
+		if p.text != agentUnsupportedMediaReply {
+			t.Fatalf("reply %d = %q, want the media reply", i, p.text)
+		}
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaNoticeIsMediaOnly keeps the latch off the other
+// deterministic replies. They need typing an exact keyword, so they have no burst
+// shape to cap — and capping "help" would silently swallow a real question.
+func TestHandleEvent_UnsupportedMediaNoticeIsMediaOnly(t *testing.T) {
+	mem := newMemAgentDDB()
+	h, posts, mu := newMediaNoticeHandler(t, mem)
+
+	for i, ts := range []string{"730.1", "730.2", "730.3"} {
+		fireTurn(t, h, eventCallbackBody("EvHelp"+strconv.Itoa(i),
+			`{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"`+ts+`","text":"help"}`))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 3 {
+		t.Fatalf("every help turn must be answered, got %d: %+v", len(*posts), *posts)
+	}
+	if got := mem.putAttempts("media#"); got != 0 {
+		t.Fatalf("a non-media deterministic reply must not touch the media latch, got %d writes", got)
+	}
+}
+
 // TestHandleEvent_UnsupportedMediaLogContract pins the demand-signal log. Mutation
 // testing found that deleting this line, hardcoding files_visible to 0, or renaming
 // the message all left the suite green — yet the whole justification for the line is
@@ -1143,7 +1400,19 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 // "Slack sent a subtype only" (benign) from "Slack changed the files shape" (the
 // case where the refusal may be wrong), which is the distinction on-call needs.
 func TestHandleEvent_UnsupportedMediaLogContract(t *testing.T) {
-	const mediaLogMsg = "agent: unsupported media; replied with the text-only limitation"
+	// Spelled out, NOT referenced as agentUnsupportedMediaMsg: an operator query
+	// consumes this exact string, so the literal is the contract and comparing the
+	// const to itself would pin nothing (renaming it would keep the suite green —
+	// which is one of the three mutants that motivated this test).
+	//
+	// Outcome-neutral on purpose: once repeats are suppressed, "replied with the
+	// text-only limitation" is false for most of a burst. The other outcome is
+	// covered by TestAgentUnsupportedMediaLogContract_SuppressedRepeat.
+	const mediaLogMsg = "agent: unsupported media"
+
+	if agentUnsupportedMediaMsg != mediaLogMsg {
+		t.Fatalf("agentUnsupportedMediaMsg = %q, want %q", agentUnsupportedMediaMsg, mediaLogMsg)
+	}
 
 	tests := []struct {
 		name            string
@@ -1223,12 +1492,70 @@ func TestHandleEvent_UnsupportedMediaLogContract(t *testing.T) {
 			if rec["user_id"] != "U2" {
 				t.Fatalf("user_id = %v, want U2 (needed to join this record to a complaining user)", rec["user_id"])
 			}
+			// Each subtest gets a fresh store, so every one is a first upload.
+			if rec["notice_posted"] != true {
+				t.Fatalf("notice_posted = %v, want true (a fresh conversation must speak)", rec["notice_posted"])
+			}
 		})
 	}
 }
 
+// TestAgentUnsupportedMediaLogContract_SuppressedRepeat is the other half of
+// TestHandleEvent_UnsupportedMediaLogContract: capping the reply must not cap the
+// COUNT. A suppressed upload still emits the same msg, so one exact $.msg filter
+// totals real demand, and notice_posted is what separates spoke-from-stayed-quiet.
+// Splitting the two outcomes across two msg strings would silently halve any
+// "how much file demand is there?" query built on this line.
+func TestAgentUnsupportedMediaLogContract_SuppressedRepeat(t *testing.T) {
+	h := &Handler{cfg: Config{AgentStore: &slackdata.AgentStore{
+		Client: newMemAgentDDB(), TableName: "agent_state",
+	}}}
+	env := &slackEventEnvelope{TeamID: "T1", Event: slackInnerEvent{
+		Type: slackEventTypeMessage, ChannelType: slackChannelTypeIM,
+		User: "U2", Channel: "D1", TS: "800.1",
+		Files: filesFromJSON(t, `[{"id":"F1"},{"id":"F2"}]`),
+	}}
+
+	var buf bytes.Buffer
+	log := slog.New(observability.NewRedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if posted := h.claimMediaNotice(context.Background(), log, env, "T1"); !posted {
+		t.Fatal("the first upload must win the latch")
+	}
+	env.Event.TS = "800.2" // a second, distinct upload in the same conversation
+	if posted := h.claimMediaNotice(context.Background(), log, env, "T1"); posted {
+		t.Fatal("the repeat must be suppressed")
+	}
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("every upload must log, suppressed or not; got %d lines: %q", len(lines), buf.String())
+	}
+	for i, wantPosted := range []bool{true, false} {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+			t.Fatalf("unmarshal %q: %v", lines[i], err)
+		}
+		// The literal again, for the same reason as in the sibling test.
+		if rec["msg"] != "agent: unsupported media" {
+			t.Fatalf("line %d msg = %v, want %q (both outcomes share one msg)", i, rec["msg"], "agent: unsupported media")
+		}
+		if rec["notice_posted"] != wantPosted {
+			t.Fatalf("line %d notice_posted = %v, want %v", i, rec["notice_posted"], wantPosted)
+		}
+		// The suppressed line still carries the count, or the cap would erase demand.
+		if got, _ := rec["files_visible"].(float64); got != 2 {
+			t.Fatalf("line %d files_visible = %v, want 2", i, rec["files_visible"])
+		}
+		// A count, never an inventory: file ids and names are user content.
+		if strings.Contains(lines[i], "F1") || strings.Contains(lines[i], "F2") {
+			t.Fatalf("line %d leaked file ids: %s", i, lines[i])
+		}
+	}
+}
+
 func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
-	store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+	mem := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
 	// countingThreadHistory answers for agentPoolTestThreadTS with a completed
 	// exchange whose reply belongs to app A1, so the continuity gate treats this as a
@@ -1259,6 +1586,12 @@ func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
 	}
 	if got := (*posts)[0].threadTS; got != agentPoolTestThreadTS {
 		t.Fatalf("reply threadTS = %q, want %q (an in-thread upload must answer in that thread)", got, agentPoolTestThreadTS)
+	}
+	// DEDUPE is what must collapse these two, not the media-notice latch — the latch
+	// would hide a dedupe regression here, since both events share a channel and a
+	// user. The second delivery must return before ever consulting it.
+	if got := mem.putAttempts("media#"); got != 1 {
+		t.Fatalf("latch attempts = %d, want 1 (the second delivery should have stopped at dedupe)", got)
 	}
 }
 

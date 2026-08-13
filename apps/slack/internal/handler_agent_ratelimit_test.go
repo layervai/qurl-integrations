@@ -210,9 +210,16 @@ func TestAgentTurnLimit_UnsupportedMediaConsumesNoSlot(t *testing.T) {
 	// A cap of 1 means a consumed slot would visibly cost the second upload its
 	// reply, so this fails loudly rather than by counter arithmetic alone.
 	h, posts, mu := newRateLimitHandler(t, mem, 1, 0, panicAgentLLM{})
-	for _, ts := range []string{"900.1", "900.2"} {
-		fireTurn(t, h, eventCallbackBody("EvRate"+ts,
-			`{"type":"app_mention","user":"U2","channel":"C1","ts":"`+ts+`","text":"<@U12345678>","files":[{"id":"F1"}]}`))
+	// Two uploads by ONE member (the per-user cap is what a consumed slot would
+	// trip) in two DIFFERENT channels. Same-channel uploads would be collapsed by
+	// the unsupported-media notice latch, which caps outbound volume per
+	// conversation — and a suppressed second reply would mask a consumed slot
+	// instead of exposing it. Distinct channels keep this test about the limiter.
+	// Only the channels need to differ; the ts values are arbitrary beyond being
+	// distinct, since dedupe keys on channel+ts.
+	for i, channel := range []string{"C1", "C2"} {
+		fireTurn(t, h, eventCallbackBody("EvRate"+strconv.Itoa(i),
+			`{"type":"app_mention","user":"U2","channel":"`+channel+`","ts":"90`+strconv.Itoa(i)+`.1","text":"<@U12345678>","files":[{"id":"F1"}]}`))
 	}
 
 	if mem.hasRateItems() {
