@@ -255,6 +255,7 @@ if not triggers:
 # Assumes each workflow declares a top-level `name:`. GitHub otherwise keys a
 # workflow by its file path, which could never match a trigger entry here.
 names = {}
+unnamed = []
 for entry in sorted(os.listdir(".github/workflows")):
     if not entry.endswith((".yml", ".yaml")):
         continue
@@ -265,6 +266,8 @@ for entry in sorted(os.listdir(".github/workflows")):
             if m:
                 names[m.group(2)] = path
                 break
+        else:
+            unnamed.append(path)
 
 missing = [t for t in triggers if t not in names]
 if missing:
@@ -279,6 +282,16 @@ if missing:
 #        list it, or record why not in NOTIFY_EXEMPT.
 
 candidates = {n: p for n, p in names.items() if can_trigger_notifier(p)}
+
+# `candidates` is keyed by name, so a workflow that declares none would slip
+# past this whole check. It cannot be exempt-by-omission: GitHub keys it by
+# file path, which no trigger entry can name, yet it still fails on main and
+# still notifies nobody. Undecidable rather than allowed -- make it declare one.
+nameless = sorted(p for p in unnamed if can_trigger_notifier(p))
+if nameless:
+    die("these workflows run on the default branch but declare no top-level "
+        "`name:`, so they cannot be named in on.workflow_run.workflows at "
+        "all: %s (give each one a name)" % nameless)
 
 unlisted = sorted(
     "%s (%s)" % (n, candidates[n])
