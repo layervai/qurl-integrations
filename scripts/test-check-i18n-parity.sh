@@ -107,12 +107,14 @@ set_json() { # <relative path> <key> <field> <value>
   python3 -c '
 import json, sys
 path, key, field, value = sys.argv[1:5]
-data = json.load(open(path))
+with open(path) as handle:
+    data = json.load(handle)
 if field:
     data[key][field] = value
 else:
     data[key] = value
-json.dump(data, open(path, "w"), indent=2)
+with open(path, "w") as handle:
+    json.dump(data, handle, indent=2)
 ' "$@"
 }
 
@@ -120,9 +122,11 @@ drop_json_key() { # <relative path> <key>
   python3 -c '
 import json, sys
 path, key = sys.argv[1:3]
-data = json.load(open(path))
+with open(path) as handle:
+    data = json.load(handle)
 del data[key]
-json.dump(data, open(path, "w"), indent=2)
+with open(path, "w") as handle:
+    json.dump(data, handle, indent=2)
 ' "$@"
 }
 
@@ -134,16 +138,21 @@ copy_chrome_ext_name_to_edge() { # <edge description>
   python3 -c '
 import json, sys
 description = sys.argv[1]
-chrome = json.load(open("apps/chrome-extension/_locales/en/messages.json"))
+with open("apps/chrome-extension/_locales/en/messages.json") as handle:
+    chrome = json.load(handle)
 path = "apps/edge-extension/_locales/en/messages.json"
-edge = json.load(open(path))
+with open(path) as handle:
+    edge = json.load(handle)
 name = chrome["ext_name"]["message"]
 edge["ext_name"] = {"message": name, "description": description}
-json.dump(edge, open(path, "w"), indent=2)
+with open(path, "w") as handle:
+    json.dump(edge, handle, indent=2)
 
 popup = "apps/edge-extension/popup/popup.html"
-markup = open(popup).read()
-open(popup, "w").write(markup.replace("qURL File Upload for Edge", name))
+with open(popup) as handle:
+    markup = handle.read()
+with open(popup, "w") as handle:
+    handle.write(markup.replace("qURL File Upload for Edge", name))
 ' "$@"
 }
 
@@ -155,11 +164,13 @@ add_wrong_browser_placeholder() {
 for app in ("chrome", "edge"):
     import json
     path = f"apps/{app}-extension/_locales/en/messages.json"
-    data = json.load(open(path))
+    with open(path) as handle:
+        data = json.load(handle)
     data["permission_request_confirm"]["placeholders"] = {
         "origin": {"example": "https://files.example.com seen from Chrome"}
     }
-    json.dump(data, open(path, "w"), indent=2)
+    with open(path, "w") as handle:
+        json.dump(data, handle, indent=2)
 '
 }
 
@@ -183,6 +194,11 @@ run_case shared-message-drift 1 "copy_btn: catalogs disagree and the key is not 
 
 run_case shared-description-drift 1 "copy_btn: catalogs disagree and the key is not a sanctioned delta" \
   set_json "$EDGE_CATALOG" copy_btn description "Copy button label"
+
+# Rule 2 compares entries deeply, so a drift in a nested field counts too — not
+# just the top-level message/description above.
+run_case shared-nested-placeholder-drift 1 "copy_btn: catalogs disagree and the key is not a sanctioned delta" \
+  python3 -c 'import json; p = "apps/edge-extension/_locales/en/messages.json"; d = json.load(open(p)); d["copy_btn"]["placeholders"] = {"n": {"content": "x"}}; json.dump(d, open(p, "w"), indent=2)'
 
 # Rule 3 — the mutation that motivated this script: Edge takes Chrome's name.
 # Exempt from rule 2, and "qURL Agent" names no browser for rule 4, so only the

@@ -79,6 +79,13 @@ CATALOG = "_locales/en/messages.json"
 
 # The other browser's name must never appear in a catalog. Values are the
 # regexes applied to the OTHER app's catalog.
+# This reaches every string in the entry, `description` included — not just the
+# user-visible `message`. Combined with rule 2 (descriptions must be identical
+# across catalogs) it means a description can never name EITHER browser: an
+# identical "…in Chrome" description on both sides still trips this on the Edge
+# copy. That is deliberate and slightly stronger than "pin what a user sees" —
+# descriptions are developer-facing and lockstep-identical anyway, so a
+# browser-specific one is a fork mistake rather than a legitimate need.
 FOREIGN_BROWSER = {
     "chrome": re.compile(r"\bEdge\b"),
     "edge": re.compile(r"\bChrome\b"),
@@ -93,6 +100,10 @@ SANCTIONED_DELTAS = {
     "permission_request_confirm": "names the host browser that shows the prompt",
 }
 
+# The character class deliberately excludes `@`, which skips Chrome's predefined
+# placeholders (__MSG_@@ui_locale__, __MSG_@@bidi_dir__ and friends). Those are
+# supplied by the browser and never appear in a catalog, so widening this to
+# match them would report every one as missing.
 MANIFEST_KEY = re.compile(r"__MSG_([A-Za-z0-9_]+)__")
 
 # popup.html renders the extension name twice before chrome.i18n resolves: the
