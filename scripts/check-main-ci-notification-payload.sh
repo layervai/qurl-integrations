@@ -53,6 +53,7 @@ command -v bash >/dev/null 2>&1 || {
 }
 
 python3 - <<'EOF'
+import fnmatch
 import json
 import os
 import re
@@ -65,6 +66,12 @@ WORKFLOW = ".github/workflows/main-ci-notifications.yml"
 STEP_NAME = "Post Slack notification"
 # Emitted by the `*)` arm of the workflow's impact case statement.
 FALLBACK_IMPACT_PREFIX = "Main CI failed before the repository reached"
+
+# Workflows that reach main (or run on a schedule) yet deliberately do not
+# notify #build-notifications. Keyed by workflow `name:`, valued by the reason
+# -- an entry here is a decision, so make it read like one in review. Empty
+# today: every workflow that can trigger the notifier is wired into it.
+NOTIFY_EXEMPT = {}
 
 # Stand-in for the workflow_run context the step reads from its env: block.
 STUB = {
@@ -114,6 +121,80 @@ def extract_run_block(step_name):
             return "\n".join(body)
     return None
 
+def on_block(path):
+    """Return the top-level `on:` mapping of a workflow as {key: [sub-lines]}."""
+    with open(path) as fh:
+        wf = fh.read().split("\n")
+    start = None
+    for i, line in enumerate(wf):
+        if re.match(r"^on:\s*$", line):
+            start = i
+            break
+    if start is None:
+        die("%s: no block-form `on:` -- teach this check the new form rather "
+            "than letting the workflow go unchecked" % path)
+    keys, cur = {}, None
+    for line in wf[start + 1:]:
+        if line.strip() and not line.startswith((" ", "#")):
+            break  # next top-level key ends the block
+        m = re.match(r"^ {2}([a-z_]+):\s*(\S.*)?$", line)
+        if m:
+            cur = m.group(1)
+            if m.group(2) and not m.group(2).startswith("#"):
+                die("%s: inline value on `on.%s` -- teach this check the new "
+                    "form rather than letting the workflow go unchecked"
+                    % (path, cur))
+            keys[cur] = []
+        elif cur is not None:
+            keys[cur].append(line)
+    if not keys:
+        die("%s: could not read any `on:` triggers" % path)
+    return keys
+
+def branch_filter(path, sub, key):
+    """Return the branch patterns listed under `key`, or None if absent."""
+    for i, line in enumerate(sub):
+        m = re.match(r"^ {4}%s:\s*(.*)$" % re.escape(key), line)
+        if not m:
+            continue
+        inline = m.group(1).strip()
+        if inline:
+            if not (inline.startswith("[") and inline.endswith("]")):
+                die("%s: unparsed `on.push.%s` value %r -- teach this check "
+                    "the new form" % (path, key, inline))
+            return [v.strip().strip("'\"") for v in inline[1:-1].split(",")
+                    if v.strip()]
+        out = []
+        for nxt in sub[i + 1:]:
+            mm = re.match(r"^ {6}- (.+?)\s*$", nxt)
+            if not mm:
+                break
+            out.append(mm.group(1).strip().strip("'\""))
+        return out
+    return None
+
+def can_trigger_notifier(path):
+    """True if this workflow can raise a workflow_run event the notifier acts on.
+
+    The notifier's `if:` gate admits only default-branch runs whose originating
+    event was `push` or `schedule`, so that gate -- not the workflow's purpose
+    -- is what decides whether listing it could ever do anything. A
+    pull_request-only or issue-only workflow listed above would be dead config.
+    """
+    keys = on_block(path)
+    if "schedule" in keys:
+        return True
+    if "push" not in keys:
+        return False
+    default = STUB["DEFAULT_BRANCH"]
+    only = branch_filter(path, keys["push"], "branches")
+    if only is not None:
+        return any(fnmatch.fnmatch(default, pat) for pat in only)
+    skip = branch_filter(path, keys["push"], "branches-ignore")
+    if skip is not None:
+        return not any(fnmatch.fnmatch(default, pat) for pat in skip)
+    return True  # unfiltered push runs on every branch, the default one included
+
 run_script = extract_run_block(STEP_NAME)
 if not run_script or "jq -n" not in run_script:
     die("could not extract the %r step's run: block -- if the workflow was "
@@ -136,15 +217,16 @@ if not triggers:
 
 # Assumes each workflow declares a top-level `name:`. GitHub otherwise keys a
 # workflow by its file path, which could never match a trigger entry here.
-names = set()
+names = {}
 for entry in sorted(os.listdir(".github/workflows")):
     if not entry.endswith((".yml", ".yaml")):
         continue
-    with open(os.path.join(".github/workflows", entry)) as fh:
+    path = os.path.join(".github/workflows", entry)
+    with open(path) as fh:
         for line in fh:
             m = re.match(r'^name: *([\'"]?)(.+?)\1\s*$', line)
             if m:
-                names.add(m.group(2))
+                names[m.group(2)] = path
                 break
 
 missing = [t for t in triggers if t not in names]
@@ -152,7 +234,33 @@ if missing:
     die("on.workflow_run.workflows names no live workflow: %s (a renamed "
         "upstream workflow makes this notifier silently never fire)" % missing)
 
-# --- 2. run the real step body against a stub curl, for every trigger
+# --- 2. and the reverse: every workflow that *can* trigger the notifier is
+#        listed. Check 1 alone only walks listed -> live, so a new app whose
+#        workflow was never wired in is invisible to CI -- it just fails on
+#        main and notifies nobody, which is how the Edge extension shipped
+#        unwired in #909. Adding a main-branch workflow now forces a choice:
+#        list it, or record why not in NOTIFY_EXEMPT.
+
+candidates = {n: p for n, p in names.items() if can_trigger_notifier(p)}
+
+unlisted = sorted(
+    "%s (%s)" % (n, candidates[n])
+    for n in candidates if n not in triggers and n not in NOTIFY_EXEMPT
+)
+if unlisted:
+    die("these workflows run on the default branch but are absent from "
+        "on.workflow_run.workflows, so their main failures notify nobody: %s "
+        "(add each one there with an impact case arm, or add it to "
+        "NOTIFY_EXEMPT with a reason)" % unlisted)
+
+# A workflow that stopped running on main -- or was deleted -- leaves its
+# exemption behind as a claim nobody rechecks.
+stale = sorted(n for n in NOTIFY_EXEMPT if n not in candidates)
+if stale:
+    die("NOTIFY_EXEMPT names workflows that can no longer trigger this "
+        "notifier: %s (drop the entry)" % stale)
+
+# --- 3. run the real step body against a stub curl, for every trigger
 
 tmp = tempfile.mkdtemp()
 try:
@@ -261,7 +369,7 @@ try:
         if not listed and not generic:
             die("unlisted %r did not hit the fallback arm" % workflow)
 
-    # --- 3. a missing webhook must fail loudly, not no-op
+    # --- 4. a missing webhook must fail loudly, not no-op
     proc, payload = run({
         "WORKFLOW_NAME": triggers[0], "SLACK_WEBHOOK_URL": ""
     })
@@ -289,6 +397,7 @@ if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
     )
 
 print("main CI notification payload builds on %s for all %d triggers "
-      "(+ fallback, schedule, missing actor); webhook guard fails loudly"
-      % (version, len(triggers)))
+      "(+ fallback, schedule, missing actor); all %d workflows that can reach "
+      "it are listed or exempt; webhook guard fails loudly"
+      % (version, len(triggers), len(candidates)))
 EOF
