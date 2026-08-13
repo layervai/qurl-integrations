@@ -114,13 +114,14 @@ fi
 #
 #   30   job setup + fetch-depth:0 checkout + origin preparation
 #   60   checkout's internal retry, when it fires
-#   62   Verify terminal Claude review: two `timeout 30s` gh calls
+#   92   Publish and verify terminal Claude review: three `timeout 30s` gh
+#        calls -- pull request refresh, comment POST, read-back
 #   ---
-#   152  = 2m32s, rounded up to a 3-minute floor
+#   182  = 3m02s, rounded up to a 4-minute floor
 #
 # Raise this alongside the cap if the surrounding steps grow; it is a floor on
 # the gap, not a prediction of it.
-min_headroom_minutes=3
+min_headroom_minutes=4
 
 job_cap="$(sed -n 's/^    timeout-minutes: \([0-9]\{1,\}\)$/\1/p' "$workflow")"
 if [ -z "$job_cap" ]; then

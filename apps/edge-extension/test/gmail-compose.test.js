@@ -387,6 +387,130 @@ test('findComposeBodyAsync performs an immediate post-observe lookup on the next
   assert.equal(response.success, true);
 });
 
+test('findComposeBodyAsync leaves no discovery timeout behind when the first lookup settles synchronously', async function (t) {
+  // Regression guard for the ordering inside findComposeBodyAsync. Both real schedulers are
+  // asynchronous (requestAnimationFrame, or a setTimeout(fn, 16) fallback), so the discovery
+  // timeout is always armed before finish() can run. This sandbox supplies a SYNCHRONOUS
+  // requestAnimationFrame instead: the first queued lookup finds the compose body and calls
+  // finish() while the function body is still running. If the timeout were armed after that
+  // lookup, finish()'s clearTimeout would target a still-null timeoutId and the 4s timer would
+  // be armed afterwards for an operation that already completed — nothing would ever clear it,
+  // and it would fire a full findComposeBody() sweep. createTimerHarness declares no surviving
+  // timers, so that leak fails this test at teardown.
+  let composeBodies = [];
+  let messageListener = null;
+  let rafCalls = 0;
+  const selectionHarness = createSelectionHarness();
+  const composeBody = {
+    classList: {
+      contains(name) {
+        return name === 'Am' || name === 'Al' || name === 'editable';
+      },
+    },
+    focus() {},
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 320, height: 24 };
+    },
+  };
+
+  const timers = createTimerHarness(t);
+  const sandbox = {
+    chrome: {
+      i18n: {
+        getMessage() {
+          return '';
+        },
+      },
+      runtime: {
+        lastError: null,
+        onMessage: {
+          addListener(listener) {
+            messageListener = listener;
+          },
+        },
+      },
+    },
+    clearTimeout: timers.clearTimeout,
+    console: {
+      warn() {},
+    },
+    document: {
+      body: {},
+      documentElement: { nodeName: 'HTML' },
+      createElement() {
+        return {
+          setAttribute() {},
+          style: {},
+          remove() {},
+        };
+      },
+      execCommand() {
+        return true;
+      },
+      createRange() {
+        return selectionHarness.createRange();
+      },
+      queryCommandSupported() {
+        return true;
+      },
+      querySelectorAll() {
+        return composeBodies;
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    requestAnimationFrame(callback) {
+      rafCalls += 1;
+      // The compose body appears exactly between the initial miss and this first queued lookup,
+      // so finish() runs inside findComposeBodyAsync rather than on a later frame.
+      composeBodies = [composeBody];
+      callback();
+      return rafCalls;
+    },
+    setTimeout: timers.setTimeout,
+  };
+
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.getComputedStyle = function () {
+    return { display: 'block', visibility: 'visible' };
+  };
+  sandbox.getSelection = function () {
+    return selectionHarness.selection;
+  };
+  sandbox.QURLComposeFormatter = {
+    buildLinkHtml() {
+      return '<p>links</p>';
+    },
+  };
+
+  vm.createContext(sandbox);
+  vm.runInContext(contentScriptSource, sandbox);
+
+  // No requestId, so this takes the no-dedup path and the discovery timeout is the only timer
+  // findComposeBodyAsync's caller can leave armed.
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(rafCalls, 1, 'the compose body should be found by the first queued lookup');
+});
+
 test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function (t) {
   let composeBodies = [];
   let execInsertCount = 0;

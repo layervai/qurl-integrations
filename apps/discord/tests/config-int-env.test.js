@@ -16,36 +16,7 @@
  * expose the full path under each scenario.
  */
 
-function captureFreshConfig(envOverrides, run) {
-  jest.isolateModules(() => {
-    const prevValues = {};
-    const origConsoleWarn = console.warn;
-    const warns = [];
-    console.warn = (...args) => warns.push(args.join(' '));
-    try {
-      for (const [key, value] of Object.entries(envOverrides)) {
-        prevValues[key] = process.env[key];
-        if (value === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = value;
-        }
-      }
-      const fresh = require('../src/config');
-      run(fresh, warns);
-    } finally {
-      console.warn = origConsoleWarn;
-      for (const [key, prev] of Object.entries(prevValues)) {
-        if (prev === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = prev;
-        }
-      }
-    }
-  });
-}
-
+const { captureFreshConfig } = require('./helpers/fresh-config');
 describe('config.intEnv — strictInteger + minPositive (QURL_BOT_MAX_INFLIGHT_HANDLERS)', () => {
   // QURL_BOT_MAX_INFLIGHT_HANDLERS is the canonical strictInteger +
   // minPositive caller. Trailing-garbage rejection is load-bearing:
