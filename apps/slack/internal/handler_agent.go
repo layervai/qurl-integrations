@@ -1025,9 +1025,19 @@ func (h *Handler) processAdmittedAgentEvent(ctx context.Context, log *slog.Logge
 // MODEL cost — so none consumes a limiter slot and none is persisted as
 // conversation — but each still costs one dedupe write and one chat.postMessage.
 //
-// The attachment case comes first. qURL conversation mode is text-only, so an
-// upload must never draw an answer that silently ignores it — not even when its
-// caption happens to read as one of the text keywords below.
+// The attachment case comes first, and it wins outright: an upload carrying a
+// complete, answerable request still gets the limitation rather than an answer,
+// and so does one whose caption reads as a text keyword below. qURL conversation
+// mode is text-only, so an upload must never draw a reply that silently ignores
+// it — and answering the text while saying nothing about the file is exactly
+// that. The cost is real: a valid question with an incidental screenshot has to
+// be re-sent. That is the deliberate trade — failing the whole turn is honest,
+// half-answering it is not.
+//
+// Metering these through agentTurnLimited would not help either. That limiter
+// caps MODEL spend, so routing uploads into it would still post one reply per
+// upload, just with the rate-limit wording. Capping outbound volume is a separate
+// control — a short-lived per-thread notice marker — not a limiter change.
 func agentDeterministicReply(e *slackInnerEvent, message string) (reply string, ok bool) {
 	switch {
 	case agentEventHasUpload(e):
