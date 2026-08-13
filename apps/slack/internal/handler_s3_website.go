@@ -646,6 +646,16 @@ func (p *preparedS3WebsiteInstallMessage) render(args *s3WebsiteInstallArgs, key
 	return b.String(), nil
 }
 
+// Hardening is deliberately asymmetric across the two containers every renderer
+// below emits, and the asymmetry is load-bearing: only the Connector gets a
+// read-only root filesystem (plus a bounded /tmp). The S3 origin keeps a
+// writable root because origins/s3-static-connector/render.sh renders
+// nginx.conf and envoy.yaml into RENDER_DIR (/etc/qurl/rendered, created and
+// owned by uid 65532 in the image) on every start, so a read-only root would
+// fail the origin at boot. Both containers still run nonroot with ALL
+// capabilities dropped and no-new-privileges. Keep this split when editing the
+// Docker, Compose, ECS, and Kubernetes renderers, and see apps/slack/docs/
+// operating.md, which scopes its read-only-root claim to the Connector.
 func renderS3WebsiteInstallInstructions(args *s3WebsiteInstallArgs, connectorImage, originImage string) (string, error) {
 	switch args.Environment {
 	case tunnelEnvDocker:
