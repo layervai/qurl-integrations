@@ -28,7 +28,6 @@ const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
-const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const {
   missingBootKeys,
   missingProdKeys,
@@ -94,16 +93,10 @@ const { LOG_KINDS } = require('./constants');
 // branch (runs BEFORE startServer so the ALB can't route a
 // request through a half-initialized replica).
 //
-// Known gap (acceptable for now): cache invalidation in http-only
-// mode. The `client.on('roleDelete' / 'channelDelete')` handlers
-// in src/discord.js only fire when the Gateway is connected, so
-// deletions made on the OpenNHP guild stay cached as stale
-// references until the replica restarts. The lazy refresh in
-// each helper checks `if (!channels.X)` — non-null but stale
-// doesn't trigger a refresh. OpenNHP guild admins rarely delete
-// tracked channels; if this becomes load-bearing, a periodic
-// REST-driven `refreshCache()` would close the gap without
-// needing a Gateway connection.
+// http-only replicas have no Gateway connection, so the cached
+// guild handle is refreshed on a timer instead of by events —
+// see initHttpOnly's periodic refreshCache().
+
 // Resolve PROCESS_ROLE via the helper in boot-requirements.js so the
 // invalid-value path is unit-testable without a child-process spawn.
 let PROCESS_ROLE, isGateway, isHttp;
@@ -128,23 +121,18 @@ try {
 logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
-// bot treats itself as a public multi-server app. Commands register globally,
-// per-guild qURL API keys come from /qurl setup (stored encrypted in
-// guild_configs), and OpenNHP-specific features (contributor roles, welcome
-// DMs, GitHub OAuth linking, PR webhook notifications) are dormant because
-// no single guild is being tracked.
-//
-// When GUILD_ID is set to a valid Discord snowflake, the original
-// single-guild OpenNHP deployment behavior is preserved: commands register
-// to that guild only, and all OpenNHP features are active.
+// bot treats itself as a public multi-server app and commands register
+// globally. When GUILD_ID is set to a valid Discord snowflake, commands
+// register to that guild only so they propagate instantly. Per-guild qURL
+// API keys come from /qurl setup (stored encrypted in guild_configs) in
+// either mode.
 const { isMultiTenant } = config;
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives. Lists live in
 // boot-requirements.js so they can be unit-tested without side-effecting
-// a bot boot. Gated on isOpenNHPActive (see config.js) — single-guild-plain
-// and multi-tenant both use the short required list.
-const missing = missingBootKeys(config, config.isOpenNHPActive);
+// a bot boot.
+const missing = missingBootKeys(config);
 
 if (missing.length > 0) {
   logger.error('Missing required environment variables:');
@@ -153,25 +141,23 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// Boot-log the effective mode so prod triage can grep it. The three
-// lines correspond exactly to the supported modes in config.js.
+// Boot-log the effective mode so prod triage can grep it. The two lines
+// correspond exactly to the supported modes in config.js.
 if (isMultiTenant) {
-  logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally; OpenNHP features are dormant.');
-} else if (config.isOpenNHPActive) {
-  logger.info(`Single-guild OpenNHP mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP community features active.`);
+  logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally.');
 } else {
-  logger.info(`Single-guild plain mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP features dormant; only /qurl registered.`);
+  logger.info(`Single-guild mode: targeting GUILD_ID=${config.GUILD_ID}. Commands register scoped to that guild.`);
 }
 
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  // QURL_API_KEY is the global-fallback key for /qurl send + /qurl map.
-  // Only the OpenNHP community server demands it at boot; single-guild-
-  // plain and multi-tenant deployments rely on per-guild /qurl setup.
-  // List is in boot-requirements.js for testability.
-  const prodMissing = missingProdKeys(process.env, config.isOpenNHPActive);
+  // QURL_API_KEY is deliberately NOT required: it is only the global
+  // fallback for /qurl send + /qurl map, and every deployment shape
+  // relies on per-guild /qurl setup. List is in boot-requirements.js
+  // for testability.
+  const prodMissing = missingProdKeys(process.env);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
@@ -182,8 +168,17 @@ if (process.env.NODE_ENV === 'production') {
   // is configured (isQurlOAuthConfigured) but BASE_URL isn't a usable https
   // origin, so /qurl setup can't dead-end at the OAuth redirect later (#619).
   // The qURL OAuth router (server.js) mounts unconditionally, so this applies
-  // to plain single-guild and multi-tenant deploys, not just one mode. See
-  // baseUrlHttpsProblem for the consumer inventory + the operator-facing
+  // to plain single-guild and multi-tenant deploys alike.
+  //
+  // With the GitHub OAuth surface removed (#1026), isQurlOAuthConfigured is
+  // now the COMPLETE set of BASE_URL consumers: /oauth/qurl/callback is the
+  // Auth0 redirect_uri, and /oauth/discord/callback rides the same value
+  // (isDiscordInstallConfigured implies isQurlOAuthConfigured — see
+  // config.js). The gap #842 left open — a deploy whose GitHub /auth
+  // callback needed BASE_URL but which this gate didn't cover — is closed by
+  // construction now that /auth no longer exists.
+  //
+  // See baseUrlHttpsProblem for the consumer inventory + the operator-facing
   // message. baseUrlExplicitlySet treats "" / whitespace-only as unset
   // (matches GUILD_ID normalization) so an accidentally-empty SSM param
   // neither escapes the check nor false-positives a non-consuming deploy.
@@ -205,8 +200,9 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// Any deploy that issues real GitHub OAuth tokens must encrypt persisted
-// credentials at rest, in any NODE_ENV — the orphan-token path uses
+// Any deploy that runs the qURL OAuth setup flow must encrypt persisted
+// credentials at rest, in any NODE_ENV — guild_configs.qurl_api_key is
+// written straight out of that callback. setGuildApiKey uses
 // encryptStrict as a backstop, but failing closed at boot is the loud
 // signal. Smoke-test the key material so a malformed value is caught here
 // instead of on the first encrypt() call minutes into serving traffic.
@@ -215,9 +211,9 @@ if (process.env.NODE_ENV === 'production') {
 // OAuth callback, but env vars are uniform across roles in a single
 // deploy, so one role refusing to boot while another silently degrades
 // is worse than refusing both.
-const kekMissing = missingKekRequiredKeys(process.env);
+const kekMissing = missingKekRequiredKeys(process.env, config.isQurlOAuthConfigured);
 if (kekMissing.length > 0) {
-  logger.error(`GITHUB_CLIENT_SECRET is set but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that issues real GitHub OAuth tokens must encrypt persisted credentials at rest.`);
+  logger.error(`qURL OAuth is configured (AUTH0_* set) but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that persists qURL API keys must encrypt them at rest.`);
   logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
   process.exit(1);
 }
@@ -237,10 +233,6 @@ if (process.env.KEY_ENCRYPTION_KEY) {
 }
 
 // Validate numeric config values
-if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINUTES <= 0) {
-  logger.error('PENDING_LINK_EXPIRY_MINUTES must be a positive integer');
-  process.exit(1);
-}
 if (!isPositiveFinite(config.RATE_LIMIT_WINDOW_MS)) {
   logger.error('RATE_LIMIT_WINDOW_MS must be a positive integer (set to 0 would disable rate limiting)');
   process.exit(1);
@@ -249,17 +241,6 @@ if (!isPositiveFinite(config.RATE_LIMIT_MAX_REQUESTS)) {
   logger.error('RATE_LIMIT_MAX_REQUESTS must be a positive integer');
   process.exit(1);
 }
-// Each org name is interpolated into GitHub search queries
-// (`type:pr author:X org:<org> is:merged`). Reject anything that doesn't
-// match GitHub's org-name rules so an injected space can't smuggle extra
-// search qualifiers.
-for (const org of config.ALLOWED_GITHUB_ORGS) {
-  if (!/^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$/.test(org)) {
-    logger.error(`ALLOWED_GITHUB_ORGS contains invalid org name: "${org}"`);
-    process.exit(1);
-  }
-}
-
 if (config.QURL_ENDPOINT === 'https://api.layerv.ai') {
   logger.warn('QURL_ENDPOINT is using production default — set via env var for non-prod');
 }
@@ -693,9 +674,9 @@ async function gracefulShutdown(code = 0) {
 
   try {
     // Wait for in-flight HTTP requests to drain — server.close() is async,
-    // process.exit() called immediately after would truncate OAuth callbacks
-    // mid-flight and leave users with a consumed pending_link but no GitHub
-    // link created.
+    // and process.exit() called immediately after would truncate an OAuth
+    // callback mid-flight, leaving the admin's /qurl setup without a
+    // persisted API key.
     await tryClose('HTTP server', httpServer, logger);
     stopServerIntervals();
     // SQS consumer drain. Stops new ReceiveMessage calls, then
@@ -1164,20 +1145,6 @@ async function start() {
       httpServer = null;
       gracefulShutdown(1);
     });
-  }
-
-  // Background retry-revoke for any OAuth tokens whose initial
-  // revoke failed. Pinned to `isGateway` not because of any Discord
-  // dependency (the sweeper only calls api.github.com — no Discord
-  // client / REST calls anywhere in src/orphan-token-sweeper.js) but
-  // to keep the sweeper a singleton: N HTTP replicas racing on the
-  // same orphaned-tokens table would each claim and re-revoke every
-  // row. Pinning to the single gateway process avoids that without
-  // a distributed work queue. If this ever needs to scale beyond one
-  // worker, replace with SQS / a Redis lock — not by spreading the
-  // sweeper across HTTP replicas.
-  if (isGateway) {
-    startOrphanTokenSweeper();
   }
 
   // SQS consumer for the worker tier (zero-downtime Pillar 1).
