@@ -1,6 +1,6 @@
 {
   "ext_name": {
-    "message": "qURL File Upload",
+    "message": "qURL Agent",
     "description": "Extension name"
   },
   "ext_desc": {
@@ -146,8 +146,12 @@
     "description": "Footer hint shown while the extension is waiting to insert links into Gmail"
   },
   "copy_btn": {
-    "message": "Copy inserted content",
-    "description": "Copy the same formatted content that is inserted into Gmail"
+    "message": "Copy the qURL link",
+    "description": "Copy only the accessible qURL URL"
+  },
+  "copy_btn_plural": {
+    "message": "Copy the qURL links",
+    "description": "Copy button label when more than one accessible qURL URL will be copied"
   },
   "copy_done": {
     "message": "Copied",
@@ -161,13 +165,27 @@
     "message": "Make sure a Gmail compose window is open.",
     "description": "Footer hint"
   },
-  "result_one_success": {
-    "message": "1 file uploaded successfully",
-    "description": "Success summary for single file"
+  "result_one_inserted": {
+    "message": "Inserted the qURL link into your Gmail draft",
+    "description": "Success summary for a single file whose link was inserted into the Gmail draft"
   },
-  "result_n_success": {
+  "result_n_inserted": {
+    "message": "Inserted $COUNT$ qURL links into your Gmail draft",
+    "description": "Success summary for multiple files whose links were inserted into the Gmail draft",
+    "placeholders": {
+      "count": {
+        "content": "$1",
+        "example": "5"
+      }
+    }
+  },
+  "result_one_uploaded": {
+    "message": "1 file uploaded successfully",
+    "description": "Success summary for a single uploaded file when Gmail insertion does not complete"
+  },
+  "result_n_uploaded": {
     "message": "$COUNT$ files uploaded successfully",
-    "description": "Success summary for multiple files",
+    "description": "Success summary for multiple uploaded files when Gmail insertion does not complete",
     "placeholders": {
       "count": {
         "content": "$1",
@@ -190,8 +208,16 @@
     }
   },
   "result_insertion_only_failed": {
-    "message": "Uploaded successfully, but Gmail draft insertion failed",
-    "description": "Error summary shown when uploads succeed but Gmail insertion fails"
+    "message": "Upload completed successfully. Use the copy button below to get the accessible qURL link.",
+    "description": "Message shown when uploads succeed, Gmail insertion fails, and one qURL link can be copied"
+  },
+  "result_insertion_only_failed_plural": {
+    "message": "Upload completed successfully. Use the copy button below to get the accessible qURL links.",
+    "description": "Message shown when uploads succeed, Gmail insertion fails, and several qURL links can be copied"
+  },
+  "result_insertion_only_failed_no_copy": {
+    "message": "Upload completed successfully, but no accessible qURL link is available to copy.",
+    "description": "Message shown when uploads succeed, Gmail insertion fails, and no https qURL link is available for manual copy"
   },
   "permission_missing_error": {
     "message": "Permission to access the configured qURL server is missing. Open settings and save the server URL again.",

@@ -13,6 +13,8 @@ on:
     workflows:
       - "slack: Build and Test"
       - "discord: Build and Test"
+      - "chrome-extension: Build and Test"
+      - "teams: Build and Test"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
       - "CodeQL"
@@ -21,15 +23,29 @@ on:
       - "Validate issue templates"
     types: [completed]
 
-permissions:
-  contents: read
+# The step authenticates to Slack with a webhook secret; no step reads the
+# workflow's GITHUB_TOKEN (there is no checkout and no API call), so deny
+# everything.
+permissions: {}
 
 jobs:
   notify-build-notifications:
     name: "Notify #build-notifications"
-    # Main workflow cancellations are exceptional: the source app workflows do
-    # not auto-cancel default-branch runs, and a cancelled pre-dispatch run still
-    # leaves sandbox on the previous image with no deploy notification.
+    # `cancelled` is in the list below, but not for the reason this comment
+    # used to give. It claimed main cancellations are exceptional because the
+    # source app workflows do not auto-cancel default-branch runs. That was
+    # wrong: `cancel-in-progress: false` protects a run already in progress,
+    # not one still pending, and GitHub keeps at most one pending run per
+    # concurrency group — so a burst of merges to main routinely cancels the
+    # intermediate runs by supersession (#1022).
+    #
+    # Supersession is no longer a validation gap: each app workflow's `changes`
+    # job now diffs against the last SHA it validated, so the surviving run
+    # covers the cancelled commits too. It does still alert here, which is a
+    # cost rather than a feature — a genuinely cancelled pre-dispatch run
+    # leaves sandbox on the previous image with no deploy notification, and the
+    # workflow_run payload alone cannot tell the two apart. Narrowing this
+    # trigger is #1022's option 3 and remains open.
     if: >-
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       contains(fromJson('["push","schedule"]'), github.event.workflow_run.event) &&
@@ -79,6 +95,12 @@ jobs:
             "discord: Build and Test")
               impact="Discord bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
               ;;
+            "chrome-extension: Build and Test")
+              impact="Chrome extension build, tests, or release packaging failed on main. Nothing auto-deploys from this workflow, so the breakage stays latent until Release Please cuts the next chrome-extension release — treat the packaged bundle from this SHA as unshippable to the Chrome Web Store until the run is repaired."
+              ;;
+            "teams: Build and Test")
+              impact="Teams app typecheck, lint, tests, or build failed on main. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
+              ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish failed. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
               ;;
@@ -100,13 +122,16 @@ jobs:
               ;;
           esac
 
-          # jq parses object-construction values with a restricted
-          # production on jq <= 1.7, which ubuntu-latest ships: a bare `+`
-          # concatenation in that position is a parse error, so every
-          # concatenation below stays wrapped in parentheses. jq 1.8
-          # accepts the bare form, so checking this on a newer local jq
-          # will not catch a regression —
-          # scripts/check-main-ci-notification-payload.sh gates it in CI.
+          # Values below use string interpolation, not `+` concatenation.
+          # jq <= 1.7, which ubuntu-latest ships, parses object-construction
+          # values under a restricted production that rejects a bare `+`
+          # there — the parse error that broke this notifier until #1021.
+          # An interpolation is always a jq Term, so it stays legal in any
+          # position, and it renders a non-string arg (say $run_number via
+          # --argjson) instead of failing at runtime. Keep it this way: jq
+          # 1.8 accepts both forms, so a newer local jq will not catch a
+          # regression — scripts/check-main-ci-notification-payload.sh gates
+          # it in CI.
           payload="$(jq -n \
             --arg text ":rotating_light: ${WORKFLOW_NAME} ${CONCLUSION} on ${DEFAULT_BRANCH} - ${short_sha}" \
             --arg repository "$REPOSITORY" \
@@ -127,23 +152,23 @@ jobs:
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: ("*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`.")
+                    text: "*:rotating_light: Main CI did not pass*\n`\($workflow)` completed with `\($conclusion)` on `\($branch)`."
                   }
                 },
                 {
                   type: "section",
                   fields: [
-                    { type: "mrkdwn", text: ("*Repository*\n<" + $repository_url + "|" + $repository + ">") },
-                    { type: "mrkdwn", text: ("*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>") },
-                    { type: "mrkdwn", text: ("*Triggered by*\n" + $actor) },
-                    { type: "mrkdwn", text: ("*Run*\n<" + $run_url + "|#" + $run_number + ">") }
+                    { type: "mrkdwn", text: "*Repository*\n<\($repository_url)|\($repository)>" },
+                    { type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($short_sha)`>" },
+                    { type: "mrkdwn", text: "*Triggered by*\n\($actor)" },
+                    { type: "mrkdwn", text: "*Run*\n<\($run_url)|#\($run_number)>" }
                   ]
                 },
                 {
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: ("*Impact*\n" + $impact)
+                    text: "*Impact*\n\($impact)"
                   }
                 },
                 {

@@ -107,11 +107,14 @@ settings, update this section in the same operational change.
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
 `chrome-extension / required`, `edge-extension / required`, `teams / required`,
-and `shared / required`. Each workflow's `changes` filter is the source of truth
-for which paths need validation. When that filter matches, the aggregate
-validates every quality gate listed in its workflow `needs:` set. When branch
-protection requires path-gated app/shared workflows, it should require only
-these aggregate checks, not the internally skipped expensive jobs.
+`s3-static-connector / required`, and `shared / required`. The connector
+aggregate is new in #1042 (refs #1022), which moved `s3-static-connector.yml`
+off `on.push.paths` onto the `changes`-job pattern; adding it to branch
+protection is a separate settings change. Each workflow's `changes` filter is
+the source of truth for which paths need validation. When that filter matches,
+the aggregate validates every quality gate listed in its workflow `needs:` set.
+When branch protection requires path-gated app/shared workflows, it should
+require only these aggregate checks, not the internally skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external

@@ -91,6 +91,18 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		unchangedOutput:      "No Teams-impacting changes detected",
 	},
 	{
+		name:                 "s3-static-connector",
+		path:                 "s3-static-connector.yml",
+		checkNamePrefix:      "s3-static-connector / ",
+		changeOutput:         "s3_static_connector",
+		changedEnv:           "CONNECTOR_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.s3_static_connector == 'true'",
+		detectChangesName:    "s3-static-connector / detect changes",
+		requiredName:         "s3-static-connector / required",
+		verifierStepName:     "Verify connector CI result",
+		unchangedOutput:      "No connector-impacting changes detected",
+	},
+	{
 		name:                 "shared",
 		path:                 "shared-test.yml",
 		checkNamePrefix:      "shared / ",
