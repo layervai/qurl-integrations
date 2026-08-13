@@ -44,7 +44,11 @@ Expected output:
 4. Select the `apps/edge-extension/release/` directory
 5. Confirm that the extension appears in the extensions list and the toolbar icon is available
 
-![Edge Extensions Page](./images/patch-0.png)
+> **Note:** This guide's screenshots (steps 4–9) were captured in Chrome, before the qURL
+> rebrand — their popup header reads `QURL File Upload`, whereas this extension's `ext_name`
+> is now **qURL File Upload for Edge**. The flow each one illustrates is identical in Edge.
+> Step 2 has no screenshot until a real `edge://extensions` capture — showing the extension
+> actually loaded — replaces the Chrome one that used to sit here.
 
 ## 3. Open a Gmail Draft Before Testing
 
@@ -140,7 +144,7 @@ Expected behavior:
 - The uploaded file can be viewed or downloaded
 - Image files and PDF files should be directly accessible through the qURL link
 
-![Open the Uploaded Resource](./images/patch-6.png)
+![Open the Uploaded Resource](./images/patch-6.jpg)
 
 ## 10. Expected Failure Cases
 
