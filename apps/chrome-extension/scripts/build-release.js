@@ -304,6 +304,7 @@ if (require.main === module) {
 module.exports = {
   applyBuildOverrides,
   collectManifestAssetPaths,
+  copyRecursive,
   excludePaths,
   hostPermissionPattern,
   loadBuildConfig,

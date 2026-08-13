@@ -377,4 +377,19 @@ test('logo.png is excluded from the release bundle and nothing at runtime loads 
 
   // The source itself must still be present for `npm run icons` to regenerate from.
   assert.ok(fs.existsSync(path.join(projectRoot, 'icons', 'logo.png')));
+
+  // Assert the behavior, not just the config: run the real copy over the real icons/ directory
+  // and check what lands. Asserting only that excludePaths contains the entry would still pass
+  // if copyRecursive changed how it derives the relative path (projectRoot drift, a
+  // path.resolve vs path.join mismatch) and shipped the file anyway.
+  const stagingRoot = makeTempReleaseRoot();
+  try {
+    buildRelease.copyRecursive(path.join(projectRoot, 'icons'), path.join(stagingRoot, 'icons'));
+
+    const copied = fs.readdirSync(path.join(stagingRoot, 'icons')).sort();
+    assert.ok(!copied.includes('logo.png'), `logo.png reached the bundle: ${copied.join(', ')}`);
+    assert.deepEqual(copied, ['icon128.png', 'icon16.png', 'icon48.png']);
+  } finally {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+  }
 });
