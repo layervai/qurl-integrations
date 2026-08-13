@@ -395,11 +395,11 @@ copyBtn.addEventListener('click', async () => {
   if (lastSuccessfulResults.length === 0) return;
 
   try {
-    const html = buildCopyUrlHtml(lastSuccessfulResults);
     const text = buildCopyUrlText(lastSuccessfulResults);
     if (!text) {
       throw new Error('No accessible qURL link available to copy.');
     }
+    const html = buildCopyUrlHtml(lastSuccessfulResults);
     await writeRichClipboard(html, text);
     copyBtn.textContent = getMessage('copy_done', 'Copied');
   } catch (err) {
@@ -782,6 +782,10 @@ function buildCopyUrlText(results) {
     .join('\n');
 }
 
+// Deliberately plainer than the formatter's buildLinkHtml: that one styles the anchor with
+// Gmail's link blue because it renders inside a Gmail draft, whereas this HTML lands in an
+// unknown rich-text target, so leaving it unstyled lets it inherit the destination's own link
+// styling. Derived from buildCopyUrlText so both clipboard flavors carry the same https-only set.
 function buildCopyUrlHtml(results) {
   const text = buildCopyUrlText(results);
   if (!text) {

@@ -8,6 +8,10 @@ const originalFetch = global.fetch;
 const originalChrome = global.chrome;
 const originalSetTimeout = global.setTimeout;
 const originalClearTimeout = global.clearTimeout;
+// createMultipartBoundary() in lib/qurl-api.js calls globalThis.crypto.getRandomValues. Chrome
+// always provides it, but Node only exposes a global `crypto` by default from v19 on, and
+// package.json still declares `engines.node: >=18` — so pin webcrypto for the upload tests and
+// restore whatever the runtime had afterwards.
 const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
 
 function restoreGlobalCrypto() {

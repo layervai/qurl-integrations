@@ -1,6 +1,6 @@
 # Developer guide
 
-Building, testing, packaging, and releasing the qURL File Upload extension.
+Building, testing, packaging, and releasing the qURL Agent extension.
 If you just want to **use** the extension in Gmail, see the
 [README](../README.md) instead.
 
