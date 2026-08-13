@@ -45,3 +45,9 @@ jobs:
       # which half it actually enforced.
       - name: Check main CI notification payload builds
         run: scripts/check-main-ci-notification-payload.sh
+
+      # The resolver decides whether app CI runs at all on main, and its
+      # failure mode is silence rather than a red run, so every branch of it
+      # is exercised here against a fixture repo and a stub `gh`.
+      - name: Test validated-base resolver
+        run: scripts/test-resolve-validated-base.sh
