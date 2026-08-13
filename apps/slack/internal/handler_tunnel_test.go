@@ -3056,6 +3056,63 @@ func TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst(t *testing.T)
 	}
 }
 
+// TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails pins the
+// best-effort half of the gate. Cleanup can fail — the qURL API may be the
+// very thing that is broken — and the install must still fail closed and
+// still withhold the DM. The credential then lingers until its one-hour TTL,
+// which is why the runbook tells operators to revoke manually on
+// `tunnel_bootstrap_cleanup_failed`.
+func TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	var revokeHits int
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			testKeyStatus: client.StatusActive,
+			// Pre-cutover: no kind echoed.
+			testKeyKeyType: client.APIKeyTypeTunnelBootstrap,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		revokeHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if revokeHits == 0 {
+		t.Error("a revoke must still be attempted when the credential is unconfirmed")
+	}
+	if !strings.Contains(async, "did not return a Connector enrollment token") {
+		t.Fatalf("async reply = %q, want the kind-first rejection copy even when cleanup fails", async)
+	}
+	if len(*dmPosts) != 0 {
+		t.Errorf("a failed revoke must not cause the credential to be DMed; got %d DM(s)", len(*dmPosts))
+	}
+	for _, post := range *dmPosts {
+		if strings.Contains(post.text, testTunnelAPIKey) {
+			t.Fatal("plaintext credential leaked into a DM")
+		}
+	}
+	if !logs.contains("tunnel_bootstrap_cleanup_failed") {
+		t.Error("a failed cleanup must log tunnel_bootstrap_cleanup_failed so an operator can revoke manually")
+	}
+}
+
 // TestTunnelInstallAcceptsCredentialWithoutEchoedTarget pins the acceptance
 // side of the gate: `target` is corroborating, not required. Now that an
 // unconfirmed credential fails the install outright, tightening the predicate

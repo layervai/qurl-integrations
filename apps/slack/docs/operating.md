@@ -215,9 +215,9 @@ Symptoms of a deploy-order violation, and what to check:
   200 but did not echo `kind` (or echoed a `target` that disagrees), so the bot
   cannot confirm it minted a one-shot, Connector-bound enrollment token rather
   than an ordinary workspace-scoped key. **The bot fails closed here**: it
-  revokes the credential, never DMs it, and tells the admin to retry or contact
-  support. The log line carries `resource_id`, `key_id`, and the `got_`/`want_`
-  kind and target values.
+  revokes the credential, never DMs it, and points the admin at support rather
+  than a retry. The log line carries `resource_id`, `key_id`, and the
+  `got_`/`want_` kind and target values.
 
   This is the in-band enforcement of the deploy-order gate, so it is expected
   to be silent once every environment is on the kind-first API. If it fires,
