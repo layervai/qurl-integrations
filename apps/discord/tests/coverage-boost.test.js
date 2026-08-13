@@ -22,21 +22,9 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
   isMultiTenant: false,
-  // OpenNHP commands (/link, /stats, /leaderboard, /bulklink, etc.) are
-  // only dispatch-active when config.isOpenNHPActive is true. This
-  // suite exercises several of them; set it here.
-  ENABLE_OPENNHP_FEATURES: true,
-  isOpenNHPActive: true,
-  STAR_MILESTONES: [10, 25, 50, 100],
-  CONTRIBUTOR_ROLE_NAME: 'Contributor',
-  ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
-  CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
-  CHAMPION_ROLE_NAME: 'Champion',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -192,11 +180,6 @@ jest.mock('../src/discord', () => ({
   sendDM: mockSendDM,
 }));
 
-jest.mock('../src/utils/admin', () => ({
-  requireAdmin: jest.fn(async () => true),
-  isAdmin: jest.fn(() => true),
-}));
-
 const mockUploadToConnector = jest.fn();
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
@@ -238,7 +221,6 @@ crypto.randomUUID = jest.fn(() => 'mock-uuid-9999');
 
 const { commands, handleCommand, _test } = require('../src/commands');
 const { sendCooldowns, setCooldown, isGoogleMapsURL } = _test;
-const { requireAdmin } = require('../src/utils/admin');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -294,40 +276,24 @@ beforeEach(() => {
 describe('handleCommand — double error (reply fail + followUp fail)', () => {
   it('logs error when error response itself fails', async () => {
     const logger = require('../src/logger');
+    // /qurl is the only shipped command, so its executor is swapped
+    // for the duration of this test to drive handleCommand's throw
+    // path. Restored immediately after so nothing leaks.
+    const qurlCommand = commands.find(c => c.data.name === 'qurl');
+    const realExecute = qurlCommand.execute;
+    qurlCommand.execute = jest.fn(() => { throw new Error('db crash'); });
     const interaction = makeInteraction({
-      commandName: 'stats',
+      commandName: 'qurl',
       replied: true,
       followUp: jest.fn().mockRejectedValue(new Error('Cannot send')),
     });
-    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
 
-    await handleCommand(interaction);
+    try {
+      await handleCommand(interaction);
+    } finally {
+      qurlCommand.execute = realExecute;
+    }
     expect(logger.error).toHaveBeenCalledWith('Failed to send error response', expect.objectContaining({ error: 'Cannot send' }));
-  });
-});
-
-describe('/bulklink — error paths', () => {
-  const findCmd = () => commands.find(c => c.data.name === 'bulklink');
-
-  it('reports already-linked-to-another-user', async () => {
-    mockDb.getLinkByGithub.mockReturnValue({ discord_id: 'other-user', github_username: 'ghuser' });
-    const interaction = makeInteraction({
-      commandName: 'bulklink',
-      options: { ...makeInteraction().options, getString: jest.fn(() => '111:ghuser') },
-    });
-    await findCmd().execute(interaction);
-    expect(interaction.reply).toHaveBeenCalled();
-  });
-
-  it('reports forceLink throw', async () => {
-    mockDb.getLinkByGithub.mockReturnValue(null);
-    mockDb.forceLink.mockImplementationOnce(() => { throw new Error('DB write fail'); });
-    const interaction = makeInteraction({
-      commandName: 'bulklink',
-      options: { ...makeInteraction().options, getString: jest.fn(() => '111:ghuser') },
-    });
-    await findCmd().execute(interaction);
-    expect(interaction.reply).toHaveBeenCalled();
   });
 });
 
