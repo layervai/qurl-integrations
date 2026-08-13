@@ -3263,9 +3263,11 @@ func TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst(t *testing.T)
 // TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails pins the
 // best-effort half of the gate. Cleanup can fail — the qURL API may be the
 // very thing that is broken — and the install must still fail closed and
-// still withhold the DM. The credential then lingers until its one-hour TTL,
-// which is why the runbook tells operators to revoke manually on
-// `tunnel_bootstrap_cleanup_failed`.
+// still withhold the DM. The credential then lingers for however long the
+// non-conforming producer decided to grant it: a producer that ignored the
+// requested `kind` gives no assurance it honored the requested expiry either.
+// That open-ended exposure is why the runbook makes manual revoke
+// unconditional on `tunnel_bootstrap_cleanup_failed`.
 func TestTunnelInstallRejectsUnconfirmedCredentialWhenRevokeFails(t *testing.T) {
 	logs := captureDefaultSlog(t)
 	ts := newAdminTestServers(t)
