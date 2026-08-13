@@ -2280,6 +2280,12 @@ const lifecycleDropDriftReason = "lifecycle event NOT purged: envelope field typ
 // this reports: drift means Slack's schema moved, so the first line is the whole
 // signal and every repeat is the same news at request volume.
 //
+// It never expires, which has a cost worth stating: a single transient
+// malformed payload latches its field forever, so if that same field later
+// moved for real, the schema change would surface at Debug rather than Warn.
+// Accepted because the alternative — a TTL — reintroduces the flood it exists
+// to stop, and the first sighting is always reported either way.
+//
 // An unbounded map on the request path needs its key space justified. Keys are
 // *json.UnmarshalTypeError.Field, which encoding/json builds from STRUCT TAGS
 // only — it carries neither slice indices nor map keys (verified: a mistyped
@@ -2349,6 +2355,13 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	// degradation is something else still needs its own UnmarshalJSON (drop
 	// slackEventFiles and a drifted `files` reads as "no attachment", and the
 	// agent answers past a file instead of refusing).
+	//
+	// What it cannot rescue is drift in a DISCRIMINATOR — env.Type or
+	// env.Event.Type — because those are what a route is selected on, and a
+	// drifted string is empty. Such an event still reaches no route. That is
+	// inherent rather than a gap to close later, and it is still an improvement
+	// on what it replaces: the drop is now announced at Warn, and a teardown
+	// lost this way is named specifically (see lifecycleRefused below).
 	//
 	// The tolerance is scoped by CONSEQUENCE, not applied uniformly, because
 	// "the rest of the struct decoded" is not the same as "the rest of the
@@ -2429,6 +2442,11 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 		// teardown was MEANT, but every field that decides WHICH partitions it
 		// hits is now suspect. A dropped teardown leaves data in place, which
 		// is recoverable by an operator; a misdirected one is not.
+		//
+		// Un-latched, unlike the generic drift line, and deliberately: this one
+		// reports a specific workspace whose teardown needs finishing by hand,
+		// so collapsing repeats would hide the second workspace. Teardowns are
+		// rare enough that the volume argument does not apply to them.
 		slog.Warn(lifecycleDropDriftReason,
 			"event_type", lifecycleEventTypeForLog(env.Event.Type),
 			"drift_field", driftField,
