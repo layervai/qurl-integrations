@@ -2317,7 +2317,10 @@ func TestAgentTurnCompleteLogsHistoryAttachments(t *testing.T) {
 				{UserID: "U1", Text: "protect everything in this", TS: agentPoolTestThreadTS, HasFiles: true},
 				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
 				{UserID: "U1", Text: "what can I reach?", TS: "100.15"},
-				{AppID: "A1", Text: "the connectors I can see here", TS: "100.16"},
+				// An assistant turn that quotes the note back. The model does see the
+				// marker, so it can echo it; counting that would report an attachment
+				// that never existed.
+				{AppID: "A1", Text: "You sent " + agentHistoryAttachmentNote + " so I can't read it.", TS: "100.16"},
 			}, nil
 		},
 	})
@@ -2347,7 +2350,7 @@ func TestAgentTurnCompleteLogsHistoryAttachments(t *testing.T) {
 		t.Fatalf("no %q record; got %s", turnCompleteMsg, buf.String())
 	}
 	if rec["history_attachments"] != float64(1) {
-		t.Fatalf("history_attachments = %v, want 1 — one rebuilt message told the model an attachment was there", rec["history_attachments"])
+		t.Fatalf("history_attachments = %v, want 1 — one USER message told the model an attachment was there; an assistant turn quoting the note is not one", rec["history_attachments"])
 	}
 }
 

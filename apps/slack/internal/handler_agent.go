@@ -1138,14 +1138,20 @@ func noteAgentHistoryAttachment(text string) string {
 // step change in the rate is the signal that Slack's read-back shape moved. Notes
 // are counted rather than messages because a merged turn can carry more than one.
 //
-// Approximate by construction: the note is ordinary user-role text, so a user who
-// pastes it verbatim inflates the count. That is fine for a trend signal and is the
-// same unauthenticated-marker trade agentHistoryAttachmentNote documents — just do
-// not read the field as an exact attachment tally.
+// Only user messages are scanned, because that is the only role the note is ever
+// appended to. An assistant turn that quoted the note back — the model does see it —
+// would otherwise be counted as an attachment that never existed.
+//
+// Still approximate by construction: the note is ordinary user-role text, so a user
+// who pastes it verbatim inflates the count. That is fine for a trend signal and is
+// the same unauthenticated-marker trade agentHistoryAttachmentNote documents — just
+// do not read the field as an exact attachment tally.
 func agentHistoryAttachmentCount(history []agent.Message) int {
 	notes := 0
 	for _, msg := range history {
-		notes += strings.Count(msg.Text, agentHistoryAttachmentNote)
+		if msg.Role == agent.RoleUser {
+			notes += strings.Count(msg.Text, agentHistoryAttachmentNote)
+		}
 	}
 	return notes
 }
