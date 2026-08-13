@@ -53,6 +53,16 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 // silently ignoring file-only messages or sending attachment captions to the LLM
 // without the attachment. Files include Slack-hosted images and canvases.
 //
+// The claim is scoped to what agentEventHasUpload actually detects: things
+// ATTACHED to the message. It leads with the rule that produces that behavior —
+// this surface reads a message's text and nothing else — instead of naming
+// canvases as a standalone capability gap. A canvas pasted as a LINK is ordinary
+// message text and is not detected (see agentEventHasUpload), so copy that read
+// as "canvases are refused" would describe a boundary this surface does not
+// enforce. "I can only read a message's text" stays true in both shapes, and
+// correctly predicts that a linked document's contents don't reach the agent
+// either.
+//
 // It names the snippet case because Slack converts a long paste into an attached
 // snippet, so a purely textual request lands here too. The paste's text is in the
 // file, not in the event, so this surface still cannot read it — but the earlier
@@ -62,7 +72,7 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 // and points at `/qurl`, which does not go through this surface.
 // TODO(upstream-contract): asserts that Slack clients turn a long paste into a
 // snippet rather than a plain message.
-const agentUnsupportedMediaReply = "I can't read attached files, images, or canvases yet — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message, or use a `/qurl` command — run `/qurl help` for the list. If you're in a channel, mention qURL again."
+const agentUnsupportedMediaReply = "I can only read a message's text, so an attached file, image, or canvas doesn't reach me — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message, or use a `/qurl` command — run `/qurl help` for the list. If you're in a channel, mention qURL again."
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
@@ -662,8 +672,22 @@ const agentDeliveryBudget = 15 * time.Second
 
 // agentEventHasUpload reports whether this event carries an attachment. The
 // file_share subtype is evidence on its own, so an upload cannot fall through to
-// silence when the files array is absent — and answering "I can't read attached
-// files" stays correct when it does.
+// silence when the files array is absent — and the text-only limitation stays
+// correct when it does.
+//
+// Detection is deliberately presence-only AND deliberately attachment-only. A
+// Slack canvas or file pasted as a LINK arrives as ordinary message text with an
+// unfurl: no files entry, no file_share subtype. It is not detected, and
+// agentUnsupportedMediaReply is worded so it does not claim otherwise. Matching
+// Slack file permalinks in the text was considered and rejected:
+// agentDeterministicReply refuses the WHOLE turn, so any message merely
+// containing such a URL would stop being answered — including "protect
+// https://…/docs/… as $handbook", which is a legitimate propose_protect_url
+// request against a raw https:// endpoint (a capability prompt_test.go pins).
+// Losing that is the worse failure, and the model is separately told never to
+// describe a page it has not fetched through the confirmed inspect path.
+// slackInnerEvent likewise does not decode `attachments` (the unfurl block), for
+// the same reason: an unfurl is evidence about a link, not about an attachment.
 // TODO(upstream-contract): relies on Slack stamping the file_share subtype on
 // every upload, and on the files array being omittable for a file this app
 // cannot see.

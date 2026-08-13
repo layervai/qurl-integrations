@@ -248,6 +248,15 @@ func TestAgentDeterministicReply(t *testing.T) {
 		{"literal help", slackInnerEvent{}, "help", agentHelpReply},
 		{"ordinary request reaches the model", slackInnerEvent{}, "what can I reach?", ""},
 		{"ordinary request with an attachment does not", slackInnerEvent{Files: oneFile}, "what can I reach?", agentUnsupportedMediaReply},
+		// A canvas or file shared as a LINK is ordinary message text: no files entry
+		// and no file_share subtype, so it is not an upload and is not refused. These
+		// pin that on purpose. A text-side permalink detector would take the whole
+		// turn with it — the media case wins outright — so the second row, a
+		// legitimate propose_protect_url request against a Slack-hosted https:// URL,
+		// would stop being answered. agentUnsupportedMediaReply is scoped to
+		// attachments so it does not promise the refusal these rows forbid.
+		{"a linked canvas is not an upload", slackInnerEvent{}, "what's in https://acme.slack.com/docs/T1/F2", ""},
+		{"protecting a Slack file URL reaches the model", slackInnerEvent{}, "protect https://acme.slack.com/files/U1/F2/report.pdf as $report", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -864,6 +873,36 @@ func TestUnsupportedMediaReplyOffersAReachableRoute(t *testing.T) {
 		if !strings.Contains(agentUnsupportedMediaReply, want) {
 			t.Errorf("unsupported-media reply must mention %q so a converted paste has a route it can take; got %q", want, agentUnsupportedMediaReply)
 		}
+	}
+}
+
+// TestUnsupportedMediaReplyLeadsWithTheTextOnlyRule pins the promise to what
+// agentEventHasUpload detects. A canvas shared as a LINK is never refused (see
+// TestAgentDeterministicReply), so a reply that opens by listing refused media
+// types teaches "canvases are refused" — a boundary this surface does not
+// enforce, which is the broken promise the reply exists to avoid.
+//
+// The fix is order, not vocabulary: state the rule that actually holds (this
+// surface reads a message's text) BEFORE naming any medium, so the takeaway
+// generalizes to the linked shape instead of contradicting it. Both checks are
+// positional so rewording stays free.
+func TestUnsupportedMediaReplyLeadsWithTheTextOnlyRule(t *testing.T) {
+	nouns := []string{"file", "image", "canvas"}
+	firstNoun := len(agentUnsupportedMediaReply)
+	for _, noun := range nouns {
+		if i := strings.Index(agentUnsupportedMediaReply, noun); i >= 0 && i < firstNoun {
+			firstNoun = i
+		}
+	}
+	if firstNoun == len(agentUnsupportedMediaReply) {
+		return // names no medium at all: nothing to over-promise.
+	}
+	rule := strings.Index(agentUnsupportedMediaReply, "text")
+	if rule < 0 || rule > firstNoun {
+		t.Errorf("unsupported-media reply must state the text-only rule before it names a medium, so a reader learns a boundary that also holds for a linked canvas; got %q", agentUnsupportedMediaReply)
+	}
+	if scope := strings.Index(agentUnsupportedMediaReply, "attach"); scope < 0 || scope > firstNoun {
+		t.Errorf("unsupported-media reply must scope the media it names to attachments — presence detection refuses nothing else; got %q", agentUnsupportedMediaReply)
 	}
 }
 

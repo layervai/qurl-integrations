@@ -155,6 +155,14 @@ including one Slack made out of typed text — and the limitation must name the
 snippet case and route to `/qurl help`, because retyping the paste would only
 reproduce the snippet.
 
+The limitation is scoped to attachments, and its wording states the rule that
+produces it: the agent reads a message's text and nothing else. A canvas or file
+shared as a **link** is ordinary message text, so it is answered normally rather
+than refused — the agent works from the text of the message, never from the
+linked document's contents, which it cannot fetch without a confirmed inspect
+action. Expect no limitation reply for a linked canvas, and expect the
+limitation's wording not to claim one.
+
 ## Evidence to retain
 
 Keep reviewer evidence outside this repository:
