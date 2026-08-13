@@ -1662,10 +1662,16 @@ func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
 	}
 }
 
+func TestSetupSyncBudgetsFitSlackAckWindow(t *testing.T) {
+	const slackAckWindow = 3 * time.Second
+	if got := adminGateBudget + setupStateMintBudget; got >= slackAckWindow {
+		t.Fatalf("setup owner-gate + state-mint budgets = %s, want below Slack ack window %s", got, slackAckWindow)
+	}
+}
+
 func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {"/qurl"},
@@ -1698,8 +1704,8 @@ func TestSlashCommandSetup_RequiresEmail(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	setupCfg := newTestOAuthSetupConfig()
+	h.SetOAuthSetup(setupCfg)
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1738,7 +1744,7 @@ func TestSlashCommandSetupWithEmail_RepliesWithPasswordlessStartURL(t *testing.T
 	if err != nil {
 		t.Fatalf("unescape state: %v", err)
 	}
-	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	verified, err := setupCfg.StateStore.StartState(context.Background(), stateRaw, fixedNow.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("minted state failed VerifyState: %v", err)
 	}
@@ -1754,8 +1760,7 @@ func TestSlashCommandSetupWithEmail_RateLimitsSetupLinksPerWorkspaceUser(t *test
 	h := newTestHandler(t, noopQURLServer(t))
 	now := fixedNow
 	h.now = func() time.Time { return now }
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	invoke := func(t *testing.T, teamID, userID string) string {
 		t.Helper()
@@ -1807,8 +1812,7 @@ func TestSlashCommandSetupWithRotate_RateLimitCopyKeepsModeFlag(t *testing.T) {
 	h := newAdminTestHandler(t, ts)
 	now := fixedNow
 	h.now = func() time.Time { return now }
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	for i := 0; i < setupLinkRateLimitMax; i++ {
 		text := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)[respFieldText]
@@ -1829,8 +1833,8 @@ func TestSlashCommandSetupWithRotate_RateLimitCopyKeepsModeFlag(t *testing.T) {
 func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 	ts := newAdminTestServers(t)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	setupCfg := newTestOAuthSetupConfig()
+	h.SetOAuthSetup(setupCfg)
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1869,7 +1873,7 @@ func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unescape state: %v", err)
 	}
-	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	verified, err := setupCfg.StateStore.StartState(context.Background(), stateRaw, fixedNow.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("minted state failed VerifyState: %v", err)
 	}
@@ -1883,8 +1887,7 @@ func TestSlashCommandSetupWithRotate_RepliesWithRotateState(t *testing.T) {
 
 func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1914,8 +1917,7 @@ func TestSlashCommandSetupWithRotate_RejectsMissingAdminStore(t *testing.T) {
 
 func TestSlashCommandSetupWithRepoint_RejectsMissingAdminStore(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1947,8 +1949,7 @@ func TestSlashCommandSetupWithRotate_NonOwnerDeniedBeforeStateMint(t *testing.T)
 	ts := newAdminTestServers(t)
 	ts.seedNonAdmin(t)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -1980,8 +1981,8 @@ func TestSlashCommandSetupWithShapeBadLegacyOwner_AllowsPlainSetupReclaim(t *tes
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	setupCfg := newTestOAuthSetupConfig()
+	h.SetOAuthSetup(setupCfg)
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
 	text := resp[respFieldText]
@@ -2000,7 +2001,7 @@ func TestSlashCommandSetupWithShapeBadLegacyOwner_AllowsPlainSetupReclaim(t *tes
 	if err != nil {
 		t.Fatalf("unescape state: %v", err)
 	}
-	verified, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second))
+	verified, err := setupCfg.StateStore.StartState(context.Background(), stateRaw, fixedNow.Add(30*time.Second))
 	if err != nil {
 		t.Fatalf("minted state failed VerifyState: %v", err)
 	}
@@ -2013,8 +2014,7 @@ func TestSlashCommandSetupWithRotate_RejectsShapeBadLegacyOwnerBeforeStateMint(t
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup --rotate Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
 	text := resp[respFieldText]
@@ -2030,8 +2030,7 @@ func TestSlashCommandSetupWithRepoint_RejectsShapeBadLegacyOwnerBeforeStateMint(
 	ts := newAdminTestServers(t)
 	ts.seedWorkspace(t, testAdminTeamID, "auth0|legacy-owner", testAdminUserID, testWorkspaceConfiguredAt)
 	h := newAdminTestHandler(t, ts)
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	resp := slashResponseForWorkspaceUser(t, h, commandUser, "setup --repoint Admin+Setup@Example.COM", testAdminTeamID, testAdminUserID)
 	text := resp[respFieldText]
@@ -2071,8 +2070,7 @@ func TestParseSetupSubcommandModes(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -2097,8 +2095,7 @@ func TestSlashCommandSetupWithEmail_RejectsInvalidEmail(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RejectsUnknownFlagAsUsage(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -2126,8 +2123,7 @@ func TestSlashCommandSetupWithEmail_RejectsUnknownFlagAsUsage(t *testing.T) {
 
 func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 
 	body := url.Values{
 		"command": {commandUser},
@@ -2156,14 +2152,13 @@ func TestSlashCommandSetupWithEmail_RejectsMultiArgUsage(t *testing.T) {
 // future refactor that accidentally re-wires it.
 func TestSetOAuthSetupPanicsOnDoubleCall(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic on second SetOAuthSetup call")
 		}
 	}()
-	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	h.SetOAuthSetup(newTestOAuthSetupConfig())
 }
 
 func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {

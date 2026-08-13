@@ -64,6 +64,24 @@ TERMINOLOGY
 
 `
 
+// finalAnswerDirective is appended to the per-turn context block on the final,
+// tool-free round ([Agent.finalAnswer]) — the turn ran out of budget or
+// iterations and this reply is the last thing it will say. It goes in the SYSTEM
+// block, not the transcript: it is our instruction, never something a user
+// message could forge, and it leaves the cached [systemPreamble] prefix intact.
+//
+// It steers the model away from the two useless shapes a cut-short turn tends to
+// produce — "let me check that for you" (there is no next round) and a confident
+// answer about something no read confirmed — toward the honest one: what is
+// known, what is not, and what the user can do next.
+const finalAnswerDirective = `
+This is your final reply for this turn: there is no more time to gather information and your tools are disabled for it.
+- Answer now, from what this conversation already established. Do not say you will check, look up, or get back to them.
+- Do not state anything about a resource that a read tool did not confirm earlier in this turn. If a lookup did not complete, say plainly what you could not confirm.
+- Always give the user a next step — re-asking, a narrower question, or the specific ` + "`/qurl`" + ` command that does it directly.
+- If their request needs an action, describe the action in one line and say it still needs their confirmation. You cannot propose it on this reply.
+`
+
 // systemPrompt builds the full per-turn system prompt: the constant
 // [systemPreamble] followed by the immutable per-turn context (channel, caller,
 // admin status). Kept as the single-string view used in tests; the live loop

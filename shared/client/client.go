@@ -104,6 +104,12 @@ var ErrCreateResourceTunnelRejectsTargetURL = errors.New("create resource: type=
 // ErrCreateAPIKeyNilInput is returned by CreateAPIKey when input is nil.
 var ErrCreateAPIKeyNilInput = errors.New("create api key: input is nil")
 
+// ErrCreateAPIKeyMissingKind is returned by CreateAPIKey when Kind is empty.
+// `kind` is required by the kind-first credential contract, so the server
+// returns 400 either way — failing fast saves a round-trip and yields a typed
+// Go error instead of an opaque wire rejection.
+var ErrCreateAPIKeyMissingKind = errors.New("create api key: kind is required")
+
 // ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
 var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
 
@@ -156,18 +162,33 @@ const ResourceTypeURL = "url"
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
 
+// Credential kinds and targets for `POST /v1/api-keys`.
+//
+// TODO(upstream-contract): these mirror qurl-service's kind-first
+// `CreateApiKeyRequest` enums; they must move in lockstep with that schema.
+// The Slack workspace-key mint keeps its own copy of the `api_key` kind in
+// apps/slack/internal/oauth (that package hand-rolls its HTTP client and does
+// not import shared/client).
 const (
 	// CredentialKindEnrollmentToken is the one-shot credential kind used for
 	// headless enrollment.
 	CredentialKindEnrollmentToken = "enrollment_token"
+	// CredentialKindAPIKey is the ordinary, long-lived credential kind.
+	CredentialKindAPIKey = "api_key"
 	// CredentialTargetConnector constrains an enrollment token to Connector
 	// enrollment.
 	CredentialTargetConnector = "connector"
 	// CredentialClaimTypeConnector binds an enrollment token to one Connector
-	// resource identifier.
+	// resource identifier. Sharing the literal "connector" with
+	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
+	// are independent enums in the upstream schema that happen to agree here,
+	// so they stay separate constants and may diverge without a coupled edit.
 	CredentialClaimTypeConnector = "connector"
-	// APIKeyTypeTunnelBootstrap is retained only to decode legacy responses
-	// during rollout. New requests must use CredentialKindEnrollmentToken.
+	// APIKeyTypeTunnelBootstrap is the retired `key_type` value. Response
+	// decoding does not need it — APIKey.KeyType keys off the `key_type` JSON
+	// tag — so it survives only for the tests that pin legacy-response decode
+	// during the producer rollout. New requests must use
+	// CredentialKindEnrollmentToken.
 	APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
 )
 
@@ -747,8 +768,10 @@ type APIKey struct {
 	Kind      string            `json:"kind,omitempty"`
 	Target    string            `json:"target,omitempty"`
 	Claims    []CredentialClaim `json:"claims,omitempty"`
-	// Legacy response fields are accepted during the producer rollout but are
-	// never present on CreateAPIKeyInput, so this client cannot send them.
+	// Legacy response fields, decoded so a pre-cutover producer's response
+	// still round-trips during the rollout window. No production code reads
+	// them, and they are absent from CreateAPIKeyInput, so this client cannot
+	// send them. Drop both once every environment is on the kind-first API.
 	KeyType    string `json:"key_type,omitempty"`
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }
@@ -889,6 +912,12 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*APIKey, error) {
 	if input == nil {
 		return nil, ErrCreateAPIKeyNilInput
+	}
+	// Kind presence is structural, so it is checked before the
+	// idempotency-key bytes (a request-decoration error) — a caller missing
+	// both should learn about the missing kind first.
+	if strings.TrimSpace(input.Kind) == "" {
+		return nil, ErrCreateAPIKeyMissingKind
 	}
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err

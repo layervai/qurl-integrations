@@ -43,6 +43,7 @@ const (
 	envQURLBindingTTLContract     = "QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT"
 	envQURLAPIKeyMintTTLContract  = "QURL_API_KEY_MINT_IDEMPOTENCY_TTL_CONTRACT"
 	envSlackRateLimitEnabled      = "QURL_SLACK_RATE_LIMIT_ENABLED"
+	envAuth0ExpectedAudience      = "AUTH0_EXPECTED_AUDIENCE"
 	envSlackBotTokenRotation      = "QURL_SLACK_BOT_TOKEN_ROTATION_ENABLED"
 	connectorImageFallbackSandbox = "dev-sandbox"
 	connectorImageFallbackOptIn   = envQURLConnectorImageFallback + "=" + connectorImageFallbackSandbox
@@ -226,7 +227,7 @@ func run() error {
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	// DM seam for secret-bearing user deliveries (`/qurl get dm:true` and qURL
-	// Connector bootstrap keys). Same token lookup + Grid fallback as channel posts.
+	// Connector enrollment tokens). Same token lookup + Grid fallback as channel posts.
 	postDM := newSlackPostDMFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
 	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
 	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
@@ -498,8 +499,8 @@ func registerOptionalSetupRoutes(ctx context.Context, rootMux *http.ServeMux, pr
 		oauth.RegisterRoutes(rootMux, oauthCfg)
 		slog.Info("registered /oauth/qurl/{start,callback} routes")
 		handler.SetOAuthSetup(oauth.SetupConfig{
-			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
+			StateStore:   oauthCfg.StateStore,
 		})
 		// Operator reminder: /qurl-admin carries the admin verbs (tunnel
 		// install, set-alias, admin add/remove/list/revoke). It must be
@@ -945,17 +946,42 @@ func missingOAuthEnvVars(vals map[string]string) []string {
 // degraded silently into a fail-fast startup error.
 var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than required minimum")
 
+// validateAuth0AudienceMatchesExpected fails fast when infra provides the
+// Auth0 API identifier expected for this qURL endpoint and AUTH0_AUDIENCE
+// drifts from it. The endpoint->audience mapping intentionally lives in
+// deployment config so sandbox/internal domains are not mirrored in public
+// source. AUTH0_AUDIENCE is compared exactly because Auth0 API identifiers
+// are exact-match strings; only the infra-provided expected value is trimmed
+// before comparison. The caller rejects surrounding whitespace in audience
+// before calling this helper because that raw value is sent to Auth0. Leaving
+// the expected value unset disables only this drift check, preserving
+// local/self-hosted deployments that own their own audience contract.
+func validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience string) error {
+	expectedAudience = strings.TrimSpace(expectedAudience)
+	if expectedAudience == "" || audience == expectedAudience {
+		return nil
+	}
+	return fmt.Errorf(
+		"AUTH0_AUDIENCE %q does not exactly match %s %q for QURL_ENDPOINT %q",
+		audience, envAuth0ExpectedAudience, expectedAudience, qurlEndpoint)
+}
+
 // buildOAuthConfig assembles the oauth.Config from env. Returns
 // (cfg, false, nil) when any required env var is missing — the caller
 // logs and skips route registration so a sandbox boot with no Auth0
 // configured still serves the existing Slack surface. Returns
 // (_, false, err) when a required env var is set but malformed
 // (short secret, non-HTTPS SlackBaseURL) — the caller fails-fast.
+// run() initializes the workspace DDB provider unconditionally before this
+// function, so no supported deployment can enable OAuth without usable DDB.
 //
 // Required env vars:
 //
 //	AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE
 //	SLACK_BASE_URL, OAUTH_STATE_SECRET, QURL_ENDPOINT
+//
+// TODO(#864): remove OAUTH_STATE_SECRET from this required set and oauth.Config
+// after the signed-state deploy-overlap parser is retired.
 //
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
@@ -984,6 +1010,9 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
+	// TODO(upstream-contract): private infra owns the QURL_ENDPOINT ->
+	// Auth0 audience mapping and sets this env var for managed deployments.
+	expectedAudience := os.Getenv(envAuth0ExpectedAudience)
 	emailConnection := strings.TrimSpace(os.Getenv("AUTH0_EMAIL_CONNECTION"))
 	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
@@ -1005,6 +1034,12 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if len(missing) > 0 {
 		slog.Warn("OAuth routes NOT registered — required env vars unset", "missing", missing)
 		return oauth.Config{}, false, nil
+	}
+	if strings.TrimSpace(audience) != audience {
+		return oauth.Config{}, false, fmt.Errorf("AUTH0_AUDIENCE must not contain surrounding whitespace (got %q)", audience)
+	}
+	if err := validateAuth0AudienceMatchesExpected(qurlEndpoint, audience, expectedAudience); err != nil {
+		return oauth.Config{}, false, err
 	}
 	// SLACK_BASE_URL must be HTTPS: the state cookie is Secure, and a
 	// browser silently drops Set-Cookie: Secure on an http:// response,
@@ -1036,18 +1071,17 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if err != nil {
 		return oauth.Config{}, false, err
 	}
+	stateStore, err := oauth.NewDDBStateStore(provider)
+	if err != nil {
+		return oauth.Config{}, false, fmt.Errorf("OAuth state store init failed: %w", err)
+	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch
 	// (bounded inside NewJWKSVerifier). The callback uses the verifier
 	// to extract the id_token `sub` claim, which becomes the
 	// workspace_mappings OwnerID at BindWorkspace time. Without a
-	// usable verifier, every callback in production would refuse the
-	// install (no OwnerID → no bind → 500). Fail-fast at boot when
-	// adminStore is wired so the operator sees the configuration error
-	// immediately instead of after the first user tries /qurl setup.
-	// On sandbox / no-DDB deploys (adminStore==nil) the bind is
-	// skipped anyway, so the verifier is downgraded to "email line
-	// missing on the success page" — non-fatal, log and continue.
+	// usable verifier, nonce binding cannot be enforced and every callback must
+	// fail closed. Surface that at boot instead of after the first setup attempt.
 	issuer := "https://" + domain + "/"
 	// id_tokens carry the application's client_id as their `aud`
 	// claim, distinct from AUTH0_AUDIENCE (the API resource server
@@ -1055,11 +1089,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// clientID here matches what Auth0 actually stamps into id_tokens.
 	verifier, err := newJWKSVerifier(ctx, issuer, clientID)
 	if err != nil {
-		if adminStore != nil {
-			return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed and AdminStore is wired — every callback would refuse the install: %w", err)
-		}
-		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task (AdminStore=nil so bind is skipped anyway)", "error", err)
-		verifier = nil
+		return oauth.Config{}, false, fmt.Errorf("JWKS verifier init failed — OAuth nonce verification is unavailable: %w", err)
 	}
 
 	return oauth.Config{
@@ -1072,6 +1102,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		SetupBindingReplayWindowHours: setupBindingReplayWindowHours,
 		APIKeyMintReplayWindowHours:   apiKeyMintReplayWindowHours,
 		OAuthStateSecret:              []byte(stateSecret),
+		StateStore:                    stateStore,
 		Provider:                      provider,
 		IDTokenVerifier:               verifier,
 		Minter:                        &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},

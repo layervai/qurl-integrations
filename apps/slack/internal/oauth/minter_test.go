@@ -933,6 +933,51 @@ func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
 	}
 }
 
+// TestHTTPAPIKeyMinterReplacementMintBadRequestCarriesContext pins the
+// debuggability of the kind-first cutover's most likely failure: a producer
+// that does not yet accept `kind` rejects the workspace mint with 400. 400 is
+// not auth-class, so it never becomes a DependencyAuthFailureError and the
+// parsed envelope context used to be discarded — leaving operators with only
+// "qurl-service /v1/api-keys returned 400". The code and request ID must
+// survive into the error an operator actually sees.
+func TestHTTPAPIKeyMinterReplacementMintBadRequestCarriesContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_field","title":"Bad Request","detail":"kind is required"},"meta":{"request_id":"req_kind"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "access-token", testTeamID, "k_old")
+	if err == nil {
+		t.Fatal("400 from the mint endpoint must be an error")
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("400 must not be classified as dependency auth failure: %+v", authErr)
+	}
+	for _, want := range []string{"400", "code=invalid_field", "request_id=req_kind"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q so the rejection is debuggable", err.Error(), want)
+		}
+	}
+}
+
+// TestErrorEnvelopeSuffixOmitsInternalSentinel keeps the internal
+// structured-envelope sentinel out of operator-facing error text; it is a
+// classification marker, not a qurl-service error code.
+func TestErrorEnvelopeSuffixOmitsInternalSentinel(t *testing.T) {
+	t.Parallel()
+
+	if got := errorEnvelopeSuffix(structuredErrorEnvelopeCode, "req_1"); got != " request_id=req_1" {
+		t.Errorf("suffix = %q, want the sentinel dropped and only the request id kept", got)
+	}
+	if got := errorEnvelopeSuffix("", ""); got != "" {
+		t.Errorf("suffix = %q, want empty when there is no context to add", got)
+	}
+}
+
 func TestHTTPAPIKeyMinterReplacementMintQuotaExceeded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
