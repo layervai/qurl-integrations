@@ -814,11 +814,15 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 //
 // TODO(upstream-contract): this applies the event path's two-signal rule to a
 // DIFFERENT Slack surface, so it additionally assumes a conversations.replies read
-// describes an upload the way a delivery does. The two signals do NOT back each
-// other up equally here: the app does not request files:read (see
-// slackinstall.DefaultBotScopes), and Slack gates file metadata in message reads on
-// that scope, so `subtype` is likely the only signal that survives in production.
-// A change to it would silently stop annotating captions.
+// describes an upload the way a delivery does. Do not read the two signals as
+// backing each other up here. Slack gates file metadata in message reads on
+// files:read, which slackinstall.DefaultBotScopes does not request — and that set
+// carries no history scope either, so any deployment where this seam works at all
+// is running an operator-expanded SLACK_BOT_SCOPES this repo cannot see. Whether
+// the files array arrives is therefore unknown from here; `subtype` is the signal
+// to assume is load-bearing, and a change to it would silently stop annotating
+// captions with every test still green, since the tests all supply the fields
+// directly.
 func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
 	var parsed slackEventFiles
 	if len(files) > 0 && json.Unmarshal(files, &parsed) != nil {
@@ -1133,6 +1137,11 @@ func noteAgentHistoryAttachment(text string) string {
 // answer "did this thread's context claim an attachment" during an incident, and a
 // step change in the rate is the signal that Slack's read-back shape moved. Notes
 // are counted rather than messages because a merged turn can carry more than one.
+//
+// Approximate by construction: the note is ordinary user-role text, so a user who
+// pastes it verbatim inflates the count. That is fine for a trend signal and is the
+// same unauthenticated-marker trade agentHistoryAttachmentNote documents — just do
+// not read the field as an exact attachment tally.
 func agentHistoryAttachmentCount(history []agent.Message) int {
 	notes := 0
 	for _, msg := range history {
