@@ -33,6 +33,37 @@ describe('private-host module is dependency-free', () => {
   });
 });
 
+describe('unwrapIPv4Mapped — every IPv4-in-IPv6 embedding (#1043)', () => {
+  // Each notation carries an IPv4 in the low 32 bits, so each is another way
+  // to spell a private IPv4. Decoding beats prefix-rejection: only the mapped
+  // form routes on a stock host, but an IPv6-only subnet with DNS64/NAT64 (a
+  // supported AWS VPC config) makes 64:ff9b:: route for real.
+  it.each([
+    ['::ffff:7f00:1', '127.0.0.1', 'IPv4-mapped, hex'],
+    ['::ffff:127.0.0.1', '127.0.0.1', 'IPv4-mapped, dotted'],
+    ['::7f00:1', '127.0.0.1', 'IPv4-compatible, hex'],
+    ['::127.0.0.1', '127.0.0.1', 'IPv4-compatible, dotted'],
+    ['::ffff:0:7f00:1', '127.0.0.1', 'IPv4-translated (SIIT)'],
+    ['64:ff9b::7f00:1', '127.0.0.1', 'NAT64 well-known prefix'],
+    ['64:ff9b::a9fe:a9fe', '169.254.169.254', 'NAT64 to IMDS'],
+  ])('decodes %s -> %s (%s)', (host, expected) => {
+    expect(unwrapIPv4Mapped(host)).toBe(expected);
+  });
+
+  it('decodes rather than blanket-rejecting, so NAT64 to a public IP survives', () => {
+    // 64:ff9b::808:808 is NAT64 reaching 8.8.8.8. Rejecting the prefix
+    // outright would break a legitimately reachable target.
+    expect(isPrivateHost('64:ff9b::808:808')).toBe(false);
+    expect(isPrivateHost('64:ff9b::cb00:710a')).toBe(false);  // 203.0.113.10
+    expect(isPrivateHost('::808:808')).toBe(false);
+    expect(isPrivateHost('::ffff:0:808:808')).toBe(false);
+  });
+
+  it('leaves a lone hextet unmatched — it can only mean 0/8 or 255.255/16', () => {
+    expect(unwrapIPv4Mapped('::a')).toBeNull();
+  });
+});
+
 describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
   // new URL() re-serializes ::ffff:127.0.0.1 to the hex form ::ffff:7f00:1,
   // so the hex tail is the form callers actually pass. Screening only the
@@ -61,11 +92,22 @@ describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
     expect(isPrivateHost('::FFFF:7F00:1')).toBe(true);
   });
 
-  it('returns null for non-mapped literals', () => {
-    expect(unwrapIPv4Mapped('::1')).toBeNull();
+  it('returns null when there is no embedded IPv4 to decode', () => {
+    expect(unwrapIPv4Mapped('::')).toBeNull();
     expect(unwrapIPv4Mapped('fe80::1')).toBeNull();
-    expect(unwrapIPv4Mapped('::ffff:zz:1')).toBeNull();
-    expect(unwrapIPv4Mapped('::ffff:1:2:3')).toBeNull();
+    expect(unwrapIPv4Mapped('::ffff:zz:1')).toBeNull();   // not hex
+    expect(unwrapIPv4Mapped('::ffff:1:2:3')).toBeNull();  // not exactly two groups
+  });
+
+  it('reads an all-digit lone hextet as decimal, which is harmless', () => {
+    // `::1` hits the dotted branch and decodes to "1", not null — the same
+    // behavior as the inline guard this table replaced. Safe either way: the
+    // decimal and hex readings of a lone hextet both land in 0.0.0.0/8 or
+    // 255.255.0.0/16, never a sensitive range, and isPrivateHost short-circuits
+    // `::1` as loopback before it ever reaches the decode.
+    expect(unwrapIPv4Mapped('::1')).toBe('1');
+    expect(isPrivateHost('::1')).toBe(true);
+    expect(isPrivateHost('1')).toBe(true); //  decimal 1 -> 0.0.0.1, in 0/8
   });
 });
 

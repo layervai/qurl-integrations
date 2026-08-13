@@ -94,18 +94,44 @@ function ipv4LocalScope(octets, { includeCgnat = false, includeMulticast = false
 }
 
 /**
- * Unwrap an IPv4-mapped IPv6 literal to its dotted-quad form, or null.
+ * Decode the IPv4 embedded in an IPv6 literal to its dotted-quad form, or
+ * null when the host carries none.
+ *
+ *   ::ffff:X:Y     IPv4-mapped     (::ffff:0:0/96)
+ *   ::X:Y          IPv4-compatible (::/96, deprecated by RFC 4291)
+ *   ::ffff:0:X:Y   IPv4-translated (SIIT)
+ *   64:ff9b::X:Y   NAT64 well-known prefix (RFC 6052)
+ *
+ * DECODE the embedded IPv4 and let the caller re-check it, rather than
+ * reasoning about which notations the host stack happens to route: only the
+ * mapped form routes on a stock host, but an IPv6-only subnet with DNS64/NAT64
+ * (a supported AWS VPC config) makes 64:ff9b:: route for real, which would
+ * flip the answer without this file changing. Decoding, not blanket
+ * prefix-rejection, is also what avoids over-blocking: `64:ff9b::808:808` is
+ * NAT64 reaching 8.8.8.8, which is public and must stay reachable.
+ *
+ * Both SPELLINGS serve a different leg, so neither is dead code:
+ *   - dotted `::ffff:127.0.0.1` — what inet_ntop (hence dns.lookup) renders,
+ *     so it is what a resolve-then-check step feeds back in; reachable from
+ *     attacker-controlled DNS via a hostile AAAA.
+ *   - hex `::ffff:7f00:1` — what WHATWG re-serializes a dotted literal to, so
+ *     it is what `new URL().hostname` yields. Matching dotted-only checked a
+ *     form that never arrives on that leg (#1035).
+ *
+ * Groups are {1,4} because IPv6 serialization suppresses each hextet's leading
+ * zeros (`::ffff:a00:1` = 10.0.0.1). Requiring exactly two groups keeps every
+ * match an EXACT decode; a lone hextet (`::a`) can only denote 0.0.0.0/8 or
+ * 255.255.0.0/16, never a sensitive range, so leaving it unmatched is safe — as
+ * is the dotted branch reading an all-digit lone hextet (`::1234`) as decimal,
+ * since both readings land in those same two ranges. The dotted branch covers
+ * only `::`/`::ffff:` on purpose: the SIIT and NAT64 dotted spellings never
+ * arrive, because the URL leg re-serializes them to hex and inet_ntop renders
+ * only the mapped block dotted.
  *
  * `host` must be bracket-stripped. Case is normalized defensively: the hex
- * tail is matched with [0-9a-f], and a composer who forgot to lowercase would
- * get a wrong `null` here — which is the fail-OPEN direction for the SSRF
+ * tails are matched with [0-9a-f], and a composer who forgot to lowercase
+ * would get a wrong `null` here — the fail-OPEN direction for the SSRF
  * caller, so this module does not rely on the contract being honoured.
- *
- * BOTH tail forms matter, and missing the hex one is a real SSRF bypass
- * (issue #1035): `new URL()` re-serializes `::ffff:127.0.0.1` to the hex form
- * `::ffff:7f00:1`, so the dotted tail is the form a human types and the hex
- * tail is the form callers actually pass. Screening only the dotted tail lets
- * `::ffff:a9fe:a9fe` (169.254.169.254, the IMDS address) read as public.
  *
  * The returned string is NOT validated as a well-formed quad — the dotted
  * branch hands back its raw capture, so `::ffff:1.2.3.4.5` yields
@@ -113,19 +139,15 @@ function ipv4LocalScope(octets, { includeCgnat = false, includeMulticast = false
  * through isPrivateHost, the boot path runs it through strict
  * parseIPv4Octets); a future composer must do the same rather than treat this
  * as a canonical address.
- *
- * Deliberately common-forms-only: the deprecated IPv4-COMPATIBLE form
- * (`::127.0.0.1`, which serializes to `::7f00:1`) falls through, as it is
- * dead in practice and `::1` covers realistic loopback.
  */
 function unwrapIPv4Mapped(rawHost) {
   const host = String(rawHost).toLowerCase();
-  const dotted = /^::ffff:([0-9.]+)$/.exec(host);
+  const dotted = /^::(?:ffff:)?([0-9.]+)$/.exec(host);
   if (dotted) return dotted[1];
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  const hex = /^(?:::ffff:0:|::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
   if (!hex) return null;
   const [hi, lo] = hex.slice(1).map(group => parseInt(group, 16));
-  return [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.');
+  return [(hi >>> 8) & 0xFF, hi & 0xFF, (lo >>> 8) & 0xFF, lo & 0xFF].join('.');
 }
 
 /**
