@@ -255,6 +255,10 @@
     "message": "Failed to send runtime message.",
     "description": "Fallback error shown when the popup cannot contact the background worker at all"
   },
+  "upload_preflight_timeout_error": {
+    "message": "Timed out preparing the upload. Please try again.",
+    "description": "Shown when resolving the qURL API base before an upload exceeds the pre-flight timeout"
+  },
   "upload_timeout_error": {
     "message": "Upload timed out after 5 minutes.",
     "description": "Shown when a file upload exceeds the configured request timeout"
