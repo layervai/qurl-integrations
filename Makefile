@@ -191,9 +191,13 @@ check-teams:
 # Offline subset only: `npm test` there also runs the live suite, which mints
 # real qURL resources and posts real Discord messages against credentials in
 # e2e/.env (see e2e/README.md). No .nvmrc here, so no version warning.
+#
+# -p is explicit rather than relying on tsc's upward search, and names the same
+# config ts-jest compiles test:unit with (neither jest config overrides it), so
+# the typecheck cannot cover a different file set than the tests below.
 check-e2e:
 	cd e2e && npm ci --no-audit --no-fund
-	cd e2e && npx tsc --noEmit
+	cd e2e && npx tsc -p tsconfig.json --noEmit
 	cd e2e && npm run test:unit
 
 # Every Node.js suite at once, for changes that cross app boundaries; prefer a

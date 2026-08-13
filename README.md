@@ -67,9 +67,9 @@ pip install pre-commit && pre-commit install
 # Run all checks for the Go apps, shared/, and the repo itself (fmt, vet, lint, test)
 make check
 
-# The Node.js suites are opt-in; see CONTRIBUTING.md#nodejs-apps for which
-# target matches your change
-make check-node
+# The Node.js suites are opt-in — run the one matching your change
+# (make check-node runs all five, but that is five npm installs)
+make check-discord
 
 # Run all tests
 go test ./...
