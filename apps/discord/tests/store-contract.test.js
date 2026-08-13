@@ -3,9 +3,9 @@
  * boot-time shape assertion.
  *
  * Coverage goals:
- *   - contract's STORE_METHODS and STORE_CONSTANTS lists are frozen so
+ *   - contract's STORE_METHODS list is frozen so
  *     a typo / reassign can't silently shrink the contract.
- *   - assertStoreShape throws on missing methods, missing constants,
+ *   - assertStoreShape throws on missing methods,
  *     non-object inputs, and succeeds on a complete backend.
  *   - The default store singleton (store/index.js under the default
  *     STORE_TYPE) exercises every method + constant the contract
@@ -14,7 +14,6 @@
  */
 
 jest.mock('../src/config', () => ({
-  PENDING_LINK_EXPIRY_MINUTES: 30,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -25,7 +24,7 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-const { STORE_METHODS, STORE_CONSTANTS, assertStoreShape } = require('../src/store/contract');
+const { STORE_METHODS, assertStoreShape } = require('../src/store/contract');
 
 describe('store/contract', () => {
   describe('STORE_METHODS', () => {
@@ -51,27 +50,13 @@ describe('store/contract', () => {
     });
   });
 
-  describe('STORE_CONSTANTS', () => {
-    it('is frozen (mutation throws under strict mode)', () => {
-      expect(Object.isFrozen(STORE_CONSTANTS)).toBe(true);
-      expect(() => STORE_CONSTANTS.push('NEW_CONSTANT')).toThrow();
-    });
-
-    it('contains no duplicates', () => {
-      const uniq = new Set(STORE_CONSTANTS);
-      expect(uniq.size).toBe(STORE_CONSTANTS.length);
-    });
-  });
-
   describe('assertStoreShape', () => {
     // Build a minimal "complete" backend for the positive test: every
-    // contract method becomes a no-op function, every constant becomes
-    // a sentinel non-undefined value. Using this here (instead of
-    // loading ddb-store, which constructs the real DDB client at
-    // module-load) keeps this suite free of I/O side effects.
+    // contract method becomes a no-op function. Using this here
+    // (instead of loading ddb-store, which constructs the real DDB
+    // client at module-load) keeps this suite free of I/O side effects.
     const completeBackend = {};
     for (const m of STORE_METHODS) completeBackend[m] = () => undefined;
-    for (const c of STORE_CONSTANTS) completeBackend[c] = {};
 
     it('passes on a complete backend', () => {
       expect(() => assertStoreShape(completeBackend, 'test-backend')).not.toThrow();
@@ -79,19 +64,12 @@ describe('store/contract', () => {
 
     it('throws when a method is missing', () => {
       const incomplete = { ...completeBackend };
-      delete incomplete['createPendingLink'];
+      delete incomplete['getStats'];
       // `.toThrow(string)` does a substring match, safer than
       // `new RegExp(...)` if a future contract entry ever contains
       // regex metacharacters ($, ., parens, etc.).
       expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('broken-backend');
-      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('createPendingLink');
-    });
-
-    it('throws when a constant is missing', () => {
-      const incomplete = { ...completeBackend };
-      delete incomplete['BADGE_TYPES'];
-      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('broken-backend');
-      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('BADGE_TYPES');
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('getStats');
     });
 
     it('throws when the backend is not an object', () => {
@@ -100,10 +78,10 @@ describe('store/contract', () => {
       expect(() => assertStoreShape('not-an-object', 'string-backend')).toThrow(/string-backend.*not an object/);
     });
 
-    it('names both missing methods AND missing constants in a single throw (one error, two diagnoses)', () => {
+    it('names every missing method in a single throw (one error, all diagnoses)', () => {
       const incomplete = { ...completeBackend };
-      delete incomplete['createPendingLink'];
-      delete incomplete['BADGE_TYPES'];
+      delete incomplete['getStats'];
+      delete incomplete['healthCheck'];
       let caught;
       try {
         assertStoreShape(incomplete, 'double-gap');
@@ -113,16 +91,8 @@ describe('store/contract', () => {
       expect(caught).toBeDefined();
       // Substring contains — safer than regex if a future entry
       // ever has regex metacharacters.
-      expect(caught.message).toContain('createPendingLink');
-      expect(caught.message).toContain('BADGE_TYPES');
-    });
-
-    it('METHODS and CONSTANTS lists are disjoint — no name can be both', () => {
-      // A name listed in both would produce a confusing shape
-      // assertion (would appear as missing/present inconsistently
-      // depending on which check runs first). Cheap guard.
-      const overlap = STORE_METHODS.filter(m => STORE_CONSTANTS.includes(m));
-      expect(overlap).toEqual([]);
+      expect(caught.message).toContain('getStats');
+      expect(caught.message).toContain('healthCheck');
     });
 
     it('no apps/discord/src caller references the pre-rename `removeGuildApiKey` name', () => {
@@ -188,10 +158,6 @@ describe('store/index (default backend)', () => {
     expect(missing).toEqual([]);
   });
 
-  it('surfaces every STORE_CONSTANTS entry', () => {
-    const missing = STORE_CONSTANTS.filter(c => store[c] === undefined);
-    expect(missing).toEqual([]);
-  });
 });
 
 // Child-process tests for boot-time assertion paths. These are the

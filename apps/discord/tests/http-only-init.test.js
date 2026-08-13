@@ -150,7 +150,7 @@ describe('initHttpOnly', () => {
     expect(client.rest.setToken).toHaveBeenCalledWith('tok-abc');
   });
 
-  it('logs a WARN naming the cache-invalidation limitation in single-guild http-only mode', async () => {
+  it('logs a WARN naming the cache-freshness limitation in single-guild http-only mode', async () => {
     const client = makeClient();
     const refreshCache = jest.fn().mockResolvedValue(undefined);
     const logger = makeLogger();
@@ -160,7 +160,7 @@ describe('initHttpOnly', () => {
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn.mock.calls[0][0]).toMatch(/http-only mode/);
-    expect(logger.warn.mock.calls[0][0]).toMatch(/cache invalidation/i);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/cache updates/i);
     expect(logger.warn.mock.calls[0][0]).toMatch(/HTTP_ONLY_REFRESH_INTERVAL_MS/);
     clearInterval(timer);
   });
