@@ -34,8 +34,8 @@ type agentFakeDDB struct {
 	// retryer runs inside the DynamoDBClient call this fake replaces, so a write
 	// whose response is dropped never surfaces as the retryable 5xx — it surfaces
 	// as the conditional-check failure the NEXT attempt raised, with the first
-	// attempt's item already in the table. When set, the next PutItem does exactly
-	// that and clears the flag, so it is a one-shot rather than a broken client.
+	// attempt's item already in the table. Consumed by the next PutItem whatever
+	// that call does, so it is a true one-shot rather than a broken client.
 	lostResponse bool
 }
 
@@ -68,9 +68,15 @@ func (f *agentFakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ .
 	}
 	k := keyOf(in.Item)
 	existing, present := f.items[k]
-	if cond := aws.ToString(in.ConditionExpression); cond != "" {
+	// Consume the flag up front so it is a true one-shot. Clearing it only on the
+	// path below would leak it onto a later unrelated write whenever THIS write
+	// loses its condition outright.
+	lost := f.lostResponse
+	f.lostResponse = false
+	cond := aws.ToString(in.ConditionExpression)
+	if cond != "" {
 		if !f.evalCond(cond, existing, present, in.ExpressionAttributeValues) {
-			return nil, condFailure(in, existing, present)
+			return nil, condFailure(in.ReturnValuesOnConditionCheckFailure, existing)
 		}
 	}
 	f.items[k] = in.Item
@@ -78,23 +84,30 @@ func (f *agentFakeDDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ .
 		sk, _ := in.Item[attrAgentSK].(*ddbtypes.AttributeValueMemberS)
 		f.lastPutAt[sk.Value] = ttl.Value
 	}
-	if f.lostResponse {
+	if lost {
 		// The write above is attempt #1; its response never came back. Attempt #2
-		// replays the same conditional write and now loses to what #1 stored.
-		f.lostResponse = false
-		return nil, condFailure(in, f.items[k], true)
+		// replays the same conditional write against what #1 stored. Re-evaluate
+		// rather than assuming it loses: deriving the answer is what keeps this
+		// honest for a future marker whose condition would still pass on replay.
+		if cond != "" && !f.evalCond(cond, f.items[k], true, in.ExpressionAttributeValues) {
+			return nil, condFailure(in.ReturnValuesOnConditionCheckFailure, f.items[k])
+		}
 	}
 	return &dynamodb.PutItemOutput{}, nil
 }
 
-// condFailure builds the error a conditional PutItem fails with, modeling
-// ReturnValuesOnConditionCheckFailure=ALL_OLD. putMarker reads the stored item
-// back to tell its own retried write from a genuine race loss, so a fake that
-// always returned a bare error would leave that branch untestable — and would
-// quietly pass if the request stopped asking for ALL_OLD.
-func condFailure(in *dynamodb.PutItemInput, existing map[string]ddbtypes.AttributeValue, present bool) error {
+// condFailure builds the error a conditional write fails with, modeling
+// ReturnValuesOnConditionCheckFailure=ALL_OLD. Honoring the request field rather
+// than always attaching the item is the point: it is what makes the lost-response
+// tests fail if putMarker ever stops asking for ALL_OLD.
+//
+// Takes the field rather than the input struct so the PutItem and UpdateItem fakes
+// in this package share one encoding of that rule and cannot drift on it. No
+// "present" flag is needed — a lookup miss yields a nil map and maps.Clone(nil) is
+// nil, which is exactly the "no item came back" the SDK reports.
+func condFailure(rv ddbtypes.ReturnValuesOnConditionCheckFailure, existing map[string]ddbtypes.AttributeValue) error {
 	err := &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
-	if in.ReturnValuesOnConditionCheckFailure == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld && present {
+	if rv == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld {
 		err.Item = maps.Clone(existing)
 	}
 	return err
@@ -737,8 +750,9 @@ func TestMarkMediaNoticeSent_LostResponseStillClaims(t *testing.T) {
 }
 
 // TestMarkEventSeen_LostResponseStillReportsFirst pins that the recovery lives in
-// the shared putMarker body, not just the expired variant. A wrongly-dropped
-// duplicate would be invisible here — but that is not what this case is. The
+// the shared putMarker body, not just the expired variant. A dropped duplicate
+// would be invisible here, since that is what dedupe is for — but this case is
+// not a duplicate. The
 // marker is written BEFORE the handler acts, so reporting false for this call's
 // own write drops the event having processed it zero times, not once.
 func TestMarkEventSeen_LostResponseStillReportsFirst(t *testing.T) {
@@ -757,10 +771,32 @@ func TestMarkEventSeen_LostResponseStillReportsFirst(t *testing.T) {
 	}
 }
 
-// TestMarkMediaNoticeSent_PreTokenMarkerStillSuppresses pins the empty-token guard
-// in markerWrittenBy. A marker written before attrWriterToken existed reads back no
-// token; if an absent token compared equal to anything the cap would vanish exactly
-// during a rolling deploy, when both item shapes are live in the same table.
+// TestClaimPendingAction_LostResponseStillClaims is where this behavior change
+// carries the most weight. ClaimPendingAction is the last gate before a
+// user-confirmed mutation executes: before the writer token, a lost response meant
+// the click was silently swallowed and the mutation never ran at all. It must now
+// recover — while a genuine double-click, which mints its own token, still loses.
+func TestClaimPendingAction_LostResponseStillClaims(t *testing.T) {
+	f := newAgentFakeDDB()
+	f.lostResponse = true
+	s := newTestAgentStore(f)
+	ctx := context.Background()
+
+	claimed, err := s.ClaimPendingAction(ctx, "T1", "pa1")
+	if err != nil || !claimed {
+		t.Fatalf("a lost response must not swallow the confirmed mutation: claimed=%v err=%v", claimed, err)
+	}
+	if again, err := s.ClaimPendingAction(ctx, "T1", "pa1"); err != nil || again {
+		t.Fatalf("consume-once must survive the recovery: again=%v err=%v", again, err)
+	}
+}
+
+// TestMarkMediaNoticeSent_PreTokenMarkerStillSuppresses pins the rolling-deploy case
+// through the store: a marker written before attrWriterToken existed reads back no
+// token, which cannot match the real one this call carries, so it must still
+// suppress. If it matched, the cap would vanish exactly when both item shapes are
+// live in the same table. (The empty-token branch of markerWrittenBy is unreachable
+// from here — see TestMarkerWrittenBy.)
 func TestMarkMediaNoticeSent_PreTokenMarkerStillSuppresses(t *testing.T) {
 	f := newAgentFakeDDB()
 	s := newTestAgentStore(f)
@@ -804,6 +840,23 @@ func TestMarkerWrittenBy(t *testing.T) {
 	}
 	if markerWrittenBy(nil, "tok-a") {
 		t.Error("a condition failure that returned no item must not match")
+	}
+}
+
+// TestMarkerSKPrefix pins that the recovery log names the latch and nothing more.
+// The tail of a marker sk is an event id or a channel:user pair, so leaking it into
+// a log line would break the field contract the agent surface keeps.
+func TestMarkerSKPrefix(t *testing.T) {
+	for sk, want := range map[string]string{
+		eventSKPrefix + "Ev123":       eventSKPrefix,
+		pendClaimSKPrefix + "abc":     pendClaimSKPrefix,
+		mediaNoticeSKPrefix + "C1:U2": mediaNoticeSKPrefix,
+		"nohash":                      "",
+		"":                            "",
+	} {
+		if got := markerSKPrefix(sk); got != want {
+			t.Errorf("markerSKPrefix(%q) = %q, want %q", sk, got, want)
+		}
 	}
 }
 

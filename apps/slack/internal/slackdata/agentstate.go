@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -97,6 +98,15 @@ const (
 	// than waiting for the TTL reaper's multi-day sweep.
 	defaultMediaNoticeTTL = 5 * time.Minute
 )
+
+// markerLostResponseRecoveredMsg is the slog msg for the one branch the writer
+// token exists to reach: a conditional write that failed against THIS call's own
+// marker, i.e. the SDK retried a write whose response was lost. Kept as a stable
+// exact string so infra can key a CloudWatch metric filter on it the way
+// qurl-integrations-infra#1065 does for the turn-rate fail-open. Worth watching in
+// both directions — a nonzero rate says the retryer is replaying marker writes in
+// production, and a permanently zero one says this machinery is unearned.
+const markerLostResponseRecoveredMsg = "agent-state: marker write recovered after a lost response"
 
 // AgentStore is the DDB-direct accessor for conversation-mode state. It owns one
 // table (EnvAgentStateTable), separate from the [Store] tables, so the
@@ -290,11 +300,18 @@ func (s *AgentStore) putMarkerIfExpired(ctx context.Context, partition, sk strin
 //
 // Every marker carries a per-call writer token, which is what lets a failed
 // condition be told apart from a lost response. No custom retryer is configured,
-// so the SDK's standard retryer is live (3 attempts) and it retries INSIDE this
-// PutItem call: an attempt can create the item and have its response dropped,
-// leaving the next attempt to fail the condition against this call's own marker.
-// Reading the stored item back through ReturnValuesOnConditionCheckFailure and
-// matching the token reports that as created=true, because it was.
+// so the SDK's standard retryer is live (3 attempts by default, tunable via
+// AWS_MAX_ATTEMPTS/AWS_RETRY_MODE) and it retries INSIDE this PutItem call: an
+// attempt can create the item and have its response dropped, leaving the next
+// attempt to fail the condition against this call's own marker. Reading the
+// stored item back through ReturnValuesOnConditionCheckFailure and matching the
+// token reports that as created=true, because it was.
+//
+// TODO(upstream-contract): this rests on two AWS behaviors we do not control and
+// that no local test can fail on — the standard retryer retrying inside the call
+// (so a lost response arrives as a condition failure, not a retryable 5xx), and
+// PutItem honoring ALL_OLD on condition failure. agentFakeDDB models both, so if
+// either changes upstream this degrades silently back to the old behavior.
 //
 // Without it that case is indistinguishable from a genuine race loss, and for
 // MarkMediaNoticeSent the caller would conclude another writer won and stay
@@ -310,12 +327,20 @@ func (s *AgentStore) putMarkerIfExpired(ctx context.Context, partition, sk strin
 // compute an identical epoch, so every member of a burst would match and claim
 // the latch at once.
 func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl time.Duration, condition string, names map[string]string, values map[string]ddbtypes.AttributeValue) (created bool, err error) {
-	// rand.Text rather than the repo's hex nonce helper (oauth/state.go): it
-	// cannot fail, so a marker write keeps the error surface it has today.
-	// MarkEventSeen fails CLOSED on an error, and dropping a Slack event because
-	// a token could not be generated would be a worse bug than the one this
-	// fixes. Uniqueness per call is the whole requirement — the token never
-	// leaves the item, so it is not a security boundary.
+	// rand.Text rather than the repo's rand.Read+hex idiom (newPendingActionID in
+	// handler_agent_confirm.go): it returns no error, so a marker write keeps the
+	// error surface it has today. MarkEventSeen fails CLOSED on an error, and
+	// dropping a Slack event because a token could not be generated would be a
+	// worse bug than the one this fixes. (Neither can really fail on Go 1.26 —
+	// crypto/rand aborts the process instead — so the win is not plumbing a dead
+	// error, not fallible-vs-infallible.) Uniqueness per call is the whole
+	// requirement; the token never leaves the item, so it is not a security
+	// boundary.
+	//
+	// Minted once here, BEFORE the PutItem: the retryer rewinds and re-sends this
+	// same serialized item, so attempt #2 carries attempt #1's token. A token
+	// minted per ATTEMPT would never match and would silently restore the old
+	// behavior — and the fake, where one call is one PutItem, could not catch it.
 	token := rand.Text()
 	_, err = s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.TableName),
@@ -333,11 +358,29 @@ func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl ti
 	if err != nil {
 		var cond *ddbtypes.ConditionalCheckFailedException
 		if errors.As(err, &cond) {
-			return markerWrittenBy(cond.Item, token), nil
+			if !markerWrittenBy(cond.Item, token) {
+				return false, nil // a genuine race loss
+			}
+			// Reachable only when the SDK retried inside the PutItem above, so it
+			// should be rare; nothing else records it. Fields stay to the contract
+			// the agent surface already keeps — an opaque Slack id and a constant
+			// namespace, never an event id, channel, user or anything they typed.
+			slog.Warn(markerLostResponseRecoveredMsg, "partition", partition, "sk_prefix", markerSKPrefix(sk))
+			return true, nil
 		}
 		return false, err
 	}
 	return true, nil
+}
+
+// markerSKPrefix returns the "<kind>#" namespace of a marker sort key, so a log
+// line can say WHICH latch recovered without carrying the event id, conversation
+// or user that follows it.
+func markerSKPrefix(sk string) string {
+	if i := strings.Index(sk, "#"); i >= 0 {
+		return sk[:i+1]
+	}
+	return ""
 }
 
 // markerWrittenBy reports whether the marker that beat a conditional write is one
@@ -346,15 +389,19 @@ func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl ti
 // marker from another writer, one written before this attribute existed, or a
 // response that carried no item back at all.
 //
-// The token != "" guard changes no outcome today: rand.Text never returns empty,
-// and a real token already compares unequal to the "" a pre-token marker reads
-// back. It is here for the refactor that moves where the token comes from — an
-// empty token would then match every marker written before attrWriterToken
-// existed, handing the latch to every caller at once during a rolling deploy.
-// [TestMarkerWrittenBy] pins it directly, because no store-level test can reach
-// that branch.
+// Presence-checked rather than read through readString, which collapses "absent"
+// into "" — the same reason readBoolPresent and readRateLimitWindow check first.
+// This is the highest-stakes comparison in the file (a false true would let
+// ClaimPendingAction execute a confirmed mutation twice), so it should be right
+// by shape. The empty-token guard is belt-and-braces on top and changes no
+// outcome today; [TestMarkerWrittenBy] pins it, because no store-level test can
+// reach that branch.
 func markerWrittenBy(stored map[string]ddbtypes.AttributeValue, token string) bool {
-	return token != "" && readString(stored, attrWriterToken) == token
+	if token == "" {
+		return false
+	}
+	got, ok := stored[attrWriterToken].(*ddbtypes.AttributeValueMemberS)
+	return ok && got.Value == token
 }
 
 // BumpTurnCount atomically increments and returns the agent-turn count for a
@@ -486,9 +533,10 @@ func (s *AgentStore) GetThreadContext(ctx context.Context, partition, threadKey 
 // response on a retried write surfaces here as an error even though the item
 // landed. That is the safe direction: postAgentConfirm falls back to the text
 // preview, which under-promises (no confirm card) instead of executing twice,
-// and the orphaned snapshot is TTL'd. Recovering it would also buy less than it
-// does for a marker — this write carries no latch semantics, and the id is
-// freshly random per propose, so a genuine collision is not a real case.
+// and the orphaned snapshot is TTL'd. This write also carries no latch
+// semantics — nothing downstream asks it "did I win" — so there is no caller to
+// mislead the way a marker's would be. Not setting ALL_OLD here is deliberate
+// besides: the item holds the proposal payload, which must not be echoed back.
 func (s *AgentStore) PutPendingAction(ctx context.Context, partition, id string, payload []byte) error {
 	if partition == "" || id == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PutPendingAction: partition and id are required"}
