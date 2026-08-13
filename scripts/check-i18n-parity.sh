@@ -245,24 +245,36 @@ def walk_strings(value, path):
             yield from walk_strings(item, f"{path}[{index}]")
 
 
+manifests = {name: load_json(root / "manifest.json") for name, root in APPS.items()}
+
 for name, catalog in (("chrome", chrome), ("edge", edge)):
     pattern = FOREIGN_BROWSER[name]
-    for key in sorted(catalog):
-        for path, value in walk_strings(catalog[key], key):
-            if not pattern.search(value):
-                continue
-            failures.append(
-                f"{APPS[name] / CATALOG}: {path} names the wrong browser: "
-                f"{value!r}\n"
-                f"  The {name} catalog must never mention the other browser. "
-                "Retarget the wording to this copy's own browser."
-            )
+
+    # manifest.json is scanned alongside the catalog: it is outside the lockstep
+    # check too (the version delta), and a name/description de-localized from
+    # __MSG_*__ to a literal is user-visible in the store listing. Only string
+    # VALUES are walked, so the `minimum_chrome_version` KEY is not matched —
+    # and the __MSG_*__ placeholders themselves carry no browser name.
+    sources = [(APPS[name] / CATALOG, catalog)]
+    if manifests[name] is not None:
+        sources.append((APPS[name] / "manifest.json", manifests[name]))
+
+    for source_path, document in sources:
+        for key in sorted(document):
+            for path, value in walk_strings(document[key], key):
+                if not pattern.search(value):
+                    continue
+                failures.append(
+                    f"{source_path}: {path} names the wrong browser: {value!r}\n"
+                    f"  The {name} copy must never mention the other browser. "
+                    "Retarget the wording to this copy's own browser."
+                )
 
 # Rule 5: manifest __MSG_*__ references resolve.
 for name, root in APPS.items():
-    manifest = load_json(root / "manifest.json")
+    manifest = manifests[name]
     if manifest is None:
-        continue
+        continue  # load_json already recorded why
     referenced = sorted(set(MANIFEST_KEY.findall(json.dumps(manifest))))
     if not referenced:
         failures.append(

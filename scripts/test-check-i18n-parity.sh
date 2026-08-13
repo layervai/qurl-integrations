@@ -242,6 +242,13 @@ run_case wrong-browser-in-description 1 "copy_btn.description names the wrong br
 run_case wrong-browser-in-nested-placeholder 1 "permission_request_confirm.placeholders.origin.example names the wrong browser" \
   add_wrong_browser_placeholder
 
+# Rule 4 covers manifest.json too, which is outside the lockstep check as well.
+# A name de-localized from __MSG_*__ to a literal is user-visible in the store
+# listing, and rule 5 alone would not notice: `description` still holds a
+# __MSG_*__ reference, so the "stopped localizing" case does not fire either.
+run_case manifest-literal-names-wrong-browser 1 "manifest.json: name names the wrong browser" \
+  set_json "apps/edge-extension/manifest.json" name "" "qURL for Chrome"
+
 # Rule 5 — manifest placeholders have no fallback: an unresolved key makes the
 # extension fail to load or list blank, and i18n-coverage.test.js never sees it.
 run_case manifest-key-absent-from-catalog 1 "references 1 key(s) absent from" \
