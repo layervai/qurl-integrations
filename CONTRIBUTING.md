@@ -16,6 +16,11 @@ pip install pre-commit && pre-commit install
 make check
 ```
 
+`make check` shells out to `python3` for the repo-consistency checks
+(`scripts/check-release-please-sync.sh`, `scripts/check-extension-lockstep.sh`).
+Both fail with an explicit install message rather than silently passing if it is
+missing.
+
 ## Project Structure
 
 Each integration lives in `apps/{name}/`. Shared libraries live in `shared/`.
@@ -28,6 +33,7 @@ apps/
     README.md
   discord/           # Discord bot
   chrome-extension/  # Chrome MV3 extension for Gmail
+  edge-extension/    # Edge MV3 extension for Gmail (fork of chrome-extension, kept in lockstep)
   cli/               # CLI tool
   teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
   zapier/            # Zapier integration (placeholder, no implementation yet)
@@ -74,7 +80,7 @@ All of these must pass before merge:
   - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
     `build`, `ci`, `chore`, `revert`
   - Scopes: `slack`, `teams`, `discord`, `cli`, `zapier`,
-    `chrome-extension`, `origins`, `shared`, `ci`
+    `chrome-extension`, `edge-extension`, `origins`, `shared`, `ci`
     (`.github/workflows/pr-title.yml` also accepts repository-maintenance
     scopes `infra` and `deps`, tracked in #463.)
 - **Linting** passes (golangci-lint with 28+ linters — see `.golangci.yml`)
@@ -106,7 +112,7 @@ settings, update this section in the same operational change.
 
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
-`chrome-extension / required`, `teams / required`,
+`chrome-extension / required`, `edge-extension / required`, `teams / required`,
 `s3-static-connector / required`, and `shared / required`. The connector
 aggregate is new in #1042 (refs #1022), which moved `s3-static-connector.yml`
 off `on.push.paths` onto the `changes`-job pattern; adding it to branch

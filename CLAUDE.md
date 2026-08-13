@@ -16,6 +16,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
+- `apps/edge-extension/` — Edge MV3 extension (JavaScript); see **Chrome↔Edge lockstep** below
 - `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); OAuth security core only — no HTTP routes, Teams SDK, or deploy yet
 - `apps/zapier/` — placeholder dir, no implementation yet
 - `origins/s3-static-connector/` — reusable private S3 static origin image
@@ -23,13 +24,36 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `e2e/` — TypeScript end-to-end tests (Jest)
 - Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it. A track is earned by cutting a semver version stream that something downstream pins to (Lambda/container deploy, Chrome Web Store, GoReleaser + `install.sh`) — not by having code, nor even by publishing an artifact: `shared/` and `apps/teams/` publish nothing, and `origins/s3-static-connector/` publishes an image tagged only `:main`/`:<sha>`, so none of them have a track. Adding one means editing `release-please-config.json` **and** `.release-please-manifest.json` together — `scripts/check-release-please-sync.sh` fails the build if their keys drift
 
+### Chrome↔Edge lockstep
+
+`apps/edge-extension/` is a platform adaptation of `apps/chrome-extension/`. The two share security-sensitive logic (multipart sanitization, HTTPS-only normalization, permission handling) that **must be kept in sync**. When editing any of the following files in one extension, apply the same change to the counterpart:
+
+| Group | Files | Why it must match |
+|-------|-------|-------------------|
+| Runtime | `lib/qurl-api.js`, `lib/qurl-compose-format.js`, `lib/qurl-config.js`, `lib/qurl-i18n.js`, `content/gmail-compose.js`, `popup/popup.js`, `popup/popup.css`, `background.js` | Upload sanitizers, HTTPS-only normalization, permission handling, Gmail DOM insertion, per-file size cap; `popup.css` because `popup.js` toggles classes defined only there |
+| Build/release | `scripts/build-release.js`, `scripts/bump-version.js`, `scripts/generate-icons.js`, `scripts/package-release.js`, `scripts/package-all.sh` | `build-release.js` re-implements the runtime's https-only and credential-stripping normalization — it can't `require()` the runtime module — and decides the bundled default origin and host permission |
+| Tests | `test/*.test.js` (all ten) | They are the guard on everything above; a browser-specific assertion should be a documented divergence, not a drift |
+
+`scripts/check-extension-lockstep.sh` enforces this on every PR (via the Scripts workflow), so drift fails CI instead of relying on a reviewer noticing. It masks three token classes on both sides and then requires an exact match: store names (`Chrome Web Store` / `Microsoft Edge Add-ons`, masked first because they contain a browser name), the capitalized prose words `Chrome`/`Edge`, and each copy's own app directory (`apps/chrome-extension` / `apps/edge-extension`, which appears in doc comments pointing at sibling files). The lowercase `chrome.*` extension API namespace is spelled the same in both browsers and is deliberately **not** masked, so a real change to an API call still trips the check. When a deliberate divergence is added, document it below **and** update that script.
+
+Accepted blind spot: because browser names are masked symmetrically, a comment naming the **wrong** browser (Edge's copy still saying "Chrome") reads as a match. That is prose-only by construction — every browser name a user actually sees lives in `_locales/en/messages.json`, which is outside this check and covered by `test/i18n-coverage.test.js` instead.
+
+`_locales/en/messages.json` is deliberately **not** in the table — it carries two sanctioned wording deltas (below). Its keys still have to be added to both copies by hand; a key used by a lockstep file but missing from `messages.json` silently falls back to the hard-coded English literal in `getMessage`'s second argument rather than failing.
+
+Intentional differences (do **not** sync these):
+- `manifest.json` / `package.json` `version` — separate release-please tracks (`chrome-extension-v*` vs `edge-extension-v*`), so the two versions move independently. This is the *only* manifest delta; Edge Add-ons hosts updates itself, so the Edge manifest carries no `update_url` (that key is the self-hosted Chrome mechanism — don't add it).
+- `_locales/en/messages.json` — `ext_name` ("qURL Agent" vs "qURL File Upload for Edge"), and `permission_request_confirm`, which names the host browser showing the prompt ("Chrome will show…" vs "Edge will show…").
+- `popup/popup.html` — the two hard-coded mirrors of `ext_name` (the static `<title>` and the header `div`), which is why it is not a lockstep file. Each copy's pair must match its own `ext_name`, or the popup renders one name and swaps to the other once `chrome.i18n` resolves.
+- Inside lockstep files, the masked tokens above: `lib/qurl-api.js` names the host browser whose minimum version guarantees `crypto.getRandomValues`; `popup/popup.js` names the browser that will show the permission prompt; `lib/qurl-config.js` points at its own app directory for the packaging `.env`. All prose; the code is identical.
+- Store-facing docs and assets: `docs/chrome-web-store-review.md` vs `docs/edge-add-ons-review.md` / `docs/edge-add-ons-submission-guide.md`. The `icons/` are *not* a delta: both apps generate them from the same `icons/logo.png` with `scripts/generate-icons.js`, so all four PNGs are byte-identical and must stay that way.
+
 ## Commit format
 
 ```
 <type>(<scope>): <description>
 
 type:  feat | fix | docs | style | refactor | perf | test | build | ci | chore | revert
-scope: slack | teams | discord | cli | zapier | chrome-extension | origins | shared | ci
+scope: slack | teams | discord | cli | zapier | chrome-extension | edge-extension | origins | shared | ci
 ```
 
 > Keep this type list aligned with CONTRIBUTING.md and `.github/workflows/pr-title.yml`'s `types:` block.

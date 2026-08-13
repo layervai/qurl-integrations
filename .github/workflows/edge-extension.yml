@@ -1,0 +1,178 @@
+name: "edge-extension: Build and Test"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Node version is read from apps/edge-extension/.nvmrc below so CI and local dev (nvm)
+# stay in lock-step. Avoid adding a NODE_VERSION env var or inline version — it would drift.
+
+jobs:
+  changes:
+    name: edge-extension / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
+    outputs:
+      # An unresolvable base forces every gate to run. A redundant run costs
+      # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
+      edge_extension: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.edge_extension }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, app CI never having
+      # executed (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        # Skipped when no base could be resolved. The job output already forces
+        # every gate true there, and running the filter anyway would let a
+        # filter error redden this job instead of honouring the fail-closed
+        # intent.
+        if: steps.base.outputs.force != 'true'
+        with:
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
+          base: ${{ steps.base.outputs.sha }}
+          filters: |
+            edge_extension:
+              # Source of truth for Edge extension-impacting paths on PR and main push events.
+              - 'apps/edge-extension/**'
+              - '.github/workflows/edge-extension.yml'
+
+  build-and-test:
+    name: edge-extension / build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.edge_extension == 'true'
+    defaults:
+      run:
+        working-directory: apps/edge-extension
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: apps/edge-extension/.nvmrc
+          cache: 'npm'
+          cache-dependency-path: apps/edge-extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Syntax check
+        # Globbed rather than enumerated so a source file added later cannot
+        # slip past the parse check. Covers the same first-party roots ESLint
+        # lints, minus test/ (already parsed by `npm test`). Piped through
+        # xargs on purpose: `find -exec` reports success even when the command
+        # it ran failed, which would make this step silently green.
+        run: |
+          find background.js popup content lib scripts -name '*.js' -print0 \
+            | xargs -0 -r -n1 node --check
+
+      - name: Run tests
+        run: npm test
+
+      # package:release rebuilds the release/ directory from source (scripts/package-release.js
+      # invokes build-release.js), so it exercises the build too — no separate build step needed.
+      - name: Package release
+        run: npm run package:release
+
+  required:
+    name: edge-extension / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every Edge extension quality gate must be listed here;
+    # edge-extension / required only validates jobs in this needs set.
+    # display_names below is annotation-only.
+    needs: [changes, build-and-test]
+    if: always()
+    steps:
+      - name: Verify Edge extension CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          EDGE_EXTENSION_CHANGED: ${{ needs.changes.outputs.edge_extension }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::edge-extension / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$EDGE_EXTENSION_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No Edge extension-impacting changes detected; Edge extension CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::edge-extension / detect changes emitted unexpected edge_extension output: ${EDGE_EXTENSION_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              build-and-test)
+                echo "edge-extension / build and test"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not an Edge extension quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Edge extension-impacting changes require every quality gate
+              # listed in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"

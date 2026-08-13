@@ -1,7 +1,9 @@
-# Lint and test the repo's shell scripts and release configuration.
-# Cheap and unfiltered so the installer's tag-selection policy and the
-# release-please config/manifest pairing can never drift without a PR check
-# noticing (both previously merged with zero mechanical verification).
+# Lint and test the repo's shell scripts, release configuration, and
+# cross-app copies that have to stay identical.
+# Cheap and unfiltered so the installer's tag-selection policy, the
+# release-please config/manifest pairing, and the Chrome/Edge extension
+# lockstep can never drift without a PR check noticing (each previously
+# relied on reviewers catching it by hand).
 name: Scripts
 
 on:
@@ -38,6 +40,9 @@ jobs:
 
       - name: Check release-please config/manifest sync
         run: scripts/check-release-please-sync.sh
+
+      - name: Check Chrome/Edge extension lockstep
+        run: scripts/check-extension-lockstep.sh
 
       # The jq <= 1.7 parse check is only meaningful on a runner whose jq
       # still has the restricted grammar; jq 1.8 (typical locally, and
