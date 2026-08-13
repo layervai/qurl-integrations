@@ -586,6 +586,10 @@ function _parseExpiry(payload) {
     return date.toISOString();
   }
 
+  // MAX_PLAUSIBLE_EXPIRY_MS is deliberately not applied below. It exists to catch a *unit* slip,
+  // which is a numeric-encoding failure: an ISO string names an instant unambiguously, so an
+  // absurd year in one is the server being wrong rather than this code decoding it wrong, and
+  // bounding it here would only trade that for a silently dropped expiry.
   if (typeof raw === 'string') {
     const trimmed = raw.trim();
     if (!trimmed) return null;
