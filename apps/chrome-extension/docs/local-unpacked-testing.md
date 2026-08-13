@@ -2,6 +2,14 @@
 
 This document explains how to build the extension with `scripts/package-all.sh`, load the unpacked `release/` directory into Google Chrome, and verify the end-to-end upload flow in Gmail without using the ZIP package.
 
+> **Note:** The screenshots in this guide predate the current popup UI. They show an older
+> `QURL File Upload` header and the labels `QURL server`, `Enter QURL server URL`,
+> `Upload to QURL`, and `Copy inserted content`, whereas the popup now reads **qURL Agent**
+> with `qURL server`, `Enter qURL server URL`, `Upload to qURL`, and `Copy the qURL link`.
+> The Gmail interface and the step-by-step upload flow still match; the popup's wording does
+> not. `_locales/en/messages.json` is the source of truth for every user-visible string.
+> Re-capturing these steps against a current build is a welcome contribution.
+
 ## Scope
 
 - Build the extension locally
@@ -45,6 +53,9 @@ Expected output:
 5. Confirm that the extension appears in the extensions list and the toolbar icon is available
 
 ![Chrome Extensions Page](./images/patch-0.png)
+
+> The extensions list in this capture is empty, so it shows the `chrome://extensions` page as
+> you find it in steps 1–4 rather than the loaded extension that step 5 asks you to confirm.
 
 ## 3. Open a Gmail Draft Before Testing
 
