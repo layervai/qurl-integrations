@@ -691,8 +691,12 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	}
 	mintedKey = key
 	if !credentialConfirmsKindFirst(key) {
+		// Correlate on resource_id/key_id rather than the caller-supplied
+		// slug: both identify the resource and credential just as precisely,
+		// and keeping user-controlled input out of this line avoids adding a
+		// new go/log-injection finding for a log statement this PR introduces.
 		log.Warn("tunnel install: minted credential did not confirm the kind-first contract — verify qurl-service is on the kind-first API",
-			"slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID,
+			"resource_id", resource.ResourceID, "key_id", key.KeyID,
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
 			"got_target", key.Target, "want_target", client.CredentialTargetConnector)
 	}
