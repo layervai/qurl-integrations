@@ -7,10 +7,8 @@ const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
 const { isPositiveFinite } = require('./utils/time');
-const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
-const webhooksRouter = require('./routes/webhooks');
 const qurlWebhookRouter = require('./routes/qurl-webhook');
 const webhookSubscriptions = require('./webhook-subscriptions');
 
@@ -89,14 +87,10 @@ const rawBodyJson = express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
 });
 
-// /webhook (GitHub) gated on isOpenNHPActive so we don't parse 1MB of
-// JSON for routes that aren't mounted. /webhooks (qURL) is unconditional
-// — the receiver returns 503 when the per-guild subscription registry
-// is still warming up (cold-start or sibling-replica lag), so an
-// unmounted-cap fresh deploy never accepts traffic.
-if (config.isOpenNHPActive) {
-  app.use('/webhook', rawBodyJson);
-}
+// /webhooks (qURL) is the only raw-body surface — the receiver returns
+// 503 when the per-guild subscription registry is still warming up
+// (cold-start or sibling-replica lag), so a fresh deploy never accepts
+// traffic before it can verify a signature.
 app.use('/webhooks', rawBodyJson);
 
 app.use(express.json({ limit: '1mb' }));
@@ -188,37 +182,6 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
   });
 });
 
-// Mount routers — only in single-guild mode. /auth (GitHub OAuth redirect)
-// and /webhook (GitHub event delivery) both depend on OpenNHP state: the
-// OAuth state uses BASE_URL, the callback calls assignContributorRole()
-// against the cached guild, and the webhook handler dispatches to
-// notifiers (notifyPRMerge, etc.) that also assume a cached guild. In
-// any non-OpenNHP mode the cache is never populated OR the downstream
-// handlers short-circuit with reason:'opennhp-disabled', so mounting
-// these routes would only surface broken UX (a 500 from the OAuth
-// callback, or a webhook that fails after its signature passes) plus
-// one wasted DB hit per OAuth callback on the orphan state token.
-//
-// Symmetry with commands.js — the full OpenNHP surface (commands +
-// routes) turns on together when config.isOpenNHPActive is true;
-// everything else gets the plain qURL sharing tool.
-//
-// LOAD-BEARING for the boot gate: invalidStateSecretValues
-// (boot-requirements.js) assumes isOpenNHPActive is the ONLY gate that
-// mounts /auth — its GitHub-flow presence rule fires on exactly that
-// flag, and it deliberately skips shape-checking GITHUB_CLIENT_SECRET
-// outside the qURL winning-key case. If a future mode mounts /auth
-// under a different condition, extend that predicate in lockstep or a
-// short fallback secret will deferred-500 there undetected.
-if (config.isOpenNHPActive) {
-  app.use('/auth', oauthRouter);
-  app.use('/webhook', webhooksRouter);
-} else if (!config.GUILD_ID) {
-  logger.info('Multi-tenant mode: /auth and /webhook routes not mounted (OpenNHP GitHub integration is dormant).');
-} else {
-  logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
-}
-
 // Unconditional mount. The receiver returns 503 while the per-guild
 // subscription registry (src/webhook-subscriptions.js) is unprimed
 // OR within the sibling-replica lag window — qurl-service retries
@@ -243,10 +206,10 @@ function noStoreHeaders(req, res, next) {
   next();
 }
 
-// qURL OAuth routes (/oauth/qurl/start + /oauth/qurl/callback) — separate
-// from the OpenNHP gate above. These always mount because /qurl setup is
-// the canonical path for any guild (multi-tenant or single-guild) to
-// configure a qURL API key, and the route gates internally on
+// qURL OAuth routes (/oauth/qurl/start + /oauth/qurl/callback). These
+// always mount because /qurl setup is the canonical path for any guild
+// (multi-tenant or single-guild) to configure a qURL API key, and the
+// route gates internally on
 // config.isQurlOAuthConfigured (returns 503 with a "not configured yet"
 // page when AUTH0_* env vars are unset, rather than a hard 404). That way
 // flipping the AUTH0_* secrets in SSM is the only step needed to turn
@@ -284,13 +247,6 @@ app.use((err, req, res, next) => {
 function startServer() {
   const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
-    // Only log OAuth/Webhook URLs when those routes are actually mounted —
-    // avoids misleading operators into curl-ing a 404 endpoint in multi-
-    // tenant or single-guild-plain mode. Metrics URL is always mounted.
-    if (config.isOpenNHPActive) {
-      logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
-      logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
-    }
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);
   });
   return server;
@@ -298,10 +254,9 @@ function startServer() {
 
 function stopIntervals() {
   clearInterval(metricsSweepInterval);
-  // Each webhook router owns a per-IP bad-sig sweep; stop them all on
+  // The qURL webhook router owns a per-IP bad-sig sweep; stop it on
   // graceful shutdown so the interval doesn't outlive the server.
   if (typeof qurlWebhookRouter.stopIntervals === 'function') qurlWebhookRouter.stopIntervals();
-  if (typeof webhooksRouter.stopIntervals === 'function') webhooksRouter.stopIntervals();
   // 30s subscription-registry refresh ticker (per-guild webhook
   // secrets cache). No-op on the gateway tier where the registry was
   // never started; required on the HTTP tier so the ticker doesn't
