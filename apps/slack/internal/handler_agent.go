@@ -207,6 +207,7 @@ type slackEventAuthorization struct {
 	EnterpriseID        string `json:"enterprise_id,omitempty"`
 	TeamID              string `json:"team_id,omitempty"`
 	UserID              string `json:"user_id,omitempty"`
+	IsBot               bool   `json:"is_bot,omitempty"`
 	IsEnterpriseInstall bool   `json:"is_enterprise_install,omitempty"`
 }
 
@@ -983,6 +984,12 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			// Keyed on agentEventHasUpload, not the subtype: an upload whose files array
 			// arrives without file_share must not slip past into the gate.
 			if agentEventHasUpload(e) {
+				// Slack also delivers an upload that explicitly mentions this bot as an
+				// app_mention. That event is admitted and claimMediaNotice counts it, so
+				// reporting the message/file_share twin here would count one upload twice.
+				if agentEventMentionsAuthorizedBot(env) {
+					return false, agentDropSilent
+				}
 				return false, agentDropChannelUpload
 			}
 			// A channel message reaches the follow-up pipeline only when channel
@@ -1281,11 +1288,27 @@ func agentHistoryOldestTS(currentTS string) string {
 // parser.go's userMentionPattern (rejects toy ids; caps pathological pastes) —
 // this one strips a leading mention rather than validating a whole token, so the
 // anchoring differs, but the id charset is kept in sync.
-var botMentionPattern = regexp.MustCompile(`^\s*<@[UW][A-Z0-9]{8,63}(?:\|[^>]*)?>\s*`)
+var botMentionPattern = regexp.MustCompile(`^\s*<@([UW][A-Z0-9]{8,63})(?:\|[^>]*)?>\s*`)
 
 // stripBotMention removes a leading bot mention from app_mention text.
 func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
+}
+
+// agentEventMentionsAuthorizedBot identifies the message event paired with an
+// app_mention delivery. Requiring both the captured mention target and is_bot avoids
+// treating an upload that mentions another member as if a second event will count it.
+func agentEventMentionsAuthorizedBot(env *slackEventEnvelope) bool {
+	match := botMentionPattern.FindStringSubmatch(env.Event.Text)
+	if len(match) < 2 {
+		return false
+	}
+	for _, authz := range env.Authorizations {
+		if authz.IsBot && authz.UserID == match[1] {
+			return true
+		}
+	}
+	return false
 }
 
 // agentHasExplicitNonHTTPSProtectURL recognizes the direct conversation form

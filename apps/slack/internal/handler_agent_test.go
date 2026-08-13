@@ -211,6 +211,10 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.User = ""
 		return e
 	}
+	withBotAuthorization := func(e *slackEventEnvelope, userID string, isBot bool) *slackEventEnvelope {
+		e.Authorizations = []slackEventAuthorization{{UserID: userID, IsBot: isBot}}
+		return e
+	}
 	// wantDrop is the refusal REASON, checked on every row including admitted ones
 	// (where agentDropSilent is what an admitted event carries). It is what the caller
 	// logs off, so a row that stops reporting agentDropChannelUpload is an upload that
@@ -301,6 +305,12 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		// message_changed carrying files stays out of the count — otherwise every edit
 		// of an old upload would re-report it as new demand.
 		{"edited channel message with files ignored, and not counted as demand", withFile(chReplySubtype("hi", agentPoolTestThreadTS, "message_changed")), true, false, agentDropSilent},
+		// A message/file_share event that mentions this bot is the twin of an
+		// app_mention event for the same upload. The admitted mention counts it, so the
+		// twin must stay silent or the demand total counts one member action twice.
+		{"mentioned channel upload twin is not counted twice", withBotAuthorization(withFile(chReply("<@U12345678>", agentPoolTestThreadTS)), "U12345678", true), true, false, agentDropSilent},
+		{"upload mentioning another user is still counted", withBotAuthorization(withFile(chReply("<@U87654321>", agentPoolTestThreadTS)), "U12345678", true), true, false, agentDropChannelUpload},
+		{"non-bot authorization does not suppress the upload count", withBotAuthorization(withFile(chReply("<@U12345678>", agentPoolTestThreadTS)), "U12345678", false), true, false, agentDropChannelUpload},
 		// The arm is every non-IM channel_type, not just "channel": a private channel and
 		// a group DM land here too. Called out because the "people talking to each other"
 		// rationale is weakest in an mpim, where the bot was deliberately invited — worth
@@ -1275,6 +1285,11 @@ func eventCallbackBody(eventID, event string) string {
 	return `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"` + eventID + `","event":` + event + `}`
 }
 
+func botAuthorizedEventCallbackBody(eventID, event string) string {
+	return `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"` + eventID + `",` +
+		`"authorizations":[{"user_id":"U12345678","is_bot":true}],"event":` + event + `}`
+}
+
 // TestUnsupportedMediaReplyOffersAReachableRoute pins the recovery route, not the
 // prose. Presence detection refuses every upload and Slack turns a long paste
 // into one, so a paste-shaped request is only recoverable somewhere other than
@@ -2022,8 +2037,13 @@ func TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly(t *testi
 	})
 	t.Cleanup(h.Wait)
 
-	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
-	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	var logs bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(observability.NewRedactingJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h.handleEvent(httptest.NewRecorder(), []byte(botAuthorizedEventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(botAuthorizedEventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
 	h.Wait()
 
 	// The whole point of the filter drop: a channel upload buys no conversations.replies
@@ -2048,6 +2068,19 @@ func TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly(t *testi
 	}
 	if got := mem.putAttempts("media#"); got != 1 {
 		t.Fatalf("latch attempts = %d, want 1 (only the mention should reach the notice latch)", got)
+	}
+	mediaLogs := 0
+	for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var rec map[string]any
+		if json.Unmarshal(line, &rec) == nil && rec["msg"] == "agent: unsupported media" {
+			mediaLogs++
+			if rec["channel_upload_unanswered"] == true {
+				t.Fatalf("message/file_share twin emitted a second demand record: %v", rec)
+			}
+		}
+	}
+	if mediaLogs != 1 {
+		t.Fatalf("one mentioned upload must emit one demand record, got %d: %s", mediaLogs, logs.String())
 	}
 }
 
