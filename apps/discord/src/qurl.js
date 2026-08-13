@@ -132,14 +132,18 @@ async function callQurl(method, path, fn) {
 // downstream qURL API is the one that actually fetches, we block at our
 // own input validation layer.
 //
-// OBSERVABILITY: both reject paths below breadcrumb the host that tripped this
-// (logger.warn) before throwing. The caller-facing message is deliberately
-// identical for every private shape, so without the breadcrumb an operator sees
-// only THAT a target was blocked — not whether it was a real IMDS/loopback
-// attempt or a false positive, e.g. a public DNS name misclassified by the
-// fc/fd ULA prefix check (the class the "IPv6 ULA prefix vs. public DNS" block
-// in tests/qurl-private-host.test.js exists to guard). That distinction is the
-// whole triage question for this guard, so the host has to reach the log.
+// OBSERVABILITY (this function stays pure — it never logs; the note lives here
+// because it governs every caller that acts on its verdict): both reject paths
+// that consume it — createOneTimeLink and assertNotPrivateAfterResolve — warn
+// the host that tripped it before throwing. Their caller-facing message is
+// deliberately identical for every private shape, so without the breadcrumb an
+// operator sees only THAT a target was blocked — not whether it was a real
+// IMDS/loopback attempt or a false positive, e.g. a public DNS name
+// misclassified by the fc/fd ULA prefix check (the class the "IPv6 ULA prefix
+// vs. public DNS" block in tests/qurl-private-host.test.js exists to guard).
+// That distinction is the whole triage question, so the host has to reach the
+// log. connector.js's detect guard consumes the same verdict and breadcrumbs it
+// separately, at its own call site.
 //
 // Logging the host verbatim is safe even though the target is user-supplied:
 // `new URL()` strips tab/CR/LF while parsing (`https://exa\nmple.com/x` yields
