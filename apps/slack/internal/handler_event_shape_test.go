@@ -271,6 +271,20 @@ func TestHandleEvent_DriftNeverDrivesTheWorkspacePurge(t *testing.T) {
 			wouldHaveDone: "fabricated a full purge from a payload that named no token",
 		},
 		{
+			// The row a future reader is most likely to find surprising, and the
+			// reason it is here: NOTHING about this payload's purge scope is in
+			// doubt — team_id is clean and event_time is not even read by the
+			// resolver. It is still refused, because narrowing the gate to
+			// "fields the scope reads" cannot be done soundly: only the FIRST
+			// mismatch is reported while every mismatched field is zeroed, so a
+			// payload drifting an ignorable field first would look scope-clean
+			// while team_id had already been emptied.
+			name: "scope-irrelevant drift on an otherwise clean teardown",
+			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftIrrelevant",` +
+				`"event_time":"1700000000","event":{"type":"app_uninstalled"}}`,
+			wouldHaveDone: "purged the correct workspace — this row is the accepted COST of the refusal, not a bug it prevents",
+		},
+		{
 			name: "inner event is a string, not an object",
 			body: `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDriftA","event":"app_uninstalled"}`,
 			// This one is safe under either policy — env.Event stays zero, so no
@@ -334,6 +348,13 @@ func TestHandleEvent_DroppedTeardownSaysSoAtWarn(t *testing.T) {
 	got := logBuf.String()
 	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "NOT purged") {
 		t.Fatalf("a refused teardown must say so at Warn; got %q", got)
+	}
+	// And ONLY that line. The generic drift line says we are "routing on the
+	// fields that decoded", which directly contradicts refusing to route — two
+	// Warns telling an operator opposite things about one event is worse than
+	// either alone.
+	if strings.Contains(got, "drift tolerated") {
+		t.Fatalf("refusal emitted the generic drift line too, which claims the opposite: %q", got)
 	}
 	// Enough to act on: which teardown, which field moved, and whether there was
 	// an id to chase. The ids themselves are not logged in the clear here, which

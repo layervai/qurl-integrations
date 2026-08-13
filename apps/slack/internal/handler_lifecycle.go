@@ -22,7 +22,10 @@ import (
 //     token (see shared/auth.SlackBotTokenInstall), but this explicit guard keeps
 //     future user-token scopes from widening the teardown path by accident. If
 //     Slack bot-token rotation is enabled later, revisit this path before
-//     treating rotated bot tokens as teardown signals.
+//     treating rotated bot tokens as teardown signals — that means
+//     isLifecycleEvent AND isBotTokensRevokedEvent here, plus
+//     isLifecycleEventType in handler.go, which recognizes a teardown on an
+//     untrusted envelope and deliberately does not read the rotation flag.
 const (
 	slackEnvelopeTypeEventCallback = "event_callback"
 	slackEventTypeAppUninstalled   = "app_uninstalled"

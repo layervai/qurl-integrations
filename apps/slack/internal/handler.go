@@ -2310,6 +2310,15 @@ func (h *Handler) driftFieldUnseen(driftField string) bool {
 // WITHOUT looking at any other field. handleEvent uses it to recognize "a purge
 // was meant here" on an envelope whose other fields it does not trust; the real
 // admission decision stays in isLifecycleEvent.
+//
+// It deliberately does NOT mirror isLifecycleEvent's botTokenRotationEnabled
+// carve-out for tokens_revoked. Reading a flag here would be answering "would
+// this have purged?" when the question is "was a purge meant?", and the answer
+// has to hold for an envelope we have already decided not to trust. With
+// rotation enabled a drifted tokens_revoked is therefore refused rather than
+// ignored — the same outcome (nothing is purged) by a louder route. Both
+// functions are named in handler_lifecycle.go's "revisit if bot-token rotation
+// is enabled" note, so they cannot drift apart unnoticed.
 func isLifecycleEventType(eventType string) bool {
 	return eventType == slackEventTypeAppUninstalled || eventType == slackEventTypeTokensRevoked
 }
@@ -2345,7 +2354,24 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	// ELEMENT of tokens.bot still counts toward the array's length. Refusing
 	// the route kills all three at the door — and costs nothing that worked
 	// before, since such an event used to be dropped whole.
-	if drifted {
+	//
+	// The refusal is deliberately keyed on ANY drift in the envelope, not just
+	// drift in a field the purge scope reads. Narrowing it to those fields
+	// looks tempting and is UNSOUND: encoding/json reports only the FIRST
+	// mismatch while zeroing every mismatched field, so a payload that drifts
+	// an ignorable field before team_id would present as "drift, but not in a
+	// field we care about" while team_id had already been zeroed. driftField
+	// is a lead for an operator, never an inventory to branch on.
+	//
+	// The cost is real and accepted: a teardown whose only drift is in a field
+	// the purge never reads is refused too, so that workspace's data persists
+	// until an operator acts on the Warn below. Fail-safe and observable beats
+	// the alternative, which is deleting the wrong tenant's install.
+	lifecycleRefused := drifted && env.Type == slackEnvelopeTypeEventCallback && isLifecycleEventType(env.Event.Type)
+	// The refusal branch logs its own, more specific line; emitting the generic
+	// one too would tell an operator we were "routing on the fields that
+	// decoded" immediately before saying we refused to.
+	if drifted && !lifecycleRefused {
 		// Warn, not Debug: this is now the ONLY signal that Slack's payload
 		// shape has moved away from what we model. Drift used to announce
 		// itself by making events disappear; that symptom is exactly what the
@@ -2370,7 +2396,7 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 		// (see handleInteraction). It sat at Debug, invisible in prod, which is
 		// how the bug this function now fixes stayed hidden for so long.
 		slog.Warn("event JSON parse failed", "error", err, "body_length", len(body))
-	case env.Type == slackEnvelopeTypeEventCallback && drifted && isLifecycleEventType(env.Event.Type):
+	case lifecycleRefused:
 		// Ack it (Slack must not retry) but do not purge. See the CONSEQUENCE
 		// paragraph above: the inner event type decoded cleanly, so we know a
 		// teardown was MEANT, but every field that decides WHICH partitions it
