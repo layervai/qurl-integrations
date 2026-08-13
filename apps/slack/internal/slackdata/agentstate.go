@@ -55,10 +55,10 @@ const (
 	// attrTurnCount is the running tally on a fixed-window turn-rate counter item
 	// (sk = "rate#<scope>#<window-start>"), incremented atomically per agent turn.
 	attrTurnCount = "turn_count"
-	// attrWriterToken is a per-call random value stamped on every marker putMarker
-	// writes. It is what lets a failed conditional write tell "another writer won"
-	// from "this call won, and the SDK retried a response that was lost" — see
-	// putMarker. Never read outside that comparison and never exposed.
+	// attrWriterToken is the per-call random value putMarker stamps on every marker
+	// it writes and compares against when a condition fails. See putMarker for what
+	// that distinction buys and why nothing cheaper works. Never read anywhere else,
+	// never logged, never returned.
 	attrWriterToken = "writer_token"
 
 	eventSKPrefix     = "evt#"
@@ -362,10 +362,13 @@ func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl ti
 				return false, nil // a genuine race loss
 			}
 			// Reachable only when the SDK retried inside the PutItem above, so it
-			// should be rare; nothing else records it. Fields stay to the contract
-			// the agent surface already keeps — an opaque Slack id and a constant
-			// namespace, never an event id, channel, user or anything they typed.
-			slog.Warn(markerLostResponseRecoveredMsg, "partition", partition, "sk_prefix", markerSKPrefix(sk))
+			// should be rare; nothing else records it. Carries NO value derived
+			// from the Slack payload — not the partition, not the sk tail. The msg
+			// answers "is this firing" and the latch answers "where", which is the
+			// whole diagnostic need, and keeping the line free of tainted values
+			// keeps it out of the go/log-injection alert class this repo already
+			// carries hundreds of.
+			slog.Warn(markerLostResponseRecoveredMsg, "latch", markerLatchName(sk))
 			return true, nil
 		}
 		return false, err
@@ -373,14 +376,25 @@ func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl ti
 	return true, nil
 }
 
-// markerSKPrefix returns the "<kind>#" namespace of a marker sort key, so a log
-// line can say WHICH latch recovered without carrying the event id, conversation
-// or user that follows it.
-func markerSKPrefix(sk string) string {
-	if i := strings.Index(sk, "#"); i >= 0 {
-		return sk[:i+1]
+// markerLatchName maps a marker sort key to the name of the latch that owns it,
+// so a log line can say WHICH latch recovered without carrying the event id,
+// conversation or user that follows the prefix.
+//
+// Deliberately an allowlist returning compile-time constants rather than a slice
+// of the sk: nothing derived from a Slack payload can reach a log through it, no
+// matter how the sort keys are reshaped later. An unrecognized key is reported as
+// "other" rather than echoed back.
+func markerLatchName(sk string) string {
+	switch {
+	case strings.HasPrefix(sk, eventSKPrefix):
+		return "event_dedupe"
+	case strings.HasPrefix(sk, pendClaimSKPrefix):
+		return "pending_action_claim"
+	case strings.HasPrefix(sk, mediaNoticeSKPrefix):
+		return "media_notice"
+	default:
+		return "other"
 	}
-	return ""
 }
 
 // markerWrittenBy reports whether the marker that beat a conditional write is one

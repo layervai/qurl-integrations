@@ -751,10 +751,10 @@ func TestMarkMediaNoticeSent_LostResponseStillClaims(t *testing.T) {
 
 // TestMarkEventSeen_LostResponseStillReportsFirst pins that the recovery lives in
 // the shared putMarker body, not just the expired variant. A dropped duplicate
-// would be invisible here, since that is what dedupe is for — but this case is
-// not a duplicate. The
-// marker is written BEFORE the handler acts, so reporting false for this call's
-// own write drops the event having processed it zero times, not once.
+// would be invisible here, since that is what dedupe is for — but this case is not
+// a duplicate: the marker is written BEFORE the handler acts, so reporting false
+// for this call's own write drops the event having processed it zero times, not
+// once.
 func TestMarkEventSeen_LostResponseStillReportsFirst(t *testing.T) {
 	f := newAgentFakeDDB()
 	f.lostResponse = true
@@ -843,19 +843,28 @@ func TestMarkerWrittenBy(t *testing.T) {
 	}
 }
 
-// TestMarkerSKPrefix pins that the recovery log names the latch and nothing more.
-// The tail of a marker sk is an event id or a channel:user pair, so leaking it into
-// a log line would break the field contract the agent surface keeps.
-func TestMarkerSKPrefix(t *testing.T) {
+// TestMarkerLatchName pins that the recovery log names the latch and nothing more.
+// The tail of a marker sk is an event id or a channel:user pair, so echoing any of
+// it into a log line would both break the field contract the agent surface keeps
+// and put the line back in the go/log-injection alert class.
+func TestMarkerLatchName(t *testing.T) {
 	for sk, want := range map[string]string{
-		eventSKPrefix + "Ev123":       eventSKPrefix,
-		pendClaimSKPrefix + "abc":     pendClaimSKPrefix,
-		mediaNoticeSKPrefix + "C1:U2": mediaNoticeSKPrefix,
-		"nohash":                      "",
-		"":                            "",
+		eventSKPrefix + "Ev123":       "event_dedupe",
+		pendClaimSKPrefix + "abc":     "pending_action_claim",
+		mediaNoticeSKPrefix + "C1:U2": "media_notice",
+		threadCtxSKPrefix + "x":       "other",
+		"nohash":                      "other",
+		"":                            "other",
 	} {
-		if got := markerSKPrefix(sk); got != want {
-			t.Errorf("markerSKPrefix(%q) = %q, want %q", sk, got, want)
+		if got := markerLatchName(sk); got != want {
+			t.Errorf("markerLatchName(%q) = %q, want %q", sk, got, want)
+		}
+	}
+	// The point of the allowlist: no input can smuggle itself into the log.
+	for _, sk := range []string{"evt#\nfake log line", "media#C1:U2\u0000", "../../etc"} {
+		got := markerLatchName(sk)
+		if strings.ContainsAny(got, "\n\u0000/") {
+			t.Errorf("markerLatchName(%q) = %q, must never echo caller input", sk, got)
 		}
 	}
 }
