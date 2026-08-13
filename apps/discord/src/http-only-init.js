@@ -19,51 +19,21 @@
 // crash-loop and let the orchestrator reschedule rather than
 // silently start with a cold cache and 5xx every webhook.
 //
-// Cache freshness: in combined / gateway mode the Gateway keeps the
-// cached guild in sync. http-only replicas have no Gateway
-// connection, so we run a periodic REST refreshCache() (every
-// REFRESH_INTERVAL_MS) instead of waiting for a replica restart.
-
-// 10-minute refresh interval — short enough that a renamed or
-// newly-unavailable guild is picked up within one window, long
-// enough that the periodic single-REST-call cost is rounding error
-// against the bot's normal REST budget. Tunable via env var.
-const DEFAULT_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
-const MIN_REFRESH_INTERVAL_MS = 30_000;
-const REFRESH_INTERVAL_MS = (() => {
-  const raw = process.env.HTTP_ONLY_REFRESH_INTERVAL_MS;
-  if (!raw) return DEFAULT_REFRESH_INTERVAL_MS;
-  const parsed = parseInt(raw, 10);
-  // Reject non-positive / NaN / sub-30s. The 30s floor exists so a
-  // misconfigured 1ms doesn't hammer the Discord REST API. Surface the
-  // rejection at boot — a silent fall-through to the default would
-  // leave operators wondering why their `HTTP_ONLY_REFRESH_INTERVAL_MS=
-  // 15000` ask isn't taking effect.
-  if (!Number.isFinite(parsed) || parsed < MIN_REFRESH_INTERVAL_MS) {
-    // Use console.warn — logger isn't loaded this early in module init
-    // (logger.js itself is required at module load and may not yet be
-    // ready depending on require order).
-    console.warn(
-      `[http-only-init] HTTP_ONLY_REFRESH_INTERVAL_MS=${JSON.stringify(raw)} rejected ` +
-      `(must be a positive integer >= ${MIN_REFRESH_INTERVAL_MS}ms); ` +
-      `using default ${DEFAULT_REFRESH_INTERVAL_MS}ms.`
-    );
-    return DEFAULT_REFRESH_INTERVAL_MS;
-  }
-  return parsed;
-})();
-
-// Pretty-print an interval for log output: "10 minute(s)" when the
-// interval is a clean multiple of a minute, "<n>ms" otherwise. Avoids
-// the "every 1 minute(s)" rounding artifact when REFRESH_INTERVAL_MS
-// is set to e.g. 45_000 via env override.
-function formatInterval(ms) {
-  if (ms >= 60_000 && ms % 60_000 === 0) {
-    const minutes = ms / 60_000;
-    return `${minutes} minute(s)`;
-  }
-  return `${ms}ms`;
-}
+// No periodic refresh, deliberately. Until #1051 this module ran a
+// 10-minute REST refreshCache() to compensate for the Gateway
+// `roleDelete` / `channelDelete` events that http-only replicas never
+// receive. #1051 removed the OpenNHP mode concept along with those
+// handlers and the roles/channels cache they invalidated, leaving
+// refreshCache() to populate one thing: the module-level `guild`
+// handle in src/discord.js. Nothing reads that handle on a schedule —
+// `verifyBotPermissions()` and the `Watching guild:` log both hang off
+// `client.once('ready')`, which never fires here because login() is
+// skipped, and the `getGuild()` export has no production consumers. A
+// timer would spend a REST call per interval refreshing a value no
+// request path reads. The single boot-time refreshCache() below earns
+// its keep on different grounds: it is fatal on failure, so it proves
+// the token, GUILD_ID, and Discord reachability before this replica is
+// allowed to serve traffic.
 
 /**
  * Initialize a process running under `PROCESS_ROLE=http` so its
@@ -72,21 +42,17 @@ function formatInterval(ms) {
  * Side effects:
  *   - `client.rest.setToken(config.DISCORD_TOKEN)` so REST calls
  *     authenticate (login() is the normal seeder; we skip it here).
- *   - Initial `await refreshCache()` when GUILD_ID is set, so the
- *     cached guild handle is populated before the first request.
- *     Multi-tenant deployments (GUILD_ID unset) skip the refresh —
- *     refreshCache is a no-op there.
- *   - Periodic `setInterval` calling refreshCache every
- *     REFRESH_INTERVAL_MS, gated on the same GUILD_ID check.
- *     `.unref()` so the timer doesn't block process exit;
- *     `gracefulShutdown` in index.js explicitly clears it for
- *     symmetry with the other intervals.
- *   - Boot-time `logger.warn` naming the cache-invalidation
- *     limitation in http-only mode so future grep-from-logs lands
- *     on the periodic-refresh strategy.
+ *   - `client.user` seeded from REST `GET /users/@me` (see the
+ *     inline comment below for why the worker tier needs it).
+ *   - Initial `await refreshCache()` when GUILD_ID is set, both to
+ *     warm the cached guild handle and as a fatal boot-time
+ *     reachability check. Multi-tenant deployments (GUILD_ID unset)
+ *     skip it — refreshCache is a no-op there.
  *
- * Returns the periodic-refresh timer so the caller can clearInterval
- * on shutdown. Returns `null` in multi-tenant mode (no timer set up).
+ * Returns nothing. This helper used to return a periodic-refresh
+ * timer for the caller to clearInterval on shutdown; see the
+ * no-periodic-refresh note in the module header for why that timer
+ * is gone.
  *
  * Pure dependency injection (client, config, refreshCache, logger
  * passed in) — keeps the helper testable without importing the
@@ -130,23 +96,9 @@ async function initHttpOnly({ client, config, refreshCache, logger }) {
   // '0' is technically truthy in JS but isn't a valid snowflake anyway —
   // config.js's regex check would have rejected it upstream.
   if (!config.GUILD_ID) {
-    return null;
+    return;
   }
   await refreshCache();
-  logger.warn(
-    'http-only mode: Gateway-driven cache updates are unavailable. ' +
-    `Periodic REST refreshCache compensates every ${formatInterval(REFRESH_INTERVAL_MS)}. ` +
-    'See src/http-only-init.js for rationale; tune via HTTP_ONLY_REFRESH_INTERVAL_MS env var.'
-  );
-  const timer = setInterval(() => {
-    refreshCache().catch(err => {
-      logger.error('Periodic refreshCache failed in http-only mode (will retry next interval)', {
-        errorMessage: err?.message,
-      });
-    });
-  }, REFRESH_INTERVAL_MS);
-  timer.unref();
-  return timer;
 }
 
-module.exports = { initHttpOnly, REFRESH_INTERVAL_MS };
+module.exports = { initHttpOnly };
