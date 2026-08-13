@@ -110,13 +110,16 @@ jobs:
               ;;
           esac
 
-          # jq parses object-construction values with a restricted
-          # production on jq <= 1.7, which ubuntu-latest ships: a bare `+`
-          # concatenation in that position is a parse error, so every
-          # concatenation below stays wrapped in parentheses. jq 1.8
-          # accepts the bare form, so checking this on a newer local jq
-          # will not catch a regression —
-          # scripts/check-main-ci-notification-payload.sh gates it in CI.
+          # Values below use string interpolation, not `+` concatenation.
+          # jq <= 1.7, which ubuntu-latest ships, parses object-construction
+          # values under a restricted production that rejects a bare `+`
+          # there — the parse error that broke this notifier until #1021.
+          # An interpolation is always a jq Term, so it stays legal in any
+          # position, and it renders a non-string arg (say $run_number via
+          # --argjson) instead of failing at runtime. Keep it this way: jq
+          # 1.8 accepts both forms, so a newer local jq will not catch a
+          # regression — scripts/check-main-ci-notification-payload.sh gates
+          # it in CI.
           payload="$(jq -n \
             --arg text ":rotating_light: ${WORKFLOW_NAME} ${CONCLUSION} on ${DEFAULT_BRANCH} - ${short_sha}" \
             --arg repository "$REPOSITORY" \
@@ -137,23 +140,23 @@ jobs:
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: ("*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`.")
+                    text: "*:rotating_light: Main CI did not pass*\n`\($workflow)` completed with `\($conclusion)` on `\($branch)`."
                   }
                 },
                 {
                   type: "section",
                   fields: [
-                    { type: "mrkdwn", text: ("*Repository*\n<" + $repository_url + "|" + $repository + ">") },
-                    { type: "mrkdwn", text: ("*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>") },
-                    { type: "mrkdwn", text: ("*Triggered by*\n" + $actor) },
-                    { type: "mrkdwn", text: ("*Run*\n<" + $run_url + "|#" + $run_number + ">") }
+                    { type: "mrkdwn", text: "*Repository*\n<\($repository_url)|\($repository)>" },
+                    { type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($short_sha)`>" },
+                    { type: "mrkdwn", text: "*Triggered by*\n\($actor)" },
+                    { type: "mrkdwn", text: "*Run*\n<\($run_url)|#\($run_number)>" }
                   ]
                 },
                 {
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: ("*Impact*\n" + $impact)
+                    text: "*Impact*\n\($impact)"
                   }
                 },
                 {
