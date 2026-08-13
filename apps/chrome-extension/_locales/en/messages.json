@@ -165,11 +165,11 @@
     "message": "Make sure a Gmail compose window is open.",
     "description": "Footer hint"
   },
-  "result_one_success": {
+  "result_one_inserted": {
     "message": "Inserted the qURL link into your Gmail draft",
     "description": "Success summary for a single file whose link was inserted into the Gmail draft"
   },
-  "result_n_success": {
+  "result_n_inserted": {
     "message": "Inserted $COUNT$ qURL links into your Gmail draft",
     "description": "Success summary for multiple files whose links were inserted into the Gmail draft",
     "placeholders": {
@@ -179,11 +179,11 @@
       }
     }
   },
-  "result_one_success_upload_only": {
+  "result_one_uploaded": {
     "message": "1 file uploaded successfully",
     "description": "Success summary for a single uploaded file when Gmail insertion does not complete"
   },
-  "result_n_success_upload_only": {
+  "result_n_uploaded": {
     "message": "$COUNT$ files uploaded successfully",
     "description": "Success summary for multiple uploaded files when Gmail insertion does not complete",
     "placeholders": {

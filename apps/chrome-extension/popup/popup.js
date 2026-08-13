@@ -504,11 +504,11 @@ function showResults(results, errors, insertionError) {
     const insertedLinks = insertionError ? 0 : copyableLinks.length;
     const summaryText = insertedLinks === 0
       ? (results.length === 1
-        ? getMessage('result_one_success_upload_only', '1 file uploaded successfully')
-        : getMessage('result_n_success_upload_only', '$1 files uploaded successfully', [String(results.length)]))
+        ? getMessage('result_one_uploaded', '1 file uploaded successfully')
+        : getMessage('result_n_uploaded', '$1 files uploaded successfully', [String(results.length)]))
       : (insertedLinks === 1
-        ? getMessage('result_one_success', 'Inserted the qURL link into your Gmail draft')
-        : getMessage('result_n_success', 'Inserted $1 qURL links into your Gmail draft', [String(insertedLinks)]));
+        ? getMessage('result_one_inserted', 'Inserted the qURL link into your Gmail draft')
+        : getMessage('result_n_inserted', 'Inserted $1 qURL links into your Gmail draft', [String(insertedLinks)]));
 
     const summary = document.createElement('div');
     summary.className = `result-summary ${summaryClass}`;

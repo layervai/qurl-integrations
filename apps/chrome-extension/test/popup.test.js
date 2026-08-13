@@ -722,8 +722,8 @@ test('showResults uses insertion-aware success summaries', function () {
     },
     {
       chromeMessages: {
-        result_n_success: 'Inserted $1 qURL links into your Gmail draft',
-        result_n_success_upload_only: '$1 files uploaded successfully',
+        result_n_inserted: 'Inserted $1 qURL links into your Gmail draft',
+        result_n_uploaded: '$1 files uploaded successfully',
         result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible qURL link.',
         result_insertion_only_failed_plural: 'Upload completed successfully. Use the copy button below to get the accessible qURL links.',
         result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
@@ -887,7 +887,7 @@ test('getMessage fallbacks stay in sync with _locales/en/messages.json', functio
     totalCallSites,
     `every getMessage call site should be checked or explicitly exempt: checked ${checked.length} + exempt ${nonLiteralCallSites} != ${totalCallSites} total`
   );
-  assert.ok(checked.includes('result_one_success') && checked.includes('result_n_success'));
+  assert.ok(checked.includes('result_one_inserted') && checked.includes('result_n_inserted'));
 });
 
 test('showResults styles an insertion-only failure as a notice, not an error', function () {
@@ -1062,10 +1062,10 @@ test('the success summary counts links actually inserted, not files uploaded', f
     },
     {
       chromeMessages: {
-        result_one_success: 'Inserted the qURL link into your Gmail draft',
-        result_n_success: 'Inserted $1 qURL links into your Gmail draft',
-        result_one_success_upload_only: '1 file uploaded successfully',
-        result_n_success_upload_only: '$1 files uploaded successfully',
+        result_one_inserted: 'Inserted the qURL link into your Gmail draft',
+        result_n_inserted: 'Inserted $1 qURL links into your Gmail draft',
+        result_one_uploaded: '1 file uploaded successfully',
+        result_n_uploaded: '$1 files uploaded successfully',
       },
     }
   );
