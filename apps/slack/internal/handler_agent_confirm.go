@@ -95,6 +95,11 @@ type pendingAction struct {
 	Asker       string           `json:"asker,omitempty"`        // Slack user who requested the turn; get is asker-only (see processAgentConfirm)
 	ChannelID   string           `json:"channel_id"`             // Slack conversation id that received the card
 	ChannelType string           `json:"channel_type,omitempty"` // Slack Events API channel_type at proposal time
+	// ResourceChannelID is the membership-gated channel an assistant-pane get was
+	// grounded against. The card and private delivery stay in ChannelID (the app DM),
+	// while approval re-resolves the token here. Empty for channel turns and legacy
+	// snapshots, which continue to execute against ChannelID.
+	ResourceChannelID string `json:"resource_channel_id,omitempty"`
 	// ThreadTS is the thread the confirm card was posted into (empty for a top-level
 	// card). The get's private delivery posts the link back into THIS thread so it
 	// lands where the user is looking — the assistant pane is a threaded view, so a
@@ -190,8 +195,15 @@ func confirmModalRouted(kind agent.ActionKind) bool {
 // fully-wired actions get an Approve button — a deferred-kind proposal stays an
 // honest "…isn't enabled yet" preview instead of a button that can't act.
 func (h *Handler) deliverAgentResult(log *slog.Logger, env *slackEventEnvelope, threadTS string, result *agent.Result) {
+	h.deliverAgentResultScoped(log, env, threadTS, env.Event.Channel, result)
+}
+
+// deliverAgentResultScoped carries the already membership-gated operating channel
+// through proposal delivery. It differs from the card's Slack conversation only for
+// an assistant-pane turn opened from a channel.
+func (h *Handler) deliverAgentResultScoped(log *slog.Logger, env *slackEventEnvelope, threadTS, operatingChannel string, result *agent.Result) {
 	if result.Proposal != nil && h.agentConfirmEnabled() && h.confirmDeliverable(result.Proposal) {
-		h.postAgentConfirm(log, env, threadTS, result.Proposal)
+		h.postAgentConfirmScoped(log, env, threadTS, operatingChannel, result.Proposal)
 		return
 	}
 	// The agent's own answer posts as standard Markdown rendered by Slack, with
@@ -288,6 +300,10 @@ func (h *Handler) agentConfirmEnabled() bool {
 // dropped. The pending action is keyed on env.TeamID (the click reads the same
 // team id — see PutPendingAction).
 func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, threadTS string, prop *agent.Proposal) {
+	h.postAgentConfirmScoped(log, env, threadTS, env.Event.Channel, prop)
+}
+
+func (h *Handler) postAgentConfirmScoped(log *slog.Logger, env *slackEventEnvelope, threadTS, operatingChannel string, prop *agent.Proposal) {
 	summary := strings.TrimSpace(prop.Summary)
 	if summary == "" {
 		// Nothing to confirm against — mirror agentReplyText's blank-summary guard.
@@ -308,17 +324,22 @@ func (h *Handler) postAgentConfirm(log *slog.Logger, env *slackEventEnvelope, th
 		h.postAgentProposalPreview(log, env, threadTS, summary)
 		return
 	}
+	resourceChannelID := ""
+	if prop.Action == agent.ActionGet && env.Event.ChannelType == slackChannelTypeIM && operatingChannel != "" && operatingChannel != env.Event.Channel {
+		resourceChannelID = operatingChannel
+	}
 	blob, err := json.Marshal(pendingAction{
-		Action:      prop.Action,
-		Token:       prop.Token,
-		Reason:      prop.Reason,
-		Alias:       prop.Alias,
-		Target:      prop.Target,
-		URL:         prop.URL,
-		Asker:       env.Event.User, // the user who requested this turn — get is asker-only
-		ChannelID:   env.Event.Channel,
-		ChannelType: env.Event.ChannelType,
-		ThreadTS:    threadTS, // deliver the get's link back into the card's own thread
+		Action:            prop.Action,
+		Token:             prop.Token,
+		Reason:            prop.Reason,
+		Alias:             prop.Alias,
+		Target:            prop.Target,
+		URL:               prop.URL,
+		Asker:             env.Event.User, // the user who requested this turn — get is asker-only
+		ChannelID:         env.Event.Channel,
+		ChannelType:       env.Event.ChannelType,
+		ResourceChannelID: resourceChannelID,
+		ThreadTS:          threadTS, // deliver the get's link back into the card's own thread
 	})
 	if err != nil {
 		log.Error("agent confirm: marshal pending action failed", "error", err)
@@ -515,6 +536,18 @@ func (h *Handler) processAgentConfirm(ctx context.Context, log *slog.Logger, pay
 		log.Warn("agent confirm: non-asker click on a get card", "asker", pa.Asker, "clicker", payload.User.ID)
 		_ = h.postResponse(log, responseURL, agentConfirmGetNotAskerReply)
 		return
+	}
+
+	// A pane get may operate on the channel the pane was opened from while its card
+	// lives in the app DM. Re-check the same membership gate used to scope the turn
+	// before consuming the request; a missing seam or lost membership fails closed.
+	if pa.ResourceChannelID != "" {
+		if pa.Action != agent.ActionGet || pa.ChannelType != slackChannelTypeIM ||
+			!h.resolveChannelMembership(ctx, log, teamID, payload.Enterprise.ID, pa.ResourceChannelID, payload.User.ID) {
+			log.Warn("agent confirm: pane get lost its channel scope", "resource_channel_id", pa.ResourceChannelID)
+			_ = h.postResponse(log, responseURL, agentConfirmScopeMismatchReply)
+			return
+		}
 	}
 
 	// CLAIM (consume-once) — the LAST gate before execute. Claim-before-execute is
@@ -1006,7 +1039,7 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 			cmd:          cmd,
 			teamID:       payload.Team.ID,
 			enterpriseID: payload.Enterprise.ID,
-			channelID:    payload.Channel.ID,
+			channelID:    agentGetResourceChannel(pa, payload.Channel.ID),
 			userID:       payload.User.ID,
 			// triggerID seeds only getWork's idempotency key — getWork never
 			// views.open's it, so the ~3s trigger-expiry doesn't apply on this
@@ -1129,6 +1162,16 @@ func (h *Handler) executeAgentAction(ctx context.Context, log *slog.Logger, pa *
 	}
 }
 
+// agentGetResourceChannel returns the channel whose policy should authorize a
+// confirmed get. New pane snapshots carry their membership-gated context channel;
+// channel turns and snapshots created before this field existed use the card channel.
+func agentGetResourceChannel(pa *pendingAction, cardChannelID string) string {
+	if pa.ResourceChannelID != "" {
+		return pa.ResourceChannelID
+	}
+	return cardChannelID
+}
+
 // recordAgentAudit persists a confirmed action attempt to the App Home review log, keyed by
 // the APPROVER (payload.User.ID) — the actor whose click ran it — so it surfaces only
 // in that user's own App Home and never aggregates across viewers (the per-viewer
@@ -1146,12 +1189,19 @@ func (h *Handler) recordAgentAudit(ctx context.Context, log *slog.Logger, payloa
 		Actor:         payload.User.ID,
 		Action:        string(pa.Action),
 		Target:        auditTargetFor(pa),
-		Channel:       payload.Channel.ID,
+		Channel:       agentAuditChannel(pa, payload.Channel.ID),
 		Reason:        pa.Reason,
 		Outcome:       res.cardText,
 		Result:        res.audit.display,
 		ResultSuccess: resultSuccess,
 	})
+}
+
+func agentAuditChannel(pa *pendingAction, cardChannelID string) string {
+	if pa.Action == agent.ActionGet {
+		return agentGetResourceChannel(pa, cardChannelID)
+	}
+	return cardChannelID
 }
 
 // recordAgentAuditEntry is the low-level best-effort store write shared by the
