@@ -26,10 +26,10 @@ apps/
     cmd/main.go      # Lambda entry point
     internal/        # App-private code — put your logic here
     README.md
-  teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
   discord/           # Discord bot
   chrome-extension/  # Chrome MV3 extension for Gmail
   cli/               # CLI tool
+  teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
   zapier/            # Zapier integration (placeholder, no implementation yet)
 origins/
   s3-static-connector/ # Reusable private S3 static origin image

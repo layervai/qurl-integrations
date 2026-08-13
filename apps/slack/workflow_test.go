@@ -144,6 +144,10 @@ func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 
 	// Guard against the scan silently matching nothing (renamed directory,
 	// changed extension), which would make every assertion above vacuous.
+	// This deliberately couples the two counts: a workflow that grows a job
+	// keyed `required` must land its spec entry in the same change, or the
+	// whole suite goes red rather than quietly under-enforcing the new
+	// aggregate.
 	if seen != len(requiredWorkflowSpecs) {
 		t.Errorf("found %d workflows with a required aggregate, want %d (one per spec)", seen, len(requiredWorkflowSpecs))
 	}
