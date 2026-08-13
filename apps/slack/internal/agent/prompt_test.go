@@ -74,18 +74,21 @@ func TestSystemPrompt_Invariants(t *testing.T) {
 		t.Error("prompt must align free-text answers with the standard-Markdown delivery path")
 	}
 
-	// A canvas, doc, or file shared as a LINK is ordinary message text: no files
-	// entry and no file_share subtype, so slackapp's deterministic
-	// unsupported-media reply correctly does not fire, and a text-side permalink
-	// detector was rejected because it would refuse the whole turn — including
-	// the URL-protection request the checks above pin (see agentEventHasUpload).
-	// That leaves this preamble as the only layer between "summarize this canvas
-	// <link>" and an answer grounded in nothing, so the clause is load-bearing.
-	// It must deny the read WITHOUT becoming a blanket refusal of linked
-	// documents: the URL stays something the agent can propose actions against.
+	// A canvas, doc, or file shared as a LINK is ordinary message text — no files
+	// entry, no file_share subtype — so no deterministic layer catches it, and none
+	// was added: a text-side detector would have refused every message containing a
+	// Slack URL, including the protect request pinned above (see agentEventHasUpload
+	// in the internal package). That leaves this clause as the only thing between
+	// "summarize this canvas <link>" and an ungrounded answer.
+	//
+	// Pin both halves. A deny-only rewrite would keep the deny phrases green while
+	// turning the clause into the blanket refusal that detector was rejected for,
+	// and the PROTECTING URLS pins above stay green through it — they sit in a
+	// different section, so they cannot see a contradiction raised in this one.
 	for _, want := range []string{
 		"A link is a URL, not content",
-		"cannot see what is behind a link",
+		"cannot see what is behind a link rather than describing it",
+		"Propose actions against the URL as usual", // the allow half
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing linked-document guard %q", want)
