@@ -136,6 +136,7 @@
   }
 
   global.QURLComposeFormatter = {
+    buildExpirySuffix: buildExpirySuffix,
     buildLinkHtml: buildLinkHtml,
     buildLinkPlainText: buildLinkPlainText,
     escapeHtml: escapeHtml,

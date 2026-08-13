@@ -408,7 +408,7 @@ copyBtn.addEventListener('click', async () => {
   }
 
   window.setTimeout(function () {
-    copyBtn.textContent = copyButtonLabel(collectCopyableLinks(lastSuccessfulResults));
+    copyBtn.textContent = copyButtonLabel(collectCopyableResults(lastSuccessfulResults));
   }, COPY_BUTTON_REVERT_MS);
 });
 
@@ -483,7 +483,7 @@ function showResults(results, errors, insertionError) {
   errorArea.classList.remove('notice');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
-  const copyableLinks = collectCopyableLinks(results);
+  const copyableLinks = collectCopyableResults(results);
   const hasCopyableLinks = copyableLinks.length > 0;
   copyBtn.textContent = copyButtonLabel(copyableLinks);
 
@@ -818,21 +818,28 @@ function copyButtonLabel(links) {
 
 // The one place that decides which links are copyable. Both clipboard flavors and the button's
 // enabled/label state read from this, so none of them can disagree about what counts as an
-// accessible qURL.
-function collectCopyableLinks(results) {
+// accessible qURL. Carries the expiry alongside each link: the copy fallback is reached exactly
+// when Gmail insertion failed, so without it the user pasting manually would be the one person
+// who never learns when the link stops working.
+function collectCopyableResults(results) {
   if (!results || results.length === 0) {
     return [];
   }
 
   return results
     .map(function (result) {
-      return normalizeAllowedLink(result.link);
+      const link = normalizeAllowedLink(result.link);
+      return link ? { link: link, expiry: result.expiry } : null;
     })
     .filter(Boolean);
 }
 
 function buildCopyUrlText(results) {
-  return collectCopyableLinks(results).join('\n');
+  return collectCopyableResults(results)
+    .map(function (entry) {
+      return entry.link + getComposeFormatter().buildExpirySuffix(entry.expiry);
+    })
+    .join('\n');
 }
 
 // Deliberately plainer than the formatter's buildLinkHtml: that one styles the anchor with
@@ -840,10 +847,15 @@ function buildCopyUrlText(results) {
 // unknown rich-text target, so leaving it unstyled lets it inherit the destination's own link
 // styling.
 function buildCopyUrlHtml(results) {
-  return collectCopyableLinks(results)
-    .map(function (link) {
-      const escaped = getComposeFormatter().escapeHtml(link);
-      return `<a href="${escaped}">${escaped}</a>`;
+  const formatter = getComposeFormatter();
+  return collectCopyableResults(results)
+    .map(function (entry) {
+      const escaped = formatter.escapeHtml(entry.link);
+      // The suffix is machine-generated (formatExpiry emits only digits and punctuation) plus a
+      // locale string, so it carries no markup today — escaped anyway because it flows into HTML
+      // and a future locale should not be able to break the anchor.
+      const expiry = formatter.escapeHtml(formatter.buildExpirySuffix(entry.expiry));
+      return `<a href="${escaped}">${escaped}</a>${expiry}`;
     })
     .join('<br>');
 }

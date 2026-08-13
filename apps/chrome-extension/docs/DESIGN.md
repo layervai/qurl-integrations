@@ -118,7 +118,7 @@ The popup is the user-facing interface. State: `selectedFiles[]`.
 2. User clicks "Upload to qURL" → for each file: read as `ArrayBuffer`, call `uploadFile()`, push result → `insertIntoGmailDraft(results)`.
 3. `insertIntoGmailDraft()` sends successful results to the background relay.
 4. `showResults()` renders success rows, upload failures, and Gmail insertion failures.
-5. If Gmail insertion fails, the popup enables a manual **Copy the qURL link** fallback using HTML and plain-text clipboard payloads when an accessible `https` link is available.
+5. If Gmail insertion fails, the popup enables a manual **Copy the qURL link** fallback using HTML and plain-text clipboard payloads when an accessible `https` link is available. The copy carries each link plus its expiry suffix — the same suffix Gmail insertion would have shown — but not the filename label, so the manual paste is not missing the expiry the automatic path would have given.
 
 **Key decisions:**
 - Files are read as `ArrayBuffer` (not base64) — efficient for large files.

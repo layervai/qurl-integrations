@@ -234,6 +234,10 @@ function loadPopup(sendMessageImpl, timerImpl, options) {
     return value === 'https://getqurllink.layerv.ai';
   };
   global.QURLComposeFormatter = {
+    // Mirrors the real formatter: empty for a missing/invalid expiry, " (Expires: …)" otherwise.
+    buildExpirySuffix(expiry) {
+      return expiry ? ` (Expires: ${expiry})` : '';
+    },
     buildLinkHtml() {
       return '';
     },
@@ -1169,4 +1173,41 @@ test('the insertion-only message agrees with the copy button about how many link
   );
   assert.equal(errorArea.children[0].textContent, 'Upload completed successfully, but no accessible qURL link is available to copy.');
   assert.equal(copyBtn.disabled, true);
+});
+
+test('copied links carry their expiry in both clipboard flavors', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const results = [
+    { filename: 'a.txt', link: 'https://files.example.com/a', expiry: '2026-01-02T03:04:05Z' },
+    { filename: 'b.txt', link: 'http://files.example.com/b', expiry: '2026-01-02T03:04:05Z' },
+    { filename: 'c.txt', link: 'https://files.example.com/c', expiry: null },
+  ];
+
+  // The copy fallback is reached exactly when insertion failed, so the expiry has to survive
+  // into what the user pastes. Non-https links are still dropped, and a null expiry adds nothing.
+  assert.equal(
+    popup.buildCopyUrlText(results),
+    'https://files.example.com/a (Expires: 2026-01-02T03:04:05Z)\nhttps://files.example.com/c'
+  );
+
+  assert.equal(
+    popup.buildCopyUrlHtml(results),
+    '<a href="https://files.example.com/a">https://files.example.com/a</a> (Expires: 2026-01-02T03:04:05Z)'
+      + '<br><a href="https://files.example.com/c">https://files.example.com/c</a>'
+  );
 });
