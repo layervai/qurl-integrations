@@ -338,7 +338,7 @@ func proposalUnsetAlias(f map[string]string) (*Proposal, error) {
 // proposal can be opened before the environment/port are pinned down, and the
 // agent gathers the rest conversationally. The confirm path (the guided install
 // wizard) is the enforcement point — it re-validates and collects any missing
-// env/port before the bootstrap key is minted, so a sparse proposal here can
+// env/port before the enrollment token is minted, so a sparse proposal here can
 // never reach a live mutation.
 func proposalProtectConnector(f map[string]string) (*Proposal, error) {
 	alias := normalizeToken(f[fieldAlias])

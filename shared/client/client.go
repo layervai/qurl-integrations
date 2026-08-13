@@ -104,6 +104,12 @@ var ErrCreateResourceTunnelRejectsTargetURL = errors.New("create resource: type=
 // ErrCreateAPIKeyNilInput is returned by CreateAPIKey when input is nil.
 var ErrCreateAPIKeyNilInput = errors.New("create api key: input is nil")
 
+// ErrCreateAPIKeyMissingKind is returned by CreateAPIKey when Kind is empty.
+// `kind` is required by the kind-first credential contract, so the server
+// returns 400 either way — failing fast saves a round-trip and yields a typed
+// Go error instead of an opaque wire rejection.
+var ErrCreateAPIKeyMissingKind = errors.New("create api key: kind is required")
+
 // ErrRevokeAPIKeyEmptyID is returned by RevokeAPIKey when keyID is empty.
 var ErrRevokeAPIKeyEmptyID = errors.New("revoke api key: key_id is empty")
 
@@ -156,9 +162,39 @@ const ResourceTypeURL = "url"
 // ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
 const ResourceTypeTunnel = "tunnel"
 
-// APIKeyTypeTunnelBootstrap is the restricted key type used by the
-// Docker reverse-tunnel onboarding flow.
-const APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
+// Credential kinds and targets for `POST /v1/api-keys`.
+//
+// TODO(upstream-contract): these mirror qurl-service's kind-first
+// `CreateApiKeyRequest` enums; they must move in lockstep with that schema.
+// The Slack workspace-key mint keeps its own copy of the `api_key` kind in
+// apps/slack/internal/oauth (that package hand-rolls its HTTP client and does
+// not import shared/client).
+const (
+	// CredentialKindEnrollmentToken is the one-shot credential kind used for
+	// headless enrollment.
+	CredentialKindEnrollmentToken = "enrollment_token"
+	// CredentialKindAPIKey is the ordinary, long-lived credential kind. No
+	// in-repo caller passes it today — the one CreateAPIKey call site mints
+	// enrollment tokens — but it is kept so the `kind` enum this client now
+	// requires is documented in one place, and so the Slack minter's unexported
+	// copy has a named counterpart to stay in lockstep with.
+	CredentialKindAPIKey = "api_key"
+	// CredentialTargetConnector constrains an enrollment token to Connector
+	// enrollment.
+	CredentialTargetConnector = "connector"
+	// CredentialClaimTypeConnector binds an enrollment token to one Connector
+	// resource identifier. Sharing the literal "connector" with
+	// CredentialTargetConnector is deliberate: `target` and `claims[].type`
+	// are independent enums in the upstream schema that happen to agree here,
+	// so they stay separate constants and may diverge without a coupled edit.
+	CredentialClaimTypeConnector = "connector"
+	// APIKeyTypeTunnelBootstrap is the retired `key_type` value. Response
+	// decoding does not need it — APIKey.KeyType keys off the `key_type` JSON
+	// tag — so it survives only for the tests that pin legacy-response decode
+	// during the producer rollout. New requests must use
+	// CredentialKindEnrollmentToken.
+	APIKeyTypeTunnelBootstrap = "tunnel_bootstrap"
+)
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -699,13 +735,19 @@ type CreateResourceInput struct {
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
-// CreateAPIKeyInput is the input for `POST /v1/api-keys`.
+// CredentialClaim narrows an enrollment token to one resource.
+type CredentialClaim struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// CreateAPIKeyInput is the kind-first input for `POST /v1/api-keys`.
 type CreateAPIKeyInput struct {
-	Name       string   `json:"name"`
-	Scopes     []string `json:"scopes"`
-	ExpiresIn  string   `json:"expires_in,omitempty"`
-	KeyType    string   `json:"key_type,omitempty"`
-	TunnelSlug string   `json:"tunnel_slug,omitempty"`
+	Name      string            `json:"name"`
+	Kind      string            `json:"kind"`
+	Target    string            `json:"target,omitempty"`
+	Claims    []CredentialClaim `json:"claims,omitempty"`
+	ExpiresIn string            `json:"expires_in,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so retries replay the same plaintext key.
@@ -715,17 +757,22 @@ type CreateAPIKeyInput struct {
 // APIKey represents an API key create response. APIKey is populated only on
 // create; list/update responses never return plaintext keys.
 type APIKey struct {
-	KeyID     string     `json:"key_id,omitempty"`
-	APIKey    string     `json:"api_key,omitempty"`
-	KeyPrefix string     `json:"key_prefix,omitempty"`
-	Name      string     `json:"name,omitempty"`
-	Scopes    []string   `json:"scopes,omitempty"`
-	Status    string     `json:"status,omitempty"`
-	CreatedAt time.Time  `json:"created_at,omitzero"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// KeyType is the optional constrained key type, such as "tunnel_bootstrap".
-	KeyType string `json:"key_type,omitempty"`
-	// TunnelSlug is the sidecar slug this constrained key is bound to.
+	KeyID     string            `json:"key_id,omitempty"`
+	APIKey    string            `json:"api_key,omitempty"`
+	KeyPrefix string            `json:"key_prefix,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Scopes    []string          `json:"scopes,omitempty"`
+	Status    string            `json:"status,omitempty"`
+	CreatedAt time.Time         `json:"created_at,omitzero"`
+	ExpiresAt *time.Time        `json:"expires_at,omitempty"`
+	Kind      string            `json:"kind,omitempty"`
+	Target    string            `json:"target,omitempty"`
+	Claims    []CredentialClaim `json:"claims,omitempty"`
+	// Legacy response fields, decoded so a pre-cutover producer's response
+	// still round-trips during the rollout window. No production code reads
+	// them, and they are absent from CreateAPIKeyInput, so this client cannot
+	// send them. Drop both once every environment is on the kind-first API.
+	KeyType    string `json:"key_type,omitempty"`
 	TunnelSlug string `json:"tunnel_slug,omitempty"`
 }
 
@@ -860,11 +907,23 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 	return &out, nil
 }
 
-// CreateAPIKey creates a qURL API key. It is used by Slack onboarding to mint
-// short-lived, restricted tunnel bootstrap keys from a workspace API key.
+// CreateAPIKey creates a qURL credential. Slack onboarding uses it to mint a
+// short-lived, one-shot enrollment token bound to one Connector resource.
 func (c *Client) CreateAPIKey(ctx context.Context, input *CreateAPIKeyInput) (*APIKey, error) {
 	if input == nil {
 		return nil, ErrCreateAPIKeyNilInput
+	}
+	// Kind presence is structural, so it is checked before the
+	// idempotency-key bytes (a request-decoration error) — a caller missing
+	// both should learn about the missing kind first.
+	//
+	// Checked trimmed but sent as given: unlike RevokeAPIKey/DeleteResource,
+	// which normalize their own string parameters, input is a caller-owned
+	// pointer and writing back would mutate the caller's struct. A padded kind
+	// is a caller bug the server will reject on its own; the guard only has to
+	// catch the empty case.
+	if strings.TrimSpace(input.Kind) == "" {
+		return nil, ErrCreateAPIKeyMissingKind
 	}
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err
