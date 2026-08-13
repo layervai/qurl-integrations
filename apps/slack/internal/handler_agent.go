@@ -837,34 +837,39 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			if !agentAdmitsSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
 				return false
 			}
-			// An upload in a channel is dropped here, flag or no flag, before any of
-			// the follow-up machinery below. The limitation reply answers turns that
-			// ADDRESS the agent, and a file dropped into a channel mid-conversation is
-			// not one; replying would make the bot interject on people talking to each
-			// other, which is the louder failure. That argument does not weaken when
-			// follow-ups ship, so the drop is not conditioned on the flag. The one
-			// channel upload this surface still answers is one that @mentions it — a
-			// different event type, admitted above — which is the route the limitation
-			// text itself tells members to take.
+			// A channel message carrying an upload is dropped here, ahead of the gate,
+			// and not conditioned on the flag. The limitation reply answers turns that
+			// ADDRESS the agent; a file dropped into a channel mid-conversation is not
+			// one, and replying would make the bot interject on people talking to each
+			// other — the louder failure. (With follow-ups off the next check drops it
+			// anyway, so today this only moves which line says no.)
 			//
-			// This deliberately gives up a reply that costs too much to keep. With
-			// follow-ups on, an upload in a thread the agent HAD joined would draw the
-			// limitation; charging for it means routing every thread upload through the
-			// gate, because "did we join this thread?" IS the conversations.replies read
-			// (loadAgentThreadHistory) — there is no cheaper oracle for it. So each one
-			// would spend a followupGateSem slot and a Slack read before dedupe, for
-			// threads the agent never joined too, and that pool's saturation path drops
-			// legitimate TEXT follow-ups. Slack stamps file_share on essentially every
-			// message-with-files, so any member of any channel the bot is in could drive
-			// that with no @mention. Admitting the upload but skipping the gate is worse
-			// still: it converts that read into an outbound post in threads the agent was
-			// never part of — exactly the interjection this branch refuses.
+			// Keeping that reply is what costs, because "did we join this thread?" IS
+			// the conversations.replies read (loadAgentThreadHistory). Answering an
+			// upload therefore means routing every thread upload through the gate: a
+			// followupGateSem slot and a Slack read before dedupe, for threads the agent
+			// never joined too, drivable by any member of any channel the bot is in with
+			// no @mention — and that pool's saturation path drops legitimate TEXT
+			// follow-ups. Skipping the gate and replying anyway is worse still: it turns
+			// that read into an outbound post in threads the agent was never part of.
 			//
-			// Dropping closes a second path with it. Answering an upload would mark the
-			// thread as one the agent joined (see loadAgentThreadHistory), so later
-			// replies there reach the model. That mechanism predates uploads — help and
-			// the invalid-alias replies do it too — but each of those is a turn someone
-			// addressed to the agent, and in a channel an upload is not.
+			// What is given up is narrower than it first looks. On THIS arm the reply
+			// could never create an agent thread — agentChannelFollowupDropped admits
+			// the event only where loadAgentThreadHistory already reported joined — it
+			// could only REFRESH one, since joined-ness is recomputed over a sliding
+			// agentHistoryWindow. So the reply kept a lapsing thread admissible; the
+			// shape that JOINS a thread is the @mention, which is unchanged and is now
+			// the only route to this reply in a channel. That makes the
+			// TODO(upstream-contract) on the app_mention arm load-bearing rather than
+			// redundant: its failure mode is silence.
+			//
+			// One collateral to name, since nothing else records it. agentEventHasUpload
+			// fails toward refusal on a files value it cannot decode, so a pure-TEXT
+			// follow-up carrying an unrecognized files shape is dropped here silently —
+			// where it used to draw claimMediaNotice's files_field_present=true /
+			// files_visible=0 log, the pair that comment designates as the "the agent
+			// refused my message" alert. The DM and @mention surfaces still raise it, so
+			// the signal survives; this surface stops contributing to it.
 			//
 			// Keyed on agentEventHasUpload, not the subtype: an upload whose files array
 			// arrives without file_share must not slip past into the gate.

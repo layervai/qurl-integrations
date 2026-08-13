@@ -186,6 +186,13 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.Files = filesFromJSON(t, `[{"id":"F1"}]`)
 		return e
 	}
+	// withRawFiles attaches a files value straight from the wire, for shapes the
+	// decoder cannot count. It goes through the real decoder, so `{}` lands as
+	// present-but-uncountable rather than hand-built struct state.
+	withRawFiles := func(e *slackEventEnvelope, raw string) *slackEventEnvelope {
+		e.Event.Files = filesFromJSON(t, raw)
+		return e
+	}
 	tests := []struct {
 		name      string
 		env       *slackEventEnvelope
@@ -237,14 +244,27 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"file_share channel thread dropped before the gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, false},
 		{"file_share channel thread reply without files dropped (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
 		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
-		// The drop is not conditioned on the flag: the reason it is not addressed to the
-		// agent does not change when follow-ups ship.
-		{"channel thread file reply dropped with followups off too", withFile(chReply("", agentPoolTestThreadTS)), false, false},
 		// A caption does not buy the message back in. The turn is refused wholesale
 		// either way (see processAgentEventWithAdmission), so the text was never the
 		// reason it would have been answered.
 		{"captioned channel thread file reply dropped", withFile(chReply("more please", agentPoolTestThreadTS)), true, false},
 		{"thread_broadcast channel thread file reply dropped", withFile(chReplySubtype("look", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast)), true, false},
+		// Captioned AND file_share with no files array. The row above it proves the
+		// subtype is honored when the text is empty; this one proves it independently of
+		// the empty-text guard at the end of the function, which cannot reach a message
+		// that HAS text.
+		{"captioned file_share channel thread reply without files dropped", chReplySubtype("here you go", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
+		// A files value the decoder cannot count reads as present, so this pure-TEXT
+		// follow-up is refused as an upload. That is the intended fail-toward-refusal
+		// posture (see slackEventFiles.UnmarshalJSON), and pinning it here is what keeps
+		// the collateral named at the branch honest: on this surface the refusal is now
+		// silent, where a DM or @mention would still raise claimMediaNotice's log.
+		{"channel thread text reply with an uncountable files value dropped", withRawFiles(chReply("and revoke it too", agentPoolTestThreadTS), `{}`), true, false},
+		// Regression pin on the flag-off path. It does NOT distinguish an unconditional
+		// drop from a flag-conditioned one — nothing can, because the gate below drops
+		// this row either way when the flag is off. Unconditionality is a readability
+		// choice here, not an observable one.
+		{"channel thread file reply dropped with followups off too", withFile(chReply("", agentPoolTestThreadTS)), false, false},
 		// ...and the route out stays open: an @mention is a different event type, so it
 		// carries an upload through from inside a channel thread. This is the only
 		// channel upload the surface still answers, and the limitation text names it.
