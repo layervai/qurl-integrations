@@ -208,7 +208,8 @@ jobs:
             exit 1
           fi
 
-          # The pinned action preserves PR-authored startup-sensitive paths
+          # TODO(upstream-contract): The pinned action preserves PR-authored
+          # startup-sensitive paths
           # under .claude-pr/ with dereferencing enabled before restoring the
           # base copies; that behavior was observed at v1.0.180. A symlink
           # such as .claude/settings.json -> /proc/self/environ would therefore
@@ -311,7 +312,8 @@ jobs:
       - name: Run Claude Code
         id: claude
         if: success()
-        # Requires v1.0.180 or newer: from that version interactive commands
+        # TODO(upstream-contract): Requires v1.0.180 or newer: from that
+        # version interactive commands
         # run on the same fail-closed runner as automatic review, and it is past
         # the v1.0.140/141 issue-comment crash. Moving the pin forward keeps
         # both; do not pin below that floor.
