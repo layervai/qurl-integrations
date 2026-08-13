@@ -1190,6 +1190,64 @@ test('the insertion-only message agrees with the copy button about how many link
   assert.equal(copyBtn.disabled, true);
 });
 
+test('the insertion-only failure copy renders the shipped wording for every link count', function () {
+  // Deliberately no chromeMessages stub: getMessage falls through to popup.js's own inline
+  // fallbacks, so these assertions pin the wording a user actually reads. The stubbed test
+  // above can only pin key selection — it asserts the very strings it just supplied, so a
+  // reworded messages.json entry passes it untouched. Keep both: that test proves which of
+  // the three keys each link count picks, this one proves what those keys say.
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const errorArea = popup.__testElements.get('errorArea');
+
+  popup.showResults(
+    [{ filename: 'a.txt', link: 'https://files.example.com/a', expiry: null }],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(
+    errorArea.children[0].textContent,
+    'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL link.'
+  );
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(
+    errorArea.children[0].textContent,
+    'Couldn\'t insert into your Gmail draft. Use the copy button below to get the accessible qURL links.'
+  );
+
+  popup.showResults(
+    [{ filename: 'a.txt', link: 'http://files.example.com/a', expiry: null }],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(
+    errorArea.children[0].textContent,
+    'Couldn\'t insert into your Gmail draft, and no accessible qURL link is available to copy.'
+  );
+});
+
 test('copied links carry their expiry in both clipboard flavors', function () {
   const popup = loadPopup(
     function () {
