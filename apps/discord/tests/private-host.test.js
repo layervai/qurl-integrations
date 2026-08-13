@@ -47,6 +47,17 @@ describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
     expect(unwrapIPv4Mapped('::ffff:8.8.8.8')).toBe('8.8.8.8');
   });
 
+  it('requires lowercased input — the contract callers must honour', () => {
+    // The hex tail is matched with [0-9a-f]. Both production callers lowercase
+    // before composing (isPrivateHost does it directly; the boot screen gets
+    // an already-lowercased hostname out of new URL()), so this is a contract
+    // for the next composer, not a live bug.
+    expect(unwrapIPv4Mapped('::FFFF:7F00:1')).toBeNull();
+    expect(unwrapIPv4Mapped('::ffff:7f00:1')).toBe('127.0.0.1');
+    // isPrivateHost lowercases internally, so it is unaffected.
+    expect(isPrivateHost('::FFFF:7F00:1')).toBe(true);
+  });
+
   it('returns null for non-mapped literals', () => {
     expect(unwrapIPv4Mapped('::1')).toBeNull();
     expect(unwrapIPv4Mapped('fe80::1')).toBeNull();

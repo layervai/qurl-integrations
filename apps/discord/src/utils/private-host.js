@@ -96,6 +96,9 @@ function ipv4LocalScope(octets, { includeCgnat = false, includeMulticast = false
 /**
  * Unwrap an IPv4-mapped IPv6 literal to its dotted-quad form, or null.
  *
+ * `host` must already be lowercased and bracket-stripped: the hex tail is
+ * matched with [0-9a-f], so an uppercased `::FFFF:7F00:1` would slip past.
+ *
  * BOTH tail forms matter, and missing the hex one is a real SSRF bypass
  * (issue #1035): `new URL()` re-serializes `::ffff:127.0.0.1` to the hex form
  * `::ffff:7f00:1`, so the dotted tail is the form a human types and the hex
