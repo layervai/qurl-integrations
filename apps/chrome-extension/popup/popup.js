@@ -553,9 +553,7 @@ function showResults(results, errors, insertionError) {
     // as its own bullet below. The singular case must not depend on insertionError, or one
     // failed upload alongside an insertion failure renders the ungrammatical "1 files…".
     title.textContent = insertionError && errors.length === 0
-      ? (hasCopyableLinks
-        ? getMessage('result_insertion_only_failed', 'Upload completed successfully. Use the copy button below to get the accessible URL.')
-        : getMessage('result_insertion_only_failed_no_copy', 'Upload completed successfully, but no accessible qURL link is available to copy.'))
+      ? insertionOnlyFailureMessage(copyableLinks)
       : errors.length === 1
       ? getMessage('result_one_error', '1 file failed to upload')
       : getMessage('result_n_errors', '$1 files failed to upload', [String(errors.length)]);
@@ -781,6 +779,27 @@ function formatFileSize(bytes) {
 
 function normalizeAllowedLink(link) {
   return getComposeFormatter().normalizeAllowedLink(link);
+}
+
+// Mirrors copyButtonLabel: the insertion-only message points the user at the copy button, so it
+// has to agree with that button about how many links are waiting there.
+function insertionOnlyFailureMessage(links) {
+  if (links.length === 0) {
+    return getMessage(
+      'result_insertion_only_failed_no_copy',
+      'Upload completed successfully, but no accessible qURL link is available to copy.'
+    );
+  }
+
+  return links.length > 1
+    ? getMessage(
+      'result_insertion_only_failed_plural',
+      'Upload completed successfully. Use the copy button below to get the accessible qURL links.'
+    )
+    : getMessage(
+      'result_insertion_only_failed',
+      'Upload completed successfully. Use the copy button below to get the accessible qURL link.'
+    );
 }
 
 // Label the copy button for the number of links it will actually copy. Every path that sets

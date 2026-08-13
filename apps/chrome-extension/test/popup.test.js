@@ -720,7 +720,8 @@ test('showResults uses insertion-aware success summaries', function () {
       chromeMessages: {
         result_n_success: 'Inserted $1 qURL links into your Gmail draft',
         result_n_success_upload_only: '$1 files uploaded successfully',
-        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible URL.',
+        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible qURL link.',
+        result_insertion_only_failed_plural: 'Upload completed successfully. Use the copy button below to get the accessible qURL links.',
         result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
       },
     }
@@ -764,7 +765,7 @@ test('showResults uses insertion-aware success summaries', function () {
     '2 files uploaded successfully'
   );
   assert.equal(uploadOnlySummary.className, 'result-summary partial');
-  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible URL.');
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL links.');
 });
 
 test('showResults disables copy when no accessible links are available', function () {
@@ -1101,4 +1102,62 @@ test('the success summary counts links actually inserted, not files uploaded', f
     null
   );
   assert.equal(summary(), 'Inserted 2 qURL links into your Gmail draft');
+});
+
+test('the insertion-only message agrees with the copy button about how many links wait there', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        copy_btn: 'Copy the qURL link',
+        copy_btn_plural: 'Copy the qURL links',
+        result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible qURL link.',
+        result_insertion_only_failed_plural: 'Upload completed successfully. Use the copy button below to get the accessible qURL links.',
+        result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const errorArea = popup.__testElements.get('errorArea');
+  const copyBtn = popup.__testElements.get('copyBtn');
+
+  popup.showResults(
+    [{ filename: 'a.txt', link: 'https://files.example.com/a', expiry: null }],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL link.');
+  assert.equal(copyBtn.textContent, 'Copy the qURL link');
+
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully. Use the copy button below to get the accessible qURL links.');
+  assert.equal(copyBtn.textContent, 'Copy the qURL links');
+
+  // Nothing copyable: the message must not point at a button that has nothing to give.
+  popup.showResults(
+    [{ filename: 'a.txt', link: 'http://files.example.com/a', expiry: null }],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(errorArea.children[0].textContent, 'Upload completed successfully, but no accessible qURL link is available to copy.');
+  assert.equal(copyBtn.disabled, true);
 });
