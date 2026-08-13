@@ -259,6 +259,16 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
+  it('lets a non-consuming deploy keep a non-origin https BASE_URL', () => {
+    // Without AUTH0_*, nothing builds an OAuth redirect from BASE_URL, so the
+    // origin-shape rules deliberately do not apply — only the stale-http://
+    // canary does. Pins the boundary: a path-prefixed https value boots here
+    // but is rejected the moment the same deploy configures qURL OAuth.
+    const nonConsuming = { isQurlOAuthConfigured: false, BASE_URL: 'https://bot.example.com/prefix' };
+    expect(baseUrlHttpsProblem(nonConsuming, true)).toBeNull();
+    expect(baseUrlHttpsProblem({ ...nonConsuming, isQurlOAuthConfigured: true }, true)).not.toBeNull();
+  });
+
   it('rejects alternate IPv4 encodings of a local-only host', () => {
     // isPrivateIPv4Literal reads parsed.hostname, which WHATWG has already
     // re-serialized to dotted-decimal for a special scheme — that
