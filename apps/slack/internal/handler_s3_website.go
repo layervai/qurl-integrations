@@ -53,11 +53,17 @@ var (
 	// grammar because the origin image does not support them. The helper below
 	// adds AWS's reserved prefix/suffix rules to this shell-safe base shape.
 	s3WebsiteBucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
-	// TODO(upstream-contract): keep this commercial-region policy in lockstep
-	// with origins/s3-static-connector/render.sh. It is pattern-based instead of
-	// an allowlist so new regions work without redeploying the Slack app;
-	// unsupported partitions are excluded below and AWS reports nonexistent
-	// commercial regions at deploy time.
+	// TODO(upstream-contract): keep this commercial-region policy a SUBSET of
+	// origins/s3-static-connector/render.sh's. The invariant is one-directional,
+	// not equality: this form must never accept a region the origin rejects, but
+	// it may be stricter, and today it is — render.sh allows us-east-0 and
+	// us-east-01, which [1-9]\d* rejects here. Every other field is the same
+	// shape (reserved bucket prefixes/suffixes, punctuation-only index, empty
+	// prefix segments, and the 256-char prefix cap are all Slack-side only), so
+	// the modal fails closed rather than emitting a manifest the origin refuses.
+	// Pattern-based instead of an allowlist so new regions work without
+	// redeploying the Slack app; unsupported partitions are excluded below and
+	// AWS reports nonexistent commercial regions at deploy time.
 	s3WebsiteRegionPattern = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[1-9]\d*$`)
 	s3WebsitePrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 	// The origin image accepts only a bare INDEX_DOCUMENT file name; a nested
@@ -519,7 +525,10 @@ func (h *Handler) buildS3WebsiteInstall(ctx context.Context, log *slog.Logger, t
 		IdempotencyKey: tunnelBootstrapIdempotencyKey(teamID, channelID, userID, args.Slug, attemptID),
 	})
 	if err != nil {
-		log.Error("S3 website install: enrollment token mint failed", "error", sanitizeS3WebsiteLogValue(err.Error()), "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))
+		// Match the tunnel twin: APIError.Error() renders only "Title (Status):
+		// Detail", so the bare error drops the server's invalid_fields — the part
+		// that names the rejected key on a kind-first contract rejection.
+		log.Error("S3 website install: enrollment token mint failed", withAPIErrorAttrs(err, "error", err, "slug", sanitizeS3WebsiteLogValue(args.Slug), "resource_id", sanitizeS3WebsiteLogValue(resolvedArgs.ResourceID))...)
 		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), err
 	}
 	mintedKey = key
@@ -675,17 +684,17 @@ func renderS3WebsiteConnectorConfigYAML(args *s3WebsiteInstallArgs) (string, err
 	if err := args.requirePinnedConnectorResource(); err != nil {
 		return "", err
 	}
-	quoted, err := yamlSingleQuotedValues(args.Slug, args.ResourceID, args.ConnectorRoutingID)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(`routes:
-  - id: %s
-    type: http
-    local_ip: 127.0.0.1
-    local_port: %d
-    resource_id: %s
-    connector_routing_id: %s`, quoted[0], s3WebsiteOriginPort, quoted[1], quoted[2]), nil
+	// Delegate rather than re-emit the route template: qurl-connector's strict
+	// decoder schema belongs in one Go function, and renderTunnelConfigYAML
+	// additionally revalidates the route identity at the renderer boundary.
+	// Output is byte-identical for a fully pinned resource.
+	return renderTunnelConfigYAML(&tunnelInstallArgs{
+		Slug:               args.Slug,
+		LocalPort:          s3WebsiteOriginPort,
+		ResourceID:         args.ResourceID,
+		ConnectorRoutingID: args.ConnectorRoutingID,
+		KnockResourceID:    args.KnockResourceID,
+	})
 }
 
 func yamlSingleQuotedValues(values ...string) ([]string, error) {
@@ -930,7 +939,7 @@ func renderECSS3WebsiteInstructions(args *s3WebsiteInstallArgs, connectorImage, 
 	}
 	secretName := "qurl-connector-" + args.Slug
 	intro := strings.Join([]string{
-		"Use this as an ECS/Fargate task-definition checklist.",
+		"Use this as an " + ecsFargateChecklistText + ".",
 		"Create the AWS Secrets Manager secret as `" + secretName + "` using the temporary enrollment token delivered separately by DM.",
 		"Run both containers in the same task; Fargate awsvpc networking lets the qURL Connector reach the private S3 origin on `127.0.0.1:" + strconv.Itoa(s3WebsiteOriginPort) + "`.",
 		"Both containers are essential, so a failure of either one restarts the whole task.",
