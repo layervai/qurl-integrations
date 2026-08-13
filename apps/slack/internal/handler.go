@@ -2303,10 +2303,18 @@ func (h *Handler) logEventDrift(err error, driftField string, env *slackEventEnv
 	if h == nil || h.driftFieldUnseen(driftField) {
 		level = slog.LevelWarn
 	}
+	// slog evaluates its variadic args before it filters on level, so the
+	// demoted repeats would each build a record the sink then discards — and
+	// those repeats are per-request during exactly the systematic drift this
+	// latch exists for. Ask first.
+	ctx := context.Background()
+	if !slog.Default().Enabled(ctx, level) {
+		return
+	}
 	// team_id/event_id match what the adjacent lifecycle and agent branches
 	// already log in the clear, and are what makes a drift report actionable
 	// (which workspace, which delivery) rather than just "something changed".
-	slog.Log(context.Background(), level, "event JSON field type drift tolerated; routing on the fields that decoded",
+	slog.Log(ctx, level, "event JSON field type drift tolerated; drifted field left empty, event handled on what did decode",
 		"error", err,
 		"drift_field", driftField,
 		"body_length", bodyLength,
