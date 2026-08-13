@@ -19,15 +19,20 @@
 # Six rules, in the order they are reported:
 #   1. The two catalogs declare the same key set.
 #   2. Every key outside SANCTIONED_DELTAS is byte-identical in both catalogs.
-#   3. Every key inside SANCTIONED_DELTAS actually differs. Without this the
-#      allowlist silently becomes a hole: setting Edge's ext_name to Chrome's
-#      value passes rules 2 and 4 (it is exempt from 2, and "qURL Agent" names
-#      no browser for 4), and Edge ships to the Edge Add-ons store under the
-#      Chrome extension's name.
-#   4. Neither catalog names the other browser, anywhere. This needs no
-#      allowlist: today the only browser names in either catalog are each copy's
-#      own, inside the two sanctioned keys. It is what catches a sanctioned
-#      delta that was copied across without being retargeted.
+#   3. Every key inside SANCTIONED_DELTAS has a genuinely different `message`.
+#      Without this the allowlist silently becomes a hole: setting Edge's
+#      ext_name to Chrome's value passes rules 2 and 4 (it is exempt from 2, and
+#      "qURL Agent" names no browser for 4), and Edge ships to the Edge Add-ons
+#      store under the Chrome extension's name. Note this compares `message`
+#      rather than the whole entry, and rule 2 above exempts only `message` —
+#      otherwise a copied message could hide behind a diverging description:
+#      the entries would be unequal, so a whole-entry rule 3 would pass.
+#   4. Neither catalog names the other browser, in any string at any depth. This
+#      needs no allowlist: today the only browser names in either catalog are
+#      each copy's own, inside the two sanctioned keys. It is what catches a
+#      sanctioned delta that was copied across without being retargeted. Matched
+#      case-sensitively, as in the sibling lockstep script, so that the lowercase
+#      `chrome.*` API namespace never reads as prose.
 #   5. Every __MSG_key__ reference in manifest.json resolves in that app's
 #      catalog. i18n-coverage.test.js does not scan manifest.json, and neither
 #      of its regexes matches the __MSG_*__ syntax, so an unresolved key there
@@ -125,22 +130,33 @@ for name, other, missing in (
             "to the hard-coded English literal in getMessage's second argument."
         )
 
-# Rule 2: shared keys are identical unless sanctioned.
+# Rule 2: shared keys are identical. A sanctioned key is exempt on `message`
+# ONLY — its description, placeholders and everything else still have to match,
+# and rule 3 below requires the exempted message to actually differ. Exempting
+# the whole entry instead would reopen the hole rule 3 exists to close: an entry
+# whose message was copied across but whose description drifted is unequal, so a
+# whole-entry rule 3 would see a difference and pass.
 for key in sorted(set(chrome) & set(edge)):
-    if key in SANCTIONED_DELTAS or chrome[key] == edge[key]:
-        continue
+    exempt = {"message"} if key in SANCTIONED_DELTAS else set()
     fields = sorted(
         field
-        for field in set(chrome[key]) | set(edge[key])
+        for field in (set(chrome[key]) | set(edge[key])) - exempt
         if chrome[key].get(field) != edge[key].get(field)
     )
+    if not fields:
+        continue
     detail = "\n".join(
         f"    {field}:\n      chrome: {chrome[key].get(field)!r}\n"
         f"      edge:   {edge[key].get(field)!r}"
         for field in fields
     )
+    scope = (
+        "is a sanctioned delta, but only its `message` may differ"
+        if key in SANCTIONED_DELTAS
+        else "is not a sanctioned delta"
+    )
     failures.append(
-        f"{key}: catalogs disagree and the key is not a sanctioned delta:\n{detail}\n"
+        f"{key}: catalogs disagree and the key {scope}:\n{detail}\n"
         "  Apply the same wording to both copies. If the divergence is deliberate, "
         "add the key to SANCTIONED_DELTAS here and to 'Intentional differences' in "
         "CLAUDE.md."
@@ -151,11 +167,13 @@ for key, reason in sorted(SANCTIONED_DELTAS.items()):
     if key not in chrome or key not in edge:
         # Rule 1 already reported the absence; do not pile on.
         continue
-    if chrome[key] != edge[key]:
+    # The user-visible message specifically: a whole-entry compare would let a
+    # copied message hide behind a diverging description and ship silently.
+    if chrome[key].get("message") != edge[key].get("message"):
         continue
     failures.append(
-        f"{key}: listed in SANCTIONED_DELTAS ({reason}) but the two catalogs "
-        f"agree: {chrome[key].get('message')!r}\n"
+        f"{key}: listed in SANCTIONED_DELTAS ({reason}) but both catalogs carry "
+        f"the same message: {chrome[key].get('message')!r}\n"
         "  This key is exempt from the equality check, so an accidental copy "
         "across the fork would otherwise ship silently. Either restore the "
         "per-browser wording, or drop the key from SANCTIONED_DELTAS here and "
@@ -163,18 +181,26 @@ for key, reason in sorted(SANCTIONED_DELTAS.items()):
     )
 
 # Rule 4: neither catalog names the other browser.
+def walk_strings(value, path):
+    """Yield (dotted path, string) for every string anywhere under `value`."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for field in sorted(value):
+            yield from walk_strings(value[field], f"{path}.{field}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from walk_strings(item, f"{path}[{index}]")
+
+
 for name, catalog in (("chrome", chrome), ("edge", edge)):
     pattern = FOREIGN_BROWSER[name]
     for key in sorted(catalog):
-        entry = catalog[key]
-        if not isinstance(entry, dict):
-            continue
-        for field in sorted(entry):
-            value = entry[field]
-            if not isinstance(value, str) or not pattern.search(value):
+        for path, value in walk_strings(catalog[key], key):
+            if not pattern.search(value):
                 continue
             failures.append(
-                f"{APPS[name] / CATALOG}: {key}.{field} names the wrong browser: "
+                f"{APPS[name] / CATALOG}: {path} names the wrong browser: "
                 f"{value!r}\n"
                 f"  The {name} catalog must never mention the other browser. "
                 "Retarget the wording to this copy's own browser."

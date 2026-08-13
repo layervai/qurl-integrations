@@ -126,6 +126,43 @@ json.dump(data, open(path, "w"), indent=2)
 ' "$@"
 }
 
+# Give Edge Chrome's ext_name message, with a description of the caller's
+# choosing, and update Edge's popup.html mirrors so rule 6 does not mask the
+# result. This is the motivating mutation, parameterized by the field that
+# decides whether it lands on rule 3 or rule 2.
+copy_chrome_ext_name_to_edge() { # <edge description>
+  python3 -c '
+import json, sys
+description = sys.argv[1]
+chrome = json.load(open("apps/chrome-extension/_locales/en/messages.json"))
+path = "apps/edge-extension/_locales/en/messages.json"
+edge = json.load(open(path))
+name = chrome["ext_name"]["message"]
+edge["ext_name"] = {"message": name, "description": description}
+json.dump(edge, open(path, "w"), indent=2)
+
+popup = "apps/edge-extension/popup/popup.html"
+markup = open(popup).read()
+open(popup, "w").write(markup.replace("qURL File Upload for Edge", name))
+' "$@"
+}
+
+# Give BOTH catalogs the same placeholder example naming Chrome. Identical on
+# both sides, so rule 2 is satisfied and only rule 4 — reaching a nested string
+# rather than a top-level field — can fire, on the Edge copy.
+add_wrong_browser_placeholder() {
+  python3 -c '
+for app in ("chrome", "edge"):
+    import json
+    path = f"apps/{app}-extension/_locales/en/messages.json"
+    data = json.load(open(path))
+    data["permission_request_confirm"]["placeholders"] = {
+        "origin": {"example": "https://files.example.com seen from Chrome"}
+    }
+    json.dump(data, open(path, "w"), indent=2)
+'
+}
+
 CHROME_CATALOG="apps/chrome-extension/_locales/en/messages.json"
 EDGE_CATALOG="apps/edge-extension/_locales/en/messages.json"
 
@@ -156,6 +193,16 @@ run_case edge-takes-chrome-ext-name 1 "ext_name: listed in SANCTIONED_DELTAS" \
 run_case sanctioned-key-collapsed 1 "permission_request_confirm: listed in SANCTIONED_DELTAS" \
   set_json "$EDGE_CATALOG" permission_request_confirm message "Allow access? Chrome will show a prompt next."
 
+# The exemption is `message` only: a sanctioned key whose message was copied
+# across still fails on its other fields. Without this, the copied message hides
+# behind the diverging description — the entries are unequal, so a whole-entry
+# rule 3 would see a difference and pass, and Edge ships under Chrome's name.
+run_case sanctioned-message-copied-description-drifts 1 "only its \`message\` may differ" \
+  copy_chrome_ext_name_to_edge "Edge extension name"
+
+run_case sanctioned-description-drift 1 "only its \`message\` may differ" \
+  set_json "$EDGE_CATALOG" ext_name description "Edge extension name"
+
 # Rule 4 — a sanctioned delta copied across without being retargeted. It still
 # differs from Chrome's, so rule 3 is satisfied and only this rule fires.
 run_case edge-names-chrome 1 "permission_request_confirm.message names the wrong browser" \
@@ -167,6 +214,12 @@ run_case chrome-names-edge 1 "permission_request_confirm.message names the wrong
 # The rule reaches description too, not just the user-visible message.
 run_case wrong-browser-in-description 1 "copy_btn.description names the wrong browser" \
   set_json "$EDGE_CATALOG" copy_btn description "Copy button, Chrome only"
+
+# Rule 4 reaches nested strings, not just top-level fields. Both catalogs carry
+# the same placeholder example here, so rule 2 is satisfied and only rule 4 can
+# fire — on the Edge copy, for naming Chrome.
+run_case wrong-browser-in-nested-placeholder 1 "permission_request_confirm.placeholders.origin.example names the wrong browser" \
+  add_wrong_browser_placeholder
 
 # Rule 5 — manifest placeholders have no fallback: an unresolved key makes the
 # extension fail to load or list blank, and i18n-coverage.test.js never sees it.
