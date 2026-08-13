@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1852,46 +1851,33 @@ func assertNoShellMetacharacter(t *testing.T, name, value string) {
 // release contract's fixture route against the config the Slack flow actually
 // generates. The contract script's value is that a released Connector's strict
 // YAML decoder accepts our route; a strict decoder rejects unknown fields, so
-// the proof only holds while the fixture carries the same field set
-// renderS3WebsiteConnectorConfigYAML emits. Without this fence the fixture
-// silently rots into testing a route no customer runs.
+// the proof only holds while the fixture is byte-for-byte what the renderer
+// emits. Both sides read this one golden — the script feeds it to the decoder,
+// this test regenerates it — so a field OR a value can only drift by failing
+// here. Run with UPDATE_GOLDEN=1 to rewrite it after an intended change, the
+// same convention origins/s3-static-connector/test/render_test.sh uses.
 func TestS3WebsiteReleaseContractRouteMatchesRenderedConfig(t *testing.T) {
-	scriptPath := filepath.Join("..", "..", "..", "origins", "s3-static-connector", "test", "qurl_connector_release_contract.sh")
-	// #nosec G304 -- scriptPath is the checked-in release contract script, built from constant path segments.
-	script, err := os.ReadFile(scriptPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", scriptPath, err)
-	}
+	goldenPath := filepath.Join("..", "..", "..", "origins", "s3-static-connector", "test", "golden", "s3-website-route.yaml")
 	configYAML, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvDocker))
 	if err != nil {
 		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
 	}
-
-	// The fixture route reaches the Connector as single-quoted printf operands,
-	// so read keys from inside the quotes; the rendered config is plain YAML.
-	fixtureKeys := s3WebsiteRouteFieldNames(t, string(script), regexp.MustCompile(`'\s*(?:-\s*)?([a-z_]+):`))
-	renderedKeys := s3WebsiteRouteFieldNames(t, configYAML, regexp.MustCompile(`(?m)^\s*(?:-\s*)?([a-z_]+):`))
-
-	if !slices.Equal(fixtureKeys, renderedKeys) {
-		t.Fatalf("release contract fixture route fields = %v, rendered config fields = %v;\nkeep %s in lockstep with renderS3WebsiteConnectorConfigYAML", fixtureKeys, renderedKeys, scriptPath)
-	}
-}
-
-// s3WebsiteRouteFieldNames collects the sorted, de-duplicated route field names
-// that pattern's first capture group matches, excluding the routes: container
-// key itself.
-func s3WebsiteRouteFieldNames(t *testing.T, text string, pattern *regexp.Regexp) []string {
-	t.Helper()
-	var names []string
-	for _, match := range pattern.FindAllStringSubmatch(text, -1) {
-		if match[1] == "routes" {
-			continue
+	// The decoder reads a file, so the golden carries the trailing newline the
+	// renderer's string form omits.
+	want := configYAML + "\n"
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(goldenPath, []byte(want), 0o600); err != nil {
+			t.Fatalf("update %s: %v", goldenPath, err)
 		}
-		names = append(names, match[1])
+		t.Logf("updated %s", goldenPath)
+		return
 	}
-	if len(names) == 0 {
-		t.Fatalf("no route fields matched %s", pattern)
+	// #nosec G304 -- goldenPath is the checked-in golden, built from constant path segments.
+	golden, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", goldenPath, err)
 	}
-	slices.Sort(names)
-	return slices.Compact(names)
+	if string(golden) != want {
+		t.Fatalf("release contract golden is stale.\n golden:\n%s\n rendered:\n%s\nRerun with UPDATE_GOLDEN=1 if the change is intended, and keep %s consuming this file.", golden, want, "origins/s3-static-connector/test/qurl_connector_release_contract.sh")
+	}
 }
