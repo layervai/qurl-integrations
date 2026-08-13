@@ -1014,8 +1014,9 @@ func (h *Handler) processAdmittedAgentEvent(ctx context.Context, log *slog.Logge
 //
 // Callers run this after dedupe and before rate limiting, the model, and — on the
 // direct @mention/DM path — the thread-history read. A channel follow-up has
-// already paid its history read in the admission gate. Every reply here is free to
-// serve, so none consumes a limiter slot and none is persisted as conversation.
+// already paid its history read in the admission gate. Every reply here is free of
+// MODEL cost — so none consumes a limiter slot and none is persisted as
+// conversation — but each still costs one dedupe write and one chat.postMessage.
 //
 // The attachment case comes first. qURL conversation mode is text-only, so an
 // upload must never draw an answer that silently ignores it — not even when its
