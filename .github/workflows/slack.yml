@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Stacked Slack PRs must run the same gates before their base reaches main.
+    branches: ["**"]
 
 permissions:
   contents: read
@@ -21,8 +22,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
     outputs:
-      slack: ${{ steps.filter.outputs.slack }}
+      # An unresolvable base forces every gate to run. A redundant run costs
+      # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
+      slack: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.slack }}
     steps:
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
@@ -31,13 +37,35 @@ jobs:
         with:
           fetch-depth: 0
 
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, app CI never having
+      # executed (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
+        # Skipped when no base could be resolved. The job output already forces
+        # every gate true there, and running the filter anyway would let a
+        # filter error redden this job instead of honouring the fail-closed
+        # intent.
+        if: steps.base.outputs.force != 'true'
         with:
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             slack:
               # Source of truth for Slack-impacting paths on PR and main push events.
               - 'apps/slack/**'
+              - 'origins/s3-static-connector/**'
               - 'shared/**'
               - 'go.mod'
               - 'go.sum'
@@ -122,7 +150,20 @@ jobs:
     # GitHub Actions cache export is part of the job. Keep the timeout above
     # the observed build+cache path so successful image builds do not get
     # canceled during cache upload.
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      # The customer-facing Connector release image cannot be published until
+      # the underlying platform reaches production, so the digest pinned in
+      # qurl_connector_release_contract.sh may not resolve yet. While "false",
+      # an unresolvable pin degrades to the emitter-side golden fence in
+      # `slack / test` (TestS3WebsiteReleaseContractRouteMatchesRenderedConfig,
+      # which keeps the route golden byte-identical to what the Slack flow
+      # generates) plus a loud warning — never a silent pass. This is the one
+      # line to flip to "true" once a public release exists, which makes a
+      # missing image fail closed again; the script implements the behaviour.
+      # Mirrors the *_PRODUCER_FIXTURE_REQUIRED knobs in
+      # layervai/qurl-connector's cross-repo-contracts.yml.
+      CONNECTOR_RELEASE_IMAGE_REQUIRED: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -131,6 +172,39 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Resolve Slack-pinned S3 origin image
+        id: s3-origin
+        shell: bash
+        run: |
+          pins="$(sed -nE 's/^[[:space:]]*defaultS3StaticConnectorImage[[:space:]]*=[[:space:]]*"([^"]+)"$/\1/p' apps/slack/internal/handler_s3_website.go)"
+          count="$(printf '%s\n' "$pins" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly one defaultS3StaticConnectorImage, found $count"
+            exit 1
+          fi
+          echo "image=$pins" >> "$GITHUB_OUTPUT"
+
+      # The script owns the pin, the resolvability preflight, the warn-vs-fail
+      # decision, and the linux/amd64 + linux/arm64 sweep, so a local run
+      # behaves exactly like CI. It reads CONNECTOR_RELEASE_IMAGE_REQUIRED from
+      # the job env above.
+      - name: Verify released Connector S3 route
+        run: bash origins/s3-static-connector/test/qurl_connector_release_contract.sh
+
+      - name: Verify Slack-pinned S3 origin (linux/amd64)
+        env:
+          S3_ORIGIN_IMAGE: ${{ steps.s3-origin.outputs.image }}
+        run: |
+          SKIP_BUILD=true PLATFORM=linux/amd64 IMG="$S3_ORIGIN_IMAGE" \
+            bash origins/s3-static-connector/test/behavior_test.sh
+
+      - name: Verify Slack-pinned S3 origin (linux/arm64)
+        env:
+          S3_ORIGIN_IMAGE: ${{ steps.s3-origin.outputs.image }}
+        run: |
+          SKIP_BUILD=true PLATFORM=linux/arm64 IMG="$S3_ORIGIN_IMAGE" \
+            bash origins/s3-static-connector/test/behavior_test.sh
 
       - name: Build slack bot image (linux/arm64)
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
