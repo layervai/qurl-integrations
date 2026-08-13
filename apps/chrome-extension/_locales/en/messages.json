@@ -162,12 +162,12 @@
     "description": "Footer hint"
   },
   "result_one_success": {
-    "message": "Agent detected that you are editing a Gmail draft and automatically inserted the qURL link into the email body.",
-    "description": "Success message shown when the uploaded link is inserted into Gmail"
+    "message": "Inserted the qURL link into your Gmail draft",
+    "description": "Success summary for a single file whose link was inserted into the Gmail draft"
   },
   "result_n_success": {
-    "message": "Agent detected that you are editing a Gmail draft and automatically inserted $COUNT$ qURL links into the email body.",
-    "description": "Success message shown when the uploaded links are inserted into Gmail",
+    "message": "Inserted $COUNT$ qURL links into your Gmail draft",
+    "description": "Success summary for multiple files whose links were inserted into the Gmail draft",
     "placeholders": {
       "count": {
         "content": "$1",

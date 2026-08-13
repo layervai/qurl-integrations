@@ -718,7 +718,7 @@ test('showResults uses insertion-aware success summaries', function () {
     },
     {
       chromeMessages: {
-        result_n_success: 'Inserted $1 qURL links into the Gmail draft.',
+        result_n_success: 'Inserted $1 qURL links into your Gmail draft',
         result_n_success_upload_only: '$1 files uploaded successfully',
         result_insertion_only_failed: 'Upload completed successfully. Use the copy button below to get the accessible URL.',
         result_insertion_only_failed_no_copy: 'Upload completed successfully, but no accessible qURL link is available to copy.',
@@ -742,7 +742,7 @@ test('showResults uses insertion-aware success summaries', function () {
   const successSummary = popup.__testElements.get('resultArea').children[0];
   assert.equal(
     successSummary.textContent,
-    'Inserted 2 qURL links into the Gmail draft.'
+    'Inserted 2 qURL links into your Gmail draft'
   );
   assert.equal(successSummary.className, 'result-summary all-success');
 
@@ -824,4 +824,50 @@ test('RUNTIME_MESSAGE_TIMEOUT_MS leaves enough budget for the background relay',
   );
   // At least a few seconds of reinject headroom (executeScript on a cold tab loads three files).
   assert.ok(popup.RUNTIME_MESSAGE_TIMEOUT_MS - fixedLegs >= 5000);
+});
+
+test('getMessage fallbacks stay in sync with _locales/en/messages.json', function () {
+  // popup.js passes an inline English fallback to every getMessage call, for the non-extension
+  // contexts where chrome.i18n is absent. Chrome itself always serves messages.json, so drift
+  // between the two is invisible at runtime and has silently crept in before — the fallbacks
+  // kept the pre-rename "N file(s) uploaded successfully" copy after messages.json moved on.
+  // Check every call site rather than the handful that changed most recently.
+  const fs = require('node:fs');
+  const messages = require('../_locales/en/messages.json');
+  const source = fs.readFileSync(popupModulePath, 'utf8');
+
+  // Resolve a messages.json entry the way getMessage's fallback path expects it: named
+  // placeholders ($COUNT$) collapse to the positional form the fallback spells out ($1).
+  // Chrome matches placeholder names case-insensitively, so "$origin$" resolves too.
+  function resolveMessage(key) {
+    const entry = messages[key];
+    if (!entry) return null;
+    return Object.entries(entry.placeholders || {}).reduce(
+      function (text, [name, placeholder]) {
+        return text.replace(new RegExp('\\$' + name + '\\$', 'gi'), placeholder.content);
+      },
+      entry.message
+    );
+  }
+
+  const callPattern = /getMessage\(\s*'([a-z0-9_]+)'\s*,\s*'((?:[^'\\]|\\.)*)'/g;
+  const checked = [];
+  let match;
+  while ((match = callPattern.exec(source)) !== null) {
+    const key = match[1];
+    const fallback = match[2].replace(/\\'/g, "'");
+    const expected = resolveMessage(key);
+
+    assert.ok(expected !== null, `getMessage('${key}', …) has no _locales/en/messages.json entry`);
+    assert.equal(
+      fallback,
+      expected,
+      `inline fallback for '${key}' drifted from messages.json`
+    );
+    checked.push(key);
+  }
+
+  // Guard the guard: a regex that stops matching would otherwise pass vacuously.
+  assert.ok(checked.length >= 40, `expected to check most getMessage call sites, saw ${checked.length}`);
+  assert.ok(checked.includes('result_one_success') && checked.includes('result_n_success'));
 });
