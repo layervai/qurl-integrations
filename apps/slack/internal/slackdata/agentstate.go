@@ -2,6 +2,7 @@ package slackdata
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"net/http"
@@ -40,7 +41,8 @@ const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
 //     mutation a user confirmed, carrying a serialized [AuditEntry]. Queried
 //     newest-first by user for the App Home review surface (see agentaudit.go).
 //
-// Every item carries a `ttl` epoch the table's DynamoDB TTL reaps.
+// Every item carries a `ttl` epoch the table's DynamoDB TTL reaps; the
+// existence-only markers additionally carry a `writer_token` (see putMarker).
 const (
 	attrAgentPK     = "pk"
 	attrAgentSK     = "sk"
@@ -52,6 +54,11 @@ const (
 	// attrTurnCount is the running tally on a fixed-window turn-rate counter item
 	// (sk = "rate#<scope>#<window-start>"), incremented atomically per agent turn.
 	attrTurnCount = "turn_count"
+	// attrWriterToken is a per-call random value stamped on every marker putMarker
+	// writes. It is what lets a failed conditional write tell "another writer won"
+	// from "this call won, and the SDK retried a response that was lost" — see
+	// putMarker. Never read outside that comparison and never exposed.
+	attrWriterToken = "writer_token"
 
 	eventSKPrefix     = "evt#"
 	pendSKPrefix      = "pend#"
@@ -281,37 +288,70 @@ func (s *AgentStore) putMarkerIfExpired(ctx context.Context, partition, sk strin
 // empty maps) when the condition needs no placeholders: the AWS SDK guards on
 // != nil, so an empty non-nil map serializes to {} and DynamoDB rejects the call.
 //
-// Known gap — a lost response reads as "someone else won". No custom retryer is
-// configured, so the SDK's standard retryer is live (3 attempts). If an attempt
-// creates the item but its response is lost, the retry fails the condition and
-// this returns (false, nil): indistinguishable from a genuine race loss. The
-// caller concludes another writer won and stays quiet, so for MarkMediaNoticeSent
-// that burst posts NOTHING until the window expires — the fail-open branch cannot
-// help, since it only sees a non-nil error. Telling the two apart needs a
-// per-call writer token in the item, compared via
-// ReturnValuesOnConditionCheckFailure; deliberately not done here because it is a
-// rare event bounded by the TTL, and the same gap is benign for the other two
-// callers (a dropped duplicate is what they want anyway).
+// Every marker carries a per-call writer token, which is what lets a failed
+// condition be told apart from a lost response. No custom retryer is configured,
+// so the SDK's standard retryer is live (3 attempts) and it retries INSIDE this
+// PutItem call: an attempt can create the item and have its response dropped,
+// leaving the next attempt to fail the condition against this call's own marker.
+// Reading the stored item back through ReturnValuesOnConditionCheckFailure and
+// matching the token reports that as created=true, because it was.
+//
+// Without it that case is indistinguishable from a genuine race loss, and for
+// MarkMediaNoticeSent the caller would conclude another writer won and stay
+// silent for the rest of the window — the exact failure the notice exists to
+// prevent, and one claimMediaNotice's fail-open branch cannot catch because
+// there is no error to fail open on. It is the right answer for the other two
+// callers too: both write the marker BEFORE acting, so a call that reported
+// false for its own write would drop the event or the click having processed it
+// zero times, not once.
+//
+// The token has to be per-call and random. Comparing the stored `ttl` instead
+// would look equivalent and is not: two callers racing within the same second
+// compute an identical epoch, so every member of a burst would match and claim
+// the latch at once.
 func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl time.Duration, condition string, names map[string]string, values map[string]ddbtypes.AttributeValue) (created bool, err error) {
+	// rand.Text rather than the repo's hex nonce helper (oauth/state.go): it
+	// cannot fail, so a marker write keeps the error surface it has today.
+	// MarkEventSeen fails CLOSED on an error, and dropping a Slack event because
+	// a token could not be generated would be a worse bug than the one this
+	// fixes. Uniqueness per call is the whole requirement — the token never
+	// leaves the item, so it is not a security boundary.
+	token := rand.Text()
 	_, err = s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.TableName),
 		Item: map[string]ddbtypes.AttributeValue{
-			attrAgentPK:  stringAttr(partition),
-			attrAgentSK:  stringAttr(sk),
-			attrAgentTTL: numberAttr(s.now().Add(ttl).Unix()),
+			attrAgentPK:     stringAttr(partition),
+			attrAgentSK:     stringAttr(sk),
+			attrAgentTTL:    numberAttr(s.now().Add(ttl).Unix()),
+			attrWriterToken: stringAttr(token),
 		},
-		ConditionExpression:       aws.String(condition),
-		ExpressionAttributeNames:  names,
-		ExpressionAttributeValues: values,
+		ConditionExpression:                 aws.String(condition),
+		ExpressionAttributeNames:            names,
+		ExpressionAttributeValues:           values,
+		ReturnValuesOnConditionCheckFailure: ddbtypes.ReturnValuesOnConditionCheckFailureAllOld,
 	})
 	if err != nil {
 		var cond *ddbtypes.ConditionalCheckFailedException
 		if errors.As(err, &cond) {
-			return false, nil
+			return markerWrittenBy(cond.Item, token), nil
 		}
 		return false, err
 	}
 	return true, nil
+}
+
+// markerWrittenBy reports whether the marker that beat a conditional write is one
+// THIS call already wrote — the write landed and only its response was lost.
+// Everything else reads as false, which is exactly the pre-token behavior: a
+// marker from another writer, one written before this attribute existed, or a
+// response that carried no item back at all.
+//
+// The empty-token guard is load-bearing, not defensive. A marker written by a
+// deployment that predates attrWriterToken reads back as "", so an empty token on
+// this side would match every one of them and hand the latch to every caller at
+// once — during a rolling deploy, precisely when both shapes are in the table.
+func markerWrittenBy(stored map[string]ddbtypes.AttributeValue, token string) bool {
+	return token != "" && readString(stored, attrWriterToken) == token
 }
 
 // BumpTurnCount atomically increments and returns the agent-turn count for a
