@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/observability"
 )
@@ -32,7 +33,7 @@ func rateLimitEventBody(eventID, userID, ts string) string {
 		`"event":{"type":"app_mention","user":"` + userID + `","channel":"C1","ts":"` + ts + `","text":"<@U12345678> hi"}}`
 }
 
-func newRateLimitHandler(t *testing.T, mem *memAgentDDB, userLimit, teamLimit int) (*Handler, *[]capturedReply, *sync.Mutex) {
+func newRateLimitHandler(t *testing.T, mem *memAgentDDB, userLimit, teamLimit int, llm agent.LLM) (*Handler, *[]capturedReply, *sync.Mutex) {
 	t.Helper()
 	// Pin the store clock so every turn lands in one rate window (the sk is keyed on
 	// the window start) — otherwise a run crossing an hour boundary would split the
@@ -40,7 +41,7 @@ func newRateLimitHandler(t *testing.T, mem *memAgentDDB, userLimit, teamLimit in
 	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state", Now: func() time.Time { return fixedNow }}
 	post, posts, mu := capturingPostMessage()
 	h := NewHandler(Config{
-		AgentLLM:                    fakeAgentLLM{reply: rateLimitTurnReply},
+		AgentLLM:                    llm,
 		AgentStore:                  store,
 		PostMessage:                 post,
 		AgentDefaultEnabled:         true,
@@ -84,7 +85,7 @@ func (f *memAgentDDB) hasRateItems() bool {
 
 func TestAgentTurnLimit_PerUser(t *testing.T) {
 	mem := newMemAgentDDB()
-	h, posts, mu := newRateLimitHandler(t, mem, 2, 0) // user cap 2, team disabled
+	h, posts, mu := newRateLimitHandler(t, mem, 2, 0, fakeAgentLLM{reply: rateLimitTurnReply}) // user cap 2, team disabled
 	for i, ts := range []string{"200.1", "200.2", "200.3"} {
 		fireTurn(t, h, rateLimitEventBody("Ev"+strconv.Itoa(i), "U2", ts))
 	}
@@ -104,7 +105,7 @@ func TestAgentTurnLimit_PerUser(t *testing.T) {
 
 func TestAgentTurnLimit_PerTeamAcrossUsers(t *testing.T) {
 	mem := newMemAgentDDB()
-	h, posts, mu := newRateLimitHandler(t, mem, 0, 2) // user disabled, team cap 2
+	h, posts, mu := newRateLimitHandler(t, mem, 0, 2, fakeAgentLLM{reply: rateLimitTurnReply}) // user disabled, team cap 2
 	for i, u := range []string{"U1", "U2", "U3"} {
 		fireTurn(t, h, rateLimitEventBody("Ev"+strconv.Itoa(i), u, "30"+strconv.Itoa(i)+".1"))
 	}
@@ -119,7 +120,7 @@ func TestAgentTurnLimit_UserFirstContainsTeamCount(t *testing.T) {
 	// user cap 1, team cap 5: a member over their own cap must NOT bump the shared
 	// team counter, so one abuser can't burn the whole workspace's budget.
 	mem := newMemAgentDDB()
-	h, _, _ := newRateLimitHandler(t, mem, 1, 5)
+	h, _, _ := newRateLimitHandler(t, mem, 1, 5, fakeAgentLLM{reply: rateLimitTurnReply})
 	for i, ts := range []string{"400.1", "400.2", "400.3"} {
 		fireTurn(t, h, rateLimitEventBody("Ev"+strconv.Itoa(i), "U2", ts))
 	}
@@ -131,7 +132,7 @@ func TestAgentTurnLimit_UserFirstContainsTeamCount(t *testing.T) {
 func TestAgentTurnLimit_FailsOpenOnCounterError(t *testing.T) {
 	mem := newMemAgentDDB()
 	mem.updateErr = errors.New("ddb down")
-	h, posts, mu := newRateLimitHandler(t, mem, 1, 0)
+	h, posts, mu := newRateLimitHandler(t, mem, 1, 0, fakeAgentLLM{reply: rateLimitTurnReply})
 	fireTurn(t, h, rateLimitEventBody("EvFO", "U2", "500.1"))
 	mu.Lock()
 	defer mu.Unlock()
@@ -183,7 +184,7 @@ func TestAgentTurnLimit_FailOpenLogContract(t *testing.T) {
 
 func TestAgentTurnLimit_DisabledRunsEveryTurn(t *testing.T) {
 	mem := newMemAgentDDB()
-	h, posts, mu := newRateLimitHandler(t, mem, 0, 0) // both disabled (unlimited)
+	h, posts, mu := newRateLimitHandler(t, mem, 0, 0, fakeAgentLLM{reply: rateLimitTurnReply}) // both disabled (unlimited)
 	for i, ts := range []string{"600.1", "600.2", "600.3", "600.4"} {
 		fireTurn(t, h, rateLimitEventBody("Ev"+strconv.Itoa(i), "U2", ts))
 	}
@@ -195,5 +196,43 @@ func TestAgentTurnLimit_DisabledRunsEveryTurn(t *testing.T) {
 	}
 	if mem.hasRateItems() {
 		t.Fatal("disabled limits must not write any rate-counter items (BumpTurnCount not called)")
+	}
+}
+
+// TestAgentTurnLimit_UnsupportedMediaConsumesNoSlot pins the third claim in the
+// unsupported-media contract. The other two — no model call, no history read —
+// are pinned in handler_agent_test.go by panicAgentLLM and countingThreadHistory;
+// without this one, moving the media branch below the limiter would leave every
+// other test green while a few screenshots silently burned a member's whole
+// hourly budget.
+func TestAgentTurnLimit_UnsupportedMediaConsumesNoSlot(t *testing.T) {
+	mem := newMemAgentDDB()
+	// A cap of 1 means a consumed slot would visibly cost the second upload its
+	// reply, so this fails loudly rather than by counter arithmetic alone.
+	h, posts, mu := newRateLimitHandler(t, mem, 1, 0, panicAgentLLM{})
+	// Two uploads by ONE member (the per-user cap is what a consumed slot would
+	// trip) in two DIFFERENT channels. Same-channel uploads would be collapsed by
+	// the unsupported-media notice latch, which caps outbound volume per
+	// conversation — and a suppressed second reply would mask a consumed slot
+	// instead of exposing it. Distinct channels keep this test about the limiter.
+	// Only the channels need to differ; the ts values are arbitrary beyond being
+	// distinct, since dedupe keys on channel+ts.
+	for i, channel := range []string{"C1", "C2"} {
+		fireTurn(t, h, eventCallbackBody("EvRate"+strconv.Itoa(i),
+			`{"type":"app_mention","user":"U2","channel":"`+channel+`","ts":"90`+strconv.Itoa(i)+`.1","text":"<@U12345678>","files":[{"id":"F1"}]}`))
+	}
+
+	if mem.hasRateItems() {
+		t.Fatal("an unsupported-media turn must not bump the turn-rate counter (BumpTurnCount not called)")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 2 {
+		t.Fatalf("both uploads should be answered, got %+v", *posts)
+	}
+	for i, p := range *posts {
+		if p.text != agentUnsupportedMediaReply {
+			t.Fatalf("reply %d = %q, want the media reply (a rate-limited reply means the media branch moved below the limiter)", i, p.text)
+		}
 	}
 }

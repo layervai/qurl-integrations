@@ -6,7 +6,8 @@ If you just want to **use** the extension in Gmail, see the
 
 ## Prerequisites
 
-- Node 18+ (the repo pins `22.21.0` in `.nvmrc`)
+- Node 20.9+ — the `sharp` devDependency requires it. CI and local dev run the
+  `22.21.0` pinned in `.nvmrc`; nothing below that is tested.
 - Google Chrome, or another Chromium browser, with access to
   `chrome://extensions`
 
