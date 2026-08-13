@@ -200,7 +200,11 @@ type slackInnerEvent struct {
 	TS          string `json:"ts"`
 	ThreadTS    string `json:"thread_ts"`
 	// Files only needs presence detection: qURL does not fetch or inspect file
-	// metadata while conversation mode remains text-only.
+	// metadata while conversation mode remains text-only. []json.RawMessage keeps
+	// each element's raw bytes, which a bare []struct{} would drop — but []struct{}
+	// also fails to decode a non-object element, and handleEvent treats any decode
+	// error as "drop the whole event", which would take lifecycle and uninstall
+	// routing down with it. Tolerating element shape is worth the bytes.
 	Files []json.RawMessage `json:"files,omitempty"`
 	// Tab is the App Home tab a user opened ("home" / "messages") on an
 	// app_home_opened event; empty on every other event type.
@@ -1047,7 +1051,8 @@ func (h *Handler) processAdmittedAgentEvent(ctx context.Context, log *slog.Logge
 // Metering these through agentTurnLimited would not help either. That limiter
 // caps MODEL spend, so routing uploads into it would still post one reply per
 // upload, just with the rate-limit wording. Capping outbound volume is a separate
-// control — a short-lived per-thread notice marker — not a limiter change.
+// control — a short-lived per-thread notice marker — not a limiter change; see
+// #1045, which implements it.
 func agentDeterministicReply(e *slackInnerEvent, message string) (reply string, ok bool) {
 	switch {
 	case agentEventHasUpload(e):

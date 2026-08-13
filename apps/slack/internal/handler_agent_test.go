@@ -957,6 +957,11 @@ func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
 	// Slack can emit both app_mention and message/file_share events for one
 	// mentioned upload. Their shared message ts must collapse to one reply even
 	// when the thread already has history and both event shapes are admissible.
+	//
+	// This rests on agentEventDedupeKey being channel+":"+ts. The two events below
+	// differ in event_id AND in type, and share only channel and ts — so if the key
+	// ever keys on either of those instead, this test goes red rather than quietly
+	// letting one upload draw two replies.
 	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
 	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
 	h.Wait()
