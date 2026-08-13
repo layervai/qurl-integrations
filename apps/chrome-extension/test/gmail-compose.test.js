@@ -1162,6 +1162,119 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
   }]);
 });
 
+test('a missing compose formatter reports failure instead of inserting nothing', async function () {
+  let messageListener = null;
+  const insertAdjacentCalls = [];
+  const execCalls = [];
+  const notified = [];
+  const selectionHarness = createSelectionHarness();
+  const composeBody = {
+    classList: {
+      contains(name) {
+        return name === 'Am' || name === 'Al' || name === 'editable';
+      },
+    },
+    focus() {},
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 320, height: 24 };
+    },
+    insertAdjacentHTML(position, html) {
+      insertAdjacentCalls.push({ position, html });
+    },
+  };
+
+  const sandbox = {
+    chrome: {
+      i18n: {
+        getMessage() {
+          return '';
+        },
+      },
+      runtime: {
+        lastError: null,
+        onMessage: {
+          addListener(listener) {
+            messageListener = listener;
+          },
+        },
+      },
+    },
+    clearTimeout,
+    console: {
+      warn(message) {
+        notified.push(String(message));
+      },
+    },
+    document: {
+      body: { appendChild() {} },
+      documentElement: { nodeName: 'HTML' },
+      createElement() {
+        return {
+          setAttribute() {},
+          style: {},
+          remove() {},
+        };
+      },
+      createRange() {
+        return selectionHarness.createRange();
+      },
+      execCommand(command, showUi, html) {
+        execCalls.push({ command, showUi, html });
+        return true;
+      },
+      queryCommandSupported() {
+        return true;
+      },
+      querySelectorAll() {
+        return [composeBody];
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    setTimeout,
+  };
+
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.getComputedStyle = function () {
+    return { display: 'block', visibility: 'visible' };
+  };
+  sandbox.getSelection = function () {
+    return selectionHarness.selection;
+  };
+  // Deliberately no sandbox.QURLComposeFormatter: buildLinkHtml then yields '',
+  // and every insertion path would happily append that empty string.
+
+  vm.createContext(sandbox);
+  vm.runInContext(contentScriptSource, sandbox);
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, false, 'an empty insertion must not be reported as success');
+  assert.deepEqual(execCalls, [], 'nothing should be inserted without the formatter');
+  assert.deepEqual(insertAdjacentCalls, [], 'the fallback path must not append an empty string either');
+  assert.ok(
+    notified.some(function (line) { return line.includes('formatter unavailable'); }),
+    'the refusal should be logged'
+  );
+});
+
 test('findComposeBodyAsync times out and reports failure when no compose body appears', async function () {
   let messageListener = null;
   let observerInstance = null;

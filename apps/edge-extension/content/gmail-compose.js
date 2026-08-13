@@ -456,6 +456,20 @@
 
       const html = buildLinkHtml(results);
 
+      // buildLinkHtml yields '' if the shared formatter is missing. It is bundled and
+      // load-ordered ahead of this script, so this is defense in depth — but without the
+      // guard every insertion path below would append an empty string and report success,
+      // leaving the user with a silently unmodified draft.
+      if (!html) {
+        console.warn('[qURL] Compose formatter unavailable; refusing to report an empty insertion as success.');
+        showGmailNotification(getMessage(
+          'compose_insert_failed_notification',
+          'qURL: Failed to insert links. Please copy them manually from the popup.'
+        ));
+        callback(false);
+        return;
+      }
+
       // Deprecated, but still the most reliable path into Gmail's contenteditable editor.
       composeBody.focus();
       const canPlaceCaret = Boolean(placeCaretAtComposeEnd(composeBody));
