@@ -121,15 +121,31 @@ def extract_run_block(step_name):
             return "\n".join(body)
     return None
 
+def uncomment(value):
+    """Drop a trailing YAML comment.
+
+    Requires whitespace before the `#`, which is YAML's own rule -- so a branch
+    name like `feat#123` survives while `[main]  # primary` loses the note.
+    """
+    return re.sub(r"\s+#.*$", "", value)
+
+
 def on_block(path):
     """Return the top-level `on:` mapping of a workflow as {key: [sub-lines]}."""
     with open(path) as fh:
         wf = fh.read().split("\n")
     start = None
     for i, line in enumerate(wf):
-        if re.match(r"^on:\s*$", line):
-            start = i
-            break
+        # YAML 1.1 reads a bare `on` as a boolean, so some formatters quote the
+        # key; GitHub accepts either. A trailing comment is fine here too.
+        m = re.match(r"""^(?:on|"on"|'on'):(.*)$""", line)
+        if not m:
+            continue
+        if uncomment(m.group(1)).strip():
+            die("%s: inline `on:` value -- teach this check the new form "
+                "rather than letting the workflow go unchecked" % path)
+        start = i
+        break
     if start is None:
         die("%s: no block-form `on:` -- teach this check the new form rather "
             "than letting the workflow go unchecked" % path)
@@ -151,15 +167,6 @@ def on_block(path):
         die("%s: could not read any `on:` triggers" % path)
     return keys
 
-def uncomment(value):
-    """Drop a trailing YAML comment.
-
-    Requires whitespace before the `#`, which is YAML's own rule -- so a branch
-    name like `feat#123` survives while `[main]  # primary` loses the note.
-    """
-    return re.sub(r"\s+#.*$", "", value)
-
-
 def push_filter(path, sub, key):
     """Return the patterns listed under `key` in an `on.push:` block, or None.
 
@@ -167,7 +174,7 @@ def push_filter(path, sub, key):
     `push` with no `branches` runs on every branch, so the two must not collapse.
     """
     for i, line in enumerate(sub):
-        m = re.match(r"^ {4}%s:\s*(.*)$" % re.escape(key), line)
+        m = re.match(r"^ {4}%s:(.*)$" % re.escape(key), line)
         if not m:
             continue
         inline = uncomment(m.group(1)).strip()
@@ -206,6 +213,9 @@ def can_trigger_notifier(path):
         return True
     if "push" not in keys:
         return False
+    # fnmatch does not distinguish GitHub's `*` (stops at `/`) from `**`
+    # (crosses it). Only the literal default-branch name is ever matched here,
+    # and it contains no `/`, so the distinction cannot change an answer.
     default = STUB["DEFAULT_BRANCH"]
     only = push_filter(path, keys["push"], "branches")
     if only is not None:
@@ -279,6 +289,19 @@ if unlisted:
         "on.workflow_run.workflows, so their main failures notify nobody: %s "
         "(add each one there with an impact case arm, or add it to "
         "NOTIFY_EXEMPT with a reason)" % unlisted)
+
+# Check 1 proves a listed trigger still names a live workflow, but not that the
+# workflow still reaches this notifier. Retarget a listed one at `pull_request`
+# and it goes on failing on main while quietly never firing -- the same silent
+# non-firing this PR exists to kill, just arrived at from the other side.
+dead = sorted(
+    "%s (%s)" % (t, names[t])
+    for t in triggers if t in names and not can_trigger_notifier(names[t])
+)
+if dead:
+    die("on.workflow_run.workflows lists workflows that can no longer trigger "
+        "it, so they are listed but will never fire: %s (restore the "
+        "default-branch `push`/`schedule` trigger, or drop the entry)" % dead)
 
 # A workflow that stopped running on main -- or was deleted -- leaves its
 # exemption behind as a claim nobody rechecks.
@@ -424,7 +447,7 @@ if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
     )
 
 print("main CI notification payload builds on %s for all %d triggers "
-      "(+ fallback, schedule, missing actor); all %d workflows that can reach "
-      "it are listed or exempt; webhook guard fails loudly"
-      % (version, len(triggers), len(candidates)))
+      "(+ fallback, schedule, missing actor); %d triggers and %d reachable "
+      "workflows agree in both directions; webhook guard fails loudly"
+      % (version, len(triggers), len(triggers), len(candidates)))
 EOF
