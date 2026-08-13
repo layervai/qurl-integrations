@@ -80,6 +80,8 @@ APPS = {
     "edge": pathlib.Path("apps/edge-extension"),
 }
 
+# Both extensions currently ship English only. Extend this checker when another
+# locale is added so catalog parity cannot silently remain English-only.
 CATALOG = "_locales/en/messages.json"
 
 # The other browser's name must never appear in a catalog. Values are the
