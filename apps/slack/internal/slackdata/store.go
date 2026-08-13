@@ -290,9 +290,10 @@ func ddbToError(op string, err error) error {
 		// ddbToError, so this 412 branch is currently unreachable.
 		// The one deliberate exception is PutPendingAction, which
 		// lets its conditional create surface AS an error (see its
-		// doc comment) and so does reach this branch; its caller
-		// treats any error as "fall back to the text preview", so
-		// the generic copy below is the right outcome there.
+		// doc comment) and so does reach this branch. That is safe
+		// because nothing there reads the status: postAgentConfirm
+		// logs the error and falls back to the text preview, so no
+		// user-facing copy is selected from it either way.
 		// Any other new op that calls ddbToError MUST catch it — the
 		// handler layer doesn't dispatch on 412, so a leak through
 		// here would surface to the user as the generic 503 copy
