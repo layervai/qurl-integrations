@@ -15,31 +15,7 @@
  * changes in one test can't leak into another via the require cache.
  */
 
-function withFreshConfig(envOverrides, run) {
-  jest.isolateModules(() => {
-    const prevValues = {};
-    for (const [key, value] of Object.entries(envOverrides)) {
-      prevValues[key] = process.env[key];
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-    try {
-      run();
-    } finally {
-      for (const [key, prev] of Object.entries(prevValues)) {
-        if (prev === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = prev;
-        }
-      }
-    }
-  });
-}
-
+const { withFreshEnv: withFreshConfig } = require('./helpers/fresh-config');
 describe('config — DETECT_EXTRA_NON_PROD_QURL_ENDPOINT_HOSTS / DETECT_EXTRA_NON_PROD_HOST_SUFFIXES', () => {
   it('default to empty arrays when unset', () => {
     withFreshConfig({
