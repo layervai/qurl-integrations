@@ -42,6 +42,17 @@
 #      that app's own ext_name. popup.html is not a lockstep file precisely
 #      because of these, so nothing else pins them.
 #
+# Two accepted limits, both in the sanctioned keys, which are the only place a
+# browser name lives:
+#   - Rule 4 rejects the OTHER fork's name, so a mistarget to a THIRD browser
+#     ("Safari will show…" in Edge's copy) clears every rule. Asserting each
+#     copy names its own browser instead would false-positive on ext_name, whose
+#     Chrome value ("qURL Agent") names no browser at all.
+#   - Rule 2 exempts a sanctioned key on `message` only, so its `description`
+#     and placeholders must stay identical across the two catalogs. That is
+#     deliberate; a legitimately per-browser `description` would need its own
+#     carve-out here and in CLAUDE.md.
+#
 # See the Chrome<->Edge lockstep section in CLAUDE.md.
 set -eu
 
@@ -111,14 +122,39 @@ def load_json(path):
     return None
 
 
-catalogs = {name: load_json(root / CATALOG) for name, root in APPS.items()}
-if any(catalog is None for catalog in catalogs.values()):
-    print("Chrome<->Edge i18n parity check could not run.\n", file=sys.stderr)
+def bail(headline):
+    print(headline + "\n", file=sys.stderr)
     for failure in failures:
         print(failure, file=sys.stderr)
     raise SystemExit(1)
 
+
+CANNOT_RUN = "Chrome<->Edge i18n parity check could not run."
+
+catalogs = {name: load_json(root / CATALOG) for name, root in APPS.items()}
+if any(catalog is None for catalog in catalogs.values()):
+    bail(CANNOT_RUN)
+
 chrome, edge = catalogs["chrome"], catalogs["edge"]
+
+# Shape gate, before the rules: every entry must be an object carrying a string
+# `message`. A valid-JSON-but-wrong-shape entry (a bare string, say) would
+# otherwise throw an AttributeError out of rule 2's set() — still a non-zero
+# exit, but a traceback instead of a curated failure.
+for name, catalog in (("chrome", chrome), ("edge", edge)):
+    for key in sorted(catalog):
+        entry = catalog[key]
+        if not isinstance(entry, dict):
+            failures.append(
+                f"{APPS[name] / CATALOG}: {key} is {type(entry).__name__}, not an "
+                "object. Every entry must be {\"message\": ..., \"description\": ...}."
+            )
+        elif not isinstance(entry.get("message"), str):
+            failures.append(
+                f"{APPS[name] / CATALOG}: {key} has no string `message`."
+            )
+if failures:
+    bail(CANNOT_RUN)
 
 # Rule 1: same key set.
 for name, other, missing in (

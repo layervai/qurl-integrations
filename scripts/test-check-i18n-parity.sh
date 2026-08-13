@@ -262,6 +262,14 @@ run_case catalog-missing 1 "missing" \
 run_case catalog-invalid-json 1 "invalid JSON" \
   python3 -c 'open("apps/edge-extension/_locales/en/messages.json", "w").write("{ not json")'
 
+# A wrong-shape-but-valid-JSON entry must produce a curated failure, not an
+# AttributeError traceback out of rule 2.
+run_case entry-not-an-object 1 "copy_btn is str, not an object" \
+  set_json "$EDGE_CATALOG" copy_btn "" "Copy the qURL link"
+
+run_case entry-message-not-a-string 1 "ext_name has no string \`message\`" \
+  python3 -c 'import json; p = "apps/chrome-extension/_locales/en/messages.json"; d = json.load(open(p)); d["ext_name"] = {"description": "Extension name"}; json.dump(d, open(p, "w"), indent=2)'
+
 run_case popup-missing 1 "popup.html: missing" \
   rm "apps/edge-extension/popup/popup.html"
 
