@@ -54,8 +54,8 @@ fi
 # Expected values come from the golden itself: the decoder must echo back what
 # it was fed, so the assertion cannot drift from the input the way a hand-kept
 # literal would. The golden is a flat one-route document, so a line match is
-# sufficient here and keeps this dependency-free. These are platform-independent,
-# so check them once rather than per arch.
+# sufficient here and keeps this dependency-free. The golden checks below are
+# platform-independent, so run them once rather than per arch.
 route_field() {
   sed -nE "s/^[[:space:]]*(- )?$1: '?(.*[^'])'?[[:space:]]*\$/\2/p" "$ROUTE_GOLDEN" | head -1
 }
