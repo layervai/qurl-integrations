@@ -6,18 +6,12 @@
 
 const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
 
-// Required at boot in EVERY environment. Gated on `isOpenNHPActive`,
-// NOT `isMultiTenant`: the GITHUB_* vars only matter when /auth +
-// /webhook routes are actually mounted. A single-guild-plain deployment
-// (GUILD_ID set but ENABLE_OPENNHP_FEATURES off) never mounts those
-// routes, so demanding dummy values just to pass the boot check would
-// be a papercut for every customer server.
+// Required at boot in EVERY environment.
 //
-// Explicitly NOT on this list even in OpenNHP mode:
-//   - GUILD_ID: if isOpenNHPActive === true then !isMultiTenant, which
-//     means the snowflake validator in config.js already accepted a
-//     17-20 digit value. Re-checking truthiness here would never catch
-//     a missing GUILD_ID — the upstream check is the authority.
+// Explicitly NOT on this list:
+//   - GUILD_ID: optional by design — unset means multi-tenant mode, and
+//     a set value has already been snowflake-validated by config.js.
+//     Re-checking truthiness here would never catch a real misconfig.
 //   - BASE_URL: config.js supplies an unconditional "http://localhost:3000"
 //     default, so `cfg.BASE_URL` is always truthy. The real enforcement is
 //     baseUrlHttpsProblem (below), called from index.js's production block,
@@ -25,45 +19,48 @@ const { MIN_STATE_SECRET_LENGTH } = require('./utils/oauth-state');
 // Listing either would be decorative — the downstream checks are the
 // authority. Keeping this list to the keys whose absence is actually a
 // boot blocker.
-function bootRequired(isOpenNHPActive) {
-  if (!isOpenNHPActive) return ['DISCORD_TOKEN'];
-  return ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET'];
+function bootRequired() {
+  return ['DISCORD_TOKEN'];
 }
 
-// Additionally required when NODE_ENV=production. QURL_API_KEY is the
-// global-fallback for /qurl send + /qurl map; single-guild-plain and
-// multi-tenant deployments both rely on per-guild /qurl setup, so it's
-// optional outside the OpenNHP community server.
+// Additionally required when NODE_ENV=production. QURL_API_KEY is NOT
+// here: it is only the global fallback for /qurl send + /qurl map, and
+// every deployment shape relies on per-guild /qurl setup instead.
 //
-// KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys.
-// The two checks overlap on prod-with-OAuth (both fail closed there);
-// the load-bearing distinct cases are: this entry catches prod
-// deploys WITHOUT GITHUB_CLIENT_SECRET (KEK still protects
-// guild_configs.qurl_api_key + qurl_send_configs.attachment_url),
-// while missingKekRequiredKeys catches the staging/preview-with-OAuth
-// case the prod block alone would not cover.
-function prodRequired(isOpenNHPActive) {
-  if (!isOpenNHPActive) return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
-  return ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
+// KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys. The
+// two overlap on prod-with-OAuth (both fail closed there); the
+// load-bearing distinct case is staging/preview with qURL OAuth
+// configured, which missingKekRequiredKeys catches and this
+// production-only list would not.
+function prodRequired() {
+  return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
 }
 
 // Compute which required keys are missing from a given config-like
 // object. Separate from bootRequired so tests can build a "config" with
 // specific holes and assert the exact missing list.
-function missingBootKeys(cfg, isOpenNHPActive) {
-  return bootRequired(isOpenNHPActive).filter(key => !cfg[key]);
+function missingBootKeys(cfg) {
+  return bootRequired().filter(key => !cfg[key]);
 }
 
-function missingProdKeys(env, isOpenNHPActive) {
-  return prodRequired(isOpenNHPActive).filter(k => !env[k]);
+function missingProdKeys(env) {
+  return prodRequired().filter(k => !env[k]);
 }
 
-// KEY_ENCRYPTION_KEY is required independently of NODE_ENV whenever
-// GITHUB_CLIENT_SECRET is set — staging/preview environments hand out
-// real GitHub OAuth tokens, and crypto.encrypt's dev plaintext fallback
-// must never reach the orphan-token persistence path.
-function missingKekRequiredKeys(env) {
-  if (!env.GITHUB_CLIENT_SECRET) return [];
+// KEY_ENCRYPTION_KEY is required independently of NODE_ENV whenever the
+// qURL OAuth setup flow is configured — staging/preview environments
+// that run guided setup persist real qURL API keys, and crypto.encrypt's
+// dev plaintext fallback must never reach
+// `guild_configs.qurl_api_key`.
+//
+// The trigger is passed in rather than derived here: KEY_ENCRYPTION_KEY
+// lives in raw env (index.js reads process.env for it, and the smoke
+// test below does too), while `isQurlOAuthConfigured` is a derived flag
+// config.js computes from the AUTH0_* block including its domain-shape
+// validation. Taking both keeps this helper pure and avoids a second,
+// drifting copy of that derivation.
+function missingKekRequiredKeys(env, isQurlOAuthConfigured) {
+  if (!isQurlOAuthConfigured) return [];
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
 }
 
@@ -202,15 +199,14 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
     // Malformed BASE_URL (incl. a host-less "https://") is not usable.
   }
   const usesHttps = parsed?.protocol === 'https:';
-  // TODO(upstream-contract): qurl-integrations-infra's `base_url` variable
-  // (qurl-bot-discord/terraform/variables.tf) validates
-  // `^https://[^[:space:]/]+(/[^/]+)*$`, which deliberately admits a path
-  // prefix — its own error text advertises "host + zero-or-more `/segment`
-  // parts". This rejects any path, so a plan-passing value like
-  // https://host/discord-bot would crash-loop the bot instead. The bot's
-  // shape is the correct one (server.js mounts the qURL OAuth router at the
-  // root, so a prefixed redirect_uri never matches); tighten the terraform
-  // side to the bare-origin regex it already uses for `qurl_endpoint`.
+  // Bare origin only. server.js mounts the qURL OAuth router at the root
+  // while the redirect URI is built by concatenation
+  // (`${BASE_URL}/oauth/qurl/callback`), so a path-prefixed BASE_URL yields
+  // a redirect_uri no mounted route can ever serve. qurl-integrations-infra
+  // rejects the same shape at plan time as of qurl-integrations-infra#1379
+  // (its `base_url` variable now validates `^https://[^[:space:]/?#]+$`),
+  // so plan-time and boot-time agree — a prefixed value can no longer reach
+  // a deploy.
   const isBareOrigin = Boolean(
     parsed
       && parsed.host
@@ -246,12 +242,16 @@ function baseUrlHttpsProblem(cfg, baseUrlExplicitlySet) {
 // monitoring until /qurl interactions start timing out from the user's
 // end. Fail-closed at boot is preferable.
 //
-// API asymmetry: this takes the PARSED `cfg` while the siblings
-// (missingBootKeys, missingProdKeys, missingKekRequiredKeys) take
-// raw `env`. The reason is that ENABLE_EVENT_SHIPPER is parsed in
-// config.js (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean)
-// and consumers should not re-implement that parsing. Reading from
-// cfg keeps the literal-'true' contract in one place.
+// API asymmetry across this module's helpers, so a caller knows what
+// to pass: `missingBootKeys` and this helper take the PARSED `cfg`;
+// `missingProdKeys` takes raw `env`; `missingKekRequiredKeys` takes
+// both (raw `env` for KEY_ENCRYPTION_KEY, which never lands on config,
+// plus the derived `isQurlOAuthConfigured` flag). The rule is that a
+// value parsed in config.js should be read from cfg rather than
+// re-parsed here — ENABLE_EVENT_SHIPPER
+// (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean) is the
+// case that motivated it, keeping the literal-'true' contract in one
+// place.
 function missingEventShipperKeys(cfg) {
   if (!cfg.ENABLE_EVENT_SHIPPER) return [];
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
@@ -519,52 +519,19 @@ function invalidHotStandbyValues(cfg) {
 // in index.js sits inside the NODE_ENV=production block, keeping dev
 // localhost workflows convenient):
 //
-//   Presence, GitHub flow — OAUTH_STATE_SECRET is required when OpenNHP
-//   mode is active (the only mode that mounts the GitHub OAuth /auth
-//   surface). Falling back to GITHUB_CLIENT_SECRET is deliberately NOT
-//   accepted in production: coupling the two secrets means rotating
-//   GitHub's client secret would invalidate all in-flight OAuth states
-//   and vice versa.
-//
-//   Presence, qURL flow — when qURL OAuth is configured (AUTH0_* set;
-//   every sign/verify call site gates on isQurlOAuthConfigured), SOME
-//   key in the signer's resolution chain must exist. Unlike the GitHub
-//   rule, the GITHUB_CLIENT_SECRET fallback satisfies this one: it's
-//   the documented backward-compat tier for the qURL chain, not a
-//   coupling accident. Without the rule, a multi-tenant deploy with
-//   Auth0 configured and no secrets would boot and 500 on the first
-//   /qurl setup.
+//   Presence — when qURL OAuth is configured (AUTH0_* set; every
+//   sign/verify call site gates on isQurlOAuthConfigured), SOME key in
+//   the signer's resolution chain must exist. Without the rule, a
+//   deploy with Auth0 configured and no state secret would boot and
+//   500 on the first /qurl setup.
 //
 //   Shape — ANY set state secret must clear the signer's length floor,
-//   in EVERY mode. The qURL OAuth flow (which resolves
-//   QURL_OAUTH_STATE_SECRET, then OAUTH_STATE_SECRET) mounts outside
-//   OpenNHP mode too, so gating the floor on isOpenNHPActive would
-//   leave a short secret to deferred-500 the first /qurl setup in a
-//   multi-tenant deploy — exactly the late failure this check exists
-//   to move to boot. The signer re-enforces the same floor lazily at
-//   sign/verify time; this is the loud-at-deploy copy. Note this rule
-//   is deliberately fail-loud-on-any-set-value: unlike the winning-key
-//   rule below (whose rejections are all guaranteed first-use 500s), a
-//   short dedicated secret fails boot even in a mode where no OAuth
-//   surface would resolve it — set-but-wrong is a misconfig in its own
-//   right, and mode flips shouldn't unearth latent bad values.
-//
-//   GITHUB_CLIENT_SECRET is NOT shape-checked unconditionally: it is a
-//   provider-issued value (GitHub mints 40 chars) rather than an
-//   operator-minted one, and a short value means GitHub OAuth token
-//   exchange itself is misconfigured — a bigger problem than state
-//   signing, and one this gate shouldn't turn into a boot failure for
-//   deploy modes that never exercise it. The ONE case where it is
-//   checked: when the qURL flow is configured and it is the winning
-//   (only) key in the signer's chain — there, a sub-32 value is
-//   guaranteed to make the first /qurl setup 500, so rejecting the
-//   boot has zero false positives.
-//
-//   The winning-key condition mirrors the signer's resolution order
-//   (utils/oauth-state.js: dedicated keys, then GITHUB_CLIENT_SECRET)
-//   rather than consulting it — if a flow's secretConfigKeys ordering
-//   ever changes, update this block in lockstep. Single-sourcing the
-//   precedence through a signer-exposed resolver is tracked in #952.
+//   in EVERY mode, so a short value fails at deploy instead of
+//   deferred-500ing the first /qurl setup. The signer re-enforces the
+//   same floor lazily at sign/verify time; this is the loud-at-deploy
+//   copy. Deliberately fail-loud-on-any-set-value: set-but-wrong is a
+//   misconfig in its own right even where nothing would resolve it, and
+//   a later config change shouldn't unearth a latent bad value.
 //
 // Presence-vs-shape separation mirrors missingHotStandbyKeys /
 // invalidHotStandbyValues: a key that is unset simply doesn't
@@ -572,36 +539,20 @@ function invalidHotStandbyValues(cfg) {
 // values are shape-checked, and each problem gets its own message.
 //
 // Every invalidStateSecretValues message ends with the same remediation
-// clause — one constant so the four sites can't drift on the
-// recommended generator.
+// clause — one constant so the sites can't drift on the recommended
+// generator.
 const STATE_SECRET_REMEDIATION = 'Generate with: openssl rand -hex 32';
 
 // Returns an array of operator-facing message strings, [] on success
 // (same shape as invalidHotStandbyValues above).
 function invalidStateSecretValues(cfg) {
   const problems = [];
-  if (cfg.isOpenNHPActive && !cfg.OAUTH_STATE_SECRET) {
-    problems.push(
-      'OAUTH_STATE_SECRET must be set in production (OpenNHP mode mounts the GitHub OAuth surface). ' +
-      STATE_SECRET_REMEDIATION
-    );
-  }
   if (cfg.isQurlOAuthConfigured
       && !cfg.QURL_OAUTH_STATE_SECRET && !cfg.OAUTH_STATE_SECRET) {
-    if (!cfg.GITHUB_CLIENT_SECRET) {
-      problems.push(
-        'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
-        `set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
-      );
-    } else if (cfg.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
-      // Winning-key check — see the GITHUB_CLIENT_SECRET note above.
-      problems.push(
-        'qURL OAuth is configured (AUTH0_* set) and GITHUB_CLIENT_SECRET is its only available ' +
-        `state-signing key, but it is shorter than ${MIN_STATE_SECRET_LENGTH} chars ` +
-        `(got ${cfg.GITHUB_CLIENT_SECRET.length}); the state signer will refuse to mint with it. ` +
-        `Set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
-      );
-    }
+    problems.push(
+      'qURL OAuth is configured (AUTH0_* set) but no state-signing secret is available: ' +
+      `set QURL_OAUTH_STATE_SECRET (preferred) or OAUTH_STATE_SECRET. ${STATE_SECRET_REMEDIATION}`
+    );
   }
   for (const key of ['OAUTH_STATE_SECRET', 'QURL_OAUTH_STATE_SECRET']) {
     const value = cfg[key];
