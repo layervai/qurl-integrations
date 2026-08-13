@@ -67,6 +67,15 @@ func isLifecycleEvent(event *slackInnerEvent, botTokenRotationEnabled bool) bool
 	}
 }
 
+// isBotTokensRevokedEvent reports whether Slack listed at least one BOT token on
+// a tokens_revoked callback — the only form of that event that means teardown.
+//
+// The non-empty Bot check is what makes it safe under the field-type tolerance
+// in handleEvent, and not merely as a redundancy: encoding/json ALLOCATES a
+// pointer field before it discovers the value's type is wrong, so a drifted
+// `"tokens": "…"` leaves Tokens non-nil pointing at a zero struct. A nil check
+// alone would read that as a revocation. Requiring a listed bot token means
+// drift here can only withhold a teardown, never invent one.
 func isBotTokensRevokedEvent(event *slackInnerEvent) bool {
 	return event != nil && event.Type == slackEventTypeTokensRevoked && event.Tokens != nil && len(event.Tokens.Bot) > 0
 }
@@ -215,6 +224,13 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 // guarded deletes. Slack event_time is second-granularity, so writes in the same
 // wall-clock second can be retained; that favors not clobbering a fast reinstall
 // over making teardown exhaustive to the sub-second.
+//
+// An event_time that drifted in type decodes to 0 (see handleEvent), which lands
+// on the observedAt branch — the same cutoff an envelope that simply omits the
+// field gets. That is a marginally LESS conservative purge than the real event
+// time would give, and it is the intended trade: the alternative used to be
+// dropping the uninstall outright, which leaves a departed workspace's data in
+// place after Slack has been acked and will not redeliver.
 func lifecyclePurgeCutoff(env *slackEventEnvelope, observedAt time.Time) time.Time {
 	observedAt = observedAt.UTC()
 	if env == nil || env.EventTime <= 0 {

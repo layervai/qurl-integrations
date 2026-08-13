@@ -274,11 +274,15 @@ func (f *slackEventFiles) UnmarshalJSON(b []byte) error {
 }
 
 type slackInnerEvent struct {
-	Type        string `json:"type"`
-	User        string `json:"user"`
-	UserTeam    string `json:"user_team,omitempty"`
-	SourceTeam  string `json:"source_team,omitempty"`
-	BotID       string `json:"bot_id"`
+	Type       string `json:"type"`
+	User       string `json:"user"`
+	UserTeam   string `json:"user_team,omitempty"`
+	SourceTeam string `json:"source_team,omitempty"`
+	BotID      string `json:"bot_id"`
+	// AppID is the app that posted the message, present only on app-authored
+	// messages. It exists solely as the SECOND self-loop guard next to BotID —
+	// see shouldDispatchAgentEvent for why one is not enough.
+	AppID       string `json:"app_id,omitempty"`
 	Subtype     string `json:"subtype"`
 	Text        string `json:"text"`
 	Channel     string `json:"channel"`
@@ -798,7 +802,23 @@ func agentAdmitsSubtype(subtype string) bool {
 func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) bool {
 	e := &env.Event
 	// Drop bot posts and the agent's own messages before considering event shape.
-	if e.BotID != "" || e.User == "" {
+	//
+	// The app_id half is redundant with bot_id on every payload Slack sends
+	// today, and that redundancy is the point: handleEvent now routes an
+	// envelope whose fields drifted in type, and a drifted string decodes to ""
+	// — so a bot_id that ever arrived as a non-string would silently turn this
+	// self-loop guard off. That is the one guard whose failure compounds: an
+	// unguarded reply to our own post is another message event, and the
+	// per-turn rate limiter is a cost backstop that fails OPEN. Two independent
+	// fields have to drift at once to reach that, instead of one.
+	//
+	// It only ever ADDS a drop: e.AppID is empty on human messages, so this
+	// cannot silence a member. The comparison is the same one
+	// loadAgentThreadHistory uses to recognize this app's own replies.
+	// TODO(upstream-contract): Slack stamps app-authored message events with
+	// app_id alongside bot_id. If that stops, this quietly reverts to
+	// bot_id-only — degradation, not breakage.
+	if e.BotID != "" || e.User == "" || (e.AppID != "" && e.AppID == env.APIAppID) {
 		return false
 	}
 	switch e.Type {
