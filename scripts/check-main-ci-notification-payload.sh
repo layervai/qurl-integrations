@@ -66,6 +66,9 @@ WORKFLOW = ".github/workflows/main-ci-notifications.yml"
 STEP_NAME = "Post Slack notification"
 # Emitted by the `*)` arm of the workflow's impact case statement.
 FALLBACK_IMPACT_PREFIX = "Main CI failed before the repository reached"
+# This repository's default branch. STUB below carries the same value as
+# payload data; these are two different facts that only coincide today.
+DEFAULT_BRANCH = "main"
 
 # Workflows that reach main (or run on a schedule) yet deliberately do not
 # notify #build-notifications. Keyed by workflow `name:`, valued by the reason
@@ -87,8 +90,9 @@ STUB = {
     "ACTOR": "octocat",
 }
 
-def die(msg):
-    raise SystemExit("%s: %s" % (WORKFLOW, msg))
+def die(msg, path=None):
+    """Abort, naming the file at fault -- the notifier unless `path` says otherwise."""
+    raise SystemExit("%s: %s" % (path or WORKFLOW, msg))
 
 with open(WORKFLOW) as fh:
     lines = fh.read().split("\n")
@@ -129,7 +133,6 @@ def uncomment(value):
     """
     return re.sub(r"\s+#.*$", "", value)
 
-
 def on_block(path):
     """Return the top-level `on:` mapping of a workflow as {key: [sub-lines]}."""
     with open(path) as fh:
@@ -141,14 +144,21 @@ def on_block(path):
         m = re.match(r"""^(?:on|"on"|'on'):(.*)$""", line)
         if not m:
             continue
-        if uncomment(m.group(1)).strip():
-            die("%s: inline `on:` value -- teach this check the new form "
-                "rather than letting the workflow go unchecked" % path)
+        inline = uncomment(m.group(1)).strip()
+        if inline:
+            if not (inline.startswith("[") and inline.endswith("]")):
+                die("unparsed inline `on:` value %r -- teach this check the "
+                    "new form rather than letting the workflow go unchecked"
+                    % inline, path)
+            # `on: [push, pull_request]` -- event names with no filters, so
+            # each maps to an empty sub-block.
+            return {v.strip().strip("'\""): []
+                    for v in inline[1:-1].split(",") if v.strip()}
         start = i
         break
     if start is None:
-        die("%s: no block-form `on:` -- teach this check the new form rather "
-            "than letting the workflow go unchecked" % path)
+        die("no block-form `on:` -- teach this check the new form rather "
+            "than letting the workflow go unchecked", path)
     keys, cur = {}, None
     for line in wf[start + 1:]:
         if line.strip() and not line.startswith((" ", "#")):
@@ -164,15 +174,17 @@ def on_block(path):
         elif cur is not None:
             keys[cur].append(line)
     if not keys:
-        die("%s: could not read any `on:` triggers" % path)
+        die("could not read any `on:` triggers", path)
     return keys
 
-def push_filter(path, sub, key):
-    """Return the patterns listed under `key` in an `on.push:` block, or None.
+def yaml_list(path, sub, key, prefix):
+    """Return the list under `key` in these `on:` sub-lines, or None if absent.
 
     None means the key is absent, which is not the same as present-but-empty:
     `push` with no `branches` runs on every branch, so the two must not collapse.
+    `prefix` names the parent key for error messages, e.g. `on.push`.
     """
+    label = "%s.%s" % (prefix, key)
     for i, line in enumerate(sub):
         m = re.match(r"^ {4}%s:(.*)$" % re.escape(key), line)
         if not m:
@@ -180,54 +192,58 @@ def push_filter(path, sub, key):
         inline = uncomment(m.group(1)).strip()
         if inline:
             if not (inline.startswith("[") and inline.endswith("]")):
-                die("%s: unparsed `on.push.%s` value %r -- teach this check "
-                    "the new form" % (path, key, inline))
+                die("unparsed `%s` value %r -- teach this check the new "
+                    "form" % (label, inline), path)
             out = [v.strip().strip("'\"") for v in inline[1:-1].split(",")
                    if v.strip()]
         else:
             out = []
             for nxt in sub[i + 1:]:
-                if not nxt.strip() or re.match(r"^\s*#", nxt):
+                if not nxt.strip() or nxt.lstrip().startswith("#"):
                     continue  # blank or comment between items
                 mm = re.match(r"^ {6}- (.+?)\s*$", nxt)
                 if not mm:
                     break  # next key ends the list
                 out.append(uncomment(mm.group(1)).strip().strip("'\""))
         if not out:
-            die("%s: `on.push.%s` is present but yielded no entries -- teach "
-                "this check the new form rather than silently reading it as "
-                "'matches nothing'" % (path, key))
+            die("`%s` is present but yielded no entries -- teach this "
+                "check the new form rather than silently reading it as "
+                "'matches nothing'" % label, path)
         return out
     return None
 
 def can_trigger_notifier(path):
     """True if this workflow can raise a workflow_run event the notifier acts on.
 
-    The notifier's `if:` gate admits only default-branch runs whose originating
-    event was `push` or `schedule`, so that gate -- not the workflow's purpose
-    -- is what decides whether listing it could ever do anything. A
-    pull_request-only or issue-only workflow listed above would be dead config.
+    The notifier's `if:` gate -- not the workflow's purpose -- is what decides
+    whether listing it could ever do anything: a pull_request-only or
+    issue-only workflow listed there would be dead config. NOTIFY_EVENTS is
+    read out of that gate rather than restated here, so widening the gate
+    cannot leave this check quietly disagreeing with it.
     """
     keys = on_block(path)
-    if "schedule" in keys:
-        return True
-    if "push" not in keys:
+    reachable = NOTIFY_EVENTS.intersection(keys)
+    if not reachable:
         return False
+    # Only `push` carries a branch filter worth reading; any other admitted
+    # event (`schedule` today) runs on the default branch by construction.
+    if reachable - {"push"}:
+        return True
     # fnmatch does not distinguish GitHub's `*` (stops at `/`) from `**`
     # (crosses it). Only the literal default-branch name is ever matched here,
     # and it contains no `/`, so the distinction cannot change an answer.
-    default = STUB["DEFAULT_BRANCH"]
-    only = push_filter(path, keys["push"], "branches")
+    push = keys["push"]
+    only = yaml_list(path, push, "branches", "on.push")
     if only is not None:
-        return any(fnmatch.fnmatch(default, pat) for pat in only)
-    skip = push_filter(path, keys["push"], "branches-ignore")
+        return any(fnmatch.fnmatch(DEFAULT_BRANCH, pat) for pat in only)
+    skip = yaml_list(path, push, "branches-ignore", "on.push")
     if skip is not None:
-        return not any(fnmatch.fnmatch(default, pat) for pat in skip)
+        return not any(fnmatch.fnmatch(DEFAULT_BRANCH, pat) for pat in skip)
     # A tag-only push -- the publish-on-tag pattern -- cannot reach the
     # notifier: workflow_run.head_branch carries the tag, so the
     # `head_branch == default_branch` gate never matches. Demanding such a
     # workflow be listed would add config that only ever hits the generic arm.
-    if any(push_filter(path, keys["push"], k) is not None
+    if any(yaml_list(path, push, k, "on.push") is not None
            for k in ("tags", "tags-ignore")):
         return False
     return True  # unfiltered push runs on every branch, the default one included
@@ -237,17 +253,33 @@ if not run_script or "jq -n" not in run_script:
     die("could not extract the %r step's run: block -- if the workflow was "
         "restructured, update this check rather than deleting it" % STEP_NAME)
 
-triggers = []
-for i, line in enumerate(lines):
-    if re.match(r"^ {4}workflows:\s*$", line):
-        for nxt in lines[i + 1:]:
-            m = re.match(r'^ {6}- ([\'"]?)(.+?)\1\s*$', nxt)
-            if not m:
-                break
-            triggers.append(m.group(2))
-        break
-if not triggers:
+notifier_on = on_block(WORKFLOW)
+if "workflow_run" not in notifier_on:
+    die("no `on.workflow_run` block to read the trigger list from")
+
+# Same parser the reverse check uses on every other workflow, rather than a
+# second, weaker one: the hand-rolled loop this replaces stopped at the first
+# comment in the list, which after the reverse check below would report the
+# workflows it silently dropped as "absent from" a list they are sitting in.
+triggers = yaml_list(WORKFLOW, notifier_on["workflow_run"], "workflows",
+                     "on.workflow_run")
+if triggers is None:
     die("could not extract on.workflow_run.workflows")
+
+# The job's `if:` decides which originating events this notifier acts on. Read
+# it rather than restating it: a second copy here would keep answering "push or
+# schedule" after someone widened the real gate, and the workflows that gate
+# newly admits would go unlisted with nothing failing -- the omission this
+# check exists to catch, arrived at from above it.
+m = re.search(
+    r"fromJson\('(\[[^']*\])'\),\s*github\.event\.workflow_run\.event\b",
+    "\n".join(lines),
+)
+if not m:
+    die("could not read the originating-event allowlist from the job's `if:` "
+        "-- teach this check the new form rather than letting it mirror a "
+        "gate that has moved on")
+NOTIFY_EVENTS = set(json.loads(m.group(1)))
 
 # --- 1. every trigger names a workflow that still exists (a missed rename
 #        means the notifier silently never fires -- no red run at all)
@@ -293,10 +325,8 @@ if nameless:
         "`name:`, so they cannot be named in on.workflow_run.workflows at "
         "all: %s (give each one a name)" % nameless)
 
-unlisted = sorted(
-    "%s (%s)" % (n, candidates[n])
-    for n in candidates if n not in triggers and n not in NOTIFY_EXEMPT
-)
+unlisted = sorted("%s (%s)" % (n, p) for n, p in candidates.items()
+                  if n not in triggers and n not in NOTIFY_EXEMPT)
 if unlisted:
     die("these workflows run on the default branch but are absent from "
         "on.workflow_run.workflows, so their main failures notify nobody: %s "
@@ -307,10 +337,8 @@ if unlisted:
 # workflow still reaches this notifier. Retarget a listed one at `pull_request`
 # and it goes on failing on main while quietly never firing -- the same silent
 # non-firing this PR exists to kill, just arrived at from the other side.
-dead = sorted(
-    "%s (%s)" % (t, names[t])
-    for t in triggers if t in names and not can_trigger_notifier(names[t])
-)
+dead = sorted("%s (%s)" % (t, names[t])
+              for t in triggers if t not in candidates)
 if dead:
     die("on.workflow_run.workflows lists workflows that can no longer trigger "
         "it, so they are listed but will never fire: %s (restore the "
@@ -318,6 +346,11 @@ if dead:
 
 # A workflow that stopped running on main -- or was deleted -- leaves its
 # exemption behind as a claim nobody rechecks.
+blank = sorted(n for n, why in NOTIFY_EXEMPT.items() if not why.strip())
+if blank:
+    die("NOTIFY_EXEMPT entries must carry a reason, these are empty: %s"
+        % blank)
+
 stale = sorted(n for n in NOTIFY_EXEMPT if n not in candidates)
 if stale:
     die("NOTIFY_EXEMPT names workflows that can no longer trigger this "
@@ -460,7 +493,7 @@ if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
     )
 
 print("main CI notification payload builds on %s for all %d triggers "
-      "(+ fallback, schedule, missing actor); %d triggers and %d reachable "
+      "(+ fallback, schedule, missing actor); the list and the %d reachable "
       "workflows agree in both directions; webhook guard fails loudly"
-      % (version, len(triggers), len(triggers), len(candidates)))
+      % (version, len(triggers), len(candidates)))
 EOF
