@@ -544,9 +544,14 @@ function showResults(results, errors, insertionError) {
   if (errors.length > 0 || insertionError) {
     errorArea.classList.remove('hidden');
     // Every upload worked and only the Gmail insertion failed, so this box carries a
-    // success-toned message plus a pointer at the copy fallback — style it as a notice
-    // rather than an error.
-    errorArea.classList.toggle('notice', Boolean(insertionError) && errors.length === 0);
+    // success-toned message plus a pointer at the copy fallback — style it as a notice rather
+    // than an error. This only holds while there is actually a fallback: with no copyable link
+    // the user has no way left to reach their upload from the popup, which is an error state
+    // however well the uploads themselves went.
+    errorArea.classList.toggle(
+      'notice',
+      Boolean(insertionError) && errors.length === 0 && hasCopyableLinks
+    );
     const title = document.createElement('div');
     title.className = 'error-title';
     // Pick the title by upload-error count; the insertion failure (if any) is always listed

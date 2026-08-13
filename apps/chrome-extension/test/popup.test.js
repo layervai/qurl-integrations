@@ -915,6 +915,15 @@ test('showResults styles an insertion-only failure as a notice, not an error', f
   popup.showResults(results, [{ filename: 'b.txt', error: 'boom' }], 'Active tab is not Gmail.');
   assert.equal(errorArea.classList.contains('notice'), false);
 
+  // Insertion failed and nothing is copyable: the popup offers no way left to reach the
+  // upload, so this is an error state no matter how well the upload itself went.
+  popup.showResults(
+    [{ filename: 'a.txt', link: 'http://files.example.com/a', expiry: null }],
+    [],
+    'Active tab is not Gmail.'
+  );
+  assert.equal(errorArea.classList.contains('notice'), false);
+
   // And the modifier must not survive into the next run.
   popup.showResults(results, [], 'Active tab is not Gmail.');
   assert.equal(errorArea.classList.contains('notice'), true);
