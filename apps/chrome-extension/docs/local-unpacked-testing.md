@@ -140,7 +140,7 @@ Expected behavior:
 - The uploaded file can be viewed or downloaded
 - Image files and PDF files should be directly accessible through the qURL link
 
-![Open the Uploaded Resource](./images/patch-6.png)
+![Open the Uploaded Resource](./images/patch-6.jpg)
 
 ## 10. Expected Failure Cases
 

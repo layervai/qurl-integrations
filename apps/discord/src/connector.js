@@ -740,6 +740,27 @@ function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
 }
 
+// Host for the qurl_site rejection breadcrumb below. Every guard behind that
+// breadcrumb throws a CONSTANT message — assertPublicHttpsTarget's four, plus
+// buildDetectTargetUrl's own DetectQurlSiteError branches — so without this it
+// says THAT a target was rejected but not WHICH host tripped it: an IPv4-mapped
+// literal, a 10.x, and a public `fd…` name misclassified by isPrivateHost's ULA
+// prefix check all read identically. Re-parsing here (error path only) beats
+// threading the host back out of buildDetectTargetUrl, and yields the same value
+// the guards judged. Both DetectQurlSiteError branches land correctly: an
+// unparseable qurl_site yields undefined (key dropped), a host-only violation
+// parses and yields the bare host.
+//
+// `hostname`, never the full URL: it excludes userinfo, port, path, query and
+// fragment by construction, so the `at_…` token — which rides in the qurl_link
+// fragment — cannot reach the log through it. undefined on an unparseable
+// qurl_site, which JSON.stringify drops, keeping that line free of a null.
+// (Same shape as the safe-host helpers in commands.js / qurl-webhook-registrar.js;
+// they differ only in fallback, and undefined is the one that omits the key.)
+function detectTargetHostname(qurlSite) {
+  try { return new URL(qurlSite).hostname; } catch { return undefined; }
+}
+
 /**
  * Resolve the qURL reverse-tunnel target for the watermark-detect endpoint.
  *
@@ -885,7 +906,10 @@ async function resolveDetectTarget() {
     const label = err instanceof DetectQurlSiteError
       ? 'Detect tunnel mint returned an invalid qurl_site'
       : 'Detect tunnel target rejected by SSRF guard';
-    logger.warn(label, { error: redactAccessToken(err.message) });
+    logger.warn(label, {
+      error: redactAccessToken(err.message),
+      hostname: detectTargetHostname(minted?.qurl_site),
+    });
     throw err;
   }
 

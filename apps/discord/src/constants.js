@@ -1,4 +1,4 @@
-// Shared constants for the OpenNHP Discord bot
+// Shared constants for the qURL Discord bot
 
 // Embed colors (Discord uses hex integers)
 const COLORS = {
