@@ -44,6 +44,15 @@ jobs:
       - name: Check Chrome/Edge extension lockstep
         run: scripts/check-extension-lockstep.sh
 
+      # The message catalogs are excluded from the lockstep check above
+      # (sanctioned wording deltas), so this is the only thing comparing
+      # them. Its own failure paths are exercised by the test below.
+      - name: Check Chrome/Edge i18n parity
+        run: scripts/check-i18n-parity.sh
+
+      - name: Test i18n parity checker
+        run: scripts/test-check-i18n-parity.sh
+
       # The jq <= 1.7 parse check is only meaningful on a runner whose jq
       # still has the restricted grammar; jq 1.8 (typical locally, and
       # eventually here) accepts the form it rejects. The script reports

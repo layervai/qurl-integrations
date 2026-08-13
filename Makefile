@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base check-discord test-discord pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-i18n-parity test-i18n-parity check-notification-payload test-validated-base check-discord test-discord pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -91,6 +91,12 @@ check-release-please-sync:
 check-extension-lockstep:
 	scripts/check-extension-lockstep.sh
 
+check-i18n-parity:
+	scripts/check-i18n-parity.sh
+
+test-i18n-parity:
+	scripts/test-check-i18n-parity.sh
+
 check-notification-payload:
 	scripts/check-main-ci-notification-payload.sh
 
@@ -130,7 +136,7 @@ check-discord:
 ## Full check (Go + repo checks, matching the Go CI path; app suites
 ## run via their own CI gates or make check-discord)
 
-check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base lint test-race
+check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-i18n-parity test-i18n-parity check-notification-payload test-validated-base lint test-race
 
 ## Cleanup
 
