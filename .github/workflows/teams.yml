@@ -1,10 +1,10 @@
 name: "teams: Build and Test"
 
-# `on.push.paths` used to gate this workflow, which made the #1022 supersession
-# gap unfixable here: when a burst of merges cancelled a pending run, the
-# superseding commit produced no run at all to widen a diff base on. Path
-# gating now lives in the `changes` job below, so every push gets a run and
-# that run can diff against the last SHA this workflow validated.
+# Path filtering lives in the `changes` job below, NOT in `on: paths:`.
+# A workflow skipped by a path filter never reports its checks, so a
+# `teams / required` branch-protection rule would block every PR that
+# doesn't touch apps/teams. The detector + always-running aggregate keeps
+# the check reporting on every PR — matching slack/discord/chrome-extension/shared.
 on:
   push:
     branches: [main]
@@ -17,6 +17,9 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Node version is read from apps/teams/.nvmrc below so CI and local dev (nvm)
+# stay in lock-step. Avoid adding a NODE_VERSION env var or inline version — it would drift.
 
 jobs:
   changes:
@@ -36,7 +39,7 @@ jobs:
     steps:
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'push'
         with:
           fetch-depth: 0
@@ -64,6 +67,7 @@ jobs:
           filters: |
             teams:
               # Source of truth for Teams-impacting paths on PR and main push events.
+              # No 'shared/**' here: shared/ is Go, and apps/teams is TypeScript.
               - 'apps/teams/**'
               - '.github/workflows/teams.yml'
 
@@ -77,7 +81,7 @@ jobs:
       run:
         working-directory: apps/teams
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -156,8 +160,8 @@ jobs:
               continue
             fi
             if [ "$result" != "success" ]; then
-              # Teams-impacting changes require every quality gate listed
-              # in needs to run and pass; skipped/cancelled is a failed gate.
+              # Teams-impacting changes require every quality gate listed in
+              # needs to run and pass; skipped/cancelled is a failed gate.
               echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
               failed=1
             fi

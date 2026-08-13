@@ -16,11 +16,12 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 - `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
 - `apps/discord/` — Node.js (CommonJS, `src/*.js`)
 - `apps/chrome-extension/` — Chrome MV3 extension (JavaScript)
-- `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
+- `apps/teams/` — Node.js (TypeScript ESM, `src/*.ts`); OAuth security core only — no HTTP routes, Teams SDK, or deploy yet
+- `apps/zapier/` — placeholder dir, no implementation yet
 - `origins/s3-static-connector/` — reusable private S3 static origin image
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
 - `e2e/` — TypeScript end-to-end tests (Jest)
-- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it
+- Per-app release tracks via Release Please monorepo mode (`release-please-config.json`); tags are `<component>-v*` except the CLI, which intentionally tags bare `v*` for OSS GoReleaser — see the `.github/workflows/release-please.yml` header before "normalizing" it. A track is earned by cutting a semver version stream that something downstream pins to (Lambda/container deploy, Chrome Web Store, GoReleaser + `install.sh`) — not by having code, nor even by publishing an artifact: `shared/` and `apps/teams/` publish nothing, and `origins/s3-static-connector/` publishes an image tagged only `:main`/`:<sha>`, so none of them have a track. Adding one means editing `release-please-config.json` **and** `.release-please-manifest.json` together — `scripts/check-release-please-sync.sh` fails the build if their keys drift
 
 ## Commit format
 

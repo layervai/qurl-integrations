@@ -154,45 +154,76 @@ at the OAuth-callback bind layer.
   - **Backend work (both paths)** — use the workspace API key to
     find-or-create a qURL Connector resource scoped to the connected qURL
     account, bind `$<id>` or the `alias:` override in the current Slack
-    channel, and mint a one-hour bootstrap API key. When `alias:` is omitted,
+    channel, and mint a one-hour, one-shot enrollment token bound to that
+    Connector. When `alias:` is omitted,
     the ID doubles as the channel alias.
   - **Idempotency** — retrying the install within the modal's 25-minute
-    validity window reuses the same bootstrap-key idempotency bucket. Retrying
-    after that window can mint a new key, so operators should run the newest
-    Slack install block and discard older bootstrap-key messages.
+    validity window reuses the same enrollment-token idempotency bucket.
+    Retrying after that window can mint a new token, so operators should run the
+    newest Slack install block and discard older enrollment-token messages.
   - **Output** — hides the internal resource id and is tailored to the selected
     environment:
     - **Docker / Docker Compose** — guarded pasteable shell blocks that write
-      `qurl-proxy.yaml`, create a bootstrap-key file, create/chown
+      `qurl-proxy.yaml`, create an enrollment-token file, create/chown
       per-connector durable agent state, pass `QURL_API_KEY_FILE`, and pass
       `QURL_CONNECTOR_ID=<id>` to the client.
     - **ECS/Fargate / Kubernetes** — the same contract as deployment snippets:
       co-locate the sidecar with the target container, mount durable
       per-instance state at `/var/lib/layerv/agent`, mount or inject the
-      bootstrap key through the runtime's secret mechanism, and remove the key
-      after the logs show a successful connection.
+      enrollment token through the runtime's secret mechanism, and remove the
+      token after the logs show a successful connection.
   - **Key delivery** — ECS/Fargate uses the client's supported `QURL_API_KEY`
     fallback because AWS injects task secrets as environment variables; Docker,
     Docker Compose, and Kubernetes prefer `QURL_API_KEY_FILE`.
     Non-interactive operators should inject `QURL_BOOTSTRAP_KEY` from their
     secret manager before running a pasted block; interactive runs prompt for
-    the bootstrap key with terminal echo disabled when possible.
+    the enrollment token with terminal echo disabled when possible.
   - **Constraint** — do not share one agent state volume across concurrently
     running sidecars.
   - **Cleanup edge** — if the bot cannot confirm Slack delivery after minting
-    a bootstrap key, it retries the final text post once, revokes the key, and
+    an enrollment token, it retries the final text post once, revokes the token, and
     posts a discard notice when possible. Cleanup uses the handler's base
     context so request cancellation does not strand a key, but process shutdown
     can still interrupt the five-second cleanup window. If that happens, the
-    bootstrap key remains bounded by its one-hour TTL; revoke it manually if
+    enrollment token remains bounded by its one-hour TTL; revoke it manually if
     logs show `tunnel_bootstrap_cleanup_failed`.
 
-### Bootstrap-key DM live smoke
+### Kind-first credential cutover
 
-Run this smoke before relying on connector bootstrap-key DM delivery in a new
+The bot mints credentials with the kind-first `POST /v1/api-keys` contract:
+Connector enrollment sends `kind=enrollment_token` with `target=connector`, and
+the workspace key mint sends `kind=api_key` on the two paths that reach
+`/v1/api-keys` — the legacy fallback (taken when the binding route 404s without
+a code, or returns 503 `bindings_disabled`) and the replacement/rotation mint.
+The primary workspace path posts to `/v1/external-identity-bindings`, which is
+not kind-gated and is unaffected. There is no dual-send fallback, so
+**qurl-service must accept kind-first bodies in every API environment Slack
+talks to before this build is deployed there.**
+
+Symptoms of a deploy-order violation, and what to check:
+
+- **Guided Connector setup fails immediately with a 400.** The producer
+  predates the cutover. Connector enrollment logs `tunnel install: enrollment
+  token mint failed` with `status`, `code`, `detail`, and `invalid_fields`
+  naming the rejected key. The workspace mint hits this only on its
+  `/v1/api-keys` paths above, surfacing `qurl-service /v1/api-keys returned 400
+  code=… request_id=…`. Quote the `request_id` when escalating. The fix is to
+  roll the producer forward, not to retry — 400 is not retried by the shared
+  client.
+- **Enrollment succeeds but logs `tunnel install: minted credential did not
+  confirm the kind-first contract`.** The producer returned 200 without echoing
+  `kind`/`target`, so the bot cannot confirm it minted a one-shot enrollment
+  token rather than an ordinary workspace-scoped key. Treat the minted
+  credential as potentially over-scoped: verify it in the qURL dashboard and
+  revoke it if it is not a Connector-bound enrollment token. This warning is
+  expected to be silent once every environment is on the kind-first API.
+
+### Enrollment-token DM live smoke
+
+Run this smoke before relying on Connector enrollment-token DM delivery in a new
 Slack app shape, especially an Enterprise Grid org install. Use a real admin
 user who has not already opened a DM with the bot when possible. The smoke posts
-only non-secret text; do not paste bootstrap keys into the command or result.
+only non-secret text; do not paste enrollment tokens into the command or result.
 Any `-text` value is sent to Slack, so keep it short, non-secret, and at most
 4000 bytes after cleanup. The message text is not written to the JSON evidence.
 Line breaks, tabs, and control characters in `-text` are normalized before the
@@ -242,7 +273,7 @@ of parsed Slack evidence.
 
 For Enterprise Grid fallback, pair the token smoke with the actual guided
 connector setup in a workspace where the org-install token is the delivery
-token. Confirm the admin receives the bootstrap-key DM and that the key-free
+token. Confirm the admin receives the enrollment-token DM and that the token-free
 install instructions post separately. The local fallback contract is covered by
 `TestSlackPostDMFuncOpensIMThenPostsWithGridFallback`; the live smoke confirms
 Slack accepts the org-install token for the real workspace shape.
@@ -697,7 +728,7 @@ that accidentally carried a numeric value.
 | `SLACK_CLIENT_ID` | Slack install | Slack app client ID used by `/oauth/slack/install`. Required for customer installs that capture per-workspace bot tokens. |
 | `SLACK_CLIENT_SECRET` | Slack install | Slack app client secret used by `/oauth/slack/callback` to exchange Slack's OAuth code. |
 | `SLACK_INSTALL_STATE_SECRET` | Slack install | HMAC-SHA256 key for Slack install state signing. Must be ≥32 bytes. Use a distinct production secret from `OAUTH_STATE_SECRET`; the fallback is only for local/dev compatibility. |
-| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector bootstrap keys, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
+| `SLACK_BOT_SCOPES` | No | Comma/space-separated extra bot scopes requested by `/oauth/slack/install`. Empty defaults to `commands,chat:write,im:write,users:read`; when set, those required defaults are still included so the captured token can receive slash commands, open 1:1 DMs, deliver private messages for `dm:true`, agent replies, and qURL Connector enrollment tokens, and verify owner-transfer targets. See [Slack app configuration](#slack-app-configuration) for the full conversation-mode scope list. |
 | `SLACK_BOT_TOKEN` | Legacy | Single-workspace fallback token for `views.open` when a workspace has not yet completed Slack install OAuth. Accepts `xoxb-` and `xoxe.xoxb-` token shapes. Must include `users:read` if ownership transfer should work before Slack install OAuth captures a per-workspace token. Production multi-customer installs should not depend on this fallback. |
 | `SLACK_MARKDOWN_VALIDATION_BOT_TOKEN` | Validation | Bot token used only by `validate-slack-markdown-renderer`. Required for live renderer validation and intentionally separate from production token lookup. |
 | `SLACK_MARKDOWN_VALIDATION_CHANNEL` | Validation | Slack channel id that receives channel-reply validation messages. Required for live renderer validation. |
@@ -772,7 +803,7 @@ For customer Slack installs, configure the Slack app with:
 - Bot scopes: `commands,chat:write,im:write,users:read` plus any extra scopes from
   `SLACK_BOT_SCOPES` (`commands` installs the slash command surface and
   `chat:write` lets the app post messages; `im:write` lets it open 1:1 DMs for
-  `dm:true` and qURL Connector bootstrap-key delivery; `users:read` lets
+  `dm:true` and qURL Connector enrollment-token delivery; `users:read` lets
   `/qurl-admin transfer-ownership` verify the target user before owner_id changes)
   - Existing installs created before `users:read` was required must re-run this
     Slack install flow before `/qurl-admin transfer-ownership` can verify a
@@ -813,7 +844,7 @@ token. Before deploying a build that depends on newly required Slack scopes,
 send affected workspaces through the reinstall link so guided connector setup
 does not fail closed on day one. New installs through `/oauth/slack/install`
 store that token automatically, and guided `/qurl-admin protect-connector` uses
-it for `views.open` plus bootstrap-key DM delivery. If Slack tells a customer
+it for `views.open` plus enrollment-token DM delivery. If Slack tells a customer
 guided connector setup needs the latest qURL Slack app install, send them
 through this reinstall link.
 Monitor the guided setup open path after deploys: the synchronous admin gate is

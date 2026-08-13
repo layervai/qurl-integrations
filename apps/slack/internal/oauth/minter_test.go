@@ -163,14 +163,25 @@ func TestHTTPAPIKeyMinterMintWorkspaceReplacementUsesAPIKeysEndpoint(t *testing.
 		gotAuth           string
 		gotIdempotencyKey string
 		gotBody           mintRequest
+		got               map[string]any
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		if err := json.Unmarshal(raw, &gotBody); err != nil {
 			t.Fatalf("decode request: %v", err)
+		}
+		// Decode the same wire body into a map so the kind-first assertions
+		// below inspect the actual JSON sent, not just the mintRequest fields
+		// the struct happens to declare.
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode mint body: %v", err)
 		}
 		writeLegacyMintSuccess(t, w)
 	}))
@@ -212,6 +223,12 @@ func TestHTTPAPIKeyMinterMintWorkspaceReplacementUsesAPIKeysEndpoint(t *testing.
 	// accidental edit to the shared set cannot silently pass both call sites.
 	if strings.Join(gotBody.Scopes, ",") != "qurl:read,qurl:write,qurl:agent" {
 		t.Errorf("scopes = %#v want the pinned qurl:read/write/agent workspace set", gotBody.Scopes)
+	}
+	if got["kind"] != "api_key" {
+		t.Fatalf(`mint body kind = %v, want "api_key" (kind-first credential API)`, got["kind"])
+	}
+	if _, has := got["key_type"]; has {
+		t.Fatal("mint body must not send retired key_type")
 	}
 }
 
@@ -913,6 +930,81 @@ func TestHTTPAPIKeyMinterReplacementMintAuthFailureTyped(t *testing.T) {
 	}
 	if authErr.Method != http.MethodPost || authErr.Path != testAPIKeysPath || authErr.StatusCode != http.StatusUnauthorized || authErr.Code != testInvalidToken || authErr.RequestID != "req_replace" {
 		t.Fatalf("auth error = %+v, want POST /v1/api-keys 401 invalid_token req_replace", authErr)
+	}
+}
+
+// TestHTTPAPIKeyMinterReplacementMintBadRequestCarriesContext pins the
+// debuggability of the kind-first cutover's most likely failure: a producer
+// that does not yet accept `kind` rejects the workspace mint with 400. 400 is
+// not auth-class, so it never becomes a DependencyAuthFailureError and the
+// parsed envelope context used to be discarded — leaving operators with only
+// "qurl-service /v1/api-keys returned 400". The code and request ID must
+// survive into the error an operator actually sees.
+func TestHTTPAPIKeyMinterReplacementMintBadRequestCarriesContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_field","title":"Bad Request","detail":"kind is required"},"meta":{"request_id":"req_kind"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	_, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "access-token", testTeamID, "k_old")
+	if err == nil {
+		t.Fatal("400 from the mint endpoint must be an error")
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("400 must not be classified as dependency auth failure: %+v", authErr)
+	}
+	for _, want := range []string{"400", "code=invalid_field", "request_id=req_kind"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q so the rejection is debuggable", err.Error(), want)
+		}
+	}
+}
+
+// TestHTTPAPIKeyMinterBindingBadRequestCarriesContext is the binding-route
+// counterpart to the /v1/api-keys test above. This path cannot produce a
+// kind-first 400 — bindingRequest sends no `kind` — but it discarded the same
+// parsed envelope context, so a non-auth rejection there was equally opaque.
+// 400 is chosen deliberately: it is neither auth-class nor a
+// shouldFallbackToLegacyMint trigger, so it exercises the plain error return.
+func TestHTTPAPIKeyMinterBindingBadRequestCarriesContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"invalid_field","title":"Bad Request","detail":"external_id malformed"},"meta":{"request_id":"req_bind"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	err := mintWorkspaceOnlyErr(m)
+	if err == nil {
+		t.Fatal("400 from the binding endpoint must be an error")
+	}
+	var authErr *DependencyAuthFailureError
+	if errors.As(err, &authErr) {
+		t.Fatalf("400 must not be classified as dependency auth failure: %+v", authErr)
+	}
+	for _, want := range []string{externalBindingPath, "400", "code=invalid_field", "request_id=req_bind"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must contain %q so the rejection is debuggable", err.Error(), want)
+		}
+	}
+}
+
+// TestErrorEnvelopeSuffixOmitsInternalSentinel keeps the internal
+// structured-envelope sentinel out of operator-facing error text; it is a
+// classification marker, not a qurl-service error code.
+func TestErrorEnvelopeSuffixOmitsInternalSentinel(t *testing.T) {
+	t.Parallel()
+
+	if got := errorEnvelopeSuffix(structuredErrorEnvelopeCode, "req_1"); got != " request_id=req_1" {
+		t.Errorf("suffix = %q, want the sentinel dropped and only the request id kept", got)
+	}
+	if got := errorEnvelopeSuffix("", ""); got != "" {
+		t.Errorf("suffix = %q, want empty when there is no context to add", got)
 	}
 }
 

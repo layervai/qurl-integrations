@@ -22,16 +22,19 @@ Each integration lives in `apps/{name}/`. Shared libraries live in `shared/`.
 
 ```
 apps/
-  slack/          # Slack integration
-    cmd/main.go   # Lambda entry point
-    internal/     # App-private code — put your logic here
+  slack/             # Slack integration
+    cmd/main.go      # Lambda entry point
+    internal/        # App-private code — put your logic here
     README.md
-  teams/          # Microsoft Teams (planned)
-  discord/        # Discord bot (planned)
-  cli/            # CLI tool
+  discord/           # Discord bot
+  chrome-extension/  # Chrome MV3 extension for Gmail
+  cli/               # CLI tool
+  teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
+  zapier/            # Zapier integration (placeholder, no implementation yet)
 origins/
   s3-static-connector/ # Reusable private S3 static origin image
-shared/           # Shared libraries used by all integrations
+shared/              # Shared Go libraries used by the Go apps
+e2e/                 # TypeScript end-to-end tests (Jest)
 ```
 
 ## Boundaries
@@ -104,15 +107,14 @@ settings, update this section in the same operational change.
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
 `chrome-extension / required`, `teams / required`,
-`s3-static-connector / required`, and `shared / required`. The last two are new
-as of #1022, which moved `teams.yml` and `s3-static-connector.yml` off
-`on.push.paths` onto the `changes`-job pattern; adding them to branch
-protection is a separate settings change. Each workflow's `changes` filter is
-the source of truth for which paths need validation. When
-that filter matches, the aggregate validates every quality gate listed in its
-workflow `needs:` set. When branch protection requires path-gated app/shared
-workflows, it should require only these aggregate checks, not the internally
-skipped expensive jobs.
+`s3-static-connector / required`, and `shared / required`. The connector
+aggregate is new as of #1022, which moved `s3-static-connector.yml` off
+`on.push.paths` onto the `changes`-job pattern; adding it to branch protection
+is a separate settings change. Each workflow's `changes` filter is the source
+of truth for which paths need validation. When that filter matches, the aggregate validates every quality gate
+listed in its workflow `needs:` set. When branch protection requires path-gated
+app/shared workflows, it should require only these aggregate checks, not the
+internally skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external
