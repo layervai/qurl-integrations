@@ -317,13 +317,21 @@ jobs:
             exit 1
           fi
 
-          # GitHub rejects issue comments longer than 65536 characters. Trim the
-          # review instead of losing the whole publication to a hard API error;
-          # the marker stays on the final line either way.
+          # TODO(upstream-contract): GitHub rejects an issue comment longer
+          # than 65536 characters, counted in characters rather than bytes —
+          # which is what LC_ALL above buys. Trim the review instead of losing
+          # the whole publication to a hard API error; the marker stays on the
+          # final line either way. Each reserve below is derived from the string
+          # it holds back, so editing the notice cannot silently breach the
+          # limit.
+          truncation_notice=$'\n\n_Review truncated to fit the comment size limit._'
           marker_block=$'\n\n'"${EXPECTED_REVIEW_MARKER}"
-          max_review_length=$(( 65536 - ${#marker_block} - 64 ))
+          # Margin in case GitHub counts an astral-plane character differently
+          # from the single code point bash counts.
+          comment_size_margin=1024
+          max_review_length=$(( 65536 - ${#marker_block} - ${#truncation_notice} - comment_size_margin ))
           if (( ${#review_body} > max_review_length )); then
-            review_body="${review_body:0:max_review_length}"$'\n\n_Review truncated to fit the comment size limit._'
+            review_body="${review_body:0:max_review_length}${truncation_notice}"
           fi
 
           if ! published_comment_id="$(jq -n --arg body "${review_body}${marker_block}" '{body: $body}' |
