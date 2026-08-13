@@ -174,7 +174,7 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		return e
 	}
 	withFile := func(e *slackEventEnvelope) *slackEventEnvelope {
-		e.Event.Files = []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+		e.Event.Files = filesFromJSON(t, `[{"id":"F1"}]`)
 		return e
 	}
 	tests := []struct {
@@ -226,42 +226,147 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 	}
 }
 
+// filesFromJSON decodes a raw Slack `files` value the way an inbound event would,
+// so table rows exercise the real decoder instead of hand-built struct state.
+func filesFromJSON(t *testing.T, raw string) slackEventFiles {
+	t.Helper()
+	var f slackEventFiles
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		t.Fatalf("decoding files %s: %v", raw, err)
+	}
+	return f
+}
+
+// TestSlackEventFilesDecodesTolerantly pins the property that keeps a shape
+// surprise from silently eating the whole message. handleEvent treats ANY envelope
+// decode error as "log at Debug, ack 200, dispatch nothing", so a files value that
+// fails to decode would drop the event — including an ordinary text turn that
+// merely carried the field. Every shape here must therefore decode without error,
+// and anything unrecognized must still read as an attachment so detection fails
+// toward refusing rather than toward answering past a file.
+func TestSlackEventFilesDecodesTolerantly(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantPresent bool
+		wantCount   int
+	}{
+		{"one file", `[{"id":"F1"}]`, true, 1},
+		{"two files", `[{"id":"F1"},{"id":"F2"}]`, true, 2},
+		{"empty array is not an upload", `[]`, false, 0},
+		{"explicit null is not an upload", `null`, false, 0},
+		{"non-object element still counts", `["F1"]`, true, 1},
+		{"whitespace-padded array still counts", "  [{\"id\":\"F1\"}]  ", true, 1},
+		// The shapes below are not ones Slack sends today. They are here because the
+		// cost of guessing wrong is the whole event vanishing, not a miscount.
+		{"object instead of array is an uncountable upload", `{"id":"F1"}`, true, 0},
+		{"string instead of array is an uncountable upload", `"F1"`, true, 0},
+		{"number instead of array is an uncountable upload", `7`, true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var f slackEventFiles
+			if err := json.Unmarshal([]byte(tt.raw), &f); err != nil {
+				t.Fatalf("files %s must not fail the decode, got %v", tt.raw, err)
+			}
+			if f.present != tt.wantPresent || f.count != tt.wantCount {
+				t.Fatalf("files %s decoded to present=%v count=%d, want present=%v count=%d",
+					tt.raw, f.present, f.count, tt.wantPresent, tt.wantCount)
+			}
+		})
+	}
+}
+
+// TestSlackEventFilesSurvivesEnvelopeDecode is the end-to-end half of
+// TestSlackEventFilesDecodesTolerantly: it pins that a surprising files shape does
+// not fail the ENCLOSING envelope decode, which is the failure that would make the
+// message disappear. A plain []json.RawMessage field fails this test.
+func TestSlackEventFilesSurvivesEnvelopeDecode(t *testing.T) {
+	for _, raw := range []string{`{"id":"F1"}`, `"F1"`, `7`, `null`, `[]`} {
+		t.Run(raw, func(t *testing.T) {
+			body := eventCallbackBody("EvShape", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"500.1","text":"what can I access?","files":`+raw+`}`)
+			var env slackEventEnvelope
+			if err := json.Unmarshal([]byte(body), &env); err != nil {
+				t.Fatalf("files %s must not fail the envelope decode, got %v", raw, err)
+			}
+			if env.Event.Text != "what can I access?" || env.Event.User != "U2" {
+				t.Fatalf("envelope fields lost alongside files %s: %+v", raw, env.Event)
+			}
+		})
+	}
+}
+
 // TestAgentDeterministicReply pins the feature switch itself: which turns are
 // answered without the model, and which fall through to it.
-func TestAgentDeterministicReply(t *testing.T) {
-	oneFile := []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
-	snippetFile := []json.RawMessage{json.RawMessage(`{"id":"F5","mode":"snippet","filetype":"text"}`)}
+// TestAgentEventHasUpload pins upload detection on the event envelope, which is
+// decided ahead of — and independently of — the text classifier below. The two
+// signals back each other up, so each is covered on its own as well as together.
+func TestAgentEventHasUpload(t *testing.T) {
 	tests := []struct {
 		name  string
 		event slackInnerEvent
-		text  string
-		want  string // "" means the turn should reach the model
+		want  bool
 	}{
-		{"attachment beats a keyword caption", slackInnerEvent{Files: oneFile}, "help", agentUnsupportedMediaReply},
+		{"files array alone", slackInnerEvent{Files: filesFromJSON(t, `[{"id":"F1"}]`)}, true},
+		{"file_share subtype alone (files array absent)", slackInnerEvent{Subtype: slackMessageSubtypeFileShare}, true},
+		{"both signals", slackInnerEvent{Subtype: slackMessageSubtypeFileShare, Files: filesFromJSON(t, `[{"id":"F1"}]`)}, true},
 		// A long paste is converted by the Slack client into a snippet, so a purely
-		// textual request arrives shaped exactly like an upload. Presence detection
-		// refuses it — the paste's text is in the file, not in this event, so the
-		// caption alone would be answered without what it refers to.
-		{"long paste converted to a snippet", slackInnerEvent{Subtype: slackMessageSubtypeFileShare, Files: snippetFile}, "protect all of these", agentUnsupportedMediaReply},
-		{"file_share with no files array is still an upload", slackInnerEvent{Subtype: slackMessageSubtypeFileShare}, "", agentUnsupportedMediaReply},
-		{"empty files array is not an upload", slackInnerEvent{Files: []json.RawMessage{}}, "help", agentHelpReply},
-		{"literal help", slackInnerEvent{}, "help", agentHelpReply},
-		{"ordinary request reaches the model", slackInnerEvent{}, "what can I reach?", ""},
-		{"ordinary request with an attachment does not", slackInnerEvent{Files: oneFile}, "what can I reach?", agentUnsupportedMediaReply},
-		// A canvas or file shared as a LINK is ordinary message text: no files entry
-		// and no file_share subtype, so it is not an upload and is not refused. These
-		// pin that on purpose. A text-side permalink detector would take the whole
-		// turn with it — the media case wins outright — so the second row, a
-		// legitimate propose_protect_url request against a Slack-hosted https:// URL,
-		// would stop being answered. agentUnsupportedMediaReply is scoped to
-		// attachments so it does not promise the refusal these rows forbid.
-		{"a linked canvas is not an upload", slackInnerEvent{}, "what's in https://acme.slack.com/docs/T1/F2", ""},
-		{"protecting a Slack file URL reaches the model", slackInnerEvent{}, "protect https://acme.slack.com/files/U1/F2/report.pdf as $report", ""},
+		// textual request arrives shaped exactly like an upload. It is refused: the
+		// paste's text is in the file, not in this event, so answering the caption
+		// would answer without the thing the caption refers to.
+		{"long paste converted to a snippet", slackInnerEvent{Subtype: slackMessageSubtypeFileShare, Files: filesFromJSON(t, `[{"id":"F5","mode":"snippet","filetype":"text"}]`)}, true},
+		{"files in a shape we could not count", slackInnerEvent{Files: filesFromJSON(t, `{"id":"F1"}`)}, true},
+		{"empty files array is not an upload", slackInnerEvent{Files: filesFromJSON(t, `[]`)}, false},
+		{"null files is not an upload", slackInnerEvent{Files: filesFromJSON(t, `null`)}, false},
+		{"plain message is not an upload", slackInnerEvent{Text: "what can I reach?"}, false},
+		{"a non-upload subtype is not an upload", slackInnerEvent{Subtype: "message_changed"}, false},
+		// A canvas or file shared as a LINK carries neither signal: Slack sends an
+		// unfurl, which slackInnerEvent does not decode. So the limitation never
+		// fires for one, which is why agentUnsupportedMediaReply is scoped to
+		// attachments rather than naming canvases outright.
+		{"a linked canvas is not an upload", slackInnerEvent{Text: "what's in https://acme.slack.com/docs/T1/F2"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			event := tt.event
-			reply, ok := agentDeterministicReply(&event, tt.text)
+			if got := agentEventHasUpload(&event); got != tt.want {
+				t.Fatalf("agentEventHasUpload = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAgentDeterministicReply pins the TEXT half of the switch: which wordings are
+// answered without the model, and which fall through to it. Uploads are not in
+// scope here by design — they are an envelope property, decided by the caller
+// before this runs. That an upload BEATS every keyword below is pinned end-to-end
+// by TestHandleEvent_UnsupportedMediaRepliesWithoutLLM's "upload captioned with a
+// deterministic keyword" row, which exercises the real ordering rather than a
+// reconstruction of it.
+func TestAgentDeterministicReply(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string // "" means the turn should reach the model
+	}{
+		{"literal help", "help", agentHelpReply},
+		{"help with different casing", "HELP", agentHelpReply},
+		{"help with punctuation reaches the model", "help!", ""},
+		{"explicit non-HTTPS protect URL", "protect http://example.com", agentInvalidProtectURLReply},
+		{"explicit invalid set-alias", "set alias $Bad_Alias for $id", agentInvalidAliasReply},
+		{"ordinary request reaches the model", "what can I reach?", ""},
+		{"empty text reaches the model", "", ""},
+		// The text half of the linked-canvas decision (envelope half in
+		// TestAgentEventHasUpload). Matching Slack file permalinks here to close that
+		// gap would refuse the whole turn — the upload branch returns before this
+		// runs — so the second row, a legitimate propose_protect_url request against
+		// a Slack-hosted https:// endpoint, would stop being answered too.
+		{"a linked canvas reaches the model", "what's in https://acme.slack.com/docs/T1/F2", ""},
+		{"protecting a Slack file URL reaches the model", "protect https://acme.slack.com/files/U1/F2/report.pdf as $report", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reply, ok := agentDeterministicReply(tt.text)
 			if tt.want == "" {
 				if ok {
 					t.Fatalf("want the turn to reach the model, got deterministic reply %q", reply)
@@ -319,7 +424,7 @@ func TestAgentChannelFollowupDropped(t *testing.T) {
 		t.Fatal("a reply in a thread the agent never joined must be dropped")
 	}
 	fileReply := reply("C9", "999.1")
-	fileReply.Event.Files = []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+	fileReply.Event.Files = filesFromJSON(t, `[{"id":"F1"}]`)
 	if !gateDrop(fileReply) {
 		t.Fatal("a file reply outside an agent thread must be dropped")
 	}

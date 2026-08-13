@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,7 +73,7 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 // and points at `/qurl`, which does not go through this surface.
 // TODO(upstream-contract): asserts that Slack clients turn a long paste into a
 // snippet rather than a plain message.
-const agentUnsupportedMediaReply = "I can only read a message's text, so an attached file, image, or canvas doesn't reach me — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message, or use a `/qurl` command — run `/qurl help` for the list. If you're in a channel, mention qURL again."
+const agentUnsupportedMediaReply = "I can only read a message's text, so an attached file, image, or canvas doesn't reach me — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message (mentioning qURL again if you're in a channel), or use a `/qurl` command — run `/qurl help` for the list."
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
@@ -197,6 +198,63 @@ type slackEventAuthorization struct {
 // slackInnerEvent is the inner `event` object for app_mention / message events,
 // plus the assistant_thread object on the container events (assistant_thread_started
 // and assistant_thread_context_changed).
+// slackEventFiles models an event's files array for PRESENCE ONLY: qURL never
+// fetches a file or reads inside one while conversation mode is text-only, so
+// only "did this carry an attachment" and "how many" survive the decode.
+//
+// It decodes tolerantly on purpose, at two levels, because handleEvent treats ANY
+// envelope decode error as "log at Debug, ack 200, dispatch nothing" — so a single
+// shape surprise anywhere in `files` would silently drop the whole event, taking
+// ordinary text turns and lifecycle/uninstall routing with it. That is the exact
+// silent disappearance agentUnsupportedMediaReply exists to prevent.
+//
+//   - ELEMENT shape: a bare []struct{} fails on a non-object element, so entries
+//     are decoded as json.RawMessage, which accepts any JSON value. (This is the
+//     standing answer to "why not []struct{}" — it is not about the bytes.)
+//   - FIELD shape: even []json.RawMessage returns an UnmarshalTypeError if `files`
+//     itself is not an array, which is why this type parses by shape rather than
+//     letting the decoder decide.
+//
+// An unrecognized shape therefore degrades to "an attachment we cannot count"
+// rather than taking the message down with it.
+type slackEventFiles struct {
+	// count is how many entries Slack sent, or 0 when files arrived in a shape this
+	// app does not recognize. Never an inventory — the entries themselves are dropped.
+	count int
+	// present is whether the event carries an attachment at all. True for a non-empty
+	// array AND for any unrecognized non-null shape, so detection fails toward
+	// refusing rather than toward answering past an attachment.
+	present bool
+}
+
+// UnmarshalJSON implements json.Unmarshaler. It classifies by SHAPE first so that
+// an unexpected files value is a recognized outcome rather than a decode failure —
+// see the type doc for why failing here would be so costly.
+//
+// encoding/json calls this only when the key is present, hands over a complete and
+// syntactically valid JSON value, and delivers an explicit null rather than
+// skipping it. The array decode below is therefore reached only for a value that
+// already begins with '[' — a valid array, whose elements always decode into
+// json.RawMessage — so its error return is unreachable in practice and kept only
+// because silently discarding an error would be worse than a branch never taken.
+func (f *slackEventFiles) UnmarshalJSON(b []byte) error {
+	value := bytes.TrimLeft(b, " \t\r\n")
+	if len(value) == 0 || value[0] != '[' {
+		// null means no attachment. Any other non-array shape is an attachment we
+		// cannot count: presence stays true so the turn is refused rather than answered
+		// past a file, and count stays 0.
+		f.present = !bytes.Equal(value, []byte("null"))
+		return nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(value, &entries); err != nil {
+		return err
+	}
+	f.count = len(entries)
+	f.present = len(entries) > 0
+	return nil
+}
+
 type slackInnerEvent struct {
 	Type        string `json:"type"`
 	User        string `json:"user"`
@@ -209,13 +267,10 @@ type slackInnerEvent struct {
 	ChannelType string `json:"channel_type"`
 	TS          string `json:"ts"`
 	ThreadTS    string `json:"thread_ts"`
-	// Files only needs presence detection: qURL does not fetch or inspect file
-	// metadata while conversation mode remains text-only. []json.RawMessage keeps
-	// each element's raw bytes, which a bare []struct{} would drop — but []struct{}
-	// also fails to decode a non-object element, and handleEvent treats any decode
-	// error as "drop the whole event", which would take lifecycle and uninstall
-	// routing down with it. Tolerating element shape is worth the bytes.
-	Files []json.RawMessage `json:"files,omitempty"`
+	// Files is decoded but never read into — only its presence and count are
+	// consulted — while conversation mode remains text-only. See slackEventFiles for
+	// why it decodes tolerantly instead of strictly.
+	Files slackEventFiles `json:"files,omitempty"`
 	// Tab is the App Home tab a user opened ("home" / "messages") on an
 	// app_home_opened event; empty on every other event type.
 	Tab string `json:"tab,omitempty"`
@@ -679,28 +734,31 @@ const agentDeliveryBudget = 15 * time.Second
 // Slack canvas or file pasted as a LINK arrives as ordinary message text with an
 // unfurl: no files entry, no file_share subtype. It is not detected, and
 // agentUnsupportedMediaReply is worded so it does not claim otherwise. Matching
-// Slack file permalinks in the text was considered and rejected:
-// agentDeterministicReply refuses the WHOLE turn, so any message merely
-// containing such a URL would stop being answered — including "protect
-// https://…/docs/… as $handbook", which is a legitimate propose_protect_url
+// Slack file permalinks in the text was considered and rejected: this branch wins
+// the turn at its call site and returns before the text is classified at all, so
+// any message merely CONTAINING such a URL would stop being answered — including
+// "protect https://…/docs/… as $handbook", a legitimate propose_protect_url
 // request against a raw https:// endpoint (a capability prompt_test.go pins).
 // Losing that is the worse failure, and the model is separately told never to
 // describe a page it has not fetched through the confirmed inspect path.
 // slackInnerEvent likewise does not decode `attachments` (the unfurl block), for
 // the same reason: an unfurl is evidence about a link, not about an attachment.
-// TODO(upstream-contract): relies on Slack stamping the file_share subtype on
-// every upload, and on the files array being omittable for a file this app
-// cannot see.
+// TODO(upstream-contract): the two signals back each other up, so this relies on
+// Slack sending AT LEAST ONE of them per upload — not on file_share being
+// universal, and not on the files array always arriving.
 func agentEventHasUpload(e *slackInnerEvent) bool {
-	return len(e.Files) > 0 || e.Subtype == slackMessageSubtypeFileShare
+	return e.Files.present || e.Subtype == slackMessageSubtypeFileShare
 }
 
-// agentHumanMessageSubtype reports whether a subtype still represents a deliberate
-// human message. Only file_share joins the empty subtype: it is an upload, which
-// this surface answers rather than ignores. Everything else — edits, joins, bot
-// posts — is system noise from here. thread_broadcast is a channel-only exception
-// and stays at its call site.
-func agentHumanMessageSubtype(subtype string) bool {
+// agentAdmitsSubtype reports whether this surface answers a message carrying this
+// subtype. It is a POLICY whitelist, not a taxonomy: thread_broadcast and
+// me_message are perfectly deliberate human messages and still return false here —
+// thread_broadcast because it is a channel-only exception handled at its call site,
+// me_message because nothing has asked for it. Only file_share joins the empty
+// subtype, because an upload is a turn this surface answers (with the text-only
+// limitation) rather than ignores. Everything else — edits, joins, bot posts — is
+// system noise from here.
+func agentAdmitsSubtype(subtype string) bool {
 	return subtype == "" || subtype == slackMessageSubtypeFileShare
 }
 
@@ -728,16 +786,16 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 		// Channel @-mention — always a deliberate address.
 		// TODO(upstream-contract): app_mention is known to carry a subtype in the wild,
 		// so a stamped mention-with-upload must not fall back into silence here.
-		if !agentHumanMessageSubtype(e.Subtype) {
+		if !agentAdmitsSubtype(e.Subtype) {
 			return false
 		}
 	case slackEventTypeMessage:
 		if e.ChannelType == slackChannelTypeIM {
-			if !agentHumanMessageSubtype(e.Subtype) {
+			if !agentAdmitsSubtype(e.Subtype) {
 				return false
 			}
 		} else {
-			if !agentHumanMessageSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
+			if !agentAdmitsSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
 				return false
 			}
 			// A channel message reaches the follow-up pipeline only when channel
@@ -750,6 +808,19 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			// the agent, and a file dropped into a channel mid-conversation is not one.
 			// Replying to it would make the bot interject on people talking to each
 			// other, which is the louder failure.
+			//
+			// Two costs come with admitting it rather than dropping it at this filter,
+			// both inert while AgentChannelFollowups is off:
+			//   - a thread upload now pays a followupGateSem slot and a
+			//     conversations.replies read before dedupe, even for threads the agent
+			//     never joined — and that pool's saturation path drops legitimate text
+			//     follow-ups. An upload can only ever produce the fixed limitation, so
+			//     it never needs history; short-circuiting it before the gate read is
+			//     the fix if that flag ships.
+			//   - answering an upload marks the thread as one the agent joined (see
+			//     loadAgentThreadHistory), so later replies there reach the model. That
+			//     mechanism predates uploads — help and the invalid-alias replies do it
+			//     too — but an upload is a new way to trigger it.
 			if !channelFollowupsEnabled || e.ThreadTS == "" {
 				return false
 			}
@@ -1053,34 +1124,23 @@ func (h *Handler) processAdmittedAgentEvent(ctx context.Context, log *slog.Logge
 	h.processAgentEventWithAdmission(ctx, log, env, partition, pre, true)
 }
 
-// agentDeterministicReply returns the fixed reply for a turn that is answered
-// without the LLM, and whether one applies. message is the caller's already-
-// stripped text so it isn't recomputed here.
+// agentDeterministicReply returns the fixed reply for a turn whose TEXT is
+// answered without the LLM, and whether one applies. message is the caller's
+// already-stripped text so it isn't recomputed here. The upload case is not here:
+// it is a property of the event envelope, not of the text, and it is decided by
+// the caller before this runs (see processAgentEventWithAdmission).
 //
 // Callers run this after dedupe and before rate limiting, the model, and — on the
 // direct @mention/DM path — the thread-history read. A channel follow-up has
 // already paid its history read in the admission gate. Every reply here is free of
-// MODEL cost — so none consumes a limiter slot and none is persisted as
-// conversation — but each still costs one dedupe write and one chat.postMessage.
+// MODEL cost — so none consumes a limiter slot and none is written to any store —
+// but each still costs one dedupe write and one chat.postMessage.
 //
-// The attachment case comes first, and it wins outright: an upload carrying a
-// complete, answerable request still gets the limitation rather than an answer,
-// and so does one whose caption reads as a text keyword below. qURL conversation
-// mode is text-only, so an upload must never draw a reply that silently ignores
-// it — and answering the text while saying nothing about the file is exactly
-// that. The cost is real: a valid question with an incidental screenshot has to
-// be re-sent. That is the deliberate trade — failing the whole turn is honest,
-// half-answering it is not.
-//
-// Metering these through agentTurnLimited would not help either. That limiter
-// caps MODEL spend, so routing uploads into it would still post one reply per
-// upload, just with the rate-limit wording. Capping outbound volume is a separate
-// control — a short-lived per-thread notice marker — not a limiter change; see
-// #1045, which implements it.
-func agentDeterministicReply(e *slackInnerEvent, message string) (reply string, ok bool) {
+// "Written to no store" is not "the model never sees it": thread history is
+// rebuilt live from the Slack transcript, so a deterministic reply still re-enters
+// the model's context on the NEXT turn in that thread, like any other bot message.
+func agentDeterministicReply(message string) (reply string, ok bool) {
 	switch {
-	case agentEventHasUpload(e):
-		return agentUnsupportedMediaReply, true
 	// Keep help literal-only: punctuation or extra words stay on the normal agent path.
 	case strings.EqualFold(message, "help"):
 		return agentHelpReply, true
@@ -1124,21 +1184,41 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		return
 	}
 
+	// The upload check comes first and wins outright: an upload carrying a complete,
+	// answerable request still gets the limitation rather than an answer, and so does
+	// one whose caption reads as a deterministic text keyword. qURL conversation mode
+	// is text-only, so an upload must never draw a reply that silently ignores it —
+	// and answering the text while saying nothing about the file is exactly that. The
+	// cost is real: a valid question with an incidental screenshot has to be re-sent.
+	// That is the deliberate trade — failing the whole turn is honest, half-answering
+	// it is not. It is a branch here rather than a case inside agentDeterministicReply
+	// so the log below keys off the CAUSE, not off the identity of the reply string.
+	// Keying on the reply was the earlier shape, defended on the grounds that a
+	// re-derivation could fall out of step with a reordered switch. Hoisting the
+	// branch removes the second derivation instead of guarding it: there is no switch
+	// case left to reorder, and the log cannot fire for the wrong turn or go quiet if
+	// the reply text is ever decorated.
+	//
+	// Metering these through agentTurnLimited would not help either. That limiter caps
+	// MODEL spend, so routing uploads into it would still post one reply per upload,
+	// just with the rate-limit wording. Capping outbound volume is a separate control —
+	// a short-lived per-thread notice marker — not a limiter change; see #1045, which
+	// implements it.
+	if agentEventHasUpload(&env.Event) {
+		// This is the only deterministic reply that logs. Not because the others are
+		// visible — none of them reach "agent: turn complete" either — but because this
+		// one is the demand signal for building real file support, and nothing else
+		// counts it. files_visible is a count, not an inventory: names, ids and
+		// mimetypes are user content and stay out of the log. It is 0 for an upload
+		// Slack described only by its subtype, or sent in a shape we could not count.
+		log.Info("agent: unsupported media; replied with the text-only limitation",
+			"files_visible", env.Event.Files.count)
+		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentUnsupportedMediaReply)
+		return
+	}
+
 	message := stripBotMention(env.Event.Text)
-	if reply, deterministic := agentDeterministicReply(&env.Event, message); deterministic {
-		// Keyed on the reply rather than re-testing agentEventHasUpload, so the log
-		// follows what was actually posted instead of a parallel derivation that a
-		// reordering of the switch above could silently falsify. Identity against the
-		// const is the point: two reply consts sharing text would itself be a bug.
-		if reply == agentUnsupportedMediaReply {
-			// A media turn returns before "agent: turn complete", so without this it is
-			// invisible in every existing dashboard — and this is the demand signal for
-			// building real file support. files_visible is a count, not an inventory:
-			// names, ids and mimetypes are user content and stay out of the log. It is 0
-			// for an upload Slack described only by its subtype.
-			log.Info("agent: unsupported media; replied with the text-only limitation",
-				"files_visible", len(env.Event.Files))
-		}
+	if reply, deterministic := agentDeterministicReply(message); deterministic {
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), reply)
 		return
 	}
