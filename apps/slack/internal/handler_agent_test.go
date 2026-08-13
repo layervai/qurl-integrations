@@ -397,8 +397,16 @@ func TestSlackMessageHasUploadMatchesEventDetection(t *testing.T) {
 	}
 	for _, raw := range shapes {
 		for _, subtype := range []string{"", slackMessageSubtypeFileShare, "message_changed"} {
-			event := slackInnerEvent{Files: filesFromJSON(t, raw), Subtype: subtype}
-			want := agentEventHasUpload(&event)
+			// The event side decodes a whole envelope on purpose. Building it with
+			// filesFromJSON would run the SAME top-level decode the seam uses, so the
+			// comparison would be one code path against itself; the divergence worth
+			// pinning is nested-struct-field decode vs top-level.
+			body := eventCallbackBody("EvParity", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"500.1","text":"x","subtype":"`+subtype+`","files":`+raw+`}`)
+			var envelope slackEventEnvelope
+			if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+				t.Fatalf("files %s must not fail the envelope decode: %v", raw, err)
+			}
+			want := agentEventHasUpload(&envelope.Event)
 			if got := SlackMessageHasUpload(json.RawMessage(raw), subtype); got != want {
 				t.Errorf("SlackMessageHasUpload(%s, %q) = %v, want %v to match the event path", raw, subtype, got, want)
 			}
@@ -417,6 +425,51 @@ func TestSlackMessageHasUploadMatchesEventDetection(t *testing.T) {
 	// padding either way. Called directly, a padded null would read as an attachment.
 	if SlackMessageHasUpload(json.RawMessage(" null "), "") {
 		t.Error("a padded null must still read as no attachment")
+	}
+	// No caller can produce this today — a RawMessage carries bytes the enclosing
+	// decode already validated — but the branch is what makes the safe direction a
+	// property of the code rather than of the comment above it. present=false is the
+	// UNSAFE answer here: it replays a caption as ordinary text.
+	if !SlackMessageHasUpload(json.RawMessage(`{"unterminated`), "") {
+		t.Error("a value that cannot be decoded must read as an attachment we cannot count, not as no attachment")
+	}
+}
+
+// TestAgentHistoryAttachmentNoteStatesTheBoundary pins the note's CONTENT, which
+// every other test takes as a given: they build their expectation from the constant
+// itself, so they pin the concatenation and not a word of what it says. Replacing
+// the note with "[x]" — or with "[the attached file was read in full]", which says
+// the opposite — passes all of them.
+//
+// The string is the mechanism here. It is the only thing standing between the model
+// and reading "protect everything in this" as a complete instruction, so it gets the
+// same treatment as agentUnsupportedMediaReply above: assert the load-bearing
+// properties, not the prose.
+func TestAgentHistoryAttachmentNoteStatesTheBoundary(t *testing.T) {
+	note := agentHistoryAttachmentNote
+	if !strings.HasPrefix(note, "[") || !strings.HasSuffix(note, "]") {
+		t.Errorf("the note must be bracketed so it reads as an annotation rather than as the user's own prose; got %q", note)
+	}
+	// It has to say something arrived...
+	if !strings.Contains(note, "attach") {
+		t.Errorf("the note must name the thing that was attached, or it says nothing the model can act on; got %q", note)
+	}
+	// ...and, load-bearing, that its contents did NOT. A note that only says "there
+	// was a file" leaves the model free to assume it read one.
+	if !strings.Contains(note, "never reached you") {
+		t.Errorf("the note must state that the contents did not arrive; got %q", note)
+	}
+	// Presence detection cannot tell a snippet from a PDF, and Slack turns a long
+	// typed paste into a snippet — so a note that named only files would misdescribe
+	// a user who typed a lot. This is the same scoping rule
+	// TestUnsupportedMediaReplyOffersAReachableRoute enforces on the refusal.
+	if !strings.Contains(note, "snippet") {
+		t.Errorf("the note must cover the paste-converted-to-snippet case, which trips the same detection; got %q", note)
+	}
+	// "this message" would be wrong the moment appendVisibleAgentMessage merges the
+	// annotated message with an adjacent one — the claim has to hold for the blob.
+	if strings.Contains(note, "this message") {
+		t.Errorf("the note must not say \"this message\": adjacent same-role messages merge into one turn; got %q", note)
 	}
 }
 
@@ -2034,6 +2087,11 @@ func TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn(t *testing.T) {
 			return []AgentThreadMessage{
 				{UserID: "U1", Text: "<@U12345678> " + caption, TS: agentPoolTestThreadTS, HasFiles: true},
 				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+				// An ordinary text turn in the same thread, so the test also pins that
+				// the note is CONDITIONAL. Without it, annotating every user message
+				// unconditionally passes.
+				{UserID: "U1", Text: "what can I reach?", TS: "100.15"},
+				{AppID: "A1", Text: "the connectors I can see here", TS: "100.16"},
 			}, nil
 		},
 	})
@@ -2049,6 +2107,8 @@ func TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn(t *testing.T) {
 	want := []agent.Message{
 		{Role: "user", Text: caption + " " + agentHistoryAttachmentNote},
 		{Role: "assistant", Text: agentUnsupportedMediaReply},
+		{Role: "user", Text: "what can I reach?"},
+		{Role: "assistant", Text: "the connectors I can see here"},
 	}
 	if !reflect.DeepEqual(history, want) {
 		t.Fatalf("history = %#v, want %#v", history, want)
@@ -2067,6 +2127,13 @@ func TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone(t *tes
 		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
 			return []AgentThreadMessage{
 				{UserID: "U1", TS: agentPoolTestThreadTS, HasFiles: true},
+				// An upload whose only text is the @mention that addressed the agent.
+				// On main it left history entirely (empty text after the strip); now it
+				// reduces to the note. The strip/annotate order is immaterial only
+				// because botMentionPattern is ^-anchored, so appending cannot disturb
+				// the prefix it matches — an unanchored pattern would make this row the
+				// one that notices.
+				{UserID: "U1", Text: "<@U12345678>", TS: "100.05", HasFiles: true},
 				{AppID: "A1", Text: "answer", TS: "100.1", HasFiles: true},
 			}, nil
 		},
@@ -2081,7 +2148,9 @@ func TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone(t *tes
 		t.Fatalf("load history: joined=%v err=%v", joined, err)
 	}
 	want := []agent.Message{
-		{Role: "user", Text: agentHistoryAttachmentNote},
+		// Both uploads merge into one user turn, so the note appears twice — the
+		// count is the number of attachments, which is what it should be.
+		{Role: "user", Text: agentHistoryAttachmentNote + "\n" + agentHistoryAttachmentNote},
 		{Role: "assistant", Text: "answer"},
 	}
 	if !reflect.DeepEqual(history, want) {
@@ -2213,17 +2282,72 @@ func TestProcessAgentEvent_EarlierAttachmentTurnReachesModelAnnotated(t *testing
 	if llm.calls != 1 {
 		t.Fatalf("follow-up should reach the model once, got %d calls", llm.calls)
 	}
+	// Exact equality, not Contains: a Contains against the note is vacuously true if
+	// the note is ever emptied, which is precisely the change this test exists to catch.
 	var annotated bool
 	for _, msg := range llm.captured[0].Messages {
 		if msg.Text == caption {
 			t.Fatalf("an attachment's caption must never reach the model as plain text; messages = %#v", llm.captured[0].Messages)
 		}
-		if strings.Contains(msg.Text, caption) && strings.Contains(msg.Text, agentHistoryAttachmentNote) {
+		if msg.Text == caption+" "+agentHistoryAttachmentNote {
 			annotated = true
 		}
 	}
 	if !annotated {
 		t.Fatalf("the caption must survive alongside its note, not be dropped; messages = %#v", llm.captured[0].Messages)
+	}
+}
+
+// TestAgentTurnCompleteLogsHistoryAttachments pins the operator field. Annotating
+// history is silent where the event path is loud: an upload's own turn refuses
+// visibly and logs an alertable pair (TestAgentUnsupportedMediaLogContract), while a
+// rebuilt annotation changes what the model is told with nothing to look at after.
+// This is the one record that says it happened, so the field has to be emitted and
+// has to count.
+func TestAgentTurnCompleteLogsHistoryAttachments(t *testing.T) {
+	const turnCompleteMsg = "agent: turn complete"
+	post, _, _ := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: "done"},
+		AgentStore:          &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "protect everything in this", TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+				{UserID: "U1", Text: "what can I reach?", TS: "100.15"},
+				{AppID: "A1", Text: "the connectors I can see here", TS: "100.16"},
+			}, nil
+		},
+	})
+	t.Cleanup(h.Wait)
+
+	var buf bytes.Buffer
+	log := slog.New(observability.NewRedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e := env(slackEventTypeMessage, "im", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+	h.processAgentEvent(context.Background(), log, e)
+	h.Wait()
+
+	var rec map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		var candidate map[string]any
+		if err := json.Unmarshal(line, &candidate); err != nil {
+			continue
+		}
+		if candidate["msg"] == turnCompleteMsg {
+			rec = candidate
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no %q record; got %s", turnCompleteMsg, buf.String())
+	}
+	if rec["history_attachments"] != float64(1) {
+		t.Fatalf("history_attachments = %v, want 1 — one rebuilt message told the model an attachment was there", rec["history_attachments"])
 	}
 }
 
