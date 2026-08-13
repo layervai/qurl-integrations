@@ -483,8 +483,7 @@ function showResults(results, errors, insertionError) {
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
   copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
-  const copyText = buildCopyUrlText(results);
-  const hasCopyableLinks = Boolean(copyText);
+  const hasCopyableLinks = Boolean(buildCopyUrlText(results));
 
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
@@ -859,7 +858,7 @@ if (typeof module !== 'undefined' && module.exports) {
     scheduleSettingsPanelClose,
     sendRuntimeMessageWithRetry,
     sendRuntimeMessageWithTimeout,
-    showResults,
     showPermissionConfirmation,
+    showResults,
   };
 }
