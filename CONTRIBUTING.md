@@ -69,7 +69,7 @@ git checkout -b feat/slack-thread-replies
 
 # 3. Write code, then verify
 make check                    # Go apps, shared/, and repo-wide checks
-make check-chrome-extension   # Node.js suites are opt-in — run the one you changed
+make check-<app>              # only if you touched a Node.js suite (see below)
 make build-slack              # Verify Lambda binary compiles (adjust for your app)
 
 # 4. Push and open a PR
