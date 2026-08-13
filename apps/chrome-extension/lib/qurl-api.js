@@ -27,6 +27,14 @@ const DEFAULT_QURL_API_BASE = QURLConfig ? QURLConfig.DEFAULT_QURL_API_BASE : nu
 const UPLOAD_PREFLIGHT_TIMEOUT_MS = 10 * 1000;
 const QURL_API_BASE_STORAGE_KEY = 'qurlApiBase';
 const UPLOAD_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+// Upper bound on how far ahead an expiry can plausibly land, used to reject values that parse
+// but cannot be real. The ceiling sits far above any TTL qURL actually issues -- the longest
+// expiry any surface offers is 7 days (apps/discord's EXPIRY_LABELS, the CLI's documented
+// `-e 7d`), and apps/discord/src/utils/time.js already hard-caps a parsed expiry at 30 days --
+// while a unit slip overshoots by four orders of magnitude, so the two cannot collide.
+// TODO(upstream-contract): if qurl-service ever issues an expiry beyond a year, this bound
+// starts hiding real ones instead of absurd ones; raise it in lockstep.
+const MAX_PLAUSIBLE_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_QURL_API_CONFIG = resolveDefaultQurlApiConfig(DEFAULT_QURL_API_BASE);
 const DEFAULT_QURL_API_BASE_NORMALIZED = DEFAULT_QURL_API_CONFIG.normalized;
 const DEFAULT_QURL_API_ORIGIN = DEFAULT_QURL_API_CONFIG.origin;
@@ -551,6 +559,9 @@ function _parseExpiry(payload) {
 
     // Current Unix timestamps in seconds are ~1e9, while millisecond timestamps are ~1e12.
     // Treat exactly 1e12 as milliseconds (year 2001 in ms vs year ~33658 in seconds).
+    // TODO(upstream-contract): this two-unit split mirrors qurl-service emitting expires_at in
+    // seconds or milliseconds. A switch to a finer unit does not fail loudly here -- it decodes
+    // to a wrong but representable date -- so the plausibility bound below is what catches it.
     const ms = raw >= 1e12 ? raw : raw * 1000;
 
     // A nanosecond timestamp (Go's UnixNano is ~1.7e18) overflows the Date range, and the
@@ -559,6 +570,16 @@ function _parseExpiry(payload) {
     const date = new Date(ms);
     if (Number.isNaN(date.getTime())) {
       console.warn('[qURL] Ignoring out-of-range expires_at:', raw);
+      return null;
+    }
+
+    // A microsecond timestamp (Go's UnixMicro is ~1.7e15) stays inside the Date range, so the
+    // check above passes and toISOString() yields a valid-but-absurd year ~55840. That string
+    // does not stop at the popup: buildExpirySuffix inserts it into the user's Gmail draft, so
+    // the recipient reads "(Expires: 55840-11-08 ...)" beside a link that is genuinely live.
+    // Treat an implausible expiry as no expiry, which both callers already render by omission.
+    if (ms > Date.now() + MAX_PLAUSIBLE_EXPIRY_MS) {
+      console.warn('[qURL] Ignoring implausibly distant expires_at:', raw);
       return null;
     }
 
