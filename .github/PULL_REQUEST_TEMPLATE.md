@@ -14,6 +14,7 @@ Brief description of changes.
 - [ ] `apps/chrome-extension/`
 - [ ] `apps/edge-extension/` (kept in lockstep with `apps/chrome-extension/`)
 - [ ] `origins/` (connector image — also triggers Slack CI)
+- [ ] `e2e/` (end-to-end tests — no CI workflow, gate locally with `make check-e2e`)
 - [ ] `shared/` (triggers tests for ALL apps — coordinate with maintainers)
 - [ ] `.github/` (requires maintainer review)
 
@@ -25,9 +26,9 @@ Brief description of changes.
 ## Test Plan
 
 - [ ] `make check` passes locally (Go apps, `shared/`, and repo-wide checks)
-- [ ] For Node.js app changes: the matching `make check-<app>` passes —
-      `check-chrome-extension`, `check-edge-extension`, `check-discord`,
-      `check-teams` (or `make check-node` for all four)
+- [ ] For Node.js changes — or `shared/`, which triggers Discord CI — the matching
+      `make check-{chrome-extension,edge-extension,discord,teams,e2e}` passes
+      (or `make check-node`)
 - [ ] New tests added for new functionality
 - [ ] Manual testing completed
 - [ ] For app/shared-impacting changes: branch is current with `main` and the matching `*/ required` aggregate check is green

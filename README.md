@@ -67,10 +67,9 @@ pip install pre-commit && pre-commit install
 # Run all checks for the Go apps, shared/, and the repo itself (fmt, vet, lint, test)
 make check
 
-# The Node.js apps are opt-in — run the one you changed
-# (check-chrome-extension | check-edge-extension | check-discord | check-teams,
-#  or check-node for all four)
-make check-chrome-extension
+# The Node.js suites are opt-in; see CONTRIBUTING.md#nodejs-apps for which
+# target matches your change
+make check-node
 
 # Run all tests
 go test ./...

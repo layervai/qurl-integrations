@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base check-discord test-discord check-chrome-extension check-edge-extension check-teams check-node pre-commit-install pre-commit-run clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean
 
 VERSION ?= dev
 
@@ -106,17 +106,18 @@ pre-commit-install:
 pre-commit-run:
 	pre-commit run --all-files
 
-## Node.js apps (Discord bot, Chrome/Edge extensions, Teams)
+## Node.js suites (Discord, Chrome/Edge extensions, Teams, e2e helpers)
 ##
-## Deliberately NOT wired into `make check`: each app installs from its own
-## lockfile, so folding them in would put four `npm ci` runs on the target
-## every Go contributor runs. Run the one matching your change instead —
-## `make check-node` runs all four. Each mirrors its app's CI gate, so a
-## green run here predicts the `<app> / required` aggregate.
+## Opt-in, never prerequisites of `make check`: each installs from its own
+## lockfile, and that does not belong on the target every Go contributor runs.
+## CONTRIBUTING.md#nodejs-apps says which to run when. Each mirrors its app's
+## CI job closely enough to predict it — output-only flags differ, and what a
+## target omits is noted on the target.
 ##
-## e2e/ has no target: its suite drives live qURL and Discord systems and
-## needs credentials from e2e/.env (see e2e/README.md). It has no CI gate
-## either — running it is a deliberate act, not a pre-push check.
+## Side effect worth knowing: these create node_modules/ that Go's `./...`
+## walk then sees. Harmless today (the one Go file in there is gofmt-clean),
+## but a dep shipping malformed Go would surface as a `make check` failure
+## with no Go change behind it.
 
 # $(1) is the app directory. Every app pins its own Node in .nvmrc and CI
 # feeds that file to setup-node, so a mismatched local Node can pass here and
@@ -128,44 +129,56 @@ define node_version_warning
 fi
 endef
 
-# Matches CI's jest flags minus --silent, kept verbose for local debugging
-# (discord.yml runs `npm test -- --ci --silent`); --no-audit --no-fund are
-# local-only conveniences that mute npm output without changing the tree.
+# Every target below uses `npm ci`, not `npm install`: CI installs the lockfile
+# exactly, and `npm install` can rewrite package-lock.json — which both dirties
+# the tree and breaks the "this predicts CI" property. `--no-audit --no-fund`
+# only mute npm output; they do not change the tree.
+
+# Kept verbose for local debugging — discord.yml adds --silent.
 test-discord:
 	$(call node_version_warning,apps/discord)
-	cd apps/discord && npm ci --no-audit --no-fund && npm test -- --ci
+	cd apps/discord && npm ci --no-audit --no-fund
+	cd apps/discord && npm test -- --ci
 
-# CI's discord gate minus `npm audit` (network-dependent and can newly fail
-# with no code change; CI owns that gate) and the Docker build (needs a
-# running daemon).
+# discord.yml's build-and-test steps minus `npm audit`, which is network
+# dependent and can newly fail with no code change. Its sibling docker-check
+# job is a separate gate and is not mirrored here.
 check-discord:
 	$(call node_version_warning,apps/discord)
-	cd apps/discord && npm ci --no-audit --no-fund && npm run lint && npm test -- --ci
+	cd apps/discord && npm ci --no-audit --no-fund
+	cd apps/discord && npm run lint
+	cd apps/discord && npm test -- --ci
 
-# The extensions' CI gate minus `npm run package:release`, which writes
-# release/ and dist/ into the app dir and shells out to `zip`. Nothing is
-# lost: build-release.js and package-release.js each have a dedicated suite
-# under test/, which `npm test` runs. The syntax check is CI's verbatim —
-# globbed so a source file added later cannot slip past it, and piped through
-# xargs because `find -exec` reports success even when the command it ran
-# failed. Chrome↔Edge lockstep is not repeated here; `make check` already
-# runs check-extension-lockstep for every PR.
+# $(1) is the extension app directory. The recipe is shared rather than written
+# once per extension on purpose: this Makefile is outside the file list in
+# scripts/check-extension-lockstep.sh, so a hand-copied second copy could drift
+# from the first with nothing in CI to catch it.
+#
+# Mirrors the extensions' build-and-test steps minus `npm run package:release`,
+# which writes release/ and dist/ and shells out to zip. That omission is the
+# one place these targets are a weaker signal than CI: `npm test` covers
+# build-release.js and package-release.js through their own suites, but not the
+# real zip-writing path — run it by hand before a store submission.
+#
+# The syntax check is CI's verbatim: globbed so a source file added later
+# cannot slip past it, and piped through xargs because `find -exec` reports
+# success even when the command it ran failed.
+define check_extension
+$(call node_version_warning,$(1))
+cd $(1) && npm ci --no-audit --no-fund
+cd $(1) && npm run lint
+cd $(1) && find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check
+cd $(1) && npm test
+endef
+
 check-chrome-extension:
-	$(call node_version_warning,apps/chrome-extension)
-	cd apps/chrome-extension && npm ci --no-audit --no-fund
-	cd apps/chrome-extension && npm run lint
-	cd apps/chrome-extension && find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check
-	cd apps/chrome-extension && npm test
+	$(call check_extension,apps/chrome-extension)
 
 check-edge-extension:
-	$(call node_version_warning,apps/edge-extension)
-	cd apps/edge-extension && npm ci --no-audit --no-fund
-	cd apps/edge-extension && npm run lint
-	cd apps/edge-extension && find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check
-	cd apps/edge-extension && npm test
+	$(call check_extension,apps/edge-extension)
 
-# teams.yml's gate in full — every step is offline and fast. `npm run build`
-# only writes the gitignored dist/.
+# teams.yml's build-and-test in full — every step is offline. `npm run build`
+# writes only dist/, which apps/teams/.gitignore already covers.
 check-teams:
 	$(call node_version_warning,apps/teams)
 	cd apps/teams && npm ci --no-audit --no-fund
@@ -174,13 +187,23 @@ check-teams:
 	cd apps/teams && npm test
 	cd apps/teams && npm run build
 
-# Every Node.js app at once, for changes that cross app boundaries (a shared
-# lint convention, a repo-wide rename). Minutes, not seconds — prefer the
-# single check-<app> when only one app moved.
-check-node: check-chrome-extension check-edge-extension check-discord check-teams
+# e2e/ has no CI workflow at all, so this is the only gate its TypeScript gets.
+# Offline subset only: `npm test` there also runs the live suite, which mints
+# real qURL resources and posts real Discord messages against credentials in
+# e2e/.env (see e2e/README.md). No .nvmrc here, so no version warning.
+check-e2e:
+	cd e2e && npm ci --no-audit --no-fund
+	cd e2e && npx tsc --noEmit
+	cd e2e && npm run test:unit
+
+# Every Node.js suite at once, for changes that cross app boundaries; prefer a
+# single target when only one app moved. They write into separate directories
+# and npm's cache takes its own locks, so `make -j5 check-node` is safe — it
+# finishes with the slowest app rather than the sum of all five.
+check-node: check-chrome-extension check-edge-extension check-discord check-teams check-e2e
 
 ## Full check (Go + repo-wide checks, matching the Go CI path; the Node.js
-## app suites are opt-in above — `make check-node` or a single `check-<app>`)
+## suites are opt-in above — `make check-node` or a single `check-<app>`)
 
 check: fmt vet check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base lint test-race
 

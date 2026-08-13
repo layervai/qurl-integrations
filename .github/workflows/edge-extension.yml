@@ -69,6 +69,9 @@ jobs:
               - 'apps/edge-extension/**'
               - '.github/workflows/edge-extension.yml'
 
+  # Mirrored locally by `make check-edge-extension`, so a contributor can run
+  # this gate before pushing. Adding or removing a step here means updating
+  # that target too; it documents which steps it deliberately omits and why.
   build-and-test:
     name: edge-extension / build and test
     runs-on: ubuntu-latest
