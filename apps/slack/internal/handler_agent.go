@@ -705,6 +705,13 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			// A channel message reaches the follow-up pipeline only when channel
 			// follow-ups are enabled AND it's a thread reply. The pipeline then checks
 			// whether this is already an agent thread, using store access.
+			//
+			// An upload is deliberately not special-cased here. With follow-ups off it
+			// is dropped like any other follow-up, which reads oddly against "never
+			// disappear silently" — but the limitation reply answers turns that ADDRESS
+			// the agent, and a file dropped into a channel mid-conversation is not one.
+			// Replying to it would make the bot interject on people talking to each
+			// other, which is the louder failure.
 			if !channelFollowupsEnabled || e.ThreadTS == "" {
 				return false
 			}
