@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1843,4 +1846,52 @@ func assertNoShellMetacharacter(t *testing.T, name, value string) {
 	if strings.ContainsAny(value, "$`\\ \t\n\r") {
 		t.Fatalf("%s contains shell metacharacter: %q", name, value)
 	}
+}
+
+// TestS3WebsiteReleaseContractRouteMatchesRenderedConfig fences the Connector
+// release contract's fixture route against the config the Slack flow actually
+// generates. The contract script's value is that a released Connector's strict
+// YAML decoder accepts our route; a strict decoder rejects unknown fields, so
+// the proof only holds while the fixture carries the same field set
+// renderS3WebsiteConnectorConfigYAML emits. Without this fence the fixture
+// silently rots into testing a route no customer runs.
+func TestS3WebsiteReleaseContractRouteMatchesRenderedConfig(t *testing.T) {
+	scriptPath := filepath.Join("..", "..", "..", "origins", "s3-static-connector", "test", "qurl_connector_release_contract.sh")
+	// #nosec G304 -- scriptPath is the checked-in release contract script, built from constant path segments.
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	configYAML, err := renderS3WebsiteConnectorConfigYAML(testS3WebsiteArgs(tunnelEnvDocker))
+	if err != nil {
+		t.Fatalf("renderS3WebsiteConnectorConfigYAML: %v", err)
+	}
+
+	// The fixture route reaches the Connector as single-quoted printf operands,
+	// so read keys from inside the quotes; the rendered config is plain YAML.
+	fixtureKeys := s3WebsiteRouteFieldNames(t, string(script), regexp.MustCompile(`'\s*(?:-\s*)?([a-z_]+):`))
+	renderedKeys := s3WebsiteRouteFieldNames(t, configYAML, regexp.MustCompile(`(?m)^\s*(?:-\s*)?([a-z_]+):`))
+
+	if !slices.Equal(fixtureKeys, renderedKeys) {
+		t.Fatalf("release contract fixture route fields = %v, rendered config fields = %v;\nkeep %s in lockstep with renderS3WebsiteConnectorConfigYAML", fixtureKeys, renderedKeys, scriptPath)
+	}
+}
+
+// s3WebsiteRouteFieldNames collects the sorted, de-duplicated route field names
+// that pattern's first capture group matches, excluding the routes: container
+// key itself.
+func s3WebsiteRouteFieldNames(t *testing.T, text string, pattern *regexp.Regexp) []string {
+	t.Helper()
+	var names []string
+	for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+		if match[1] == "routes" {
+			continue
+		}
+		names = append(names, match[1])
+	}
+	if len(names) == 0 {
+		t.Fatalf("no route fields matched %s", pattern)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
