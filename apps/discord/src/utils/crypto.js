@@ -72,10 +72,10 @@ function encrypt(plaintext) {
   if (!key) {
     // Warn once per process so dev installs without KEY_ENCRYPTION_KEY
     // don't silently store secrets in plaintext. index.js fails boot
-    // when NODE_ENV=production OR when GITHUB_CLIENT_SECRET is set, so
-    // this branch only runs in dev/test environments without OAuth
-    // wiring. For live third-party credentials, callers MUST use
-    // encryptStrict() instead.
+    // when NODE_ENV=production OR when the qURL OAuth setup flow is
+    // configured, so this branch only runs in dev/test environments
+    // without OAuth wiring. For live third-party credentials, callers
+    // MUST use encryptStrict() instead.
     if (!plaintextWarned) {
       plaintextWarned = true;
       logger.warn('KEY_ENCRYPTION_KEY is not set — secrets are being stored in PLAINTEXT. Generate a key with `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"` and set KEY_ENCRYPTION_KEY in the environment before using in any shared deployment.');

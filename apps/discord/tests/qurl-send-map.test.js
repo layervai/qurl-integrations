@@ -28,19 +28,10 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 25,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
   SHARD_ID: '0:1',
   isMultiTenant: false,
-  ENABLE_OPENNHP_FEATURES: true,
-  isOpenNHPActive: true,
-  STAR_MILESTONES: [10, 25, 50, 100],
-  CONTRIBUTOR_ROLE_NAME: 'Contributor',
-  ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
-  CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
-  CHAMPION_ROLE_NAME: 'Champion',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -131,11 +122,6 @@ jest.mock('../src/store', () => mockDb);
 
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
-}));
-
-jest.mock('../src/utils/admin', () => ({
-  requireAdmin: jest.fn(async () => true),
-  isAdmin: jest.fn(() => true),
 }));
 
 const mockDetectWatermark = jest.fn();

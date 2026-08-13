@@ -30,7 +30,6 @@ const {
   MAX_CONCURRENT_MONITORS,
   DISCORD_MEMBERS_PAGE_SIZE,
   PREWARM_MAX_PAGES,
-  UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
   AUDIT_EVENTS,
   TRUST,
   ddbSendConfigGuardActionCount,
@@ -47,8 +46,6 @@ const {
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
-const { requireAdmin } = require('./utils/admin');
-const { createStateSigner } = require('./utils/oauth-state');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
@@ -183,41 +180,6 @@ const { editDM, sendChannelMessage } = require('./discord-rest');
 // across replicas. Still re-exported via _test (see module.exports) so
 // the byte-identity unit test reads it where it always did.
 const { renderViewCounter } = require('./view-counter-render');
-
-
-// Generate an OAuth state token bound to the initiating Discord user.
-//
-// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(stateSecret,
-// `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
-// discord_id pulled from consumePendingLink(); a mismatch means the state
-// was tampered with or replayed across users, even if the random nonce
-// happened to collide with a live pending row.
-//
-// Defense-in-depth only — the primary binding is the single-use DB row
-// plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
-// so a stolen state URL cannot be silently coerced to another user.
-//
-// Secret resolution, the 32-char length floor, and the jest-only
-// random fallback live in the shared signer — see utils/oauth-state.js.
-// The payload shape here is deliberately distinct from the qURL OAuth
-// state's; see utils/qurl-oauth-state.js for the cross-purpose forgery
-// analysis.
-const githubOAuthStateSigner = createStateSigner({
-  flowLabel: 'OAuth state',
-  secretConfigKeys: ['OAUTH_STATE_SECRET'],
-});
-function generateState(discordId) {
-  const nonce = crypto.randomBytes(16).toString('hex');
-  return `${nonce}.${githubOAuthStateSigner.sign(`${discordId}:${nonce}`)}`;
-}
-function verifyStateBinding(state, discordId) {
-  if (typeof state !== 'string') return false;
-  const parts = state.split('.');
-  if (parts.length !== 2) return false;
-  const [nonce, sig] = parts;
-  if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
-  return githubOAuthStateSigner.verify(`${discordId}:${nonce}`, sig);
-}
 
 // --- QURL send helpers ---
 
@@ -8500,619 +8462,6 @@ setInterval(sweepCooldowns, 60 * 1000).unref();
 // Command definitions
 const commands = [
   {
-    data: new SlashCommandBuilder()
-      .setName('link')
-      .setDescription('Link your GitHub account to receive Contributor role when PRs are merged'),
-    async execute(interaction) {
-      const discordId = interaction.user.id;
-
-      // Check if already linked
-      const existing = await db.getLinkByDiscord(discordId);
-
-      // Generate state and create pending link. State is HMAC-bound to the
-      // discord user ID so the OAuth callback can verify cross-user replay
-      // didn't happen even if the random nonce were somehow leaked.
-      const state = generateState(discordId);
-      await db.createPendingLink(state, discordId);
-
-      const authUrl = `${config.BASE_URL}/auth/github?state=${state}`;
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.PRIMARY)
-        .setTitle('🔗 Link Your GitHub Account')
-        .setDescription(
-          existing
-            ? `You're currently linked to **@${existing.github_username}**.\n\nClick the button below to link a different account or re-verify.`
-            : 'Click the button below to verify your GitHub identity.\n\n' +
-              'Once linked, you\'ll automatically receive the **@Contributor** role when your PRs to OpenNHP repos are merged!'
-        )
-        .addFields({
-          name: '🔒 Privacy',
-          value: 'We only request permission to read your public profile (username). We cannot access your repositories or private information.',
-        })
-        .setFooter({ text: `Link expires in ${config.PENDING_LINK_EXPIRY_MINUTES} minutes` });
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel(existing ? '🔄 Re-link GitHub' : '🔗 Link GitHub Account')
-          .setStyle(ButtonStyle.Link)
-          .setURL(authUrl)
-      );
-
-      await interaction.reply({
-        embeds: [embed],
-        components: [row],
-        ephemeral: true,
-      });
-
-      logger.info('User initiated /link', { discordId, relink: !!existing });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('unlink')
-      .setDescription('Unlink your GitHub account'),
-    async execute(interaction) {
-      const discordId = interaction.user.id;
-
-      const existing = await db.getLinkByDiscord(discordId);
-      if (!existing) {
-        return interaction.reply({
-          content: 'You don\'t have a GitHub account linked.',
-          ephemeral: true,
-        });
-      }
-
-      // Confirmation prompt
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.ERROR)
-        .setTitle('⚠️ Confirm Unlink')
-        .setDescription(
-          `Are you sure you want to unlink your GitHub account **@${existing.github_username}**?\n\n` +
-          'You will no longer automatically receive the @Contributor role for future PRs.'
-        );
-
-      // Nonce the customIds so two concurrent /unlink flows can't have
-      // their collectors consume each other's button clicks.
-      const nonce = crypto.randomBytes(8).toString('hex');
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`unlink_confirm_${nonce}`)
-          .setLabel('Yes, Unlink')
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-          .setCustomId(`unlink_cancel_${nonce}`)
-          .setLabel('Cancel')
-          .setStyle(ButtonStyle.Secondary)
-      );
-
-      const response = await interaction.reply({
-        embeds: [embed],
-        components: [row],
-        ephemeral: true,
-      });
-
-      try {
-        const buttonInteraction = await response.awaitMessageComponent({
-          componentType: ComponentType.Button,
-          filter: (i) => i.user.id === interaction.user.id && i.customId.endsWith(`_${nonce}`),
-          time: TIMEOUTS.BUTTON_INTERACTION,
-        });
-
-        if (buttonInteraction.customId === `unlink_confirm_${nonce}`) {
-          await db.deleteLink(discordId);
-          await buttonInteraction.update({
-            content: `✓ Unlinked from GitHub **@${existing.github_username}**.\n\nYou can link a new account anytime with \`/link\`.`,
-            embeds: [],
-            components: [],
-          });
-          logger.info('User unlinked', { discordId, github: existing.github_username });
-        } else {
-          await buttonInteraction.update({
-            content: 'Unlink cancelled. Your GitHub account is still linked.',
-            embeds: [],
-            components: [],
-          });
-        }
-      } catch {
-        await interaction.editReply({
-          content: 'Confirmation timed out. Your GitHub account is still linked.',
-          embeds: [],
-          components: [],
-        });
-      }
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('whois')
-      .setDescription('Check GitHub link for a user')
-      .addUserOption(option =>
-        option
-          .setName('user')
-          .setDescription('The Discord user to check (leave empty for yourself)')
-          .setRequired(false)
-      ),
-    async execute(interaction) {
-      const targetUser = interaction.options.getUser('user') || interaction.user;
-      const link = await db.getLinkByDiscord(targetUser.id);
-
-      if (link) {
-        const contributions = await db.getContributions(targetUser.id);
-        const badges = await db.getBadges(targetUser.id);
-        const streak = await db.getStreak(targetUser.id);
-
-        const embed = new EmbedBuilder()
-          .setColor(COLORS.SUCCESS)
-          .setTitle(`GitHub Link for ${targetUser.username}`)
-          .addFields(
-            { name: 'GitHub', value: `[@${link.github_username}](https://github.com/${link.github_username})`, inline: true },
-            { name: 'Linked Since', value: new Date(link.linked_at).toLocaleDateString(), inline: true },
-            { name: 'PRs Merged', value: `${contributions.length}`, inline: true }
-          );
-
-        // Add badges
-        if (badges.length > 0) {
-          const badgeDisplay = badges
-            .map(b => {
-              const info = db.BADGE_INFO[b.badge_type];
-              return info ? `${info.emoji} ${info.name}` : b.badge_type;
-            })
-            .join(' • ');
-          embed.addFields({ name: '🏅 Badges', value: badgeDisplay });
-        }
-
-        // Add streak (monthly tracking)
-        if (streak && streak.current_streak > 0) {
-          embed.addFields({
-            name: '🔥 Streak',
-            value: `${streak.current_streak} month${streak.current_streak > 1 ? 's' : ''} (Best: ${streak.longest_streak})`,
-            inline: true,
-          });
-        }
-
-        // Add recent contributions
-        if (contributions.length > 0) {
-          const recent = contributions.slice(0, 3)
-            .map(c => `• ${c.repo} #${c.pr_number}`)
-            .join('\n');
-          embed.addFields({ name: 'Recent Contributions', value: recent });
-        }
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setLabel('View on GitHub')
-            .setStyle(ButtonStyle.Link)
-            .setURL(`https://github.com/${link.github_username}`)
-        );
-
-        await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
-      } else {
-        await interaction.reply({
-          content: targetUser.id === interaction.user.id
-            ? 'You haven\'t linked your GitHub account yet. Use `/link` to get started!'
-            : `${targetUser.username} hasn't linked their GitHub account.`,
-          ephemeral: true,
-        });
-      }
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('contributions')
-      .setDescription('View your contribution history')
-      .addUserOption(option =>
-        option
-          .setName('user')
-          .setDescription('The user to check (leave empty for yourself)')
-          .setRequired(false)
-      ),
-    async execute(interaction) {
-      const targetUser = interaction.options.getUser('user') || interaction.user;
-      const contributions = await db.getContributions(targetUser.id);
-
-      if (contributions.length === 0) {
-        return interaction.reply({
-          content: targetUser.id === interaction.user.id
-            ? 'You don\'t have any recorded contributions yet. Link your GitHub with `/link` and merge a PR!'
-            : `${targetUser.username} doesn't have any recorded contributions.`,
-          ephemeral: true,
-        });
-      }
-
-      // Group by repo
-      const byRepo = {};
-      for (const c of contributions) {
-        if (!byRepo[c.repo]) byRepo[c.repo] = [];
-        byRepo[c.repo].push(c);
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.PURPLE)
-        .setTitle(`📊 Contributions by ${targetUser.username}`)
-        .setDescription(`**${contributions.length}** PRs merged across **${Object.keys(byRepo).length}** repos`)
-        .setTimestamp();
-
-      for (const [repo, prs] of Object.entries(byRepo)) {
-        const prList = prs.slice(0, 5)
-          .map(p => `• #${p.pr_number}${p.pr_title ? `: ${p.pr_title.substring(0, 40)}${p.pr_title.length > 40 ? '...' : ''}` : ''}`)
-          .join('\n');
-        embed.addFields({
-          name: `${repo} (${prs.length})`,
-          value: prList + (prs.length > 5 ? `\n... and ${prs.length - 5} more` : ''),
-        });
-      }
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('stats')
-      .setDescription('Show bot statistics'),
-    async execute(interaction) {
-      const stats = await db.getStats();
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.PURPLE)
-        .setTitle('📊 OpenNHP Bot Stats')
-        .addFields(
-          { name: 'Linked Users', value: `${stats.linkedUsers}`, inline: true },
-          { name: 'Total PRs', value: `${stats.totalContributions}`, inline: true },
-          { name: 'Contributors', value: `${stats.uniqueContributors}`, inline: true }
-        );
-
-      if (stats.byRepo.length > 0) {
-        const repoList = stats.byRepo
-          .slice(0, 5)
-          .map(r => `• ${r.repo}: ${r.count} PRs`)
-          .join('\n');
-        embed.addFields({ name: 'Top Repositories', value: repoList });
-      }
-
-      // Add leaderboard
-      const topContributors = await db.getTopContributors(5);
-      if (topContributors.length > 0) {
-        const leaderboard = topContributors
-          .map((c, i) => {
-            const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-            return `${medal} <@${c.discord_id}>: ${c.count} PRs`;
-          })
-          .join('\n');
-        embed.addFields({ name: '🏆 Top Contributors', value: leaderboard });
-      }
-
-      embed.setTimestamp();
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('leaderboard')
-      .setDescription('Show contribution leaderboard'),
-    async execute(interaction) {
-      const topContributors = await db.getTopContributors(10);
-
-      if (topContributors.length === 0) {
-        return interaction.reply({
-          content: 'No contributions recorded yet!',
-          ephemeral: true,
-        });
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.GOLD)
-        .setTitle('🏆 Contribution Leaderboard')
-        .setDescription(
-          topContributors
-            .map((c, i) => {
-              const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i + 1}.**`;
-              return `${medal} <@${c.discord_id}> — **${c.count}** PRs`;
-            })
-            .join('\n')
-        )
-        .setTimestamp();
-
-      await interaction.reply({ embeds: [embed] });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('forcelink')
-      .setDescription('(Admin) Force link a Discord user to a GitHub account')
-      .addUserOption(option =>
-        option
-          .setName('user')
-          .setDescription('Discord user to link')
-          .setRequired(true)
-      )
-      .addStringOption(option =>
-        option
-          .setName('github')
-          .setDescription('GitHub username (without @)')
-          .setRequired(true)
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      const targetUser = interaction.options.getUser('user');
-      const githubUsername = interaction.options.getString('github').replace(/^@+/, '');
-
-      // Same validation /bulklink uses — reject anything that isn't a valid
-      // GitHub login. A malformed string in guild_links would later be
-      // reflected into embeds and interpolated into search queries.
-      if (!/^[a-zA-Z0-9-]{1,39}$/.test(githubUsername)) {
-        return interaction.reply({
-          content: `❌ Invalid GitHub username format: \`${githubUsername}\`. Must be 1-39 chars, alphanumerics + hyphen only.`,
-          ephemeral: true,
-        });
-      }
-
-      const existingLink = await db.getLinkByGithub(githubUsername);
-      if (existingLink && existingLink.discord_id !== targetUser.id) {
-        return interaction.reply({
-          content: `⚠️ GitHub **@${githubUsername}** is already linked to <@${existingLink.discord_id}>. Unlink them first.`,
-          ephemeral: true,
-        });
-      }
-
-      await db.forceLink(targetUser.id, githubUsername);
-
-      await interaction.reply({
-        content: `✓ Linked <@${targetUser.id}> to GitHub **@${githubUsername}**`,
-        ephemeral: true,
-      });
-
-      logger.info('Admin force-linked user', {
-        admin: interaction.user.id,
-        target: targetUser.id,
-        github: githubUsername,
-      });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('bulklink')
-      .setDescription('(Admin) Bulk link users from a list')
-      .addStringOption(option =>
-        option
-          .setName('mappings')
-          .setDescription('Comma-separated discord_id:github pairs (e.g., 123:user1,456:user2)')
-          .setRequired(true)
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      const mappings = interaction.options.getString('mappings');
-      const pairs = mappings.split(',').map(s => s.trim());
-
-      let success = 0;
-      let failed = 0;
-      const errors = [];
-
-      for (const pair of pairs) {
-        const [discordId, github] = pair.split(':').map(s => s.trim());
-        if (!discordId || !github) {
-          failed++;
-          errors.push(`Invalid format: "${pair}"`);
-          continue;
-        }
-        if (!/^\d{17,20}$/.test(discordId)) {
-          failed++;
-          errors.push(`Invalid Discord ID: "${discordId}"`);
-          continue;
-        }
-        // GitHub username format: letters/digits/hyphens, can't start/end with
-        // hyphen, no consecutive hyphens, 1-39 chars.
-        if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(github)) {
-          failed++;
-          errors.push(`Invalid GitHub username: "${github}"`);
-          continue;
-        }
-
-        try {
-          const existing = await db.getLinkByGithub(github);
-          if (existing && existing.discord_id !== discordId) {
-            failed++;
-            errors.push(`@${github} already linked to another user`);
-            continue;
-          }
-
-          await db.forceLink(discordId, github);
-          success++;
-        } catch (error) {
-          failed++;
-          errors.push(`Error linking ${discordId}: ${error.message}`);
-        }
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(failed === 0 ? COLORS.SUCCESS : COLORS.WARNING)
-        .setTitle('📦 Bulk Link Results')
-        .addFields(
-          { name: '✓ Success', value: `${success}`, inline: true },
-          { name: '✗ Failed', value: `${failed}`, inline: true }
-        );
-
-      if (errors.length > 0) {
-        embed.addFields({
-          name: 'Errors',
-          value: errors.slice(0, 10).join('\n') + (errors.length > 10 ? `\n... and ${errors.length - 10} more` : ''),
-        });
-      }
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-
-      logger.info('Admin bulk-linked users', {
-        admin: interaction.user.id,
-        success,
-        failed,
-      });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('backfill-milestones')
-      .setDescription('(Admin) Backfill star milestones for a repo that already has stars')
-      .addStringOption(option =>
-        option
-          .setName('repo')
-          .setDescription('Full repo name (e.g., OpenNHP/opennhp)')
-          .setRequired(true)
-      )
-      .addIntegerOption(option =>
-        option
-          .setName('stars')
-          .setDescription('Current star count')
-          .setRequired(true)
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      const repo = interaction.options.getString('repo');
-      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-        return interaction.reply({ content: 'Invalid repo format. Use `owner/repo` (e.g., `OpenNHP/opennhp`).', ephemeral: true });
-      }
-      const stars = interaction.options.getInteger('stars');
-
-      let backfilled = 0;
-      let skipped = 0;
-
-      for (const milestone of config.STAR_MILESTONES) {
-        if (stars >= milestone) {
-          if (!(await db.hasMilestoneBeenAnnounced('stars', milestone, repo))) {
-            if (await db.recordMilestone('stars', milestone, repo)) {
-              backfilled++;
-            }
-          } else {
-            skipped++;
-          }
-        }
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(COLORS.SUCCESS)
-        .setTitle('✓ Milestones Backfilled')
-        .setDescription(`Backfilled milestones for **${repo}** (${stars} stars)`)
-        .addFields(
-          { name: 'Backfilled', value: `${backfilled}`, inline: true },
-          { name: 'Already Recorded', value: `${skipped}`, inline: true }
-        );
-
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-
-      logger.info('Admin backfilled milestones', {
-        admin: interaction.user.id,
-        repo,
-        stars,
-        backfilled,
-      });
-    },
-  },
-  {
-    data: new SlashCommandBuilder()
-      .setName('unlinked')
-      .setDescription('(Admin) Show contributors who haven\'t linked their GitHub')
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    async execute(interaction) {
-      if (!await requireAdmin(interaction)) return;
-
-      await interaction.deferReply({ ephemeral: true });
-
-      try {
-        const guild = interaction.guild;
-        const contributorRole = guild.roles.cache.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
-
-        if (!contributorRole) {
-          return interaction.editReply({
-            content: `❌ Could not find role "${config.CONTRIBUTOR_ROLE_NAME}"`,
-          });
-        }
-
-        // `guild.members.fetch()` (no args) crashes in http-only worker
-        // mode because it relies on a gateway shard; route through the
-        // REST prewarm helper instead. After it resolves, the cache is
-        // the authoritative member set.
-        await prewarmGuildMembersCache(guild, { command: '/unlinked' });
-        // Prewarm swallows REST failures (correct for /qurl send
-        // degraded mode). For an admin reporting command, an empty
-        // OR partial cache is pathological — reporting "all linked"
-        // against an incomplete member set is a silent false positive.
-        // Mid-pagination failures (e.g. 429 on page 6 of 12) leave a
-        // non-empty cache that's still missing members. Compare against
-        // the expected count with `UNLINKED_CACHE_COMPLETENESS_THRESHOLD`
-        // tolerance to allow approximate-count drift but catch
-        // substantive shortfalls.
-        //
-        // Edge case: when both `memberCount` AND
-        // `approximateMemberCount` are absent (rare in practice — the
-        // guild loaded via REST `?with_counts=true` populates the
-        // latter), this falls back to a `size === 0` check only.
-        // Best-effort under that condition; a guild that fails
-        // mid-pagination with no count metadata available will
-        // currently still surface "all linked" if cache is non-empty.
-        const expectedMembers = effectiveGuildMemberCount(guild);
-        const cacheSize = guild.members.cache?.size ?? 0;
-        // `cacheSize === 0` is a sound proxy for "prewarm produced
-        // nothing" because `GET /guilds/{id}/members` includes the bot
-        // itself — a real guild with the bot present can never
-        // legitimately return zero members. The check defends against
-        // degraded-API silence, not against zero-member guilds.
-        const looksIncomplete = cacheSize === 0
-          || (expectedMembers != null && cacheSize < expectedMembers * UNLINKED_CACHE_COMPLETENESS_THRESHOLD);
-        if (looksIncomplete) {
-          // Debug-log the trip so dashboards can surface false-positive
-          // patterns (e.g. `approximateMemberCount` over-reporting on
-          // guilds with high churn → healthy run flagged degraded).
-          logger.debug('unlinked surfaced degraded-cache message', {
-            command: '/unlinked', guild_id: guild.id,
-            cache_size: cacheSize, expected_members: expectedMembers,
-          });
-          return interaction.editReply({
-            content: '⚠️ Could not load complete member list (Discord API may be degraded). Please retry.',
-          });
-        }
-        const contributors = guild.members.cache.filter(
-          (m) => m.roles.cache.has(contributorRole.id),
-        );
-
-        // Check which ones are not linked (single bulk query, not N+1)
-        const linkedIds = await db.getLinkedDiscordIds();
-        const unlinked = [];
-        for (const [id, member] of contributors) {
-          if (!linkedIds.has(id)) unlinked.push(member);
-        }
-
-        if (unlinked.length === 0) {
-          return interaction.editReply({
-            content: '✓ All contributors have linked their GitHub accounts!',
-          });
-        }
-
-        const embed = new EmbedBuilder()
-          .setColor(COLORS.ERROR)
-          .setTitle('⚠️ Unlinked Contributors')
-          .setDescription(
-            `${unlinked.length} contributor(s) have the @${config.CONTRIBUTOR_ROLE_NAME} role but haven't linked their GitHub:\n\n` +
-            unlinked.slice(0, 20).map(m => `• <@${m.id}> (${m.user.tag})`).join('\n') +
-            (unlinked.length > 20 ? `\n... and ${unlinked.length - 20} more` : '')
-          )
-          .setFooter({ text: 'Use /forcelink to manually link these users' });
-
-        await interaction.editReply({ embeds: [embed] });
-      } catch (error) {
-        logger.error('Error in /unlinked', { error: error.message });
-        await interaction.editReply({
-          content: '❌ An error occurred while checking unlinked contributors.',
-        });
-      }
-    },
-  },
-  {
     // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
     // expected-set assertion in
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
@@ -9609,54 +8958,21 @@ const commands = [
   },
 ];
 
-// Commands that are safe to register outside the OpenNHP community guild.
-// Everything else (/link, /whois, /contributions, /stats, /leaderboard,
-// /forcelink, /bulklink, /unlinked, /backfill-milestones, /unlink) are
-// OpenNHP-community features that depend on single-guild state (the
-// cached guild, BASE_URL, GITHUB_* secrets). Registering them outside
-// the OpenNHP guild would put them in autocomplete where they'd fail
-// opaquely — /link would build a URL with an undefined BASE_URL,
-// /forcelink would try to fetch members from a null guild, etc.
-//
-// The full command set is only registered when the bot is in "OpenNHP
-// mode": GUILD_ID points at a real guild AND ENABLE_OPENNHP_FEATURES is
-// true. Every other configuration (multi-tenant, OR single-guild-plain
-// /qurl install like the test playground or a customer server) gets
-// only the allowlist.
-//
-// Keep the allowlist explicit and near the commands array so adding a
-// new customer-safe command requires updating both locations
-// intentionally.
-const CUSTOMER_SAFE_COMMANDS = new Set(['qurl']);
-
-// Single callsite for the active command set. `registerCommands` (at
-// boot) and `handleCommand` (per interaction) both ask this so a future
-// gating change — e.g. a third mode, a per-command flag — touches one
-// place instead of two. Keeps the two sites from drifting.
-function getActiveCommands() {
-  return config.isOpenNHPActive
-    ? commands
-    : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
-}
-
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
-// not purge each other on a fresh PUT call, so a bot that previously
-// ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
-// X) and is now redeployed in multi-tenant or single-guild-plain mode
-// will leave /link, /leaderboard, etc. visible in X's slash-command
-// autocomplete until Discord's cache ages out. The dispatch-time filter
-// in handleCommand prevents those stale commands from doing anything
-// harmful, but users still see dead commands in the picker. Issuing
-// PUT-with-empty-body on the guild-commands endpoint clears the
-// guild-scoped set.
+// not purge each other on a fresh PUT call, so a guild that was served
+// by an older deploy registering a wider command set keeps those
+// entries visible in its slash-command autocomplete until Discord's
+// cache ages out. The dispatch-time filter in handleCommand prevents
+// stale commands from doing anything harmful, but users still see dead
+// commands in the picker. Issuing PUT-with-empty-body on the guild-
+// commands endpoint clears the guild-scoped set.
 //
-// Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
-// guild-scoped commands to config.GUILD_ID, so purging there would
-// race with the upcoming PUT. Only iterates the `guilds` map the caller
-// passes in — we can't and shouldn't enumerate guilds we've never joined.
+// Runs before the registration PUT below, so in single-guild mode the
+// purge and the subsequent guild-scoped PUT are strictly sequential —
+// no race. Only iterates the `guilds` map the caller passes in — we
+// can't and shouldn't enumerate guilds we've never joined.
 async function purgeStaleGuildCommands({ rest, appId, guilds }) {
-  if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
   // Parallelize the per-guild fetch+put. Promise.allSettled so one
   // slow/failing guild doesn't block the others; Discord's guild-
   // commands endpoint uses a separate rate bucket per guild.
@@ -9675,9 +8991,7 @@ async function purgeStaleGuildCommands({ rest, appId, guilds }) {
   })()));
 }
 
-// Register commands with Discord. `config.isOpenNHPActive` is the
-// single source of truth for "this deployment exercises the OpenNHP
-// community surface" — see config.js for the derivation.
+// Register commands with Discord.
 //
 // Signature decoupled from discord.js Client so both the legacy
 // Client path AND the @discordjs/ws shim path can call this:
@@ -9689,22 +9003,21 @@ async function purgeStaleGuildCommands({ rest, appId, guilds }) {
 async function registerCommands({ rest, appId, guilds = new Map() }) {
   await purgeStaleGuildCommands({ rest, appId, guilds });
 
-  const activeCommands = getActiveCommands();
-  const commandData = activeCommands.map(cmd => cmd.data.toJSON());
+  const commandData = commands.map(cmd => cmd.data.toJSON());
 
   try {
     if (config.GUILD_ID) {
       // Guild-scoped registration: commands appear instantly in just this
-      // guild. Used by the single-guild OpenNHP deployment where fast command
+      // guild. Used by single-guild deployments where fast command
       // iteration matters more than appearing in other guilds.
-      logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
+      logger.info(`Registering ${commands.length} slash commands to guild ${config.GUILD_ID}...`);
       await rest.put(Routes.applicationGuildCommands(appId, config.GUILD_ID), { body: commandData });
     } else {
       // Global registration: commands appear in every guild the bot joins.
       // Discord caches global commands for up to 1 hour, so newly-added
       // commands may take that long to propagate. Used for multi-tenant
       // deployments (customers invite the bot to their own servers).
-      logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
+      logger.info(`Registering ${commands.length} slash commands globally (multi-tenant mode): ${commands.map(c => c.data.name).join(', ')}`);
       await rest.put(Routes.applicationCommands(appId), { body: commandData });
     }
     logger.info('Slash commands registered.');
@@ -9908,18 +9221,15 @@ async function handleCommand(interaction) {
     });
   };
 
-  // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
-  // mode to customer-safe mode (flip GUILD_ID unset OR flip
-  // ENABLE_OPENNHP_FEATURES to false), the prior guild-scoped /link,
-  // /whois, etc. registrations remain in the old guild — Discord's two
-  // namespaces (guild and global) don't purge each other on a new .set()
-  // call. Those stale handlers all assume cached guild state (BASE_URL,
-  // contributor roles) that customer-safe mode doesn't populate and
-  // would crash on. Filter the handler lookup to the active set so a
-  // stale registration from a previous deploy can't dispatch to a broken
-  // path.
-  const activeCommands = getActiveCommands();
-  const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
+  // Defense-in-depth against stale registrations: a guild served by an
+  // older deploy may still list commands this build no longer ships
+  // (the GitHub account-linking and contributor-role commands, removed
+  // in #1026), because Discord's guild and global namespaces don't
+  // purge each other on a new .set() call. purgeStaleGuildCommands
+  // clears them at boot, but Discord's cache can lag. Look the handler
+  // up in the shipped set so a stale registration can't dispatch into a
+  // path that no longer exists.
+  const command = commands.find(cmd => cmd.data.name === interaction.commandName);
   if (!command) {
     // The interaction is for a command we know exists globally (Discord
     // only dispatches registered commands to us) but is not in the
@@ -10110,7 +9420,6 @@ module.exports = {
   handleConfirmVoiceEveryone,
   handleConfirmPickManual,
   handleConfirmEveryone,
-  verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.

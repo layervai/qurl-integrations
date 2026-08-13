@@ -20,7 +20,7 @@ process.env.BASE_URL = 'http://localhost:3000';
 // KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
 // review round 2; matches the legacy modal-paste path's existing check.
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
-// /qurl-oauth router mounts always; OpenNHP is a different gate
+// /qurl-oauth router mounts unconditionally and gates internally
 process.env.GUILD_ID = '123456789012345678';
 // Trust proxy so the Secure-cookie test can simulate ALB-fronted prod
 // via X-Forwarded-Proto: https (server.js reads TRUST_PROXY at module
