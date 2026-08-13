@@ -229,7 +229,7 @@
   },
   "no_active_tab_error": {
     "message": "No active tab found",
-    "description": "Shown when Chrome does not report an active tab for the current window"
+    "description": "Shown when the browser does not report an active tab for the current window"
   },
   "no_response_from_content_script": {
     "message": "No response from content script",
