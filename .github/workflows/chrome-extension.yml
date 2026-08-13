@@ -95,14 +95,14 @@ jobs:
         run: npm run lint
 
       - name: Syntax check
+        # Globbed rather than enumerated so a source file added later cannot
+        # slip past the parse check. Covers the same first-party roots ESLint
+        # lints, minus test/ (already parsed by `npm test`). Piped through
+        # xargs on purpose: `find -exec` reports success even when the command
+        # it ran failed, which would make this step silently green.
         run: |
-          node --check popup/popup.js
-          node --check background.js
-          node --check content/gmail-compose.js
-          node --check lib/qurl-api.js
-          node --check lib/qurl-compose-format.js
-          node --check lib/qurl-config.js
-          node --check lib/qurl-i18n.js
+          find background.js popup content lib scripts -name '*.js' -print0 \
+            | xargs -0 -r -n1 node --check
 
       - name: Run tests
         run: npm test

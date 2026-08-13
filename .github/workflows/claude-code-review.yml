@@ -26,15 +26,15 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.base.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    # GitHub cancels the whole job at this cap and a cancelled job carries no
-    # annotation, so a kill here still reads like an infra blip or a passing
-    # review. Treat this as the outer backstop only: the review is expected to
-    # run out of CLAUDE_REVIEW_BUDGET_MINUTES first, because a step-level kill
-    # fails one step and leaves the job alive to report why.
+    # A kill at this cap surfaces as a `cancelled` check rather than an explicit
+    # timeout, so a lost review reads like an infra blip or a passing one. On
+    # #981 one commit's review completed at 7m25s while another was killed twice
+    # at the old 8m cap. Also covers checkout, origin preparation, and verify.
     #
-    # PR #981 (5,000+ line diff, 35+ files) sat exactly on the previous 8-minute
-    # cap: run 31702806041 killed at 8m15s, its rerun killed at 8m16s, and the
-    # last run that finished (commit 9cc2e2ac) took 7m25s.
+    # Treat this as the outer backstop only. The review step is capped lower, at
+    # CLAUDE_REVIEW_BUDGET_MINUTES, so it runs out first and fails a single step
+    # rather than cancelling the job — a cancelled job runs nothing further and
+    # so can never explain itself.
     timeout-minutes: 15
     env:
       # Deliberately under the job cap. The remaining headroom covers checkout,

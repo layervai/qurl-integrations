@@ -4,13 +4,15 @@ Brief description of changes.
 
 ## Scope
 
-<!-- Which app does this PR change? Check one. -->
+<!-- Which area(s) does this PR change? Check all that apply. -->
 
 - [ ] `apps/slack/`
 - [ ] `apps/teams/`
 - [ ] `apps/discord/`
 - [ ] `apps/cli/`
 - [ ] `apps/zapier/`
+- [ ] `apps/chrome-extension/`
+- [ ] `origins/` (connector image — also triggers Slack CI)
 - [ ] `shared/` (triggers tests for ALL apps — coordinate with maintainers)
 - [ ] `.github/` (requires maintainer review)
 

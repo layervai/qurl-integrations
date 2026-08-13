@@ -135,19 +135,33 @@ no change, and any approved demo action records an audit event.
 1. Run `/qurl-admin admins` as the owner/admin.
 2. Run the same command as a non-admin reviewer.
 3. Send one unsupported file or image to the Agent or Assistant surface.
-4. Use the Agent feedback controls or run `/qurl feedback`.
-5. Ask the Slack workspace owner/admin to remove and reinstall the app.
-6. Have the same first-connected reviewer from section 1 run `/qurl help` to
+4. Paste a block of text long enough that the Slack client converts it to a
+   snippet, using a qURL request as the caption.
+5. Use the Agent feedback controls or run `/qurl feedback`.
+6. Ask the Slack workspace owner/admin to remove and reinstall the app.
+7. Have the same first-connected reviewer from section 1 run `/qurl help` to
    confirm that Slack restored slash-command registration.
-7. Have that reviewer run `/qurl setup <reviewer-email>` with the same email
+8. Have that reviewer run `/qurl setup <reviewer-email>` with the same email
    and complete passwordless sign-in to re-establish qURL workspace ownership.
-8. Have that reviewer run `/qurl list` and confirm the seeded demo resource is
+9. Have that reviewer run `/qurl list` and confirm the seeded demo resource is
    listed.
 
 Expected result: admin authorization is enforced, unsupported media receives a
 clear limitation, feedback has a safe route, and reinstall requires an explicit
 reconnect before connected commands return to a usable state. A successful
-`/qurl help` response alone is not reconnect evidence.
+`/qurl help` response alone is not reconnect evidence. The snippet-converted
+paste gets that same limitation — the agent surface reads no attachment,
+including one Slack made out of typed text — and the limitation must name the
+snippet case and route to `/qurl help`, because retyping the paste would only
+reproduce the snippet.
+
+The limitation is scoped to attachments, and its wording states the rule that
+produces it: the agent reads a message's text and nothing else. A canvas or file
+shared as a **link** is ordinary message text, so it is answered normally rather
+than refused — the agent works from the text of the message, never from the
+linked document's contents, which it cannot fetch without a confirmed inspect
+action. Expect no limitation reply for a linked canvas, and expect the
+limitation's wording not to claim one.
 
 ## Evidence to retain
 
@@ -160,7 +174,7 @@ Keep reviewer evidence outside this repository:
 - existing-install reauthorization, clean OAuth consent, and install-success
   captures;
 - command, App Home, AI disclosure, proposal, reject, private-delivery, and
-  unsupported-media captures;
+  unsupported-media captures, including the snippet-converted paste;
 - the post-reinstall setup and `/qurl list` capture;
 - the production app version or commit used for the test;
 - the audit record for the approved demo action, if approval was exercised;
