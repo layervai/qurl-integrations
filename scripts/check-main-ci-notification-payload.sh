@@ -151,25 +151,45 @@ def on_block(path):
         die("%s: could not read any `on:` triggers" % path)
     return keys
 
-def branch_filter(path, sub, key):
-    """Return the branch patterns listed under `key`, or None if absent."""
+def uncomment(value):
+    """Drop a trailing YAML comment.
+
+    Requires whitespace before the `#`, which is YAML's own rule -- so a branch
+    name like `feat#123` survives while `[main]  # primary` loses the note.
+    """
+    return re.sub(r"\s+#.*$", "", value)
+
+
+def push_filter(path, sub, key):
+    """Return the patterns listed under `key` in an `on.push:` block, or None.
+
+    None means the key is absent, which is not the same as present-but-empty:
+    `push` with no `branches` runs on every branch, so the two must not collapse.
+    """
     for i, line in enumerate(sub):
         m = re.match(r"^ {4}%s:\s*(.*)$" % re.escape(key), line)
         if not m:
             continue
-        inline = m.group(1).strip()
+        inline = uncomment(m.group(1)).strip()
         if inline:
             if not (inline.startswith("[") and inline.endswith("]")):
                 die("%s: unparsed `on.push.%s` value %r -- teach this check "
                     "the new form" % (path, key, inline))
-            return [v.strip().strip("'\"") for v in inline[1:-1].split(",")
-                    if v.strip()]
-        out = []
-        for nxt in sub[i + 1:]:
-            mm = re.match(r"^ {6}- (.+?)\s*$", nxt)
-            if not mm:
-                break
-            out.append(mm.group(1).strip().strip("'\""))
+            out = [v.strip().strip("'\"") for v in inline[1:-1].split(",")
+                   if v.strip()]
+        else:
+            out = []
+            for nxt in sub[i + 1:]:
+                if not nxt.strip() or re.match(r"^\s*#", nxt):
+                    continue  # blank or comment between items
+                mm = re.match(r"^ {6}- (.+?)\s*$", nxt)
+                if not mm:
+                    break  # next key ends the list
+                out.append(uncomment(mm.group(1)).strip().strip("'\""))
+        if not out:
+            die("%s: `on.push.%s` is present but yielded no entries -- teach "
+                "this check the new form rather than silently reading it as "
+                "'matches nothing'" % (path, key))
         return out
     return None
 
@@ -187,12 +207,19 @@ def can_trigger_notifier(path):
     if "push" not in keys:
         return False
     default = STUB["DEFAULT_BRANCH"]
-    only = branch_filter(path, keys["push"], "branches")
+    only = push_filter(path, keys["push"], "branches")
     if only is not None:
         return any(fnmatch.fnmatch(default, pat) for pat in only)
-    skip = branch_filter(path, keys["push"], "branches-ignore")
+    skip = push_filter(path, keys["push"], "branches-ignore")
     if skip is not None:
         return not any(fnmatch.fnmatch(default, pat) for pat in skip)
+    # A tag-only push -- the publish-on-tag pattern -- cannot reach the
+    # notifier: workflow_run.head_branch carries the tag, so the
+    # `head_branch == default_branch` gate never matches. Demanding such a
+    # workflow be listed would add config that only ever hits the generic arm.
+    if any(push_filter(path, keys["push"], k) is not None
+           for k in ("tags", "tags-ignore")):
+        return False
     return True  # unfiltered push runs on every branch, the default one included
 
 run_script = extract_run_block(STEP_NAME)
