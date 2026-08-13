@@ -478,6 +478,14 @@ func (s *AgentStore) GetThreadContext(ctx context.Context, partition, threadKey 
 // partition): the propose surface (events) and the click surface (interactions)
 // both carry team id identically, whereas the enterprise field can differ — so
 // keying on team id is what lets the click find what propose stored.
+//
+// Deliberately does NOT take putMarker's writer-token treatment, so a lost
+// response on a retried write surfaces here as an error even though the item
+// landed. That is the safe direction: postAgentConfirm falls back to the text
+// preview, which under-promises (no confirm card) instead of executing twice,
+// and the orphaned snapshot is TTL'd. Recovering it would also buy less than it
+// does for a marker — this write carries no latch semantics, and the id is
+// freshly random per propose, so a genuine collision is not a real case.
 func (s *AgentStore) PutPendingAction(ctx context.Context, partition, id string, payload []byte) error {
 	if partition == "" || id == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "PutPendingAction: partition and id are required"}
