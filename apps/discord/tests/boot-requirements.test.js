@@ -259,6 +259,26 @@ describe('baseUrlHttpsProblem', () => {
     }
   });
 
+  it('rejects alternate IPv4 encodings of a local-only host', () => {
+    // isPrivateIPv4Literal reads parsed.hostname, which WHATWG has already
+    // re-serialized to dotted-decimal for a special scheme — that
+    // canonicalization is the only reason hex/decimal/octal/short forms are
+    // caught, and nothing else in the suite pins it. Without these cases a
+    // future parser change (or a move off new URL) could silently reopen the
+    // loopback and 169.254.169.254 metadata holes with every other test green.
+    for (const bad of [
+      'https://0x7f000001', // hex      -> 127.0.0.1
+      'https://2130706433', // decimal  -> 127.0.0.1
+      'https://0177.0.0.1', // octal    -> 127.0.0.1
+      'https://127.1', //     short     -> 127.0.0.1
+    ]) {
+      expect(new URL(bad).hostname).toBe('127.0.0.1');
+      const msg = baseUrlHttpsProblem(cfg({ isQurlOAuthConfigured: true, BASE_URL: bad }), true);
+      expect(msg).not.toBeNull();
+      expect(msg).toContain('public bare https:// origin');
+    }
+  });
+
   // The #619 headline regression: a deploy with the qURL OAuth setup flow
   // configured (AUTH0_* set) but BASE_URL left unset silently falls back to
   // localhost and dead-ends /qurl setup at the OAuth redirect. Boot must
