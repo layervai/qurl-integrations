@@ -60,9 +60,11 @@ jobs:
       # (sanctioned wording deltas), so this is the only thing comparing
       # them. Its own failure paths are exercised by the test below.
       - name: Check Chrome/Edge i18n parity
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/check-i18n-parity.sh
 
       - name: Test i18n parity checker
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-check-i18n-parity.sh
 
       # The jq <= 1.7 parse check is only meaningful on a runner whose jq

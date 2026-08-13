@@ -312,6 +312,9 @@ run_case entry-not-an-object 1 "copy_btn is str, not an object" \
 run_case entry-message-not-a-string 1 "ext_name has no string \`message\`" \
   python3 -c 'import json; p = "apps/chrome-extension/_locales/en/messages.json"; d = json.load(open(p)); d["ext_name"] = {"description": "Extension name"}; json.dump(d, open(p, "w"), indent=2)'
 
+run_case manifest-not-an-object 1 "manifest.json: top level is list, not an object" \
+  python3 -c 'import json; json.dump([1, 2], open("apps/edge-extension/manifest.json", "w"))'
+
 run_case popup-missing 1 "could not run" \
   rm "apps/edge-extension/popup/popup.html"
 

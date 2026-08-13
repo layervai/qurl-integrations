@@ -192,6 +192,16 @@ for name, catalog in (("chrome", chrome), ("edge", edge)):
             failures.append(
                 f"{APPS[name] / CATALOG}: {key} has no string `message`."
             )
+
+    # Same gate for the manifest: rules 4 and 5 iterate it as a mapping, so a
+    # valid-JSON-but-wrong-shape document (a list, say) would throw rather than
+    # report. Missing and unparseable manifests are already covered by the
+    # load_json failures above.
+    if not isinstance(manifests[name], dict):
+        failures.append(
+            f"{APPS[name] / 'manifest.json'}: top level is "
+            f"{type(manifests[name]).__name__}, not an object."
+        )
 if failures:
     bail(CANNOT_RUN)
 
