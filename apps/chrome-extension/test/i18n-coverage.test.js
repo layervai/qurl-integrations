@@ -8,7 +8,8 @@ const path = require('node:path');
 // localizable and nothing in CI notices. _locales/ is deliberately outside the Chrome/Edge
 // lockstep check (see CLAUDE.md), and this is the guard on that fallback path.
 //
-// Scope, deliberately: everything here is within ONE app and never looks at message text.
+// Scope, deliberately: everything here is within ONE app, and the only thing it asks of a
+// message is that it is non-empty — never what it says.
 // Cross-app parity — identical key sets, the sanctioned per-browser wording deltas, and the
 // __MSG_*__ references in manifest.json, which SOURCE_ROOTS below does not scan — belongs to
 // scripts/check-i18n-parity.sh. It has to live outside this file: this is itself a lockstep

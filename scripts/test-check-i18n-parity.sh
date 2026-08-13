@@ -229,12 +229,28 @@ run_case manifest-key-absent-from-catalog 1 "references 1 key(s) absent from" \
 run_case manifest-stopped-localizing 1 "no __MSG_*__ references found" \
   python3 -c 'import json; json.dump({"manifest_version": 3, "name": "qURL", "description": "x"}, open("apps/edge-extension/manifest.json", "w"))'
 
+run_case manifest-missing 1 "manifest.json: missing" \
+  rm "apps/edge-extension/manifest.json"
+
+run_case manifest-invalid-json 1 "invalid JSON" \
+  python3 -c 'open("apps/chrome-extension/manifest.json", "w").write("{ not json")'
+
 # Rule 6 — popup.html's two pre-i18n mirrors, which no lockstep file covers.
 run_case popup-title-mismatch 1 "<title> reads 'qURL Agent' but this app's ext_name is" \
   python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<title>qURL File Upload for Edge</title>", "<title>qURL Agent</title>"))'
 
 run_case popup-header-mismatch 1 "data-i18n=\"ext_name\" reads 'qURL Agent' but this app's ext_name is" \
   python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace(">qURL File Upload for Edge</div>", ">qURL Agent</div>"))'
+
+# The header mirror is matched on its data-i18n key alone, so extra classes and
+# reordered attributes still resolve — an innocent CSS refactor must not read as
+# "the scan is broken".
+run_case popup-header-tolerates-extra-class 0 "i18n in parity" \
+  python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<div class=\"title\" data-i18n=\"ext_name\">", "<div data-i18n=\"ext_name\" class=\"title utility\">"))'
+
+# Rule 6 is symmetric over both apps; the cases above only mutate Edge.
+run_case popup-title-mismatch-chrome-side 1 "<title> reads 'qURL File Upload for Edge' but this app's ext_name is" \
+  python3 -c 'p = "apps/chrome-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<title>qURL Agent</title>", "<title>qURL File Upload for Edge</title>"))'
 
 run_case popup-mirror-shape-changed 1 "no <title> mirror of ext_name found" \
   python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<title>qURL File Upload for Edge</title>", ""))'

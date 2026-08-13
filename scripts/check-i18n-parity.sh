@@ -91,7 +91,10 @@ POPUP_MIRRORS = (
     ("<title>", re.compile(r"<title>(.*?)</title>", re.DOTALL)),
     (
         'data-i18n="ext_name"',
-        re.compile(r'<div class="title" data-i18n="ext_name">(.*?)</div>', re.DOTALL),
+        # Deliberately tolerant of extra classes and attribute order: the element
+        # is identified by its data-i18n key alone, so an innocent CSS refactor
+        # (class="title utility") does not surface as "the scan is broken".
+        re.compile(r'<div\b[^>]*\bdata-i18n="ext_name"[^>]*>(.*?)</div>', re.DOTALL),
     ),
 )
 
@@ -267,9 +270,9 @@ if failures:
     )
     raise SystemExit(1)
 
-shared = len(set(chrome) & set(edge)) - len(SANCTIONED_DELTAS)
+identical = sum(1 for key in set(chrome) & set(edge) if chrome[key] == edge[key])
 print(
     f"chrome-extension/edge-extension i18n in parity "
-    f"({shared} identical keys, {len(SANCTIONED_DELTAS)} sanctioned deltas)"
+    f"({identical} identical keys, {len(SANCTIONED_DELTAS)} sanctioned deltas)"
 )
 EOF
