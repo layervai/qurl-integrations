@@ -67,19 +67,33 @@ with open(WORKFLOW) as fh:
 
 # --- structural extraction (stdlib only; PyYAML is not guaranteed on runners)
 
-def extract_block(header_pattern, body_indent):
-    """Return the dedented block scalar following the first matching header."""
+def extract_run_block(step_name):
+    """Return the dedented run: block of the named step.
+
+    Anchored on the step name rather than "first run: block in the file", so
+    inserting a step ahead of this one cannot silently redirect the check at
+    the wrong script.
+    """
+    start = None
     for i, line in enumerate(lines):
-        if re.match(header_pattern, line):
-            body, pad = [], " " * body_indent
+        if re.match(r"^ {6}- name: %s\s*$" % re.escape(step_name), line):
+            start = i
+            break
+    if start is None:
+        return None
+    for i in range(start + 1, len(lines)):
+        if re.match(r"^ {6}- ", lines[i]):
+            break  # next step; this one has no run: block
+        if re.match(r"^ {8}run: \|\s*$", lines[i]):
+            body, pad = [], " " * 10
             for nxt in lines[i + 1:]:
                 if nxt.strip() and not nxt.startswith(pad):
                     break
-                body.append(nxt[body_indent:] if nxt.startswith(pad) else "")
+                body.append(nxt[10:] if nxt.startswith(pad) else "")
             return "\n".join(body)
     return None
 
-run_script = extract_block(r"^ {8}run: \|\s*$", 10)
+run_script = extract_run_block(STEP_NAME)
 if not run_script or "jq -n" not in run_script:
     die("could not extract the %r step's run: block -- if the workflow was "
         "restructured, update this check rather than deleting it" % STEP_NAME)
@@ -99,6 +113,8 @@ if not triggers:
 # --- 1. every trigger names a workflow that still exists (a missed rename
 #        means the notifier silently never fires -- no red run at all)
 
+# Assumes each workflow declares a top-level `name:`. GitHub otherwise keys a
+# workflow by its file path, which could never match a trigger entry here.
 names = set()
 for entry in sorted(os.listdir(".github/workflows")):
     if not entry.endswith((".yml", ".yaml")):
