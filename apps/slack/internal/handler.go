@@ -800,9 +800,9 @@ type Handler struct {
 	agentAckTimeout time.Duration
 	// driftLogged latches which envelope field paths have already reported a
 	// tolerated JSON type drift, so a systematic Slack schema change reports
-	// once per field instead of once per request. Keys come from our own struct
-	// tags, so it is bounded by the envelope shape; see logEventDrift. Usable
-	// on a zero Handler, so a hand-built test Handler needs no construction.
+	// once per field instead of once per request. See logEventDrift for why the
+	// key space is bounded. A zero sync.Map is fully usable, so this latches
+	// correctly on a hand-built Handler that never went through NewHandler.
 	driftLogged sync.Map
 	// wg tracks live async workers so cmd/main.go's Wait() can drain
 	// them after http.Server.Shutdown returns. wg.Add MUST happen on
@@ -2273,13 +2273,20 @@ const lifecycleDropDriftReason = "lifecycle event NOT purged: envelope field typ
 //
 // The latch is per PROCESS and never expires, which is the right shape for what
 // this reports: drift means Slack's schema moved, so the first line is the whole
-// signal and every repeat is the same news at request volume. Keys come from our
-// own struct tags via *json.UnmarshalTypeError.Field, so the map is bounded by
-// the envelope's shape — a payload cannot grow it.
+// signal and every repeat is the same news at request volume.
 //
-// nil-receiver-safe, and safe on a Handler built without NewHandler: a nil map
-// pointer just means no latching, so a hand-built test Handler logs every time
-// rather than silently dropping the line.
+// An unbounded map on the request path needs its key space justified. Keys are
+// *json.UnmarshalTypeError.Field, which encoding/json builds from STRUCT TAGS
+// only — it carries neither slice indices nor map keys (verified: a mistyped
+// value under `map[string]string` reports the map's own field name, not the
+// payload's key). Every envelope field is a string, int64, bool, pointer, slice
+// or struct today, so the ceiling is the number of fields we declare and a
+// payload cannot move it. Adding a map-typed field would not breach that either,
+// on current behavior — but it is the change that would put this assumption back
+// in play, so re-check it there.
+//
+// nil-receiver-safe, and correct on a Handler built without NewHandler: sync.Map
+// needs no construction, so only a nil *Handler* skips the latch.
 func (h *Handler) logEventDrift(err error, driftField string, env *slackEventEnvelope, bodyLength int) {
 	level := slog.LevelDebug
 	if h == nil || h.driftFieldUnseen(driftField) {
