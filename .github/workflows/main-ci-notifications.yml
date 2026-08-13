@@ -120,23 +120,23 @@ jobs:
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: "*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`."
+                    text: ("*:rotating_light: Main CI did not pass*\n`" + $workflow + "` completed with `" + $conclusion + "` on `" + $branch + "`.")
                   }
                 },
                 {
                   type: "section",
                   fields: [
-                    { type: "mrkdwn", text: "*Repository*\n<" + $repository_url + "|" + $repository + ">" },
-                    { type: "mrkdwn", text: "*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>" },
-                    { type: "mrkdwn", text: "*Triggered by*\n" + $actor },
-                    { type: "mrkdwn", text: "*Run*\n<" + $run_url + "|#" + $run_number + ">" }
+                    { type: "mrkdwn", text: ("*Repository*\n<" + $repository_url + "|" + $repository + ">") },
+                    { type: "mrkdwn", text: ("*Commit*\n<" + $commit_url + "|`" + $short_sha + "`>") },
+                    { type: "mrkdwn", text: ("*Triggered by*\n" + $actor) },
+                    { type: "mrkdwn", text: ("*Run*\n<" + $run_url + "|#" + $run_number + ">") }
                   ]
                 },
                 {
                   type: "section",
                   text: {
                     type: "mrkdwn",
-                    text: "*Impact*\n" + $impact
+                    text: ("*Impact*\n" + $impact)
                   }
                 },
                 {
