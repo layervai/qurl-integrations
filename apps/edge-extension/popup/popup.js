@@ -395,8 +395,11 @@ copyBtn.addEventListener('click', async () => {
   if (lastSuccessfulResults.length === 0) return;
 
   try {
-    const html = buildCopyHtml(lastSuccessfulResults);
-    const text = buildCopyText(lastSuccessfulResults);
+    const text = buildCopyUrlText(lastSuccessfulResults);
+    if (!text) {
+      throw new Error('No accessible qURL link available to copy.');
+    }
+    const html = buildCopyUrlHtml(lastSuccessfulResults);
     await writeRichClipboard(html, text);
     copyBtn.textContent = getMessage('copy_done', 'Copied');
   } catch (err) {
@@ -405,7 +408,7 @@ copyBtn.addEventListener('click', async () => {
   }
 
   window.setTimeout(function () {
-    copyBtn.textContent = getMessage('copy_btn', 'Copy inserted content');
+    copyBtn.textContent = copyButtonLabel(collectCopyableResults(lastSuccessfulResults));
   }, COPY_BUTTON_REVERT_MS);
 });
 
@@ -477,20 +480,40 @@ function showResults(results, errors, insertionError) {
   errorArea.innerHTML = '';
   resultArea.classList.add('hidden');
   errorArea.classList.add('hidden');
+  errorArea.classList.remove('notice');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
-  copyBtn.textContent = getMessage('copy_btn', 'Copy inserted content');
+  const copyableLinks = collectCopyableResults(results);
+  const hasCopyableLinks = copyableLinks.length > 0;
+  copyBtn.textContent = copyButtonLabel(copyableLinks);
 
   if (results.length === 0 && errors.length === 0 && !insertionError) return;
 
   if (results.length > 0) {
-    copyArea.classList.remove('hidden');
-    copyBtn.disabled = false;
+    // Only offer the copy fallback when it can actually hand the user something. A visible but
+    // permanently disabled button raises a question it doesn't answer — especially under the
+    // green all-success banner, where nothing else on screen explains why it is greyed out.
+    if (hasCopyableLinks) {
+      copyArea.classList.remove('hidden');
+      copyBtn.disabled = false;
+    }
     resultArea.classList.remove('hidden');
-    const summaryClass = errors.length === 0 ? 'all-success' : 'partial';
-    const summaryText = results.length === 1
-      ? getMessage('result_one_success', '1 file uploaded successfully')
-      : getMessage('result_n_success', '$1 files uploaded successfully', [String(results.length)]);
+    const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
+    // Two different things get counted here, so they use two different counts. The "inserted"
+    // wording counts accessible links, because that is what actually became a link in the
+    // draft — buildLinkHtml renders a non-https result as filename-only text, so counting
+    // results would claim more links than the draft received. The upload-only wording counts
+    // files, which is what it is about. When nothing was linkable there is no honest
+    // "inserted" sentence to show, so fall back to the upload-only wording rather than
+    // announcing "Inserted 0 qURL links".
+    const insertedLinks = insertionError ? 0 : copyableLinks.length;
+    const summaryText = insertedLinks === 0
+      ? (results.length === 1
+        ? getMessage('result_one_uploaded', '1 file uploaded successfully')
+        : getMessage('result_n_uploaded', '$1 files uploaded successfully', [String(results.length)]))
+      : (insertedLinks === 1
+        ? getMessage('result_one_inserted', 'Inserted the qURL link into your Gmail draft')
+        : getMessage('result_n_inserted', 'Inserted $1 qURL links into your Gmail draft', [String(insertedLinks)]));
 
     const summary = document.createElement('div');
     summary.className = `result-summary ${summaryClass}`;
@@ -525,13 +548,22 @@ function showResults(results, errors, insertionError) {
 
   if (errors.length > 0 || insertionError) {
     errorArea.classList.remove('hidden');
+    // Every upload worked and only the Gmail insertion failed, so this box carries a
+    // success-toned message plus a pointer at the copy fallback — style it as a notice rather
+    // than an error. This only holds while there is actually a fallback: with no copyable link
+    // the user has no way left to reach their upload from the popup, which is an error state
+    // however well the uploads themselves went.
+    errorArea.classList.toggle(
+      'notice',
+      Boolean(insertionError) && errors.length === 0 && hasCopyableLinks
+    );
     const title = document.createElement('div');
     title.className = 'error-title';
     // Pick the title by upload-error count; the insertion failure (if any) is always listed
     // as its own bullet below. The singular case must not depend on insertionError, or one
     // failed upload alongside an insertion failure renders the ungrammatical "1 files…".
     title.textContent = insertionError && errors.length === 0
-      ? getMessage('result_insertion_only_failed', 'Uploaded successfully, but Gmail draft insertion failed')
+      ? insertionOnlyFailureMessage(copyableLinks)
       : errors.length === 1
       ? getMessage('result_one_error', '1 file failed to upload')
       : getMessage('result_n_errors', '$1 files failed to upload', [String(errors.length)]);
@@ -558,11 +590,12 @@ function clearResults() {
   progressArea.classList.add('hidden');
   resultArea.innerHTML = '';
   resultArea.classList.add('hidden');
+  errorArea.classList.remove('notice');
   errorArea.innerHTML = '';
   errorArea.classList.add('hidden');
   copyArea.classList.add('hidden');
   copyBtn.disabled = true;
-  copyBtn.textContent = getMessage('copy_btn', 'Copy inserted content');
+  copyBtn.textContent = getMessage('copy_btn', 'Copy the qURL link');
 }
 
 function setLoading(loading) {
@@ -737,11 +770,9 @@ function isRetryableRuntimeMessageError(err) {
   return Boolean(err && err.qurlRetryable);
 }
 
-// buildCopyHtml/buildCopyText/normalizeAllowedLink delegate to the single implementation in
-// lib/qurl-compose-format.js (loaded before this script in popup.html). Keeping one copy
-// prevents the security-sensitive https-only URL logic from drifting between two places. The
-// formatter is a hard dependency, so fail loudly if it is missing rather than silently
-// falling back to a second, potentially weaker, implementation.
+// Clipboard URL extraction still delegates the https-only validation to the shared formatter in
+// lib/qurl-compose-format.js. Keep the URL allowlist in one place so Gmail insertion, link
+// rendering, and clipboard copy cannot drift on what constitutes a safe qURL.
 function getComposeFormatter() {
   if (!window.QURLComposeFormatter) {
     throw new Error('QURLComposeFormatter is not loaded — check the script order in popup.html.');
@@ -756,16 +787,82 @@ function formatFileSize(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
-function buildCopyHtml(results) {
-  return getComposeFormatter().buildLinkHtml(results);
-}
-
-function buildCopyText(results) {
-  return getComposeFormatter().buildLinkPlainText(results);
-}
-
 function normalizeAllowedLink(link) {
   return getComposeFormatter().normalizeAllowedLink(link);
+}
+
+// Mirrors copyButtonLabel: the insertion-only message points the user at the copy button, so it
+// has to agree with that button about how many links are waiting there.
+function insertionOnlyFailureMessage(links) {
+  if (links.length === 0) {
+    return getMessage(
+      'result_insertion_only_failed_no_copy',
+      'Upload completed successfully, but no accessible qURL link is available to copy.'
+    );
+  }
+
+  return links.length > 1
+    ? getMessage(
+      'result_insertion_only_failed_plural',
+      'Upload completed successfully. Use the copy button below to get the accessible qURL links.'
+    )
+    : getMessage(
+      'result_insertion_only_failed',
+      'Upload completed successfully. Use the copy button below to get the accessible qURL link.'
+    );
+}
+
+// Label the copy button for the number of links it will actually copy. Every path that sets
+// the label goes through here — the initial render and the post-"Copied" revert alike — so the
+// button can't revert to the singular form while several links are still copyable.
+function copyButtonLabel(links) {
+  return links.length > 1
+    ? getMessage('copy_btn_plural', 'Copy the qURL links')
+    : getMessage('copy_btn', 'Copy the qURL link');
+}
+
+// The one place that decides which links are copyable. Both clipboard flavors and the button's
+// enabled/label state read from this, so none of them can disagree about what counts as an
+// accessible qURL. Carries the expiry alongside each link: the copy fallback is reached exactly
+// when Gmail insertion failed, so without it the user pasting manually would be the one person
+// who never learns when the link stops working.
+function collectCopyableResults(results) {
+  if (!results || results.length === 0) {
+    return [];
+  }
+
+  return results
+    .map(function (result) {
+      const link = normalizeAllowedLink(result.link);
+      return link ? { link: link, expiry: result.expiry } : null;
+    })
+    .filter(Boolean);
+}
+
+function buildCopyUrlText(results) {
+  return collectCopyableResults(results)
+    .map(function (entry) {
+      return entry.link + getComposeFormatter().buildExpirySuffix(entry.expiry);
+    })
+    .join('\n');
+}
+
+// Deliberately plainer than the formatter's buildLinkHtml: that one styles the anchor with
+// Gmail's link blue because it renders inside a Gmail draft, whereas this HTML lands in an
+// unknown rich-text target, so leaving it unstyled lets it inherit the destination's own link
+// styling.
+function buildCopyUrlHtml(results) {
+  const formatter = getComposeFormatter();
+  return collectCopyableResults(results)
+    .map(function (entry) {
+      const escaped = formatter.escapeHtml(entry.link);
+      // The suffix is machine-generated (formatExpiry emits only digits and punctuation) plus a
+      // locale string, so it carries no markup today — escaped anyway because it flows into HTML
+      // and a future locale should not be able to break the anchor.
+      const expiry = formatter.escapeHtml(formatter.buildExpirySuffix(entry.expiry));
+      return `<a href="${escaped}">${escaped}</a>${expiry}`;
+    })
+    .join('<br>');
 }
 
 async function writeRichClipboard(html, text) {
@@ -810,6 +907,8 @@ function copyViaExecCommand(html, text) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     applyLocalizedText,
+    buildCopyUrlHtml,
+    buildCopyUrlText,
     clearSettingsPanelCloseTimer,
     createInsertLinksMessage,
     createRequestId,
@@ -825,5 +924,6 @@ if (typeof module !== 'undefined' && module.exports) {
     sendRuntimeMessageWithRetry,
     sendRuntimeMessageWithTimeout,
     showPermissionConfirmation,
+    showResults,
   };
 }

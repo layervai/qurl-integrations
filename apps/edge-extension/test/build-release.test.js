@@ -346,3 +346,50 @@ test('validateReleaseManifest fails when a referenced manifest asset is missing'
     fs.rmSync(releaseRoot, { recursive: true, force: true });
   }
 });
+
+test('logo.png is excluded from the release bundle and nothing at runtime loads it', function () {
+  const projectRoot = path.resolve(__dirname, '..');
+
+  // The exclusion only holds while logo.png is purely a build-time source for
+  // generate-icons.js. If a runtime file ever points back at it, the packaged extension would
+  // reference an asset the bundle no longer carries — a broken image users see but CI would not.
+  assert.ok(
+    buildRelease.excludePaths.has(path.join('icons', 'logo.png')),
+    'icons/logo.png should be excluded from the release bundle'
+  );
+
+  const runtimeFiles = [
+    path.join('manifest.json'),
+    path.join('popup', 'popup.html'),
+    path.join('popup', 'popup.css'),
+    path.join('popup', 'popup.js'),
+    path.join('background.js'),
+    path.join('content', 'gmail-compose.js'),
+  ];
+
+  for (const relativePath of runtimeFiles) {
+    const contents = fs.readFileSync(path.join(projectRoot, relativePath), 'utf8');
+    assert.ok(
+      !contents.includes('logo.png'),
+      `${relativePath} references icons/logo.png, which build-release.js excludes from the bundle`
+    );
+  }
+
+  // The source itself must still be present for `npm run icons` to regenerate from.
+  assert.ok(fs.existsSync(path.join(projectRoot, 'icons', 'logo.png')));
+
+  // Assert the behavior, not just the config: run the real copy over the real icons/ directory
+  // and check what lands. Asserting only that excludePaths contains the entry would still pass
+  // if copyRecursive changed how it derives the relative path (projectRoot drift, a
+  // path.resolve vs path.join mismatch) and shipped the file anyway.
+  const stagingRoot = makeTempReleaseRoot();
+  try {
+    buildRelease.copyRecursive(path.join(projectRoot, 'icons'), path.join(stagingRoot, 'icons'));
+
+    const copied = fs.readdirSync(path.join(stagingRoot, 'icons')).sort();
+    assert.ok(!copied.includes('logo.png'), `logo.png reached the bundle: ${copied.join(', ')}`);
+    assert.deepEqual(copied, ['icon128.png', 'icon16.png', 'icon48.png']);
+  } finally {
+    fs.rmSync(stagingRoot, { recursive: true, force: true });
+  }
+});
