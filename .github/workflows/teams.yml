@@ -1,16 +1,15 @@
 name: "teams: Build and Test"
 
+# `on.push.paths` used to gate this workflow, which made the #1022 supersession
+# gap unfixable here: when a burst of merges cancelled a pending run, the
+# superseding commit produced no run at all to widen a diff base on. Path
+# gating now lives in the `changes` job below, so every push gets a run and
+# that run can diff against the last SHA this workflow validated.
 on:
   push:
     branches: [main]
-    paths:
-      - 'apps/teams/**'
-      - '.github/workflows/teams.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'apps/teams/**'
-      - '.github/workflows/teams.yml'
 
 permissions:
   contents: read
@@ -20,10 +19,60 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: teams / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
+    outputs:
+      # An unresolvable base forces every gate to run. A redundant run costs
+      # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
+      teams: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.teams }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, app CI never having
+      # executed (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          # Empty on pull_request (the step above is push-only), which leaves
+          # paths-filter on its PR API path; empty on a forced full run too,
+          # where the job output above ignores this filter's verdict.
+          base: ${{ steps.base.outputs.sha }}
+          filters: |
+            teams:
+              # Source of truth for Teams-impacting paths on PR and main push events.
+              - 'apps/teams/**'
+              - '.github/workflows/teams.yml'
+
   build-and-test:
     name: teams / build and test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.teams == 'true'
     defaults:
       run:
         working-directory: apps/teams
@@ -51,3 +100,67 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  required:
+    name: teams / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every Teams quality gate must be listed here; teams / required only
+    # validates jobs in this needs set. display_names below is annotation-only.
+    needs: [changes, build-and-test]
+    if: always()
+    steps:
+      - name: Verify Teams CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEAMS_CHANGED: ${{ needs.changes.outputs.teams }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::teams / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$TEAMS_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No Teams-impacting changes detected; Teams CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::teams / detect changes emitted unexpected teams output: ${TEAMS_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              build-and-test)
+                echo "teams / build and test"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a Teams quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Teams-impacting changes require every quality gate listed
+              # in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"

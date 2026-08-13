@@ -27,9 +27,21 @@ permissions:
 jobs:
   notify-build-notifications:
     name: "Notify #build-notifications"
-    # Main workflow cancellations are exceptional: the source app workflows do
-    # not auto-cancel default-branch runs, and a cancelled pre-dispatch run still
-    # leaves sandbox on the previous image with no deploy notification.
+    # `cancelled` is in the list below, but not for the reason this comment
+    # used to give. It claimed main cancellations are exceptional because the
+    # source app workflows do not auto-cancel default-branch runs. That was
+    # wrong: `cancel-in-progress: false` protects a run already in progress,
+    # not one still pending, and GitHub keeps at most one pending run per
+    # concurrency group — so a burst of merges to main routinely cancels the
+    # intermediate runs by supersession (#1022).
+    #
+    # Supersession is no longer a validation gap: each app workflow's `changes`
+    # job now diffs against the last SHA it validated, so the surviving run
+    # covers the cancelled commits too. It does still alert here, which is a
+    # cost rather than a feature — a genuinely cancelled pre-dispatch run
+    # leaves sandbox on the previous image with no deploy notification, and the
+    # workflow_run payload alone cannot tell the two apart. Narrowing this
+    # trigger is #1022's option 3 and remains open.
     if: >-
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       contains(fromJson('["push","schedule"]'), github.event.workflow_run.event) &&
