@@ -1,16 +1,15 @@
 name: "origins/s3-static-connector: Build and Publish"
 
+# `on.push.paths` used to gate this workflow, which made the #1022 supersession
+# gap unfixable here: when a burst of merges cancelled a pending run, the
+# superseding commit produced no run at all to widen a diff base on — so a
+# connector change could reach main neither validated nor published. Path
+# gating now lives in the `changes` job below.
 on:
   push:
     branches: [main]
-    paths:
-      - 'origins/s3-static-connector/**'
-      - '.github/workflows/s3-static-connector.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'origins/s3-static-connector/**'
-      - '.github/workflows/s3-static-connector.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,10 +23,69 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}/s3-static-connector
 
 jobs:
+  changes:
+    name: s3-static-connector / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
+    outputs:
+      # workflow_dispatch is an operator asking for a full build, and it has no
+      # diff to filter on; force it true rather than let an empty filter output
+      # skip the run. An unresolvable base forces every gate too: a redundant
+      # run costs minutes, a wrongly narrow diff ships unvalidated code (#1022).
+      s3_static_connector: >-
+        ${{ (github.event_name == 'workflow_dispatch' || steps.base.outputs.force == 'true')
+            && 'true' || steps.filter.outputs.s3_static_connector }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, the connector image
+      # never rebuilt (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
+      # Skipped on workflow_dispatch, which checks nothing out and has no diff
+      # to compute, and skipped when no base could be resolved. The job output
+      # above already forces both cases true, and running the filter anyway
+      # would let a filter error redden this job instead of honouring the
+      # fail-closed intent.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: github.event_name != 'workflow_dispatch' && steps.base.outputs.force != 'true'
+        with:
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
+          base: ${{ steps.base.outputs.sha }}
+          filters: |
+            s3_static_connector:
+              # Source of truth for connector-impacting paths on PR and main push events.
+              - 'origins/s3-static-connector/**'
+              - '.github/workflows/s3-static-connector.yml'
+
   test:
     name: s3-static-connector / test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.s3_static_connector == 'true'
     defaults:
       run:
         working-directory: origins/s3-static-connector
@@ -87,8 +145,18 @@ jobs:
   publish:
     name: s3-static-connector / publish
     runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Gate on the aggregate rather than on `test` directly — the same shape as
+    # slack/discord `trigger-deploy`. It keeps publishing behind every gate the
+    # aggregate enforces, and it keeps this job out of the quality-gate set that
+    # apps/slack/workflow_test.go derives from `if:` + `needs:` (a main-push-only
+    # job inside `required.needs` would fail the aggregate on every PR).
+    needs: [changes, required]
+    # `required` is `if: always()`, so a failed gate fails it and skips this job.
+    # Publishing at main's tip after a superseded run is the intended behaviour:
+    # the image is tagged with the SHA that main actually reached.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.s3_static_connector == 'true'
     permissions:
       contents: read
       packages: write
@@ -199,3 +267,69 @@ jobs:
 
           diff -u /tmp/tested-manifests.json /tmp/main-manifests.json
           diff -u /tmp/tested-manifests.json /tmp/sha-manifests.json
+
+  required:
+    name: s3-static-connector / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every connector quality gate must be listed here; s3-static-connector /
+    # required only validates jobs in this needs set. `publish` is deliberately
+    # absent: it is a main-push-only side effect, and a PR would always see it
+    # skipped. display_names below is annotation-only.
+    needs: [changes, test]
+    if: always()
+    steps:
+      - name: Verify connector CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CONNECTOR_CHANGED: ${{ needs.changes.outputs.s3_static_connector }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::s3-static-connector / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$CONNECTOR_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No connector-impacting changes detected; connector CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::s3-static-connector / detect changes emitted unexpected s3_static_connector output: ${CONNECTOR_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              test)
+                echo "s3-static-connector / test"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a quality gate.
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # Connector-impacting changes require every quality gate listed
+              # in needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"

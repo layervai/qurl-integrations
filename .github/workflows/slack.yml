@@ -21,8 +21,13 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
     outputs:
-      slack: ${{ steps.filter.outputs.slack }}
+      # An unresolvable base forces every gate to run. A redundant run costs
+      # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
+      slack: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.slack }}
     steps:
       # On PRs, paths-filter uses the pull request API; push events need git
       # history to compute the diff.
@@ -31,9 +36,30 @@ jobs:
         with:
           fetch-depth: 0
 
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, app CI never having
+      # executed (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
+        # Skipped when no base could be resolved. The job output already forces
+        # every gate true there, and running the filter anyway would let a
+        # filter error redden this job instead of honouring the fail-closed
+        # intent.
+        if: steps.base.outputs.force != 'true'
         with:
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             slack:
               # Source of truth for Slack-impacting paths on PR and main push events.
