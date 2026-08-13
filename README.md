@@ -6,17 +6,17 @@ Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that 
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. Microsoft Teams and Zapier are planned.
+This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress; Zapier is planned.
 
 ## Structure
 
 ```
-apps/                Per-integration apps (independent release tracks)
+apps/                Per-integration apps (released apps get independent release tracks)
   slack/             Slack Secure Access Agent — /qurl slash commands (Go)
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   cli/               CLI — create & manage qURLs from the terminal (Go)
-  teams/             Microsoft Teams (planned)
+  teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector
@@ -83,7 +83,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, PR requirements
 ## Releases
 
 This repo uses [Release Please](https://github.com/googleapis/release-please) in monorepo mode.
-Each app has an independent version track:
+Each *released* app has an independent version track. A track is earned by cutting a semver
+version stream that something downstream pins to — not by merely publishing an artifact.
+`origins/s3-static-connector/` ships a container image but tags it only `:main` and `:<sha>`, and
+`shared/`, `apps/teams/`, and `apps/zapier/` ship nothing, so none of them have a track:
 
 - Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack-v0.2.0`
 - The CLI is the one component tagged **without** its prefix (`v0.2.0`, not `cli-v0.2.0`) so OSS
@@ -91,12 +94,20 @@ Each app has an independent version track:
   [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml) before "normalizing" it
 - Only commits touching an app's directory trigger its release; `shared/` changes ship with each
   app's next release
-- Each app has its own `CHANGELOG.md`
+- Each released app gets its own `CHANGELOG.md` once its first release lands
 
 ## CI
 
-Each app has a path-filtered workflow that only runs when its code (or shared code) changes.
-A `shared-test.yml` workflow runs all app tests when `shared/` is modified.
+Each app's workflow runs on every PR. A `changes` detector job inside it decides whether that
+app's quality gates actually execute, and an always-reporting aggregate check — `slack / required`,
+`discord / required`, `chrome-extension / required`, `teams / required`, `shared / required` —
+summarizes the result. Branch protection requires those aggregates, never the gates themselves.
+
+Path filtering deliberately lives in the detector rather than in `on: paths:`: a workflow skipped
+by a trigger-level path filter never reports its checks at all, so a required aggregate would
+block every PR that happens not to touch that app. The detector's filter is the source of truth
+for which paths need validation, and `shared-test.yml` runs all Go app tests when `shared/`
+is modified.
 
 ## License
 
