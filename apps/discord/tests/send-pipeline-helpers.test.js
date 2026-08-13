@@ -19,8 +19,6 @@ jest.mock('../src/config', () => ({
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_DETECT_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
-  PENDING_LINK_EXPIRY_MINUTES: 30,
-  ADMIN_USER_IDS: [],
 }));
 
 // Silence logger output during tests
@@ -133,11 +131,6 @@ jest.mock('../src/discord', () => ({
 }));
 
 // Mock admin util
-jest.mock('../src/utils/admin', () => ({
-  requireAdmin: jest.fn(() => true),
-  isAdmin: jest.fn(() => false),
-}));
-
 // Mock form-data (for connector.js)
 jest.mock('form-data', () => {
   return jest.fn().mockImplementation(() => ({
@@ -993,8 +986,6 @@ describe('handleAddRecipients', () => {
       QURL_SEND_COOLDOWN_MS: 30000,
       QURL_DETECT_COOLDOWN_MS: 30000,
       QURL_SEND_MAX_RECIPIENTS: 50,
-      PENDING_LINK_EXPIRY_MINUTES: 30,
-      ADMIN_USER_IDS: [],
     }));
 
     // Mock logger
@@ -1115,11 +1106,6 @@ describe('handleAddRecipients', () => {
     }));
 
     // Mock admin util
-    jest.mock('../src/utils/admin', () => ({
-      requireAdmin: jest.fn(() => true),
-      isAdmin: jest.fn(() => false),
-    }));
-
     // Mock qurl
     mockCreateOneTimeLink = jest.fn();
     jest.mock('../src/qurl', () => ({
