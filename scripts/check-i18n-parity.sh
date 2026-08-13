@@ -48,6 +48,10 @@
 #     ("Safari will show…" in Edge's copy) clears every rule. Asserting each
 #     copy names its own browser instead would false-positive on ext_name, whose
 #     Chrome value ("qURL Agent") names no browser at all.
+#   - Rule 4 is case-sensitive (see rule 4 below), so a lowercase browser name
+#     in a user-facing message ("open in edge") slips past it. Accepted: browser
+#     names are proper nouns and every catalog string capitalizes them, and
+#     matching case-insensitively would diverge from the sibling script.
 #   - Rule 2 exempts a sanctioned key on `message` only, so its `description`
 #     and placeholders must stay identical across the two catalogs. That is
 #     deliberate; a legitimately per-browser `description` would need its own
