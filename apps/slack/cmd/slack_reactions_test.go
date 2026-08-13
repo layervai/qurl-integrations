@@ -53,7 +53,7 @@ func newTestReactionPort(lookup slackBotTokenLookup, addURL, removeURL string, h
 
 func TestSlackReactionPort_AddPostsExpectedRequest(t *testing.T) {
 	srv, got := reactionTestServer(t, `{"ok":true}`)
-	port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", srv.Client())
+	port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", slackWebAPITestClient(srv))
 
 	if err := port.Add(context.Background(), "T1", "", "C1", "100.1", "eyes"); err != nil {
 		t.Fatalf("Add: %v", err)
@@ -75,7 +75,7 @@ func TestSlackReactionPort_AddPostsExpectedRequest(t *testing.T) {
 
 func TestSlackReactionPort_RemoveRoutesToRemoveURL(t *testing.T) {
 	srv, got := reactionTestServer(t, `{"ok":true}`)
-	port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", srv.Client())
+	port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", slackWebAPITestClient(srv))
 
 	if err := port.Remove(context.Background(), "T1", "", "C1", "100.1", "eyes"); err != nil {
 		t.Fatalf("Remove: %v", err)
@@ -101,7 +101,7 @@ func TestSlackReactionPort_BenignErrorsTreatedAsSuccess(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			srv, _ := reactionTestServer(t, c.okJSON)
-			port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", srv.Client())
+			port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", slackWebAPITestClient(srv))
 			if err := c.call(port); err != nil {
 				t.Fatalf("benign idempotent outcome must read as success, got %v", err)
 			}
@@ -111,7 +111,7 @@ func TestSlackReactionPort_BenignErrorsTreatedAsSuccess(t *testing.T) {
 
 func TestSlackReactionPort_RealErrorSurfaces(t *testing.T) {
 	srv, _ := reactionTestServer(t, `{"ok":false,"error":"message_not_found"}`)
-	port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", srv.Client())
+	port := newTestReactionPort(staticTokenLookup("xoxb-test"), srv.URL+"/add", srv.URL+"/remove", slackWebAPITestClient(srv))
 	err := port.Add(context.Background(), "T1", "", "C1", "100.1", "eyes")
 	if err == nil || !strings.Contains(err.Error(), "message_not_found") {
 		t.Fatalf("a non-benign ok:false must surface, got %v", err)
@@ -127,7 +127,7 @@ func TestSlackReactionPort_GridFallback(t *testing.T) {
 			return "", auth.ErrSlackBotTokenNotConfigured
 		}
 		return testTokenXoxbOrg, nil
-	}, srv.URL+"/add", srv.URL+"/remove", srv.Client())
+	}, srv.URL+"/add", srv.URL+"/remove", slackWebAPITestClient(srv))
 
 	if err := port.Add(context.Background(), "T1", "E1", "C1", "100.1", "eyes"); err != nil {
 		t.Fatalf("Add with Grid fallback: %v", err)

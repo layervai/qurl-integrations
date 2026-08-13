@@ -32,15 +32,20 @@ const (
 	testGridEnterpriseID              = "E_grid"
 )
 
-// Preserve the production views.open timeout and redirect policy while keeping
-// httptest traffic off http.DefaultTransport. Server.Close closes idle
-// connections on the global transport, which can interrupt parallel tests.
+// Preserve the production views.open client policy while swapping in the
+// server-owned transport. Server.Close closes idle connections on
+// http.DefaultTransport, which can interrupt parallel tests.
 func slackOpenViewTestClient(srv *httptest.Server) *http.Client {
-	client := srv.Client()
-	client.Timeout = slackViewsOpenTimeout
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
+	client := defaultSlackViewsOpenClient()
+	client.Transport = srv.Client().Transport
+	return client
+}
+
+// Preserve the shared Slack Web API client policy while swapping in the
+// server-owned transport for test isolation.
+func slackWebAPITestClient(srv *httptest.Server) *http.Client {
+	client := defaultSlackWebAPIClient()
+	client.Transport = srv.Client().Transport
 	return client
 }
 
@@ -194,7 +199,7 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, srv.Client())
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
 	for _, tc := range []struct {
 		name string
 		user string
@@ -257,7 +262,7 @@ func TestSlackUserLookupFuncWithTokenLookupRequiresWorkspaceToken(t *testing.T) 
 			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
 		}
 		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, srv.Client())
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
 
 	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
 	if !errors.Is(err, auth.ErrSlackBotTokenNotConfigured) {
@@ -292,7 +297,7 @@ func TestSlackUserLookupFuncWithTokenLookupPropagatesWorkspaceTokenErrors(t *tes
 			t.Fatalf("ownership transfer lookup must not fall back to the Enterprise Grid token")
 		}
 		return "", fmt.Errorf("unexpected token owner %q", ownerID)
-	}, testSlackWebAPIUserAgent, srv.URL, srv.Client())
+	}, testSlackWebAPIUserAgent, srv.URL, slackWebAPITestClient(srv))
 
 	ok, err := lookup(context.Background(), testGridTeamID, testGridEnterpriseID, "UGRIDUSER")
 	if err == nil {
@@ -1110,7 +1115,7 @@ func TestSlackWebAPIPosterGridFallbackWarningSanitizesOwnerIDs(t *testing.T) {
 			return testSlackValidationToken, nil
 		}
 		return "", auth.ErrSlackBotTokenNotConfigured
-	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, srv.Client())
+	}, testSlackValidationUA, srv.URL, "chat.postMessage", slackChatPostMessageResponseError, slackWebAPITestClient(srv))
 
 	if _, err := poster.gridPost(context.Background(), teamID, enterpriseID, []byte(`{"channel":"C123","text":"hello"}`)); err != nil {
 		t.Fatalf("gridPost: %v", err)
