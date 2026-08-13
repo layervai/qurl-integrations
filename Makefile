@@ -197,7 +197,13 @@ check-teams:
 # e2e/ has no CI workflow at all, so this is the only gate its TypeScript gets.
 # Offline subset only: `npm test` there also runs the live suite, which mints
 # real qURL resources and posts real Discord messages against credentials in
-# e2e/.env (see e2e/README.md). No .nvmrc here, so no version warning.
+# e2e/.env (see e2e/README.md).
+#
+# Alone among these apps e2e/ has no .nvmrc, so it gets no version warning —
+# note its package.json asks for node >=24 (the others pin 22.21.0), and npm
+# does not enforce engines by default. Giving it an .nvmrc is the right fix,
+# but the pin belongs with the e2e CI workflow that would verify it; inventing
+# one here would be a version nothing checks.
 #
 # -p is explicit rather than relying on tsc's upward search, and names the same
 # config ts-jest compiles with (neither jest config overrides it). Note the
