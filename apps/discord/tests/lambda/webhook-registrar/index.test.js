@@ -93,6 +93,118 @@ describe('webhook-registrar Lambda — input validation', () => {
   ])('throws when %s doesn\'t start with https:// (got %s)', async (key, badValue) => {
     await expect(handler({ ...BASE_EVENT, [key]: badValue }, CONTEXT)).rejects.toThrow(/must start with https:\/\//);
   });
+
+  it.each([
+    'Discord Bot view counter (env=prod)', // capital B
+    'discord bot view counter (env=prod)', // lowercase d
+    'Discord bot - view counter (env=prod)', // dash instead of contiguous
+    'Some unrelated description (env=prod)',
+    'Discord bot view counterX (env=prod)', // no boundary
+  ])('throws on description prefix drift (%s) — orphan-sweep matcher invariant', async (badDescription) => {
+    // The URL-migration orphan sweep derives its prefix from this
+    // `description`. If terraform ever sets a string that doesn't
+    // begin with `Discord bot view counter (` (or equal exactly), the
+    // sweep silently goes uncatchable for the central registrar's
+    // own future orphans. Fail-fast at the boundary instead.
+    await expect(handler({ ...BASE_EVENT, description: badDescription }, CONTEXT))
+      .rejects.toThrow(/description must start with "Discord bot view counter \("/);
+  });
+
+  it('KEEPS the sweep enabled when QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP=0 (footgun guard, normalize-then-test)', async () => {
+    // An operator typing `=0` intuitively expects sweep ON; without
+    // env-var normalization the previous `!process.env.VAR` would
+    // treat any non-empty string as truthy and DISABLE the sweep —
+    // benign blast radius (no deletions) but surprising. Pin the
+    // normalize-then-test semantics.
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '0';
+    try {
+      ssmMock
+        .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+        .resolves({ Parameter: { Value: 'lv_test_key' } })
+        .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+        .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+        .on(PutParameterCommand)
+        .resolves({});
+      let deleted = false;
+      mockQurlService({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          {
+            webhook_id: 'wh_orphan',
+            url: 'https://oldhost.example/webhooks/qurl',
+            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
+            events: ['qurl.accessed', 'qurl.expired'],
+            failure_count: 1475,
+            last_delivery_success: false,
+          },
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      await handler({ ...BASE_EVENT }, CONTEXT);
+      expect(deleted).toBe(true); // sweep ran — `=0` does NOT disable
+    } finally {
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it('disables the orphan sweep when QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP is set (hard guard for active-active)', async () => {
+    const oldEnv = process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+    process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = '1';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      ssmMock
+        .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+        .resolves({ Parameter: { Value: 'lv_test_key' } })
+        .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+        .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+        .on(PutParameterCommand)
+        .resolves({});
+      let deleted = false;
+      mockQurlService({
+        'GET /v1/webhooks': () => ({ body: { data: [
+          // Would be a confirmed orphan if sweep were enabled.
+          {
+            webhook_id: 'wh_orphan',
+            url: 'https://oldhost.example/webhooks/qurl',
+            description: 'Discord bot view counter (region=us-east-2, env=sandbox-old)',
+            events: ['qurl.accessed', 'qurl.expired'],
+            failure_count: 1475,
+            last_delivery_success: false,
+          },
+        ] } }),
+        'DELETE /v1/webhooks/wh_orphan': () => { deleted = true; return { status: 204, body: '' }; },
+        'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_new', secret: 'whsec_new' } } }),
+      });
+      const result = await handler({ ...BASE_EVENT }, CONTEXT);
+      expect(deleted).toBe(false); // hard guard wins despite confirmed-orphan-shaped row
+      expect(result.action).toBe('created');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('URL-migration orphan sweep DISABLED via env override'));
+    } finally {
+      warnSpy.mockRestore();
+      if (oldEnv === undefined) delete process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP;
+      else process.env.QURL_WEBHOOK_REGISTRAR_DISABLE_URL_MIGRATION_SWEEP = oldEnv;
+    }
+  });
+
+  it('accepts description that exactly equals the prefix (boundary case)', async () => {
+    // The matcher allows either `prefix` exactly OR `prefix + " ("`.
+    // The Lambda boundary must allow the same shape for parity.
+    ssmMock
+      .on(GetParameterCommand, { Name: '/test/QURL_API_KEY' })
+      .resolves({ Parameter: { Value: 'lv_test_key' } })
+      .on(GetParameterCommand, { Name: '/test/QURL_WEBHOOK_SECRET' })
+      .rejects(Object.assign(new Error('not found'), { name: 'ParameterNotFound' }))
+      .on(PutParameterCommand)
+      .resolves({});
+    mockQurlService({
+      'GET /v1/webhooks': () => ({ body: { data: [] } }),
+      'POST /v1/webhooks': () => ({ status: 201, body: { data: { webhook_id: 'wh_ok', secret: 'whsec_x' } } }),
+    });
+    const result = await handler({ ...BASE_EVENT, description: 'Discord bot view counter' }, CONTEXT);
+    expect(result.action).toBe('created');
+  });
 });
 
 describe('webhook-registrar Lambda — cold bootstrap (no existing sub, no SSM secret)', () => {

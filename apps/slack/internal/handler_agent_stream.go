@@ -194,6 +194,16 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 	}
 	ctx, cancel := s.deliveryCtx()
 	defer cancel()
+	if result.DiscardedStreamText {
+		// The turn streamed narration from a round it then ABANDONED, and Reply comes
+		// from a later, independent round (see agent.Result.DiscardedStreamText). The
+		// stream is append-only, so the reconcile below could only run the two
+		// together into one message — "Let me check the res" immediately followed by
+		// the real answer. Take the broken-stream fallback instead: stop what the user
+		// already saw, and let the caller post the complete answer as its own message.
+		s.stop(ctx, nil)
+		return false
+	}
 	if tail := s.markdown.flush(); tail != "" {
 		s.pending.WriteString(tail)
 	}
@@ -222,14 +232,14 @@ func (s *agentReplyStreamer) finalizeReply(result *agent.Result) (deliveredReply
 				}
 			}
 		}
-		// The stream itself owns an ordinary free-text reply, so append the same
-		// reviewer-facing LLM footer as the non-streaming post path before stopStream.
-		// Proposal narration is followed by a separately disclosed confirm card and
-		// must not be labeled as the final generated answer.
+		// Every healthy non-empty generated stream is a standalone Slack app message,
+		// so append the reviewer-facing LLM footer before stopStream. This includes
+		// proposal narration: the following confirm card has its own provenance line,
+		// but it does not label the separate narration message.
 		// Key the guard off bytes that actually reached Slack: result.Reply can be
 		// synthesized or trimmed, while streamed is the delivery source of truth.
 		// Re-check broken because the reconcile flush above can fail inside this block.
-		if !s.broken && result.Proposal == nil && strings.TrimSpace(s.streamed.String()) != "" {
+		if !s.broken && strings.TrimSpace(s.streamed.String()) != "" {
 			s.pending.WriteString(agentLLMReplyDisclaimer)
 			s.flush(ctx)
 		}

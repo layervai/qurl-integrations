@@ -606,8 +606,20 @@ func (h *Handler) runAgentFollowupPipeline(log *slog.Logger, env *slackEventEnve
 // defaultMaxIterations Anthropic round-trips plus channel-scoped reads, so it
 // needs more than the 25s slash-command budget — 25s could cancel a legitimate
 // multi-tool-call turn mid-flight and surface a spurious error to the user. The
-// iteration cap and (later) per-user rate limiting bound how long a slot is held.
-const agentTurnTimeout = 90 * time.Second
+// iteration cap and per-user rate limiting bound how long a slot is held.
+//
+// It was 90s while overrunning the budget meant losing the turn: the only way to
+// protect a slow-but-legitimate turn was to wait longer. The agent package now
+// RATIONS this deadline (see agent.finalAnswerReserve) and finalizes into a real
+// answer instead of failing, which inverts the tradeoff — a longer budget no
+// longer buys safety, it only buys a longer wait before the same graceful answer.
+//
+// So size it for the user instead. At the reserve's 15s tail, a turn finalizes by
+// 60s and delivers a few seconds after, leaving ample margin inside the 90s window
+// the misuse suite scores a reply against (and well inside what a member in a
+// Slack thread will tolerate). Gathering still gets 45s — six round-trips at
+// typical latency — so the set of turns that converge on their own is unchanged.
+const agentTurnTimeout = 60 * time.Second
 
 // agentFollowupGateTimeout bounds the pre-turn Slack read for a channel follow-up
 // admission decision. A slow gate fails closed silently because the message may be
@@ -1075,7 +1087,10 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	if streamer != nil {
 		streamOpts = append(streamOpts, agent.WithStreamSink(streamer.onDelta))
 	}
-	a := agent.New(h.cfg.AgentLLM, h.newAgentBackend(log), streamOpts...)
+	// Keep the backend reference: its per-turn scan memo carries whether the
+	// workspace scan completed, which the turn-complete log reports below.
+	backend := h.newAgentBackend(log)
+	a := agent.New(h.cfg.AgentLLM, backend, streamOpts...)
 	result, _, err := a.Run(ctx, &tc, history, message)
 
 	if err != nil {
@@ -1099,8 +1114,22 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// Token usage per turn (summed across the agent's round-trips). The cache
 	// counters are the operator hook for confirming whether prompt caching is
 	// paying off once conversation mode is live (see the agent package).
+	// cutoff is empty on a turn that converged on its own, and names the ration that
+	// ran out otherwise ("budget" / "iterations"). It is the operator signal for
+	// agent latency regressions: a rising cutoff rate means turns are being answered
+	// from a partial picture, which no other field here would reveal.
+	//
+	// resources_partial is the same signal one layer down, and needs its own field
+	// because a partial scan does NOT raise cutoff — the turn converges normally,
+	// just over an incomplete resource list. The per-page and per-read budgets are
+	// far tighter than the qURL client's own 30s timeout, so a slow-but-working
+	// backend now yields partial answers where it used to yield complete ones. That
+	// is the intended trade, but without this field it would degrade answer quality
+	// silently, which is the blind spot cutoff exists to close.
 	log.Info("agent: turn complete",
 		"proposed", result.Proposal != nil,
+		"cutoff", string(result.Cutoff),
+		"resources_partial", backend.resourceScanPartial(),
 		"input_tokens", result.Usage.InputTokens,
 		"output_tokens", result.Usage.OutputTokens,
 		"cache_read_tokens", result.Usage.CacheReadInputTokens,
@@ -1117,7 +1146,7 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	}
 	// Deliver: an interactive confirm card for an executable proposal once the
 	// confirm flow is enabled, else the text reply/preview (merged #650 behavior).
-	h.deliverAgentResult(log, env, replyTS, &result)
+	h.deliverAgentResultScoped(log, env, replyTS, operatingChannel, &result)
 }
 
 func (h *Handler) prepareAgentEventAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string, pre *loadedHistory, preadmitted bool) (string, *loadedHistory, bool) {
