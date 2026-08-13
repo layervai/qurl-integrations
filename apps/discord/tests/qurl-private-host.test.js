@@ -40,6 +40,7 @@ const logger = require('../src/logger');
 
 beforeEach(() => {
   logger.warn.mockClear();
+  mockClient.create.mockClear();
   mockDnsLookup.mockReset().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
 });
 
@@ -289,6 +290,9 @@ describe('SSRF rejection observability — the blocked host reaches the log', ()
       address: '169.254.169.254',
     });
     expect(logger.warn).not.toHaveBeenCalledWith(SYNTACTIC_REJECT, expect.anything());
+    // Same security property expectBlocked pins for the syntactic cases: this is
+    // the leg that gets furthest before rejecting, so nothing may have been sent.
+    expect(mockClient.create).not.toHaveBeenCalled();
   });
 
   it('reports the mapped address dns.lookup actually returned, not the name', async () => {
