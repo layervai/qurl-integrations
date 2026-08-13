@@ -52,7 +52,17 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 // agentUnsupportedMediaReply makes the text-only boundary explicit instead of
 // silently ignoring file-only messages or sending attachment captions to the LLM
 // without the attachment. Files include Slack-hosted images and canvases.
-const agentUnsupportedMediaReply = "I can't read attached files, images, or canvases yet. Start a new text-only message with your qURL request. If you're in a channel, mention qURL again."
+//
+// It names the snippet case because Slack converts a long paste into an attached
+// snippet, so a purely textual request lands here too. The paste's text is in the
+// file, not in the event, so this surface still cannot read it — but the earlier
+// "start a new text-only message" advice reproduced the snippet on the retry,
+// leaving a paste-shaped request with no route at all. Presence detection cannot
+// tell a snippet from a PDF (see agentEventHasUpload), so one string covers both
+// and points at `/qurl`, which does not go through this surface.
+// TODO(upstream-contract): asserts that Slack clients turn a long paste into a
+// snippet rather than a plain message.
+const agentUnsupportedMediaReply = "I can't read attached files, images, or canvases yet — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message, or use a `/qurl` command — run `/qurl help` for the list. If you're in a channel, mention qURL again."
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a

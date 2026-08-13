@@ -230,6 +230,7 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 // answered without the model, and which fall through to it.
 func TestAgentDeterministicReply(t *testing.T) {
 	oneFile := []json.RawMessage{json.RawMessage(`{"id":"F1"}`)}
+	snippetFile := []json.RawMessage{json.RawMessage(`{"id":"F5","mode":"snippet","filetype":"text"}`)}
 	tests := []struct {
 		name  string
 		event slackInnerEvent
@@ -237,6 +238,11 @@ func TestAgentDeterministicReply(t *testing.T) {
 		want  string // "" means the turn should reach the model
 	}{
 		{"attachment beats a keyword caption", slackInnerEvent{Files: oneFile}, "help", agentUnsupportedMediaReply},
+		// A long paste is converted by the Slack client into a snippet, so a purely
+		// textual request arrives shaped exactly like an upload. Presence detection
+		// refuses it — the paste's text is in the file, not in this event, so the
+		// caption alone would be answered without what it refers to.
+		{"long paste converted to a snippet", slackInnerEvent{Subtype: slackMessageSubtypeFileShare, Files: snippetFile}, "protect all of these", agentUnsupportedMediaReply},
 		{"file_share with no files array is still an upload", slackInnerEvent{Subtype: slackMessageSubtypeFileShare}, "", agentUnsupportedMediaReply},
 		{"empty files array is not an upload", slackInnerEvent{Files: []json.RawMessage{}}, "help", agentHelpReply},
 		{"literal help", slackInnerEvent{}, "help", agentHelpReply},
@@ -848,6 +854,19 @@ func eventCallbackBody(eventID, event string) string {
 	return `{"type":"event_callback","team_id":"T1","api_app_id":"A1","event_id":"` + eventID + `","event":` + event + `}`
 }
 
+// TestUnsupportedMediaReplyOffersAReachableRoute pins the recovery route, not the
+// prose. Presence detection refuses every upload and Slack turns a long paste
+// into one, so a paste-shaped request is only recoverable somewhere other than
+// this surface: copy that offered nothing but "send it as a message again" would
+// loop the user back through the same conversion, with no way to be answered.
+func TestUnsupportedMediaReplyOffersAReachableRoute(t *testing.T) {
+	for _, want := range []string{"snippet", "`/qurl help`"} {
+		if !strings.Contains(agentUnsupportedMediaReply, want) {
+			t.Errorf("unsupported-media reply must mention %q so a converted paste has a route it can take; got %q", want, agentUnsupportedMediaReply)
+		}
+	}
+}
+
 func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	tests := []struct {
 		name string
@@ -873,6 +892,15 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			name:       "upload captioned with a deterministic keyword",
 			body:       eventCallbackBody("EvFileHelp", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.4","text":"help","files":[{"id":"F4"}]}`),
 			wantThread: "400.4",
+		},
+		{
+			// Slack converts a long paste into a snippet, so a request that the user
+			// typed as text arrives as a captioned upload. The reply must still be the
+			// limitation — and must name a route the user can actually take, since
+			// retyping the paste reproduces the snippet.
+			name:       "long paste converted to a snippet",
+			body:       eventCallbackBody("EvSnippet", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.6","text":"protect all of these","files":[{"id":"F5","mode":"snippet","filetype":"text","name":"Untitled"}]}`),
+			wantThread: "400.6",
 		},
 		{
 			// A file_share whose files array never arrived is still an upload; the
