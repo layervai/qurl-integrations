@@ -193,8 +193,10 @@ check-teams:
 # e2e/.env (see e2e/README.md). No .nvmrc here, so no version warning.
 #
 # -p is explicit rather than relying on tsc's upward search, and names the same
-# config ts-jest compiles test:unit with (neither jest config overrides it), so
-# the typecheck cannot cover a different file set than the tests below.
+# config ts-jest compiles with (neither jest config overrides it). Note the
+# typecheck is deliberately the wider net: tsconfig.json includes **/*.ts, so
+# it covers helpers/ and the live tests/ too, while test:unit runs only
+# unit/**. For the live suite that typecheck is the only gate there is.
 check-e2e:
 	cd e2e && npm ci --no-audit --no-fund
 	cd e2e && npx tsc -p tsconfig.json --noEmit
