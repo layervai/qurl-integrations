@@ -26,7 +26,11 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.base.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # A kill at this cap surfaces as a `cancelled` check rather than an explicit
+    # timeout, so a lost review reads like an infra blip or a passing one. On
+    # #981 one commit's review completed at 7m25s while another was killed twice
+    # at the old 8m cap. Also covers checkout, origin preparation, and verify.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write

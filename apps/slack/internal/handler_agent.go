@@ -148,6 +148,20 @@ const agentTurnRateWindow = time.Hour
 // TODO(upstream-contract): keep this value in lockstep with that infra filter.
 const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
 
+// agentUnsupportedMediaMsg is the slog msg for EVERY upload this surface cannot
+// read, whether or not the turn posted the notice. Deliberately one value, and
+// deliberately not "…; replied with the text-only limitation": once repeats are
+// suppressed that sentence is FALSE for most of a burst, which is exactly the kind
+// of quietly-wrong record an operator would build an alert on.
+//
+// A media turn returns before "agent: turn complete", so this line is its only
+// trace in any dashboard, and it is the demand signal for building real file
+// support. Infra's CloudWatch metric filters key on an exact $.msg (see
+// agentTurnRateCounterFailOpenMsg), so splitting sent-from-suppressed across two
+// strings would also make total demand require summing two filters. Both problems
+// go away by keeping one msg and putting the outcome in notice_posted.
+const agentUnsupportedMediaMsg = "agent: unsupported media"
+
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
 // triggering message while a turn runs (reactions.add), then removes when it ends.
 const agentAckReaction = "eyes"
@@ -224,6 +238,19 @@ type slackEventFiles struct {
 	// array AND for any unrecognized non-null shape, so detection fails toward
 	// refusing rather than toward answering past an attachment.
 	present bool
+}
+
+// MarshalJSON always fails, making this type decode-only by construction.
+//
+// The entries are discarded at decode time, so there is nothing faithful left to
+// emit — and because count/present are unexported, the DEFAULT marshaling would
+// emit `{}`, which this type's own UnmarshalJSON reads back as an uncountable
+// attachment. A round-tripped envelope would therefore refuse EVERY turn,
+// including purely textual ones, from a value that never carried a file. That is
+// silent and would be brutal to diagnose, so it is an error at the point of the
+// mistake instead. No marshal site exists today (verified); this keeps it that way.
+func (slackEventFiles) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("slackEventFiles is decode-only: re-marshaling an event would round-trip files into an attachment that was never there")
 }
 
 // UnmarshalJSON implements json.Unmarshaler. It classifies by SHAPE first so that
@@ -1105,6 +1132,33 @@ func agentEventThreadKey(env *slackEventEnvelope) string {
 	return agentThreadKey(env.Event.Channel, agentEventRootTS(&env.Event))
 }
 
+// agentEventMediaNoticeKey identifies the conversation an unsupported-media notice
+// is capped over: channel + the uploading member.
+//
+// Deliberately NOT agentEventThreadKey. That key carries the thread ROOT, which
+// agentEventRootTS resolves to the message's OWN ts for a top-level message — and
+// an upload burst is exactly that shape (every DM message reaches the agent, and
+// none of them carries a thread_ts), so a thread-keyed latch would be unique per
+// upload and cap nothing. Channel-scoped, it collapses the burst whether the files
+// land as top-level messages or as replies in one assistant-pane thread.
+//
+// Channel-scoped is deliberately coarser than per-conversation, and the cost is
+// worth naming: every assistant-pane thread in the app DM shares one channel id,
+// as do separate agent threads in one channel, so a member who opens a NEW pane
+// thread with an upload inside the window gets a thread that says nothing at all.
+// Accepted because they were told the same limitation moments earlier in that
+// channel, and because the alternative — keying on the thread — caps nothing at
+// all for the burst this exists to stop. The short TTL is what keeps it tolerable.
+//
+// The user is in the key so a burst only ever silences its own author: another
+// member's first upload in that channel is still answered. env.Event.User is
+// non-empty here for the same reason the per-user turn cap relies on
+// (shouldDispatchAgentEvent rejects e.User == ""), so the scope can't collapse
+// into one shared per-channel bucket.
+func agentEventMediaNoticeKey(env *slackEventEnvelope) string {
+	return env.Event.Channel + ":" + env.Event.User
+}
+
 // agentEventDedupeKey identifies the inbound MESSAGE — channel + the message's
 // OWN ts — so every delivery of one message (a retry, or overlapping app_mention
 // + message.im events with distinct event_ids) shares it and dedupes to one turn.
@@ -1158,6 +1212,56 @@ func agentDeterministicReply(message string) (reply string, ok bool) {
 	return "", false
 }
 
+// claimMediaNotice reports whether THIS upload should draw the text-only notice.
+// Event dedupe cannot cap an upload burst — a member dragging in a hundred files
+// sends a hundred distinct messages, so every one is a legitimate first delivery —
+// and the turn limiters must not, since a fixed string costs no model tokens (see
+// agentDeterministicReply). What is scarce here is outbound: chat.postMessage
+// quota is per-workspace, so an unmetered burst degrades agent replies for
+// everyone else in the workspace, and a hundred identical bot messages are their
+// own channel noise. So suppress the repeats instead of metering the turns.
+//
+// Fails OPEN, unlike the dedupe write above it: a marker error must not turn an
+// upload back into the silence this notice exists to replace, and posting is no
+// worse than the unsuppressed behavior. The dedupe guarantee is unaffected —
+// this only ever decides whether an already-deduped turn speaks.
+//
+// Note what fail-open does NOT cover: the latch and the dedupe marker share a
+// partition, so a wholesale DynamoDB outage trips MarkEventSeen first and that
+// fails CLOSED. This branch is reached when the media write alone fails — a
+// throttled partition, a malformed key, a conditional-check surprise.
+func (h *Handler) claimMediaNotice(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, partition string) bool {
+	first, err := h.cfg.AgentStore.MarkMediaNoticeSent(ctx, partition, agentEventMediaNoticeKey(env))
+	if err != nil {
+		log.Error("agent: unsupported-media notice latch failed; replying anyway", "error", err)
+		first = true
+	}
+	// This is the only deterministic reply that logs. Not because the others are
+	// invisible — none of them reach "agent: turn complete" either — but because this
+	// one is the demand signal for building real file support, and nothing else counts
+	// it. Suppressed repeats log too, so capping the reply does not also cap the count;
+	// notice_posted is what separates the two. Every field is a count, a bool, or an
+	// opaque Slack ID: names, ids and mimetypes are user content and stay out.
+	//
+	// files_visible is 0 in two operationally OPPOSITE cases, which is why the two
+	// bools are here to separate them:
+	//   - files_field_present=false, file_share_subtype=true — Slack described the
+	//     upload by subtype alone. Normal, high volume, and the refusal is correct.
+	//   - files_field_present=true with files_visible=0 — the files value arrived in
+	//     a shape the decoder could not count, i.e. Slack changed the wire format.
+	//     This is the ONLY path where the refusal may be wrong: a text-only turn
+	//     that merely carried an unrecognized files value gets refused with no
+	//     attachment involved. Alert on that pair; it is the "the agent refused my
+	//     message" report.
+	log.Info(agentUnsupportedMediaMsg,
+		"files_visible", env.Event.Files.count,
+		"files_field_present", env.Event.Files.present,
+		"file_share_subtype", env.Event.Subtype == slackMessageSubtypeFileShare,
+		"user_id", env.Event.User,
+		"notice_posted", first)
+	return first
+}
+
 func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, admittedPartition string, pre *loadedHistory, preadmitted bool) {
 	// Panic safety-net: we've already acked 200 and may have committed the dedupe
 	// marker, so Slack won't retry. If the turn panics, startAsyncWorker's recover
@@ -1208,31 +1312,17 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 	// Metering these through agentTurnLimited would not help either. That limiter caps
 	// MODEL spend, so routing uploads into it would still post one reply per upload,
 	// just with the rate-limit wording. Capping outbound volume is a separate control —
-	// a short-lived per-thread notice marker — not a limiter change; see #1045, which
-	// implements it.
+	// a short-lived notice marker — not a limiter change; claimMediaNotice below is it.
+	// Note the marker is keyed per CONVERSATION (channel + user), not per thread: a
+	// burst arrives as top-level messages, whose thread root is each message's own ts,
+	// so a per-thread marker would be unique per upload and cap nothing.
 	if agentEventHasUpload(&env.Event) {
-		// This is the only deterministic reply that logs. Not because the others are
-		// visible — none of them reach "agent: turn complete" either — but because this
-		// one is the demand signal for building real file support, and nothing else
-		// counts it. Every field is a count, a bool, or an opaque Slack ID: names, ids
-		// and mimetypes are user content and stay out of the log.
-		//
-		// files_visible is 0 in two operationally OPPOSITE cases, which is why the two
-		// bools are here to separate them:
-		//   - files_field_present=false, file_share_subtype=true — Slack described the
-		//     upload by subtype alone. Normal, high volume, and the refusal is correct.
-		//   - files_field_present=true with files_visible=0 — the files value arrived in
-		//     a shape the decoder could not count, i.e. Slack changed the wire format.
-		//     This is the ONLY path where the refusal may be wrong: a text-only turn
-		//     that merely carried an unrecognized files value gets refused with no
-		//     attachment involved. Alert on that pair; it is the "the agent refused my
-		//     message" report.
-		log.Info("agent: unsupported media; replied with the text-only limitation",
-			"files_visible", env.Event.Files.count,
-			"files_field_present", env.Event.Files.present,
-			"file_share_subtype", env.Event.Subtype == slackMessageSubtypeFileShare,
-			"user_id", env.Event.User)
-		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentUnsupportedMediaReply)
+		// Every upload is logged and counted; only the first in a conversation SPEAKS.
+		// claimMediaNotice owns both, so capping the reply does not cap the demand
+		// signal — see the field contract on its log call.
+		if h.claimMediaNotice(ctx, log, env, partition) {
+			h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentUnsupportedMediaReply)
+		}
 		return
 	}
 

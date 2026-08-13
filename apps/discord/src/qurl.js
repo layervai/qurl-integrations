@@ -150,10 +150,43 @@ function isPrivateHost(host) {
     if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
     if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
   }
-  // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
-  // prefix (URL parsing already stripped the brackets) and re-check.
-  const mapped = h.match(/^::ffff:([0-9.]+)$/);
-  if (mapped) return isPrivateHost(mapped[1]);
+  // IPv4-in-IPv6 embeddings — each carries an IPv4 in the low 32 bits, so each
+  // is another way to spell a private IPv4:
+  //   ::ffff:X:Y     IPv4-mapped     (::ffff:0:0/96)
+  //   ::X:Y          IPv4-compatible (::/96, deprecated by RFC 4291)
+  //   ::ffff:0:X:Y   IPv4-translated (SIIT)
+  //   64:ff9b::X:Y   NAT64 well-known prefix (RFC 6052)
+  // DECODE the embedded IPv4 and re-check it rather than reasoning about which
+  // notations the host stack happens to route: only the mapped form routes on a
+  // stock host, but an IPv6-only subnet with DNS64/NAT64 (a supported AWS VPC
+  // config) makes 64:ff9b:: route for real, which would flip the answer without
+  // this file changing.
+  //
+  // The two SPELLINGS below each serve a different leg, so neither is dead code:
+  //   - dotted `::ffff:127.0.0.1` — what inet_ntop (hence dns.lookup) renders,
+  //     so it is what assertNotPrivateAfterResolve feeds back in; reachable from
+  //     attacker-controlled DNS via a hostile AAAA.
+  //   - hex `::ffff:7f00:1` — what WHATWG re-serializes a dotted literal to, so
+  //     it is what `new URL(...).hostname` yields. Matching dotted-only checked
+  //     a form that never arrives on that leg (#1035).
+  // Groups are {1,4} because IPv6 serialization suppresses each hextet's leading
+  // zeros (`::ffff:a00:1` = 10.0.0.1). Both ends are anchored, so an alternative
+  // leaving the wrong group count backtracks into the next — their order is
+  // immaterial. Requiring exactly two groups keeps every match an EXACT decode;
+  // a lone hextet (`::a`) can only denote 0.0.0.0/8 or 255.255.0.0/16, never a
+  // sensitive range, so leaving it unmatched is safe — as is the dotted branch
+  // reading an all-digit lone hextet (`::1234`) as decimal, since both the
+  // decimal and hex readings land in those same two ranges.
+  // The dotted branch covers only `::`/`::ffff:` on purpose: the SIIT and NAT64
+  // dotted spellings never arrive, because the URL leg re-serializes them to hex
+  // and inet_ntop renders only the mapped block dotted.
+  const embeddedDotted = h.match(/^::(?:ffff:)?([0-9.]+)$/);
+  if (embeddedDotted) return isPrivateHost(embeddedDotted[1]);
+  const embeddedHex = h.match(/^(?:::ffff:0:|::ffff:|64:ff9b::|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (embeddedHex) {
+    const [hi, lo] = embeddedHex.slice(1).map((g) => parseInt(g, 16));
+    return isPrivateHost([(hi >>> 8) & 0xFF, hi & 0xFF, (lo >>> 8) & 0xFF, lo & 0xFF].join('.'));
+  }
   // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
   // Node's URL does too. Convert to dotted-quad.
   if (/^\d+$/.test(h)) {
