@@ -114,10 +114,12 @@ pre-commit-run:
 ## CI job closely enough to predict it — output-only flags differ, and what a
 ## target omits is noted on the target.
 ##
-## Side effect worth knowing: these create node_modules/ that Go's `./...`
-## walk then sees. Harmless today (the one Go file in there is gofmt-clean),
-## but a dep shipping malformed Go would surface as a `make check` failure
-## with no Go change behind it.
+## Side effect worth knowing: these create node_modules/ that Go's `./...` walk
+## then sees (eslint's flatted ships a .go file). .golangci.yml already drops
+## findings under node_modules/, so `lint` is covered; `vet` and `test-race`
+## are not, so a dep shipping malformed Go would surface as a `make check`
+## failure with no Go change behind it. Harmless today — measured at ~0.7s of
+## extra package loading, and the one Go file in there is clean.
 
 # $(1) is the app directory. Every app pins its own Node in .nvmrc and CI
 # feeds that file to setup-node, so a mismatched local Node can pass here and

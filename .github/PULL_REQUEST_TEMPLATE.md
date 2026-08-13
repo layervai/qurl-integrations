@@ -27,8 +27,8 @@ Brief description of changes.
 
 - [ ] `make check` passes locally (Go apps, `shared/`, and repo-wide checks)
 - [ ] For Node.js changes — or `shared/`, which triggers Discord CI — the matching
-      `make check-{chrome-extension,edge-extension,discord,teams,e2e}` passes
-      (or `make check-node`)
+      target passes: `make check-chrome-extension`, `check-edge-extension`,
+      `check-discord`, `check-teams`, `check-e2e` (or `check-node` for all five)
 - [ ] New tests added for new functionality
 - [ ] Manual testing completed
 - [ ] For app/shared-impacting changes: branch is current with `main` and the matching `*/ required` aggregate check is green
