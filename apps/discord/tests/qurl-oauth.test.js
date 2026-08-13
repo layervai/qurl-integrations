@@ -489,6 +489,7 @@ describe('qurl-oauth routes', () => {
             },
           }),
         });
+      const fetchMock = globalThis.fetch;
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
       ).set('Cookie', cookieFor(state));
@@ -496,6 +497,16 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
+
+      // Guild-key mint must send `kind: api_key` — qurl-service's
+      // POST /v1/api-keys requires `kind` and 400s without it. Durable
+      // keys use kind=api_key (enrollment_token and the system-only
+      // device are the other kinds); pin that the legacy `key_type`
+      // field name doesn't reappear.
+      const mintCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/v1/api-keys'));
+      const body = JSON.parse(mintCall[1].body);
+      expect(body.kind).toBe('api_key');
+      expect(body).not.toHaveProperty('key_type');
 
       // Confused-deputy mitigation: the success page must surface the
       // bound (guild_id, qURL email, key prefix) tuple as a structured

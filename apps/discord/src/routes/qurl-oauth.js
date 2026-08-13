@@ -360,7 +360,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
+      body: JSON.stringify({ kind: 'api_key', name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
       signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
     });
     if (!mintResp.ok) {
