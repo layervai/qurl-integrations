@@ -169,13 +169,35 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.ThreadTS = threadTS
 		return e
 	}
+	// chReplyIn is chReply for a non-"channel" channel_type — a private channel or a
+	// group DM, both of which take the same arm of the filter.
+	chReplyIn := func(channelType, text, threadTS string) *slackEventEnvelope {
+		e := env(slackEventTypeMessage, channelType, "U2", "", "", text)
+		e.Event.ThreadTS = threadTS
+		return e
+	}
 	chReplySubtype := func(text, threadTS, subtype string) *slackEventEnvelope {
 		e := chReply(text, threadTS)
 		e.Event.Subtype = subtype
 		return e
 	}
+	// mentionInThread is the recovery route the limitation reply names: an @mention
+	// posted inside a channel thread. It arrives as its own event type, so it never
+	// meets the channel branch's upload drop.
+	mentionInThread := func(text, threadTS string) *slackEventEnvelope {
+		e := env(slackEventTypeAppMention, "channel", "U2", "", "", text)
+		e.Event.ThreadTS = threadTS
+		return e
+	}
 	withFile := func(e *slackEventEnvelope) *slackEventEnvelope {
 		e.Event.Files = filesFromJSON(t, `[{"id":"F1"}]`)
+		return e
+	}
+	// withRawFiles attaches a files value straight from the wire, for shapes the
+	// decoder cannot count. It goes through the real decoder, so `{}` lands as
+	// present-but-uncountable rather than hand-built struct state.
+	withRawFiles := func(e *slackEventEnvelope, raw string) *slackEventEnvelope {
+		e.Event.Files = filesFromJSON(t, raw)
 		return e
 	}
 	tests := []struct {
@@ -212,18 +234,56 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"non-upload subtype on a mention ignored", env(slackEventTypeAppMention, "channel", "U2", "", "message_changed", "<@U12345678> hi"), false, false},
 		{"other event type ignored", env("reaction_added", "channel", "U2", "", "", "x"), false, false},
 
-		// Channel follow-ups: a thread reply is admitted ONLY when the flag is on; a
-		// top-level channel message is never admitted (no un-addressed chatter).
+		// Channel follow-ups: a TEXT thread reply is admitted ONLY when the flag is on;
+		// a top-level channel message is never admitted (no un-addressed chatter).
 		{"channel thread reply, followups off", chReply("hi", agentPoolTestThreadTS), false, false},
 		{"channel thread reply, followups on", chReply("hi", agentPoolTestThreadTS), true, true},
 		{"top-level channel message, followups off", chReply("hi", ""), false, false},
 		{"top-level channel message, followups on", chReply("hi", ""), true, false},
 		{"top-level channel file ignored", withFile(chReply("", "")), true, false},
 		{"channel thread reply empty text, followups on", chReply("   ", agentPoolTestThreadTS), true, false},
-		{"channel thread file reply reaches continuity gate", withFile(chReply("", agentPoolTestThreadTS)), true, true},
-		{"file_share channel thread reaches continuity gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, true},
+
+		// Channel uploads: never admitted, on any channel path. This is what keeps a
+		// thread upload off followupGateSem and out of conversations.replies, so the
+		// rows below are the whole cost fix — a regression here is silent, because the
+		// admitted event still ends in the same limitation reply.
+		{"channel thread file reply dropped before the gate", withFile(chReply("", agentPoolTestThreadTS)), true, false},
+		{"file_share channel thread dropped before the gate", withFile(chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare)), true, false},
+		{"file_share channel thread reply without files dropped (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
 		{"file_share top-level channel file ignored", withFile(chReplySubtype("", "", slackMessageSubtypeFileShare)), true, false},
-		{"file_share channel thread reply without files reaches continuity gate (subtype is proof)", chReplySubtype("", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, true},
+		// A caption does not buy the message back in. The turn is refused wholesale
+		// either way (see processAgentEventWithAdmission), so the text was never the
+		// reason it would have been answered.
+		{"captioned channel thread file reply dropped", withFile(chReply("more please", agentPoolTestThreadTS)), true, false},
+		{"thread_broadcast channel thread file reply dropped", withFile(chReplySubtype("look", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast)), true, false},
+		// Captioned AND file_share with no files array. The row above it proves the
+		// subtype is honored when the text is empty; this one proves it independently of
+		// the empty-text guard at the end of the function, which cannot reach a message
+		// that HAS text.
+		{"captioned file_share channel thread reply without files dropped", chReplySubtype("here you go", agentPoolTestThreadTS, slackMessageSubtypeFileShare), true, false},
+		// A files value the decoder cannot count reads as present, so this pure-TEXT
+		// follow-up is refused as an upload. That is the intended fail-toward-refusal
+		// posture (see slackEventFiles.UnmarshalJSON), and pinning it here is what keeps
+		// the collateral named at the branch honest: on this surface the refusal is now
+		// silent, where a DM or @mention would still raise claimMediaNotice's log.
+		{"channel thread text reply with an uncountable files value dropped", withRawFiles(chReply("and revoke it too", agentPoolTestThreadTS), `{}`), true, false},
+		// Regression pin on the flag-off path. It does NOT distinguish an unconditional
+		// drop from a flag-conditioned one — nothing can, because the gate below drops
+		// this row either way when the flag is off. Unconditionality is a readability
+		// choice here, not an observable one.
+		{"channel thread file reply dropped with followups off too (flag gate drops it anyway)", withFile(chReply("", agentPoolTestThreadTS)), false, false},
+		// The arm is every non-IM channel_type, not just "channel": a private channel and
+		// a group DM land here too. Called out because the "people talking to each other"
+		// rationale is weakest in an mpim, where the bot was deliberately invited — worth
+		// revisiting when the flag ships, but the cost argument is unchanged.
+		{"private channel thread file reply dropped", withFile(chReplyIn(slackChannelTypeGroup, "", agentPoolTestThreadTS)), true, false},
+		{"group DM thread file reply dropped", withFile(chReplyIn(slackChannelTypeMPIM, "", agentPoolTestThreadTS)), true, false},
+		{"private channel thread text reply still admitted", chReplyIn(slackChannelTypeGroup, "hi", agentPoolTestThreadTS), true, true},
+		// ...and the route out stays open: an @mention is a different event type, so it
+		// carries an upload through from inside a channel thread. This is the only
+		// channel upload the surface still answers, and the limitation text names it.
+		{"file-only mention inside a channel thread still admitted", withFile(mentionInThread("<@U12345678>", agentPoolTestThreadTS)), true, true},
+
 		{"thread_broadcast channel thread reply, followups off", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), false, false},
 		{"thread_broadcast channel thread reply, followups on", chReplySubtype("hi", agentPoolTestThreadTS, slackMessageSubtypeThreadBroadcast), true, true},
 		{"thread_broadcast top-level channel message, followups on", chReplySubtype("hi", "", slackMessageSubtypeThreadBroadcast), true, false},
@@ -381,6 +441,95 @@ func TestAgentEventHasUpload(t *testing.T) {
 				t.Fatalf("agentEventHasUpload = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSlackMessageHasUploadMatchesEventDetection pins the two upload classifiers
+// against each other rather than restating expectations for one of them. The event
+// path decides whether an upload's OWN turn is refused; SlackMessageHasUpload
+// decides whether every LATER turn in that thread is told the attachment was there.
+// A disagreement is not a miscount — it puts a caption back in front of the model
+// stripped of the fact that it described a file.
+func TestSlackMessageHasUploadMatchesEventDetection(t *testing.T) {
+	shapes := []string{
+		`[{"id":"F1"}]`, `[{"id":"F1"},{"id":"F2"}]`, `["F1"]`, `[]`, `null`,
+		`{"id":"F1"}`, `"F1"`, `7`,
+	}
+	for _, raw := range shapes {
+		for _, subtype := range []string{"", slackMessageSubtypeFileShare, "message_changed"} {
+			// The event side decodes a whole envelope on purpose. Building it with
+			// filesFromJSON would run the SAME top-level decode the seam uses, so the
+			// comparison would be one code path against itself; the divergence worth
+			// pinning is nested-struct-field decode vs top-level.
+			body := eventCallbackBody("EvParity", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"500.1","text":"x","subtype":"`+subtype+`","files":`+raw+`}`)
+			var envelope slackEventEnvelope
+			if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+				t.Fatalf("files %s must not fail the envelope decode: %v", raw, err)
+			}
+			want := agentEventHasUpload(&envelope.Event)
+			if got := SlackMessageHasUpload(json.RawMessage(raw), subtype); got != want {
+				t.Errorf("SlackMessageHasUpload(%s, %q) = %v, want %v to match the event path", raw, subtype, got, want)
+			}
+		}
+	}
+	// An absent files key has no event counterpart to compare against: the seam hands
+	// over a nil RawMessage where the envelope decode never calls the Unmarshaler.
+	if SlackMessageHasUpload(nil, "") {
+		t.Error("a message with no files field and no subtype is not an upload")
+	}
+	if !SlackMessageHasUpload(nil, slackMessageSubtypeFileShare) {
+		t.Error("file_share alone must still read as an upload, as it does on the event path")
+	}
+	// Routing through json.Unmarshal rather than calling the Unmarshaler directly is
+	// what makes the byte-for-byte "null" check safe here too: the decoder strips the
+	// padding either way. Called directly, a padded null would read as an attachment.
+	if SlackMessageHasUpload(json.RawMessage(" null "), "") {
+		t.Error("a padded null must still read as no attachment")
+	}
+	// No caller can produce this today — a RawMessage carries bytes the enclosing
+	// decode already validated — but the branch is what makes the safe direction a
+	// property of the code rather than of the comment above it. present=false is the
+	// UNSAFE answer here: it replays a caption as ordinary text.
+	if !SlackMessageHasUpload(json.RawMessage(`{"unterminated`), "") {
+		t.Error("a value that cannot be decoded must read as an attachment we cannot count, not as no attachment")
+	}
+}
+
+// TestAgentHistoryAttachmentNoteStatesTheBoundary pins the note's CONTENT, which
+// every other test takes as a given: they build their expectation from the constant
+// itself, so they pin the concatenation and not a word of what it says. Replacing
+// the note with "[x]" — or with "[the attached file was read in full]", which says
+// the opposite — passes all of them.
+//
+// The string is the mechanism here. It is the only thing standing between the model
+// and reading "protect everything in this" as a complete instruction, so it gets the
+// same treatment as agentUnsupportedMediaReply above: assert the load-bearing
+// properties, not the prose.
+func TestAgentHistoryAttachmentNoteStatesTheBoundary(t *testing.T) {
+	note := agentHistoryAttachmentNote
+	if !strings.HasPrefix(note, "[") || !strings.HasSuffix(note, "]") {
+		t.Errorf("the note must be bracketed so it reads as an annotation rather than as the user's own prose; got %q", note)
+	}
+	// It has to say something arrived...
+	if !strings.Contains(note, "attach") {
+		t.Errorf("the note must name the thing that was attached, or it says nothing the model can act on; got %q", note)
+	}
+	// ...and, load-bearing, that its contents did NOT. A note that only says "there
+	// was a file" leaves the model free to assume it read one.
+	if !strings.Contains(note, "never reached you") {
+		t.Errorf("the note must state that the contents did not arrive; got %q", note)
+	}
+	// Presence detection cannot tell a snippet from a PDF, and Slack turns a long
+	// typed paste into a snippet — so a note that named only files would misdescribe
+	// a user who typed a lot. This is the same scoping rule
+	// TestUnsupportedMediaReplyOffersAReachableRoute enforces on the refusal.
+	if !strings.Contains(note, "snippet") {
+		t.Errorf("the note must cover the paste-converted-to-snippet case, which trips the same detection; got %q", note)
+	}
+	// "this message" would be wrong the moment appendVisibleAgentMessage merges the
+	// annotated message with an adjacent one — the claim has to hold for the blob.
+	if strings.Contains(note, "this message") {
+		t.Errorf("the note must not say \"this message\": adjacent same-role messages merge into one turn; got %q", note)
 	}
 }
 
@@ -1214,6 +1363,73 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 	}
 }
 
+// TestHandleEvent_ChannelThreadUploadStaysSilent is the reply this surface gives up,
+// stated as a test so it is a decision and not a regression. With channel follow-ups
+// ON and a thread the agent HAS joined — the single case where an un-mentioned channel
+// upload would have drawn the limitation — nothing is read, nothing is posted, and no
+// marker is written. The member's route is the @mention the limitation text names, and
+// TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly holds that open.
+//
+// Paying for the reply instead would mean routing every thread upload through the
+// admission gate, because "did we join this thread?" IS this history read. Slack stamps
+// file_share on essentially every message-with-files, so that would let any member of
+// any channel the bot is in spend a followupGateSem slot and a conversations.replies
+// call with no @mention — and that pool's saturation path drops legitimate text
+// follow-ups.
+func TestHandleEvent_ChannelThreadUploadStaysSilent(t *testing.T) {
+	mem := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	hist := &countingThreadHistory{}
+	h := NewHandler(Config{
+		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+		AgentThreadHistory:    hist.read,
+		AgentChannelFollowups: true, AgentDefaultEnabled: true,
+	})
+	t.Cleanup(h.Wait)
+
+	// A TEXT thread reply in the same thread, on the same handler, is the positive
+	// control. Every assertion below is otherwise a zero, and a test that only asserts
+	// zeros passes for the wrong reason the moment the premise decays — a flipped
+	// default, a new pre-dispatch gate, a Config field this literal forgets. The control
+	// fails FIRST in all of those, so the uploads' silence stays attributable to the
+	// upload guard rather than assumed. (Verified: without it, this test still passes
+	// with AgentChannelFollowups or AgentDefaultEnabled set to false.)
+	//
+	// "help" is a deterministic reply, so the control never reaches panicAgentLLM.
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvChanControl", `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.0","text":"help"}`)))
+	// Bare upload, captioned upload, and a file_share whose files array never arrived —
+	// all three are channel thread replies in the same agent thread, and none is
+	// addressed to the agent.
+	for _, body := range []string{
+		eventCallbackBody("EvChanFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.1","text":"","files":[{"id":"F1"}]}`),
+		eventCallbackBody("EvChanFileCaption", `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.2","text":"here you go","files":[{"id":"F2"}]}`),
+		eventCallbackBody("EvChanFileBare", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.3","text":""}`),
+	} {
+		h.handleEvent(httptest.NewRecorder(), []byte(body))
+	}
+	h.Wait()
+
+	// One history read, one dedupe marker, one reply — all the control's. The three
+	// uploads contribute nothing to any of the three counts.
+	if calls := hist.callCount(); calls != 1 {
+		t.Fatalf("history lookups = %d, want 1 (the control's; a channel upload reads none)", calls)
+	}
+	if got := mem.putAttempts("evt#"); got != 1 {
+		t.Fatalf("dedupe attempts = %d, want 1 (the control's; a channel upload never reaches the marker)", got)
+	}
+	// The media latch is the sharpest of the three: it is written only by a turn that
+	// reached the upload branch, so a nonzero count means an upload was answered.
+	if got := mem.putAttempts("media#"); got != 0 {
+		t.Fatalf("media latch attempts = %d, want 0 (no channel upload should reach the notice)", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentHelpReply {
+		t.Fatalf("only the control should be answered, got %+v", *posts)
+	}
+}
+
 // mediaUploadBody builds one deliberate upload. Each call is a DISTINCT message —
 // its own event id and its own ts — so every one clears event dedupe on its own.
 // That is the burst shape: dedupe cannot cap it, which is why the notice latch has
@@ -1577,45 +1793,99 @@ func TestAgentUnsupportedMediaLogContract_SuppressedRepeat(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_UnsupportedMediaOverlapDedupes(t *testing.T) {
+// TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly covers the
+// overlap Slack produces for ONE mentioned in-thread upload: an app_mention plus a
+// message/file_share twin. The mention is the surface that answers it — the twin is a
+// channel upload, dropped at the dispatch filter — so exactly one limitation reply
+// goes out, and the twin costs nothing on the way to being dropped.
+//
+// This used to be a dedupe test, and it cannot be one any more: with the twin stopped
+// at the filter, only one of the two events ever reaches the marker, so it could no
+// longer fail on a broken dedupe key. That coverage moved to
+// TestHandleEvent_OverlappingTextEventsDedupeOnChannelAndTS, which uses a TEXT thread
+// reply — the shape where both events are still admissible.
+func TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly(t *testing.T) {
 	mem := newMemAgentDDB()
 	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
 	post, posts, mu := capturingPostMessage()
-	// countingThreadHistory answers for agentPoolTestThreadTS with a completed
-	// exchange whose reply belongs to app A1, so the continuity gate treats this as a
-	// thread the agent already joined and admits the file_share follow-up.
+	// countingThreadHistory would answer for agentPoolTestThreadTS with a completed
+	// exchange whose reply belongs to app A1 — i.e. a thread the agent HAS joined, the
+	// one case where the file_share twin would otherwise have been admitted and
+	// answered. Its call count is the assertion: the twin must not reach it even then.
+	//
+	// AgentChannelFollowups: true is load-bearing. With it false the twin would be
+	// dropped by the flag gate instead of the upload guard and this test would still
+	// pass, proving nothing about the guard.
+	hist := &countingThreadHistory{}
 	h := NewHandler(Config{
 		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+		AgentThreadHistory:    hist.read,
+		AgentChannelFollowups: true, AgentDefaultEnabled: true,
+	})
+	t.Cleanup(h.Wait)
+
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.Wait()
+
+	// The whole point of the filter drop: a channel upload buys no conversations.replies
+	// read, so it also spends no followupGateSem slot — that pool stays available for the
+	// legitimate text follow-ups its saturation path would otherwise drop.
+	if calls := hist.callCount(); calls != 0 {
+		t.Fatalf("channel upload should read no thread history, got %d lookups", calls)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentUnsupportedMediaReply {
+		t.Fatalf("a mentioned in-thread upload should post one media reply, got %+v", *posts)
+	}
+	if got := (*posts)[0].threadTS; got != agentPoolTestThreadTS {
+		t.Fatalf("reply threadTS = %q, want %q (an in-thread upload must answer in that thread)", got, agentPoolTestThreadTS)
+	}
+	// Only the mention reached the turn at all, so it alone consulted the marker and the
+	// latch. Both counts are 1 — if the twin ever starts being admitted again, both go
+	// to 2 here before anything user-visible changes.
+	if got := mem.putAttempts("evt#"); got != 1 {
+		t.Fatalf("dedupe attempts = %d, want 1 (the file_share twin should stop at the dispatch filter)", got)
+	}
+	if got := mem.putAttempts("media#"); got != 1 {
+		t.Fatalf("latch attempts = %d, want 1 (only the mention should reach the notice latch)", got)
+	}
+}
+
+// TestHandleEvent_OverlappingTextEventsDedupeOnChannelAndTS holds the coverage the
+// media overlap test above used to carry. Slack emits both app_mention and
+// message.channels for one mentioned message; with channel follow-ups on, a TEXT
+// thread reply is admissible under BOTH shapes, so both events reach dedupe and their
+// shared message identity is the only thing that can collapse them.
+//
+// This rests on agentEventDedupeKey being channel+":"+ts. The two events differ in
+// event_id AND in type, and share only channel and ts — so if the key ever keys on
+// either of those instead, this goes red rather than quietly double-replying. The
+// dedupe-attempt count is asserted too: it is what proves both events actually got
+// that far, so a future filter change cannot hollow this test out silently.
+func TestHandleEvent_OverlappingTextEventsDedupeOnChannelAndTS(t *testing.T) {
+	mem := newMemAgentDDB()
+	store := &slackdata.AgentStore{Client: mem, TableName: "agent_state"}
+	post, posts, mu := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM: fakeAgentLLM{reply: testAgentStillWorksReply}, AgentStore: store, PostMessage: post,
 		AgentThreadHistory:    (&countingThreadHistory{}).read,
 		AgentChannelFollowups: true, AgentDefaultEnabled: true,
 	})
 	t.Cleanup(h.Wait)
 
-	// Slack can emit both app_mention and message/file_share events for one
-	// mentioned upload. Their shared message ts must collapse to one reply even
-	// when the thread already has history and both event shapes are admissible.
-	//
-	// This rests on agentEventDedupeKey being channel+":"+ts. The two events below
-	// differ in event_id AND in type, and share only channel and ts — so if the key
-	// ever keys on either of those instead, this test goes red rather than quietly
-	// letting one upload draw two replies.
-	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvMentionFile", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
-	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvShareFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"400.3","text":"<@U12345678>","files":[{"id":"F3"}]}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvMentionText", `{"type":"app_mention","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"401.3","text":"<@U12345678> more please"}`)))
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvChannelText", `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"401.3","text":"<@U12345678> more please"}`)))
 	h.Wait()
 
+	if got := mem.putAttempts("evt#"); got != 2 {
+		t.Fatalf("dedupe attempts = %d, want 2 — both events must REACH dedupe for this to be testing the key at all", got)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != agentUnsupportedMediaReply {
-		t.Fatalf("overlapping mention/file_share events should post one media reply, got %+v", *posts)
-	}
-	if got := (*posts)[0].threadTS; got != agentPoolTestThreadTS {
-		t.Fatalf("reply threadTS = %q, want %q (an in-thread upload must answer in that thread)", got, agentPoolTestThreadTS)
-	}
-	// DEDUPE is what must collapse these two, not the media-notice latch — the latch
-	// would hide a dedupe regression here, since both events share a channel and a
-	// user. The second delivery must return before ever consulting it.
-	if got := mem.putAttempts("media#"); got != 1 {
-		t.Fatalf("latch attempts = %d, want 1 (the second delivery should have stopped at dedupe)", got)
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("overlapping mention/channel events for one message should post one agent reply, got %+v", *posts)
 	}
 }
 
@@ -1969,6 +2239,299 @@ func TestLoadAgentThreadHistory_ReconstructsOnlyCompletedQURLExchanges(t *testin
 	}
 	if !reflect.DeepEqual(history, want) {
 		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+// agentHistoryTestFollowupTS is the inbound follow-up turn's ts in the
+// attachment-history tests: later than every entry the stub returns, so it is the
+// current turn (which Agent.Run adds) rather than part of the rebuilt transcript.
+const agentHistoryTestFollowupTS = "100.2"
+
+// TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn pins the text-only
+// boundary ACROSS turns. An upload's own turn is refused outright, but the caption
+// stays in the Slack thread and every later turn rebuilds that thread from
+// conversations.replies. Replayed bare, "protect everything in this" reads as a
+// complete instruction the model can act on when the next message says "ok do it" —
+// a referent it never saw, presented as plain text. That is the same
+// misrepresentation agentUnsupportedMediaReply exists to remove, one turn later.
+//
+// The note travels with the caption rather than relying on the refusal reply beside
+// it: repeated uploads in one conversation are capped (claimMediaNotice) and post no
+// reply at all, so a caption can outlive the reply that explained it — as long as a
+// later exchange completes. A caption with no completed exchange after it is dropped
+// by the pre-existing window rules instead, which is the other safe direction; see
+// TestLoadAgentThreadHistory_UnrepliedAttachmentNeverReachesTheModel.
+func TestLoadAgentThreadHistory_AnnotatesEarlierAttachmentTurn(t *testing.T) {
+	const caption = "protect everything in this"
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "<@U12345678> " + caption, TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+				// An ordinary text turn in the same thread, so the test also pins that
+				// the note is CONDITIONAL. Without it, annotating every user message
+				// unconditionally passes.
+				{UserID: "U1", Text: "what can I reach?", TS: "100.15"},
+				{AppID: "A1", Text: "the connectors I can see here", TS: "100.16"},
+			}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined {
+		t.Fatalf("load history: joined=%v err=%v", joined, err)
+	}
+	want := []agent.Message{
+		{Role: "user", Text: caption + " " + agentHistoryAttachmentNote},
+		{Role: "assistant", Text: agentUnsupportedMediaReply},
+		{Role: "user", Text: "what can I reach?"},
+		{Role: "assistant", Text: "the connectors I can see here"},
+	}
+	if !reflect.DeepEqual(history, want) {
+		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+// TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone covers the
+// two edges of the annotation. A file-only upload has no caption at all, so before
+// the note it left model context entirely — the refusal reply beside it answered
+// nothing, and a thread could read as if the user had never spoken. It becomes the
+// note on its own instead of vanishing. An own reply is never annotated: this
+// surface posts no files, so a HasFiles on one is Slack describing something we did
+// not attach.
+func TestLoadAgentThreadHistory_KeepsFileOnlyTurnAndLeavesOwnRepliesAlone(t *testing.T) {
+	h := NewHandler(Config{
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", TS: agentPoolTestThreadTS, HasFiles: true},
+				// An upload whose only text is the @mention that addressed the agent.
+				// On main it left history entirely (empty text after the strip); now it
+				// reduces to the note. The strip/annotate order is immaterial only
+				// because botMentionPattern is ^-anchored, so appending cannot disturb
+				// the prefix it matches — an unanchored pattern would make this row the
+				// one that notices.
+				{UserID: "U1", Text: "<@U12345678>", TS: "100.05", HasFiles: true},
+				{AppID: "A1", Text: "answer", TS: "100.1", HasFiles: true},
+			}, nil
+		},
+	})
+	e := env(slackEventTypeMessage, "channel", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+
+	history, joined, err := h.loadAgentThreadHistory(context.Background(), e)
+	if err != nil || !joined {
+		t.Fatalf("load history: joined=%v err=%v", joined, err)
+	}
+	want := []agent.Message{
+		// Both uploads merge into one user turn, so the note appears twice — the
+		// count is the number of attachments, which is what it should be.
+		{Role: "user", Text: agentHistoryAttachmentNote + "\n" + agentHistoryAttachmentNote},
+		{Role: "assistant", Text: "answer"},
+	}
+	if !reflect.DeepEqual(history, want) {
+		t.Fatalf("history = %#v, want %#v", history, want)
+	}
+}
+
+// TestLoadAgentThreadHistory_UnrepliedAttachmentNeverReachesTheModel pins where
+// the annotation STOPS mattering, so the note is not mistaken for a guarantee that
+// every caption survives. Two pre-existing window rules outrank it, and both were
+// already in place before uploads were refused at all:
+//
+//   - a thread with no completed exchange returns no history (lastAssistant < 0);
+//   - a caption after the last qURL response is an incomplete tail and is dropped.
+//
+// #1045 caps repeated unsupported-media replies, so an upload really can sit in a
+// thread with no reply beside it — which is exactly when a reader might expect the
+// note to be doing the work. It is not: in both shapes the caption reaches the model
+// neither annotated nor bare, which is the other safe direction. The value of pinning
+// it is that a future change to the tail rules cannot quietly turn "dropped" into
+// "replayed bare" without a red test.
+func TestLoadAgentThreadHistory_UnrepliedAttachmentNeverReachesTheModel(t *testing.T) {
+	const caption = "protect everything in this"
+	load := func(t *testing.T, raw []AgentThreadMessage) []agent.Message {
+		t.Helper()
+		h := NewHandler(Config{
+			AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+				return raw, nil
+			},
+		})
+		e := env(slackEventTypeMessage, "channel", "U1", "", "", "ok do it")
+		e.APIAppID = "A1"
+		e.Event.ThreadTS = agentPoolTestThreadTS
+		e.Event.TS = agentHistoryTestFollowupTS
+
+		history, _, err := h.loadAgentThreadHistory(context.Background(), e)
+		if err != nil {
+			t.Fatalf("load history: %v", err)
+		}
+		return history
+	}
+	// The two dropped shapes are checked by absence rather than by an expected
+	// slice, so the assertion stays true to what actually matters: the caption is
+	// gone in EVERY form, annotated or bare.
+	mustNotMentionCaption := func(t *testing.T, history []agent.Message) {
+		t.Helper()
+		for _, msg := range history {
+			if strings.Contains(msg.Text, caption) {
+				t.Fatalf("an un-replied caption must not reach the model at all; history = %#v", history)
+			}
+		}
+	}
+
+	t.Run("capped upload with no completed exchange yields no history", func(t *testing.T) {
+		got := load(t, []AgentThreadMessage{
+			{UserID: "U1", Text: caption, TS: agentPoolTestThreadTS, HasFiles: true},
+		})
+		mustNotMentionCaption(t, got)
+		if len(got) != 0 {
+			t.Fatalf("history = %#v, want none", got)
+		}
+	})
+
+	t.Run("capped upload trailing a completed exchange is dropped as an incomplete tail", func(t *testing.T) {
+		got := load(t, []AgentThreadMessage{
+			{UserID: "U1", Text: "what can I reach?", TS: agentPoolTestThreadTS},
+			{AppID: "A1", Text: "answer", TS: "100.1"},
+			{UserID: "U1", Text: caption, TS: "100.15", HasFiles: true},
+		})
+		mustNotMentionCaption(t, got)
+		want := []agent.Message{
+			{Role: "user", Text: "what can I reach?"},
+			{Role: "assistant", Text: "answer"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("history = %#v, want %#v", got, want)
+		}
+	})
+
+	// The contrast case, in the same test so the boundary is readable from one
+	// place: once an exchange completes after it, the caption is back inside the
+	// window — and it arrives annotated, merged into the adjacent user turn.
+	t.Run("a caption followed by a completed exchange survives, annotated", func(t *testing.T) {
+		got := load(t, []AgentThreadMessage{
+			{UserID: "U1", Text: caption, TS: agentPoolTestThreadTS, HasFiles: true},
+			{UserID: "U1", Text: "what can I reach?", TS: "100.1"},
+			{AppID: "A1", Text: "answer", TS: "100.15"},
+		})
+		want := []agent.Message{
+			{Role: "user", Text: caption + " " + agentHistoryAttachmentNote + "\nwhat can I reach?"},
+			{Role: "assistant", Text: "answer"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("history = %#v, want %#v", got, want)
+		}
+	})
+}
+
+// TestProcessAgentEvent_EarlierAttachmentTurnReachesModelAnnotated is the
+// end-to-end half: it asserts on what the LLM is actually handed, not on the
+// rebuilt slice, so an annotation lost anywhere between loadAgentThreadHistory and
+// the request still fails.
+func TestProcessAgentEvent_EarlierAttachmentTurnReachesModelAnnotated(t *testing.T) {
+	const caption = "protect everything in this"
+	llm := &scriptedHandlerAgentLLM{responses: []agent.Response{{
+		Text:       testAgentStillWorksReply,
+		StopReason: testAgentStopEndTurn,
+	}}}
+	post, _, _ := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            llm,
+		AgentStore:          &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: caption, TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+			}, nil
+		},
+	})
+
+	e := env(slackEventTypeMessage, "im", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+	h.processAgentEvent(context.Background(), slog.Default(), e)
+
+	if llm.calls != 1 {
+		t.Fatalf("follow-up should reach the model once, got %d calls", llm.calls)
+	}
+	// Exact equality, not Contains: a Contains against the note is vacuously true if
+	// the note is ever emptied, which is precisely the change this test exists to catch.
+	var annotated bool
+	for _, msg := range llm.captured[0].Messages {
+		if msg.Text == caption {
+			t.Fatalf("an attachment's caption must never reach the model as plain text; messages = %#v", llm.captured[0].Messages)
+		}
+		if msg.Text == caption+" "+agentHistoryAttachmentNote {
+			annotated = true
+		}
+	}
+	if !annotated {
+		t.Fatalf("the caption must survive alongside its note, not be dropped; messages = %#v", llm.captured[0].Messages)
+	}
+}
+
+// TestAgentTurnCompleteLogsHistoryAttachments pins the operator field. Annotating
+// history is silent where the event path is loud: an upload's own turn refuses
+// visibly and logs an alertable pair (TestAgentUnsupportedMediaLogContract), while a
+// rebuilt annotation changes what the model is told with nothing to look at after.
+// This is the one record that says it happened, so the field has to be emitted and
+// has to count.
+func TestAgentTurnCompleteLogsHistoryAttachments(t *testing.T) {
+	const turnCompleteMsg = "agent: turn complete"
+	post, _, _ := capturingPostMessage()
+	h := NewHandler(Config{
+		AgentLLM:            fakeAgentLLM{reply: "done"},
+		AgentStore:          &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"},
+		PostMessage:         post,
+		AgentDefaultEnabled: true,
+		AgentThreadHistory: func(context.Context, string, string, string, string, string) ([]AgentThreadMessage, error) {
+			return []AgentThreadMessage{
+				{UserID: "U1", Text: "protect everything in this", TS: agentPoolTestThreadTS, HasFiles: true},
+				{AppID: "A1", Text: agentUnsupportedMediaReply, TS: "100.1"},
+				{UserID: "U1", Text: "what can I reach?", TS: "100.15"},
+				// An assistant turn that quotes the note back. The model does see the
+				// marker, so it can echo it; counting that would report an attachment
+				// that never existed.
+				{AppID: "A1", Text: "You sent " + agentHistoryAttachmentNote + " so I can't read it.", TS: "100.16"},
+			}, nil
+		},
+	})
+	t.Cleanup(h.Wait)
+
+	var buf bytes.Buffer
+	log := slog.New(observability.NewRedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e := env(slackEventTypeMessage, "im", "U1", "", "", "ok do it")
+	e.APIAppID = "A1"
+	e.Event.ThreadTS = agentPoolTestThreadTS
+	e.Event.TS = agentHistoryTestFollowupTS
+	h.processAgentEvent(context.Background(), log, e)
+	h.Wait()
+
+	var rec map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		var candidate map[string]any
+		if err := json.Unmarshal(line, &candidate); err != nil {
+			continue
+		}
+		if candidate["msg"] == turnCompleteMsg {
+			rec = candidate
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no %q record; got %s", turnCompleteMsg, buf.String())
+	}
+	if rec["history_attachments"] != float64(1) {
+		t.Fatalf("history_attachments = %v, want 1 — one USER message told the model an attachment was there; an assistant turn quoting the note is not one", rec["history_attachments"])
 	}
 }
 

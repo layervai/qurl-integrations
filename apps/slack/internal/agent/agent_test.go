@@ -277,7 +277,7 @@ func TestRun_ProposeGet_StopsAndKeepsHistoryValid(t *testing.T) {
 	// the next turn in this thread is a valid request.
 	assertWellFormed(t, history)
 	last := history[len(history)-1]
-	if last.Role != roleUser || len(last.ToolResults) != 1 || last.ToolResults[0].Content != proposalAckResult {
+	if last.Role != RoleUser || len(last.ToolResults) != 1 || last.ToolResults[0].Content != proposalAckResult {
 		t.Fatalf("expected a proposal-ack tool result, got %+v", last)
 	}
 }
@@ -564,7 +564,7 @@ func TestRun_FinalAnswerFallsBackWhenTheModelSaysNothing(t *testing.T) {
 	// whitespace-only response instead would survive assistantBlocks (which drops
 	// only a truly empty string) and be replayed on the next turn in the thread.
 	last := history[len(history)-1]
-	if last.Role != roleAssistant || last.Text != iterationCapMessage {
+	if last.Role != RoleAssistant || last.Text != iterationCapMessage {
 		t.Fatalf("history must record the delivered reply, got %+v", last)
 	}
 }
@@ -607,8 +607,8 @@ func TestRun_MissingDeps(t *testing.T) {
 
 func TestRun_AppendsToPriorHistoryWithoutMutatingInput(t *testing.T) {
 	prior := []Message{
-		{Role: roleUser, Text: "earlier question"},
-		{Role: roleAssistant, Text: "earlier answer"},
+		{Role: RoleUser, Text: "earlier question"},
+		{Role: RoleAssistant, Text: "earlier answer"},
 	}
 	priorLen := len(prior)
 	llm := &scriptedLLM{responses: []Response{textResp("follow-up answer")}}
@@ -637,7 +637,7 @@ func TestRun_AppendsToPriorHistoryWithoutMutatingInput(t *testing.T) {
 	}
 	// The delta begins with the user message Run prepends — the clean turn boundary
 	// the conflict-merge grafts onto the winner's transcript.
-	if d := history[priorLen]; d.Role != roleUser || d.Text != "follow-up" {
+	if d := history[priorLen]; d.Role != RoleUser || d.Text != "follow-up" {
 		t.Fatalf("delta does not begin with the user message: %+v", d)
 	}
 }
