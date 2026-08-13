@@ -150,17 +150,24 @@ function isPrivateHost(host) {
     if (h.startsWith('fc') || h.startsWith('fd')) return true;  // fc00::/7 unique-local
     if (/^fe[89a-f][0-9a-f]:/.test(h)) return true;             // fe80::/10 + fec0::/10 site-local
   }
-  // IPv4-mapped IPv6 literal (::ffff:0:0/96). Both spellings reach here already
-  // bracket-stripped (by the branch above), and the one production callers
-  // actually pass is the SECOND:
-  //   - dotted `::ffff:127.0.0.1` — only ever from a hand-built string
-  //   - hex    `::ffff:7f00:1`    — what WHATWG re-serializes the dotted
-  //     literal to, so it is what `new URL(...).hostname` yields and therefore
-  //     what createOneTimeLink and connector.js's detect-tunnel guard receive
-  // Matching dotted-only meant checking a form that never arrives, letting
-  // every private IPv4 smuggle through as hex (#1035). Re-check the embedded
-  // IPv4 in both spellings. Groups are {1,4} because a zero high byte
-  // serializes unpadded (`::ffff:0:1` = 0.0.0.1).
+  // IPv4-mapped IPv6 literal (::ffff:0:0/96). BOTH spellings below are
+  // load-bearing — they serve different callers, so neither is dead code:
+  //   - dotted `::ffff:127.0.0.1` — what inet_ntop (hence dns.lookup) renders a
+  //     mapped address as, so it is what assertNotPrivateAfterResolve feeds back
+  //     in. Reachable from attacker-controlled DNS: an AAAA of
+  //     `::ffff:169.254.169.254` arrives here in this form. Do NOT drop this
+  //     branch as "no parser emits it" — the resolve leg does.
+  //   - hex `::ffff:7f00:1` — what WHATWG re-serializes a dotted mapped literal
+  //     to, so it is what `new URL(...).hostname` yields and therefore what the
+  //     URL-target guards receive. Matching dotted-only meant checking a form
+  //     that never arrives on that path, letting every private IPv4 through as
+  //     hex (#1035).
+  // Groups are {1,4} because a zero high byte serializes unpadded
+  // (`::ffff:0:1` = 0.0.0.1). Deliberately NOT handled: the adjacent
+  // `::127.0.0.1` (v4-compatible), `::ffff:0:127.0.0.1` (v4-translated) and
+  // NAT64 `64:ff9b::` notations also re-serialize to hex, but each is
+  // EHOSTUNREACH to the embedded IPv4 without a translator, so none is a
+  // reachable bypass.
   const mappedDotted = h.match(/^::ffff:([0-9.]+)$/);
   if (mappedDotted) return isPrivateHost(mappedDotted[1]);
   const mappedHex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);

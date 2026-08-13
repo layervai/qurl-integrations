@@ -1420,6 +1420,22 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       );
     });
 
+    // #1035: the same guard, reached via an IPv4-mapped IPv6 literal. `new URL()`
+    // re-serializes this to `[::ffff:a9fe:a9fe]`, which the pre-fix isPrivateHost
+    // classified as PUBLIC. This case was never exploitable here — the
+    // `r_*.qurl.site` host-pin below isPrivateHost rejects a bracketed literal
+    // regardless — but it pins the ORDER: the private-address layer must fire
+    // first, so the mapped form is rejected as private rather than falling
+    // through to the host-pin's "not under an expected qURL tunnel domain".
+    it('SSRF guard: an IPv4-mapped IPv6 minted qurl_site is rejected as private, not by the host-pin', async () => {
+      const get = captureDetect({ detected: false }, { qurlSite: 'https://[::ffff:169.254.169.254]' });
+      await expect(
+        connector.detectWatermark(Buffer.from('x'), { guildId: 'g', apiKey: 'k' }),
+      ).rejects.toThrow(/private\/internal/);
+      expect(mockClient.resolve).not.toHaveBeenCalled();
+      expect(get()).toBeNull();
+    });
+
     it('SSRF guard: a non-https minted qurl_site throws and NO knock or POST happens', async () => {
       const get = captureDetect({ detected: false }, { qurlSite: 'http://r_abc12345678.qurl.site' });
       await expect(

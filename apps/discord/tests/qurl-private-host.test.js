@@ -1,12 +1,24 @@
 /**
- * Tests for the isPrivateHost logic inside createOneTimeLink — SSRF guard.
- * We can't import isPrivateHost directly (not exported), so drive it via
- * createOneTimeLink and assert the thrown error.
+ * Tests for the isPrivateHost SSRF guard. isPrivateHost is exported (also
+ * consumed by connector.js's detect-tunnel check), so the prefix/literal logic
+ * is pinned directly; the createOneTimeLink cases below additionally cover the
+ * end-to-end path — guard verdict, thrown error, and no outbound request.
  */
 
 jest.mock('../src/config', () => ({
   QURL_API_KEY: 'test',
   QURL_ENDPOINT: 'https://api.test.local',
+}));
+
+// Mock the SDK so a REGRESSION fails as a clean assertion rather than a ~17s
+// real-network timeout (and real CI egress): every URL in this file must be
+// rejected BEFORE a client is ever built, so `create` must never be called.
+const mockClient = { create: jest.fn() };
+jest.mock('@layervai/qurl', () => ({
+  QURLClient: jest.fn().mockImplementation(() => mockClient),
+  ERROR_CODE_NETWORK: 'network_error',
+  ERROR_CODE_TIMEOUT: 'timeout',
+  ERROR_CODE_CLIENT_VALIDATION: 'client_validation',
 }));
 
 jest.mock('../src/logger', () => ({
@@ -20,8 +32,11 @@ jest.mock('../src/logger', () => ({
 const { createOneTimeLink, isPrivateHost } = require('../src/qurl');
 
 async function expectBlocked(url) {
+  mockClient.create.mockClear();
   await expect(createOneTimeLink(url, '1h', 'test', 'key'))
     .rejects.toThrow(/private|not allowed/i);
+  // The security property itself, not just the message: nothing was sent.
+  expect(mockClient.create).not.toHaveBeenCalled();
 }
 
 describe('createOneTimeLink SSRF / private-host blocklist', () => {
@@ -113,7 +128,7 @@ describe('isPrivateHost — IPv6 ULA prefix vs. public DNS', () => {
 // pass `new URL(...).hostname`. The original guard matched `::ffff:[0-9.]+`,
 // i.e. a dotted form that never arrives, so every private IPv4 smuggled
 // through a check whose entire purpose was rejecting them.
-describe('isPrivateHost - IPv4-mapped IPv6 (::ffff:)', () => {
+describe('isPrivateHost — IPv4-mapped IPv6 (::ffff:)', () => {
   // This is the bug in one assertion, and the reason the hex branch must exist.
   it('documents that the parser rewrites the dotted literal to hex', () => {
     expect(new URL('https://[::ffff:127.0.0.1]').hostname).toBe('[::ffff:7f00:1]');
@@ -139,11 +154,35 @@ describe('isPrivateHost - IPv4-mapped IPv6 (::ffff:)', () => {
     expect(isPrivateHost('::ffff:0:0')).toBe(true);        // 0.0.0.0
   });
 
-  // Retained alongside the hex branch: reachable only via a hand-built string
-  // (no parser emits it), but cheap defense-in-depth for a non-URL caller.
-  it('still classifies the dotted spelling as private', () => {
+  // NOT vestigial, and NOT merely "the form a human types": inet_ntop — hence
+  // dns.lookup — renders a mapped address dotted, so this is the spelling
+  // assertNotPrivateAfterResolve feeds back into isPrivateHost. It is reachable
+  // from attacker-controlled DNS (an AAAA of ::ffff:169.254.169.254), so the
+  // dotted branch is load-bearing on the resolve leg exactly as the hex branch
+  // is on the URL leg. This test exists to stop it being deleted as dead code.
+  it('classifies the dotted spelling (the dns.lookup form) as private', () => {
     expect(isPrivateHost('::ffff:127.0.0.1')).toBe(true);
     expect(isPrivateHost('::ffff:169.254.169.254')).toBe(true);
+  });
+
+  // Pins the toLowerCase() at the top of isPrivateHost, which the [0-9a-f]
+  // class depends on. Without it this whole describe still passes.
+  it('is case-insensitive on the hex groups', () => {
+    expect(isPrivateHost('::FFFF:7F00:1')).toBe(true);      // 127.0.0.1
+    expect(isPrivateHost('::FFFF:A9FE:A9FE')).toBe(true);   // 169.254.169.254
+  });
+
+  // The ranges are decided by the reconstructed octets, so a mis-masked byte in
+  // a future rewrite would show up here first. Only ac10/6440 are exercised
+  // above, and neither pins an edge.
+  it('respects the RFC1918 / CGNAT boundaries through the hex branch', () => {
+    expect(isPrivateHost('::ffff:ac0f:ffff')).toBe(false);  // 172.15.255.255, below /12
+    expect(isPrivateHost('::ffff:ac1f:ffff')).toBe(true);   // 172.31.255.255, top of /12
+    expect(isPrivateHost('::ffff:ac20:1')).toBe(false);     // 172.32.0.1, above /12
+    expect(isPrivateHost('::ffff:643f:ffff')).toBe(false);  // 100.63.255.255, below /10
+    expect(isPrivateHost('::ffff:647f:ffff')).toBe(true);   // 100.127.255.255, top of /10
+    expect(isPrivateHost('::ffff:6480:1')).toBe(false);     // 100.128.0.1, above /10
+    expect(isPrivateHost('::ffff:ffff:ffff')).toBe(true);   // 255.255.255.255, 4-digit groups
   });
 
   // The mirror-image failure: over-blocking would break legitimate targets.
