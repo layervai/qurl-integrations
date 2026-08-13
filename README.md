@@ -83,9 +83,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, PR requirements
 ## Releases
 
 This repo uses [Release Please](https://github.com/googleapis/release-please) in monorepo mode.
-Each *released* app has an independent version track. A track is earned by shipping a
-semver-versioned artifact consumed outside this repo — `shared/`, `origins/s3-static-connector/`,
-`apps/teams/`, and `apps/zapier/` have no track:
+Each *released* app has an independent version track. A track is earned by cutting a semver
+version stream that something downstream pins to — not by merely publishing an artifact.
+`origins/s3-static-connector/` ships a container image but tags it only `:main` and `:<sha>`, and
+`shared/`, `apps/teams/`, and `apps/zapier/` ship nothing, so none of them have a track:
 
 - Commits scoped to an app bump only that app: `feat(slack): add thread replies` → `slack-v0.2.0`
 - The CLI is the one component tagged **without** its prefix (`v0.2.0`, not `cli-v0.2.0`) so OSS
