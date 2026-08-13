@@ -1,29 +1,50 @@
 /**
  * Generates PNG icons from the shared logo source using sharp.
  * Run: node scripts/generate-icons.js
+ *
+ * The generated icons are committed, so they can silently drift from this script:
+ * a sharp upgrade can change the PNG encoder and leave the committed bytes stale
+ * (that is exactly what happened in #908, where merging main moved sharp
+ * ^0.34.5 -> ^0.35.0). `test/generate-icons.test.js` guards against that by
+ * regenerating into a temp directory and byte-comparing against `icons/`.
+ * (Issue #1046 tracks the tradeoff that comparison makes: it is byte-exact, so
+ * any upstream sharp encoder change turns CI red until the icons are regenerated.)
  */
 const path = require('path');
 const fs = require('fs');
 
 const sizes = [16, 48, 128];
-let sharp;
 
-try {
-  sharp = require('sharp');
-} catch (error) {
-  console.error('Missing dependency: "sharp". Run "npm install" in the project root before generating icons.');
-  process.exit(1);
+const extensionRoot = path.join(__dirname, '..');
+const defaultIconsDir = path.join(extensionRoot, 'icons');
+const defaultSourcePath = path.join(defaultIconsDir, 'logo.png');
+
+function loadSharp() {
+  try {
+    return require('sharp');
+  } catch (error) {
+    throw new Error('Missing dependency: "sharp". Run "npm install" in the project root before generating icons.');
+  }
 }
 
-async function generateIcons() {
-  const sourcePath = path.join(__dirname, '..', 'icons', 'logo.png');
+/**
+ * Renders every icon size into `outDir` and resolves with the written paths.
+ * Callers other than the CLI (the drift test) pass a temp `outDir` so they can
+ * compare against the committed icons without overwriting them.
+ */
+async function generateIcons(options) {
+  const { sourcePath = defaultSourcePath, outDir = defaultIconsDir } = options || {};
+  const sharp = loadSharp();
 
   if (!fs.existsSync(sourcePath)) {
     throw new Error(`Missing icon source: ${sourcePath}`);
   }
 
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const written = [];
   for (const size of sizes) {
-    const pngPath = path.join(__dirname, '..', 'icons', `icon${size}.png`);
+    const pngPath = path.join(outDir, `icon${size}.png`);
 
     await sharp(sourcePath)
       // The logo source is not exactly square (420x418), and sharp's default `fit: 'cover'`
@@ -33,8 +54,31 @@ async function generateIcons() {
       .png()
       .toFile(pngPath);
 
-    console.log(`Generated: icons/icon${size}.png`);
+    written.push(pngPath);
+  }
+
+  return written;
+}
+
+async function main() {
+  const written = await generateIcons();
+
+  for (const pngPath of written) {
+    console.log(`Generated: ${path.relative(extensionRoot, pngPath)}`);
   }
 }
 
-generateIcons().catch(console.error);
+if (require.main === module) {
+  main().catch(function (error) {
+    console.error(error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  defaultIconsDir,
+  defaultSourcePath,
+  generateIcons,
+  main,
+  sizes,
+};
