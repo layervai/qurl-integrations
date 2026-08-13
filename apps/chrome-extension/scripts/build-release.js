@@ -12,6 +12,12 @@ const includePaths = [
   'icons',
   '_locales',
 ];
+// icons/ is copied wholesale, but logo.png in it is the build-time source generate-icons.js
+// resizes from — nothing in the packaged extension loads it (the manifest and the popup header
+// both reference generated icon*.png), so shipping it is dead weight in the Web Store upload.
+const excludePaths = new Set([
+  path.join('icons', 'logo.png'),
+]);
 
 function main() {
   const buildConfig = loadBuildConfig();
@@ -41,6 +47,10 @@ function recreateDirectory(dirPath) {
 }
 
 function copyRecursive(source, target) {
+  if (excludePaths.has(path.relative(projectRoot, source))) {
+    return;
+  }
+
   const stat = fs.statSync(source);
 
   if (stat.isDirectory()) {
@@ -294,6 +304,8 @@ if (require.main === module) {
 module.exports = {
   applyBuildOverrides,
   collectManifestAssetPaths,
+  copyRecursive,
+  excludePaths,
   hostPermissionPattern,
   loadBuildConfig,
   normalizeBuildQurlApiBase,

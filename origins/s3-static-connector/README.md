@@ -18,6 +18,27 @@ runs the behavior contract against that exact candidate digest for both
 `:main` and `:<git-sha>`. Deployments should pin the resolved image digest
 once the published image has soaked in the target environment.
 
+## qURL Connector compatibility
+
+The origin's Connector-facing contract is intentionally small: plain HTTP on
+`127.0.0.1:8080`, with both containers running as UID/GID `65532`. Connector
+enrollment is independent of the origin and uses the current native UDP
+lifecycle: a one-shot, resource-bound enrollment token is consumed on the
+first start, and the Connector persists the resulting device credential.
+
+Slack validates the complete server-issued `resource_id`,
+`connector_routing_id`, and `knock_resource_id` tuple before minting that
+enrollment token. It persists only the first two route identities; the
+Connector rehydrates the knock target from the authenticated resource response
+and does not use the retired public HTTP bootstrap lifecycle.
+
+Slack pins the origin by multi-architecture digest. Its CI extracts that exact
+pin, runs this image's complete behavior suite on both `linux/amd64` and
+`linux/arm64`, and verifies the numeric user, exposed port, and loopback listen
+default before accepting a Slack or origin change. The same gate boots the
+immutable current Connector release and requires strict config loading to
+accept the canonical loopback route.
+
 The image packages two pinned processes:
 
 - **nginx** owns the website surface — clean URLs, the security header set,
