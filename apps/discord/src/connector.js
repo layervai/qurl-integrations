@@ -740,13 +740,16 @@ function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
 }
 
-// Host for the qurl_site rejection breadcrumb below. Every guard in
-// assertPublicHttpsTarget throws a CONSTANT message, so without this the
-// breadcrumb says THAT a target was rejected but not WHICH host tripped it —
-// an IPv4-mapped literal, a 10.x, and a public `fd…` name misclassified by
-// isPrivateHost's ULA prefix check all read identically. Re-parsing here (error
-// path only) beats threading the host back out of buildDetectTargetUrl, and
-// yields the same value the guards judged.
+// Host for the qurl_site rejection breadcrumb below. Every guard behind that
+// breadcrumb throws a CONSTANT message — assertPublicHttpsTarget's four, plus
+// buildDetectTargetUrl's own DetectQurlSiteError branches — so without this it
+// says THAT a target was rejected but not WHICH host tripped it: an IPv4-mapped
+// literal, a 10.x, and a public `fd…` name misclassified by isPrivateHost's ULA
+// prefix check all read identically. Re-parsing here (error path only) beats
+// threading the host back out of buildDetectTargetUrl, and yields the same value
+// the guards judged. Both DetectQurlSiteError branches land correctly: an
+// unparseable qurl_site yields undefined (key dropped), a host-only violation
+// parses and yields the bare host.
 //
 // `hostname`, never the full URL: it excludes userinfo, port, path, query and
 // fragment by construction, so the `at_…` token — which rides in the qurl_link

@@ -299,6 +299,15 @@ async function createOneTimeLink(targetUrl, expiresIn, label, apiKey) {
       // two guards fired straight from the log line — a syntactic reject points
       // at isPrivateHost's own classification, which is where the false
       // positives live.
+      //
+      // WARN, deliberately, even though this leg is user-driven and a plain
+      // `http://localhost:3000` typo trips it: a typo and an SSRF probe are
+      // INDISTINGUISHABLE here, and telling them apart is the only reason this
+      // line exists — demoting it to info/debug would keep the signal off the
+      // dashboards that would surface the probe. Same posture (and same
+      // attacker-reachable, rate-limited shape) as the webhook verification
+      // failure warn in routes/qurl-webhook.js. Volume is bounded by Discord's
+      // command rate limits, and the payload is one short host.
       logger.warn('Target URL rejected by SSRF guard (private host literal)', {
         hostname: parsed.hostname,
       });
