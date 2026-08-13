@@ -8,12 +8,18 @@
  * bot token) but never seeded client.rest with the token, so the
  * very first sendDM / channel.send / member.roles.add returned
  * 401. We assert here that initHttpOnly() does both side effects
- * login() would normally do (token + cache refresh) AND sets up
- * the periodic refresh that compensates for the missing
- * roleDelete/channelDelete events.
+ * login() would normally do (token + cache refresh).
+ *
+ * This suite also pins the ABSENCE of a periodic refresh. The
+ * module used to run a 10-minute REST refreshCache() to make up for
+ * the Gateway roleDelete/channelDelete events http-only replicas
+ * never see; #1051 deleted those handlers and the roles/channels
+ * cache they invalidated, leaving nothing that reads the cached
+ * guild handle on a schedule. The no-timer test below fails if a
+ * future change reintroduces one without a reader to justify it.
  */
 
-const { initHttpOnly, REFRESH_INTERVAL_MS } = require('../src/http-only-init');
+const { initHttpOnly } = require('../src/http-only-init');
 
 // Avoid constructing a real discord.js ClientUser in tests — it
 // walks the User -> Base inheritance chain and pokes the Client
@@ -79,13 +85,11 @@ describe('initHttpOnly', () => {
     const logger = makeLogger();
     const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' };
 
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    await initHttpOnly({ client, config, refreshCache, logger });
 
     expect(client.rest.setToken).toHaveBeenCalledTimes(1);
     expect(client.rest.setToken).toHaveBeenCalledWith('tok-abc');
     expect(refreshCache).toHaveBeenCalledTimes(1);
-    expect(timer).not.toBeNull();
-    clearInterval(timer);
   });
 
   it('seeds the token first, then refreshes (refreshCache uses REST so token must already be set)', async () => {
@@ -98,40 +102,34 @@ describe('initHttpOnly', () => {
     const logger = makeLogger();
     const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' };
 
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    await initHttpOnly({ client, config, refreshCache, logger });
 
     expect(callOrder).toEqual(['setToken', 'refreshCache']);
-    clearInterval(timer);
   });
 
-  it('skips refreshCache + timer when GUILD_ID is unset (multi-tenant mode)', async () => {
+  it('skips refreshCache when GUILD_ID is unset (multi-tenant mode)', async () => {
     const client = makeClient();
     const refreshCache = jest.fn().mockResolvedValue(undefined);
     const logger = makeLogger();
     const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: null };
 
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    await initHttpOnly({ client, config, refreshCache, logger });
 
     expect(client.rest.setToken).toHaveBeenCalledWith('tok-abc');
     expect(refreshCache).not.toHaveBeenCalled();
-    expect(timer).toBeNull();
-    // No WARN — multi-tenant http-only doesn't have a single-guild
-    // cache that could go stale, so the periodic-refresh disclaimer
-    // would be misleading.
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('skips refreshCache + timer when GUILD_ID is empty string', async () => {
+  it('skips refreshCache when GUILD_ID is empty string', async () => {
     const client = makeClient();
     const refreshCache = jest.fn().mockResolvedValue(undefined);
     const logger = makeLogger();
     const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '' };
 
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    await initHttpOnly({ client, config, refreshCache, logger });
 
     expect(client.rest.setToken).toHaveBeenCalledWith('tok-abc');
     expect(refreshCache).not.toHaveBeenCalled();
-    expect(timer).toBeNull();
   });
 
   it('propagates refreshCache rejection so start() fails loud', async () => {
@@ -150,22 +148,23 @@ describe('initHttpOnly', () => {
     expect(client.rest.setToken).toHaveBeenCalledWith('tok-abc');
   });
 
-  it('logs a WARN naming the cache-freshness limitation in single-guild http-only mode', async () => {
+  it('does NOT warn about cache staleness (nothing reads the guild handle on a schedule)', async () => {
+    // The module used to emit a boot WARN naming the missing
+    // roleDelete/channelDelete events and the periodic refresh that
+    // compensated for them. Both the events and the cache they
+    // invalidated are gone (#1051), so the warning would now point
+    // operators at a limitation that no longer exists.
     const client = makeClient();
     const refreshCache = jest.fn().mockResolvedValue(undefined);
     const logger = makeLogger();
     const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' };
 
-    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    await initHttpOnly({ client, config, refreshCache, logger });
 
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn.mock.calls[0][0]).toMatch(/http-only mode/);
-    expect(logger.warn.mock.calls[0][0]).toMatch(/cache updates/i);
-    expect(logger.warn.mock.calls[0][0]).toMatch(/HTTP_ONLY_REFRESH_INTERVAL_MS/);
-    clearInterval(timer);
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  describe('periodic refresh', () => {
+  describe('no periodic refresh', () => {
     beforeEach(() => {
       jest.useFakeTimers();
     });
@@ -173,100 +172,55 @@ describe('initHttpOnly', () => {
       jest.useRealTimers();
     });
 
-    it('schedules a setInterval at REFRESH_INTERVAL_MS that calls refreshCache', async () => {
+    it('schedules no timer — refreshCache runs once at boot and never again', async () => {
+      // Regression pin for the timer removal. In http-only mode the
+      // cached guild handle has no reader at all: verifyBotPermissions()
+      // and the `Watching guild:` log both hang off client.once('ready'),
+      // which never fires because login() is skipped, and getGuild() has
+      // no production consumers. A reinstated timer would burn a REST
+      // call per interval refreshing a value no request path reads.
+      //
+      // Asserted behaviourally (advance the clock, count the calls)
+      // rather than by spying on setInterval, so it also catches a
+      // setTimeout-chain or any other self-rescheduling variant.
       const client = makeClient();
       const refreshCache = jest.fn().mockResolvedValue(undefined);
       const logger = makeLogger();
       const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' };
 
-      const timer = await initHttpOnly({ client, config, refreshCache, logger });
+      await initHttpOnly({ client, config, refreshCache, logger });
 
-      expect(refreshCache).toHaveBeenCalledTimes(1); // initial
-      jest.advanceTimersByTime(REFRESH_INTERVAL_MS);
-      expect(refreshCache).toHaveBeenCalledTimes(2); // periodic
-      jest.advanceTimersByTime(REFRESH_INTERVAL_MS);
-      expect(refreshCache).toHaveBeenCalledTimes(3);
-      clearInterval(timer);
-    });
+      expect(refreshCache).toHaveBeenCalledTimes(1); // initial, fatal-on-failure
+      expect(jest.getTimerCount()).toBe(0);
 
-    it('catches periodic-refresh rejections and logs at error (does not crash the process)', async () => {
-      // A transient Discord outage during a periodic refresh must not
-      // surface as an unhandledRejection that takes down the http
-      // replica. The next interval retries automatically.
-      const client = makeClient();
-      const refreshCache = jest.fn()
-        .mockResolvedValueOnce(undefined) // initial succeeds
-        .mockRejectedValueOnce(Object.assign(new Error('transient 503'), { status: 503 }));
-      const logger = makeLogger();
-      const config = { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' };
-
-      const timer = await initHttpOnly({ client, config, refreshCache, logger });
-
-      jest.advanceTimersByTime(REFRESH_INTERVAL_MS);
-      // setInterval callbacks queue microtasks; flush them.
+      // Well past the 10-minute interval the deleted timer used.
+      jest.advanceTimersByTime(60 * 60 * 1000);
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(logger.error).toHaveBeenCalledTimes(1);
-      expect(logger.error.mock.calls[0][0]).toMatch(/Periodic refreshCache failed/);
-      expect(logger.error.mock.calls[0][1]).toEqual({ errorMessage: 'transient 503' });
-      clearInterval(timer);
+      expect(refreshCache).toHaveBeenCalledTimes(1);
+      expect(logger.error).not.toHaveBeenCalled();
     });
   });
 
-  it('REFRESH_INTERVAL_MS exposes a sane default (≥30s, ≤30min)', () => {
-    expect(REFRESH_INTERVAL_MS).toBeGreaterThanOrEqual(30_000);
-    expect(REFRESH_INTERVAL_MS).toBeLessThanOrEqual(30 * 60 * 1000);
-  });
-});
+  it('returns nothing — callers have no timer to clear on shutdown', async () => {
+    // gracefulShutdown in src/index.js no longer tracks an
+    // http-refresh timer; this pins the contract that made that
+    // removal safe.
+    const client = makeClient();
+    const refreshCache = jest.fn().mockResolvedValue(undefined);
+    const logger = makeLogger();
 
-describe('HTTP_ONLY_REFRESH_INTERVAL_MS env override', () => {
-  // Re-loads the module under different env values to verify the
-  // module-load-time validation. Each case isolates its env mutation
-  // and module cache so the canonical export above stays intact.
-  const originalEnv = process.env.HTTP_ONLY_REFRESH_INTERVAL_MS;
-  let warnSpy;
-
-  beforeEach(() => {
-    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-  afterEach(() => {
-    if (originalEnv === undefined) delete process.env.HTTP_ONLY_REFRESH_INTERVAL_MS;
-    else process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = originalEnv;
-    warnSpy.mockRestore();
-    jest.resetModules();
-  });
-
-  it('accepts a valid override and uses it instead of the default', () => {
-    process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = '60000';
-    jest.isolateModules(() => {
-      const { REFRESH_INTERVAL_MS: overridden } = require('../src/http-only-init');
-      expect(overridden).toBe(60_000);
+    const single = await initHttpOnly({
+      client, refreshCache, logger,
+      config: { DISCORD_TOKEN: 'tok-abc', GUILD_ID: '123' },
     });
-    expect(warnSpy).not.toHaveBeenCalled();
-  });
-
-  it('rejects sub-30s values with a console.warn naming the bad input', () => {
-    process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = '15000';
-    jest.isolateModules(() => {
-      const { REFRESH_INTERVAL_MS: overridden } = require('../src/http-only-init');
-      // Falls back to default — silent fall-through would leave operators
-      // wondering why their `=15000` ask isn't taking effect.
-      expect(overridden).toBe(10 * 60 * 1000);
+    const multi = await initHttpOnly({
+      client: makeClient(), refreshCache, logger,
+      config: { DISCORD_TOKEN: 'tok-abc', GUILD_ID: null },
     });
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/HTTP_ONLY_REFRESH_INTERVAL_MS=/);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/15000/);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/rejected/);
-  });
 
-  it('rejects non-numeric values with a console.warn', () => {
-    process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = 'soon';
-    jest.isolateModules(() => {
-      const { REFRESH_INTERVAL_MS: overridden } = require('../src/http-only-init');
-      expect(overridden).toBe(10 * 60 * 1000);
-    });
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/"soon"/);
+    expect(single).toBeUndefined();
+    expect(multi).toBeUndefined();
   });
 });

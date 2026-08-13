@@ -75,6 +75,9 @@ jobs:
               - 'apps/teams/**'
               - '.github/workflows/teams.yml'
 
+  # Mirrored locally by `make check-teams`, so a contributor can run this gate
+  # before pushing. That target mirrors this job in full, so adding or removing
+  # a step here means updating it too.
   build-and-test:
     name: teams / build and test
     runs-on: ubuntu-latest

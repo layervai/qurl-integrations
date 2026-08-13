@@ -182,13 +182,13 @@ func toSDKMessages(msgs []Message) []anthropic.MessageParam {
 	out := make([]anthropic.MessageParam, 0, len(msgs))
 	for i := range msgs {
 		m := &msgs[i]
-		if m.Role == roleAssistant {
+		if m.Role == RoleAssistant {
 			if block := assistantBlocks(m); len(block) > 0 {
 				out = append(out, anthropic.NewAssistantMessage(block...))
 			}
 			continue
 		}
-		// roleUser: either tool results or a plain text message.
+		// RoleUser: either tool results or a plain text message.
 		if len(m.ToolResults) > 0 {
 			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(m.ToolResults))
 			for _, tr := range m.ToolResults {

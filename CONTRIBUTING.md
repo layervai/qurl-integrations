@@ -16,6 +16,10 @@ pip install pre-commit && pre-commit install
 make check
 ```
 
+`make check` covers the Go apps, `shared/`, and the repo-wide checks. It does
+**not** run the Node.js suites — those are opt-in, see
+[Node.js apps](#nodejs-apps) below.
+
 `make check` shells out to `python3` for the repo-consistency checks
 (`scripts/check-release-please-sync.sh`, `scripts/check-extension-lockstep.sh`).
 Both fail with an explicit install message rather than silently passing if it is
@@ -64,13 +68,36 @@ git checkout main && git pull
 git checkout -b feat/slack-thread-replies
 
 # 3. Write code, then verify
-make check                    # Full CI parity: fmt + vet + lint + test
+make check                    # Go apps, shared/, and repo-wide checks
+make check-<app>              # only if you touched a Node.js suite (see below)
 make build-slack              # Verify Lambda binary compiles (adjust for your app)
 
 # 4. Push and open a PR
 git push -u origin feat/slack-thread-replies
 gh pr create --title "feat(slack): add thread replies"
 ```
+
+### Node.js apps
+
+`make check` stops at the Go boundary. Each Node.js app installs from its own
+lockfile, so the suites are opt-in targets rather than prerequisites of
+`make check`:
+
+- `make check-chrome-extension`, `check-edge-extension`, `check-discord`,
+  `check-teams` — each mirrors that app's `<app> / build and test` job.
+- `make check-e2e` — `e2e/`'s offline subset (typecheck plus `test:unit`).
+  The live suite is deliberately excluded: it mints real qURL resources, posts
+  real Discord messages, and needs credentials in `e2e/.env`. `e2e/` has no CI
+  workflow, so this target is the only gate its TypeScript gets.
+- `make check-node` — all five.
+
+Go by what your change *triggers*, not just which directory it sits in:
+`discord.yml`'s filter includes `shared/**`, so a Go-only change under
+`shared/` runs Discord CI and is worth a `make check-discord`.
+
+A green run predicts that app's `*/ required` aggregate, but CI stays the gate.
+Each CI job carries a comment pointing back at its target, and each target
+records what it omits and why — a step added to one belongs in the other.
 
 ## PR Requirements
 
@@ -164,6 +191,8 @@ If you need something that doesn't exist in `shared/`, start by putting it in yo
 4. **Adding large dependencies** — Dependency review will flag high-severity or GPL deps.
 5. **Hardcoding secrets** — Use environment variables. `detect-private-key` hook catches some of this.
 6. **Skipping `make check`** — CI runs the same checks. Save yourself the round-trip.
+7. **Assuming `make check` covered a Node.js app** — it doesn't. Run the
+   matching `make check-<app>` too (see [Node.js apps](#nodejs-apps)).
 
 ## Getting Help
 

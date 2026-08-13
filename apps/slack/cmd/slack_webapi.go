@@ -1095,6 +1095,12 @@ func fetchSlackAgentThreadHistoryPage(ctx context.Context, httpClient *http.Clie
 			UserID string `json:"user"`
 			Text   string `json:"text"`
 			TS     string `json:"ts"`
+			// Subtype and Files are decoded for PRESENCE ONLY, and only so a rebuilt
+			// history message can say an attachment was there. Files stays raw because
+			// the shape tolerance that keeps an unexpected `files` value from failing
+			// the whole decode lives with the classifier — see internal.SlackMessageHasUpload.
+			Subtype string          `json:"subtype"`
+			Files   json.RawMessage `json:"files"`
 		} `json:"messages"`
 		ResponseMetadata struct {
 			NextCursor string `json:"next_cursor"`
@@ -1113,11 +1119,12 @@ func fetchSlackAgentThreadHistoryPage(ctx context.Context, httpClient *http.Clie
 	}
 	for _, message := range out.Messages {
 		page.messages = append(page.messages, internal.AgentThreadMessage{
-			AppID:  message.AppID,
-			BotID:  message.BotID,
-			UserID: message.UserID,
-			Text:   message.Text,
-			TS:     message.TS,
+			AppID:    message.AppID,
+			BotID:    message.BotID,
+			UserID:   message.UserID,
+			Text:     message.Text,
+			TS:       message.TS,
+			HasFiles: internal.SlackMessageHasUpload(message.Files, message.Subtype),
 		})
 	}
 	return page, nil
