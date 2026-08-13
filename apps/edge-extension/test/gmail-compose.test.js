@@ -256,11 +256,28 @@ function createComposeSandbox(t, config) {
   };
 }
 
-test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
-  let composeBodies = [];
-  const execCalls = [];
-  const caretMoves = [];
-  const composeBody = {
+// Every test hands the content script the same fixture element: one that satisfies *both*
+// recognition paths in isLikelyComposeBody (the `Am Al editable` class triple and the
+// role=textbox/contenteditable/aria-multiline triple) and reports a non-empty rect so isVisible
+// keeps it. A hand-written copy at every call site buried the one member a test actually cared
+// about under ~20 identical lines, and made adding a member the content script started reading a
+// many-way edit.
+//
+// `overrides` is merged with applyOverrides, so a key replaces the default member and `undefined`
+// removes it. The three that vary today:
+//
+//   getBoundingClientRect  the default box is only sized (width/height), which is all isVisible
+//                          reads; the tests that rank bodies against each other add top/left
+//   focus                  a no-op unless the test records which body was focused
+//   insertAdjacentHTML     deliberately absent by default. The content script feature-detects it
+//                          as its last-resort insertion path, so a body that always has it would
+//                          let that path be reached silently. Tests that exercise it pass a
+//                          recorder; the one that must never reach it passes a thrower.
+//
+// Each call builds its own members, so no two bodies from this factory are deepEqual — an
+// assertion naming one of them still fails if the content script picked the other.
+function createComposeBody(overrides) {
+  return applyOverrides({
     classList: {
       contains(name) {
         return name === 'Am' || name === 'Al' || name === 'editable';
@@ -276,10 +293,18 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
     getBoundingClientRect() {
       return { width: 320, height: 24 };
     },
+  }, overrides);
+}
+
+test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
+  let composeBodies = [];
+  const execCalls = [];
+  const caretMoves = [];
+  const composeBody = createComposeBody({
     insertAdjacentHTML() {
       throw new Error('insertAdjacentHTML should not be reached when execCommand succeeds');
     },
-  };
+  });
 
   const { documentElement, messageListener, observers } = createComposeSandbox(t, {
     document: {
@@ -340,23 +365,7 @@ test('findComposeBodyAsync observes documentElement when document.body is not re
 test('findComposeBodyAsync performs an immediate post-observe lookup on the next frame', async function (t) {
   let composeBodies = [];
   const rafCallbacks = [];
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -399,23 +408,7 @@ test('findComposeBodyAsync leaves no discovery timeout behind when the first loo
   // timers, so that leak fails this test at teardown.
   let composeBodies = [];
   let rafCalls = 0;
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -451,23 +444,7 @@ test('findComposeBodyAsync leaves no discovery timeout behind when the first loo
 test('duplicate INSERT_LINKS requests with the same requestId only insert once', async function (t) {
   let composeBodies = [];
   let execInsertCount = 0;
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener, observers } = createComposeSandbox(t, {
     expectedArmed: { 30000: 1 },
@@ -509,23 +486,7 @@ test('duplicate INSERT_LINKS requests with the same requestId only insert once',
 
 test('completed requests are retained (under the cap) so retries replay instead of re-inserting', async function (t) {
   let execInsertCount = 0;
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener } = createComposeSandbox(t, {
     // Timers are stubbed rather than tracked through createTimerHarness: this test needs the 30s
@@ -578,23 +539,7 @@ test('completed requests are retained (under the cap) so retries replay instead 
 test('Selection API fallback inserts at the end when execCommand is unavailable', async function (t) {
   const insertedFragments = [];
   const startAfterCalls = [];
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -631,23 +576,7 @@ test('Selection API fallback inserts at the end when execCommand is unavailable'
 test('Selection API fallback runs when execCommand reports insertion failure', async function (t) {
   const execCalls = [];
   const insertedFragments = [];
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -685,44 +614,22 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
 test('findComposeBody prefers the topmost visible compose body when none is focused', async function (t) {
   const caretMoves = [];
   const focusCalls = [];
-  const backgroundCompose = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
+  const backgroundCompose = createComposeBody({
     focus() {
       focusCalls.push('background');
-    },
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
     },
     getBoundingClientRect() {
       return { width: 320, height: 24, top: 240, left: 640 };
     },
-  };
-  const foregroundCompose = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
+  });
+  const foregroundCompose = createComposeBody({
     focus() {
       focusCalls.push('foreground');
-    },
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
     },
     getBoundingClientRect() {
       return { width: 320, height: 24, top: 120, left: 320 };
     },
-  };
+  });
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -774,25 +681,14 @@ test('findComposeBody breaks a tie between identically placed compose bodies on 
   // element querySelectorAll yields first. Listing the background copy first is what turns that
   // regression into a failure here instead of a silently identical result.
   function createTiedCompose(label) {
-    return {
-      classList: {
-        contains(name) {
-          return name === 'Am' || name === 'Al' || name === 'editable';
-        },
-      },
+    return createComposeBody({
       focus() {
         focusCalls.push(label);
-      },
-      getAttribute(name) {
-        if (name === 'contenteditable') return 'true';
-        if (name === 'role') return 'textbox';
-        if (name === 'aria-multiline') return 'true';
-        return null;
       },
       getBoundingClientRect() {
         return { width: 320, height: 24, top: 120, left: 320 };
       },
-    };
+    });
   }
 
   const backgroundCompose = createTiedCompose('background');
@@ -836,23 +732,7 @@ test('findComposeBody breaks a tie between identically placed compose bodies on 
 test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
   let composeBodies = [];
   const responseOrder = [];
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
-  };
+  const composeBody = createComposeBody();
 
   const { messageListener, observers } = createComposeSandbox(t, {
     expectedArmed: { 30000: 33 },
@@ -887,26 +767,11 @@ test('pending INSERT_LINKS requests are not evicted before they complete', funct
 
 test('insertAdjacentHTML is the last resort when selection insertion fails', async function (t) {
   const insertAdjacentCalls = [];
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
+  const composeBody = createComposeBody({
     insertAdjacentHTML(position, html) {
       insertAdjacentCalls.push({ position, html });
     },
-  };
+  });
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -942,26 +807,11 @@ test('insertAdjacentHTML is the last resort when selection insertion fails', asy
 test('a missing compose formatter reports failure instead of inserting nothing', async function (t) {
   const insertAdjacentCalls = [];
   const execCalls = [];
-  const composeBody = {
-    classList: {
-      contains(name) {
-        return name === 'Am' || name === 'Al' || name === 'editable';
-      },
-    },
-    focus() {},
-    getAttribute(name) {
-      if (name === 'contenteditable') return 'true';
-      if (name === 'role') return 'textbox';
-      if (name === 'aria-multiline') return 'true';
-      return null;
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24 };
-    },
+  const composeBody = createComposeBody({
     insertAdjacentHTML(position, html) {
       insertAdjacentCalls.push({ position, html });
     },
-  };
+  });
 
   const { messageListener, warnings } = createComposeSandbox(t, {
     expectedArmed: { 4000: 1 },
