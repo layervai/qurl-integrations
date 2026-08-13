@@ -67,6 +67,18 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		unchangedOutput:      "No Chrome extension-impacting changes detected",
 	},
 	{
+		name:                 "teams",
+		path:                 "teams.yml",
+		checkNamePrefix:      "teams / ",
+		changeOutput:         "teams",
+		changedEnv:           "TEAMS_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.teams == 'true'",
+		detectChangesName:    "teams / detect changes",
+		requiredName:         "teams / required",
+		verifierStepName:     "Verify Teams CI result",
+		unchangedOutput:      "No Teams-impacting changes detected",
+	},
+	{
 		name:                 "shared",
 		path:                 "shared-test.yml",
 		checkNamePrefix:      "shared / ",

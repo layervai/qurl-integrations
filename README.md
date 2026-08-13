@@ -6,7 +6,7 @@ Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that 
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock grants the caller's IP temporary access — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. Microsoft Teams and Zapier are planned.
+This monorepo contains qURL integrations across several surfaces — a Slack app and a CLI tool (Go), a Discord app (Node.js), and a Chrome extension for Gmail — plus shared Go libraries. A Microsoft Teams OAuth core is in progress; Zapier is planned.
 
 ## Structure
 
@@ -16,7 +16,7 @@ apps/                Per-integration apps (independent release tracks)
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   cli/               CLI — create & manage qURLs from the terminal (Go)
-  teams/             Microsoft Teams (planned)
+  teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
   s3-static-connector/  Private S3 static site origin behind qURL Connector

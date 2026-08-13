@@ -26,8 +26,8 @@ apps/
     cmd/main.go   # Lambda entry point
     internal/     # App-private code — put your logic here
     README.md
-  teams/          # Microsoft Teams (planned)
-  discord/        # Discord bot (planned)
+  teams/          # Microsoft Teams OAuth core (TypeScript, not yet shipped)
+  discord/        # Discord bot
   cli/            # CLI tool
 origins/
   s3-static-connector/ # Reusable private S3 static origin image
@@ -103,12 +103,12 @@ settings, update this section in the same operational change.
 
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
-`chrome-extension / required`, and `shared / required`. Each workflow's
-`changes` filter is the source of truth for which paths need validation. When
-that filter matches, the aggregate validates every quality gate listed in its
-workflow `needs:` set. When branch protection requires path-gated app/shared
-workflows, it should require only these aggregate checks, not the internally
-skipped expensive jobs.
+`chrome-extension / required`, `teams / required`, and `shared / required`. Each
+workflow's `changes` filter is the source of truth for which paths need
+validation. When that filter matches, the aggregate validates every quality gate
+listed in its workflow `needs:` set. When branch protection requires path-gated
+app/shared workflows, it should require only these aggregate checks, not the
+internally skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external
