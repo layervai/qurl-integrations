@@ -124,9 +124,18 @@ func (s *Store) GetScopePolicy(ctx context.Context, tenantID, scopeID string) ([
 }
 
 // BindScopeAlias binds an alias to a resource within a Teams scope.
+//
+// DynamoDB rejects "SET alias_bindings.#alias = :rid" with a ValidationException
+// when the parent alias_bindings map does not yet exist on the row, so the bind
+// is two writes: seed the map, then write the nested key under an
+// attribute_not_exists guard so a duplicate alias fails instead of overwriting
+// an existing binding. This mirrors [slackdata.Store.BindChannelAlias].
 func (s *Store) BindScopeAlias(ctx context.Context, tenantID, scopeID, aliasName, resourceID string) error {
 	if tenantID == "" || scopeID == "" || aliasName == "" || resourceID == "" {
 		return &Error{StatusCode: http.StatusBadRequest, Title: "BindScopeAlias: tenant_id, scope_id, alias_name, and resource_id are required"}
+	}
+	if err := s.ensureScopeAliasBindingsMap(ctx, tenantID, scopeID); err != nil {
+		return fmt.Errorf("ensure alias_bindings map: %w", err)
 	}
 	now := s.nowOrDefault().UTC()
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
@@ -155,6 +164,36 @@ func (s *Store) BindScopeAlias(ctx context.Context, tenantID, scopeID, aliasName
 		return ErrAliasAlreadyBound
 	}
 	return ddbToError("BindScopeAlias", err)
+}
+
+// ensureScopeAliasBindingsMap lazily seeds alias_bindings as an empty map on the
+// scope row so nested SET paths are writable. A failed condition means another
+// writer already seeded it, which is success for our purposes.
+func (s *Store) ensureScopeAliasBindingsMap(ctx context.Context, tenantID, scopeID string) error {
+	now := s.nowOrDefault().UTC()
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.ChannelPoliciesName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTenantID: stringAttr(tenantID),
+			attrScopeID:  stringAttr(scopeID),
+		},
+		UpdateExpression:    aws.String("SET " + attrAliasBindings + " = :empty_map, " + attrCreatedAt + " = if_not_exists(" + attrCreatedAt + ", :created_at), " + attrUpdatedAt + " = :updated_at, " + attrUpdatedAtNano + " = :updated_at_nano"),
+		ConditionExpression: aws.String("attribute_not_exists(" + attrAliasBindings + ")"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":empty_map":       &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{}},
+			":created_at":      stringAttr(now.Format(time.RFC3339)),
+			":updated_at":      stringAttr(now.Format(time.RFC3339)),
+			":updated_at_nano": unixNanoAttr(now),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if errors.As(err, &ccfe) {
+		return nil
+	}
+	return ddbToError("ensureScopeAliasBindingsMap", err)
 }
 
 // UnbindScopeAlias removes an alias from a Teams scope.
@@ -288,8 +327,11 @@ func (s *Store) PurgeResourceFromScope(ctx context.Context, tenantID, scopeID, r
 	sort.Strings(aliases)
 	now := s.nowOrDefault().UTC()
 	expr := "SET " + attrUpdatedAt + " = :updated_at, " + attrUpdatedAtNano + " = :updated_at_nano DELETE " + attrAllowedResourceIDs + " :resource_ids"
-	names := map[string]string{}
+	// Left nil when no alias matches: the SDK serializes any non-nil map, and
+	// DynamoDB rejects an empty ExpressionAttributeNames.
+	var names map[string]string
 	if len(aliases) > 0 {
+		names = make(map[string]string, len(aliases))
 		parts := make([]string, 0, len(aliases))
 		for i, alias := range aliases {
 			key := fmt.Sprintf("#a%d", i)

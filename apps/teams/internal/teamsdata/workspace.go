@@ -245,18 +245,23 @@ func (s *Store) SavePersonalConversationRef(ctx context.Context, tenantID, actor
 		return &Error{StatusCode: http.StatusBadRequest, Title: "SavePersonalConversationRef: marshal personal reference failed", Detail: err.Error()}
 	}
 	now := s.nowOrDefault().UTC()
-	// Use if_not_exists to initialize the personal_conversation_refs map on first
-	// write. DynamoDB does not auto-create intermediate map attributes, so without
-	// this the first SavePersonalConversationRef call for a tenant would fail with
-	// "The document path provided in the update expression is invalid for update".
+	// DynamoDB does not auto-create intermediate map attributes, so the nested
+	// SET below needs personal_conversation_refs to already exist. It cannot be
+	// seeded in the same statement — an update expression may not touch two
+	// overlapping document paths, so "SET personal_conversation_refs =
+	// if_not_exists(...), personal_conversation_refs.#actor = :ref" is rejected
+	// outright. Seed first, then write the actor slot, as
+	// [Store.ensureScopeAliasBindingsMap] does for alias_bindings.
+	if err := s.ensurePersonalConversationRefsMap(ctx, tenantID, now); err != nil {
+		return err
+	}
 	_, err = s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.WorkspaceMappingsName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTenantID: stringAttr(tenantID),
 		},
 		UpdateExpression: aws.String(
-			"SET " + attrPersonalConversationRefs + " = if_not_exists(" + attrPersonalConversationRefs + ", :empty_map), " +
-				attrPersonalConversationRefs + ".#actor = :ref, " +
+			"SET " + attrPersonalConversationRefs + ".#actor = :ref, " +
 				attrUpdatedAt + " = :now, " +
 				attrUpdatedAtNano + " = :now_nano"),
 		ConditionExpression: aws.String("attribute_exists(" + attrTenantID + ")"),
@@ -264,16 +269,49 @@ func (s *Store) SavePersonalConversationRef(ctx context.Context, tenantID, actor
 			"#actor": actorID,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":empty_map": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{}},
-			":ref":       stringAttr(string(raw)),
-			":now":       stringAttr(now.Format(time.RFC3339)),
-			":now_nano":  unixNanoAttr(now),
+			":ref":      stringAttr(string(raw)),
+			":now":      stringAttr(now.Format(time.RFC3339)),
+			":now_nano": unixNanoAttr(now),
 		},
 	})
 	if err != nil {
 		return ddbToError("SavePersonalConversationRef", err)
 	}
 	return nil
+}
+
+// ensurePersonalConversationRefsMap lazily seeds personal_conversation_refs as
+// an empty map so the nested actor-slot SET is writable.
+//
+// The seed is best-effort: a failed condition means either the map already
+// exists or the tenant row does not, and the caller's own
+// attribute_exists(teams_tenant_id) guard is what authoritatively rejects the
+// missing-tenant case.
+func (s *Store) ensurePersonalConversationRefsMap(ctx context.Context, tenantID string, now time.Time) error {
+	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.WorkspaceMappingsName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTenantID: stringAttr(tenantID),
+		},
+		UpdateExpression: aws.String(
+			"SET " + attrPersonalConversationRefs + " = :empty_map, " +
+				attrUpdatedAt + " = :now, " +
+				attrUpdatedAtNano + " = :now_nano"),
+		ConditionExpression: aws.String("attribute_exists(" + attrTenantID + ") AND attribute_not_exists(" + attrPersonalConversationRefs + ")"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":empty_map": &ddbtypes.AttributeValueMemberM{Value: map[string]ddbtypes.AttributeValue{}},
+			":now":       stringAttr(now.Format(time.RFC3339)),
+			":now_nano":  unixNanoAttr(now),
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	var ccfe *ddbtypes.ConditionalCheckFailedException
+	if errors.As(err, &ccfe) {
+		return nil
+	}
+	return ddbToError("ensurePersonalConversationRefsMap", err)
 }
 
 // PersonalConversationRef loads the stored personal bot chat reference, if present.
