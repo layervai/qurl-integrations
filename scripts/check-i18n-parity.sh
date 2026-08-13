@@ -110,6 +110,9 @@ SANCTIONED_DELTAS = {
 # match them would report every one as missing.
 MANIFEST_KEY = re.compile(r"__MSG_([A-Za-z0-9_]+)__")
 
+# Markup nested inside a popup mirror, stripped before the text is compared.
+CHILD_TAG = re.compile(r"<[^>]*>")
+
 # popup.html renders the extension name twice before chrome.i18n resolves: the
 # static <title>, and the header div that data-i18n later overwrites. Both must
 # already hold this app's own ext_name or the popup visibly swaps names on open.
@@ -154,16 +157,29 @@ def bail(headline):
 
 CANNOT_RUN = "Chrome<->Edge i18n parity check could not run."
 
+def load_text(path):
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        failures.append(f"{path}: missing")
+    return None
+
+
 catalogs = {name: load_json(root / CATALOG) for name, root in APPS.items()}
 if any(catalog is None for catalog in catalogs.values()):
     bail(CANNOT_RUN)
 
 chrome, edge = catalogs["chrome"], catalogs["edge"]
+manifests = {name: load_json(root / "manifest.json") for name, root in APPS.items()}
+popups = {name: load_text(root / "popup/popup.html") for name, root in APPS.items()}
 
-# Shape gate, before the rules: every entry must be an object carrying a string
-# `message`. A valid-JSON-but-wrong-shape entry (a bare string, say) would
-# otherwise throw an AttributeError out of rule 2's set() — still a non-zero
-# exit, but a traceback instead of a curated failure.
+# Input gate, before any rule runs. Two jobs: every catalog entry must be an
+# object carrying a string `message` — a valid-JSON-but-wrong-shape entry would
+# otherwise throw an AttributeError out of rule 2's set(), a non-zero exit but a
+# traceback rather than a curated failure — and every file loaded above must
+# have been readable. A missing or unparseable input is an infrastructure
+# problem, not drift, so it bails under CANNOT_RUN rather than being reported
+# beneath the drift banner. Everything past this point is known-good.
 for name, catalog in (("chrome", chrome), ("edge", edge)):
     for key in sorted(catalog):
         entry = catalog[key]
@@ -255,8 +271,6 @@ def walk_strings(value, path):
             yield from walk_strings(item, f"{path}[{index}]")
 
 
-manifests = {name: load_json(root / "manifest.json") for name, root in APPS.items()}
-
 for name, catalog in (("chrome", chrome), ("edge", edge)):
     pattern = FOREIGN_BROWSER[name]
 
@@ -265,9 +279,10 @@ for name, catalog in (("chrome", chrome), ("edge", edge)):
     # __MSG_*__ to a literal is user-visible in the store listing. Only string
     # VALUES are walked, so the `minimum_chrome_version` KEY is not matched —
     # and the __MSG_*__ placeholders themselves carry no browser name.
-    sources = [(APPS[name] / CATALOG, catalog)]
-    if manifests[name] is not None:
-        sources.append((APPS[name] / "manifest.json", manifests[name]))
+    sources = (
+        (APPS[name] / CATALOG, catalog),
+        (APPS[name] / "manifest.json", manifests[name]),
+    )
 
     for source_path, document in sources:
         for key in sorted(document):
@@ -283,8 +298,6 @@ for name, catalog in (("chrome", chrome), ("edge", edge)):
 # Rule 5: manifest __MSG_*__ references resolve.
 for name, root in APPS.items():
     manifest = manifests[name]
-    if manifest is None:
-        continue  # load_json already recorded why
     referenced = sorted(set(MANIFEST_KEY.findall(json.dumps(manifest))))
     if not referenced:
         failures.append(
@@ -307,11 +320,7 @@ for name, root in APPS.items():
     if expected is None:
         continue  # rule 1/5 already covers a missing ext_name
     popup = root / "popup/popup.html"
-    try:
-        markup = popup.read_text()
-    except FileNotFoundError:
-        failures.append(f"{popup}: missing")
-        continue
+    markup = popups[name]
     for label, pattern in POPUP_MIRRORS:
         match = pattern.search(markup)
         if match is None:
@@ -320,10 +329,13 @@ for name, root in APPS.items():
                 "or the markup changed shape."
             )
             continue
-        # Stripped on both sides: surrounding whitespace in the markup is not
+        # Child markup is stripped before comparing, so adding an icon or a
+        # wrapping span inside the mirror does not read as a name mismatch —
+        # the same tolerance the tag-agnostic pattern above provides. Then
+        # stripped on both sides: surrounding whitespace in the markup is not
         # rendered, so comparing it against a raw catalog value would report a
         # difference the user could never see.
-        actual = html.unescape(match.group("text")).strip()
+        actual = html.unescape(CHILD_TAG.sub("", match.group("text"))).strip()
         if actual != expected.strip():
             failures.append(
                 f"{popup}: {label} reads {actual!r} but this app's ext_name is "

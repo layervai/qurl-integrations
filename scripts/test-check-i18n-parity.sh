@@ -260,7 +260,7 @@ run_case manifest-key-absent-chrome-side 1 "references 1 key(s) absent from" \
 run_case manifest-stopped-localizing 1 "no __MSG_*__ references found" \
   python3 -c 'import json; json.dump({"manifest_version": 3, "name": "qURL", "description": "x"}, open("apps/edge-extension/manifest.json", "w"))'
 
-run_case manifest-missing 1 "manifest.json: missing" \
+run_case manifest-missing 1 "could not run" \
   rm "apps/edge-extension/manifest.json"
 
 run_case manifest-invalid-json 1 "invalid JSON" \
@@ -286,6 +286,14 @@ run_case popup-header-tolerates-element-change 0 "i18n in parity" \
 run_case popup-title-mismatch-chrome-side 1 "<title> reads 'qURL File Upload for Edge' but this app's ext_name is" \
   python3 -c 'p = "apps/chrome-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<title>qURL Agent</title>", "<title>qURL File Upload for Edge</title>"))'
 
+# Child markup inside a mirror is stripped before comparing, so adding an icon
+# is not a name mismatch — but the text around it still has to be right.
+run_case popup-header-tolerates-child-markup 0 "i18n in parity" \
+  python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("data-i18n=\"ext_name\">qURL File Upload for Edge<", "data-i18n=\"ext_name\"><img class=\"logo\">qURL File Upload for Edge<"))'
+
+run_case popup-child-markup-does-not-mask-drift 1 "data-i18n=\"ext_name\" reads 'qURL Agent' but this app's ext_name is" \
+  python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("data-i18n=\"ext_name\">qURL File Upload for Edge<", "data-i18n=\"ext_name\"><img class=\"logo\">qURL Agent<"))'
+
 run_case popup-mirror-shape-changed 1 "no <title> mirror of ext_name found" \
   python3 -c 'p = "apps/edge-extension/popup/popup.html"; s = open(p).read(); open(p, "w").write(s.replace("<title>qURL File Upload for Edge</title>", ""))'
 
@@ -304,7 +312,7 @@ run_case entry-not-an-object 1 "copy_btn is str, not an object" \
 run_case entry-message-not-a-string 1 "ext_name has no string \`message\`" \
   python3 -c 'import json; p = "apps/chrome-extension/_locales/en/messages.json"; d = json.load(open(p)); d["ext_name"] = {"description": "Extension name"}; json.dump(d, open(p, "w"), indent=2)'
 
-run_case popup-missing 1 "popup.html: missing" \
+run_case popup-missing 1 "could not run" \
   rm "apps/edge-extension/popup/popup.html"
 
 printf 'check-i18n-parity.sh: %d cases passed\n' "$case_no"
