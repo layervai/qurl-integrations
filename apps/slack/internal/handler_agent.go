@@ -1102,6 +1102,10 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 
 	message := stripBotMention(env.Event.Text)
 	if reply, deterministic := agentDeterministicReply(&env.Event, message); deterministic {
+		// Keyed on the reply rather than re-testing agentEventHasUpload, so the log
+		// follows what was actually posted instead of a parallel derivation that a
+		// reordering of the switch above could silently falsify. Identity against the
+		// const is the point: two reply consts sharing text would itself be a bug.
 		if reply == agentUnsupportedMediaReply {
 			// A media turn returns before "agent: turn complete", so without this it is
 			// invisible in every existing dashboard — and this is the demand signal for
