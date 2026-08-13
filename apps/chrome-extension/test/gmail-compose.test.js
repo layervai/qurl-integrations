@@ -698,6 +698,80 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
   assert.deepEqual(caretMoves, [foregroundCompose]);
 });
 
+test('findComposeBody breaks a tie between identically placed compose bodies on z-index', async function (t) {
+  const caretMoves = [];
+  const focusCalls = [];
+
+  // compareComposeBodies leads with z-index and every term after it is geometry, so the
+  // tie-break only decides anything once the rects tie outright. Both bodies here report the
+  // same top, the same left, and the same area, which leaves z-index as the sole term with an
+  // opinion — the test above cannot make that claim, since its rects differ by `top` and so
+  // `top` alone already picks the foreground copy.
+  //
+  // DOM order is load-bearing for the same reason: `matches.sort` is stable, so a comparator
+  // that stopped consulting z-index would return 0 for this pair and hand the win to whichever
+  // element querySelectorAll yields first. Listing the background copy first is what turns that
+  // regression into a failure here instead of a silently identical result.
+  function createTiedCompose(label) {
+    return {
+      classList: {
+        contains(name) {
+          return name === 'Am' || name === 'Al' || name === 'editable';
+        },
+      },
+      focus() {
+        focusCalls.push(label);
+      },
+      getAttribute(name) {
+        if (name === 'contenteditable') return 'true';
+        if (name === 'role') return 'textbox';
+        if (name === 'aria-multiline') return 'true';
+        return null;
+      },
+      getBoundingClientRect() {
+        return { width: 320, height: 24, top: 120, left: 320 };
+      },
+    };
+  }
+
+  const backgroundCompose = createTiedCompose('background');
+  const foregroundCompose = createTiedCompose('foreground');
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll(selector) {
+        return selector.includes(':focus')
+          ? []
+          : [backgroundCompose, foregroundCompose];
+      },
+    },
+    globals: {
+      getComputedStyle(element) {
+        if (element === foregroundCompose) {
+          return { display: 'block', visibility: 'visible', zIndex: '20' };
+        }
+        return { display: 'block', visibility: 'visible', zIndex: '1' };
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
+    },
+  });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['foreground']);
+  assert.deepEqual(caretMoves, [foregroundCompose]);
+});
+
 test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
   let composeBodies = [];
   const responseOrder = [];
