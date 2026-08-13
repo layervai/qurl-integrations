@@ -207,6 +207,12 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
 		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
 		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
+		// file_share is admissible now, so the ONLY thing stopping a bot's upload from
+		// drawing a reply (and looping) is the author/bot guard ahead of the subtype
+		// switch. That guard is not in this PR's diff, which is exactly why it is
+		// pinned here.
+		{"bot file upload ignored (author guard, not the subtype filter)", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "B1", slackMessageSubtypeFileShare, "")), false, false},
+		{"authorless file upload ignored", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "", "", slackMessageSubtypeFileShare, "")), false, false},
 		{"me_message dm ignored (named in the policy doc, not admitted)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "me_message", "hi"), false, false},
 		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true},
 		{"file_share dm without files still admitted (subtype is proof)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, true},
@@ -345,6 +351,24 @@ func TestSlackEventFilesSurvivesEnvelopeDecode(t *testing.T) {
 				t.Fatalf("files %q decoded to present=%v, want %v", tt.field, env.Event.Files.present, tt.wantPresent)
 			}
 		})
+	}
+}
+
+// TestSlackEventFilesIsDecodeOnly pins that an event cannot be re-marshaled, and
+// shows why that matters. count/present are unexported, so default marshaling emits
+// `{}` — and `{}` is exactly the shape this type's UnmarshalJSON classifies as an
+// uncountable attachment. A round trip would therefore turn every event, textual
+// ones included, into a refused media turn. The guard makes that loud.
+func TestSlackEventFilesIsDecodeOnly(t *testing.T) {
+	var f slackEventFiles
+	if err := json.Unmarshal([]byte(`{}`), &f); err != nil {
+		t.Fatalf("decoding `{}`: %v", err)
+	}
+	if !f.present {
+		t.Fatal("precondition: `{}` must read as an uncountable attachment for this hazard to exist")
+	}
+	if _, err := json.Marshal(slackInnerEvent{Text: "what can I access?"}); err == nil {
+		t.Fatal("marshaling an inner event must fail: a round trip would refuse every turn")
 	}
 }
 
@@ -1493,18 +1517,18 @@ func TestHandleEvent_UnsupportedMediaLogContract(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		event           string
-		wantVisible     float64
-		wantFieldPresen bool
-		wantSubtype     bool
+		name             string
+		event            string
+		wantVisible      float64
+		wantFieldPresent bool
+		wantSubtype      bool
 	}{
 		{
-			name:            "counted files",
-			event:           `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"600.1","text":"hi","files":[{"id":"F1"},{"id":"F2"}]}`,
-			wantVisible:     2,
-			wantFieldPresen: true,
-			wantSubtype:     true,
+			name:             "counted files",
+			event:            `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"600.1","text":"hi","files":[{"id":"F1"},{"id":"F2"}]}`,
+			wantVisible:      2,
+			wantFieldPresent: true,
+			wantSubtype:      true,
 		},
 		{
 			// Benign: Slack described the upload by subtype alone.
@@ -1516,10 +1540,10 @@ func TestHandleEvent_UnsupportedMediaLogContract(t *testing.T) {
 		{
 			// The alertable pair: present but uncountable, and NO file_share subtype —
 			// so this turn may have carried no attachment at all.
-			name:            "uncountable shape",
-			event:           `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"600.3","text":"hi","files":{"id":"F1"}}`,
-			wantVisible:     0,
-			wantFieldPresen: true,
+			name:             "uncountable shape",
+			event:            `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"600.3","text":"hi","files":{"id":"F1"}}`,
+			wantVisible:      0,
+			wantFieldPresent: true,
 		},
 	}
 	for _, tt := range tests {
@@ -1561,8 +1585,8 @@ func TestHandleEvent_UnsupportedMediaLogContract(t *testing.T) {
 			if rec["files_visible"] != tt.wantVisible {
 				t.Fatalf("files_visible = %v, want %v", rec["files_visible"], tt.wantVisible)
 			}
-			if rec["files_field_present"] != tt.wantFieldPresen {
-				t.Fatalf("files_field_present = %v, want %v", rec["files_field_present"], tt.wantFieldPresen)
+			if rec["files_field_present"] != tt.wantFieldPresent {
+				t.Fatalf("files_field_present = %v, want %v", rec["files_field_present"], tt.wantFieldPresent)
 			}
 			if rec["file_share_subtype"] != tt.wantSubtype {
 				t.Fatalf("file_share_subtype = %v, want %v", rec["file_share_subtype"], tt.wantSubtype)

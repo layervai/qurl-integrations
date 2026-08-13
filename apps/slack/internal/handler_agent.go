@@ -240,6 +240,19 @@ type slackEventFiles struct {
 	present bool
 }
 
+// MarshalJSON always fails, making this type decode-only by construction.
+//
+// The entries are discarded at decode time, so there is nothing faithful left to
+// emit — and because count/present are unexported, the DEFAULT marshaling would
+// emit `{}`, which this type's own UnmarshalJSON reads back as an uncountable
+// attachment. A round-tripped envelope would therefore refuse EVERY turn,
+// including purely textual ones, from a value that never carried a file. That is
+// silent and would be brutal to diagnose, so it is an error at the point of the
+// mistake instead. No marshal site exists today (verified); this keeps it that way.
+func (slackEventFiles) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("slackEventFiles is decode-only: re-marshaling an event would round-trip files into an attachment that was never there")
+}
+
 // UnmarshalJSON implements json.Unmarshaler. It classifies by SHAPE first so that
 // an unexpected files value is a recognized outcome rather than a decode failure —
 // see the type doc for why failing here would be so costly.
