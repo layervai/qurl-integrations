@@ -162,14 +162,19 @@ check-discord:
 # build-release.js and package-release.js through their own suites, but not the
 # real zip-writing path — run it by hand before a store submission.
 #
-# The syntax check is CI's verbatim: globbed so a source file added later
-# cannot slip past it, and piped through xargs because `find -exec` reports
-# success even when the command it ran failed.
+# The syntax check is CI's command verbatim, run through `bash -o pipefail`
+# because that is the shell GitHub gives a `run:` step. Without it a Make
+# recipe line runs under /bin/sh, the pipeline reports only xargs's status,
+# and a `find` that failed — a globbed root renamed in some later refactor —
+# would pass here while failing CI. That is the one asymmetry this file's
+# "predicts CI" claim cannot afford. Globbed so a source file added later
+# cannot slip past the check, and piped through xargs rather than `find
+# -exec`, which reports success even when the command it ran failed.
 define check_extension
 $(call node_version_warning,$(1))
 cd $(1) && npm ci --no-audit --no-fund
 cd $(1) && npm run lint
-cd $(1) && find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check
+cd $(1) && bash -o pipefail -c "find background.js popup content lib scripts -name '*.js' -print0 | xargs -0 -r -n1 node --check"
 cd $(1) && npm test
 endef
 
