@@ -43,7 +43,7 @@ import (
 //
 // Expiry: 5 minutes from mint preserves the established slash-command-reply →
 // click → Auth0 authenticate → callback window. It remains independent of the
-// longer Connector bootstrap-key lifetime so a leaked setup link has the
+// longer Connector enrollment-token lifetime so a leaked setup link has the
 // smallest already-proven UX window.
 //
 // Replay posture: StateStore-backed states are consumed once on callback. The

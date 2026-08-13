@@ -191,8 +191,8 @@ const (
 	testForbiddenBootstrapArgv   = `printf '%s' "$QURL_BOOTSTRAP_KEY"`
 	testTunnelAgentDirFragment   = `/var/lib/layerv/qurl-connector/${QURL_CONNECTOR_ID}/agent`
 	testTunnelLocalPort9090Line  = "local_port: 9090"
-	testTunnelKeyHistoryNote     = "prompts for the bootstrap key"
-	testTunnelKeyPromptLine      = "Paste qURL bootstrap key (input hidden)"
+	testTunnelKeyHistoryNote     = "prompts for the enrollment token"
+	testTunnelKeyPromptLine      = "Paste qURL enrollment token (input hidden)"
 	testTunnelKeyInstallLine     = `QURL_BOOTSTRAP_KEY_LEN=${#QURL_BOOTSTRAP_KEY}`
 	testTunnelECSAPIKeyNameLine  = `"name": "QURL_API_KEY"`
 	testForbiddenConnectorSlug   = "QURL_CONNECTOR_SLUG"
@@ -513,6 +513,12 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
 	now := fixedNow
 
+	// This test's mint stub returns the pre-cutover envelope (no kind/target),
+	// which is exactly the case the rollout warning exists to surface. Capture
+	// the default logger so the warning's emission is asserted end to end, not
+	// just its predicate.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -539,7 +545,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
@@ -586,11 +592,14 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
-		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
+	assertConnectorEnrollmentKind(t, apiKeyBody)
+	if apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
+		t.Errorf("api key body expires_in = %v, want %q", apiKeyBody[testKeyExpiresIn], tunnelBootstrapTTL)
 	}
-	if _, ok := apiKeyBody["purpose"]; ok {
-		t.Errorf("api key body contained deprecated purpose field: %+v", apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if !logs.contains(kindFirstWarning) {
+		t.Error("a legacy-shaped mint response must raise the kind-first rollout warning")
 	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
@@ -602,9 +611,9 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	for _, want := range []string{
 		"qURL Connector `" + testTunnelSlug + "` is ready to install.",
 		"qURL alias `$" + testTunnelSlug + "` is ready in this channel.",
-		"temporary bootstrap key expires in 1 hour and was sent separately by DM",
+		"temporary enrollment token expires in 1 hour and was sent separately by DM",
 		"The install instructions below either prompt for it or reference your platform secret manager",
-		"Paste the DM key only when prompted or into your secret manager",
+		"Paste the DM token only when prompted or into your secret manager",
 		"Run this whole block on the Linux Docker host",
 		testTunnelKeyHistoryNote,
 		"set -eu",
@@ -620,7 +629,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		`--network "container:${WEB_CONTAINER}"`,
 		testTunnelAgentDirFragment,
 		testTunnelImageRef,
-		"Treat the separate bootstrap-key DM as secret",
+		"Treat the separate enrollment-token DM as secret",
 		"Keep the qURL agent-state directory, volume, or PVC",
 		"/qurl get $" + testTunnelSlug,
 	} {
@@ -641,7 +650,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 		t.Fatalf("PostDM target = team %q user %q, want %q/%q", dm.teamID, dm.userID, testAdminTeamID, testAdminUserID)
 	}
 	for _, want := range []string{
-		"Temporary qURL Connector bootstrap key for `" + testTunnelSlug + "` expires in 1 hour.",
+		"Temporary qURL Connector enrollment token for `" + testTunnelSlug + "` expires in 1 hour.",
 		"install instructions were sent separately",
 		"Delete this DM from Slack history",
 		testTunnelAPIKey,
@@ -690,7 +699,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
+			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
 			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
@@ -1346,6 +1355,11 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := fixedNow
 	modalCreatedAt := now.Add(-10 * time.Minute)
 
+	// Counterpart to the slash-path assertion: this test's mint stub returns
+	// the kind-first envelope, so the rollout warning must stay silent. Without
+	// this direction, a warning that fired unconditionally would still pass.
+	logs := captureDefaultSlog(t)
+
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)
 
@@ -1368,15 +1382,20 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&apiKeyBody); err != nil {
 			t.Fatalf("decode api key body: %v", err)
 		}
+		// Post-cutover response shape. The slash-path fixtures deliberately
+		// keep the legacy envelope so both shapes stay covered on the Slack
+		// side through the rollout window; this one exercises the kind-first
+		// response the producer will actually send afterwards.
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelModalKey,
-			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetConnector,
+			"claims":         []map[string]string{{testKeyType: client.CredentialClaimTypeConnector, "id": testTunnelSlug}},
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -1421,8 +1440,14 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
-	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
-		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
+	// The modal path shares buildTunnelInstall with the slash path, but assert
+	// the full wire contract here too so a claims/retired-field regression is
+	// caught on either entry point independently.
+	assertConnectorEnrollmentKind(t, apiKeyBody)
+	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
+	assertNoRetiredCredentialFields(t, apiKeyBody)
+	if logs.contains(kindFirstWarning) {
+		t.Error("a kind-first mint response must not raise the rollout warning")
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
@@ -2938,7 +2963,7 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "did not return a bootstrap key") {
+	if !strings.Contains(async, "did not return an enrollment token") {
 		t.Fatalf("async reply = %q, want missing-plaintext copy", async)
 	}
 	if revokeHits != 1 {
@@ -2963,7 +2988,7 @@ func TestTunnelInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) {
 	h.SetAliasStore(h.cfg.AdminStore)
 	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
 
-	if !strings.Contains(async, "No bootstrap key was minted") || !strings.Contains(async, "Slack DM delivery") {
+	if !strings.Contains(async, "No enrollment token was minted") || !strings.Contains(async, "Slack DM delivery") {
 		t.Fatalf("async reply = %q, want DM-unwired pre-mint refusal", async)
 	}
 	if resourceHits != 0 || apiKeyHits != 0 {
@@ -3202,7 +3227,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		t.Fatalf("response_url bodies leaked bootstrap key: %v", responseBodies)
 	}
 	last := responseBodies[len(responseBodies)-1]
-	if !strings.Contains(last, "bootstrap key was revoked") || !strings.Contains(last, "discard it") {
+	if !strings.Contains(last, "enrollment token was revoked") || !strings.Contains(last, "discard it") {
 		t.Fatalf("last response_url body = %q, want revoked-key discard follow-up", last)
 	}
 	if len(*dmPosts) != 2 {
@@ -3211,7 +3236,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	if !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
 		t.Fatalf("first DM = %q, want bootstrap key", (*dmPosts)[0].text)
 	}
-	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that key") {
+	if strings.Contains((*dmPosts)[1].text, testTunnelAPIKey) || !strings.Contains((*dmPosts)[1].text, "was revoked") || !strings.Contains((*dmPosts)[1].text, "Discard that token") {
 		t.Fatalf("second DM = %q, want discard notice without key", (*dmPosts)[1].text)
 	}
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
@@ -3795,7 +3820,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 			t.Fatalf("DM-failure notice leaked install secret/details %q: %s", forbidden, failure)
 		}
 	}
-	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary key was revoked") {
+	if !strings.Contains(failure, "could not deliver") || !strings.Contains(failure, "temporary token was revoked") {
 		t.Fatalf("failure notice = %s, want DM failure and revoke copy", failure)
 	}
 	got, err := agentStore.ListAuditEntries(context.Background(), testAdminTeamID, testAdminUserID, 10)
@@ -3870,7 +3895,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	}
 	failure := parseSlackText(t, []byte(responseBodies[0]))
 	for _, want := range []string{
-		"temporary key was revoked",
+		"temporary token was revoked",
 		"latest qURL Slack app install",
 		"<https://slack-bot.example/oauth/slack/install|the qURL Slack install link>",
 		"/qurl-admin protect-connector",
@@ -4446,4 +4471,58 @@ func tunnelInstallViewSubmissionBodyWithIdentity(t *testing.T, meta *TunnelInsta
 		t.Fatalf("marshal private_metadata: %v", err)
 	}
 	return viewSubmissionBody(t, "V_test_tunnel", callbackIDTunnelInstall, string(pm), payloadTeamID, payloadUserID, values)
+}
+
+// TestCredentialConfirmsKindFirst pins the response-confirmation semantics the
+// rollout warning keys off. The two cases that matter most are the ones that
+// pull in opposite directions: a pre-cutover producer (no `kind` at all) must
+// warn, because it silently minted a broader credential than requested; a
+// post-cutover producer that echoes `kind` but omits the corroborating
+// `target` must NOT warn, or the signal becomes permanent noise.
+func TestCredentialConfirmsKindFirst(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		key  *client.APIKey
+		want bool
+	}{
+		{
+			name: "kind and target both confirmed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: client.CredentialTargetConnector},
+			want: true,
+		},
+		{
+			name: "kind confirmed, target not echoed",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken},
+			want: true,
+		},
+		{
+			name: "kind confirmed but target disagrees",
+			key:  &client.APIKey{Kind: client.CredentialKindEnrollmentToken, Target: "workspace"},
+			want: false,
+		},
+		{
+			name: "pre-cutover producer echoes nothing",
+			key:  &client.APIKey{KeyType: client.APIKeyTypeTunnelBootstrap, TunnelSlug: testTunnelSlug},
+			want: false,
+		},
+		{
+			name: "producer minted an ordinary api key",
+			key:  &client.APIKey{Kind: client.CredentialKindAPIKey},
+			want: false,
+		},
+		{
+			name: "nil key",
+			key:  nil,
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := credentialConfirmsKindFirst(tc.key); got != tc.want {
+				t.Errorf("credentialConfirmsKindFirst(%+v) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
 }

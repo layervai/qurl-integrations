@@ -221,7 +221,7 @@ func run() error {
 	// the slash-command modals.
 	postMessage := newSlackPostMessageFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackChatPostMessageURL, nil)
 	// DM seam for secret-bearing user deliveries (`/qurl get dm:true` and qURL
-	// Connector bootstrap keys). Same token lookup + Grid fallback as channel posts.
+	// Connector enrollment tokens). Same token lookup + Grid fallback as channel posts.
 	postDM := newSlackPostDMFuncWithTokenLookup(workspaceTokenLookup, userAgent, slackConversationsOpenURL, slackChatPostMessageURL, nil)
 	// chat.postEphemeral seam: delivers a get's one-time link privately in a channel as a
 	// standalone ephemeral (the response_url ephemeral collides with the card-replace).
