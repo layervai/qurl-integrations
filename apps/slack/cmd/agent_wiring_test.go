@@ -317,7 +317,7 @@ func TestLogAgentSurfaceState_ConfirmMode(t *testing.T) {
 	// The confirm/mutation line must key on the EFFECTIVE predicate
 	// (Handler.agentConfirmEnabled), never the raw flag: a flag set while the surface
 	// is dark must read "set but DARK", not "LIVE".
-	wired := agentSurfaceState{llmWired: true, storeWired: true, postWired: true, blocksWired: true}
+	wired := agentSurfaceState{llmWired: true, storeWired: true, postWired: true, blocksWired: true, ephemeralBlocksWired: true}
 	cases := []struct {
 		name        string
 		state       agentSurfaceState
@@ -330,6 +330,8 @@ func TestLogAgentSurfaceState_ConfirmMode(t *testing.T) {
 		// Killed: only the kill-switch line; no separate confirm line (it would name the
 		// seams, not the kill switch, as the blocker).
 		{name: "flag set but killed → no confirm line", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.killed = true }), wantConfirm: ""},
+		// CONFIRM live but the channel get-delivery seam unwired → the loud post-mint-failure warning.
+		{name: "confirm live but ephemeral-blocks unwired", state: with(wired, func(s *agentSurfaceState) { s.confirmFlag = true; s.ephemeralBlocksWired = false }), wantConfirm: "channel get approvals will FAIL after minting"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

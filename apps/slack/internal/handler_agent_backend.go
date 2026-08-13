@@ -2,14 +2,18 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -55,9 +59,10 @@ type agentBackend struct {
 	// failed scan is cached too: a transient error on the first call fails
 	// list_resources for the rest of the turn rather than re-hammering a failing
 	// API mid-scan — intentional, fail-fast.
-	resourcesOnce sync.Once
-	resources     []client.Resource
-	resourcesErr  error
+	resourcesOnce    sync.Once
+	resources        []client.Resource
+	resourcesPartial bool
+	resourcesErr     error
 
 	// Per-turn memo of the channel's alias bindings (GetChannelPolicy), shared by
 	// list_aliases and list_resources. list_resources joins it (rid -> $channelAlias) to
@@ -68,6 +73,15 @@ type agentBackend struct {
 	policyOnce    sync.Once
 	policyEntries []slackdata.PolicyEntry
 	policyErr     error
+
+	// fetchClient opens the short-lived qURL minted by inspect_token. Tests may
+	// replace it; production falls back to a small timeout client.
+	fetchClient *http.Client
+
+	// allowInspectableLoopbackHosts relaxes inspect_token's entry-host policy for
+	// tests that use local httptest servers. Production must leave this false so
+	// inspect_token only enters qurl.link -> *.qurl.site.
+	allowInspectableLoopbackHosts bool
 }
 
 // newAgentBackend builds the backend from the handler's authenticated-client
@@ -95,11 +109,20 @@ func (b *agentBackend) channelAllowed(ctx context.Context, tc *agent.TurnContext
 // only on the first call; subsequent calls return the cached scan, so
 // list_resources costs one workspace scan per turn no matter how many times the
 // model calls it.
-func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+func (b *agentBackend) channelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, bool, error) {
 	b.resourcesOnce.Do(func() {
-		b.resources, b.resourcesErr = collectChannelResources(ctx, c, allowed)
+		b.resources, b.resourcesPartial, b.resourcesErr = collectChannelResources(ctx, c, allowed)
 	})
-	return b.resources, b.resourcesErr
+	return b.resources, b.resourcesPartial, b.resourcesErr
+}
+
+// resourceScanPartial reports whether this turn's workspace scan stopped short of
+// the channel's whole allowed set (see collectChannelResources). False when no
+// scan ran. Read by the turn-complete log AFTER Agent.Run returns; the memo is
+// written on the same goroutine that executes the read tools, so no
+// synchronization is needed here.
+func (b *agentBackend) resourceScanPartial() bool {
+	return b.resourcesPartial
 }
 
 // channelPolicy returns the channel's alias bindings, fetched once and memoized for the
@@ -120,6 +143,27 @@ func (b *agentBackend) fail(op string, err error) (string, error) {
 	return "", fmt.Errorf("%s: %w", op, err)
 }
 
+// authClientForTurn resolves the workspace's qURL client for a tool call,
+// translating the "workspace not connected" case into the same actionable nudge
+// the slash path uses (workspaceNotSetupMessage). A non-empty nudge is returned
+// as CONTENT (with err == nil) so the model relays "run /qurl setup <email>"
+// instead of a generic model-safe error; any other client error stays a fail()
+// (logged, collapsed to the generic string) with a nil client and empty nudge.
+// The three outcomes are mutually exclusive — exactly one of (client, nudge,
+// err) is non-zero. The nudge is workspace state, not an LLM-distilled value, so
+// it is safe to surface verbatim.
+func (b *agentBackend) authClientForTurn(ctx context.Context, op string, tc *agent.TurnContext) (c *client.Client, nudge string, err error) {
+	c, err = b.authClient(ctx, tc.TeamID)
+	if err == nil {
+		return c, "", nil
+	}
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return nil, workspaceNotSetupMessage, nil
+	}
+	_, err = b.fail(op, err)
+	return nil, "", err
+}
+
 // agentBackendUnconfigured is returned (as content, not an error) when the admin
 // store isn't wired — a no-DDB deploy answers gracefully instead of erroring.
 const agentBackendUnconfigured = "Resource information isn't available in this workspace yet."
@@ -137,15 +181,23 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 	if len(allowed) == 0 {
 		return "No resources are protected in this channel yet.", nil
 	}
-	c, err := b.authClient(ctx, tc.TeamID)
+	c, nudge, err := b.authClientForTurn(ctx, "list resources: client", tc)
 	if err != nil {
-		return b.fail("list resources: client", err)
+		return "", err
 	}
-	resources, err := b.channelResources(ctx, c, allowed)
+	if nudge != "" {
+		return nudge, nil
+	}
+	resources, partial, err := b.channelResources(ctx, c, allowed)
 	if err != nil {
 		return b.fail("list resources", err)
 	}
 	if len(resources) == 0 {
+		if partial {
+			// Never let an incomplete scan read as "nothing is protected here" — that
+			// is the one wrong answer this tool must not give.
+			return channelResourcesIncompleteEmpty, nil
+		}
 		return "No resources are protected in this channel yet.", nil
 	}
 	// Channel alias bindings name resources that carry no intrinsic alias/slug (e.g.
@@ -169,13 +221,34 @@ func (b *agentBackend) ListResources(ctx context.Context, tc *agent.TurnContext)
 		lines = append(lines, formatResourceLine(&resources[i], channelAlias[resources[i].ResourceID]))
 	}
 	sort.Strings(lines)
-	return "Resources reachable in this channel:\n" + strings.Join(lines, "\n"), nil
+	out := "Resources reachable in this channel:\n" + strings.Join(lines, "\n")
+	if partial {
+		out += channelResourcesIncompleteNote
+	}
+	return out, nil
 }
+
+// channelResourcesIncompleteNote / channelResourcesIncompleteEmpty are the
+// tool_result text for a scan that did not complete (see collectChannelResources).
+// Both are plain statements of fact for the model to relay, not instructions —
+// tool output is untrusted by contract, and these read the same way as any other
+// content. They exist so a partial scan can never be reported as a complete one.
+const (
+	channelResourcesIncompleteNote  = "\n(This scan did not finish, so the list above may be missing resources reachable in this channel.)"
+	channelResourcesIncompleteEmpty = "The resource scan for this channel did not finish, so I can't confirm what's reachable here right now."
+)
 
 // channelResourcesMaxPages bounds the pagination loop. At listResourcesPageLimit
 // per page this scans up to 2,000 workspace resources for the channel's
 // reachable set — far above any real workspace, while keeping the loop bounded.
 const channelResourcesMaxPages = 20
+
+// channelResourcesPageBudget bounds ONE page of the workspace scan. The shared
+// qURL client's 30s HTTP timeout is a batch-job budget: a single slow page could
+// outlast the whole conversation turn, and twenty of them dwarf it. On an
+// interactive surface the useful bound is per page, small, and enforced by
+// context so the scan yields what it has instead of being killed wholesale.
+const channelResourcesPageBudget = 5 * time.Second
 
 // collectChannelResources pages through the workspace resource list and keeps
 // only those in the channel's allowed set, stopping early once every allowed
@@ -183,32 +256,73 @@ const channelResourcesMaxPages = 20
 // only the first page would silently drop channel-reachable resources that sort
 // past it in a workspace with more than one page of resources.
 //
+// The second return is partial: true when the scan stopped before accounting for
+// the whole allowed set — page cap reached, or a page ran out of time. That flag
+// is load-bearing, not cosmetic: silently returning a short list would make the
+// agent report "nothing here matches" for a resource that does exist, which is a
+// worse failure than being slow. The caller passes the caveat through to the
+// model so the answer stays honest about its scope.
+//
+// Every page is ATTEMPTED while any budget remains, rather than pre-emptively
+// skipped when the remaining budget looks too small for a full page. Not trying
+// costs exactly what trying and failing costs — the pages already collected are
+// kept either way — so refusing to start would only ever downgrade a workspace
+// whose pages actually answer in a few hundred milliseconds. Correctness comes
+// from the per-page deadline plus the partial flag, not from predicting latency.
+//
 // The len(found) >= len(allowed) early-stop can't fire if a channel_policies row
 // references a resource id that no longer exists workspace-side (a stale policy):
-// found never reaches len(allowed), so the loop runs the full
-// channelResourcesMaxPages. Correct, just worst-case more reads until the stale
-// row is cleaned up. channelResources memoizes this per turn, so that worst-case
-// scan is paid at most once per turn however many times list_resources is called
-// (it bounds the repeat, not the single-scan cost).
-func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, error) {
+// found never reaches len(allowed), so the scan runs until the page cap or the
+// budget stops it — now bounded in wall-clock either way, where it previously
+// cost twenty sequential round-trips. channelResources memoizes the result per
+// turn, so that worst case is paid at most once per turn however many times
+// list_resources is called (it bounds the repeat, not the single-scan cost).
+func collectChannelResources(ctx context.Context, c *client.Client, allowed map[string]struct{}) ([]client.Resource, bool, error) {
 	found := make([]client.Resource, 0, len(allowed))
+	// Track DISTINCT reachable ids, not the number of hits. Cursor pagination can
+	// legitimately return the same resource on two pages when the workspace list
+	// shifts mid-scan, and counting hits would then satisfy the early-stop before
+	// every allowed id was accounted for — dropping a reachable resource AND, worse
+	// under the partial contract below, reporting the short list as complete.
+	seen := make(map[string]struct{}, len(allowed))
 	cursor := ""
 	for page := 0; page < channelResourcesMaxPages; page++ {
-		out, err := c.ListResources(ctx, client.ListResourcesInput{Limit: listResourcesPageLimit, Cursor: cursor})
+		// WithTimeout takes the EARLIER of the page budget and whatever the read
+		// context has left, so a page never outlives the read that asked for it.
+		pageCtx, cancel := context.WithTimeout(ctx, channelResourcesPageBudget)
+		out, err := c.ListResources(pageCtx, client.ListResourcesInput{Limit: listResourcesPageLimit, Cursor: cursor})
+		// Read the page context's own outcome before canceling it, so a fired
+		// deadline is distinguishable from our cancel regardless of how the client
+		// wraps the error.
+		pageRanLong := errors.Is(pageCtx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err != nil {
-			return nil, err
+			// Out of time, whether this page's own budget or the read's — either way
+			// the pages already collected are still good, and partial says so. Only a
+			// real API failure (or a canceled turn, which latches Canceled rather than
+			// DeadlineExceeded) discards the scan.
+			if pageRanLong {
+				return found, true, nil
+			}
+			return nil, false, err
 		}
 		for i := range out.Resources {
-			if _, ok := allowed[out.Resources[i].ResourceID]; ok {
-				found = append(found, out.Resources[i])
+			rid := out.Resources[i].ResourceID
+			if _, ok := allowed[rid]; !ok {
+				continue
 			}
+			if _, dup := seen[rid]; dup {
+				continue
+			}
+			seen[rid] = struct{}{}
+			found = append(found, out.Resources[i])
 		}
-		if len(found) >= len(allowed) || !out.HasMore || out.NextCursor == "" {
-			break
+		if len(seen) >= len(allowed) || !out.HasMore || out.NextCursor == "" {
+			return found, false, nil
 		}
 		cursor = out.NextCursor
 	}
-	return found, nil
+	return found, true, nil
 }
 
 // ListAliases lists the channel-scoped aliases visible to the caller.
@@ -262,9 +376,12 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 	if err != nil {
 		return b.fail("resolve token: channel scope", err)
 	}
-	c, err := b.authClient(ctx, tc.TeamID)
+	c, nudge, err := b.authClientForTurn(ctx, "resolve token: client", tc)
 	if err != nil {
-		return b.fail("resolve token: client", err)
+		return "", err
+	}
+	if nudge != "" {
+		return nudge, nil
 	}
 	out, err := c.ListResources(ctx, client.ListResourcesInput{Slug: token})
 	if err != nil {
@@ -284,9 +401,12 @@ func (b *agentBackend) ResolveToken(ctx context.Context, tc *agent.TurnContext, 
 
 // Quota reports the workspace plan and usage.
 func (b *agentBackend) Quota(ctx context.Context, tc *agent.TurnContext) (string, error) {
-	c, err := b.authClient(ctx, tc.TeamID)
+	c, nudge, err := b.authClientForTurn(ctx, "quota: client", tc)
 	if err != nil {
-		return b.fail("quota: client", err)
+		return "", err
+	}
+	if nudge != "" {
+		return nudge, nil
 	}
 	q, err := c.GetQuota(ctx)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // scriptedLLM returns a pre-baked sequence of responses, one per Complete call,
@@ -26,6 +27,34 @@ func (s *scriptedLLM) Complete(_ context.Context, req *Request) (Response, error
 	r := s.responses[s.calls]
 	s.calls++
 	return r, nil
+}
+
+// blockingLLM blocks the first call until its context expires — an upstream that
+// outruns the round's ration — then answers the final round normally.
+type blockingLLM struct {
+	final Response
+	calls int
+}
+
+func (b *blockingLLM) Complete(ctx context.Context, _ *Request) (Response, error) {
+	b.calls++
+	if b.calls == 1 {
+		<-ctx.Done()
+		return Response{}, ctx.Err()
+	}
+	return b.final, nil
+}
+
+// deadlineCapturingBackend records the context deadline a read tool was handed,
+// so the sub-budget can be asserted without waiting for it to elapse.
+type deadlineCapturingBackend struct {
+	fakeBackend
+	deadline time.Time
+}
+
+func (d *deadlineCapturingBackend) ListResources(ctx context.Context, _ *TurnContext) (string, error) {
+	d.deadline, _ = ctx.Deadline()
+	return "x", nil
 }
 
 // fakeBackend returns canned strings and records which reads were attempted.
@@ -128,6 +157,34 @@ func TestRun_ReadThenAnswer_GroundsOnToolResult(t *testing.T) {
 	if got := len(history); got != 4 {
 		t.Fatalf("history len = %d, want 4: %+v", got, history)
 	}
+}
+
+func TestRun_ProposeInspectStopsForConfirmation(t *testing.T) {
+	// A summary request resolves to propose_inspect: the loop must STOP and hand back
+	// an ActionInspect proposal. Fetching the page mints a qURL (a grant), so it is
+	// gated on a human Confirm — never a read the model performs on its own, and the
+	// backend is never touched during the turn.
+	llm := &scriptedLLM{responses: []Response{
+		toolResp(toolProposeInspect, map[string]any{fieldToken: "$dashboard", fieldReason: "onboarding"}),
+	}}
+	backend := &fakeBackend{}
+	a := New(llm, backend)
+
+	ctx, tc := testCtx()
+	res, history, err := a.Run(ctx, tc, nil, "what's on $dashboard?")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Proposal == nil || res.Proposal.Action != ActionInspect {
+		t.Fatalf("expected an inspect proposal, got %+v", res.Proposal)
+	}
+	if res.Proposal.Token != "dashboard" {
+		t.Fatalf("inspect proposal token = %q, want dashboard", res.Proposal.Token)
+	}
+	if len(backend.resolveCalls) != 0 {
+		t.Fatalf("propose_inspect must not touch the backend before confirmation, got %+v", backend.resolveCalls)
+	}
+	assertWellFormed(t, history)
 }
 
 func TestRun_ProposeAlongsideReadInSameTurn_KeepsHistoryValid(t *testing.T) {
@@ -356,24 +413,187 @@ func TestRun_BackendError_SurfacedNotFatal(t *testing.T) {
 	}
 }
 
-func TestRun_IterationCap(t *testing.T) {
-	// Always ask for a read tool; the loop must give up after the cap rather
-	// than spin forever.
+func TestRun_IterationCapFinalizesWithAModelAnswer(t *testing.T) {
+	// A model that never stops asking for reads must be cut off at the cap — but
+	// what it already gathered is worth more than a canned "couldn't work it out",
+	// so the turn spends one final tool-free round saying so.
 	llm := &scriptedLLM{responses: []Response{
 		toolResp(toolListResources, map[string]any{}),
 		toolResp(toolListResources, map[string]any{}),
-		toolResp(toolListResources, map[string]any{}),
+		textResp("Here's what I could confirm so far."),
 	}}
 	ctx, tc := testCtx()
 	res, _, err := New(llm, &fakeBackend{resources: "x"}, WithMaxIterations(2)).Run(ctx, tc, nil, "loop")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Reply != iterationCapMessage {
-		t.Fatalf("expected the iteration-cap message, got %q", res.Reply)
+	if res.Reply != "Here's what I could confirm so far." {
+		t.Fatalf("expected the final round's answer, got %q", res.Reply)
 	}
-	if llm.calls != 2 {
-		t.Fatalf("expected exactly 2 model calls at the cap, got %d", llm.calls)
+	if res.Cutoff != CutoffIterations {
+		t.Fatalf("Cutoff = %q, want %q", res.Cutoff, CutoffIterations)
+	}
+	if llm.calls != 3 {
+		t.Fatalf("expected 2 gathering rounds plus 1 final round, got %d model calls", llm.calls)
+	}
+	assertGatheringThenFinal(t, llm.captured)
+}
+
+func TestRun_TurnBudgetFinalizesInsteadOfTimingOut(t *testing.T) {
+	// The turn deadline is already inside the finalization reserve, so there is no
+	// budget for a gathering round. The old loop would have started one anyway,
+	// blown the deadline, and surfaced an error the caller renders as "that took
+	// longer than I could handle". It must answer instead.
+	llm := &scriptedLLM{responses: []Response{textResp("I couldn't finish checking, here's what I know.")}}
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve/2)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reply != "I couldn't finish checking, here's what I know." {
+		t.Fatalf("expected the reserved final answer, got %q", res.Reply)
+	}
+	if res.Cutoff != CutoffBudget {
+		t.Fatalf("Cutoff = %q, want %q", res.Cutoff, CutoffBudget)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("expected exactly the final round, got %d model calls", llm.calls)
+	}
+	if !llm.captured[0].TextOnly {
+		t.Fatal("the final round must forbid tool calls")
+	}
+}
+
+func TestRun_SlowRoundFallsBackToTheReservedFinalAnswer(t *testing.T) {
+	// One round-trip that outruns its own ration (an overloaded upstream retrying
+	// with backoff inside a single call) must not fail the turn: the reserve was
+	// held back precisely so the turn can still answer.
+	llm := &blockingLLM{final: textResp("Here's what I have.")}
+	_, tc := testCtx()
+	// Deadline just past the reserve, so exactly one gathering round is funded —
+	// with a ration short enough to expire in test time.
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve+250*time.Millisecond)
+	defer cancel()
+
+	res, _, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "give me access to $docs")
+	if err != nil {
+		t.Fatalf("Run must degrade to an answer, not fail: %v", err)
+	}
+	if res.Reply != "Here's what I have." {
+		t.Fatalf("expected the reserved final answer, got %q", res.Reply)
+	}
+	if res.Cutoff != CutoffBudget {
+		t.Fatalf("Cutoff = %q, want %q", res.Cutoff, CutoffBudget)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the turn deadline should still be intact: the reserve was not spent on the slow round")
+	}
+}
+
+func TestRun_ReadToolGetsItsOwnSubBudget(t *testing.T) {
+	// A single backend read must not be able to spend the turn. The read is handed
+	// a context whose deadline is strictly tighter than the turn's, and never
+	// reaches into the finalization reserve.
+	llm := &scriptedLLM{responses: []Response{
+		toolResp(toolListResources, map[string]any{}),
+		textResp("done"),
+	}}
+	backend := &deadlineCapturingBackend{}
+	_, tc := testCtx()
+	turnBudget := finalAnswerReserve + maxToolCallBudget + time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), turnBudget)
+	defer cancel()
+
+	if _, _, err := New(llm, backend).Run(ctx, tc, nil, "what can I access?"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if backend.deadline.IsZero() {
+		t.Fatal("the read tool received a context with no deadline")
+	}
+	turnDeadline, _ := ctx.Deadline()
+	if !backend.deadline.Before(turnDeadline) {
+		t.Fatal("the read tool's deadline must be tighter than the turn's")
+	}
+	if got := time.Until(backend.deadline); got > maxToolCallBudget {
+		t.Fatalf("read budget %v exceeds the %v cap", got, maxToolCallBudget)
+	}
+}
+
+func TestRun_FinalAnswerIgnoresUnexpectedToolCalls(t *testing.T) {
+	// TextOnly forbids tool calls, but a model or transport that returned one
+	// anyway must not leave a tool_use with no matching tool_result in the
+	// transcript — that would poison every later turn in the thread.
+	llm := &scriptedLLM{responses: []Response{
+		{Text: "partial answer", ToolCalls: []ToolCall{{ID: "tu_x", Name: toolListResources}}, StopReason: "tool_use"},
+	}}
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve/2)
+	defer cancel()
+
+	res, history, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reply != "partial answer" {
+		t.Fatalf("expected the final round's text, got %q", res.Reply)
+	}
+	for i := range history {
+		if len(history[i].ToolCalls) > 0 {
+			t.Fatalf("final round recorded a tool_use with no tool_result: %+v", history[i])
+		}
+	}
+}
+
+func TestRun_FinalAnswerFallsBackWhenTheModelSaysNothing(t *testing.T) {
+	llm := &scriptedLLM{responses: []Response{textResp("   ")}}
+	_, tc := testCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), finalAnswerReserve/2)
+	defer cancel()
+
+	res, history, err := New(llm, &fakeBackend{}).Run(ctx, tc, nil, "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reply != iterationCapMessage {
+		t.Fatalf("a blank final answer must fall back to the ask-again reply, got %q", res.Reply)
+	}
+	// The transcript must say what the user was actually told. Recording the raw
+	// whitespace-only response instead would survive assistantBlocks (which drops
+	// only a truly empty string) and be replayed on the next turn in the thread.
+	last := history[len(history)-1]
+	if last.Role != roleAssistant || last.Text != iterationCapMessage {
+		t.Fatalf("history must record the delivered reply, got %+v", last)
+	}
+}
+
+// assertGatheringThenFinal pins the shape of a finalized turn: every gathering
+// round offers tools, and only the last round forbids them and carries the
+// final-answer directive.
+func assertGatheringThenFinal(t *testing.T, captured []*Request) {
+	t.Helper()
+	if len(captured) < 2 {
+		t.Fatalf("expected at least one gathering round plus a final round, got %d", len(captured))
+	}
+	for i, req := range captured[:len(captured)-1] {
+		if req.TextOnly {
+			t.Fatalf("gathering round %d must be able to call tools", i)
+		}
+		if strings.Contains(req.SystemPerTurn, finalAnswerDirective) {
+			t.Fatalf("gathering round %d must not carry the final-answer directive", i)
+		}
+	}
+	final := captured[len(captured)-1]
+	if !final.TextOnly {
+		t.Fatal("the final round must forbid tool calls")
+	}
+	if !strings.Contains(final.SystemPerTurn, finalAnswerDirective) {
+		t.Fatal("the final round must carry the final-answer directive")
+	}
+	if len(final.Tools) == 0 {
+		t.Fatal("the final round must still DEFINE tools: the Messages API rejects a tool_use transcript with none")
 	}
 }
 

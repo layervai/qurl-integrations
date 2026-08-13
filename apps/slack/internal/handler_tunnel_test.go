@@ -542,7 +542,7 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -586,8 +586,11 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	if got, want := resourceBody[testKeyDescription], defaultTunnelDisplayName(testTunnelSlug); got != want {
 		t.Errorf("resource body description = %v, want install default %q", got, want)
 	}
-	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody["expires_in"] != tunnelBootstrapTTL {
+	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug || apiKeyBody[testKeyExpiresIn] != tunnelBootstrapTTL {
 		t.Errorf("api key body = %+v, want constrained tunnel bootstrap key", apiKeyBody)
+	}
+	if _, ok := apiKeyBody["purpose"]; ok {
+		t.Errorf("api key body contained deprecated purpose field: %+v", apiKeyBody)
 	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
@@ -690,7 +693,7 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -1371,7 +1374,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 			"name":            "Slack qURL Connector bootstrap " + testTunnelSlug,
 			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
 			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -1418,7 +1421,7 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	if resourceBody[testKeyType] != client.ResourceTypeTunnel || resourceBody[testKeySlug] != testTunnelSlug || resourceBody["find_or_create"] != true {
 		t.Errorf("resource body = %+v, want tunnel find-or-create slug", resourceBody)
 	}
-	if apiKeyBody[testKeyPurpose] != client.APIKeyPurposeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
+	if apiKeyBody[testKeyKeyType] != client.APIKeyTypeTunnelBootstrap || apiKeyBody[testKeyTunnelSlug] != testTunnelSlug {
 		t.Errorf("api key body = %+v, want tunnel bootstrap key", apiKeyBody)
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
@@ -1540,7 +1543,7 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 					testKeyKeyID:      testTunnelAPIKeyID,
 					testKeyAPIKey:     testTunnelModalKey,
 					testKeyStatus:     client.StatusActive,
-					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 					testKeyTunnelSlug: testTunnelSlug,
 					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 				})
@@ -1612,7 +1615,7 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 					testKeyKeyID:      testTunnelAPIKeyID,
 					testKeyAPIKey:     testTunnelModalKey,
 					testKeyStatus:     client.StatusActive,
-					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 					testKeyTunnelSlug: testTunnelSlug,
 					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 				})
@@ -2241,7 +2244,7 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelModalKey,
 			testKeyStatus:     client.StatusActive,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -2292,13 +2295,31 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", w.Code, w.Body.String())
 	}
+	// stepTimeout bounds each synchronization step below: comfortably above the
+	// goroutine-spawn / slot-release latency of a legitimate run on loaded CI, and —
+	// via the guard — under agentConnectorAuditWriteTimeout, so a regressed synchronous
+	// audit (which pins the worker in PutItem until that ctx fires) is still holding the
+	// slot when the claim times out instead of freeing first.
+	const stepTimeout = 2 * time.Second
+	if stepTimeout >= agentConnectorAuditWriteTimeout {
+		t.Fatalf("stepTimeout (%s) must stay under agentConnectorAuditWriteTimeout (%s)", stepTimeout, agentConnectorAuditWriteTimeout)
+	}
 	select {
 	case <-ddb.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(stepTimeout):
 		t.Fatal("tail audit write did not start")
 	}
-	if got := len(h.sem); got != 0 {
-		t.Fatalf("worker semaphore len = %d, want 0 while tail audit is blocked", got)
+	// Don't sample len(h.sem): the pooled worker frees its slot in runOnPool's deferred
+	// <-sem — a different goroutine with no happens-before to ddb.started, so the read is
+	// nondeterministic (the original flake). Claim the slot instead; with cap(h.sem)==1 the
+	// send blocks until the worker frees it. The slot is then left held — no more pool work.
+	if cap(h.sem) != 1 {
+		t.Fatalf("test assumes cap(h.sem) == 1, got %d", cap(h.sem))
+	}
+	select {
+	case h.sem <- struct{}{}:
+	case <-time.After(stepTimeout):
+		t.Fatal("worker slot not released while tail audit is blocked")
 	}
 	releaseAudit()
 	h.Wait()
@@ -2903,7 +2924,7 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     "",
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3095,7 +3116,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     "lv_live_bad'quote",
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3135,7 +3156,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3231,7 +3252,7 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3413,7 +3434,7 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3480,7 +3501,7 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3652,7 +3673,7 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3732,7 +3753,7 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3812,7 +3833,7 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3886,7 +3907,7 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      keyID,
 			testKeyAPIKey:     fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -3977,7 +3998,7 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 		})
 	})
@@ -4096,7 +4117,7 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 		respondQURLEnvelope(t, w, map[string]any{
 			testKeyKeyID:      testTunnelAPIKeyID,
 			testKeyAPIKey:     "lv_live_retry_bootstrap",
-			testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 			testKeyTunnelSlug: testTunnelSlug,
 			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 		})
@@ -4189,7 +4210,7 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 				respondQURLEnvelope(t, w, map[string]any{
 					testKeyKeyID:      testTunnelAPIKeyID,
 					testKeyAPIKey:     testTunnelAPIKey,
-					testKeyPurpose:    client.APIKeyPurposeTunnelBootstrap,
+					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
 					testKeyTunnelSlug: testTunnelSlug,
 					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
 				})

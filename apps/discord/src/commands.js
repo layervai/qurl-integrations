@@ -21,7 +21,21 @@ const db = require('./store');
 const logger = require('./logger');
 const viewUpdateRegistry = require('./view-update-registry');
 const { createHandleViewUpdate } = require('./view-update-handler');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, DISCORD_MEMBERS_PAGE_SIZE, PREWARM_MAX_PAGES, UNLINKED_CACHE_COMPLETENESS_THRESHOLD, AUDIT_EVENTS, TRUST } = require('./constants');
+const {
+  COLORS,
+  TIMEOUTS,
+  RESOURCE_TYPES,
+  DM_STATUS,
+  MAX_FILE_SIZE,
+  MAX_CONCURRENT_MONITORS,
+  DISCORD_MEMBERS_PAGE_SIZE,
+  PREWARM_MAX_PAGES,
+  UNLINKED_CACHE_COMPLETENESS_THRESHOLD,
+  AUDIT_EVENTS,
+  TRUST,
+  ddbSendConfigGuardActionCount,
+  ddbSendConfigGuardFitsTransaction,
+} = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -34,6 +48,7 @@ const {
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
+const { createStateSigner } = require('./utils/oauth-state');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, detectWatermark, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
@@ -172,7 +187,7 @@ const { renderViewCounter } = require('./view-counter-render');
 
 // Generate an OAuth state token bound to the initiating Discord user.
 //
-// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(OAUTH_STATE_SECRET,
+// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(stateSecret,
 // `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
 // discord_id pulled from consumePendingLink(); a mismatch means the state
 // was tampered with or replayed across users, even if the random nonce
@@ -181,44 +196,19 @@ const { renderViewCounter } = require('./view-counter-render');
 // Defense-in-depth only — the primary binding is the single-use DB row
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
-let _warnedStateSecretFallback = false;
-// Random per-process fallback so even inside the Jest harness there's no
-// static key that, if accidentally shipped, would be forgeable. Regenerated
-// on every process start; tests that need a stable secret should set
-// OAUTH_STATE_SECRET explicitly in their own mocks.
-const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-function stateSecret() {
-  // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
-  // can be rotated without also invalidating in-flight OAuth state tokens —
-  // and vice versa. Blast-radius isolation: leaking one doesn't enable
-  // forgery of the other's use cases. Fall back to GITHUB_CLIENT_SECRET for
-  // backward-compat with existing deployments.
-  const dedicated = process.env.OAUTH_STATE_SECRET;
-  if (dedicated) return dedicated;
-  if (!config.GITHUB_CLIENT_SECRET) {
-    // Only use the static fallback inside Jest (NODE_ENV=test AND either
-    // JEST_WORKER_ID set by Jest, or CI=true). This raises the bar: merely
-    // setting NODE_ENV=test by accident in a deployed env doesn't enable
-    // the forgeable key. Everywhere else throws hard so a misconfig is loud.
-    const inTestHarness = process.env.NODE_ENV === 'test'
-      && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
-    if (!inTestHarness) {
-      throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
-    }
-    if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
-      _warnedStateSecretFallback = true;
-    }
-    return _testFallbackSecret;
-  }
-  return config.GITHUB_CLIENT_SECRET;
-}
+//
+// Secret resolution, the 32-char length floor, and the jest-only
+// random fallback live in the shared signer — see utils/oauth-state.js.
+// The payload shape here is deliberately distinct from the qURL OAuth
+// state's; see utils/qurl-oauth-state.js for the cross-purpose forgery
+// analysis.
+const githubOAuthStateSigner = createStateSigner({
+  flowLabel: 'OAuth state',
+  secretConfigKeys: ['OAUTH_STATE_SECRET'],
+});
 function generateState(discordId) {
   const nonce = crypto.randomBytes(16).toString('hex');
-  const sig = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  return `${nonce}.${sig}`;
+  return `${nonce}.${githubOAuthStateSigner.sign(`${discordId}:${nonce}`)}`;
 }
 function verifyStateBinding(state, discordId) {
   if (typeof state !== 'string') return false;
@@ -226,12 +216,7 @@ function verifyStateBinding(state, discordId) {
   if (parts.length !== 2) return false;
   const [nonce, sig] = parts;
   if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
-  const expected = crypto.createHmac('sha256', stateSecret())
-    .update(`${discordId}:${nonce}`)
-    .digest('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  } catch { return false; }
+  return githubOAuthStateSigner.verify(`${discordId}:${nonce}`, sig);
 }
 
 // --- QURL send helpers ---
@@ -572,7 +557,8 @@ const addRecipientsLocks = new Set();
 // Same-process per-send Revoke lock. Collector-local `revokeInFlight`
 // handles duplicate clicks inside one management collector; this Set lets
 // another collector in the same process see a Revoke already mutating the
-// send. Cross-process safety still relies on revoked_at/#862.
+// send. Cross-process safety relies on revoked_at plus the guarded
+// recordQURLSendBatch transaction.
 const revokingSendLocks = new Set();
 const ADD_RECIPIENTS_IN_PROGRESS_MSG = 'Already processing an "Add Recipients" action.';
 const ALREADY_REVOKING_SEND_MSG = 'Already revoking links for this send.';
@@ -2536,8 +2522,8 @@ async function executeSendPipeline(interaction, {
     // by a stale "Revoked 0/0". These flags are collector-local UX gates;
     // revokingSendLocks handles same-process cross-collector Revoke only
     // while work is active. After the lock releases, and across processes,
-    // revoked_at is the correctness boundary until #862 closes the write
-    // window.
+    // revoked_at is the correctness boundary; recordQURLSendBatch enforces
+    // it again in the same transaction as any later Add Recipients rows.
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
     // Authoritative DDB strict-success count. Tracked separately from
@@ -2880,6 +2866,60 @@ async function executeSendPipeline(interaction, {
   }
 }
 
+async function cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, options = {}) {
+  const rowsMayHavePersisted = options.rowsMayHavePersisted !== false;
+  const cleanupReason = options.reason || (rowsMayHavePersisted ? 'revoked_guard' : 'pre_persistence');
+  const txnActionCount = ddbSendConfigGuardActionCount(batchSends);
+  if (rowsMayHavePersisted && !ddbSendConfigGuardFitsTransaction(batchSends)) {
+    // Unreachable by construction for today's Add Recipients flow: oversized
+    // batches fail before DDB, and revoked errors only come from a single
+    // transaction. If a future caller violates that invariant, still revoke
+    // the freshly minted qURLs; rows may point at deleted resources, but no DMs
+    // have been sent and the grants fail closed.
+    logger.error('Cleaning up oversized Add Recipients batch after possible persistence', {
+      sendId,
+      send_count: batchSends.length,
+      txn_actions: txnActionCount,
+    });
+  }
+
+  // Called when no recipient rows landed, or when a terminal guarded
+  // transaction failure is ambiguous enough that deleting freshly minted qURLs
+  // is the fail-closed outcome (no DMs have been sent yet).
+  const resourceIds = [...new Set(
+    batchSends
+      .map(s => s.resourceId)
+      .filter(id => typeof id === 'string' && id.length > 0),
+  )];
+  if (resourceIds.length === 0) return;
+
+  const results = await batchSettled(resourceIds, async (resourceId) => {
+    await deleteLink(resourceId, apiKey);
+    return resourceId;
+  }, 5);
+  const failed = [];
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      failed.push({ resourceId: resourceIds[index], error: result.reason?.message });
+    }
+  });
+  if (failed.length > 0) {
+    logger.error('Failed to clean up freshly minted Add Recipients qURL resources', {
+      sendId,
+      reason: cleanupReason,
+      failed_count: failed.length,
+      total: resourceIds.length,
+      failures: failed,
+    });
+  } else {
+    logger.info('Cleaned up freshly minted Add Recipients qURL resources', {
+      sendId,
+      reason: cleanupReason,
+      total: resourceIds.length,
+    });
+  }
+}
+
 // Handle adding new recipients to an existing send. senderDiscordId is
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
@@ -2893,8 +2933,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   // getSendConfig runs after the user-select await, so revoked_at catches
   // button, slash-command, and out-of-band revokes that landed while the
-  // Add Recipients picker was open. A revoke after this point can still race
-  // until recordQURLSendBatch grows a conditional write (#862).
+  // Add Recipients picker was open. recordQURLSendBatch repeats this guard
+  // in the recipient-row transaction to close the post-read write window.
   if (sendConfig.revoked_at) {
     return {
       msg: 'Cannot add recipients — this send has already been revoked.',
@@ -2931,11 +2971,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
   // {id, username} returned on every path after this point so the
-  // caller can extend its recipients[] (post-Add revoke shows
-  // names). The success path is the only one where this is load-
-  // bearing; failure paths return it for contract consistency, and
-  // the caller's `successSet.has(r.id)` filter excludes phantom
-  // IDs from any path that didn't write qurl_sends rows.
+  // caller can extend its recipients[] after a successful add. Most
+  // non-revoked failure paths return it for contract consistency; revoked
+  // paths return [] so the post-revoke render cannot show phantom grants.
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2945,33 +2983,54 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  const hasFile = sendConfig.connector_resource_id;
-  const hasLocation = sendConfig.actual_url;
+  // connector_resource_id exists for file AND location sends because maps are
+  // uploaded as JSON resources before minting. Classify by the persisted
+  // payload shape instead, or a location send would look like a mixed send and
+  // produce duplicate (send_id, recipient_id) rows.
+  const hasFilePayload = Boolean(sendConfig.attachment_url);
+  const hasLocation = Boolean(sendConfig.actual_url);
+  if (hasFilePayload && hasLocation) {
+    // Normal saveSendConfig callers persist one payload shape. Seeing both
+    // means a stale/corrupt mixed row; reject it instead of minting duplicate
+    // (send_id, recipient_id) rows that qurl_sends cannot represent cleanly.
+    logger.warn('addRecipients refused mixed file/location send config', { sendId });
+    return {
+      msg: 'Cannot add recipients — mixed file and location sends are not supported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  if (hasFilePayload && sendConfig.resource_type && sendConfig.resource_type !== RESOURCE_TYPES.FILE) {
+    logger.warn('addRecipients refused non-file send config with file payload', {
+      sendId,
+      resource_type: sendConfig.resource_type,
+    });
+    return {
+      msg: 'Cannot add recipients — stored send configuration is unsupported. Create a new send instead.',
+      newLinks: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+  const hasLegacyFileMarker = !sendConfig.resource_type
+    && Boolean(sendConfig.connector_resource_id)
+    && !hasLocation;
+  const hasFile = hasFilePayload
+    || ((sendConfig.resource_type === RESOURCE_TYPES.FILE || hasLegacyFileMarker) && !hasLocation);
 
   if (!hasFile && !hasLocation) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Tracks which prep paths actually completed so we can emit a single
-  // upload_success per send (not one per kind). A sendConfig with both
-  // file + location would otherwise fire two events for the same send,
-  // which double-counts UploadCount in CloudWatch unless the metric
-  // filter dimensions on `kind` (it doesn't, currently — see
-  // qurl-integrations-infra#309). The collapsed event keeps UploadCount
-  // = "number of fully-prepared sends" regardless of kind composition.
+  // Tracks which prep path completed so upload_success can name the kind
+  // after the shared try/catch. Mixed configs are rejected above because
+  // qurl_sends cannot represent two rows for one send/recipient pair.
   const preparedKinds = [];
   // Inherit the original send's self-destruct timer so additional
   // recipients see the same vanish behavior. Persisted as a REAL/Number
   // column; both stores return null when unset. Hoisted above the file/
-  // location branches because both pull the same value — the branches
-  // can both fire for a sendConfig that had both kinds, and a per-branch
-  // recompute would invite drift.
+  // location branches because both pull the same value.
   const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
   // activeKind tracks which branch is in-flight when the outer catch
-  // fires. The inner file try/catch returns on file failure, so by the
-  // time we reach the outer catch the failure was NOT in the file
-  // branch — `hasFile ? 'file' : 'location'` would mis-label mixed
-  // sends. Per-branch assignment is the durable fix.
+  // fires. A future refactor that throws before either branch sets it
+  // lands kind=null, which is discoverable in CloudWatch.
   let activeKind = null;
   try {
     if (hasFile) {
@@ -3138,9 +3197,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg, newLinks: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
-  // Single emission per send. `kind` carries the composition so a future
-  // CloudWatch dimension on it can break the count down per kind without
-  // double-counting mixed sends. Values: 'file' | 'location' | 'mixed'.
+  // Single emission per send. Values: 'file' | 'location'. The fallback is
+  // defensive only; mixed configs are rejected before any prep path runs.
   if (preparedKinds.length > 0) {
     const kind = preparedKinds.length === 1 ? preparedKinds[0] : 'mixed';
     logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind });
@@ -3199,14 +3257,50 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-  // Same guarantee as executeSendPipeline: if the DB write fails, abort
-  // BEFORE any DMs go out so we don't leave live QURL links with no
-  // local record.
+  if (!ddbSendConfigGuardFitsTransaction(batchSends)) {
+    logger.error('addRecipients refused oversized guarded write before DDB persistence', {
+      sendId,
+      send_count: batchSends.length,
+      txn_actions: ddbSendConfigGuardActionCount(batchSends),
+    });
+    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+      rowsMayHavePersisted: false,
+      reason: 'pre_persistence_oversized_batch',
+    });
+    return {
+      msg: 'Cannot add recipients — too many recipients selected. Try fewer recipients.',
+      newLinks: [], newRecipients: [],
+      delivered: 0,
+      failed: 0,
+    };
+  }
+  // Same dispatch guarantee as executeSendPipeline: if the DB write fails,
+  // abort BEFORE any DMs go out. The revoked-race branch below also deletes
+  // freshly minted resources because those rows deliberately never land.
   try {
-    await db.recordQURLSendBatch(batchSends);
+    await db.recordQURLSendBatch(batchSends, { requireSendConfigUnrevoked: true });
   } catch (err) {
+    if (err?.code === 'SEND_CONFIG_REVOKED') {
+      logger.warn('recordQURLSendBatch refused Add Recipients for revoked send', {
+        sendId, error: err.message, linkCount: batchSends.length,
+      });
+      await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId);
+      return {
+        msg: 'Cannot add recipients — this send has already been revoked.',
+        newLinks: [], newRecipients: [],
+        delivered: 0,
+        failed: 0,
+      };
+    }
     logger.error('recordQURLSendBatch failed in addRecipients; aborting before DMs', {
       sendId, error: err.message, linkCount: batchSends.length,
+    });
+    // Normal transaction failures are atomic, so no rows landed. If the final
+    // retry actually committed but its response was lost, this cleanup can
+    // leave rows pointing at deleted resources; that is still fail-closed
+    // because no DMs were sent and the qURLs no longer grant access.
+    await cleanupFreshAddRecipientResources(batchSends, apiKey, sendId, {
+      reason: 'guarded_transaction_failed',
     });
     return {
       msg: 'Failed to save link records. Recipients were not messaged. Please try again.',

@@ -58,6 +58,7 @@ const {
   ScanCommand,
   BatchGetCommand,
   BatchWriteCommand,
+  TransactWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
 // aws-sdk-client-mock intercepts DocumentClient commands globally.
@@ -836,7 +837,7 @@ describe('qurl sends', () => {
   });
 
   test('recordQURLSendBatch: writes qurl_id per row when provided, sparsely', async () => {
-    ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
+    ddbMock.on(BatchWriteCommand).resolves({});
     await store.recordQURLSendBatch([
       { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
         resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
@@ -849,9 +850,11 @@ describe('qurl sends', () => {
     ]);
     const calls = ddbMock.commandCalls(BatchWriteCommand);
     expect(calls).toHaveLength(1);
-    const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends'];
-    expect(writes[0].PutRequest.Item.qurl_id).toBe('q_aaaaaaaaaa1');
-    expect('qurl_id' in writes[1].PutRequest.Item).toBe(false);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends']
+      .map(item => item.PutRequest.Item);
+    expect(writes[0].qurl_id).toBe('q_aaaaaaaaaa1');
+    expect('qurl_id' in writes[1]).toBe(false);
   });
 
   test('recordQURLSendBatch: writes guild_id per row when provided, sparsely (#1101 attribution)', async () => {
@@ -860,7 +863,7 @@ describe('qurl sends', () => {
     // (or sends an empty string) must not surface the attribute. The
     // /qurl detect read filters sends on guild_id, so the write side must
     // land it exactly when present.
-    ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
+    ddbMock.on(BatchWriteCommand).resolves({});
     await store.recordQURLSendBatch([
       { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
         resourceId: 'res', resourceType: 'file', qurlLink: 'https://…',
@@ -879,58 +882,201 @@ describe('qurl sends', () => {
     ]);
     const calls = ddbMock.commandCalls(BatchWriteCommand);
     expect(calls).toHaveLength(1);
-    const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends'];
-    expect(writes[0].PutRequest.Item.guild_id).toBe('guild-77');
-    expect('guild_id' in writes[1].PutRequest.Item).toBe(false);
-    expect('guild_id' in writes[2].PutRequest.Item).toBe(false);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+    const writes = calls[0].args[0].input.RequestItems['test-prefix-qurl-sends']
+      .map(item => item.PutRequest.Item);
+    expect(writes[0].guild_id).toBe('guild-77');
+    expect('guild_id' in writes[1]).toBe(false);
+    expect('guild_id' in writes[2]).toBe(false);
   });
 
-  test('recordQURLSendBatch: chunks >25 items into multiple BatchWrite calls', async () => {
-    ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
-    const sends = Array.from({ length: 30 }, (_, i) => ({
-      sendId: `s${i}`, senderDiscordId: 'sender', recipientDiscordId: `r${i}`,
+  test('recordQURLSendBatch: allows guarded writes at the 100-action limit', async () => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const sends = Array.from({ length: 99 }, (_, i) => ({
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: `r${i}`,
       resourceId: 'r', resourceType: 'file', qurlLink: '…',
       expiresIn: '24h', channelId: 'ch', targetType: 'user',
     }));
-    await store.recordQURLSendBatch(sends);
-    const calls = ddbMock.commandCalls(BatchWriteCommand);
-    expect(calls).toHaveLength(2); // 25 + 5
+    await store.recordQURLSendBatch(sends, { requireSendConfigUnrevoked: true });
+    const calls = ddbMock.commandCalls(TransactWriteCommand);
+    expect(calls).toHaveLength(1); // 99 puts + 1 guard
+    expect(calls[0].args[0].input.TransactItems).toHaveLength(100);
   });
 
-  test('recordQURLSendBatch: retries UnprocessedItems with backoff', async () => {
-    let attempt = 0;
-    ddbMock.on(BatchWriteCommand).callsFake((input) => {
-      attempt++;
-      // First call: return some items as unprocessed. Second: clean.
-      if (attempt === 1) {
-        return Promise.resolve({
-          UnprocessedItems: {
-            'test-prefix-qurl-sends': input.RequestItems['test-prefix-qurl-sends'].slice(0, 2),
-          },
-        });
-      }
-      return Promise.resolve({ UnprocessedItems: {} });
+  test('recordQURLSendBatch: rejects guarded writes that would need multiple transactions', async () => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    const sends = Array.from({ length: 51 }, (_, i) => ({
+      sendId: `s${i}`, senderDiscordId: 'sender', recipientDiscordId: `r${i}`,
+      resourceId: 'r', resourceType: 'file', qurlLink: '...',
+      expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }));
+
+    await expect(store.recordQURLSendBatch(sends, { requireSendConfigUnrevoked: true }))
+      .rejects.toThrow('guarded batch exceeds TransactWriteItems action limit (102 > 100)');
+
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('recordQURLSendBatch: gates recipient puts on an unrevoked send config', async () => {
+    ddbMock.on(TransactWriteCommand).resolves({});
+    await store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+        resourceId: 'r', resourceType: 'file', qurlLink: '…',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ], { requireSendConfigUnrevoked: true });
+    const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input.TransactItems;
+    expect(items[0].ConditionCheck).toEqual({
+      TableName: 'test-prefix-qurl-send-configs',
+      Key: { send_id: 's1' },
+      ConditionExpression: 'sender_discord_id = :sender AND attribute_not_exists(revoked_at)',
+      ExpressionAttributeValues: { ':sender': 'sender' },
     });
-    const sends = Array.from({ length: 5 }, (_, i) => ({
-      sendId: `s${i}`, senderDiscordId: 'sender', recipientDiscordId: `r${i}`,
-      resourceId: 'r', resourceType: 'file', qurlLink: '…',
-      expiresIn: '24h', channelId: 'ch', targetType: 'user',
-    }));
-    await store.recordQURLSendBatch(sends);
-    expect(attempt).toBe(2); // one retry
+    expect(items[1].Put.TableName).toBe('test-prefix-qurl-sends');
   });
 
-  test('recordQURLSendBatch: throws after MAX_RETRIES when items remain unprocessed', async () => {
-    // Always return same items as unprocessed — simulate persistent throttle.
-    ddbMock.on(BatchWriteCommand).callsFake((input) => Promise.resolve({
-      UnprocessedItems: { 'test-prefix-qurl-sends': input.RequestItems['test-prefix-qurl-sends'] },
-    }));
+  test('recordQURLSendBatch: rejects a batch that mixes senders for one send id', async () => {
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender-a', recipientDiscordId: 'r1',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link-1',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's1', senderDiscordId: 'sender-b', recipientDiscordId: 'r2',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link-2',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ], { requireSendConfigUnrevoked: true })).rejects.toThrow('conflicting sender_discord_id for send_id s1');
+
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('recordQURLSendBatch: rejects sender conflicts across the whole guarded batch before DDB', async () => {
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's0', senderDiscordId: 'sender-a', recipientDiscordId: 'r0',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's1', senderDiscordId: 'sender-a', recipientDiscordId: 'r1',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's0', senderDiscordId: 'sender-b', recipientDiscordId: 'r2',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ], { requireSendConfigUnrevoked: true })).rejects.toThrow('conflicting sender_discord_id for send_id s0');
+
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('recordQURLSendBatch: fails closed when the send config was revoked mid-flight', async () => {
+    const cancelled = new Error('transaction cancelled');
+    cancelled.name = 'TransactionCanceledException';
+    cancelled.CancellationReasons = [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }];
+    ddbMock.on(TransactWriteCommand).rejects(cancelled);
     const sends = [{
       sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
       resourceId: 'r', resourceType: 'file', qurlLink: '…',
       expiresIn: '24h', channelId: 'ch', targetType: 'user',
     }];
-    await expect(store.recordQURLSendBatch(sends)).rejects.toThrow(/unprocessed items after/);
+    await expect(store.recordQURLSendBatch(sends, { requireSendConfigUnrevoked: true })).rejects.toMatchObject({
+      name: 'SendConfigRevokedError',
+      code: 'SEND_CONFIG_REVOKED',
+      sendId: 's1',
+    });
+  });
+
+  test('recordQURLSendBatch: reports the failed send id when cancellation reasons identify it', async () => {
+    const cancelled = new Error('transaction cancelled');
+    cancelled.name = 'TransactionCanceledException';
+    cancelled.CancellationReasons = [
+      { Code: 'None' },
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'None' },
+      { Code: 'None' },
+    ];
+    ddbMock.on(TransactWriteCommand).rejects(cancelled);
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link-1',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's2', senderDiscordId: 'sender', recipientDiscordId: 'r2',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link-2',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ], { requireSendConfigUnrevoked: true })).rejects.toMatchObject({
+      name: 'SendConfigRevokedError',
+      code: 'SEND_CONFIG_REVOKED',
+      sendId: 's2',
+      sendIds: ['s2'],
+    });
+  });
+
+  test('recordQURLSendBatch: does not label non-guard condition failures as revoked', async () => {
+    const cancelled = new Error('transaction cancelled');
+    cancelled.name = 'TransactionCanceledException';
+    cancelled.CancellationReasons = [
+      { Code: 'None' },
+      { Code: 'None' },
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'None' },
+    ];
+    ddbMock.on(TransactWriteCommand).rejects(cancelled);
+    await expect(store.recordQURLSendBatch([
+      { sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link-1',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+      { sendId: 's2', senderDiscordId: 'sender', recipientDiscordId: 'r2',
+        resourceId: 'r', resourceType: 'file', qurlLink: 'link-2',
+        expiresIn: '24h', channelId: 'ch', targetType: 'user' },
+    ], { requireSendConfigUnrevoked: true })).rejects.toBe(cancelled);
+  });
+
+  test('recordQURLSendBatch: retries retryable transaction cancellations', async () => {
+    let attempts = 0;
+    ddbMock.on(TransactWriteCommand).callsFake(() => {
+      attempts++;
+      if (attempts === 1) {
+        const conflict = new Error('transaction conflict');
+        conflict.name = 'TransactionCanceledException';
+        conflict.CancellationReasons = [{ Code: 'TransactionConflict' }, { Code: 'None' }];
+        return Promise.reject(conflict);
+      }
+      return Promise.resolve({});
+    });
+    const sends = [{
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+      resourceId: 'r', resourceType: 'file', qurlLink: '…',
+      expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }];
+    await store.recordQURLSendBatch(sends, { requireSendConfigUnrevoked: true });
+    expect(attempts).toBe(2);
+  });
+
+  test('recordQURLSendBatch: rethrows after retryable transaction cancellations are exhausted', async () => {
+    const conflict = new Error('transaction conflict');
+    conflict.name = 'TransactionCanceledException';
+    conflict.CancellationReasons = [{ Code: 'TransactionConflict' }, { Code: 'None' }];
+    let attempts = 0;
+    ddbMock.on(TransactWriteCommand).callsFake(() => {
+      attempts++;
+      return Promise.reject(conflict);
+    });
+    const setTimeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation((resolve) => {
+      resolve();
+      return 0;
+    });
+    const sends = [{
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+      resourceId: 'r', resourceType: 'file', qurlLink: 'link',
+      expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }];
+
+    try {
+      await expect(store.recordQURLSendBatch(sends, { requireSendConfigUnrevoked: true })).rejects.toBe(conflict);
+      expect(attempts).toBe(6);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(5);
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+
+    const tokens = ddbMock.commandCalls(TransactWriteCommand)
+      .map(call => call.args[0].input.ClientRequestToken);
+    expect(new Set(tokens).size).toBe(1);
+    expect(tokens[0]).toEqual(expect.any(String));
   });
 
   test('updateSendDMStatus: composite-key UpdateItem sets dm_status', async () => {

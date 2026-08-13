@@ -18,9 +18,10 @@ const (
 	// under Slack's 100-block view limit, with header/intro/divider on top).
 	agentHomeMaxEntries = 20
 
-	agentHomeTitle = "qURL Secure Access Agent"
-	agentHomeIntro = "Your recent actions through the Secure Access Agent."
-	agentHomeEmpty = "No actions yet. Ask the Secure Access Agent in a channel or DM to get access, protect a resource, or manage aliases — anything you confirm shows up here."
+	agentHomeTitle   = "qURL Secure Access Agent"
+	agentHomeIntro   = "Your recent actions through the Secure Access Agent."
+	agentHomeEmpty   = "No actions yet. Ask the Secure Access Agent in a channel or DM to get access, protect a resource, or manage aliases — anything you confirm shows up here."
+	agentHomeSupport = "Need help? Contact qURL support: " + qurlContactURL
 )
 
 // handleAppHomeOpened publishes the viewer's own agent-action review surface when they
@@ -72,14 +73,20 @@ func (h *Handler) publishAgentHome(ctx context.Context, log *slog.Logger, teamID
 	}
 }
 
-// buildAgentHomeView renders the Home tab blocks: a title, a one-line intro, then one
-// section per recent action (newest-first, as ListAuditEntries returns them), or an
-// empty-state line when there are none.
+// buildAgentHomeView renders the Home tab blocks: a title, a one-line intro, the
+// AI-disclosure and support context lines, then one section per recent action
+// (newest-first, as ListAuditEntries returns them), or an empty-state line when
+// there are none.
 func buildAgentHomeView(entries []slackdata.AuditEntry) []any {
-	blocks := make([]any, 0, 4+len(entries)) // header + intro + divider + entries (or the empty-state line)
+	blocks := make([]any, 0, 6+len(entries)) // header + intro + disclosure + support + divider + entries (or empty-state)
 	blocks = append(blocks,
 		headerBlock(agentHomeTitle),
 		sectionBlock(agentHomeIntro),
+		// Slack-AI-required disclosure near the top: AI is used, it can be wrong, and
+		// where the privacy notice lives. A context block reads as subtext, matching
+		// the modal "subtext" pattern (contextBlock).
+		contextBlock(agentAIDisclosureShort),
+		contextBlock(agentHomeSupport),
 		map[string]any{"type": "divider"},
 	)
 	if len(entries) == 0 {

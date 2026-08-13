@@ -2,10 +2,12 @@ package slackdata
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -252,27 +254,7 @@ func (s *Store) GetChannelPolicy(ctx context.Context, teamID, channelID string) 
 // "available in a channel" iff its id is in that union regardless of which
 // surface carries it.
 func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, resourceID string) error {
-	if teamID == "" || channelID == "" || resourceID == "" {
-		return &Error{
-			StatusCode: http.StatusBadRequest,
-			Title:      "ExposeResourceToChannel: team_id, channel_id, and resource_id are required",
-		}
-	}
-	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName: aws.String(s.ChannelPoliciesName),
-		Key: map[string]ddbtypes.AttributeValue{
-			attrSlackTeamID:    stringAttr(teamID),
-			attrSlackChannelID: stringAttr(channelID),
-		},
-		UpdateExpression: aws.String("ADD " + attrAllowedResourceIDs + " :rids"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
-		},
-	})
-	if err != nil {
-		return ddbToError("ExposeResourceToChannel", err)
-	}
-	return nil
+	return s.updateChannelResourceSet(ctx, "ExposeResourceToChannel", "ADD", teamID, channelID, resourceID)
 }
 
 // RevokeResourceFromChannel removes resourceID from the (teamID, channelID)
@@ -288,25 +270,33 @@ func (s *Store) ExposeResourceToChannel(ctx context.Context, teamID, channelID, 
 // revoking such a channel means unbinding its aliases too (the Edit modal's
 // aliases field, or `/qurl-admin unset-alias`).
 func (s *Store) RevokeResourceFromChannel(ctx context.Context, teamID, channelID, resourceID string) error {
+	return s.updateChannelResourceSet(ctx, "RevokeResourceFromChannel", "DELETE", teamID, channelID, resourceID)
+}
+
+func (s *Store) updateChannelResourceSet(ctx context.Context, operation, updateVerb, teamID, channelID, resourceID string) error {
 	if teamID == "" || channelID == "" || resourceID == "" {
 		return &Error{
 			StatusCode: http.StatusBadRequest,
-			Title:      "RevokeResourceFromChannel: team_id, channel_id, and resource_id are required",
+			Title:      operation + ": team_id, channel_id, and resource_id are required",
 		}
 	}
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
 	_, err := s.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID:    stringAttr(teamID),
 			attrSlackChannelID: stringAttr(channelID),
 		},
-		UpdateExpression: aws.String("DELETE " + attrAllowedResourceIDs + " :rids"),
+		UpdateExpression: aws.String("SET " + attrUpdatedAt + " = " + exprNow + ", " + attrUpdatedAtNano + " = " + exprNowNano + " " + updateVerb + " " + attrAllowedResourceIDs + " :rids"),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rids": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			":rids":     &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err != nil {
-		return ddbToError("RevokeResourceFromChannel", err)
+		return ddbToError(operation, err)
 	}
 	return nil
 }
@@ -389,10 +379,15 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// alias_bindings key that pointed at it. The DELETE uses the literal attribute
 	// name (matching RevokeResourceFromChannel); only the user-controlled alias
 	// keys are name-aliased.
-	expr := "DELETE " + attrAllowedResourceIDs + " :rid"
-	var names map[string]string
+	now := s.nowOrDefault()
+	nowISO := now.UTC().Format(time.RFC3339)
+	expr := "SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano
+	names := map[string]string{
+		"#updated_at":      attrUpdatedAt,
+		"#updated_at_nano": attrUpdatedAtNano,
+	}
 	if len(aliasKeys) > 0 {
-		names = map[string]string{exprAliasBindings: attrAliasBindings}
+		names[exprAliasBindings] = attrAliasBindings
 		removes := make([]string, len(aliasKeys))
 		for i, alias := range aliasKeys {
 			nameRef := fmt.Sprintf("#a%d", i)
@@ -401,6 +396,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		}
 		expr += " REMOVE " + strings.Join(removes, ", ")
 	}
+	expr += " DELETE " + attrAllowedResourceIDs + " :rid"
 
 	in := &dynamodb.UpdateItemInput{
 		TableName: aws.String(s.ChannelPoliciesName),
@@ -410,11 +406,11 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 		},
 		UpdateExpression: aws.String(expr),
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":rid": &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			":rid":      &ddbtypes.AttributeValueMemberSS{Value: []string{resourceID}},
+			exprNow:     stringAttr(nowISO),
+			exprNowNano: unixNanoAttr(now),
 		},
-	}
-	if names != nil {
-		in.ExpressionAttributeNames = names
+		ExpressionAttributeNames: names,
 	}
 	if _, err := s.Client.UpdateItem(ctx, in); err != nil {
 		return nil, ddbToError("PurgeResourceFromChannel", err)
@@ -480,6 +476,114 @@ func (s *Store) ChannelsForResource(ctx context.Context, teamID, resourceID stri
 	}
 	sort.Strings(channels)
 	return channels, nil
+}
+
+// PurgeTeamChannelPolicies deletes EVERY channel_policies row for teamID — all
+// alias_bindings and allowed_resource_ids across every channel the bot was used
+// in. It is part of the Slack-lifecycle (app_uninstalled / tokens_revoked) and
+// `/qurl uninstall` cascade that forgets a workspace once the Slack install is
+// gone and there is nothing left for those per-channel grants to authorize.
+//
+// Two phases against the partition key (slack_team_id):
+//
+//   - Query pages over the team's rows (LastEvaluatedKey loop, same shape as
+//     [Store.ChannelsForResource]), projecting only the SK so a wide row doesn't
+//     drag every attribute over the wire — the DeleteItem only needs the key.
+//   - Each row is removed with an unconditional DeleteItem keyed by its
+//     (slack_team_id, slack_channel_id). Unconditional ⇒ idempotent: a row that a
+//     concurrent unset-alias already cleared makes its delete a DynamoDB no-op.
+//
+// Best-effort by construction: it attempts to delete every row it observes
+// during the Query pass, even after an individual DeleteItem fails, then returns
+// the joined delete errors at the end. A row created after the Query completes
+// is not seen — acceptable here because once the Slack app is uninstalled the
+// bot can no longer be invoked to create new policy rows, so the set is
+// effectively frozen before the purge runs. A missed channel_policies row has no
+// TTL and can persist unless a later uninstall/revoke delivery triggers another
+// purge, so lifecycle callers should treat returned errors as meaningful cleanup
+// signals even though the Slack ack has already been sent. Sequential DeleteItem
+// (not BatchWriteItem) keeps the [DynamoDBClient] surface unchanged; per-team
+// channel-policy rows are bounded by the channels a workspace used the bot in,
+// so the round-trips stay modest.
+func (s *Store) PurgeTeamChannelPolicies(ctx context.Context, teamID string) error {
+	return s.purgeTeamChannelPolicies(ctx, teamID, time.Time{})
+}
+
+// PurgeTeamChannelPoliciesBefore deletes channel_policies rows for teamID only
+// when they have not been updated since cutoff. Rows created or changed by a
+// fast reinstall/setup after the teardown signal are retained rather than being
+// clobbered by a delayed async purge.
+func (s *Store) PurgeTeamChannelPoliciesBefore(ctx context.Context, teamID string, cutoff time.Time) error {
+	return s.purgeTeamChannelPolicies(ctx, teamID, cutoff)
+}
+
+func (s *Store) purgeTeamChannelPolicies(ctx context.Context, teamID string, cutoff time.Time) error {
+	if teamID == "" {
+		return &Error{StatusCode: http.StatusBadRequest, Title: "PurgeTeamChannelPolicies: team_id is required"}
+	}
+	var startKey map[string]ddbtypes.AttributeValue
+	var deleteErrs []error
+	for {
+		out, err := s.Client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.ChannelPoliciesName),
+			KeyConditionExpression: aws.String(attrSlackTeamID + " = :tid"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":tid": stringAttr(teamID),
+			},
+			// Only the SK is needed to issue the per-row DeleteItem; the rest of
+			// each row is irrelevant to a full delete. Mirrors the projected reads
+			// elsewhere on this table.
+			ProjectionExpression: aws.String("#cid"),
+			ExpressionAttributeNames: map[string]string{
+				"#cid": attrSlackChannelID,
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return joinSweepErrors(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
+		}
+		for _, item := range out.Items {
+			channelID := readString(item, attrSlackChannelID)
+			if channelID == "" {
+				// A row without a readable SK can't be addressed for delete; record
+				// cleanup residue rather than emit a malformed key (it would 400).
+				// This should not happen for a well-formed table.
+				deleteErrs = append(deleteErrs, &Error{
+					StatusCode: http.StatusInternalServerError,
+					Title:      "PurgeTeamChannelPolicies: queried row missing slack_channel_id",
+				})
+				continue
+			}
+			deleteInput := &dynamodb.DeleteItemInput{
+				TableName: aws.String(s.ChannelPoliciesName),
+				Key: map[string]ddbtypes.AttributeValue{
+					attrSlackTeamID:    stringAttr(teamID),
+					attrSlackChannelID: stringAttr(channelID),
+				},
+			}
+			if !cutoff.IsZero() {
+				deleteInput.ConditionExpression = aws.String(purgeCutoffCondition)
+				deleteInput.ExpressionAttributeNames = map[string]string{
+					"#updated_at_nano": attrUpdatedAtNano,
+				}
+				deleteInput.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
+					":purge_cutoff_nano": unixNanoAttr(cutoff),
+				}
+			}
+			if _, err := s.Client.DeleteItem(ctx, deleteInput); err != nil {
+				var ccfe *ddbtypes.ConditionalCheckFailedException
+				if !cutoff.IsZero() && errors.As(err, &ccfe) {
+					continue
+				}
+				deleteErrs = append(deleteErrs, ddbToError("PurgeTeamChannelPolicies", err))
+			}
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	return errors.Join(deleteErrs...)
 }
 
 // allowedResourceIDsFromItem returns the set of resource IDs a channel_policies

@@ -1,10 +1,10 @@
 package internal
 
 // Tests for the native assistant-pane "thinking…" status (container Slice 2): set on a
-// DM (message.im / pane) turn before the LLM call and (by Slack) auto-cleared when the
-// reply posts; NOT set for an app_mention (channel) turn; im-only + best-effort behind
-// the AssistantThreads seam (nil = no-op, a failure never fails the turn); and on the
-// SAME thread the reply lands on (the auto-clear precondition).
+// DM (message.im / pane) turn before the LLM call and explicitly cleared when the turn
+// exits; NOT set for an app_mention (channel) turn; im-only + best-effort behind the
+// AssistantThreads seam (nil = no-op, a failure never fails the turn); and on the SAME
+// thread the reply lands on.
 
 import (
 	"bytes"
@@ -37,7 +37,9 @@ func newStatusHandler(t *testing.T, seam AssistantThreadsPort, rec ReactionPort,
 	return h, posts, mu
 }
 
-var wantDMSurfaceAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "D1", timestamp: "100.2", name: agentAckReaction}
+const agentStatusTestDMTimestamp = "100.2"
+
+var wantDMSurfaceAck = reactionCall{teamID: "T1", enterpriseID: "", channel: "D1", timestamp: agentStatusTestDMTimestamp, name: agentAckReaction}
 
 func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	fake := &fakeAssistantThreads{}
@@ -49,24 +51,26 @@ func TestAgentStatus_SetForPaneTurnOnReplyThread(t *testing.T) {
 	h.Wait()
 
 	statuses := fake.statusCalls()
-	if len(statuses) != 1 {
-		t.Fatalf("a pane (im) turn must set exactly one status, got %d", len(statuses))
+	if len(statuses) != 2 {
+		t.Fatalf("a pane (im) turn must set then clear its status, got %d calls", len(statuses))
 	}
 	st := statuses[0]
-	if st.channelID != "D1" || st.threadTS != "100.2" || st.status != agentThinkingStatus {
+	if st.channelID != "D1" || st.threadTS != agentStatusTestDMTimestamp || st.status != agentThinkingStatus {
 		t.Fatalf("status = %+v, want channel D1 / thread 100.2 / %q", st, agentThinkingStatus)
+	}
+	if cleared := statuses[1]; cleared.channelID != st.channelID || cleared.threadTS != st.threadTS || cleared.status != "" {
+		t.Fatalf("status clear = %+v, want channel %s / thread %s / empty status", cleared, st.channelID, st.threadTS)
 	}
 	adds, removes := rec.snapshot()
 	if len(adds) != 0 || len(removes) != 0 {
 		t.Fatalf("pane (im) turn must use status only, got reaction adds=%+v removes=%+v", adds, removes)
 	}
 
-	// The status thread MUST equal the reply thread, or Slack's auto-clear (which fires
-	// when the app posts into the thread) never clears the "thinking…" indicator.
+	// The status thread MUST equal the reply thread.
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].threadTS != st.threadTS {
-		t.Fatalf("reply must post on the status thread (auto-clear precondition); reply=%+v status.thread=%s", *posts, st.threadTS)
+		t.Fatalf("reply must post on the status thread; reply=%+v status.thread=%s", *posts, st.threadTS)
 	}
 }
 
@@ -76,19 +80,22 @@ func TestAgentStatus_DefaultPaneTurnOnReplyThread(t *testing.T) {
 	h, posts, mu := newStatusHandler(t, fake, rec, fakeAgentLLM{reply: testAgentReachStagingReply}, false)
 
 	// Default/pre-pane mode still attempts native status in addition to the reaction
-	// fallback, so it must keep the same auto-clear precondition as exclusive mode.
+	// fallback, so it must keep the same explicit-clear lifecycle as exclusive mode.
 	h.handleEvent(httptest.NewRecorder(), []byte(dmMessageBody("EvDefaultStatus")))
 	h.Wait()
 
 	statuses := fake.statusCalls()
-	if len(statuses) != 1 {
-		t.Fatalf("a default pane (im) turn must set exactly one status, got %d", len(statuses))
+	if len(statuses) != 2 {
+		t.Fatalf("a default pane (im) turn must set then clear its status, got %d calls", len(statuses))
 	}
 	st := statuses[0]
+	if cleared := statuses[1]; cleared.channelID != st.channelID || cleared.threadTS != st.threadTS || cleared.status != "" {
+		t.Fatalf("default status clear = %+v, want channel %s / thread %s / empty status", cleared, st.channelID, st.threadTS)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].threadTS != st.threadTS {
-		t.Fatalf("default reply must post on the status thread (auto-clear precondition); reply=%+v status.thread=%s", *posts, st.threadTS)
+		t.Fatalf("default reply must post on the status thread; reply=%+v status.thread=%s", *posts, st.threadTS)
 	}
 	adds, removes := rec.snapshot()
 	if len(adds) != 1 || adds[0] != wantDMSurfaceAck || len(removes) != 1 || removes[0] != wantDMSurfaceAck {
@@ -168,7 +175,7 @@ func TestAgentStatus_BestEffortDoesNotFailTurn(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
 		t.Fatalf("a failing setStatus must not fail the turn; reply = %+v", *posts)
 	}
 	logs := logBuf.String()
@@ -199,7 +206,7 @@ func TestAgentStatus_DefaultPaneTurnKeepsReactionFallback(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 || (*posts)[0].text != testAgentStillWorksReply {
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
 		t.Fatalf("a failing setStatus must not fail the turn; reply = %+v", *posts)
 	}
 	logs := logBuf.String()
@@ -251,5 +258,23 @@ func TestAgentStatus_ExclusivePaneNoReactionOnStatusPanic(t *testing.T) {
 	defer mu.Unlock()
 	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
 		t.Fatalf("a panicking exclusive pane status path must post the error reply; reply = %+v", *posts)
+	}
+}
+
+func TestAgentStatus_ClearedWhenTurnPanics(t *testing.T) {
+	fake := &fakeAssistantThreads{}
+	h, posts, mu := newStatusHandler(t, fake, nil, panicAgentLLM{}, true)
+
+	h.processAgentEvent(context.Background(), slog.Default(),
+		env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?"))
+
+	statuses := fake.statusCalls()
+	if len(statuses) != 2 || statuses[0].status != agentThinkingStatus || statuses[1].status != "" {
+		t.Fatalf("a panicking turn must set then clear pane status, got %+v", statuses)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*posts) != 1 || (*posts)[0].text != agentErrorReply {
+		t.Fatalf("a panicking turn must post the error reply; reply = %+v", *posts)
 	}
 }
