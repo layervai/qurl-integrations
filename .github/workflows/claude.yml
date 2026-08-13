@@ -328,8 +328,8 @@ jobs:
           # Keep comment-triggered analysis on the same proven model as the
           # automatic PR review. The action's implicit default may select the
           # 1M-context variant, which this repository credential cannot start.
-          # Nothing enforces this coupling: when claude-code-review.yml's
-          # --model changes, change this one in the same pull request.
+          # Nothing enforces this coupling: keep this --model identical to
+          # claude-code-review.yml's and change both in the same pull request.
           # Do not add extra allowed tools by default: the action's base GitHub
           # tools are sufficient here. The automatic review workflow uses a
           # narrow GitHub MCP allowlist because its explicit prompt needs PR
