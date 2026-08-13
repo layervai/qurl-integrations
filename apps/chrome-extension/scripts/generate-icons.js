@@ -15,8 +15,8 @@ const fs = require('fs');
 
 const sizes = [16, 48, 128];
 
-const extensionRoot = path.join(__dirname, '..');
-const defaultIconsDir = path.join(extensionRoot, 'icons');
+const projectRoot = path.resolve(__dirname, '..');
+const defaultIconsDir = path.join(projectRoot, 'icons');
 const defaultSourcePath = path.join(defaultIconsDir, 'logo.png');
 
 function loadSharp() {
@@ -87,7 +87,7 @@ async function main() {
   await generateIcons({
     outDir: defaultIconsDir,
     onGenerated: function (pngPath) {
-      console.log(`Generated: ${path.relative(extensionRoot, pngPath)}`);
+      console.log(`Generated: ${path.relative(projectRoot, pngPath)}`);
     },
   });
 }

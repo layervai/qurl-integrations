@@ -7,6 +7,14 @@ const path = require('path');
 
 const generateIcons = require('../scripts/generate-icons.js');
 
+const generateIconsModulePath = require.resolve('../scripts/generate-icons.js');
+const sharpModulePath = require.resolve('sharp');
+
+// The three files this guard exists to protect, spelled out rather than derived from
+// `generateIcons.sizes`: assertions built from the value under test go vacuously green if that
+// value ever becomes empty.
+const EXPECTED_ICON_FILES = ['icon128.png', 'icon16.png', 'icon48.png'];
+
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
@@ -15,16 +23,22 @@ function committedIconPath(size) {
   return path.join(generateIcons.defaultIconsDir, `icon${size}.png`);
 }
 
-// Hashes rather than buffers: they compare just as strictly but keep an assertion
-// failure readable instead of dumping kilobytes of PNG.
-function committedIconHashes() {
-  const hashes = {};
+// Hash plus mtime. The hash keeps an assertion failure readable instead of dumping kilobytes of
+// PNG, and the mtime is what actually detects an unwanted write: a generator that ignored
+// `outDir` would rewrite `icons/` with byte-identical content, which a hash alone cannot see.
+function committedIconFingerprints() {
+  const fingerprints = {};
 
   for (const size of generateIcons.sizes) {
-    hashes[size] = sha256(fs.readFileSync(committedIconPath(size)));
+    const iconPath = committedIconPath(size);
+
+    fingerprints[size] = {
+      sha256: sha256(fs.readFileSync(iconPath)),
+      mtimeMs: fs.statSync(iconPath).mtimeMs,
+    };
   }
 
-  return hashes;
+  return fingerprints;
 }
 
 // `await run(...)` inside the try, not `return run(...)`: the callback is async, and returning its
@@ -43,6 +57,67 @@ test('generate-icons exports its entry points', function () {
   assert.equal(typeof generateIcons.generateIcons, 'function');
   assert.equal(typeof generateIcons.main, 'function');
   assert.deepEqual(generateIcons.sizes, [16, 48, 128]);
+});
+
+// `sizes` on its own is a restatement of the module's own constant. The coupling that can actually
+// break is with manifest.json, which declares the icon sizes twice: a size declared there but not
+// generated ships an icon path Chrome resolves to nothing and renders blank.
+test('manifest icon declarations match the generated sizes', function () {
+  const manifestPath = path.join(path.dirname(generateIcons.defaultIconsDir), 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const expectedSizes = generateIcons.sizes.map(String).sort();
+
+  const declarations = [
+    ['icons', manifest.icons],
+    ['action.default_icon', manifest.action && manifest.action.default_icon],
+  ];
+
+  for (const [label, declaration] of declarations) {
+    assert.ok(declaration, `manifest.json has no ${label} block`);
+    assert.deepEqual(Object.keys(declaration).sort(), expectedSizes, `manifest.json ${label} declares sizes "npm run icons" does not generate`);
+
+    for (const [size, iconPath] of Object.entries(declaration)) {
+      assert.equal(iconPath, `icons/icon${size}.png`, `manifest.json ${label}["${size}"] points somewhere unexpected`);
+    }
+  }
+});
+
+// This is the one failure mode that would leave a green but useless guard. If the
+// `require.main === module` guard in the script regressed, the `require` at the top of this file
+// would regenerate the real `icons/` before any assertion ran — and the drift test below would
+// then compare freshly written files against themselves and pass forever while dirtying the tree.
+//
+// Stubbing the side-effecting primitive is how `package-release.test.js` proves the same property
+// for its sibling script. It works here because `loadSharp()` requires sharp lazily, inside
+// `generateIcons`, so the stub is reachable. It is not racy: an auto-run would call `main()` during
+// `require`, and an async function runs synchronously up to its first `await` — which is after
+// `sharp(sourcePath)` is invoked — so the call is recorded before `require` returns.
+test('requiring the module does not generate icons', function () {
+  const realSharp = require.cache[sharpModulePath];
+  const calls = [];
+
+  require.cache[sharpModulePath] = {
+    id: sharpModulePath,
+    filename: sharpModulePath,
+    loaded: true,
+    exports: function () {
+      calls.push(Array.from(arguments));
+      throw new Error('sharp stub must not be invoked');
+    },
+  };
+  delete require.cache[generateIconsModulePath];
+
+  try {
+    require('../scripts/generate-icons.js');
+    assert.deepEqual(calls, [], 'requiring generate-icons.js invoked sharp — the require.main guard is not holding');
+  } finally {
+    if (realSharp) {
+      require.cache[sharpModulePath] = realSharp;
+    } else {
+      delete require.cache[sharpModulePath];
+    }
+    delete require.cache[generateIconsModulePath];
+  }
 });
 
 test('generateIcons refuses to run without an explicit outDir', async function () {
@@ -67,8 +142,11 @@ test('generateIcons refuses to run without an explicit outDir', async function (
 // the icons are regenerated.
 test('committed icons match a fresh "npm run icons"', async function () {
   await withTempDir('qurl-icon-drift-', async function (tempDir) {
-    const written = await generateIcons.generateIcons({ outDir: tempDir });
-    assert.equal(written.length, generateIcons.sizes.length);
+    await generateIcons.generateIcons({ outDir: tempDir });
+
+    // Pins the comparison below to all three files: without it, a generator that wrote nothing
+    // would leave the loop with no iterations and this test vacuously green.
+    assert.deepEqual(fs.readdirSync(tempDir).sort(), EXPECTED_ICON_FILES);
 
     for (const size of generateIcons.sizes) {
       const committedPath = committedIconPath(size);
@@ -98,21 +176,25 @@ test('committed icons match a fresh "npm run icons"', async function () {
   });
 });
 
-// The drift test above is only trustworthy if `outDir` really redirects the output: were it
-// ignored, the test would regenerate `icons/` in place and then compare those files against
-// themselves, passing no matter what. This pins both halves of that — a nested `outDir` that
-// does not exist yet is created and written to, and `icons/` is left untouched.
+// The drift test is only trustworthy if `outDir` really redirects the output: were it ignored, that
+// test would regenerate `icons/` in place and compare those files against themselves, passing no
+// matter what. This pins both halves — a nested `outDir` that does not exist yet is created and
+// written to, and `icons/` is left untouched.
 test('generateIcons honors a custom outDir and leaves icons/ untouched', async function () {
-  const before = committedIconHashes();
+  const before = committedIconFingerprints();
 
   await withTempDir('qurl-icon-outdir-', async function (tempDir) {
     const outDir = path.join(tempDir, 'nested', 'icons');
-    const written = await generateIcons.generateIcons({ outDir });
+    const generated = [];
 
-    assert.deepEqual(
-      written.map(function (pngPath) { return path.basename(pngPath); }),
-      generateIcons.sizes.map(function (size) { return `icon${size}.png`; })
-    );
+    const written = await generateIcons.generateIcons({
+      outDir,
+      onGenerated: function (pngPath) { generated.push(pngPath); },
+    });
+
+    assert.deepEqual(written.map(function (pngPath) { return path.basename(pngPath); }).sort(), EXPECTED_ICON_FILES);
+    // The CLI reports progress through this callback, so it must fire once per file, in order.
+    assert.deepEqual(generated, written);
 
     for (const pngPath of written) {
       assert.equal(path.dirname(pngPath), outDir);
@@ -120,5 +202,5 @@ test('generateIcons honors a custom outDir and leaves icons/ untouched', async f
     }
   });
 
-  assert.deepEqual(committedIconHashes(), before, 'generating into a custom outDir rewrote icons/');
+  assert.deepEqual(committedIconFingerprints(), before, 'generating into a custom outDir wrote to icons/');
 });
