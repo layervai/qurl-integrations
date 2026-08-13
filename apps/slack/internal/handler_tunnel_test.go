@@ -3053,6 +3053,55 @@ func TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst(t *testing.T)
 	}
 }
 
+// TestTunnelInstallAcceptsCredentialWithoutEchoedTarget pins the acceptance
+// side of the gate: `target` is corroborating, not required. Now that an
+// unconfirmed credential fails the install outright, tightening the predicate
+// to demand `target` would break enrollment against every producer that
+// echoes `kind` but omits it — a regression that no rejection test would
+// catch, since all of those assert the opposite direction. This is the test
+// that fails if someone "hardens" the gate past its documented contract.
+func TestTunnelInstallAcceptsCredentialWithoutEchoedTarget(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyResourceID: testTunnelResourceID,
+			testKeyType:       client.ResourceTypeTunnel,
+			testKeySlug:       testTunnelSlug,
+			testKeyStatus:     client.StatusActive,
+		})
+	})
+	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+		// Honors kind, omits target entirely.
+		respondQURLEnvelope(t, w, map[string]any{
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			testKeyStatus: client.StatusActive,
+			"kind":        client.CredentialKindEnrollmentToken,
+		})
+	})
+	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("a credential that confirms kind must not be revoked")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	h := newAdminTestHandler(t, ts)
+	dmPosts := captureTunnelPostDMSuccess(h)
+	h.SetAliasStore(h.cfg.AdminStore)
+	_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+	if logs.contains(kindFirstRejection) {
+		t.Error("a response that echoes kind without target must not be rejected")
+	}
+	if !strings.Contains(async, "is ready to install") {
+		t.Fatalf("async reply = %q, want the successful install copy", async)
+	}
+	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelAPIKey) {
+		t.Fatalf("enrollment token DM = %+v, want one containing the token", *dmPosts)
+	}
+}
+
 func TestTunnelInstallRefusesWhenPostDMUnwiredBeforeMintingKey(t *testing.T) {
 	ts := newAdminTestServers(t)
 	ts.seedAdmin(t)

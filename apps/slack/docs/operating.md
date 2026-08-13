@@ -226,6 +226,18 @@ Symptoms of a deploy-order violation, and what to check:
   `tunnel_bootstrap_cleanup_failed` and the credential remains bounded by its
   one-hour TTL; revoke it manually.
 
+  Expect one `level=error` line per attempt while a pre-cutover producer is
+  still serving, so mute or scope any alert that pages on error level for this
+  message during the rollout window.
+
+  The Connector *resource* is created before this gate runs and is not removed
+  on rejection — the same as every other post-mint failure path (missing
+  plaintext, shell validation, DM delivery), which revoke the credential and
+  leave the resource for the retry to reuse via alias match. After a
+  deploy-order incident you may therefore have Connector resources with no
+  working enrollment; re-running setup for the same slug reuses them, or list
+  and delete unused ones in the qURL dashboard.
+
   A producer that honors `kind` but simply omits `target` from the response is
   **not** rejected — `target` is treated as corroborating, so a partial echo
   cannot break every enrollment.
