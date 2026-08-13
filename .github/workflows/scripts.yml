@@ -27,6 +27,10 @@ permissions:
 # Every check below is independent, so each one is guarded to run even after
 # an earlier failure. Without that the first red check hides the rest, and a
 # check that stops running looks exactly like a check that passes.
+#
+# One consequence: timeout-minutes below is now a whole-suite budget rather
+# than "until the first failure". The suite runs in about 8s against the 5m
+# cap, so there is room, but a slow new check spends everyone's margin.
 jobs:
   scripts:
     name: Lint and test scripts

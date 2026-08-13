@@ -65,6 +65,25 @@ if [ ! -s "$script" ]; then
   exit 1
 fi
 
+# The report block reads `date +%s`, so the wall clock decides which branch it
+# takes. Sampling the real clock made the boundary cases racy -- a single tick
+# between sampling `now` and running a case turns 779s into 780s and flips the
+# expected classification. Stub `date` instead, the way
+# test-resolve-validated-base.sh stubs `gh`, so every boundary is exact.
+bindir="$tmp/bin"
+mkdir -p "$bindir"
+cat > "$bindir/date" <<'STUB_EOF'
+#!/bin/sh
+if [ "$1" = "+%s" ]; then
+  printf '%s\n' "$DATE_NOW_STUB"
+  exit 0
+fi
+exec /bin/date "$@"
+STUB_EOF
+chmod +x "$bindir/date"
+PATH="$bindir:$PATH"
+export PATH
+
 failures=0
 
 note_failure() {
@@ -119,7 +138,7 @@ expect_case() {
   local desc="$1" want_title="$2" started_at="$3" budget_minutes="$4"
   local out status=0 error_lines
 
-  out="$(STARTED_AT="$started_at" BUDGET_MINUTES="$budget_minutes" bash "$script" 2>&1)" || status=$?
+  out="$(DATE_NOW_STUB="$now" STARTED_AT="$started_at" BUDGET_MINUTES="$budget_minutes" bash "$script" 2>&1)" || status=$?
 
   if [ "$status" -ne 0 ]; then
     note_failure "$desc: expected exit 0, got $status"
@@ -140,7 +159,9 @@ expect_case() {
   echo "ok: $desc"
 }
 
-now="$(date +%s)"
+# Fixed rather than sampled: with `date` stubbed there is no clock to race,
+# and the arithmetic below is exact.
+now=1000000000
 
 # Overrun: the runner kills the step at the budget, so elapsed is always at or
 # just past it by the time this step measures.

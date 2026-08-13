@@ -234,6 +234,10 @@ jobs:
         # Exits 0 on purpose: the review step's own failure already fails the
         # job, and a second red step would bury the annotation.
         if: failure() && steps.claude-review.outcome == 'failure'
+        # BUDGET_MINUTES restates a job-level env var the shell can already
+        # see. That is deliberate: it keeps every input this block reads on
+        # the step, which is the interface
+        # scripts/test-claude-review-budget-report.sh drives.
         env:
           BUDGET_MINUTES: ${{ env.CLAUDE_REVIEW_BUDGET_MINUTES }}
           STARTED_AT: ${{ steps.review_origin.outputs.started_at }}
