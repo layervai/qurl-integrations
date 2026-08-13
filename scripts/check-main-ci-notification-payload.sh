@@ -11,6 +11,26 @@
 # checking locally on a newer jq sees the broken filter compile fine. Only the
 # CI runner's jq makes this check authoritative; see the warning below.
 #
+# To enforce that half locally — rather than pushing and waiting for CI — run
+# this script in a container whose jq matches the runner's. The pairing is the
+# point, not the image tag: ubuntu:24.04 ships jq 1.7, the version
+# ubuntu-latest has today. Should ubuntu-latest ever ship jq >= 1.8, the
+# restricted grammar stops applying to the notifier too — there is then no
+# image that restores this half, and nothing left for one to catch.
+#
+#   docker run --rm -v "$PWD:/src:ro" ubuntu:24.04 bash -c '
+#     export DEBIAN_FRONTEND=noninteractive
+#     apt-get update -qq && apt-get install -y -qq jq python3 git
+#     mkdir -p /work && cd /work
+#     cp -R /src/.github /src/scripts .
+#     git init -q .
+#     scripts/check-main-ci-notification-payload.sh'
+#
+# The copy and fresh `git init` are load-bearing: this script starts with
+# `cd "$(git rev-parse --show-toplevel)"`, and the read-only mount carries no
+# .git the container can use (in a worktree it is a file pointing outside the
+# mount), so /work has to be a repo root of its own.
+#
 # Rather than pattern-matching the jq source (brittle, and would need updating
 # on every reword), this extracts the step's shell body and runs it verbatim
 # against a stub `curl`, then asserts on the payload it actually produced.
@@ -261,7 +281,10 @@ if digits and (int(digits.group(1)), int(digits.group(2))) >= (1, 8):
     sys.stderr.write(
         "warning: %s relaxed the object-construction grammar, so this run "
         "cannot catch a jq <= 1.7 parse regression. Only CI (ubuntu-latest, "
-        "jq 1.7) enforces that half.\n" % version
+        "jq 1.7) enforces that half.\n"
+        "hint: to enforce it locally, run this script inside a jq 1.7 "
+        "container -- see the docker recipe in its header comment.\n"
+        % version
     )
 
 print("main CI notification payload builds on %s for all %d triggers "
