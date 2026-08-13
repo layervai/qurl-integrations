@@ -13,6 +13,8 @@ on:
     workflows:
       - "slack: Build and Test"
       - "discord: Build and Test"
+      - "chrome-extension: Build and Test"
+      - "teams: Build and Test"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
       - "CodeQL"
@@ -78,6 +80,12 @@ jobs:
               ;;
             "discord: Build and Test")
               impact="Discord bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
+              ;;
+            "chrome-extension: Build and Test")
+              impact="Chrome extension build, tests, or release packaging failed on main. Nothing auto-deploys from this workflow, so the breakage stays latent until Release Please cuts the next chrome-extension release — treat the packaged bundle from this SHA as unshippable to the Chrome Web Store until the run is repaired."
+              ;;
+            "teams: Build and Test")
+              impact="Teams app typecheck, lint, tests, or build failed on main. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
               ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish failed. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
