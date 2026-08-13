@@ -917,6 +917,14 @@ For customer Slack installs, configure the Slack app with:
     enabled. Without it, agent replies still post, but the best-effort reaction
     ack is absent. This scope is not part of the install defaults; declare it in
     the app manifest and add it explicitly to `SLACK_BOT_SCOPES`.
+  - Conversation-mode installs should include `files:read` so a rebuilt thread
+    can tell the model that an earlier turn carried an attachment. Slack gates
+    file metadata in message reads on this scope, so without it
+    `conversations.replies` returns no `files` array and the signal rests
+    entirely on the message `subtype` — which still detects a real upload, but
+    leaves nothing to fall back on if Slack's read-back shape changes. An upload
+    is refused on its own turn either way; this affects only what LATER turns in
+    that thread are told about it.
   - Conversation-mode installs that answer channel/private-channel/group-DM
     threads should include `channels:read` / `groups:read` / `mpim:read` with the
     corresponding event scopes. The confirm flow snapshots Slack's event

@@ -16,6 +16,18 @@ const sharpModulePath = require.resolve('sharp');
 const EXPECTED_SIZES = [16, 48, 128];
 const EXPECTED_ICON_FILES = EXPECTED_SIZES.map(function (size) { return `icon${size}.png`; }).sort();
 
+// Derived, not hard-coded: this file is byte-identical in both extensions, so a literal app
+// directory is necessarily wrong in one of them — which is exactly what shipped, with one copy
+// pointing developers at the other extension's directory. Deriving it also lets the lockstep
+// check compare these lines instead of masking them away (see CLAUDE.md).
+const APP_DIR = `apps/${path.basename(generateIcons.projectRoot)}`;
+
+// One function rather than the same sentence written out at both call sites: this string is what
+// shipped wrong, and duplicating it is how it went wrong — the second copy was never updated.
+function remediation() {
+  return `Fix: run \`npm run icons\` in ${APP_DIR} and commit the result.`;
+}
+
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
@@ -56,7 +68,7 @@ async function withTempDir(prefix, run) {
 
 // `sizes` alone would just restate the module's own constant. The coupling that can actually break
 // is with manifest.json, which declares the icon sizes twice: a size declared there but never
-// generated ships an icon path Chrome resolves to nothing and renders blank.
+// generated ships an icon path the browser resolves to nothing and renders blank.
 test('manifest icon declarations match the generated sizes', function () {
   assert.deepEqual(generateIcons.sizes, EXPECTED_SIZES);
 
@@ -128,6 +140,23 @@ test('generateIcons refuses to run without an explicit outDir', async function (
   );
 });
 
+// The remediation above is the one thing here with no other guard behind it. Lockstep cannot cover
+// it: `check-extension-lockstep.sh` masks `apps/(chrome|edge)-extension` on both sides, so the same
+// wrong literal in both copies normalizes to a match — verified by mutation, which the whole suite
+// and the lockstep check both pass. `ownAppDir` is derived from this file's own location rather
+// than from `generateIcons.projectRoot` — a different file, so a literal re-hard-coded in either
+// copy fails here. Different derivation path, not a different value: both resolve under the same
+// app root, so a rename that moves script and test together stays green, which is what we want.
+test('the drift remediation names this extension, not its counterpart', function () {
+  const ownAppDir = `apps/${path.basename(path.resolve(__dirname, '..'))}`;
+
+  assert.equal(APP_DIR, ownAppDir);
+  assert.ok(
+    remediation().includes(` in ${ownAppDir} and`),
+    `the remediation should send developers to ${ownAppDir}, but says: ${remediation()}`
+  );
+});
+
 // Guards against the committed icons drifting from `icons/logo.png` — see #908, where a
 // sharp ^0.34.5 -> ^0.35.0 bump changed the PNG encoder and left the committed 16px and 48px
 // files stale (128px happened to survive byte-identical, which is why it went unnoticed).
@@ -153,7 +182,7 @@ test('committed icons match a fresh "npm run icons"', async function () {
       // Without this, a deleted icon fails as a bare ENOENT stack rather than the remediation below.
       assert.ok(
         fs.existsSync(committedPath),
-        `icons/icon${size}.png is missing. Fix: run \`npm run icons\` in apps/chrome-extension and commit the result.`
+        `icons/icon${size}.png is missing. ${remediation()}`
       );
 
       const committed = fs.readFileSync(committedPath);
@@ -165,7 +194,7 @@ test('committed icons match a fresh "npm run icons"', async function () {
           `icons/icon${size}.png is stale: it does not match what "npm run icons" generates from icons/logo.png.\n` +
           `  committed: ${committed.length} bytes, sha256 ${sha256(committed)}\n` +
           `  generated: ${fresh.length} bytes, sha256 ${sha256(fresh)}\n` +
-          'Fix: run `npm run icons` in apps/chrome-extension and commit the result.\n' +
+          remediation() + '\n' +
           'If you did not touch icons/logo.png, the encoder changed under you — most likely a sharp\n' +
           'upgrade, or a sharp built against a different libvips (musl/Alpine, or a global-libvips\n' +
           'build). Regenerating and committing is still the fix (see #1046).'
