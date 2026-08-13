@@ -25,6 +25,7 @@ import (
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
+	"github.com/layervai/qurl-integrations/shared/observability"
 )
 
 const (
@@ -193,6 +194,7 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		{"mention with empty text ignored", env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>   "), false, false},
 		{"file-only mention admitted for limitation reply", withFile(env(slackEventTypeAppMention, "channel", "U2", "", "", "<@U12345678>")), false, true},
 		{"file-only dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "")), false, true},
+		{"me_message dm ignored (named in the policy doc, not admitted)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "me_message", "hi"), false, false},
 		{"file_share dm admitted for limitation reply", withFile(env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, "")), false, true},
 		{"file_share dm without files still admitted (subtype is proof)", env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", slackMessageSubtypeFileShare, ""), false, true},
 		{"file_share subtype on a mention admitted", withFile(env(slackEventTypeAppMention, "channel", "U2", "", slackMessageSubtypeFileShare, "<@U12345678>")), false, true},
@@ -256,7 +258,6 @@ func TestSlackEventFilesDecodesTolerantly(t *testing.T) {
 		{"empty array is not an upload", `[]`, false, 0},
 		{"explicit null is not an upload", `null`, false, 0},
 		{"non-object element still counts", `["F1"]`, true, 1},
-		{"whitespace-padded array still counts", "  [{\"id\":\"F1\"}]  ", true, 1},
 		// The shapes below are not ones Slack sends today. They are here because the
 		// cost of guessing wrong is the whole event vanishing, not a miscount.
 		{"object instead of array is an uncountable upload", `{"id":"F1"}`, true, 0},
@@ -282,22 +283,40 @@ func TestSlackEventFilesDecodesTolerantly(t *testing.T) {
 // not fail the ENCLOSING envelope decode, which is the failure that would make the
 // message disappear. A plain []json.RawMessage field fails this test.
 func TestSlackEventFilesSurvivesEnvelopeDecode(t *testing.T) {
-	for _, raw := range []string{`{"id":"F1"}`, `"F1"`, `7`, `null`, `[]`} {
-		t.Run(raw, func(t *testing.T) {
-			body := eventCallbackBody("EvShape", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"500.1","text":"what can I access?","files":`+raw+`}`)
+	tests := []struct {
+		name string
+		// field is spliced into the event object, so the absent case can omit the key
+		// entirely — which is a different path from an explicit null.
+		field       string
+		wantPresent bool
+	}{
+		{"object instead of array", `,"files":{"id":"F1"}`, true},
+		{"string instead of array", `,"files":"F1"`, true},
+		{"number instead of array", `,"files":7`, true},
+		{"explicit null", `,"files":null`, false},
+		{"empty array", `,"files":[]`, false},
+		{"field absent entirely", ``, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := eventCallbackBody("EvShape", `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"500.1","text":"what can I access?"`+tt.field+`}`)
 			var env slackEventEnvelope
 			if err := json.Unmarshal([]byte(body), &env); err != nil {
-				t.Fatalf("files %s must not fail the envelope decode, got %v", raw, err)
+				t.Fatalf("files %q must not fail the envelope decode, got %v", tt.field, err)
 			}
 			if env.Event.Text != "what can I access?" || env.Event.User != "U2" {
-				t.Fatalf("envelope fields lost alongside files %s: %+v", raw, env.Event)
+				t.Fatalf("envelope fields lost alongside files %q: %+v", tt.field, env.Event)
+			}
+			// Surviving the decode is only half of it: an uncountable shape must still
+			// read as an attachment, or the tolerance would turn into a silent
+			// answer-past-the-file instead of a silent drop.
+			if env.Event.Files.present != tt.wantPresent {
+				t.Fatalf("files %q decoded to present=%v, want %v", tt.field, env.Event.Files.present, tt.wantPresent)
 			}
 		})
 	}
 }
 
-// TestAgentDeterministicReply pins the feature switch itself: which turns are
-// answered without the model, and which fall through to it.
 // TestAgentEventHasUpload pins upload detection on the event envelope, which is
 // decided ahead of — and independently of — the text classifier below. The two
 // signals back each other up, so each is covered on its own as well as together.
@@ -331,6 +350,29 @@ func TestAgentEventHasUpload(t *testing.T) {
 			event := tt.event
 			if got := agentEventHasUpload(&event); got != tt.want {
 				t.Fatalf("agentEventHasUpload = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSlackEventFilesNestedDecodeIsUnpadded pins the stdlib behavior the decoder's
+// null check relies on: as a struct field, files arrives with the whitespace around
+// it already stripped, so comparing the value against "null" byte-for-byte is safe.
+// If encoding/json ever passed padding through, a null files field would read as an
+// uncountable attachment and refuse an ordinary text turn.
+func TestSlackEventFilesNestedDecodeIsUnpadded(t *testing.T) {
+	for _, body := range []string{
+		`{"files": null , "text":"x"}`,
+		`{"files" :  null   ,"text":"x"}`,
+		"{\"files\":\n\tnull\n\t,\"text\":\"x\"}",
+	} {
+		t.Run(body, func(t *testing.T) {
+			var e slackInnerEvent
+			if err := json.Unmarshal([]byte(body), &e); err != nil {
+				t.Fatalf("decode failed: %v", err)
+			}
+			if e.Files.present {
+				t.Fatalf("a null files field must not read as an attachment, got present=true")
 			}
 		})
 	}
@@ -1047,6 +1089,14 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			wantThread: "400.6",
 		},
 		{
+			// A files value the decoder could not count still refuses. This is the shape
+			// that would otherwise have taken the whole event down (see
+			// TestSlackEventFilesSurvivesEnvelopeDecode) — here it reaches the reply.
+			name:       "files in a shape we could not count",
+			body:       eventCallbackBody("EvUncountable", `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"400.7","text":"protect this","files":{"id":"F7"}}`),
+			wantThread: "400.7",
+		},
+		{
 			// A file_share whose files array never arrived is still an upload; the
 			// subtype alone must keep it out of the silent-drop path.
 			name:       "file_share with no files array",
@@ -1080,6 +1130,98 @@ func TestHandleEvent_UnsupportedMediaRepliesWithoutLLM(t *testing.T) {
 			}
 			if got := (*posts)[0].threadTS; got != tt.wantThread {
 				t.Fatalf("reply threadTS = %q, want %q (the limitation must thread under the upload)", got, tt.wantThread)
+			}
+		})
+	}
+}
+
+// TestHandleEvent_UnsupportedMediaLogContract pins the demand-signal log. Mutation
+// testing found that deleting this line, hardcoding files_visible to 0, or renaming
+// the message all left the suite green — yet the whole justification for the line is
+// that an operator query consumes it, exactly like the fail-open message pinned by
+// TestAgentTurnLimit_FailOpenLogContract. It also pins the two bools that separate
+// "Slack sent a subtype only" (benign) from "Slack changed the files shape" (the
+// case where the refusal may be wrong), which is the distinction on-call needs.
+func TestHandleEvent_UnsupportedMediaLogContract(t *testing.T) {
+	const mediaLogMsg = "agent: unsupported media; replied with the text-only limitation"
+
+	tests := []struct {
+		name            string
+		event           string
+		wantVisible     float64
+		wantFieldPresen bool
+		wantSubtype     bool
+	}{
+		{
+			name:            "counted files",
+			event:           `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"600.1","text":"hi","files":[{"id":"F1"},{"id":"F2"}]}`,
+			wantVisible:     2,
+			wantFieldPresen: true,
+			wantSubtype:     true,
+		},
+		{
+			// Benign: Slack described the upload by subtype alone.
+			name:        "subtype only",
+			event:       `{"type":"message","subtype":"file_share","channel_type":"im","user":"U2","channel":"D1","ts":"600.2","text":"hi"}`,
+			wantVisible: 0,
+			wantSubtype: true,
+		},
+		{
+			// The alertable pair: present but uncountable, and NO file_share subtype —
+			// so this turn may have carried no attachment at all.
+			name:            "uncountable shape",
+			event:           `{"type":"message","channel_type":"im","user":"U2","channel":"D1","ts":"600.3","text":"hi","files":{"id":"F1"}}`,
+			wantVisible:     0,
+			wantFieldPresen: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &slackdata.AgentStore{Client: newMemAgentDDB(), TableName: "agent_state"}
+			post, _, _ := capturingPostMessage()
+			h := NewHandler(Config{
+				AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
+				AgentDefaultEnabled: true,
+			})
+			t.Cleanup(h.Wait)
+
+			var env slackEventEnvelope
+			if err := json.Unmarshal([]byte(eventCallbackBody("EvLog", tt.event)), &env); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			var buf bytes.Buffer
+			log := slog.New(observability.NewRedactingJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			h.processAgentEventWithAdmission(context.Background(), log, &env, "", nil, false)
+			h.Wait()
+
+			var rec map[string]any
+			for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+				var candidate map[string]any
+				if err := json.Unmarshal(line, &candidate); err != nil {
+					continue
+				}
+				if candidate["msg"] == mediaLogMsg {
+					rec = candidate
+					break
+				}
+			}
+			if rec == nil {
+				t.Fatalf("no %q record; an operator query consumes this line, so it must be emitted. got %s", mediaLogMsg, buf.String())
+			}
+			if rec["level"] != "INFO" {
+				t.Fatalf("level = %v, want INFO", rec["level"])
+			}
+			if rec["files_visible"] != tt.wantVisible {
+				t.Fatalf("files_visible = %v, want %v", rec["files_visible"], tt.wantVisible)
+			}
+			if rec["files_field_present"] != tt.wantFieldPresen {
+				t.Fatalf("files_field_present = %v, want %v", rec["files_field_present"], tt.wantFieldPresen)
+			}
+			if rec["file_share_subtype"] != tt.wantSubtype {
+				t.Fatalf("file_share_subtype = %v, want %v", rec["file_share_subtype"], tt.wantSubtype)
+			}
+			if rec["user_id"] != "U2" {
+				t.Fatalf("user_id = %v, want U2 (needed to join this record to a complaining user)", rec["user_id"])
 			}
 		})
 	}

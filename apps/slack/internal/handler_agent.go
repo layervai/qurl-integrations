@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -237,17 +236,22 @@ type slackEventFiles struct {
 // already begins with '[' — a valid array, whose elements always decode into
 // json.RawMessage — so its error return is unreachable in practice and kept only
 // because silently discarding an error would be worse than a branch never taken.
+//
+// The value also arrives unpadded — encoding/json strips the whitespace around it
+// before calling here — so the "null" comparison below can be byte-for-byte. That
+// guarantee is load-bearing (a padded "null " would classify as an attachment and
+// refuse a clean text turn) and is pinned by TestSlackEventFilesNestedDecodeIsUnpadded
+// rather than assumed. The length check is panic insurance, not whitespace handling.
 func (f *slackEventFiles) UnmarshalJSON(b []byte) error {
-	value := bytes.TrimLeft(b, " \t\r\n")
-	if len(value) == 0 || value[0] != '[' {
+	if len(b) == 0 || b[0] != '[' {
 		// null means no attachment. Any other non-array shape is an attachment we
 		// cannot count: presence stays true so the turn is refused rather than answered
 		// past a file, and count stays 0.
-		f.present = !bytes.Equal(value, []byte("null"))
+		f.present = string(b) != "null"
 		return nil
 	}
 	var entries []json.RawMessage
-	if err := json.Unmarshal(value, &entries); err != nil {
+	if err := json.Unmarshal(b, &entries); err != nil {
 		return err
 	}
 	f.count = len(entries)
@@ -269,8 +273,10 @@ type slackInnerEvent struct {
 	ThreadTS    string `json:"thread_ts"`
 	// Files is decoded but never read into — only its presence and count are
 	// consulted — while conversation mode remains text-only. See slackEventFiles for
-	// why it decodes tolerantly instead of strictly.
-	Files slackEventFiles `json:"files,omitempty"`
+	// why it decodes tolerantly instead of strictly. No omitempty, unlike the
+	// pointer and string fields around it: encoding/json never treats a non-pointer
+	// struct as empty, so the tag would claim an omission that cannot happen.
+	Files slackEventFiles `json:"files"`
 	// Tab is the App Home tab a user opened ("home" / "messages") on an
 	// app_home_opened event; empty on every other event type.
 	Tab string `json:"tab,omitempty"`
@@ -1208,11 +1214,24 @@ func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.
 		// This is the only deterministic reply that logs. Not because the others are
 		// visible — none of them reach "agent: turn complete" either — but because this
 		// one is the demand signal for building real file support, and nothing else
-		// counts it. files_visible is a count, not an inventory: names, ids and
-		// mimetypes are user content and stay out of the log. It is 0 for an upload
-		// Slack described only by its subtype, or sent in a shape we could not count.
+		// counts it. Every field is a count, a bool, or an opaque Slack ID: names, ids
+		// and mimetypes are user content and stay out of the log.
+		//
+		// files_visible is 0 in two operationally OPPOSITE cases, which is why the two
+		// bools are here to separate them:
+		//   - files_field_present=false, file_share_subtype=true — Slack described the
+		//     upload by subtype alone. Normal, high volume, and the refusal is correct.
+		//   - files_field_present=true with files_visible=0 — the files value arrived in
+		//     a shape the decoder could not count, i.e. Slack changed the wire format.
+		//     This is the ONLY path where the refusal may be wrong: a text-only turn
+		//     that merely carried an unrecognized files value gets refused with no
+		//     attachment involved. Alert on that pair; it is the "the agent refused my
+		//     message" report.
 		log.Info("agent: unsupported media; replied with the text-only limitation",
-			"files_visible", env.Event.Files.count)
+			"files_visible", env.Event.Files.count,
+			"files_field_present", env.Event.Files.present,
+			"file_share_subtype", env.Event.Subtype == slackMessageSubtypeFileShare,
+			"user_id", env.Event.User)
 		h.postAgentReply(log, env, agentEventRootTS(&env.Event), agentUnsupportedMediaReply)
 		return
 	}
