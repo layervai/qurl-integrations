@@ -9,10 +9,12 @@
 # one browser's users. See the Chrome<->Edge lockstep table in CLAUDE.md.
 #
 # The two copies are byte-identical except for the host browser's name in prose
-# and comments, so this normalizes the prose token `Edge` -> `Chrome` in the Edge
-# copy and then demands an exact match. The `chrome.*` extension API namespace is
-# spelled the same in both browsers and is deliberately NOT normalized, so a real
-# change to an API call can never be masked by the normalization.
+# and comments, so this masks the capitalized prose tokens `Chrome` and `Edge` on
+# BOTH sides before demanding an exact match. Masking both sides rather than
+# rewriting Edge -> Chrome keeps an ordinary comment about an "Edge case" from
+# reading as drift. The lowercase `chrome.*` extension API namespace is spelled
+# the same in both browsers and is deliberately NOT masked, so a real change to
+# an API call can never be hidden by the normalization.
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
@@ -40,8 +42,10 @@ LOCKSTEP_FILES = [
 ]
 
 # Prose/comment mentions of the host browser are the only sanctioned delta.
-# Word-boundary anchored so the `chrome.*` API namespace is left untouched.
-BROWSER_PROSE = re.compile(r"\bEdge\b")
+# Word-boundary anchored and case-sensitive so the lowercase `chrome.*` API
+# namespace is left untouched.
+BROWSER_PROSE = re.compile(r"\b(?:Chrome|Edge)\b")
+BROWSER_MASK = "<browser>"
 
 failures = []
 
@@ -57,19 +61,18 @@ for rel in LOCKSTEP_FILES:
         )
         continue
 
-    chrome_text = chrome_path.read_text()
-    edge_text = edge_path.read_text()
-    normalized = BROWSER_PROSE.sub("Chrome", edge_text)
+    chrome_text = BROWSER_PROSE.sub(BROWSER_MASK, chrome_path.read_text())
+    edge_text = BROWSER_PROSE.sub(BROWSER_MASK, edge_path.read_text())
 
-    if normalized == chrome_text:
+    if chrome_text == edge_text:
         continue
 
     diff = "".join(
         difflib.unified_diff(
             chrome_text.splitlines(keepends=True),
-            normalized.splitlines(keepends=True),
-            fromfile=str(chrome_path),
-            tofile=f"{edge_path} (normalized: Edge -> Chrome)",
+            edge_text.splitlines(keepends=True),
+            fromfile=f"{chrome_path} (browser name masked)",
+            tofile=f"{edge_path} (browser name masked)",
         )
     )
     failures.append(f"{rel}: copies have diverged:\n{diff}")

@@ -34,7 +34,7 @@ Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-pyth
 | `content/gmail-compose.js`| `content/gmail-compose.js`| Gmail DOM manipulation                 |
 | `background.js`           | `background.js`           | Service worker message handling        |
 
-`scripts/check-extension-lockstep.sh` enforces this on every PR (via the Scripts workflow): it normalizes the host browser's name in the Edge copy and then requires an exact match, so drift fails CI instead of relying on a reviewer noticing. The `chrome.*` extension API namespace is spelled the same in both browsers and is deliberately not normalized. When a deliberate divergence is added, document it below **and** update that script.
+`scripts/check-extension-lockstep.sh` enforces this on every PR (via the Scripts workflow): it masks the capitalized prose words `Chrome`/`Edge` on both sides and then requires an exact match, so drift fails CI instead of relying on a reviewer noticing. The lowercase `chrome.*` extension API namespace is spelled the same in both browsers and is deliberately not masked, so a real change to an API call still trips the check. When a deliberate divergence is added, document it below **and** update that script.
 
 Intentional differences (do **not** sync these):
 - `manifest.json` / `package.json` `version` — separate release-please tracks (`chrome-extension-v*` vs `edge-extension-v*`), so the two versions move independently. This is the *only* manifest delta; Edge Add-ons hosts updates itself, so the Edge manifest carries no `update_url` (that key is the self-hosted Chrome mechanism — don't add it).
