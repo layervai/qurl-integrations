@@ -96,8 +96,10 @@ function ipv4LocalScope(octets, { includeCgnat = false, includeMulticast = false
 /**
  * Unwrap an IPv4-mapped IPv6 literal to its dotted-quad form, or null.
  *
- * `host` must already be lowercased and bracket-stripped: the hex tail is
- * matched with [0-9a-f], so an uppercased `::FFFF:7F00:1` would slip past.
+ * `host` must be bracket-stripped. Case is normalized defensively: the hex
+ * tail is matched with [0-9a-f], and a composer who forgot to lowercase would
+ * get a wrong `null` here — which is the fail-OPEN direction for the SSRF
+ * caller, so this module does not rely on the contract being honoured.
  *
  * BOTH tail forms matter, and missing the hex one is a real SSRF bypass
  * (issue #1035): `new URL()` re-serializes `::ffff:127.0.0.1` to the hex form
@@ -109,7 +111,8 @@ function ipv4LocalScope(octets, { includeCgnat = false, includeMulticast = false
  * (`::127.0.0.1`, which serializes to `::7f00:1`) falls through, as it is
  * dead in practice and `::1` covers realistic loopback.
  */
-function unwrapIPv4Mapped(host) {
+function unwrapIPv4Mapped(rawHost) {
+  const host = String(rawHost).toLowerCase();
   const dotted = /^::ffff:([0-9.]+)$/.exec(host);
   if (dotted) return dotted[1];
   const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
@@ -120,7 +123,8 @@ function unwrapIPv4Mapped(host) {
 
 /**
  * Classify an IPv6 literal's local scope by its first hextet, or null when it
- * is not local. `host` must already be lowercased and bracket-stripped.
+ * is not local. `host` must be bracket-stripped; case is normalized
+ * defensively, for the same fail-open reason as unwrapIPv4Mapped.
  *
  * Callers filter on the returned name: site-local is deprecated and only the
  * fail-closed SSRF posture bothers to screen it.
@@ -129,7 +133,8 @@ function unwrapIPv4Mapped(host) {
  * lenient prefix parse, so parseInt('fc00.example.com', 16) is 0xfc00 and the
  * unique-local mask would misread real public DNS names as link-local.
  */
-function ipv6LocalScope(host) {
+function ipv6LocalScope(rawHost) {
+  const host = String(rawHost).toLowerCase();
   if (host === '::') return 'unspecified';
   if (host === '::1') return 'loopback';
   const firstGroup = parseInt(host.split(':')[0], 16);

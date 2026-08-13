@@ -47,14 +47,15 @@ describe('unwrapIPv4Mapped — issue #1035 (SSRF bypass)', () => {
     expect(unwrapIPv4Mapped('::ffff:8.8.8.8')).toBe('8.8.8.8');
   });
 
-  it('requires lowercased input — the contract callers must honour', () => {
-    // The hex tail is matched with [0-9a-f]. Both production callers lowercase
-    // before composing (isPrivateHost does it directly; the boot screen gets
-    // an already-lowercased hostname out of new URL()), so this is a contract
-    // for the next composer, not a live bug.
-    expect(unwrapIPv4Mapped('::FFFF:7F00:1')).toBeNull();
+  it('normalizes case itself rather than trusting the caller', () => {
+    // The hex tail is matched with [0-9a-f], so a composer who forgot to
+    // lowercase would get a wrong null — fail-OPEN for the SSRF caller. Both
+    // current callers do lowercase, but the shared table does not depend on
+    // that, since it is meant to be composed from again.
+    expect(unwrapIPv4Mapped('::FFFF:7F00:1')).toBe('127.0.0.1');
     expect(unwrapIPv4Mapped('::ffff:7f00:1')).toBe('127.0.0.1');
-    // isPrivateHost lowercases internally, so it is unaffected.
+    expect(ipv6LocalScope('FE80::1')).toBe('link-local');
+    expect(ipv6LocalScope('FC00::1')).toBe('unique-local');
     expect(isPrivateHost('::FFFF:7F00:1')).toBe(true);
   });
 
