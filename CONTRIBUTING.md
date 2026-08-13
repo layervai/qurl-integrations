@@ -33,6 +33,7 @@ apps/
     README.md
   discord/           # Discord bot
   chrome-extension/  # Chrome MV3 extension for Gmail
+  edge-extension/    # Edge MV3 extension for Gmail (fork of chrome-extension, kept in lockstep)
   cli/               # CLI tool
   teams/             # Microsoft Teams OAuth core (TypeScript, not yet shipped)
   zapier/            # Zapier integration (placeholder, no implementation yet)
