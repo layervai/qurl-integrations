@@ -270,5 +270,12 @@ module.exports = {
   // level invocations above are the load-bearing assertions.
   assertIntent,
   assertNoIntent,
+  // Test-only today, and the http tier depends on it staying that way.
+  // `guild` is refreshed exactly once, at boot — http-only replicas run
+  // no periodic refresh because no request path reads this handle (see
+  // the module header in src/http-only-init.js). A request-time consumer
+  // added here would silently reintroduce the staleness window that
+  // refresh used to cover, so give it its own refresh path rather than
+  // reading the boot-time snapshot.
   getGuild: () => guild,
 };
