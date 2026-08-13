@@ -30,6 +30,9 @@ const EnvAgentStateTable = "QURL_AGENT_STATE_TABLE"
 //     proposal snapshot awaiting an Approve/Reject click.
 //   - pending-action claim markers: sk = "pendclaim#<id>", existence-only — the
 //     consume-once latch so a proposal executes at most once.
+//   - unsupported-media notice markers: sk = "media#<channel>:<user>",
+//     existence-only — the once-per-window latch that keeps one member's upload
+//     burst from drawing one bot reply per file.
 //   - assistant pane context: sk = "actx#<thread_key>", carries the channel id a
 //     user opened the assistant pane FROM, so a later pane turn (which carries no
 //     context of its own) can scope its reads to that channel. Last write wins.
@@ -53,7 +56,10 @@ const (
 	eventSKPrefix     = "evt#"
 	pendSKPrefix      = "pend#"
 	pendClaimSKPrefix = "pendclaim#"
-	threadCtxSKPrefix = "actx#"
+	// mediaNoticeSKPrefix namespaces the unsupported-media notice latch; the full
+	// sk is "media#<channel_id>:<user_id>" (see AgentStore.MarkMediaNoticeSent).
+	mediaNoticeSKPrefix = "media#"
+	threadCtxSKPrefix   = "actx#"
 	// rateSKPrefix namespaces the per-window turn-rate counters; the full sk is
 	// "rate#<scope>#<window-start-unix>" where scope is "team" or "user#<id>".
 	rateSKPrefix = "rate#"
@@ -74,6 +80,15 @@ const (
 	// Enforced at read time in LoadPendingAction (not just by the lagging DynamoDB
 	// TTL reaper), so the window is a real bound.
 	defaultPendingActionTTL = 10 * time.Minute
+	// defaultMediaNoticeTTL bounds how long one delivered "I can't read files"
+	// notice suppresses the next. Short: the notice is the only thing standing
+	// between an upload and silence, so a member who returns to the same
+	// conversation minutes later must hear it again. Long enough that a single
+	// drag-and-drop burst — which lands in seconds — collapses to one reply.
+	// This is a real deadline, not just a cleanup hint: MarkMediaNoticeSent goes
+	// through putMarkerIfExpired, which reclaims an expired marker itself rather
+	// than waiting for the TTL reaper's multi-day sweep.
+	defaultMediaNoticeTTL = 5 * time.Minute
 )
 
 // AgentStore is the DDB-direct accessor for conversation-mode state. It owns one
@@ -89,12 +104,13 @@ type AgentStore struct {
 
 	// Now is injected so tests can pin the clock. Defaults to time.Now.
 	Now func() time.Time
-	// ContextTTL / DedupeTTL / PendingActionTTL / AuditTTL default to the
-	// package defaults when zero.
+	// ContextTTL / DedupeTTL / PendingActionTTL / AuditTTL / MediaNoticeTTL
+	// default to the package defaults when zero.
 	ContextTTL       time.Duration
 	DedupeTTL        time.Duration
 	PendingActionTTL time.Duration
 	AuditTTL         time.Duration
+	MediaNoticeTTL   time.Duration
 }
 
 // NewAgentStore constructs an [AgentStore]. The table name falls back to
@@ -180,13 +196,103 @@ func (s *AgentStore) MarkEventSeen(ctx context.Context, partition, eventID strin
 	return created, nil // false → already seen (a retry/duplicate)
 }
 
+func (s *AgentStore) mediaNoticeTTL() time.Duration {
+	if s.MediaNoticeTTL > 0 {
+		return s.MediaNoticeTTL
+	}
+	return defaultMediaNoticeTTL
+}
+
+// MarkMediaNoticeSent claims the right to send ONE unsupported-media notice for
+// conversationKey (channel + user, see agentEventMediaNoticeKey in the slack
+// handler) and reports whether this call won it. A member who drags in a hundred
+// files sends a hundred deliberate messages, each with its own event id and its
+// own ts, so every one clears event dedupe and would otherwise draw its own
+// chat.postMessage — and that quota is per-workspace, so the burst degrades agent
+// replies for everyone else in the workspace.
+//
+// Deliberately NOT keyed on the thread: an upload burst arrives as top-level
+// messages, which carry no thread_ts, so a thread-keyed latch would be unique per
+// message and suppress nothing at all. Keyed WITH the user so one member's burst
+// never swallows another member's first notice.
+//
+// Unlike the turn-rate counters this meters outbound volume, not model spend — a
+// suppressed notice costs no tokens either way. Callers treat an error as "send
+// it" (fail open): the notice is the only alternative to silence, and failing
+// open is no worse than the unsuppressed behavior.
+//
+// Uses putMarkerIfExpired, NOT putMarkerIfAbsent: over-suppression here IS the
+// bug, so the window cannot be left to the TTL reaper. See that method.
+//
+// One caveat the latch cannot cover: the claim is taken before the reply is
+// posted, and the delivery seam reports failure only to the log. If that first
+// post fails, the window stays claimed with nothing delivered. Accepted rather
+// than compensated — releasing the claim would need the post error threaded back
+// through deliverAgentText, and a failed post is already the rarer event.
+func (s *AgentStore) MarkMediaNoticeSent(ctx context.Context, partition, conversationKey string) (firstTime bool, err error) {
+	if partition == "" || conversationKey == "" {
+		return false, &Error{StatusCode: http.StatusBadRequest, Title: "MarkMediaNoticeSent: partition and conversation_key are required"}
+	}
+	created, err := s.putMarkerIfExpired(ctx, partition, mediaNoticeSKPrefix+conversationKey, s.mediaNoticeTTL())
+	if err != nil {
+		return false, ddbToError("MarkMediaNoticeSent", err)
+	}
+	return created, nil // false → a notice is already live in this window
+}
+
 // putMarkerIfAbsent conditionally creates an existence-only marker (pk=partition,
 // sk, ttl) and reports whether THIS call created it (true) vs found it already
 // present (false). The attribute_not_exists(pk) condition makes concurrent writers
 // on different instances race to a single winner. Shared by [AgentStore.MarkEventSeen]
-// (event dedupe) and [AgentStore.ClaimPendingAction] (consume-once latch). Returns
+// (event dedupe), [AgentStore.ClaimPendingAction] (consume-once latch) and
+// [AgentStore.MarkMediaNoticeSent] (once-per-window notice latch). Returns
 // the raw client error for the caller to wrap with its op context.
 func (s *AgentStore) putMarkerIfAbsent(ctx context.Context, partition, sk string, ttl time.Duration) (created bool, err error) {
+	return s.putMarker(ctx, partition, sk, ttl, "attribute_not_exists("+attrAgentPK+")", nil, nil)
+}
+
+// putMarkerIfExpired is putMarkerIfAbsent for a marker whose TTL is a real
+// deadline rather than just cleanup. It also wins when the stored marker has
+// already expired, overwriting it in the same conditional write.
+//
+// DynamoDB's TTL reaper is documented to delete "within a few days", so for a
+// marker keyed to a minutes-long window the reaper is not a clock — an absent-only
+// condition would hold the marker for however long the sweep takes. That is
+// harmless for the markers whose late-expiry failure mode is "suppress a duplicate
+// again" (event dedupe, the consume-once claim latch), and wrong for one whose
+// failure mode is a user hearing nothing. This mirrors what LoadPendingAction does
+// at read time, enforced at write time instead so it stays a single round trip and
+// concurrent writers still race to one winner.
+//
+// A marker carrying no ttl attribute at all fails the comparison and so counts as
+// live; every writer here stamps one.
+func (s *AgentStore) putMarkerIfExpired(ctx context.Context, partition, sk string, ttl time.Duration) (created bool, err error) {
+	return s.putMarker(ctx, partition, sk, ttl,
+		// `ttl` is a DynamoDB reserved word, so it MUST be aliased via an
+		// expression-attribute name — a bare `ttl <= :now` 400s with
+		// ValidationException. See BumpTurnCount for the same trap.
+		"attribute_not_exists("+attrAgentPK+") OR #ttl <= :now",
+		map[string]string{"#ttl": attrAgentTTL},
+		map[string]ddbtypes.AttributeValue{":now": numberAttr(s.now().Unix())},
+	)
+}
+
+// putMarker is the shared conditional-create body. names/values MUST be nil (not
+// empty maps) when the condition needs no placeholders: the AWS SDK guards on
+// != nil, so an empty non-nil map serializes to {} and DynamoDB rejects the call.
+//
+// Known gap — a lost response reads as "someone else won". No custom retryer is
+// configured, so the SDK's standard retryer is live (3 attempts). If an attempt
+// creates the item but its response is lost, the retry fails the condition and
+// this returns (false, nil): indistinguishable from a genuine race loss. The
+// caller concludes another writer won and stays quiet, so for MarkMediaNoticeSent
+// that burst posts NOTHING until the window expires — the fail-open branch cannot
+// help, since it only sees a non-nil error. Telling the two apart needs a
+// per-call writer token in the item, compared via
+// ReturnValuesOnConditionCheckFailure; deliberately not done here because it is a
+// rare event bounded by the TTL, and the same gap is benign for the other two
+// callers (a dropped duplicate is what they want anyway).
+func (s *AgentStore) putMarker(ctx context.Context, partition, sk string, ttl time.Duration, condition string, names map[string]string, values map[string]ddbtypes.AttributeValue) (created bool, err error) {
 	_, err = s.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.TableName),
 		Item: map[string]ddbtypes.AttributeValue{
@@ -194,7 +300,9 @@ func (s *AgentStore) putMarkerIfAbsent(ctx context.Context, partition, sk string
 			attrAgentSK:  stringAttr(sk),
 			attrAgentTTL: numberAttr(s.now().Add(ttl).Unix()),
 		},
-		ConditionExpression: aws.String("attribute_not_exists(" + attrAgentPK + ")"),
+		ConditionExpression:       aws.String(condition),
+		ExpressionAttributeNames:  names,
+		ExpressionAttributeValues: values,
 	})
 	if err != nil {
 		var cond *ddbtypes.ConditionalCheckFailedException
