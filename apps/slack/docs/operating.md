@@ -240,13 +240,42 @@ Symptoms of a deploy-order violation, and what to check:
   code=… request_id=…`. Quote the `request_id` when escalating. The fix is to
   roll the producer forward, not to retry — 400 is not retried by the shared
   client.
-- **Enrollment succeeds but logs `tunnel install: minted credential did not
-  confirm the kind-first contract`.** The producer returned 200 without echoing
-  `kind`/`target`, so the bot cannot confirm it minted a one-shot enrollment
-  token rather than an ordinary workspace-scoped key. Treat the minted
-  credential as potentially over-scoped: verify it in the qURL dashboard and
-  revoke it if it is not a Connector-bound enrollment token. This warning is
-  expected to be silent once every environment is on the kind-first API.
+- **Setup fails after a successful mint, logging `tunnel install: minted
+  credential did not confirm the kind-first contract`.** The producer returned
+  200 but did not echo `kind` (or echoed a `target` that disagrees), so the bot
+  cannot confirm it minted a one-shot, Connector-bound enrollment token rather
+  than an ordinary workspace-scoped key. **The bot fails closed here**: it
+  revokes the credential, never DMs it, and points the admin at support rather
+  than a retry. The log line carries `resource_id`, `key_id`, and the
+  `got_`/`want_` kind and target values.
+
+  This is the in-band enforcement of the deploy-order gate, so it is expected
+  to be silent once every environment is on the kind-first API. If it fires,
+  the fix is to roll the producer forward — retrying will not clear it.
+
+  **The revoke is best-effort. If it fails (`tunnel_bootstrap_cleanup_failed`),
+  revoke the `key_id` by hand and do not wait for it to expire.** The usual
+  one-hour bound comes from the `expires_in` this bot requests, and a producer
+  that ignored the credential *kind* gives no assurance it honored the
+  *expiry* either — the credential may be long-lived or non-expiring, and it
+  may carry broader scopes than an enrollment token. Treat a failed cleanup
+  here as a live, potentially over-scoped credential.
+
+  Expect one `level=error` line per attempt while a pre-cutover producer is
+  still serving, so mute or scope any alert that pages on error level for this
+  message during the rollout window.
+
+  The Connector *resource* is created before this gate runs and is not removed
+  on rejection — the same as every other post-mint failure path (missing
+  plaintext, shell validation, DM delivery), which revoke the credential and
+  leave the resource for the retry to reuse via alias match. After a
+  deploy-order incident you may therefore have Connector resources with no
+  working enrollment; re-running setup for the same slug reuses them, or list
+  and delete unused ones in the qURL dashboard.
+
+  A producer that honors `kind` but simply omits `target` from the response is
+  **not** rejected — `target` is treated as corroborating, so a partial echo
+  cannot break every enrollment.
 
 ### Enrollment-token DM live smoke
 
