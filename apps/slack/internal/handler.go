@@ -803,6 +803,11 @@ type Handler struct {
 	// once per field instead of once per request. See logEventDrift for why the
 	// key space is bounded. A zero sync.Map is fully usable, so this latches
 	// correctly on a hand-built Handler that never went through NewHandler.
+	//
+	// Embedded BY VALUE, which makes "a Handler is used through a pointer" a
+	// real constraint rather than a convention: sync.Map carries a noCopy, so
+	// copying a Handler now trips go vet's copylocks. Every use is already
+	// *Handler, and the vet run in `make check` keeps it that way.
 	driftLogged sync.Map
 	// wg tracks live async workers so cmd/main.go's Wait() can drain
 	// them after http.Server.Shutdown returns. wg.Add MUST happen on

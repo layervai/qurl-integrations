@@ -359,10 +359,54 @@ func TestHandleEvent_DroppedTeardownSaysSoAtWarn(t *testing.T) {
 	// Enough to act on: which teardown, which field moved, and whether there was
 	// an id to chase. The ids themselves are not logged in the clear here, which
 	// matches the surrounding lifecycle lines.
-	for _, want := range []string{"event_type=app_uninstalled", "drift_field=team_id", "has_enterprise_id=true"} {
+	for _, want := range []string{"event_type=app_uninstalled", "drift_field=team_id", "has_team_id=false", "has_enterprise_id=true", "has_event_id=true"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("refusal log missing %q, got %q", want, got)
 		}
+	}
+
+	// The opposite shape, so a swapped or misnamed flag cannot pass by matching
+	// only the case the first assertion happens to exercise.
+	logBuf.Reset()
+	clean := `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvDropWarn2","event_time":"nope","event":{"type":"app_uninstalled"}}`
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, clean, clean))
+	h.Wait()
+	for _, want := range []string{"drift_field=event_time", "has_team_id=true", "has_enterprise_id=false"} {
+		if !strings.Contains(logBuf.String(), want) {
+			t.Errorf("refusal log missing %q, got %q", want, logBuf.String())
+		}
+	}
+}
+
+// TestHandleEvent_DriftRefusalOutranksTheRotationAck pins switch ORDER. The
+// rotation branch sits after the refusal and reads tokens.bot — the very field
+// whose element drift can fabricate a revocation — so reshuffling the two would
+// let a drifted payload be classified by data the refusal exists to distrust.
+func TestHandleEvent_DriftRefusalOutranksTheRotationAck(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	h, provider, _ := newLifecycleTestHandler(t)
+	h.cfg.SlackBotTokenRotationEnabled = true
+
+	body := `{"type":"event_callback","team_id":"` + testAdminTeamID + `","api_app_id":"A1","event_id":"EvRotDrift",` +
+		`"event_time":"nope","event":{"type":"tokens_revoked","tokens":{"bot":["B123"]}}}`
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackEvents, body, body))
+	h.Wait()
+	if w.Code != http.StatusOK {
+		t.Fatalf("ack code = %d, want 200", w.Code)
+	}
+
+	if got := logBuf.String(); !strings.Contains(got, "NOT purged") {
+		t.Fatalf("a drifted teardown must take the refusal branch even with rotation enabled; got %q", got)
+	}
+	// Nothing purged either way here — the point is which branch classified it.
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("rotation-enabled drifted teardown deleted %d rows, want 0", provider.deleteStateCalls)
 	}
 }
 
