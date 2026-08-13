@@ -898,6 +898,8 @@ test('getMessage fallbacks stay in sync with _locales/en/messages.json', functio
     totalCallSites,
     `getMessage call sites do not add up: ${checked.length} checked + ${nonLiteralCallSites} exempt != ${totalCallSites} total. `
     + 'If you added a call site with a literal fallback, callPattern should have matched it — check the pattern still fits. '
+    + 'It only matches single-quoted fallbacks: a double-quoted literal slips past it, so write copy containing an '
+    + 'apostrophe as a single-quoted string with a backslash escape. '
     + 'If you added one without a literal fallback (a runtime key, a non-literal fallback), add its shape to nonLiteralCallSites.'
   );
   assert.ok(checked.includes('result_one_inserted') && checked.includes('result_n_inserted'));

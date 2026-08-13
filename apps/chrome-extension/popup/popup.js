@@ -793,6 +793,9 @@ function normalizeAllowedLink(link) {
 
 // Mirrors copyButtonLabel: the insertion-only message points the user at the copy button, so it
 // has to agree with that button about how many links are waiting there.
+// The apostrophes below are backslash-escaped rather than the literals switched to double quotes:
+// the fallback-sync test in test/popup.test.js only scans single-quoted getMessage fallbacks, so a
+// double-quoted one drops out of its coverage and trips its call-site arithmetic.
 function insertionOnlyFailureMessage(links) {
   if (links.length === 0) {
     return getMessage(
