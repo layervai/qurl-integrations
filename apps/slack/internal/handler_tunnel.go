@@ -690,14 +690,7 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 		return nil, sanitizeAPIError(err, "Failed to mint a qURL Connector enrollment token"), err
 	}
 	mintedKey = key
-	// The response fields are the only in-band signal that the producer
-	// honored the kind-first request. A pre-cutover producer that ignored
-	// `kind`/`target` mints an ordinary workspace-scoped key instead of a
-	// one-shot enrollment token — same 200, far broader credential. Warn
-	// rather than fail closed: the deploy-order gate is the real control, and
-	// a producer that omits these fields on an otherwise-valid token must not
-	// break enrollment.
-	if key.Kind != client.CredentialKindEnrollmentToken || key.Target != client.CredentialTargetConnector {
+	if !credentialConfirmsKindFirst(key) {
 		log.Warn("tunnel install: minted credential did not confirm the kind-first contract — verify qurl-service is on the kind-first API",
 			"slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID,
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
@@ -947,6 +940,24 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 		return errors.New("tunnel install DM delivery is not configured")
 	}
 	return h.cfg.PostDM(ctx, teamID, enterpriseID, userID, msg)
+}
+
+// credentialConfirmsKindFirst reports whether a mint response echoes back the
+// kind-first contract the request asked for. The response is the only in-band
+// signal that the producer honored the request: a pre-cutover producer that
+// ignored `kind` mints an ordinary workspace-scoped key instead of a one-shot
+// enrollment token — same 200, far broader credential.
+//
+// Target is corroborating, not required. Keying "unconfirmed" off Kind alone
+// means a producer that honors the request but does not echo `target` stays
+// silent; treating a missing `target` as a mismatch would fire this warning on
+// every enrollment forever and train operators to ignore it. A `target` that
+// is present and wrong is still a real disagreement and does warn.
+func credentialConfirmsKindFirst(key *client.APIKey) bool {
+	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
+		return false
+	}
+	return key.Target == "" || key.Target == client.CredentialTargetConnector
 }
 
 func revokeBootstrapKeyAfterInstallFailure(parent context.Context, log *slog.Logger, c *client.Client, key *client.APIKey, reason string) {
