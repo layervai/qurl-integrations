@@ -210,13 +210,25 @@ Symptoms of a deploy-order violation, and what to check:
   code=… request_id=…`. Quote the `request_id` when escalating. The fix is to
   roll the producer forward, not to retry — 400 is not retried by the shared
   client.
-- **Enrollment succeeds but logs `tunnel install: minted credential did not
-  confirm the kind-first contract`.** The producer returned 200 without echoing
-  `kind`/`target`, so the bot cannot confirm it minted a one-shot enrollment
-  token rather than an ordinary workspace-scoped key. Treat the minted
-  credential as potentially over-scoped: verify it in the qURL dashboard and
-  revoke it if it is not a Connector-bound enrollment token. This warning is
-  expected to be silent once every environment is on the kind-first API.
+- **Setup fails after a successful mint, logging `tunnel install: minted
+  credential did not confirm the kind-first contract`.** The producer returned
+  200 but did not echo `kind` (or echoed a `target` that disagrees), so the bot
+  cannot confirm it minted a one-shot, Connector-bound enrollment token rather
+  than an ordinary workspace-scoped key. **The bot fails closed here**: it
+  revokes the credential, never DMs it, and tells the admin to retry or contact
+  support. The log line carries `resource_id`, `key_id`, and the `got_`/`want_`
+  kind and target values.
+
+  This is the in-band enforcement of the deploy-order gate, so it is expected
+  to be silent once every environment is on the kind-first API. If it fires,
+  the fix is to roll the producer forward — retrying will not clear it. Note
+  the revoke is best-effort: if it fails, the log shows
+  `tunnel_bootstrap_cleanup_failed` and the credential remains bounded by its
+  one-hour TTL; revoke it manually.
+
+  A producer that honors `kind` but simply omits `target` from the response is
+  **not** rejected — `target` is treated as corroborating, so a partial echo
+  cannot break every enrollment.
 
 ### Enrollment-token DM live smoke
 

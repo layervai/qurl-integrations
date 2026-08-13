@@ -82,10 +82,10 @@ func captureDefaultSlog(t *testing.T) *capturedLogs {
 	return logs
 }
 
-// kindFirstWarning is the message logged when a mint response does not confirm
-// the kind-first contract. Shared so the fires/silent assertions cannot drift
-// apart from each other.
-const kindFirstWarning = "tunnel install: minted credential did not confirm the kind-first contract"
+// kindFirstRejection is the message logged when a mint response does not
+// confirm the kind-first contract and the install is failed closed. Shared so
+// the fires/silent assertions cannot drift apart from each other.
+const kindFirstRejection = "tunnel install: minted credential did not confirm the kind-first contract"
 
 // assertConnectorEnrollmentKind pins the kind/target pair that makes the
 // minted credential a Connector-bound enrollment token rather than an ordinary

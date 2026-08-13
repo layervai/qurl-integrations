@@ -513,10 +513,9 @@ func TestTunnelInstallWizardRequest(t *testing.T) {
 func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T) {
 	now := fixedNow
 
-	// This test's mint stub returns the pre-cutover envelope (no kind/target),
-	// which is exactly the case the rollout warning exists to surface. Capture
-	// the default logger so the warning's emission is asserted end to end, not
-	// just its predicate.
+	// The happy path must not trip the kind-first gate. Capture the default
+	// logger so a gate that rejected valid responses would fail here rather
+	// than only in the dedicated rejection test.
 	logs := captureDefaultSlog(t)
 
 	ts := newAdminTestServers(t)
@@ -543,14 +542,14 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 			t.Fatalf("decode api key body: %v", err)
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelAPIKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetConnector,
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -598,8 +597,8 @@ func TestTunnelInstallCreatesResourceBindsAliasAndMintsBootstrapKey(t *testing.T
 	}
 	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
-	if !logs.contains(kindFirstWarning) {
-		t.Error("a legacy-shaped mint response must raise the kind-first rollout warning")
+	if logs.contains(kindFirstRejection) {
+		t.Error("a kind-first mint response must not be rejected")
 	}
 	if idempotencyKey == "" {
 		t.Error("Idempotency-Key header was empty")
@@ -697,14 +696,14 @@ func TestTunnelInstallReinstallShowsExistingDisplayName(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			"name":            "Slack qURL Connector enrollment " + testTunnelSlug,
-			"scopes":          []string{tunnelScopeAgent, tunnelScopeWrite},
-			testKeyStatus:     client.StatusActive,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelAPIKey,
+			"name":           "Slack qURL Connector enrollment " + testTunnelSlug,
+			"scopes":         []string{tunnelScopeAgent, tunnelScopeWrite},
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetConnector,
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -1355,9 +1354,8 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	now := fixedNow
 	modalCreatedAt := now.Add(-10 * time.Minute)
 
-	// Counterpart to the slash-path assertion: this test's mint stub returns
-	// the kind-first envelope, so the rollout warning must stay silent. Without
-	// this direction, a warning that fired unconditionally would still pass.
+	// Same guard on the modal entry point: a kind-first response must pass the
+	// gate cleanly.
 	logs := captureDefaultSlog(t)
 
 	ts := newAdminTestServers(t)
@@ -1446,8 +1444,8 @@ func TestTunnelInstallModalSubmissionMintsKubernetesInstructions(t *testing.T) {
 	assertConnectorEnrollmentKind(t, apiKeyBody)
 	assertSingleConnectorClaim(t, apiKeyBody, testTunnelSlug)
 	assertNoRetiredCredentialFields(t, apiKeyBody)
-	if logs.contains(kindFirstWarning) {
-		t.Error("a kind-first mint response must not raise the rollout warning")
+	if logs.contains(kindFirstRejection) {
+		t.Error("a kind-first mint response must not be rejected")
 	}
 	if len(*dmPosts) != 1 || !strings.Contains((*dmPosts)[0].text, testTunnelModalKey) {
 		t.Fatalf("bootstrap DM posts = %+v, want one containing modal key", *dmPosts)
@@ -1565,12 +1563,12 @@ func TestTunnelInstallModalSubmissionRendersDockerTargets(t *testing.T) {
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyKeyID:      testTunnelAPIKeyID,
-					testKeyAPIKey:     testTunnelModalKey,
-					testKeyStatus:     client.StatusActive,
-					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-					testKeyTunnelSlug: testTunnelSlug,
-					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+					testKeyKeyID:     testTunnelAPIKeyID,
+					testKeyAPIKey:    testTunnelModalKey,
+					testKeyStatus:    client.StatusActive,
+					"kind":           client.CredentialKindEnrollmentToken,
+					"target":         client.CredentialTargetConnector,
+					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
 
@@ -1637,12 +1635,12 @@ func TestTunnelInstallSubmissionAuditsOnlyAgentProtectConnector(t *testing.T) {
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyKeyID:      testTunnelAPIKeyID,
-					testKeyAPIKey:     testTunnelModalKey,
-					testKeyStatus:     client.StatusActive,
-					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-					testKeyTunnelSlug: testTunnelSlug,
-					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+					testKeyKeyID:     testTunnelAPIKeyID,
+					testKeyAPIKey:    testTunnelModalKey,
+					testKeyStatus:    client.StatusActive,
+					"kind":           client.CredentialKindEnrollmentToken,
+					"target":         client.CredentialTargetConnector,
+					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
 
@@ -2266,12 +2264,12 @@ func TestTunnelInstallModalTailAuditReleasesWorkerSlot(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelModalKey,
-			testKeyStatus:     client.StatusActive,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    testTunnelModalKey,
+			testKeyStatus:    client.StatusActive,
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetConnector,
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -2947,10 +2945,10 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "",
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: "",
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -2968,6 +2966,90 @@ func TestTunnelInstallRejectsMissingPlaintextBootstrapKey(t *testing.T) {
 	}
 	if revokeHits != 1 {
 		t.Fatalf("bootstrap key revoke hits = %d, want 1", revokeHits)
+	}
+}
+
+// TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst pins the
+// fail-closed gate. A producer that predates the kind-first API returns 200
+// with an ordinary workspace-scoped key rather than a one-shot,
+// Connector-bound enrollment token — so the bot must revoke it and fail the
+// install rather than DM an admin a credential with more authority than the
+// flow promises. The secret must never reach a DM.
+func TestTunnelInstallRejectsCredentialThatDoesNotConfirmKindFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		envelope map[string]any
+	}{
+		{
+			// Pre-cutover producer: ignored `kind` entirely and echoed the
+			// retired fields instead.
+			name: "pre-cutover envelope",
+			envelope: map[string]any{
+				testKeyKeyID:      testTunnelAPIKeyID,
+				testKeyAPIKey:     testTunnelAPIKey,
+				testKeyStatus:     client.StatusActive,
+				testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
+				testKeyTunnelSlug: testTunnelSlug,
+			},
+		},
+		{
+			// Producer honored `kind` but bound the credential to something
+			// other than Connector enrollment — a real disagreement, not a
+			// missing echo.
+			name: "target disagrees",
+			envelope: map[string]any{
+				testKeyKeyID:  testTunnelAPIKeyID,
+				testKeyAPIKey: testTunnelAPIKey,
+				testKeyStatus: client.StatusActive,
+				"kind":        client.CredentialKindEnrollmentToken,
+				"target":      "workspace",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureDefaultSlog(t)
+			ts := newAdminTestServers(t)
+			ts.seedAdmin(t)
+			var revokeHits int
+			ts.addCustomer(http.MethodPost, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+				respondQURLEnvelope(t, w, map[string]any{
+					testKeyResourceID: testTunnelResourceID,
+					testKeyType:       client.ResourceTypeTunnel,
+					testKeySlug:       testTunnelSlug,
+					testKeyStatus:     client.StatusActive,
+				})
+			})
+			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
+				respondQURLEnvelope(t, w, tc.envelope)
+			})
+			ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
+				revokeHits++
+				w.WriteHeader(http.StatusNoContent)
+			})
+
+			h := newAdminTestHandler(t, ts)
+			dmPosts := captureTunnelPostDMSuccess(h)
+			h.SetAliasStore(h.cfg.AdminStore)
+			_, _, async := newAdminSlashInvoker(t, h).invokeAdminAsync(testTunnelInstallCmd, testAdminTeamID, testAdminUserID)
+
+			if !strings.Contains(async, "did not return a Connector enrollment token") {
+				t.Fatalf("async reply = %q, want the kind-first rejection copy", async)
+			}
+			if revokeHits != 1 {
+				t.Fatalf("unconfirmed credential revoke hits = %d, want 1", revokeHits)
+			}
+			if len(*dmPosts) != 0 {
+				t.Fatalf("an unconfirmed credential must never be DMed; got %d DM(s)", len(*dmPosts))
+			}
+			for _, post := range *dmPosts {
+				if strings.Contains(post.text, testTunnelAPIKey) {
+					t.Fatal("plaintext credential leaked into a DM")
+				}
+			}
+			if !logs.contains(kindFirstRejection) {
+				t.Error("the rejection must be logged so an operator can trace it")
+			}
+		})
 	}
 }
 
@@ -3139,10 +3221,10 @@ func TestTunnelInstallRevokesBootstrapKeyWhenShellValidationFails(t *testing.T) 
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "lv_live_bad'quote",
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: "lv_live_bad'quote",
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3179,10 +3261,10 @@ func TestTunnelInstallRevokesBootstrapKeyWhenSlackFollowupFails(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3275,10 +3357,10 @@ func TestTunnelInstallAgentAuditWriteFailureDoesNotBlockInstall(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 
@@ -3457,10 +3539,10 @@ func TestTunnelInstallAgentAuditRecordsUnexpectedPanic(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3524,10 +3606,10 @@ func TestTunnelInstallBuildPanicRevokesBootstrapKeyAndAudits(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3696,10 +3778,10 @@ func TestTunnelInstallRetriesTransientTextDeliveryBeforeRevoking(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	var revokeHits int
@@ -3776,10 +3858,10 @@ func TestTunnelInstallRevokesBootstrapKeyWhenDMSendFails(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3856,10 +3938,10 @@ func TestTunnelInstallMissingScopeDMFailureMentionsSlackReinstall(t *testing.T) 
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/"+testTunnelAPIKeyID, func(w http.ResponseWriter, _ *http.Request) {
@@ -3930,10 +4012,10 @@ func TestTunnelInstallRetryAfterDMRevokeUsesFreshIdempotencyKey(t *testing.T) {
 		idempotencyKeys = append(idempotencyKeys, r.Header.Get(client.HeaderIdempotencyKey))
 		keyID := fmt.Sprintf("key_retry_%d", apiKeyHits)
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      keyID,
-			testKeyAPIKey:     fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  keyID,
+			testKeyAPIKey: fmt.Sprintf("lv_live_retry_bootstrap_%d", apiKeyHits),
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	ts.addCustomer(http.MethodDelete, "/v1/api-keys/key_retry_1", func(w http.ResponseWriter, _ *http.Request) {
@@ -4021,10 +4103,10 @@ func TestTunnelInstallFallsBackToTextWhenBlocksRejected(t *testing.T) {
 	})
 	ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     testTunnelAPIKey,
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
+			testKeyKeyID:  testTunnelAPIKeyID,
+			testKeyAPIKey: testTunnelAPIKey,
+			"kind":        client.CredentialKindEnrollmentToken,
+			"target":      client.CredentialTargetConnector,
 		})
 	})
 	var revokeHits int
@@ -4140,11 +4222,11 @@ func TestTunnelInstallRetryRemintsWhenAliasAlreadyMatches(t *testing.T) {
 			return
 		}
 		respondQURLEnvelope(t, w, map[string]any{
-			testKeyKeyID:      testTunnelAPIKeyID,
-			testKeyAPIKey:     "lv_live_retry_bootstrap",
-			testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-			testKeyTunnelSlug: testTunnelSlug,
-			testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+			testKeyKeyID:     testTunnelAPIKeyID,
+			testKeyAPIKey:    "lv_live_retry_bootstrap",
+			"kind":           client.CredentialKindEnrollmentToken,
+			"target":         client.CredentialTargetConnector,
+			testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 		})
 	})
 
@@ -4233,11 +4315,11 @@ func TestTunnelInstallTypedEnvironmentInstructions(t *testing.T) {
 			})
 			ts.addCustomer(http.MethodPost, "/v1/api-keys", func(w http.ResponseWriter, _ *http.Request) {
 				respondQURLEnvelope(t, w, map[string]any{
-					testKeyKeyID:      testTunnelAPIKeyID,
-					testKeyAPIKey:     testTunnelAPIKey,
-					testKeyKeyType:    client.APIKeyTypeTunnelBootstrap,
-					testKeyTunnelSlug: testTunnelSlug,
-					testKeyExpiresAt:  now.Add(time.Hour).Format(time.RFC3339),
+					testKeyKeyID:     testTunnelAPIKeyID,
+					testKeyAPIKey:    testTunnelAPIKey,
+					"kind":           client.CredentialKindEnrollmentToken,
+					"target":         client.CredentialTargetConnector,
+					testKeyExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
 				})
 			})
 

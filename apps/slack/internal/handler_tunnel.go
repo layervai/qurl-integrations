@@ -592,6 +592,12 @@ func slackTriggerOpenViewBudgetRemaining(triggerElapsed time.Duration) time.Dura
 // the qURL API accepted the key create but omitted the plaintext key.
 var errMissingBootstrapPlaintext = errors.New("enrollment token response missing plaintext")
 
+// errKindFirstUnconfirmed is returned by [Handler.buildTunnelInstall] when the
+// qURL API returned a credential that does not confirm the kind-first
+// contract. See [credentialConfirmsKindFirst] for why this fails the install
+// rather than delivering an unconfirmed credential.
+var errKindFirstUnconfirmed = errors.New("minted credential did not confirm the kind-first contract")
+
 // tunnelInstallBuild is the successful result of [Handler.buildTunnelInstall]:
 // the created resource, the minted enrollment token, token-free install instructions,
 // and the secret-bearing DM body. client is retained so the caller can revoke key
@@ -693,12 +699,14 @@ func (h *Handler) buildTunnelInstall(ctx context.Context, log *slog.Logger, team
 	if !credentialConfirmsKindFirst(key) {
 		// Correlate on resource_id/key_id rather than the caller-supplied
 		// slug: both identify the resource and credential just as precisely,
-		// and keeping user-controlled input out of this line avoids adding a
-		// new go/log-injection finding for a log statement this PR introduces.
-		log.Warn("tunnel install: minted credential did not confirm the kind-first contract — verify qurl-service is on the kind-first API",
+		// and keeping user-controlled input out of this line avoids a
+		// go/log-injection finding on a log statement added here.
+		log.Error("tunnel install: minted credential did not confirm the kind-first contract — qurl-service may predate the kind-first API",
 			"resource_id", resource.ResourceID, "key_id", key.KeyID,
 			"got_kind", key.Kind, "want_kind", client.CredentialKindEnrollmentToken,
 			"got_target", key.Target, "want_target", client.CredentialTargetConnector)
+		revokeBootstrapKeyAfterInstallFailure(h.baseCtx, log, c, key, "kind_first_unconfirmed")
+		return nil, "The qURL API did not return a Connector enrollment token. Please retry or contact support.", errKindFirstUnconfirmed
 	}
 	if key.APIKey == "" {
 		log.Error("tunnel install: create api key response missing plaintext", "slug", args.Slug, "resource_id", resource.ResourceID, "key_id", key.KeyID)
@@ -952,11 +960,16 @@ func (h *Handler) postTunnelInstallDM(ctx context.Context, teamID, enterpriseID,
 // ignored `kind` mints an ordinary workspace-scoped key instead of a one-shot
 // enrollment token — same 200, far broader credential.
 //
-// Target is corroborating, not required. Keying "unconfirmed" off Kind alone
-// means a producer that honors the request but does not echo `target` stays
-// silent; treating a missing `target` as a mismatch would fire this warning on
-// every enrollment forever and train operators to ignore it. A `target` that
-// is present and wrong is still a real disagreement and does warn.
+// This gates delivery. An unconfirmed credential is revoked and the install
+// fails rather than DMing an admin a key with more authority than the flow
+// promises. The deploy-order gate (qurl-service must ship the kind-first API
+// first) remains the primary control; this is the in-band enforcement of it,
+// and it is what makes that gate more than a convention.
+//
+// Target is corroborating, not required, and that leniency matters more now
+// that this fails closed: a producer that honors `kind` but does not echo
+// `target` must not break every enrollment. A `target` that is present and
+// disagrees is a real conflict and does fail.
 func credentialConfirmsKindFirst(key *client.APIKey) bool {
 	if key == nil || key.Kind != client.CredentialKindEnrollmentToken {
 		return false
