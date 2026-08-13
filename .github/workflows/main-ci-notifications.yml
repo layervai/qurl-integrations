@@ -23,8 +23,10 @@ on:
       - "Validate issue templates"
     types: [completed]
 
-permissions:
-  contents: read
+# The step authenticates to Slack with a webhook secret; no step reads the
+# workflow's GITHUB_TOKEN (there is no checkout and no API call), so deny
+# everything.
+permissions: {}
 
 jobs:
   notify-build-notifications:
