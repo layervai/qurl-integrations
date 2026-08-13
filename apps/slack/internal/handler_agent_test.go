@@ -169,6 +169,13 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.ThreadTS = threadTS
 		return e
 	}
+	// chReplyIn is chReply for a non-"channel" channel_type — a private channel or a
+	// group DM, both of which take the same arm of the filter.
+	chReplyIn := func(channelType, text, threadTS string) *slackEventEnvelope {
+		e := env(slackEventTypeMessage, channelType, "U2", "", "", text)
+		e.Event.ThreadTS = threadTS
+		return e
+	}
 	chReplySubtype := func(text, threadTS, subtype string) *slackEventEnvelope {
 		e := chReply(text, threadTS)
 		e.Event.Subtype = subtype
@@ -264,7 +271,14 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		// drop from a flag-conditioned one — nothing can, because the gate below drops
 		// this row either way when the flag is off. Unconditionality is a readability
 		// choice here, not an observable one.
-		{"channel thread file reply dropped with followups off too", withFile(chReply("", agentPoolTestThreadTS)), false, false},
+		{"channel thread file reply dropped with followups off too (flag gate drops it anyway)", withFile(chReply("", agentPoolTestThreadTS)), false, false},
+		// The arm is every non-IM channel_type, not just "channel": a private channel and
+		// a group DM land here too. Called out because the "people talking to each other"
+		// rationale is weakest in an mpim, where the bot was deliberately invited — worth
+		// revisiting when the flag ships, but the cost argument is unchanged.
+		{"private channel thread file reply dropped", withFile(chReplyIn(slackChannelTypeGroup, "", agentPoolTestThreadTS)), true, false},
+		{"group DM thread file reply dropped", withFile(chReplyIn(slackChannelTypeMPIM, "", agentPoolTestThreadTS)), true, false},
+		{"private channel thread text reply still admitted", chReplyIn(slackChannelTypeGroup, "hi", agentPoolTestThreadTS), true, true},
 		// ...and the route out stays open: an @mention is a different event type, so it
 		// carries an upload through from inside a channel thread. This is the only
 		// channel upload the surface still answers, and the limitation text names it.
@@ -1285,9 +1299,19 @@ func TestHandleEvent_ChannelThreadUploadStaysSilent(t *testing.T) {
 	})
 	t.Cleanup(h.Wait)
 
+	// A TEXT thread reply in the same thread, on the same handler, is the positive
+	// control. Every assertion below is otherwise a zero, and a test that only asserts
+	// zeros passes for the wrong reason the moment the premise decays — a flipped
+	// default, a new pre-dispatch gate, a Config field this literal forgets. The control
+	// fails FIRST in all of those, so the uploads' silence stays attributable to the
+	// upload guard rather than assumed. (Verified: without it, this test still passes
+	// with AgentChannelFollowups or AgentDefaultEnabled set to false.)
+	//
+	// "help" is a deterministic reply, so the control never reaches panicAgentLLM.
+	h.handleEvent(httptest.NewRecorder(), []byte(eventCallbackBody("EvChanControl", `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.0","text":"help"}`)))
 	// Bare upload, captioned upload, and a file_share whose files array never arrived —
-	// all three are channel thread replies in an agent thread, and none is addressed to
-	// the agent.
+	// all three are channel thread replies in the same agent thread, and none is
+	// addressed to the agent.
 	for _, body := range []string{
 		eventCallbackBody("EvChanFile", `{"type":"message","subtype":"file_share","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.1","text":"","files":[{"id":"F1"}]}`),
 		eventCallbackBody("EvChanFileCaption", `{"type":"message","channel_type":"channel","user":"U2","channel":"C1","thread_ts":"`+agentPoolTestThreadTS+`","ts":"500.2","text":"here you go","files":[{"id":"F2"}]}`),
@@ -1297,18 +1321,23 @@ func TestHandleEvent_ChannelThreadUploadStaysSilent(t *testing.T) {
 	}
 	h.Wait()
 
-	if calls := hist.callCount(); calls != 0 {
-		t.Fatalf("channel thread upload should read no thread history, got %d lookups", calls)
+	// One history read, one dedupe marker, one reply — all the control's. The three
+	// uploads contribute nothing to any of the three counts.
+	if calls := hist.callCount(); calls != 1 {
+		t.Fatalf("history lookups = %d, want 1 (the control's; a channel upload reads none)", calls)
 	}
-	// No dedupe marker either: the drop happens before the pipeline, so an upload burst
-	// in a channel writes nothing at all.
-	if got := mem.putAttempts("evt#"); got != 0 {
-		t.Fatalf("dedupe attempts = %d, want 0 (a channel upload never reaches the marker)", got)
+	if got := mem.putAttempts("evt#"); got != 1 {
+		t.Fatalf("dedupe attempts = %d, want 1 (the control's; a channel upload never reaches the marker)", got)
+	}
+	// The media latch is the sharpest of the three: it is written only by a turn that
+	// reached the upload branch, so a nonzero count means an upload was answered.
+	if got := mem.putAttempts("media#"); got != 0 {
+		t.Fatalf("media latch attempts = %d, want 0 (no channel upload should reach the notice)", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 0 {
-		t.Fatalf("channel thread upload should draw no reply, got %+v", *posts)
+	if len(*posts) != 1 || (*posts)[0].text != agentHelpReply {
+		t.Fatalf("only the control should be answered, got %+v", *posts)
 	}
 }
 
@@ -1694,6 +1723,10 @@ func TestHandleEvent_MentionedChannelUploadAnswersOnceViaTheMentionOnly(t *testi
 	// exchange whose reply belongs to app A1 — i.e. a thread the agent HAS joined, the
 	// one case where the file_share twin would otherwise have been admitted and
 	// answered. Its call count is the assertion: the twin must not reach it even then.
+	//
+	// AgentChannelFollowups: true is load-bearing. With it false the twin would be
+	// dropped by the flag gate instead of the upload guard and this test would still
+	// pass, proving nothing about the guard.
 	hist := &countingThreadHistory{}
 	h := NewHandler(Config{
 		AgentLLM: panicAgentLLM{}, AgentStore: store, PostMessage: post,
@@ -1762,8 +1795,8 @@ func TestHandleEvent_OverlappingTextEventsDedupeOnChannelAndTS(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(*posts) != 1 {
-		t.Fatalf("overlapping mention/channel events for one message should post one reply, got %+v", *posts)
+	if len(*posts) != 1 || (*posts)[0].text != agentLLMReplyWithDisclaimer(testAgentStillWorksReply) {
+		t.Fatalf("overlapping mention/channel events for one message should post one agent reply, got %+v", *posts)
 	}
 }
 
