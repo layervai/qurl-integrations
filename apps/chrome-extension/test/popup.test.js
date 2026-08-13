@@ -867,8 +867,21 @@ test('getMessage fallbacks stay in sync with _locales/en/messages.json', functio
     checked.push(key);
   }
 
-  // Guard the guard: a regex that stops matching would otherwise pass vacuously.
-  assert.ok(checked.length >= 40, `expected to check most getMessage call sites, saw ${checked.length}`);
+  // Guard the guard: a pattern that stops matching would otherwise pass vacuously. Rather than
+  // a hard-coded floor (which unrelated churn in the number of call sites would trip), account
+  // for every getMessage( occurrence in the file: each one is either checked above or is a known
+  // site with no literal fallback to compare — the function's own definition, its delegation to
+  // QURLI18n, the ext_name/document.title call, and applyLocalizedText's runtime-key lookups.
+  // Adding a call site of either kind keeps the arithmetic balanced or fails loudly here.
+  const totalCallSites = (source.match(/getMessage\(/g) || []).length;
+  const nonLiteralCallSites = (source.match(
+    /function getMessage\(|QURLI18n\.getMessage\(|getMessage\('ext_name', document\.title\)|getMessage\(key, ''\)/g
+  ) || []).length;
+  assert.equal(
+    checked.length + nonLiteralCallSites,
+    totalCallSites,
+    `every getMessage call site should be checked or explicitly exempt: checked ${checked.length} + exempt ${nonLiteralCallSites} != ${totalCallSites} total`
+  );
   assert.ok(checked.includes('result_one_success') && checked.includes('result_n_success'));
 });
 
@@ -1020,4 +1033,72 @@ test('the copy button keeps the plural label after the "Copied" text reverts', a
   // The revert must follow the same count the render used, not fall back to the singular label
   // while both links are still copyable.
   assert.equal(copyBtn.textContent, 'Copy the qURL links');
+});
+
+test('the success summary counts links actually inserted, not files uploaded', function () {
+  const popup = loadPopup(
+    function () {
+      return Promise.resolve({ success: true });
+    },
+    {
+      setTimeout() {
+        return 1;
+      },
+      clearTimeout() {},
+    },
+    {
+      chromeMessages: {
+        result_one_success: 'Inserted the qURL link into your Gmail draft',
+        result_n_success: 'Inserted $1 qURL links into your Gmail draft',
+        result_one_success_upload_only: '1 file uploaded successfully',
+        result_n_success_upload_only: '$1 files uploaded successfully',
+      },
+    }
+  );
+
+  global.QURLComposeFormatter.normalizeAllowedLink = function (link) {
+    return String(link).startsWith('https://') ? String(link) : null;
+  };
+
+  const resultArea = popup.__testElements.get('resultArea');
+  const summary = function () {
+    return resultArea.children[0].textContent;
+  };
+
+  // Two uploads but only one accessible link: buildLinkHtml renders the non-https one as
+  // filename-only text, so only one link reached the draft.
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'http://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+  assert.equal(summary(), 'Inserted the qURL link into your Gmail draft');
+
+  // Nothing was linkable, so there is no honest "inserted" sentence — report the upload.
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'http://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'http://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+  assert.equal(summary(), '2 files uploaded successfully');
+
+  popup.showResults([{ filename: 'a.txt', link: 'ftp://files.example.com/a', expiry: null }], [], null);
+  assert.equal(summary(), '1 file uploaded successfully');
+
+  // All linkable: the count matches both the files and the links.
+  popup.showResults(
+    [
+      { filename: 'a.txt', link: 'https://files.example.com/a', expiry: null },
+      { filename: 'b.txt', link: 'https://files.example.com/b', expiry: null },
+    ],
+    [],
+    null
+  );
+  assert.equal(summary(), 'Inserted 2 qURL links into your Gmail draft');
 });

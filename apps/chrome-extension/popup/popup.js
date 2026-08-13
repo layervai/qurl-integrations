@@ -494,13 +494,21 @@ function showResults(results, errors, insertionError) {
     copyBtn.disabled = !hasCopyableLinks;
     resultArea.classList.remove('hidden');
     const summaryClass = errors.length === 0 && !insertionError ? 'all-success' : 'partial';
-    const summaryText = results.length === 1
-      ? (insertionError
+    // Two different things get counted here, so they use two different counts. The "inserted"
+    // wording counts accessible links, because that is what actually became a link in the
+    // draft — buildLinkHtml renders a non-https result as filename-only text, so counting
+    // results would claim more links than the draft received. The upload-only wording counts
+    // files, which is what it is about. When nothing was linkable there is no honest
+    // "inserted" sentence to show, so fall back to the upload-only wording rather than
+    // announcing "Inserted 0 qURL links".
+    const insertedLinks = insertionError ? 0 : copyableLinks.length;
+    const summaryText = insertedLinks === 0
+      ? (results.length === 1
         ? getMessage('result_one_success_upload_only', '1 file uploaded successfully')
-        : getMessage('result_one_success', 'Inserted the qURL link into your Gmail draft'))
-      : (insertionError
-        ? getMessage('result_n_success_upload_only', '$1 files uploaded successfully', [String(results.length)])
-        : getMessage('result_n_success', 'Inserted $1 qURL links into your Gmail draft', [String(results.length)]));
+        : getMessage('result_n_success_upload_only', '$1 files uploaded successfully', [String(results.length)]))
+      : (insertedLinks === 1
+        ? getMessage('result_one_success', 'Inserted the qURL link into your Gmail draft')
+        : getMessage('result_n_success', 'Inserted $1 qURL links into your Gmail draft', [String(insertedLinks)]));
 
     const summary = document.createElement('div');
     summary.className = `result-summary ${summaryClass}`;
