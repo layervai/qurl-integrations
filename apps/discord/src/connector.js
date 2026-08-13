@@ -740,30 +740,22 @@ function redactAccessToken(message) {
   return String(message ?? '').replace(/at_[A-Za-z0-9_-]+/g, 'at_[REDACTED]');
 }
 
-// Best-effort host for the qurl_site rejection breadcrumb below. Every guard in
-// assertPublicHttpsTarget throws a CONSTANT message, so on its own the
-// breadcrumb tells an operator THAT a target was rejected but not WHICH host
-// tripped it — they can't distinguish an IPv4-mapped literal from a 10.x from a
-// public `fd…` DNS name that isPrivateHost's ULA prefix check misclassified
-// (the false-positive class tests/qurl-private-host.test.js pins). Re-parsing on
-// the error path is cheaper than threading the host back out of
-// buildDetectTargetUrl, and it's the same value the guards saw.
+// Host for the qurl_site rejection breadcrumb below. Every guard in
+// assertPublicHttpsTarget throws a CONSTANT message, so without this the
+// breadcrumb says THAT a target was rejected but not WHICH host tripped it —
+// an IPv4-mapped literal, a 10.x, and a public `fd…` name misclassified by
+// isPrivateHost's ULA prefix check all read identically. Re-parsing here (error
+// path only) beats threading the host back out of buildDetectTargetUrl, and
+// yields the same value the guards judged.
 //
-// This widens the breadcrumb from message-only to message + host, NOT to the
-// full URL: `hostname` excludes userinfo, port, path, query and fragment by
-// construction, so the `at_…` access token — which rides in the qurl_link
-// fragment and never appears in qurl_site — cannot reach the log through it.
-// The value is control-char-free because WHATWG parsing strips tab/CR/LF before
-// the host is extracted, and logger.js JSON-encodes meta on top of that.
-//
-// Returns undefined for an unparseable qurl_site; JSON.stringify drops the key,
-// so that line stays as clean as it was before rather than carrying a null.
+// `hostname`, never the full URL: it excludes userinfo, port, path, query and
+// fragment by construction, so the `at_…` token — which rides in the qurl_link
+// fragment — cannot reach the log through it. undefined on an unparseable
+// qurl_site, which JSON.stringify drops, keeping that line free of a null.
+// (Same shape as the safe-host helpers in commands.js / qurl-webhook-registrar.js;
+// they differ only in fallback, and undefined is the one that omits the key.)
 function detectTargetHostname(qurlSite) {
-  try {
-    return new URL(qurlSite).hostname;
-  } catch {
-    return undefined;
-  }
+  try { return new URL(qurlSite).hostname; } catch { return undefined; }
 }
 
 /**

@@ -237,10 +237,10 @@ describe('isPrivateHost — IPv4-in-IPv6 embeddings', () => {
 });
 
 // Every case above proves the guard REJECTS. None of them prove an operator can
-// find out why: both legs throw the same caller-facing message, and #1043 left
-// them logging nothing at all. So the log line is the only thing that separates
-// a real IMDS attempt from the false positive the ULA block above worries about
-// — a distinction you otherwise cannot make without reproducing the call.
+// find out why: both legs throw the same caller-facing message, and neither has
+// ever logged. So the log line is the only thing that separates a real IMDS
+// attempt from the false positive the ULA block above worries about — a
+// distinction you otherwise cannot make without reproducing the call.
 const SYNTACTIC_REJECT = 'Target URL rejected by SSRF guard (private host literal)';
 const RESOLVED_REJECT = 'Target URL rejected by SSRF guard (DNS resolved to a private address)';
 
@@ -270,12 +270,11 @@ describe('SSRF rejection observability — the blocked host reaches the log', ()
     // newline is gone by the time isPrivateHost sees `127.0.0.1` — the logged
     // value is control-char-free without any explicit scrubbing. (logger.js
     // JSON-encodes meta as well, so this is the inner of two layers.)
+    // The exact-object match IS the no-control-char assertion: the payload is
+    // pinned to the clean host, so a surviving newline fails right here.
     await expect(createOneTimeLink('http://127.0.0\n.1/x', '1h', 't', 'k'))
       .rejects.toThrow(/private\/internal/);
     expect(logger.warn).toHaveBeenCalledWith(SYNTACTIC_REJECT, { hostname: '127.0.0.1' });
-    const [, meta] = logger.warn.mock.calls.find(([msg]) => msg === SYNTACTIC_REJECT);
-    // eslint-disable-next-line no-control-regex
-    expect(meta.hostname).not.toMatch(/[\x00-\x1f\x7f]/);
   });
 
   it('names the host AND the offending resolved address on the rebinding leg', async () => {
