@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Microsoft Edge extension for Gmail: upload files to qURL and insert access links into compose drafts.",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.9.0"
   },
   "scripts": {
     "icons": "node scripts/generate-icons.js",

@@ -7,8 +7,7 @@ If you just want to **use** the extension in Gmail, see the
 ## Prerequisites
 
 - Node 20.9+ — the `sharp` devDependency requires it. CI and local dev run the
-  `22.21.0` pinned in `.nvmrc`; nothing below that is tested. (`package.json`
-  still declares `engines.node: >=18`, which predates the `sharp` 0.35 bump.)
+  `22.21.0` pinned in `.nvmrc`; nothing below that is tested.
 - Microsoft Edge with access to `edge://extensions`
 
 ## Setup
