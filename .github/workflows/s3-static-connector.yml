@@ -148,7 +148,7 @@ jobs:
     # Gate on the aggregate rather than on `test` directly — the same shape as
     # slack/discord `trigger-deploy`. It keeps publishing behind every gate the
     # aggregate enforces, and it keeps this job out of the quality-gate set that
-    # apps/slack/workflow_test.go derives from `if:` + `needs:` (a main-push-only
+    # internal/ciworkflows derives from `if:` + `needs:` (a main-push-only
     # job inside `required.needs` would fail the aggregate on every PR).
     needs: [changes, required]
     # `required` is `if: always()`, so a failed gate fails it and skips this job.

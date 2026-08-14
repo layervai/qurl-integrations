@@ -1,4 +1,14 @@
-package slack
+// Package ciworkflows holds repo-wide CI contract tests: assertions about the
+// shape of every workflow in .github/workflows, not about any one app.
+//
+// It lives here rather than under apps/<app>/ because an app workflow's paths
+// filter decides when that app's tests run, and these tests read every
+// workflow file. Sitting in apps/slack, they inherited slack.yml's filter,
+// which matches `.github/workflows/slack.yml` alone — so a PR adding a new
+// workflow skipped them entirely and shipped an unregistered aggregate green
+// (#1081). `.github/workflows/workflow-contract.yml` runs this package
+// unfiltered on every PR and merge group instead.
+package ciworkflows
 
 import (
 	"context"
@@ -14,7 +24,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const slackQualityGateCondition = "needs.changes.outputs.slack == 'true'"
+const (
+	slackQualityGateCondition = "needs.changes.outputs.slack == 'true'"
+	workflowContractCheckName = "Workflow Contract"
+	workflowContractTestName  = "Test workflow contract"
+	workflowContractTestRun   = "go test -count=1 ./internal/ciworkflows/..."
+)
 
 type requiredWorkflowSpec struct {
 	name                 string
@@ -129,6 +144,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 }
 
 type githubWorkflow struct {
+	On   any                  `yaml:"on"`
 	Jobs map[string]githubJob `yaml:"jobs"`
 }
 
@@ -143,6 +159,117 @@ type step struct {
 	Name  string `yaml:"name"`
 	Run   string `yaml:"run"`
 	Shell string `yaml:"shell"`
+}
+
+// TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup pins the premise
+// that makes these repo-wide tests useful. A paths filter or conditional job
+// would put the check back behind the same green-when-broken hole this package
+// exists to close: a workflow edit outside the filter could violate the
+// contract without causing this check to report at all.
+func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
+	workflow := readWorkflow(t, "workflow-contract.yml")
+	triggers := parseWorkflowTriggers(t, workflow.On)
+
+	pullRequest, ok := triggers["pull_request"]
+	if !ok {
+		t.Fatal("workflow-contract.yml must run on pull_request")
+	}
+	if pullRequest != nil {
+		config, ok := pullRequest.(map[string]any)
+		if !ok {
+			t.Fatalf("workflow-contract.yml pull_request trigger has unexpected type %T", pullRequest)
+		}
+		for _, filter := range []string{"paths", "paths-ignore"} {
+			if _, ok := config[filter]; ok {
+				t.Fatalf("workflow-contract.yml pull_request trigger must not define %s", filter)
+			}
+		}
+	}
+	if _, ok := triggers["merge_group"]; !ok {
+		t.Fatal("workflow-contract.yml must run on merge_group")
+	}
+
+	contract, ok := workflow.Jobs["contract"]
+	if !ok {
+		t.Fatal("workflow-contract.yml is missing contract job")
+	}
+	if contract.Name != workflowContractCheckName {
+		t.Fatalf("contract job name = %q, want %q", contract.Name, workflowContractCheckName)
+	}
+	if strings.TrimSpace(contract.If) != "" {
+		t.Fatalf("contract job must be unconditional, got if = %q", contract.If)
+	}
+	if contract.Needs != nil {
+		t.Fatalf("contract job must not depend on another job, got needs = %#v", contract.Needs)
+	}
+
+	for _, step := range contract.Steps {
+		if step.Name != workflowContractTestName {
+			continue
+		}
+		if run := strings.TrimSpace(step.Run); run != workflowContractTestRun {
+			t.Fatalf("%s command = %q, want %q", workflowContractTestName, run, workflowContractTestRun)
+		}
+		return
+	}
+	t.Fatalf("contract job is missing %s step", workflowContractTestName)
+}
+
+func TestParseWorkflowTriggers(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  []string
+	}{
+		{name: "scalar", value: "push", want: []string{"push"}},
+		{name: "sequence", value: []any{"push", "pull_request"}, want: []string{"push", "pull_request"}},
+		{name: "typed sequence", value: []string{"push", "merge_group"}, want: []string{"push", "merge_group"}},
+		{name: "mapping", value: map[string]any{"pull_request": nil}, want: []string{"pull_request"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := parseWorkflowTriggers(t, test.value)
+			if len(got) != len(test.want) {
+				t.Fatalf("trigger count = %d, want %d", len(got), len(test.want))
+			}
+			for _, trigger := range test.want {
+				if _, ok := got[trigger]; !ok {
+					t.Errorf("missing trigger %q", trigger)
+				}
+			}
+		})
+	}
+}
+
+func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
+	t.Helper()
+
+	switch typed := value.(type) {
+	case string:
+		return map[string]any{typed: nil}
+	case []any:
+		triggers := make(map[string]any, len(typed))
+		for _, raw := range typed {
+			trigger, ok := raw.(string)
+			if !ok {
+				t.Fatalf("workflow on sequence contains non-string value %T", raw)
+			}
+			triggers[trigger] = nil
+		}
+		return triggers
+	case []string:
+		triggers := make(map[string]any, len(typed))
+		for _, trigger := range typed {
+			triggers[trigger] = nil
+		}
+		return triggers
+	case map[string]any:
+		return typed
+	default:
+		t.Fatalf("workflow on has unexpected type %T", value)
+		return nil
+	}
 }
 
 // TestRequiredWorkflowSpecsCoverEveryAggregate keeps requiredWorkflowSpecs

@@ -1,0 +1,62 @@
+# Repo-wide CI contract tests: every workflow that defines a required
+# aggregate is registered in requiredWorkflowSpecs, lists all of its quality
+# gates in needs, and ships a verifier script that fails on a skipped or red
+# gate.
+#
+# Unfiltered on purpose. These tests read every file in .github/workflows, so
+# any workflow edit can break them. They used to live in apps/slack and rode
+# slack.yml's paths filter, which matches `.github/workflows/slack.yml` alone
+# — a PR adding a new workflow skipped them entirely, reported every check
+# green, and would have reddened main on merge (#1081). The filter was the
+# bug, not the tests.
+name: Workflow Contract
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-contract-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  # Deliberately not keyed `required`: this workflow has no quality gates to
+  # aggregate, and a job with that key would make the very test below demand a
+  # requiredWorkflowSpecs entry for it.
+  contract:
+    # Branch protection requires this check by name, which is safe only
+    # because the job has no `changes` detector and no paths filter — it
+    # reports on every PR rather than skipping the ones it does not apply to.
+    name: Workflow Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The verifier-script tests shell out to bash and jq; both are present on
+      # ubuntu-latest, and requireCommand skips rather than fails without them.
+      # A silent skip here would hollow out the check, so assert they exist.
+      - name: Verify test prerequisites
+        run: command -v bash && command -v jq
+
+      - name: Test workflow contract
+        run: go test -count=1 ./internal/ciworkflows/...
+
+      # Test first so a linter failure cannot hide the contract result.
+      - name: Lint workflow contract
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.10.1
+          # Slack/shared gates verify the root config schema. Repeating that
+          # network-dependent fetch here adds flake; the linter still applies it.
+          verify: false
+          args: --timeout=5m ./internal/ciworkflows/...
