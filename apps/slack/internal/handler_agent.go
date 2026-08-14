@@ -51,17 +51,15 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 
 // agentUnsupportedMediaReply makes the text-only boundary explicit instead of
 // silently ignoring file-only messages or sending attachment captions to the LLM
-// without the attachment. Files include Slack-hosted images and canvases.
+// without the attachment. Files include Slack-hosted images. Canvas shares are
+// deliberately absent because Slack's event exposes neither upload signal for them.
 //
-// The claim is scoped to what agentEventHasUpload actually detects: things
-// ATTACHED to the message. It leads with the rule that produces that behavior —
-// this surface reads a message's text and nothing else — instead of naming
-// canvases as a standalone capability gap. A canvas pasted as a LINK is ordinary
-// message text and is not detected (see agentEventHasUpload), so copy that read
-// as "canvases are refused" would describe a boundary this surface does not
-// enforce. "I can only read a message's text" stays true in both shapes, and
-// correctly predicts that a linked document's contents don't reach the agent
-// either.
+// The claim is scoped to the upload signals agentEventHasUpload actually detects,
+// not every attachment the Slack client can display. It leads with the rule —
+// this surface reads a message's text and nothing else — instead of naming media
+// types the detection cannot see. A canvas turn reaches the model, but the canvas
+// body does not, so naming canvases would promise a refusal this surface never
+// performs while the leading rule still accurately describes the result.
 //
 // It names the snippet case because Slack converts a long paste into an attached
 // snippet, so a purely textual request lands here too. The paste's text is in the
@@ -72,7 +70,7 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 // and points at `/qurl`, which does not go through this surface.
 // TODO(upstream-contract): asserts that Slack clients turn a long paste into a
 // snippet rather than a plain message.
-const agentUnsupportedMediaReply = "I can only read a message's text, so an attached file, image, or canvas doesn't reach me — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message (mentioning qURL again if you're in a channel), or use a `/qurl` command — run `/qurl help` for the list."
+const agentUnsupportedMediaReply = "I can only read a message's text, so an attached file or image doesn't reach me — and Slack turns a long paste into an attached snippet, so a big block of text lands here too.\nSend a shorter message (mentioning qURL again if you're in a channel), or use a `/qurl` command — run `/qurl help` for the list."
 
 // agentAIPrivacyURL is the privacy notice for the Secure Access Agent's AI
 // features. Surfaced in every AI-disclosure string below so users always have a
@@ -791,27 +789,36 @@ const agentFollowupGateTimeout = 5 * time.Second
 // and lets SIGTERM still drain in-flight delivery.
 const agentDeliveryBudget = 15 * time.Second
 
-// agentEventHasUpload reports whether this event carries an attachment. The
-// file_share subtype is evidence on its own, so an upload cannot fall through to
-// silence when the files array is absent — and the text-only limitation stays
-// correct when it does.
+// agentEventHasUpload reports whether this event carries a supported file-upload
+// signal. The file_share subtype is evidence on its own, so an upload cannot fall
+// through to silence when the files array is absent — and the text-only limitation
+// stays correct when it does.
 //
 // Detection is deliberately presence-only AND deliberately attachment-only. A
-// Slack canvas or file pasted as a LINK arrives as ordinary message text with an
-// unfurl: no files entry, no file_share subtype. It is not detected, and
-// agentUnsupportedMediaReply is worded so it does not claim otherwise. Matching
-// Slack file permalinks in the text was considered and rejected: this branch wins
-// the turn at its call site and returns before the text is classified at all, so
-// any message merely CONTAINING such a URL would stop being answered — including
+// file pasted as a LINK arrives as ordinary message text with an unfurl: no files
+// entry, no file_share subtype. It is not detected, and agentUnsupportedMediaReply
+// is worded so it does not claim otherwise. Matching Slack file permalinks in the
+// text was considered and rejected: this branch wins the turn at its call site and
+// returns before the text is classified at all, so any message merely CONTAINING
+// such a URL would stop being answered — including
 // "protect https://…/docs/… as $handbook", a legitimate propose_protect_url
 // request against a raw https:// endpoint (a capability prompt_test.go pins).
 // Losing that is the worse failure, and the model is separately told never to
 // describe a page it has not fetched through the confirmed inspect path.
 // slackInnerEvent likewise does not decode `attachments` (the unfurl block), for
 // the same reason: an unfurl is evidence about a link, not about an attachment.
+//
+// A canvas is currently undetectable whether attached or linked. A captured
+// attachment event carried neither signal and reached the model, even though
+// conversations.history later reported files[1] for the stored message. The stored
+// object therefore cannot predict the event path, and agentUnsupportedMediaReply
+// does not promise that canvases are refused.
+//
 // TODO(upstream-contract): the two signals back each other up, so this relies on
-// Slack sending AT LEAST ONE of them per upload — not on file_share being
-// universal, and not on the files array always arriving.
+// Slack sending AT LEAST ONE of them per NON-CANVAS upload — not on file_share
+// being universal, and not on the files array always arriving. The comparison
+// upload carried both, so file_share remains a supported signal. If Slack's canvas
+// event shape changes, update the captured test fixture and reply contract together.
 func agentEventHasUpload(e *slackInnerEvent) bool {
 	return hasUploadSignal(e.Files, e.Subtype)
 }

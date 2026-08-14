@@ -363,6 +363,14 @@ func filesFromJSON(t *testing.T, raw string) slackEventFiles {
 	return f
 }
 
+// capturedCanvasEvent projects the observed attached-canvas event onto the only
+// fields agentEventHasUpload consumes. Slack sent neither files nor file_share;
+// Text is omitted because a document URL would instead model the linked case and
+// misleadingly suggest that Text participates in upload detection.
+func capturedCanvasEvent() slackInnerEvent {
+	return slackInnerEvent{}
+}
+
 // TestSlackEventFilesDecodesTolerantly pins the property that keeps a shape
 // surprise from silently eating the whole message. handleEvent treats ANY envelope
 // decode error as "log at Debug, ack 200, dispatch nothing", so a files value that
@@ -481,11 +489,10 @@ func TestAgentEventHasUpload(t *testing.T) {
 		{"null files is not an upload", slackInnerEvent{Files: filesFromJSON(t, `null`)}, false},
 		{"plain message is not an upload", slackInnerEvent{Text: "what can I reach?"}, false},
 		{"a non-upload subtype is not an upload", slackInnerEvent{Subtype: "message_changed"}, false},
-		// A canvas or file shared as a LINK carries neither signal: Slack sends an
-		// unfurl, which slackInnerEvent does not decode. So the limitation never
-		// fires for one, which is why agentUnsupportedMediaReply is scoped to
-		// attachments rather than naming canvases outright.
-		{"a linked canvas is not an upload", slackInnerEvent{Text: "what's in https://acme.slack.com/docs/T1/F2"}, false},
+		{"captured attached canvas has no upload signal", capturedCanvasEvent(), false},
+		// Separate from the captured attachment shape: a permalink in Text remains
+		// ordinary message text and must not make the upload branch win the turn.
+		{"linked canvas permalink is not an upload signal", slackInnerEvent{Text: "what's in https://acme.slack.com/docs/T1/F2"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -583,6 +590,16 @@ func TestAgentHistoryAttachmentNoteStatesTheBoundary(t *testing.T) {
 	// annotated message with an adjacent one — the claim has to hold for the blob.
 	if strings.Contains(note, "this message") {
 		t.Errorf("the note must not say \"this message\": adjacent same-role messages merge into one turn; got %q", note)
+	}
+}
+
+// TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases pins the user-facing half
+// of the observed contract. TestAgentEventHasUpload separately records that the
+// captured canvas event has no upload signal; this test prevents the reply from
+// claiming that such an event is refused.
+func TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases(t *testing.T) {
+	if strings.Contains(strings.ToLower(agentUnsupportedMediaReply), "canvas") {
+		t.Fatalf("agentUnsupportedMediaReply promises canvases the detector cannot see: %q", agentUnsupportedMediaReply)
 	}
 }
 
@@ -1315,11 +1332,13 @@ func TestUnsupportedMediaReplyOffersAReachableRoute(t *testing.T) {
 // types teaches "canvases are refused" — a boundary this surface does not
 // enforce, which is the broken promise the reply exists to avoid.
 //
-// The fix is order, not vocabulary: state the rule that actually holds (this
-// surface reads a message's text) BEFORE naming any medium, so the takeaway
-// generalizes to the linked shape instead of contradicting it. Both checks are
+// This ordering check is separate from the canvas vocabulary guard above: state
+// the rule that actually holds (this surface reads a message's text) BEFORE naming
+// any medium, so the takeaway generalizes to linked media. Both checks are
 // positional so rewording stays free.
 func TestUnsupportedMediaReplyLeadsWithTheTextOnlyRule(t *testing.T) {
+	// Keep canvas here even though the current reply omits it. Absent nouns are
+	// ignored below; if canvas is ever reintroduced, its ordering stays guarded.
 	nouns := []string{"file", "image", "canvas"}
 	firstNoun := len(agentUnsupportedMediaReply)
 	for _, noun := range nouns {
