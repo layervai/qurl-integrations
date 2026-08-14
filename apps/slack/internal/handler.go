@@ -810,6 +810,17 @@ type Handler struct {
 	// agentAckTimeout is captured from Config.AgentAckTimeout once at construction.
 	// The handler reads it without synchronization on the request hot path.
 	agentAckTimeout time.Duration
+	// driftLogged latches which envelope field paths have already reported a
+	// tolerated JSON type drift, so a systematic Slack schema change reports
+	// once per field instead of once per request. See logEventDrift for why the
+	// key space is bounded. A zero sync.Map is fully usable, so this latches
+	// correctly on a hand-built Handler that never went through NewHandler.
+	//
+	// Embedded BY VALUE, which makes "a Handler is used through a pointer" a
+	// real constraint rather than a convention: sync.Map carries a noCopy, so
+	// copying a Handler now trips go vet's copylocks. Every use is already
+	// *Handler, and the vet run in `make check` keeps it that way.
+	driftLogged sync.Map
 	// wg tracks live async workers so cmd/main.go's Wait() can drain
 	// them after http.Server.Shutdown returns. wg.Add MUST happen on
 	// the request goroutine (before the `go` keyword) — adding inside
@@ -2238,17 +2249,242 @@ func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*clie
 	return h.cfg.NewClient(apiKey), nil
 }
 
+// jsonFieldTypeDrift reports whether a decode error is a per-FIELD type
+// mismatch — a JSON value the decoder could not put in the struct field it
+// landed in — rather than a failure to parse the body at all, and returns the
+// dotted path of the field it happened on.
+//
+// The distinction is what lets handleEvent salvage the first case. A
+// *json.SyntaxError leaves the envelope completely zero, because encoding/json
+// validates the whole document before decoding any of it. A
+// *json.UnmarshalTypeError is the opposite: the decoder records it, skips only
+// the offending value, and keeps filling in the rest.
+//
+// Two edges worth knowing before relying on that:
+//
+//   - Only the FIRST mismatch is reported, but EVERY mismatched field is
+//     zeroed. The returned path names one field; it is not an inventory.
+//   - A numeric literal that is well-typed but out of range for the target
+//     (`"event_time": 1e30`) also arrives as *json.UnmarshalTypeError.
+//
+// errors.As rather than a type assertion is defensive, not required: today the
+// decoder MUTATES the error to add context rather than wrapping it, so a plain
+// assertion would work. An empty Field means the mismatch was against the whole
+// document (a body that is a bare array or string), which populates nothing and
+// so is not field drift.
+func jsonFieldTypeDrift(err error) (field string, ok bool) {
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) || typeErr.Field == "" {
+		return "", false
+	}
+	return typeErr.Field, true
+}
+
+// lifecycleDropDriftReason is the operator-facing half of refusing to purge on a
+// drifted envelope. Split out so the message lives next to the reasoning rather
+// than inline in the switch.
+const lifecycleDropDriftReason = "lifecycle event NOT purged: envelope field type drift makes the purge SCOPE untrustworthy; no workspace data was deleted"
+
+// logEventDrift reports a tolerated field-type drift, at Warn the first time it
+// sees a given field path and at Debug after that.
+//
+// The latch is per PROCESS and never expires, which is the right shape for what
+// this reports: drift means Slack's schema moved, so the first line is the whole
+// signal and every repeat is the same news at request volume.
+//
+// It never expires, which has a cost worth stating: a single transient
+// malformed payload latches its field forever, so if that same field later
+// moved for real, the schema change would surface at Debug rather than Warn.
+// Accepted because the alternative — a TTL — reintroduces the flood it exists
+// to stop, and the first sighting is always reported either way.
+//
+// An unbounded map on the request path needs its key space justified. Keys are
+// *json.UnmarshalTypeError.Field, which encoding/json builds from STRUCT TAGS
+// only — it carries neither slice indices nor map keys (verified: a mistyped
+// value under `map[string]string` reports the map's own field name, not the
+// payload's key). Every envelope field is a string, int64, bool, pointer, slice
+// or struct today, so the ceiling is the number of fields we declare and a
+// payload cannot move it. Adding a map-typed field would not breach that either,
+// on current behavior — but it is the change that would put this assumption back
+// in play, so re-check it there.
+//
+// nil-receiver-safe, and correct on a Handler built without NewHandler: sync.Map
+// needs no construction, so only a nil *Handler* skips the latch.
+func (h *Handler) logEventDrift(err error, driftField string, env *slackEventEnvelope, bodyLength int) {
+	// slog evaluates its variadic args before it filters on level, so the
+	// demoted repeats would each build a record the sink then discards — and
+	// those repeats are per-request during exactly the systematic drift this
+	// latch exists for. Ask first.
+	//
+	// ORDER MATTERS: the level check comes before the latch is claimed, never
+	// after. Claiming first would let a sink with Warn disabled consume a
+	// field's one guaranteed report, so a later REAL schema move on that field
+	// would only ever surface at Debug — the latch quietly eating the thing it
+	// exists to deliver. Returning early instead costs nothing, because a
+	// threshold sink that rejects Warn rejects Debug too.
+	ctx := context.Background()
+	level := slog.LevelWarn
+	if !slog.Default().Enabled(ctx, level) {
+		return
+	}
+	if h != nil {
+		if _, seen := h.driftLogged.LoadOrStore(driftField, struct{}{}); seen {
+			level = slog.LevelDebug
+			if !slog.Default().Enabled(ctx, level) {
+				return
+			}
+		}
+	}
+	// team_id/event_id match what the adjacent lifecycle and agent branches
+	// already log in the clear, and are what makes a drift report actionable
+	// (which workspace, which delivery) rather than just "something changed".
+	slog.Log(ctx, level, "event JSON field type drift tolerated; drifted field left empty, event handled on what did decode",
+		"error", err,
+		"drift_field", driftField,
+		"body_length", bodyLength,
+		"envelope_type", env.Type,
+		"inner_event_type", env.Event.Type,
+		"team_id", env.TeamID,
+		"event_id", env.EventID,
+	)
+}
+
+// isLifecycleEventType reports whether an inner event type names a teardown,
+// WITHOUT looking at any other field. handleEvent uses it to recognize "a purge
+// was meant here" on an envelope whose other fields it does not trust; the real
+// admission decision stays in isLifecycleEvent.
+//
+// It deliberately does NOT mirror isLifecycleEvent's botTokenRotationEnabled
+// carve-out for tokens_revoked. Reading a flag here would be answering "would
+// this have purged?" when the question is "was a purge meant?", and the answer
+// has to hold for an envelope we have already decided not to trust. With
+// rotation enabled a drifted tokens_revoked is therefore refused rather than
+// ignored — the same outcome (nothing is purged) by a louder route. Both
+// functions are named in handler_lifecycle.go's "revisit if bot-token rotation
+// is enabled" note, so they cannot drift apart unnoticed.
+func isLifecycleEventType(eventType string) bool {
+	return eventType == slackEventTypeAppUninstalled || eventType == slackEventTypeTokensRevoked
+}
+
 func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	var env slackEventEnvelope
-	switch err := json.Unmarshal(body, &env); {
-	case err != nil:
-		// Bad JSON shouldn't 4xx (Slack retries on non-2xx). Surface
-		// the parse error at Debug so spec drift / corrupt payloads
-		// are visible to operators without breaking the contract.
-		slog.Debug("event JSON parse failed", "error", err, "body_length", len(body))
+	err := json.Unmarshal(body, &env)
+	driftField, drifted := jsonFieldTypeDrift(err)
+	// A single drifted FIELD must not cost the whole event. It used to: ANY
+	// decode error aborted here, so one unexpected JSON type anywhere in the
+	// payload silently discarded the event — invisibly, at Debug, with a 200
+	// that stops Slack retrying. PR #971 bought `files` out of that with a
+	// shape-tolerant decoder; this backstops every field that has no such
+	// decoder. The two are complementary, not substitutes: a blanket tolerance
+	// can only degrade a field to its ZERO value, so a field whose safe
+	// degradation is something else still needs its own UnmarshalJSON (drop
+	// slackEventFiles and a drifted `files` reads as "no attachment", and the
+	// agent answers past a file instead of refusing).
+	//
+	// What it cannot rescue is drift in a DISCRIMINATOR — env.Type or
+	// env.Event.Type — because those are what a route is selected on, and a
+	// drifted string is empty. Such an event still reaches no route. That is
+	// inherent rather than a gap to close later, and it is still an improvement
+	// on what it replaces: the drop is now announced at Warn, and a teardown
+	// lost this way is named specifically (see lifecycleRefused below).
+	//
+	// The tolerance is scoped by CONSEQUENCE, not applied uniformly, because
+	// "the rest of the struct decoded" is not the same as "the rest of the
+	// struct is trustworthy". A conversation turn is cheap and reversible —
+	// the worst case is one reply too many or too few. The lifecycle purge is
+	// neither: it deletes a workspace's bot token, qURL key, mappings and
+	// policies, and Slack has already been acked. So a drifted envelope may
+	// drive a turn but is refused the purge, below.
+	//
+	// That is not caution for its own sake. Drift genuinely can REDIRECT the
+	// purge rather than merely withhold it, in three ways that all sit behind
+	// that one route: a drifted team_id falls back to enterprise_id (a
+	// different workspace, not none); is_enterprise_install is a BOOL, so
+	// drift flips a Grid org teardown onto the workspace branch; and a drifted
+	// ELEMENT of tokens.bot still counts toward the array's length. Refusing
+	// the route kills all three at the door — and costs nothing that worked
+	// before, since such an event used to be dropped whole.
+	//
+	// The refusal is deliberately keyed on ANY drift in the envelope, not just
+	// drift in a field the purge scope reads. Narrowing it to those fields
+	// looks tempting and is UNSOUND: encoding/json reports only the FIRST
+	// mismatch while zeroing every mismatched field, so a payload that drifts
+	// an ignorable field before team_id would present as "drift, but not in a
+	// field we care about" while team_id had already been zeroed. driftField
+	// is a lead for an operator, never an inventory to branch on.
+	//
+	// The cost is real and accepted: a teardown whose only drift is in a field
+	// the purge never reads is refused too, so that workspace's data persists
+	// until an operator acts on the Warn below. Fail-safe and observable beats
+	// the alternative, which is deleting the wrong tenant's install.
+	// Deliberately NOT gated on env.Type == event_callback. This branch only
+	// logs, so it costs nothing to recognize a teardown whose ENVELOPE type is
+	// the field that drifted — and that is the case an operator would otherwise
+	// never hear about, since the generic line would say "routing on the fields
+	// that decoded" while a teardown quietly matched no route at all.
+	// url_verification keeps precedence by sitting earlier in the switch.
+	lifecycleRefused := drifted && isLifecycleEventType(env.Event.Type)
+	// The refusal branch logs its own, more specific line; emitting the generic
+	// one too would tell an operator we were "routing on the fields that
+	// decoded" immediately before saying we refused to.
+	if drifted && !lifecycleRefused {
+		// Warn, not Debug: this is now the ONLY signal that Slack's payload
+		// shape has moved away from what we model. Drift used to announce
+		// itself by making events disappear; that symptom is exactly what the
+		// tolerance removes, so the line has to be visible at prod log levels.
+		//
+		// Latched per field path because real drift is systematic — a Slack
+		// schema change drifts EVERY event, so an unlatched line would flood
+		// exactly when the service is degraded. The key space is bounded by
+		// our own struct shape, not by anything a payload controls, so the
+		// latch cannot grow without a code change.
+		h.logEventDrift(err, driftField, &env, len(body))
+	}
+	switch {
+	case err != nil && !drifted:
+		// Body-level parse failure: a syntax error, or a mismatch against the
+		// whole document. Nothing usable decoded, so there is nothing to route.
+		//
+		// Bad JSON shouldn't 4xx — Slack retries on non-2xx — but this drops an
+		// event permanently, since the 200 below stops redelivery. That makes it
+		// MORE worth seeing than tolerated drift, not less, so it matches the
+		// Warn that the sibling routing layer already uses for the same failure
+		// (see handleInteraction). It sat at Debug, invisible in prod, which is
+		// how the bug this function now fixes stayed hidden for so long.
+		//
+		// Un-latched, unlike the drift line above, and deliberately: drift is
+		// systematic by nature (a schema change moves EVERY event), while a
+		// body Slack signed but did not encode validly is a one-off. There is
+		// also no stable key to latch on — a syntax error names an offset, not
+		// a field.
+		slog.Warn("event JSON parse failed", "error", err, "body_length", len(body))
 	case env.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": env.Challenge})
 		return
+	case lifecycleRefused:
+		// Ack it (Slack must not retry) but do not purge. See the CONSEQUENCE
+		// paragraph above: the inner event type decoded cleanly, so we know a
+		// teardown was MEANT, but every field that decides WHICH partitions it
+		// hits is now suspect. A dropped teardown leaves data in place, which
+		// is recoverable by an operator; a misdirected one is not.
+		//
+		// Un-latched, unlike the generic drift line, and deliberately: this one
+		// reports a specific workspace whose teardown needs investigation, so
+		// collapsing repeats would hide the second workspace. Teardowns are rare
+		// enough that the volume argument does not apply to them. The ids are data
+		// fields in the production JSON log handler (which escapes control bytes),
+		// not message text; without them the runbook cannot identify the retained
+		// workspace or the Slack delivery that needs reconciliation.
+		slog.Warn(lifecycleDropDriftReason,
+			"event_type", lifecycleEventTypeForLog(env.Event.Type),
+			"drift_field", driftField,
+			"team_id", env.TeamID,
+			"enterprise_id", env.EnterpriseID,
+			"event_id", env.EventID,
+			"has_team_id", env.TeamID != "",
+			"has_enterprise_id", env.EnterpriseID != "",
+			"has_event_id", env.EventID != "",
+		)
 	case env.Type == slackEnvelopeTypeEventCallback && h.cfg.SlackBotTokenRotationEnabled && isBotTokensRevokedEvent(&env.Event):
 		// In token-rotation deployments this callback can mean "Slack rotated the
 		// bot token" rather than "workspace uninstalled the app". Ack it, but do

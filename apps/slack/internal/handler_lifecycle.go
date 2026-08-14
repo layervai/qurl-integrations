@@ -22,7 +22,10 @@ import (
 //     token (see shared/auth.SlackBotTokenInstall), but this explicit guard keeps
 //     future user-token scopes from widening the teardown path by accident. If
 //     Slack bot-token rotation is enabled later, revisit this path before
-//     treating rotated bot tokens as teardown signals.
+//     treating rotated bot tokens as teardown signals — that means
+//     isLifecycleEvent AND isBotTokensRevokedEvent here, plus
+//     isLifecycleEventType in handler.go, which recognizes a teardown on an
+//     untrusted envelope and deliberately does not read the rotation flag.
 const (
 	slackEnvelopeTypeEventCallback = "event_callback"
 	slackEventTypeAppUninstalled   = "app_uninstalled"
@@ -67,8 +70,33 @@ func isLifecycleEvent(event *slackInnerEvent, botTokenRotationEnabled bool) bool
 	}
 }
 
+// isBotTokensRevokedEvent reports whether Slack named at least one BOT token on
+// a tokens_revoked callback — the only form of that event that means teardown.
+//
+// It requires a non-empty token STRING, not merely a non-empty array, because
+// two different decoder behaviors can hand this function a counted entry that
+// names nothing:
+//
+//   - `"tokens": "…"` — encoding/json ALLOCATES a pointer field before it
+//     discovers the value's type is wrong, so Tokens comes back non-nil at a
+//     zero struct. A nil check alone would read that as a revocation.
+//   - `"bot": [null]` or `"bot": [{…}]` — the slice is sized before its
+//     elements are decoded, so a null or mistyped element still occupies a
+//     slot and leaves "" behind. `[null]` does this with NO decode error at
+//     all, so no amount of care at the call site would catch it.
+//
+// Both would otherwise fabricate a full workspace purge out of a payload that
+// revoked nothing. See TestIsBotTokensRevokedEvent_RequiresANamedToken.
 func isBotTokensRevokedEvent(event *slackInnerEvent) bool {
-	return event != nil && event.Type == slackEventTypeTokensRevoked && event.Tokens != nil && len(event.Tokens.Bot) > 0
+	if event == nil || event.Type != slackEventTypeTokensRevoked || event.Tokens == nil {
+		return false
+	}
+	for _, token := range event.Tokens.Bot {
+		if strings.TrimSpace(token) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // orderedIDSet accumulates non-empty, whitespace-trimmed workspace ids in
@@ -215,6 +243,14 @@ func lifecycleWorkspaceIDs(env *slackEventEnvelope) []string {
 // guarded deletes. Slack event_time is second-granularity, so writes in the same
 // wall-clock second can be retained; that favors not clobbering a fast reinstall
 // over making teardown exhaustive to the sub-second.
+//
+// A zero EventTime therefore means "purge everything up to now", which is the
+// LEAST conservative cutoff available and would delete a reinstall that landed
+// between the teardown and its delivery. That is fine for a genuinely absent
+// event_time (nothing better is known) but would not be fine for a DRIFTED one,
+// where a real timestamp exists and we simply failed to read it. handleEvent
+// refuses the lifecycle route on a drifted envelope, so this function never sees
+// that case; it is one of the reasons the refusal exists.
 func lifecyclePurgeCutoff(env *slackEventEnvelope, observedAt time.Time) time.Time {
 	observedAt = observedAt.UTC()
 	if env == nil || env.EventTime <= 0 {

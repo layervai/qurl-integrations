@@ -616,6 +616,52 @@ disconnect — rather than waiting on the retry path. A first-class admin/operat
 force/local-only escape hatch is tracked in #806 (sequence it soon, since this
 manual row edit is otherwise the only out during an upstream outage).
 
+## Teardowns refused on Slack payload shape drift
+
+`handleEvent` tolerates a Slack Events API field arriving with an unexpected JSON
+type — the rest of the envelope still decodes, so a conversation turn is answered
+rather than silently dropped. The **workspace purge is deliberately excluded**
+from that tolerance: several fields can silently *redirect* a purge rather than
+withhold it (a drifted `team_id` falls back to `enterprise_id`; the
+`is_enterprise_install` bool zeroes onto the workspace branch; a mistyped element
+of `tokens.bot` still counts toward the array length), so a drifted
+`app_uninstalled` / `tokens_revoked` is acked and **not** purged.
+
+That fail-safe has an operational consequence worth alerting on: a *systematic*
+drift — one Slack schema change touching any envelope field — refuses **every**
+teardown for its duration, so uninstalled workspaces keep their bot token, qURL
+key, mappings and channel policies until someone finishes the purge by hand.
+Drift converts into an accumulating manual-cleanup queue, not a one-off.
+
+Two log lines carry it. The refusal line is intentionally **un-latched**, so each
+affected workspace and Slack delivery is visible rather than collapsed into the
+first:
+
+```text
+fields @timestamp, event_type, drift_field, team_id, enterprise_id, event_id
+| filter @message like /lifecycle event NOT purged/
+```
+
+The generic drift line is latched per field path (first sighting at `WARN`,
+repeats demoted to `DEBUG`), so it reports a schema move once rather than once
+per request:
+
+```text
+fields @timestamp, drift_field, envelope_type, inner_event_type, team_id, event_id
+| filter @message like /field type drift tolerated/
+```
+
+Alert on the first query, not the second: a single `NOT purged` line means one
+workspace needs teardown **investigation**, and a burst means Slack changed a
+shape and the retention backlog may be growing. Treat the line as a queue for
+reconciliation, never as authorization to purge: first confirm from Slack install
+state that the workspace or org was actually uninstalled, then re-deliver the
+teardown or run the manual purge. This matters especially when bot-token rotation
+is enabled, where a drifted `tokens_revoked` can describe a still-installed
+workspace, and for a non-`event_callback` envelope that merely carried a lifecycle
+inner type. `drift_field` names the first field that moved — every drifted field
+is zeroed, but only the first is reported, so treat it as a lead, not an inventory.
+
 ## Endpoints
 
 | Endpoint | Purpose |
