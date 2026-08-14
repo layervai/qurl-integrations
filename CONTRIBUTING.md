@@ -85,10 +85,10 @@ lockfile, so the suites are opt-in targets rather than prerequisites of
 
 - `make check-chrome-extension`, `check-edge-extension`, `check-discord`,
   `check-teams` — each mirrors that app's `<app> / build and test` job.
-- `make check-e2e` — `e2e/`'s offline subset (typecheck plus `test:unit`).
-  The live suite is deliberately excluded: it mints real qURL resources, posts
-  real Discord messages, and needs credentials in `e2e/.env`. `e2e/` has no CI
-  workflow, so this target is the only gate its TypeScript gets.
+- `make check-e2e` — mirrors `e2e / build and test`: `e2e/`'s offline subset
+  (typecheck plus `test:unit`). The live suite is excluded from both this
+  target and CI, deliberately — it mints real qURL resources, posts real
+  Discord messages, and needs credentials in `e2e/.env` that CI does not have.
 - `make check-node` — all five.
 
 Go by what your change *triggers*, not just which directory it sits in:
@@ -140,14 +140,17 @@ settings, update this section in the same operational change.
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
 `chrome-extension / required`, `edge-extension / required`, `teams / required`,
-`s3-static-connector / required`, and `shared / required`. The connector
-aggregate is new in #1042 (refs #1022), which moved `s3-static-connector.yml`
-off `on.push.paths` onto the `changes`-job pattern; adding it to branch
-protection is a separate settings change. Each workflow's `changes` filter is
-the source of truth for which paths need validation. When that filter matches,
-the aggregate validates every quality gate listed in its workflow `needs:` set.
-When branch protection requires path-gated app/shared workflows, it should
-require only these aggregate checks, not the internally skipped expensive jobs.
+`s3-static-connector / required`, `e2e / required`, and `shared / required`. The
+connector aggregate is new in #1042 (refs #1022), which moved
+`s3-static-connector.yml` off `on.push.paths` onto the `changes`-job pattern;
+adding it to branch protection is a separate settings change. `e2e / required`
+is new and needs that same settings change — until it is added, `e2e.yml`
+reports its result on every PR without gating any merge. Each workflow's
+`changes` filter is the source of truth for which paths need validation. When
+that filter matches, the aggregate validates every quality gate listed in its
+workflow `needs:` set. When branch protection requires path-gated app/shared
+workflows, it should require only these aggregate checks, not the internally
+skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external
