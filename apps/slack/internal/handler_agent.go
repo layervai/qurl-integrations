@@ -952,6 +952,14 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	// The bot-scopes-only argument is what makes the breakage direction
 	// unreachable, so adding user_scope to the install flow is the specific
 	// change that would put it back in play — revisit here if that happens.
+	//
+	// All three strands run AHEAD of the channel-upload branch on purpose, and
+	// that ordering is load-bearing beyond the self-reply loop: an upload refused
+	// here never reaches logAgentChannelUploadUnanswered, so it never counts as
+	// demand. Machine traffic — a bot post, another app, this app's own reply —
+	// is not a member asking for file support, and an authorless upload has no
+	// user_id to join a complaint to. Moving this guard below that branch would
+	// count those rejected events as demand before dropping them.
 	if e.BotID != "" || e.AppID != "" || e.User == "" {
 		return false, agentDropSilent
 	}
