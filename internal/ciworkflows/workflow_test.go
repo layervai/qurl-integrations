@@ -116,6 +116,18 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		unchangedOutput:      "No connector-impacting changes detected",
 	},
 	{
+		name:                 "e2e",
+		path:                 "e2e.yml",
+		checkNamePrefix:      "e2e / ",
+		changeOutput:         "e2e",
+		changedEnv:           "E2E_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.e2e == 'true'",
+		detectChangesName:    "e2e / detect changes",
+		requiredName:         "e2e / required",
+		verifierStepName:     "Verify e2e CI result",
+		unchangedOutput:      "No e2e-impacting changes detected",
+	},
+	{
 		name:                 "shared",
 		path:                 "shared-test.yml",
 		checkNamePrefix:      "shared / ",
