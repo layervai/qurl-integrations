@@ -357,6 +357,14 @@ func filesFromJSON(t *testing.T, raw string) slackEventFiles {
 	return f
 }
 
+// capturedCanvasEvent projects the observed attached-canvas event onto the only
+// fields agentEventHasUpload consumes. Slack sent neither files nor file_share;
+// Text is omitted because a document URL would instead model the linked case and
+// misleadingly suggest that Text participates in upload detection.
+func capturedCanvasEvent() slackInnerEvent {
+	return slackInnerEvent{}
+}
+
 // TestSlackEventFilesDecodesTolerantly pins the property that keeps a shape
 // surprise from silently eating the whole message. handleEvent treats ANY envelope
 // decode error as "log at Debug, ack 200, dispatch nothing", so a files value that
@@ -475,16 +483,7 @@ func TestAgentEventHasUpload(t *testing.T) {
 		{"null files is not an upload", slackInnerEvent{Files: filesFromJSON(t, `null`)}, false},
 		{"plain message is not an upload", slackInnerEvent{Text: "what can I reach?"}, false},
 		{"a non-upload subtype is not an upload", slackInnerEvent{Subtype: "message_changed"}, false},
-		// A canvas carries neither signal in EITHER shape — linked or attached — so
-		// the limitation never fires for one. Confirmed against a real payload
-		// (T09UP622L90, 2026-08-14): a human attaching a canvas from the Slack client
-		// produced an event with no files entry and no file_share subtype, and the
-		// turn reached the model, while an ordinary upload in the same channel
-		// minutes earlier carried both. The row below is that captured shape; an
-		// attached canvas needs no separate row because Slack sends the same thing.
-		// This is why agentUnsupportedMediaReply is scoped to attachments and does
-		// not name canvases — see TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases.
-		{"a canvas share is not an upload", slackInnerEvent{Text: "what's in https://acme.slack.com/docs/T1/F2"}, false},
+		{"captured attached canvas has no upload signal", capturedCanvasEvent(), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -585,20 +584,16 @@ func TestAgentHistoryAttachmentNoteStatesTheBoundary(t *testing.T) {
 	}
 }
 
-// TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases keeps the reply copy honest
-// about what agentEventHasUpload can actually see. Slack sends a canvas share with
-// neither the files entry nor the file_share subtype (confirmed against a real
-// payload — see agentEventHasUpload), so a canvas turn reaches the model instead of
-// the limitation. Naming canvases in the copy would promise a refusal this surface
-// never performs, which is the exact drift this guards: the reply and the detection
-// have to move together, in whichever direction Slack moves.
-func TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases(t *testing.T) {
-	canvasShare := slackInnerEvent{Text: "what can I access here? https://acme.slack.com/docs/T1/F2"}
-	if agentEventHasUpload(&canvasShare) {
-		t.Fatal("a canvas share is detectable now: name canvases in agentUnsupportedMediaReply again and retire this test")
-	}
-	if strings.Contains(strings.ToLower(agentUnsupportedMediaReply), "canvas") {
-		t.Fatalf("agentUnsupportedMediaReply promises canvases the detection cannot see: %q", agentUnsupportedMediaReply)
+// TestAgentUnsupportedMediaReplyMatchesCanvasDetection couples the reply to the
+// captured classifier-visible canvas shape. Canvases belong in the refusal only
+// when that shape is detectable; changing one side without the other is contract
+// drift in either direction.
+func TestAgentUnsupportedMediaReplyMatchesCanvasDetection(t *testing.T) {
+	canvasEvent := capturedCanvasEvent()
+	detected := agentEventHasUpload(&canvasEvent)
+	namedInReply := strings.Contains(strings.ToLower(agentUnsupportedMediaReply), "canvas")
+	if detected != namedInReply {
+		t.Fatalf("canvas contract mismatch: detected=%v named_in_reply=%v reply=%q", detected, namedInReply, agentUnsupportedMediaReply)
 	}
 }
 
@@ -1331,9 +1326,9 @@ func TestUnsupportedMediaReplyOffersAReachableRoute(t *testing.T) {
 // types teaches "canvases are refused" — a boundary this surface does not
 // enforce, which is the broken promise the reply exists to avoid.
 //
-// The fix is order, not vocabulary: state the rule that actually holds (this
-// surface reads a message's text) BEFORE naming any medium, so the takeaway
-// generalizes to the linked shape instead of contradicting it. Both checks are
+// This ordering check is separate from the canvas vocabulary guard above: state
+// the rule that actually holds (this surface reads a message's text) BEFORE naming
+// any medium, so the takeaway generalizes to linked media. Both checks are
 // positional so rewording stays free.
 func TestUnsupportedMediaReplyLeadsWithTheTextOnlyRule(t *testing.T) {
 	nouns := []string{"file", "image", "canvas"}

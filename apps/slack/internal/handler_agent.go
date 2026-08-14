@@ -51,17 +51,15 @@ const agentHelpReply = "I can help with qURL operations in this Slack context:\n
 
 // agentUnsupportedMediaReply makes the text-only boundary explicit instead of
 // silently ignoring file-only messages or sending attachment captions to the LLM
-// without the attachment. Files include Slack-hosted images, but NOT canvases.
+// without the attachment. Files include Slack-hosted images. Canvas shares are
+// deliberately absent because Slack's event exposes neither upload signal for them.
 //
-// The claim is scoped to what agentEventHasUpload actually detects: things
-// ATTACHED to the message. It leads with the rule that produces that behavior —
+// The claim is scoped to the upload signals agentEventHasUpload actually detects,
+// not every attachment the Slack client can display. It leads with the rule —
 // this surface reads a message's text and nothing else — instead of naming media
-// types the detection cannot see. Canvases are deliberately absent from the list:
-// Slack sends a canvas share with neither signal agentEventHasUpload keys off (see
-// there for the captured payload), so a canvas turn reaches the model, and naming
-// canvases here would promise a refusal this surface never performs. The leading
-// rule still predicts what the user sees, because a canvas body is not in the
-// event either — the model answers the text and never sees the document.
+// types the detection cannot see. A canvas turn reaches the model, but the canvas
+// body does not, so naming canvases would promise a refusal this surface never
+// performs while the leading rule still accurately describes the result.
 //
 // It names the snippet case because Slack converts a long paste into an attached
 // snippet, so a purely textual request lands here too. The paste's text is in the
@@ -791,10 +789,10 @@ const agentFollowupGateTimeout = 5 * time.Second
 // and lets SIGTERM still drain in-flight delivery.
 const agentDeliveryBudget = 15 * time.Second
 
-// agentEventHasUpload reports whether this event carries an attachment. The
-// file_share subtype is evidence on its own, so an upload cannot fall through to
-// silence when the files array is absent — and the text-only limitation stays
-// correct when it does.
+// agentEventHasUpload reports whether this event carries a supported file-upload
+// signal. The file_share subtype is evidence on its own, so an upload cannot fall
+// through to silence when the files array is absent — and the text-only limitation
+// stays correct when it does.
 //
 // Detection is deliberately presence-only AND deliberately attachment-only. A
 // file pasted as a LINK arrives as ordinary message text with an unfurl: no files
@@ -810,22 +808,17 @@ const agentDeliveryBudget = 15 * time.Second
 // slackInnerEvent likewise does not decode `attachments` (the unfurl block), for
 // the same reason: an unfurl is evidence about a link, not about an attachment.
 //
-// A CANVAS is not detected in ANY shape, attached or linked. Confirmed against a
-// real payload (workspace T09UP622L90, 2026-08-14): a canvas attached from the
-// Slack client by a human carried neither signal, and the turn reached the model
-// ("agent: turn complete"), while an ordinary upload in the same channel minutes
-// earlier logged both (files_field_present=true, file_share_subtype=true). Note
-// conversations.history DOES report files[1] for that same canvas message, so the
-// stored message object cannot be used to predict the event — only the event can.
-// agentUnsupportedMediaReply is worded so it does not claim canvases are refused.
+// A canvas is currently undetectable whether attached or linked. A captured
+// attachment event carried neither signal and reached the model, even though
+// conversations.history later reported files[1] for the stored message. The stored
+// object therefore cannot predict the event path, and agentUnsupportedMediaReply
+// does not promise that canvases are refused.
 //
 // TODO(upstream-contract): the two signals back each other up, so this relies on
 // Slack sending AT LEAST ONE of them per NON-CANVAS upload — not on file_share
-// being universal, and not on the files array always arriving. The same capture
-// confirmed the Events API still stamps file_share even though conversations.history
-// no longer reports it, so that branch stays load-bearing. If Slack ever starts
-// sending either signal for a canvas, the canvas cases in handler_agent_test.go
-// fail and this comment plus the reply copy need to change together.
+// being universal, and not on the files array always arriving. The comparison
+// upload carried both, so file_share remains a supported signal. If Slack's canvas
+// event shape changes, update the captured test fixture and reply contract together.
 func agentEventHasUpload(e *slackInnerEvent) bool {
 	return hasUploadSignal(e.Files, e.Subtype)
 }
