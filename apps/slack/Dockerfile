@@ -4,12 +4,10 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-# Bumped 1.26.5 → 1.26.6 for seven reachable August 2026 standard-library
-# advisories. This verified-CVE update was adopted before the image completed
-# the normal dependency-age quarantine. go.mod requires go 1.26.6. SHA-pinned
-# to the multi-arch index digest, same as the rest of the repo's base images —
-# GOTOOLCHAIN stays the image default `local`, so there's no unpinned
-# build-time toolchain fetch.
+# Bumped 1.26.5 → 1.26.6 for the standard-library fixes caught by govulncheck;
+# go.mod requires go 1.26.6. SHA-pinned to the multi-arch index digest, same as
+# the rest of the repo's base images — GOTOOLCHAIN stays the image default
+# `local`, so there's no unpinned build-time toolchain fetch.
 FROM golang:1.26.6-alpine@sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df AS build
 
 WORKDIR /src
