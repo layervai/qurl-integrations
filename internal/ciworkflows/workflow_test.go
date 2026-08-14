@@ -7,7 +7,7 @@
 // which matches `.github/workflows/slack.yml` alone — so a PR adding a new
 // workflow skipped them entirely and shipped an unregistered aggregate green
 // (#1081). `.github/workflows/workflow-contract.yml` runs this package
-// unfiltered on every PR instead.
+// unfiltered on every PR and merge group instead.
 package ciworkflows
 
 import (

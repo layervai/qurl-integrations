@@ -56,5 +56,7 @@ jobs:
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
           version: v2.10.1
-          verify: false # Avoid a network-dependent JSONSchema fetch; the pinned linter still loads and applies the config.
+          # Slack/shared gates verify the root config schema. Repeating that
+          # network-dependent fetch here adds flake; the linter still applies it.
+          verify: false
           args: --timeout=5m ./internal/ciworkflows/...
