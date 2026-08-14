@@ -887,9 +887,10 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
 // isLikelyComposeBody recognizes a compose body two independent ways — the `Am Al editable` class
 // triple, or role=textbox plus contenteditable=true plus either aria-multiline=true or a
 // [role="dialog"] ancestor — and every fixture above satisfies BOTH. That made either path free to
-// regress in silence: blinding one of them left all thirteen tests above green, and only blinding
-// both failed anything. The tests below give each path a fixture that matches it and misses the
-// other, so each one is now pinned on its own, and pair them with the cases that must be rejected.
+// regress in silence: blinding one of them left every pre-existing test above green, and only
+// blinding both failed anything. The tests below give each path a fixture that matches it and
+// misses the other, so each one is now pinned on its own, and pair them with the cases that must be
+// rejected.
 //
 // These drive discovery through the real message listener rather than calling isLikelyComposeBody
 // directly, because the content script is loaded into a vm sandbox and exports nothing.
