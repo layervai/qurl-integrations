@@ -162,6 +162,18 @@ const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowi
 // agentTurnRateCounterFailOpenMsg), so splitting sent-from-suppressed across two
 // strings would also make total demand require summing two filters. Both problems
 // go away by keeping one msg and putting the outcome in notice_posted.
+//
+// That "infra keys on an exact $.msg" is no longer hypothetical here: this msg is
+// now an infra-observed contract in its own right, like
+// agentTurnRateCounterFailOpenMsg above. The CloudWatch metric filter added in
+// qurl-integrations-infra#1388 backs the "Alert on that pair" instruction in
+// claimMediaNotice, matching this exact msg together with
+// files_field_present=true and files_visible=0. So the filter depends on those
+// two FIELD KEYS as much as on this string -- renaming either one silently zeroes
+// the alarm rather than breaking it, which is the failure mode the filter exists
+// to prevent.
+// TODO(upstream-contract): keep this value, and the files_field_present /
+// files_visible keys on both emitters, in lockstep with that infra filter.
 const agentUnsupportedMediaMsg = "agent: unsupported media"
 
 // agentAckReaction is the glanceable "working on it" emoji the agent adds to the
