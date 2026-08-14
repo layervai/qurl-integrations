@@ -117,7 +117,7 @@ is modified.
 That pattern is itself under test. `internal/ciworkflows` reads every file in
 `.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
 spec, leaves a quality gate out of `required.needs`, or ships a verifier that treats a skipped
-gate as a pass. Its check — `Workflow contract` — is unfiltered and reports on every PR, because
+gate as a pass. Its check — `Workflow Contract` — is unfiltered and reports on every PR, because
 a check behind a paths filter cannot police the paths filters (#1081).
 
 ## License

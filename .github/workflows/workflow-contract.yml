@@ -31,9 +31,9 @@ jobs:
     # Branch protection requires this check by name, which is safe only
     # because the job has no `changes` detector and no paths filter — it
     # reports on every PR rather than skipping the ones it does not apply to.
-    name: Workflow contract
+    name: Workflow Contract
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -47,6 +47,13 @@ jobs:
       # A silent skip here would hollow out the check, so assert they exist.
       - name: Verify test prerequisites
         run: command -v bash && command -v jq
+
+      - name: Lint workflow contract
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.10.1
+          verify: false # Avoid a network-dependent JSONSchema fetch; the pinned linter still loads and applies the config.
+          args: --timeout=5m ./internal/ciworkflows/...
 
       - name: Test workflow contract
         run: go test -count=1 ./internal/ciworkflows/...
