@@ -1,0 +1,20 @@
+# Throwaway probe: reproduces the #1081 defect (a workflow with a required
+# aggregate and no requiredWorkflowSpecs entry) in a workflow-only diff.
+# workflow_dispatch only, so it never executes. Delete with its branch.
+name: Probe Delete Me
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  required:
+    name: probe / required
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: noop
+        shell: bash
+        run: 'true'
