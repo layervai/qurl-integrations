@@ -200,11 +200,16 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		e.Event.Files = filesFromJSON(t, raw)
 		return e
 	}
-	// withBot / withoutUser restamp an otherwise-admissible event as one the author
-	// guard rejects, so the rows below can pin that the guard runs BEFORE the
-	// channel-upload branch — i.e. neither shape reaches the demand log.
+	// withBot / withApp / withoutUser restamp an otherwise-admissible event as one
+	// the author guard rejects, so the rows below can pin that the guard runs BEFORE
+	// the channel-upload branch — i.e. none of the three shapes reaches the demand
+	// log.
 	withBot := func(e *slackEventEnvelope) *slackEventEnvelope {
 		e.Event.BotID = "B9"
+		return e
+	}
+	withApp := func(e *slackEventEnvelope) *slackEventEnvelope {
+		e.Event.AppID = "A1"
 		return e
 	}
 	withoutUser := func(e *slackEventEnvelope) *slackEventEnvelope {
@@ -296,10 +301,11 @@ func TestShouldDispatchAgentEvent(t *testing.T) {
 		// the flag is dark today, so a flag-conditioned reason would report zero for as
 		// long as the signal is the only thing telling us to build file support.
 		{"channel thread file reply dropped with followups off too (flag gate drops it anyway)", withFile(chReply("", agentPoolTestThreadTS)), false, false, agentDropChannelUpload},
-		// The author guard runs ahead of the upload branch, so neither of these becomes
-		// demand: a bot's upload would count the agent's own traffic as members asking
-		// for file support, and an authorless one has no user_id to join a complaint to.
+		// The author guard runs ahead of the upload branch, so none of these becomes
+		// demand: bot/app traffic is not a member asking for file support, and an
+		// authorless upload has no user_id to join a complaint to.
 		{"bot channel thread upload ignored, and not counted as demand", withBot(withFile(chReply("", agentPoolTestThreadTS))), true, false, agentDropSilent},
+		{"app channel thread upload ignored, and not counted as demand", withApp(withFile(chReply("", agentPoolTestThreadTS))), true, false, agentDropSilent},
 		{"authorless channel thread upload ignored, and not counted as demand", withoutUser(withFile(chReply("", agentPoolTestThreadTS))), true, false, agentDropSilent},
 		// An edit is not an upload arriving. The subtype guard runs first, so a
 		// message_changed carrying files stays out of the count — otherwise every edit

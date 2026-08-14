@@ -958,8 +958,8 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	// here never reaches logAgentChannelUploadUnanswered, so it never counts as
 	// demand. Machine traffic — a bot post, another app, this app's own reply —
 	// is not a member asking for file support, and an authorless upload has no
-	// user_id to join a complaint to. Below that branch this guard would refuse
-	// the member either way and inflate that count all the same.
+	// user_id to join a complaint to. Moving this guard below that branch would
+	// count those rejected events as demand before dropping them.
 	if e.BotID != "" || e.AppID != "" || e.User == "" {
 		return false, agentDropSilent
 	}
