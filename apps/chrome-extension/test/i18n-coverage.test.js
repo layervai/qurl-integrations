@@ -6,7 +6,15 @@ const path = require('node:path');
 // A key referenced by the code but absent from messages.json does not throw: getMessage
 // falls back to its hard-coded English second argument, so the string silently stops being
 // localizable and nothing in CI notices. _locales/ is deliberately outside the Chrome/Edge
-// lockstep check (see CLAUDE.md), which makes this the only mechanical guard on it.
+// lockstep check (see CLAUDE.md), and this is the guard on that fallback path.
+//
+// Scope, deliberately: everything here is within ONE app, and the only thing it asks of a
+// message is that it is non-empty — never what it says.
+// Cross-app parity — identical key sets, the sanctioned per-browser wording deltas, and the
+// __MSG_*__ references in manifest.json, which SOURCE_ROOTS below does not scan — belongs to
+// scripts/check-i18n-parity.sh. It has to live outside this file: this is itself a lockstep
+// file, and the lockstep normalization masks Chrome/Edge on both sides, so an assertion here
+// pinning browser-specific copy would be erased before the comparison.
 
 const ROOT = path.join(__dirname, '..');
 
