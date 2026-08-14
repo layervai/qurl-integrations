@@ -881,3 +881,277 @@ test('findComposeBodyAsync times out and reports failure when no compose body ap
   assert.equal(observers[0].disconnected, true);
   assert.equal(appended.length, 1);
 });
+
+// ==================== Compose Body Recognition ====================
+
+// isLikelyComposeBody recognizes a compose body two independent ways — the `Am Al editable` class
+// triple, or role=textbox plus contenteditable=true plus either aria-multiline=true or a
+// [role="dialog"] ancestor — and every fixture above satisfies BOTH. That made either path free to
+// regress in silence: blinding one of them left every pre-existing test above green, and only
+// blinding both failed anything. The tests below give each path a fixture that matches it and
+// misses the other, so each one is now pinned on its own, and pair them with the cases that must be
+// rejected.
+//
+// These drive discovery through the real message listener rather than calling isLikelyComposeBody
+// directly, because the content script is loaded into a vm sandbox and exports nothing.
+
+// Drives a full INSERT_LINKS request against a single fixture and reports what the insertion
+// touched. The fixture is the only element querySelectorAll offers and it is sized, so isVisible
+// can neither keep nor drop it on its own, and the sandbox's execCommand always succeeds — a
+// successful response therefore means isLikelyComposeBody accepted the fixture, and nothing else.
+async function insertIntoComposeBody(t, composeBody) {
+  const caretMoves = [];
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll() {
+        return [composeBody];
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
+    },
+  });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  return { caretMoves, response };
+}
+
+// The counterpart for a fixture discovery must refuse. Same setup, so the fixture is again present
+// and sized and recognition is the only thing that can reject it, but here nothing is ever found:
+// the request runs out the 4s discovery timeout and reports failure with the toast appended. As in
+// the timeout test above, timers are stubbed rather than tracked so that timeout can be fired by
+// hand instead of waited out, and the request carries no requestId, so it is the only timer armed.
+async function assertComposeBodyRejected(t, composeBody) {
+  const timeoutCallbacks = [];
+
+  const { appended, messageListener, observers } = createComposeSandbox(t, {
+    timers: {
+      clearTimeout() {},
+      setTimeout(callback, delay) {
+        timeoutCallbacks.push({ callback, delay });
+        return timeoutCallbacks.length;
+      },
+    },
+    document: {
+      querySelectorAll() {
+        return [composeBody];
+      },
+    },
+  });
+
+  const responsePromise = new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  const composeTimeout = timeoutCallbacks.find(function (entry) {
+    return entry.delay === 4000;
+  });
+  assert.ok(composeTimeout, 'the fixture should not have been discovered before the timeout armed');
+  composeTimeout.callback();
+
+  const response = await responsePromise;
+  assert.equal(response.success, false);
+  assert.equal(observers[0].disconnected, true);
+  assert.equal(appended.length, 1);
+}
+
+test('the class triple alone is enough to recognize a compose body', async function (t) {
+  const focusCalls = [];
+  // getAttribute misses every name the role path reads, so the class triple is the only thing
+  // left that can match. It returns null rather than 'false' for contenteditable, which is what
+  // keeps the early return from rejecting the fixture before either path is tried.
+  const composeBody = createComposeBody({
+    focus() {
+      focusCalls.push('class-triple');
+    },
+    getAttribute() {
+      return null;
+    },
+  });
+
+  const { caretMoves, response } = await insertIntoComposeBody(t, composeBody);
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['class-triple']);
+  assert.deepEqual(caretMoves, [composeBody]);
+});
+
+// The class path is a conjunction, so matching it as a unit above leaves each of its three terms
+// free to be dropped. Each fixture here carries the other two classes and withholds one, with the
+// role path starved as in the test above, so the withheld term is the only thing that can refuse
+// it.
+for (const missingClass of ['Am', 'Al', 'editable']) {
+  test('a body missing the ' + missingClass + ' class is not a compose body', async function (t) {
+    const composeBody = createComposeBody({
+      classList: {
+        contains(name) {
+          return name !== missingClass && (name === 'Am' || name === 'Al' || name === 'editable');
+        },
+      },
+      getAttribute() {
+        return null;
+      },
+    });
+
+    await assertComposeBodyRejected(t, composeBody);
+  });
+}
+
+test('the role/contenteditable/aria-multiline triple alone is enough to recognize a compose body', async function (t) {
+  const focusCalls = [];
+  // classList matches nothing, so the class triple cannot be what recognizes this one.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    focus() {
+      focusCalls.push('role-triple');
+    },
+  });
+
+  const { caretMoves, response } = await insertIntoComposeBody(t, composeBody);
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['role-triple']);
+  assert.deepEqual(caretMoves, [composeBody]);
+});
+
+test('a dialog ancestor stands in for aria-multiline on the role path', async function (t) {
+  const closestSelectors = [];
+  const dialog = { nodeName: 'DIV' };
+  // No fixture above defines closest, because aria-multiline=true short-circuits the disjunction
+  // before the content script can reach it. Dropping aria-multiline is what forces the call.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    closest(selector) {
+      closestSelectors.push(selector);
+      return dialog;
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'role') return 'textbox';
+      return null;
+    },
+  });
+
+  const { caretMoves, response } = await insertIntoComposeBody(t, composeBody);
+
+  assert.equal(response.success, true);
+  assert.deepEqual(caretMoves, [composeBody]);
+  assert.deepEqual(closestSelectors, ['[role="dialog"]']);
+});
+
+test('a textbox with neither aria-multiline nor a dialog ancestor is not a compose body', async function (t) {
+  // The role path's last condition, standing alone: everything it gates on matches except the
+  // disjunction itself, so a fixture that reaches it and is still refused is the only thing that
+  // can tell a consulted closest() from one whose result is ignored.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    closest() {
+      return null;
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'role') return 'textbox';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a textbox that is not contenteditable is not a compose body', async function (t) {
+  // The role path's own contenteditable clause, which the contenteditable="false" test below does
+  // not reach: that one is refused by the early return before either path is tried. The early
+  // return only fires on the literal string 'false', so a body that simply lacks the attribute
+  // sails past it with the class triple missing and aria-multiline set — leaving this clause as
+  // the one thing that can still refuse it.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute(name) {
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a contenteditable element that is not a textbox is not a compose body', async function (t) {
+  // The sibling of the clause above. Gmail marks plenty of things contenteditable that are not a
+  // draft body, so the role check is what keeps the second path from claiming them; with the
+  // class triple missing and aria-multiline set, it is again the only thing left to refuse this.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a body matching neither recognition path is not a compose body', async function (t) {
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute() {
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('contenteditable="false" rejects a body the class triple would otherwise match', async function (t) {
+  // The class triple still matches here, so only the early return can be what refuses this
+  // fixture. The selector list screens the same case with :not([contenteditable="false"]), but
+  // these tests stub querySelectorAll, so this pins the guard in isLikelyComposeBody rather than
+  // the CSS — the one that still has to hold for the other two selectors, which do not screen it.
+  const composeBody = createComposeBody({
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'false';
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});

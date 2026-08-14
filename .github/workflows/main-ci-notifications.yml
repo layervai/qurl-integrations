@@ -18,6 +18,7 @@ on:
       - "teams: Build and Test"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
+      - "e2e: Build and Test"
       - "CodeQL"
       - "Secrets Scan"
       - "Release Please"
@@ -107,6 +108,9 @@ jobs:
               ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish failed. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
+              ;;
+            "e2e: Build and Test")
+              impact="The e2e suite's offline gate — typecheck plus unit tests — failed on main. Only that subset runs in CI; the live suite needs credentials CI does not have, so this says e2e/'s own TypeScript is broken, not that a live integration regressed. No app is affected, but e2e/ cannot be trusted to catch one until the run is repaired."
               ;;
             "Shared Tests (All Apps)")
               impact="Shared integration code failed after merge. Treat downstream app deploys from this SHA as suspect until the run is fixed or proven unrelated."
