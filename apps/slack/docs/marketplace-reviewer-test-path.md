@@ -135,6 +135,9 @@ no change, and any approved demo action records an audit event.
 1. Run `/qurl-admin admins` as the owner/admin.
 2. Run the same command as a non-admin reviewer.
 3. Send one unsupported file or image to the Agent or Assistant surface.
+   Use an attached file or image, not a canvas: Slack delivers a canvas share
+   without the attachment signals the app can see, so a canvas is answered as an
+   ordinary text turn rather than receiving the limitation.
 4. Paste a block of text long enough that the Slack client converts it to a
    snippet, using a qURL request as the caption.
 5. Use the Agent feedback controls or run `/qurl feedback`.
