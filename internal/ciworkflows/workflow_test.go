@@ -27,6 +27,8 @@ import (
 const (
 	slackQualityGateCondition = "needs.changes.outputs.slack == 'true'"
 	workflowContractCheckName = "Workflow Contract"
+	workflowContractTestName  = "Test workflow contract"
+	workflowContractTestRun   = "go test -count=1 ./internal/ciworkflows/..."
 )
 
 type requiredWorkflowSpec struct {
@@ -200,6 +202,17 @@ func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
 	if contract.Needs != nil {
 		t.Fatalf("contract job must not depend on another job, got needs = %#v", contract.Needs)
 	}
+
+	for _, step := range contract.Steps {
+		if step.Name != workflowContractTestName {
+			continue
+		}
+		if run := strings.TrimSpace(step.Run); run != workflowContractTestRun {
+			t.Fatalf("%s command = %q, want %q", workflowContractTestName, run, workflowContractTestRun)
+		}
+		return
+	}
+	t.Fatalf("contract job is missing %s step", workflowContractTestName)
 }
 
 func TestParseWorkflowTriggers(t *testing.T) {
