@@ -20,7 +20,16 @@
 # comment naming the WRONG browser (Edge's copy still saying "Chrome") reads as
 # a match. That is prose-only by construction — every browser name a user sees
 # lives in _locales/en/messages.json, which is outside this check and covered by
-# each app's test/i18n-coverage.test.js instead.
+# scripts/check-i18n-parity.sh instead.
+#
+# That has to be a separate script rather than an assertion in one of the
+# lockstep test files below, because the masking above applies to those files
+# too: a browser name asserted there is erased on both sides before the
+# comparison, so the assertion cannot pin it. (Each app's
+# test/i18n-coverage.test.js is a different guard — it checks that keys used in
+# that app's source exist in that app's catalog and are non-empty. It never
+# compares the two catalogs or looks at message content, so it does not cover
+# this blind spot.)
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
