@@ -484,6 +484,9 @@ func TestAgentEventHasUpload(t *testing.T) {
 		{"plain message is not an upload", slackInnerEvent{Text: "what can I reach?"}, false},
 		{"a non-upload subtype is not an upload", slackInnerEvent{Subtype: "message_changed"}, false},
 		{"captured attached canvas has no upload signal", capturedCanvasEvent(), false},
+		// Separate from the captured attachment shape: a permalink in Text remains
+		// ordinary message text and must not make the upload branch win the turn.
+		{"linked canvas permalink is not an upload signal", slackInnerEvent{Text: "what's in https://acme.slack.com/docs/T1/F2"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
