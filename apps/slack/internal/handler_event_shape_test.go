@@ -489,16 +489,24 @@ func TestShouldDispatchAgentEvent_AppPostDroppedWithADriftedBotID(t *testing.T) 
 		e.Event.AppID = "A1"
 		return e
 	}
+	dispatches := func(e *slackEventEnvelope) bool {
+		t.Helper()
+		got, drop := shouldDispatchAgentEvent(e, false)
+		if drop != agentDropSilent {
+			t.Fatalf("identity guard returned drop reason %v, want silent", drop)
+		}
+		return got
+	}
 
 	// bot_id intact: the original guard still does the work.
 	withBotID := ownPost()
 	withBotID.Event.BotID = "B9"
-	if shouldDispatchAgentEvent(withBotID, false) {
+	if dispatches(withBotID) {
 		t.Fatal("own post with bot_id admitted")
 	}
 
 	// bot_id zeroed, exactly as a drifted `"bot_id": 42` decodes.
-	if shouldDispatchAgentEvent(ownPost(), false) {
+	if dispatches(ownPost()) {
 		t.Fatal("own post admitted once bot_id drifted away — this is the self-reply loop")
 	}
 
@@ -506,7 +514,7 @@ func TestShouldDispatchAgentEvent_AppPostDroppedWithADriftedBotID(t *testing.T) 
 	// only ever drop, never silence a member.
 	human := env(slackEventTypeMessage, slackChannelTypeIM, "U2", "", "", "what can I reach?")
 	human.APIAppID = "A1"
-	if !shouldDispatchAgentEvent(human, false) {
+	if !dispatches(human) {
 		t.Fatal("human DM dropped by the app_id guard")
 	}
 
@@ -515,7 +523,7 @@ func TestShouldDispatchAgentEvent_AppPostDroppedWithADriftedBotID(t *testing.T) 
 	otherApp := ownPost()
 	otherApp.Event.AppID = "A_OTHER"
 	otherApp.APIAppID = ""
-	if shouldDispatchAgentEvent(otherApp, false) {
+	if dispatches(otherApp) {
 		t.Fatal("different app's post admitted without bot_id")
 	}
 }

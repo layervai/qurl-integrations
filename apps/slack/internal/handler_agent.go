@@ -149,7 +149,9 @@ const agentTurnRateWindow = time.Hour
 const agentTurnRateCounterFailOpenMsg = "agent: turn-rate counter failed; allowing turn (fail-open)"
 
 // agentUnsupportedMediaMsg is the slog msg for EVERY upload this surface cannot
-// read, whether or not the turn posted the notice. Deliberately one value, and
+// read: whether or not the turn posted the notice, and whether or not a turn ran at
+// all (a channel upload is refused before dispatch — see
+// logAgentChannelUploadUnanswered). Deliberately one value, and
 // deliberately not "…; replied with the text-only limitation": once repeats are
 // suppressed that sentence is FALSE for most of a burst, which is exactly the kind
 // of quietly-wrong record an operator would build an alert on.
@@ -205,6 +207,7 @@ type slackEventAuthorization struct {
 	EnterpriseID        string `json:"enterprise_id,omitempty"`
 	TeamID              string `json:"team_id,omitempty"`
 	UserID              string `json:"user_id,omitempty"`
+	IsBot               bool   `json:"is_bot,omitempty"`
 	IsEnterpriseInstall bool   `json:"is_enterprise_install,omitempty"`
 }
 
@@ -645,16 +648,21 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 		h.handleAppHomeOpened(env)
 		return
 	}
-	if !shouldDispatchAgentEvent(env, h.agentChannelFollowupsEnabled()) {
+	dispatch, drop := shouldDispatchAgentEvent(env, h.agentChannelFollowupsEnabled())
+	if !dispatch {
+		// Refusals are silent by design — this is the message.channels firehose once
+		// follow-ups ship, so most of what lands here is other people's chatter and
+		// must cost nothing, not even a logger. A channel upload is the one refusal
+		// that reports itself (see logAgentChannelUploadUnanswered for what it would
+		// otherwise cost us); its volume is bounded by real uploads rather than by
+		// traffic, so building the logger inside this branch is what keeps the
+		// exception off the per-event path.
+		if drop == agentDropChannelUpload {
+			logAgentChannelUploadUnanswered(agentEventLogger(env), env)
+		}
 		return
 	}
-	log := slog.With(
-		"surface", "agent",
-		"team_id", env.TeamID,
-		"enterprise_id", env.EnterpriseID,
-		"channel_id", env.Event.Channel,
-		"event_id", env.EventID,
-	)
+	log := agentEventLogger(env)
 	envCopy := *env
 	turn := func(ctx context.Context, log *slog.Logger) {
 		h.processAgentEvent(ctx, log, &envCopy)
@@ -677,6 +685,22 @@ func (h *Handler) handleAgentEvent(env *slackEventEnvelope) {
 	if !h.runOnPool(h.sem, log, agentTurnTimeout, turn) {
 		log.Warn("agent: async pool saturated — dropping event")
 	}
+}
+
+// agentEventLogger builds the identifying fields every line about ONE inbound agent
+// event carries. Shared by the dispatched turn and the refusal logged above it so an
+// operator who finds either line can pivot on the same keys — a refusal that named
+// the event differently from the turn it replaces would not join to anything. It is
+// a function rather than a value computed once in handleAgentEvent because most
+// events are refused silently and must not pay for a logger at all.
+func agentEventLogger(env *slackEventEnvelope) *slog.Logger {
+	return slog.With(
+		"surface", "agent",
+		"team_id", env.TeamID,
+		"enterprise_id", env.EnterpriseID,
+		"channel_id", env.Event.Channel,
+		"event_id", env.EventID,
+	)
 }
 
 // runAgentFollowupPipeline runs the channel-follow-up admission gate and, only when the
@@ -840,6 +864,32 @@ func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
 	return hasUploadSignal(parsed, subtype)
 }
 
+// agentDispatchDrop names WHY shouldDispatchAgentEvent refused an event, for the one
+// refusal a caller has to say something about. It is returned BY the branch that
+// drops, rather than re-derived from the event afterwards: the caller sees a filter
+// that already ran, and a second copy of "was this a channel upload?" at the call site
+// would be free to disagree with the first — the exact shape this file removed once
+// before (see the upload branch in processAgentEventWithAdmission, which is hoisted so
+// its log keys off the CAUSE). Returning it also keeps the filter a pure function of
+// its inputs, so the table test can pin the reason alongside the verdict instead of a
+// logger being threaded through it.
+//
+// Only reasons a caller acts on get a value; naming every branch would be dead weight
+// that still has to be kept true. Read it ONLY when the verdict is false.
+type agentDispatchDrop int
+
+const (
+	// agentDropSilent is every refusal nothing reports — other people's chatter,
+	// bot posts, edits, top-level channel messages — and the value that accompanies
+	// an ADMITTED event.
+	agentDropSilent agentDispatchDrop = iota
+	// agentDropChannelUpload is a member's upload arriving on a channel surface,
+	// which this filter answers with silence. Reported because that silence costs
+	// two things nothing else records: the demand signal for real file support, and
+	// the "the agent refused my message" pair. See logAgentChannelUploadUnanswered.
+	agentDropChannelUpload
+)
+
 // agentAdmitsSubtype reports whether this surface answers a message carrying this
 // subtype. It is a POLICY whitelist, not a taxonomy: thread_broadcast and
 // me_message are perfectly deliberate human messages and still return false here —
@@ -871,7 +921,10 @@ func agentAdmitsSubtype(subtype string) bool {
 // runAgentFollowupPipeline then confirms it's the agent's OWN thread (it has saved
 // history) before answering; a top-level channel message is never admitted, so we never
 // respond to un-addressed channel chatter.
-func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) bool {
+//
+// The second return names the refusal for the caller (see agentDispatchDrop); it is
+// meaningful only when the verdict is false.
+func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) (bool, agentDispatchDrop) {
 	e := &env.Event
 	// Drop bot posts and the agent's own messages before considering event shape.
 	//
@@ -900,7 +953,7 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 	// unreachable, so adding user_scope to the install flow is the specific
 	// change that would put it back in play — revisit here if that happens.
 	if e.BotID != "" || e.AppID != "" || e.User == "" {
-		return false
+		return false, agentDropSilent
 	}
 	switch e.Type {
 	case slackEventTypeAppMention:
@@ -908,23 +961,26 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 		// TODO(upstream-contract): app_mention is known to carry a subtype in the wild,
 		// so a stamped mention-with-upload must not fall back into silence here.
 		if !agentAdmitsSubtype(e.Subtype) {
-			return false
+			return false, agentDropSilent
 		}
 	case slackEventTypeMessage:
 		if e.ChannelType == slackChannelTypeIM {
 			if !agentAdmitsSubtype(e.Subtype) {
-				return false
+				return false, agentDropSilent
 			}
 		} else {
 			if !agentAdmitsSubtype(e.Subtype) && e.Subtype != slackMessageSubtypeThreadBroadcast {
-				return false
+				return false, agentDropSilent
 			}
 			// A channel message carrying an upload is dropped here, ahead of the gate,
 			// and not conditioned on the flag. The limitation reply answers turns that
 			// ADDRESS the agent; a file dropped into a channel mid-conversation is not
 			// one, and replying would make the bot interject on people talking to each
 			// other — the louder failure. (With follow-ups off the next check drops it
-			// anyway, so today this only moves which line says no.)
+			// anyway, so for the member this only moves which line says no. It is not
+			// invisible any more, though: the reason returned here is what the caller
+			// logs off, and reaching this branch first is what makes the record of an
+			// upload independent of the flag.)
 			//
 			// Keeping that reply is what costs, because "did we join this thread?" IS
 			// the conversations.replies read (loadAgentThreadHistory). Answering an
@@ -945,30 +1001,44 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 			// TODO(upstream-contract) on the app_mention arm load-bearing rather than
 			// redundant: its failure mode is silence.
 			//
-			// One collateral to name, since nothing else records it. agentEventHasUpload
-			// fails toward refusal on a files value it cannot decode, so a pure-TEXT
-			// follow-up carrying an unrecognized files shape is dropped here silently —
-			// where it used to draw claimMediaNotice's files_field_present=true /
-			// files_visible=0 log, the pair that comment designates as the "the agent
-			// refused my message" alert. The DM and @mention surfaces still raise it, so
-			// the signal survives; this surface stops contributing to it.
+			// The refusal is silent to the MEMBER, but it is not silent in the record:
+			// this is the one drop the caller reports, because the two things it
+			// otherwise loses have no other source. One is demand — claimMediaNotice's
+			// line is the only count of "someone tried to send a file", and dropping
+			// here skips it, so channel demand would read as zero exactly when the flag
+			// that creates channel uploads ships. The other is the alertable pair:
+			// agentEventHasUpload fails toward refusal on a files value it cannot
+			// decode, so a pure-TEXT follow-up carrying an unrecognized files shape is
+			// refused here too, and that is claimMediaNotice's files_field_present=true
+			// / files_visible=0 — the "the agent refused my message" report. Both ride
+			// out on logAgentChannelUploadUnanswered.
 			//
 			// Keyed on agentEventHasUpload, not the subtype: an upload whose files array
 			// arrives without file_share must not slip past into the gate.
 			if agentEventHasUpload(e) {
-				return false
+				// Slack also delivers an upload that explicitly mentions this bot as an
+				// app_mention. That event is admitted and claimMediaNotice counts it, so
+				// reporting the message/file_share twin here would count one upload twice.
+				if agentEventMentionsAuthorizedBot(env) {
+					return false, agentDropSilent
+				}
+				return false, agentDropChannelUpload
 			}
 			// A channel message reaches the follow-up pipeline only when channel
 			// follow-ups are enabled AND it's a thread reply. The pipeline then checks
 			// whether this is already an agent thread, using store access.
+			//
+			// Reached only by TEXT, so the reason stays silent: a member's chatter in a
+			// channel the bot is in is not a refusal anyone reports, and this is the
+			// branch the firehose actually lands on.
 			if !channelFollowupsEnabled || e.ThreadTS == "" {
-				return false
+				return false, agentDropSilent
 			}
 		}
 	default:
-		return false
+		return false, agentDropSilent
 	}
-	return agentEventHasUpload(e) || strings.TrimSpace(stripBotMention(e.Text)) != ""
+	return agentEventHasUpload(e) || strings.TrimSpace(stripBotMention(e.Text)) != "", agentDropSilent
 }
 
 // isOwnAppPost reports whether a message this app can see was authored by this
@@ -976,10 +1046,9 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 // api_app_id. Both operands must be non-empty: an absent app_id proves nothing,
 // and an absent api_app_id would otherwise match every human message.
 //
-// It is deliberately one function for two callers that consume it differently —
-// shouldDispatchAgentEvent to refuse a turn, loadAgentThreadHistory to classify
-// a thread message as the assistant's own — so the shared assumption about what
-// app_id means has one home. See shouldDispatchAgentEvent for that assumption.
+// Admission rejects every app-authored post directly; this stricter predicate is
+// for loadAgentThreadHistory, which must distinguish this app's replies from other
+// apps rather than merely reject them all.
 func isOwnAppPost(appID, apiAppID string) bool {
 	return appID != "" && appID == apiAppID
 }
@@ -1257,17 +1326,38 @@ func agentHistoryOldestTS(currentTS string) string {
 	return strconv.FormatInt(oldest, 10) + ".000000"
 }
 
-// botMentionPattern matches a leading Slack user mention, e.g. "<@U123>" or
-// "<@U123|name>", so an @-mention's text can be reduced to the actual request.
-// The [UW][A-Z0-9]{8,63} id body matches the established mention-id grammar in
-// parser.go's userMentionPattern (rejects toy ids; caps pathological pastes) —
-// this one strips a leading mention rather than validating a whole token, so the
-// anchoring differs, but the id charset is kept in sync.
-var botMentionPattern = regexp.MustCompile(`^\s*<@[UW][A-Z0-9]{8,63}(?:\|[^>]*)?>\s*`)
+// slackUserMentionExpr matches Slack's encoded user mention. The ID grammar mirrors
+// parser.go's userMentionPattern (rejects toy ids; caps pathological pastes).
+const slackUserMentionExpr = `<@([UW][A-Z0-9]{8,63})(?:\|[^>]*)?>`
+
+var (
+	slackUserMentionPattern = regexp.MustCompile(slackUserMentionExpr)
+	// botMentionPattern is anchored because stripBotMention removes only the bot
+	// mention Slack prefixes to a normal app_mention request.
+	botMentionPattern = regexp.MustCompile(`^\s*` + slackUserMentionExpr + `\s*`)
+)
 
 // stripBotMention removes a leading bot mention from app_mention text.
 func stripBotMention(text string) string {
 	return strings.TrimSpace(botMentionPattern.ReplaceAllString(text, ""))
+}
+
+// agentEventMentionsAuthorizedBot identifies the message event paired with an
+// app_mention delivery. Requiring both the mention target and is_bot avoids treating
+// an upload that mentions another member as if a second event will count it.
+//
+// TODO(upstream-contract): suppressing this record assumes Slack also delivers the
+// paired app_mention that claimMediaNotice counts. If Slack stops emitting that twin,
+// mentioned uploads would be undercounted rather than double-counted.
+func agentEventMentionsAuthorizedBot(env *slackEventEnvelope) bool {
+	for _, match := range slackUserMentionPattern.FindAllStringSubmatch(env.Event.Text, -1) {
+		for _, authz := range env.Authorizations {
+			if authz.IsBot && authz.UserID == match[1] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // agentHasExplicitNonHTTPSProtectURL recognizes the direct conversation form
@@ -1454,8 +1544,11 @@ func (h *Handler) claimMediaNotice(ctx context.Context, log *slog.Logger, env *s
 	// invisible — none of them reach "agent: turn complete" either — but because this
 	// one is the demand signal for building real file support, and nothing else counts
 	// it. Suppressed repeats log too, so capping the reply does not also cap the count;
-	// notice_posted is what separates the two. Every field is a count, a bool, or an
-	// opaque Slack ID: names, ids and mimetypes are user content and stay out.
+	// notice_posted is what separates the two. The uploads that never get here at all —
+	// channel uploads, dropped at the dispatch filter — emit this same msg and field
+	// set from logAgentChannelUploadUnanswered, so the count stays whole; keep the two
+	// in step. Every field is a count, a bool, or an opaque Slack ID: names, ids and
+	// mimetypes are user content and stay out.
 	//
 	// files_visible is 0 in two operationally OPPOSITE cases, which is why the two
 	// bools are here to separate them:
@@ -1474,6 +1567,48 @@ func (h *Handler) claimMediaNotice(ctx context.Context, log *slog.Logger, env *s
 		"user_id", env.Event.User,
 		"notice_posted", first)
 	return first
+}
+
+// logAgentChannelUploadUnanswered records an upload this surface refused before any
+// turn ran — a channel upload dropped at the dispatch filter (see agentDispatchDrop).
+// It sits beside claimMediaNotice because the two share one field contract, and the
+// whole point is that they TOTAL: same msg, same fields, so the exact-$.msg filter
+// that measures file demand keeps counting every upload, and the alertable
+// files_field_present=true / files_visible=0 pair keeps firing for the shape where
+// the refusal may be wrong (a pure-text follow-up carrying a files value the decoder
+// could not read). Splitting either across a second msg would quietly halve both.
+//
+// It says "unanswered", not which gate said no, and that is deliberate: with channel
+// follow-ups off the flag gate would have refused this event anyway, so naming a gate
+// would describe the code's line ordering rather than what the member experienced.
+// The outcome is the same on both sides of the flag, and so is this line.
+//
+// channel_upload_unanswered is a DISCRIMINATOR, not a restatement of notice_posted:
+// notice_posted=false already means "counted, but a repeat we suppressed" — a
+// conversation that DID hear the limitation at least once. This line means nothing
+// was posted at all and no turn ran. So it carries the new field and omits
+// notice_posted entirely; an operator separating "we told them" from "we said
+// nothing" filters on presence rather than on a bool that means two things.
+//
+// Not gated on the per-workspace toggle, unlike claimMediaNotice, which sits behind
+// workspaceAgentEnabled: resolving that toggle is a DynamoDB read, and paying one per
+// dropped event on the message.channels firehose is the cost this drop exists to
+// avoid. So the channel total includes workspaces that never opted into conversation
+// mode. That is the right unit for demand anyway — wanting to send a file is not
+// conditional on the toggle — but it is not apples-to-apples with the DM/@mention
+// lines, and a dashboard comparing the two should say so.
+//
+// log carries the event's identifying fields (see agentEventLogger). Volume is bounded
+// by real uploads rather than by traffic, which is what makes an Info line safe on
+// this path; Debug — the level the later "outside an agent thread" drop uses — would
+// not survive to the operator query this exists to feed.
+func logAgentChannelUploadUnanswered(log *slog.Logger, env *slackEventEnvelope) {
+	log.Info(agentUnsupportedMediaMsg,
+		"files_visible", env.Event.Files.count,
+		"files_field_present", env.Event.Files.present,
+		"file_share_subtype", env.Event.Subtype == slackMessageSubtypeFileShare,
+		"user_id", env.Event.User,
+		"channel_upload_unanswered", true)
 }
 
 func (h *Handler) processAgentEventWithAdmission(ctx context.Context, log *slog.Logger, env *slackEventEnvelope, admittedPartition string, pre *loadedHistory, preadmitted bool) {
