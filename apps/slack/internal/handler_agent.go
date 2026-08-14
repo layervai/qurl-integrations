@@ -218,11 +218,16 @@ type slackEventAuthorization struct {
 // fetches a file or reads inside one while conversation mode is text-only, so
 // only "did this carry an attachment" and "how many" survive the decode.
 //
-// It decodes tolerantly on purpose, at two levels, because handleEvent treats ANY
-// envelope decode error as "log at Debug, ack 200, dispatch nothing" — so a single
-// shape surprise anywhere in `files` would silently drop the whole event, taking
-// ordinary text turns and lifecycle/uninstall routing with it. That is the exact
-// silent disappearance agentUnsupportedMediaReply exists to prevent.
+// It decodes tolerantly on purpose, at two levels. Originally that was because
+// handleEvent treated ANY envelope decode error as "ack 200, dispatch nothing",
+// so one shape surprise here dropped the whole event. handleEvent now tolerates
+// field-type drift, which retires that reason and replaces it with a sharper
+// one: the blanket tolerance can only degrade a field to its ZERO value, and
+// this field's zero value is a LIE — `present=false` reads as "no attachment",
+// so the agent would answer past a file instead of refusing. Only a decoder
+// that classifies by shape can degrade to the safe answer ("an attachment I
+// cannot count"), which is the silent mis-answer agentUnsupportedMediaReply
+// exists to prevent.
 //
 //   - ELEMENT shape: a bare []struct{} fails on a non-object element, so entries
 //     are decoded as json.RawMessage, which accepts any JSON value. (This is the
@@ -290,11 +295,15 @@ func (f *slackEventFiles) UnmarshalJSON(b []byte) error {
 }
 
 type slackInnerEvent struct {
-	Type        string `json:"type"`
-	User        string `json:"user"`
-	UserTeam    string `json:"user_team,omitempty"`
-	SourceTeam  string `json:"source_team,omitempty"`
-	BotID       string `json:"bot_id"`
+	Type       string `json:"type"`
+	User       string `json:"user"`
+	UserTeam   string `json:"user_team,omitempty"`
+	SourceTeam string `json:"source_team,omitempty"`
+	BotID      string `json:"bot_id"`
+	// AppID is the app that posted the message, present only on app-authored
+	// messages. It is an independent bot-post guard next to BotID — see
+	// shouldDispatchAgentEvent for why neither may depend on api_app_id surviving.
+	AppID       string `json:"app_id,omitempty"`
 	Subtype     string `json:"subtype"`
 	Text        string `json:"text"`
 	Channel     string `json:"channel"`
@@ -918,9 +927,32 @@ func agentAdmitsSubtype(subtype string) bool {
 func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled bool) (bool, agentDispatchDrop) {
 	e := &env.Event
 	// Drop bot posts and the agent's own messages before considering event shape.
-	// Ahead of the channel-upload branch on purpose: a bot's or an authorless upload
-	// is not a member asking for file support, so it must not reach that log either.
-	if e.BotID != "" || e.User == "" {
+	//
+	// app_id is redundant with bot_id on every payload Slack sends today, and
+	// that redundancy is the point: handleEvent now routes an envelope whose
+	// fields drifted in type, and a drifted string decodes to "". Reject any
+	// non-empty app_id directly rather than comparing it with api_app_id: one
+	// payload can drift both bot_id and api_app_id, and encoding/json would zero
+	// both while reporting only the first. Making this guard depend on the
+	// envelope id would therefore reopen the self-reply loop. Other apps are bot
+	// posts too, so rejecting them is the human-only policy this function already
+	// promises. e.User == "" remains another strand for an app post that omits
+	// `user`.
+	//
+	// It only ever ADDS a drop, and cannot silence a member: the install flow
+	// requests bot scopes only (no user_scope — see slackinstall.DefaultBotScopes),
+	// so this app never posts as a user and an event stamped with its app id is
+	// necessarily its own.
+	// TODO(upstream-contract): this assumes Slack stamps app_id on app-authored
+	// message events and ONLY on those. Both directions matter and they fail
+	// differently: if app_id stops arriving, the guard goes inert and falls back
+	// to bot_id (degradation); if it ever appeared on a human-authored event, the
+	// guard would silence that member (breakage). isOwnAppPost separately uses
+	// api_app_id to classify this app's replies in loadAgentThreadHistory.
+	// The bot-scopes-only argument is what makes the breakage direction
+	// unreachable, so adding user_scope to the install flow is the specific
+	// change that would put it back in play — revisit here if that happens.
+	if e.BotID != "" || e.AppID != "" || e.User == "" {
 		return false, agentDropSilent
 	}
 	switch e.Type {
@@ -1007,6 +1039,18 @@ func shouldDispatchAgentEvent(env *slackEventEnvelope, channelFollowupsEnabled b
 		return false, agentDropSilent
 	}
 	return agentEventHasUpload(e) || strings.TrimSpace(stripBotMention(e.Text)) != "", agentDropSilent
+}
+
+// isOwnAppPost reports whether a message this app can see was authored by this
+// app itself, by comparing the message's app_id against the envelope's
+// api_app_id. Both operands must be non-empty: an absent app_id proves nothing,
+// and an absent api_app_id would otherwise match every human message.
+//
+// Admission rejects every app-authored post directly; this stricter predicate is
+// for loadAgentThreadHistory, which must distinguish this app's replies from other
+// apps rather than merely reject them all.
+func isOwnAppPost(appID, apiAppID string) bool {
+	return appID != "" && appID == apiAppID
 }
 
 // isAgentChannelFollowup reports whether this event is a non-@mention reply in a
@@ -1129,7 +1173,7 @@ func (h *Handler) loadAgentThreadHistory(ctx context.Context, env *slackEventEnv
 			continue
 		}
 		_, ownUser := botUsers[msg.UserID]
-		ownReply := (msg.AppID != "" && msg.AppID == env.APIAppID) ||
+		ownReply := isOwnAppPost(msg.AppID, env.APIAppID) ||
 			(msg.BotID != "" && ownUser)
 		if ownReply {
 			// A block-only qURL response still proves this is an agent thread
