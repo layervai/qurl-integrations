@@ -296,6 +296,69 @@ function createComposeBody(overrides) {
   }, overrides);
 }
 
+// Drive candidate bodies through the full insertion path and assert which one wins. Ranking tests
+// put a losing candidate first: removing an isolated term leaves that wrong body in place through
+// the stable sort, while inverting precedence lets its conflicting lower-priority term win.
+async function assertComposeRanking(t, candidates, expectedLabel) {
+  const focusCalls = [];
+  const caretMoves = [];
+  const composeBodies = candidates.map(function (candidate) {
+    return createComposeBody({
+      focus() {
+        focusCalls.push(candidate.label);
+      },
+      getBoundingClientRect() {
+        return candidate.rect;
+      },
+    });
+  });
+  const zIndexByBody = new Map(composeBodies.map(function (composeBody, index) {
+    return [composeBody, candidates[index].zIndex];
+  }));
+  const expectedIndex = candidates.findIndex(function (candidate) {
+    return candidate.label === expectedLabel;
+  });
+  assert.notEqual(expectedIndex, -1, `missing expected candidate ${expectedLabel}`);
+  assert.notEqual(
+    expectedIndex,
+    0,
+    'list a loser first so a dropped comparator term cannot pass on stable DOM order'
+  );
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll(selector) {
+        return selector.includes(':focus') ? [] : composeBodies;
+      },
+    },
+    globals: {
+      getComputedStyle(element) {
+        return {
+          display: 'block',
+          visibility: 'visible',
+          zIndex: String(zIndexByBody.get(element)),
+        };
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
+    },
+  });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, [expectedLabel]);
+  assert.deepEqual(caretMoves, [composeBodies[expectedIndex]]);
+}
+
 test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
   let composeBodies = [];
   const execCalls = [];
@@ -612,121 +675,54 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
 });
 
 test('findComposeBody prefers the topmost visible compose body when none is focused', async function (t) {
-  const caretMoves = [];
-  const focusCalls = [];
-  const backgroundCompose = createComposeBody({
-    focus() {
-      focusCalls.push('background');
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24, top: 240, left: 640 };
-    },
-  });
-  const foregroundCompose = createComposeBody({
-    focus() {
-      focusCalls.push('foreground');
-    },
-    getBoundingClientRect() {
-      return { width: 320, height: 24, top: 120, left: 320 };
-    },
-  });
+  await assertComposeRanking(t, [
+    { label: 'lower', zIndex: 20, rect: { width: 320, height: 24, top: 240, left: 320 } },
+    { label: 'topmost', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
+  ], 'topmost');
+});
 
-  const { messageListener } = createComposeSandbox(t, {
-    document: {
-      querySelectorAll(selector) {
-        return selector.includes(':focus')
-          ? []
-          : [backgroundCompose, foregroundCompose];
-      },
-    },
-    globals: {
-      getComputedStyle(element) {
-        if (element === foregroundCompose) {
-          return { display: 'block', visibility: 'visible', zIndex: '20' };
-        }
-        return { display: 'block', visibility: 'visible', zIndex: '1' };
-      },
-    },
-    decorateRange(range) {
-      range.selectNodeContents = function (node) {
-        caretMoves.push(node);
-      };
-    },
-  });
+test('findComposeBody breaks a top tie on the leftmost compose body', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'rightmost', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 640 } },
+    { label: 'leftmost', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
+  ], 'leftmost');
+});
 
-  const response = await new Promise(function (resolve) {
-    assert.equal(messageListener({
-      type: 'INSERT_LINKS',
-      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
-    }, null, resolve), true);
-  });
-
-  assert.equal(response.success, true);
-  assert.deepEqual(focusCalls, ['foreground']);
-  assert.deepEqual(caretMoves, [foregroundCompose]);
+test('findComposeBody breaks an identical-position tie on the largest compose body', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'wide-short', zIndex: 20, rect: { width: 640, height: 24, top: 120, left: 320 } },
+    { label: 'narrow-tall', zIndex: 20, rect: { width: 240, height: 96, top: 120, left: 320 } },
+    { label: 'largest', zIndex: 20, rect: { width: 480, height: 64, top: 120, left: 320 } },
+  ], 'largest');
 });
 
 test('findComposeBody breaks a tie between identically placed compose bodies on z-index', async function (t) {
-  const caretMoves = [];
-  const focusCalls = [];
+  const tiedRect = { width: 320, height: 24, top: 120, left: 320 };
+  await assertComposeRanking(t, [
+    { label: 'background', zIndex: 1, rect: tiedRect },
+    { label: 'foreground', zIndex: 20, rect: tiedRect },
+  ], 'foreground');
+});
 
-  // compareComposeBodies leads with z-index and every term after it is geometry, so the
-  // tie-break only decides anything once the rects tie outright. Both bodies here report the
-  // same top, the same left, and the same area, which leaves z-index as the sole term with an
-  // opinion — the test above cannot make that claim, since its rects differ by `top` and so
-  // `top` alone already picks the foreground copy.
-  //
-  // DOM order is load-bearing for the same reason: `matches.sort` is stable, so a comparator
-  // that stopped consulting z-index would return 0 for this pair and hand the win to whichever
-  // element querySelectorAll yields first. Listing the background copy first is what turns that
-  // regression into a failure here instead of a silently identical result.
-  function createTiedCompose(label) {
-    return createComposeBody({
-      focus() {
-        focusCalls.push(label);
-      },
-      getBoundingClientRect() {
-        return { width: 320, height: 24, top: 120, left: 320 };
-      },
-    });
-  }
+test('findComposeBody prefers a higher z-index over a higher-placed compose body', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'topmost', zIndex: 1, rect: { width: 320, height: 24, top: 120, left: 320 } },
+    { label: 'raised', zIndex: 20, rect: { width: 320, height: 24, top: 240, left: 320 } },
+  ], 'raised');
+});
 
-  const backgroundCompose = createTiedCompose('background');
-  const foregroundCompose = createTiedCompose('foreground');
+test('findComposeBody prefers top position over left position', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'lower-left', zIndex: 20, rect: { width: 320, height: 24, top: 240, left: 320 } },
+    { label: 'upper-right', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 640 } },
+  ], 'upper-right');
+});
 
-  const { messageListener } = createComposeSandbox(t, {
-    document: {
-      querySelectorAll(selector) {
-        return selector.includes(':focus')
-          ? []
-          : [backgroundCompose, foregroundCompose];
-      },
-    },
-    globals: {
-      getComputedStyle(element) {
-        if (element === foregroundCompose) {
-          return { display: 'block', visibility: 'visible', zIndex: '20' };
-        }
-        return { display: 'block', visibility: 'visible', zIndex: '1' };
-      },
-    },
-    decorateRange(range) {
-      range.selectNodeContents = function (node) {
-        caretMoves.push(node);
-      };
-    },
-  });
-
-  const response = await new Promise(function (resolve) {
-    assert.equal(messageListener({
-      type: 'INSERT_LINKS',
-      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
-    }, null, resolve), true);
-  });
-
-  assert.equal(response.success, true);
-  assert.deepEqual(focusCalls, ['foreground']);
-  assert.deepEqual(caretMoves, [foregroundCompose]);
+test('findComposeBody prefers left position over area', async function (t) {
+  await assertComposeRanking(t, [
+    { label: 'right-large', zIndex: 20, rect: { width: 640, height: 64, top: 120, left: 640 } },
+    { label: 'left-small', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
+  ], 'left-small');
 });
 
 test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
