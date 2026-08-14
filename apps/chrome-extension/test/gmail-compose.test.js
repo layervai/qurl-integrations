@@ -991,6 +991,27 @@ test('the class triple alone is enough to recognize a compose body', async funct
   assert.deepEqual(caretMoves, [composeBody]);
 });
 
+// The class path is a conjunction, so matching it as a unit above leaves each of its three terms
+// free to be dropped. Each fixture here carries the other two classes and withholds one, with the
+// role path starved as in the test above, so the withheld term is the only thing that can refuse
+// it.
+for (const missingClass of ['Am', 'Al', 'editable']) {
+  test('a body missing the ' + missingClass + ' class is not a compose body', async function (t) {
+    const composeBody = createComposeBody({
+      classList: {
+        contains(name) {
+          return name !== missingClass && (name === 'Am' || name === 'Al' || name === 'editable');
+        },
+      },
+      getAttribute() {
+        return null;
+      },
+    });
+
+    await assertComposeBodyRejected(t, composeBody);
+  });
+}
+
 test('the role/contenteditable/aria-multiline triple alone is enough to recognize a compose body', async function (t) {
   const focusCalls = [];
   // classList matches nothing, so the class triple cannot be what recognizes this one.
