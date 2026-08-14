@@ -130,7 +130,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 }
 
 type githubWorkflow struct {
-	On   map[string]any       `yaml:"on"`
+	On   any                  `yaml:"on"`
 	Jobs map[string]githubJob `yaml:"jobs"`
 }
 
@@ -147,15 +147,16 @@ type step struct {
 	Shell string `yaml:"shell"`
 }
 
-// TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
-// these repo-wide tests useful. A paths filter or conditional job would put
-// the check back behind the same green-when-broken hole this package exists to
-// close: a workflow edit outside the filter could violate the contract without
-// causing this check to report at all.
-func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
+// TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup pins the premise
+// that makes these repo-wide tests useful. A paths filter or conditional job
+// would put the check back behind the same green-when-broken hole this package
+// exists to close: a workflow edit outside the filter could violate the
+// contract without causing this check to report at all.
+func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
 	workflow := readWorkflow(t, "workflow-contract.yml")
+	triggers := parseWorkflowTriggers(t, workflow.On)
 
-	pullRequest, ok := workflow.On["pull_request"]
+	pullRequest, ok := triggers["pull_request"]
 	if !ok {
 		t.Fatal("workflow-contract.yml must run on pull_request")
 	}
@@ -170,6 +171,9 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 			}
 		}
 	}
+	if _, ok := triggers["merge_group"]; !ok {
+		t.Fatal("workflow-contract.yml must run on merge_group")
+	}
 
 	contract, ok := workflow.Jobs["contract"]
 	if !ok {
@@ -183,6 +187,63 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 	}
 	if contract.Needs != nil {
 		t.Fatalf("contract job must not depend on another job, got needs = %#v", contract.Needs)
+	}
+}
+
+func TestParseWorkflowTriggers(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  []string
+	}{
+		{name: "scalar", value: "push", want: []string{"push"}},
+		{name: "sequence", value: []any{"push", "pull_request"}, want: []string{"push", "pull_request"}},
+		{name: "typed sequence", value: []string{"push", "merge_group"}, want: []string{"push", "merge_group"}},
+		{name: "mapping", value: map[string]any{"pull_request": nil}, want: []string{"pull_request"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := parseWorkflowTriggers(t, test.value)
+			if len(got) != len(test.want) {
+				t.Fatalf("trigger count = %d, want %d", len(got), len(test.want))
+			}
+			for _, trigger := range test.want {
+				if _, ok := got[trigger]; !ok {
+					t.Errorf("missing trigger %q", trigger)
+				}
+			}
+		})
+	}
+}
+
+func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
+	t.Helper()
+
+	switch typed := value.(type) {
+	case string:
+		return map[string]any{typed: nil}
+	case []any:
+		triggers := make(map[string]any, len(typed))
+		for _, raw := range typed {
+			trigger, ok := raw.(string)
+			if !ok {
+				t.Fatalf("workflow on sequence contains non-string value %T", raw)
+			}
+			triggers[trigger] = nil
+		}
+		return triggers
+	case []string:
+		triggers := make(map[string]any, len(typed))
+		for _, trigger := range typed {
+			triggers[trigger] = nil
+		}
+		return triggers
+	case map[string]any:
+		return typed
+	default:
+		t.Fatalf("workflow on has unexpected type %T", value)
+		return nil
 	}
 }
 
