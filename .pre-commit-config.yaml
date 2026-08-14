@@ -50,6 +50,20 @@ repos:
         pass_filenames: false
         files: '^(release-please-config\.json|\.release-please-manifest\.json|scripts/check-release-please-sync\.sh)$'
 
+      - id: i18n-parity
+        name: Chrome/Edge i18n parity
+        entry: scripts/check-i18n-parity.sh
+        language: system
+        pass_filenames: false
+        files: '^apps/(chrome|edge)-extension/(_locales/en/messages\.json|manifest\.json|popup/popup\.html)$|^scripts/check-i18n-parity\.sh$'
+
+      - id: i18n-parity-tests
+        name: Chrome/Edge i18n parity tests
+        entry: scripts/test-check-i18n-parity.sh
+        language: system
+        pass_filenames: false
+        files: '^scripts/(check-i18n-parity|test-check-i18n-parity)\.sh$'
+
       - id: main-ci-notification-payload
         name: main CI notification payload builds
         entry: scripts/check-main-ci-notification-payload.sh
