@@ -1064,6 +1064,48 @@ test('a textbox with neither aria-multiline nor a dialog ancestor is not a compo
   await assertComposeBodyRejected(t, composeBody);
 });
 
+test('a textbox that is not contenteditable is not a compose body', async function (t) {
+  // The role path's own contenteditable clause, which the contenteditable="false" test below does
+  // not reach: that one is refused by the early return before either path is tried. The early
+  // return only fires on the literal string 'false', so a body that simply lacks the attribute
+  // sails past it with the class triple missing and aria-multiline set — leaving this clause as
+  // the one thing that can still refuse it.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute(name) {
+      if (name === 'role') return 'textbox';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
+test('a contenteditable element that is not a textbox is not a compose body', async function (t) {
+  // The sibling of the clause above. Gmail marks plenty of things contenteditable that are not a
+  // draft body, so the role check is what keeps the second path from claiming them; with the
+  // class triple missing and aria-multiline set, it is again the only thing left to refuse this.
+  const composeBody = createComposeBody({
+    classList: {
+      contains() {
+        return false;
+      },
+    },
+    getAttribute(name) {
+      if (name === 'contenteditable') return 'true';
+      if (name === 'aria-multiline') return 'true';
+      return null;
+    },
+  });
+
+  await assertComposeBodyRejected(t, composeBody);
+});
+
 test('a body matching neither recognition path is not a compose body', async function (t) {
   const composeBody = createComposeBody({
     classList: {
