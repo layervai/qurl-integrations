@@ -846,16 +846,41 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 // a shape it does not recognize — an attachment we cannot count.
 //
 // TODO(upstream-contract): this applies the event path's two-signal rule to a
-// DIFFERENT Slack surface, so it additionally assumes a conversations.replies read
-// describes an upload the way a delivery does. Do not read the two signals as
-// backing each other up here. Slack gates file metadata in message reads on
-// files:read, which slackinstall.DefaultBotScopes does not request — and that set
-// carries no history scope either, so any deployment where this seam works at all
-// is running an operator-expanded SLACK_BOT_SCOPES this repo cannot see. Whether
-// the files array arrives is therefore unknown from here; `subtype` is the signal
-// to assume is load-bearing, and a change to it would silently stop annotating
-// captions with every test still green, since the tests all supply the fields
-// directly.
+// DIFFERENT Slack surface, and the two surfaces were measured to disagree about
+// WHICH signal carries an upload. Do not read the two signals as backing each
+// other up here.
+//
+// Measured 2026-08-14 against the live workspace (T09UP622L90): 4,668 messages
+// read back through conversations.history across 17 public, private and IM
+// conversations, 265 of them file-bearing. `file_share` appeared ZERO times —
+// every one of those messages came back as subtype "" with a populated files
+// array. So on THIS surface `files` is the load-bearing signal and `subtype` is
+// the one that never fires, the exact inverse of the event path, where the same
+// investigation confirmed Slack still stamps file_share (a live
+// "agent: unsupported media" line carrying file_share_subtype=true). Both
+// branches stay: between them, the two surfaces need both.
+//
+// The same read settles the scope question this comment used to leave open. The
+// live bot token holds 13 scopes and files:read is NOT one of them, yet history
+// still returned full file metadata — filetype, mode, mimetype, file_access —
+// for hosted, external and snippet files. The one restricted file came back with
+// file_access "access_denied" and null metadata, and STILL occupied an entry in
+// the array, so presence detection survives even where metadata does not. The
+// files array arrives without files:read. DefaultBotScopes accounts for four of
+// those 13 and carries no history scope, so a deployment reaching this seam is
+// running an operator-expanded SLACK_BOT_SCOPES this repo cannot see — but do
+// not read the deployed set off the slack_bot_scopes attribute in
+// qurl-bot-slack-workspace-state either: it still records the four defaults
+// against a live token holding 13, so it reflects the grant some earlier install
+// observed rather than the one in force.
+//
+// Still ASSUMED: the scan read conversations.history while this seam reads
+// conversations.replies — the same message objects from the same API family, but
+// not separately measured — and it was one workspace on one day, so a plan
+// difference, an Enterprise Grid install, or an upstream change could still move
+// it. If the files array stops arriving, captions silently stop being annotated
+// with every test still green, since the tests supply both fields directly and
+// never read Slack.
 func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
 	var parsed slackEventFiles
 	if len(files) > 0 && json.Unmarshal(files, &parsed) != nil {
