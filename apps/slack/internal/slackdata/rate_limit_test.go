@@ -382,11 +382,7 @@ func (f *rateLimitDDB) UpdateItem(_ context.Context, in *dynamodb.UpdateItemInpu
 			return nil, err
 		}
 		if !ok {
-			condErr := &ddbtypes.ConditionalCheckFailedException{Message: aws.String("conditional check failed")}
-			if in.ReturnValuesOnConditionCheckFailure == ddbtypes.ReturnValuesOnConditionCheckFailureAllOld && present {
-				condErr.Item = cloneRateLimitTestItem(existing)
-			}
-			return nil, condErr
+			return nil, condFailure(in.ReturnValuesOnConditionCheckFailure, existing)
 		}
 	}
 
