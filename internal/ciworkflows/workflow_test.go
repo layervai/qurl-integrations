@@ -1,4 +1,14 @@
-package slack
+// Package ciworkflows holds repo-wide CI contract tests: assertions about the
+// shape of every workflow in .github/workflows, not about any one app.
+//
+// It lives here rather than under apps/<app>/ because an app workflow's paths
+// filter decides when that app's tests run, and these tests read every
+// workflow file. Sitting in apps/slack, they inherited slack.yml's filter,
+// which matches `.github/workflows/slack.yml` alone — so a PR adding a new
+// workflow skipped them entirely and shipped an unregistered aggregate green
+// (#1081). `.github/workflows/workflow-contract.yml` runs this package
+// unfiltered on every PR instead.
+package ciworkflows
 
 import (
 	"context"

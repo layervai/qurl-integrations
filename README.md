@@ -114,6 +114,12 @@ block every PR that happens not to touch that app. The detector's filter is the 
 for which paths need validation, and `shared-test.yml` runs all Go app tests when `shared/`
 is modified.
 
+That pattern is itself under test. `internal/ciworkflows` reads every file in
+`.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
+spec, leaves a quality gate out of `required.needs`, or ships a verifier that treats a skipped
+gate as a pass. Its check — `Workflow contract` — is unfiltered and reports on every PR, because
+a check behind a paths filter cannot police the paths filters (#1081).
+
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2025-present LayerV, Inc.
