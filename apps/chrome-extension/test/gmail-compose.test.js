@@ -297,9 +297,8 @@ function createComposeBody(overrides) {
 }
 
 // Drive candidate bodies through the full insertion path and assert which one wins. Ranking tests
-// put the losing candidate first whenever removing the term under test would produce a tie; the
-// stable sort therefore preserves the wrong candidate instead of letting the mutation pass by
-// coincidence.
+// put a losing candidate first: removing an isolated term leaves that wrong body in place through
+// the stable sort, while inverting precedence lets its conflicting lower-priority term win.
 async function assertComposeRanking(t, candidates, expectedLabel) {
   const focusCalls = [];
   const caretMoves = [];
@@ -691,9 +690,10 @@ test('findComposeBody breaks a top tie on the leftmost compose body', async func
 
 test('findComposeBody breaks an identical-position tie on the largest compose body', async function (t) {
   await assertComposeRanking(t, [
-    { label: 'smaller', zIndex: 20, rect: { width: 320, height: 24, top: 120, left: 320 } },
-    { label: 'larger', zIndex: 20, rect: { width: 480, height: 64, top: 120, left: 320 } },
-  ], 'larger');
+    { label: 'wide-short', zIndex: 20, rect: { width: 640, height: 24, top: 120, left: 320 } },
+    { label: 'narrow-tall', zIndex: 20, rect: { width: 240, height: 96, top: 120, left: 320 } },
+    { label: 'largest', zIndex: 20, rect: { width: 480, height: 64, top: 120, left: 320 } },
+  ], 'largest');
 });
 
 test('findComposeBody breaks a tie between identically placed compose bodies on z-index', async function (t) {
