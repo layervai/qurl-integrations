@@ -584,16 +584,13 @@ func TestAgentHistoryAttachmentNoteStatesTheBoundary(t *testing.T) {
 	}
 }
 
-// TestAgentUnsupportedMediaReplyMatchesCanvasDetection couples the reply to the
-// captured classifier-visible canvas shape. Canvases belong in the refusal only
-// when that shape is detectable; changing one side without the other is contract
-// drift in either direction.
-func TestAgentUnsupportedMediaReplyMatchesCanvasDetection(t *testing.T) {
-	canvasEvent := capturedCanvasEvent()
-	detected := agentEventHasUpload(&canvasEvent)
-	namedInReply := strings.Contains(strings.ToLower(agentUnsupportedMediaReply), "canvas")
-	if detected != namedInReply {
-		t.Fatalf("canvas contract mismatch: detected=%v named_in_reply=%v reply=%q", detected, namedInReply, agentUnsupportedMediaReply)
+// TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases pins the user-facing half
+// of the observed contract. TestAgentEventHasUpload separately records that the
+// captured canvas event has no upload signal; this test prevents the reply from
+// claiming that such an event is refused.
+func TestAgentUnsupportedMediaReplyDoesNotPromiseCanvases(t *testing.T) {
+	if strings.Contains(strings.ToLower(agentUnsupportedMediaReply), "canvas") {
+		t.Fatalf("agentUnsupportedMediaReply promises canvases the detector cannot see: %q", agentUnsupportedMediaReply)
 	}
 }
 
@@ -1331,6 +1328,8 @@ func TestUnsupportedMediaReplyOffersAReachableRoute(t *testing.T) {
 // any medium, so the takeaway generalizes to linked media. Both checks are
 // positional so rewording stays free.
 func TestUnsupportedMediaReplyLeadsWithTheTextOnlyRule(t *testing.T) {
+	// Keep canvas here even though the current reply omits it. Absent nouns are
+	// ignored below; if canvas is ever reintroduced, its ordering stays guarded.
 	nouns := []string{"file", "image", "canvas"}
 	firstNoun := len(agentUnsupportedMediaReply)
 	for _, noun := range nouns {
