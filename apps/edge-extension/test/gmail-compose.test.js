@@ -320,6 +320,11 @@ async function assertComposeRanking(t, candidates, expectedLabel) {
     return candidate.label === expectedLabel;
   });
   assert.notEqual(expectedIndex, -1, `missing expected candidate ${expectedLabel}`);
+  assert.notEqual(
+    expectedIndex,
+    0,
+    'list a loser first so a dropped comparator term cannot pass on stable DOM order'
+  );
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
