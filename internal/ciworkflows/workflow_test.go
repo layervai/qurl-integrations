@@ -24,7 +24,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const slackQualityGateCondition = "needs.changes.outputs.slack == 'true'"
+const (
+	slackQualityGateCondition = "needs.changes.outputs.slack == 'true'"
+	workflowContractCheckName = "Workflow Contract"
+)
 
 type requiredWorkflowSpec struct {
 	name                 string
@@ -127,6 +130,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 }
 
 type githubWorkflow struct {
+	On   map[string]any       `yaml:"on"`
 	Jobs map[string]githubJob `yaml:"jobs"`
 }
 
@@ -141,6 +145,45 @@ type step struct {
 	Name  string `yaml:"name"`
 	Run   string `yaml:"run"`
 	Shell string `yaml:"shell"`
+}
+
+// TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
+// these repo-wide tests useful. A paths filter or conditional job would put
+// the check back behind the same green-when-broken hole this package exists to
+// close: a workflow edit outside the filter could violate the contract without
+// causing this check to report at all.
+func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
+	workflow := readWorkflow(t, "workflow-contract.yml")
+
+	pullRequest, ok := workflow.On["pull_request"]
+	if !ok {
+		t.Fatal("workflow-contract.yml must run on pull_request")
+	}
+	if pullRequest != nil {
+		config, ok := pullRequest.(map[string]any)
+		if !ok {
+			t.Fatalf("workflow-contract.yml pull_request trigger has unexpected type %T", pullRequest)
+		}
+		for _, filter := range []string{"paths", "paths-ignore"} {
+			if _, ok := config[filter]; ok {
+				t.Fatalf("workflow-contract.yml pull_request trigger must not define %s", filter)
+			}
+		}
+	}
+
+	contract, ok := workflow.Jobs["contract"]
+	if !ok {
+		t.Fatal("workflow-contract.yml is missing contract job")
+	}
+	if contract.Name != workflowContractCheckName {
+		t.Fatalf("contract job name = %q, want %q", contract.Name, workflowContractCheckName)
+	}
+	if strings.TrimSpace(contract.If) != "" {
+		t.Fatalf("contract job must be unconditional, got if = %q", contract.If)
+	}
+	if contract.Needs != nil {
+		t.Fatalf("contract job must not depend on another job, got needs = %#v", contract.Needs)
+	}
 }
 
 // TestRequiredWorkflowSpecsCoverEveryAggregate keeps requiredWorkflowSpecs

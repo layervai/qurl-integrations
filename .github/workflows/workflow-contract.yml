@@ -48,12 +48,13 @@ jobs:
       - name: Verify test prerequisites
         run: command -v bash && command -v jq
 
+      - name: Test workflow contract
+        run: go test -count=1 ./internal/ciworkflows/...
+
+      # Test first so a linter failure cannot hide the contract result.
       - name: Lint workflow contract
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
           version: v2.10.1
           verify: false # Avoid a network-dependent JSONSchema fetch; the pinned linter still loads and applies the config.
           args: --timeout=5m ./internal/ciworkflows/...
-
-      - name: Test workflow contract
-        run: go test -count=1 ./internal/ciworkflows/...
