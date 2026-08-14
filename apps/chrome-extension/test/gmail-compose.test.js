@@ -296,6 +296,23 @@ function createComposeBody(overrides) {
   }, overrides);
 }
 
+// The five compose-ranking tests below pin compareComposeBodies a term at a time: four isolate a
+// single term by tying every other one, and the last sets two terms against each other to pin the
+// order they are consulted in. All five need the same two things — bodies that are identical
+// except in the rect members the term under test reads, and a record of which one the content
+// script ended up picking. `rect` is returned verbatim, so a test spells out every member its
+// terms consult and leaves the rest tied; a term meant to stay silent has nothing to speak on.
+function createRankedCompose(focusCalls, label, rect) {
+  return createComposeBody({
+    focus() {
+      focusCalls.push(label);
+    },
+    getBoundingClientRect() {
+      return rect;
+    },
+  });
+}
+
 test('findComposeBodyAsync observes documentElement when document.body is not ready', async function (t) {
   let composeBodies = [];
   const execCalls = [];
@@ -614,22 +631,156 @@ test('Selection API fallback runs when execCommand reports insertion failure', a
 test('findComposeBody prefers the topmost visible compose body when none is focused', async function (t) {
   const caretMoves = [];
   const focusCalls = [];
-  const backgroundCompose = createComposeBody({
-    focus() {
-      focusCalls.push('background');
+
+  // Both bodies report the same z-index and the same `left`, which leaves `top` as the only term
+  // in compareComposeBodies with an opinion — and is what makes this test's name true. It used to
+  // hand the winner z-index 20 against the loser's 1 as well, and the comparator returns on the
+  // z-index delta before it reads a rect at all, so deleting `top` (and `left` with it) left this
+  // test green and the name claiming coverage nothing held.
+  //
+  // DOM order is load-bearing: `matches.sort` is stable, so a comparator that stopped consulting
+  // `top` would return 0 for this pair and hand the win to whichever element querySelectorAll
+  // yields first. Listing the lower copy first is what turns that regression into a failure here
+  // rather than a coincidentally identical result.
+  const lowerCompose = createRankedCompose(focusCalls, 'lower', { width: 320, height: 24, top: 240, left: 320 });
+  const topmostCompose = createRankedCompose(focusCalls, 'topmost', { width: 320, height: 24, top: 120, left: 320 });
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll(selector) {
+        return selector.includes(':focus')
+          ? []
+          : [lowerCompose, topmostCompose];
+      },
     },
-    getBoundingClientRect() {
-      return { width: 320, height: 24, top: 240, left: 640 };
+    globals: {
+      getComputedStyle() {
+        return { display: 'block', visibility: 'visible', zIndex: '20' };
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
     },
   });
-  const foregroundCompose = createComposeBody({
-    focus() {
-      focusCalls.push('foreground');
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['topmost']);
+  assert.deepEqual(caretMoves, [topmostCompose]);
+});
+
+test('findComposeBody breaks a top tie on the leftmost compose body', async function (t) {
+  const caretMoves = [];
+  const focusCalls = [];
+
+  // z-index and `top` tie here, so `left` is the sole term left with an opinion. The test above
+  // cannot pin it: its bodies already share a `left`, and `top` separates them before the
+  // comparator ever reaches the `left` term.
+  //
+  // The rightward copy is listed first for the stable-sort reason spelled out above.
+  const rightmostCompose = createRankedCompose(focusCalls, 'rightmost', { width: 320, height: 24, top: 120, left: 640 });
+  const leftmostCompose = createRankedCompose(focusCalls, 'leftmost', { width: 320, height: 24, top: 120, left: 320 });
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll(selector) {
+        return selector.includes(':focus')
+          ? []
+          : [rightmostCompose, leftmostCompose];
+      },
     },
-    getBoundingClientRect() {
-      return { width: 320, height: 24, top: 120, left: 320 };
+    globals: {
+      getComputedStyle() {
+        return { display: 'block', visibility: 'visible', zIndex: '20' };
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
     },
   });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['leftmost']);
+  assert.deepEqual(caretMoves, [leftmostCompose]);
+});
+
+test('findComposeBody breaks an identical-position tie on the largest compose body', async function (t) {
+  const caretMoves = [];
+  const focusCalls = [];
+
+  // z-index, `top` and `left` all tie, which leaves `width * height` as the last term that can
+  // separate these two. It also sorts the opposite way round from the geometry above it — larger
+  // area wins where smaller `top`/`left` wins — so a sign copied from the terms above fails here
+  // instead of passing by symmetry.
+  //
+  // The smaller copy is listed first for the stable-sort reason spelled out above.
+  const smallerCompose = createRankedCompose(focusCalls, 'smaller', { width: 320, height: 24, top: 120, left: 320 });
+  const largerCompose = createRankedCompose(focusCalls, 'larger', { width: 480, height: 64, top: 120, left: 320 });
+
+  const { messageListener } = createComposeSandbox(t, {
+    document: {
+      querySelectorAll(selector) {
+        return selector.includes(':focus')
+          ? []
+          : [smallerCompose, largerCompose];
+      },
+    },
+    globals: {
+      getComputedStyle() {
+        return { display: 'block', visibility: 'visible', zIndex: '20' };
+      },
+    },
+    decorateRange(range) {
+      range.selectNodeContents = function (node) {
+        caretMoves.push(node);
+      };
+    },
+  });
+
+  const response = await new Promise(function (resolve) {
+    assert.equal(messageListener({
+      type: 'INSERT_LINKS',
+      results: [{ filename: 'demo.txt', link: 'https://files.example.com/q/demo', expiry: null }],
+    }, null, resolve), true);
+  });
+
+  assert.equal(response.success, true);
+  assert.deepEqual(focusCalls, ['larger']);
+  assert.deepEqual(caretMoves, [largerCompose]);
+});
+
+test('findComposeBody breaks a tie between identically placed compose bodies on z-index', async function (t) {
+  const caretMoves = [];
+  const focusCalls = [];
+
+  // Both bodies here report the same top, the same left and the same area, which leaves z-index
+  // as the sole term with an opinion — the mirror image of the three tests above, each of which
+  // ties z-index so that one geometry term decides.
+  //
+  // DOM order is load-bearing for the same reason it is up there: `matches.sort` is stable, so a
+  // comparator that stopped consulting z-index would return 0 for this pair and hand the win to
+  // whichever element querySelectorAll yields first. Listing the background copy first is what
+  // turns that regression into a failure here instead of a silently identical result.
+  const tiedRect = { width: 320, height: 24, top: 120, left: 320 };
+  const backgroundCompose = createRankedCompose(focusCalls, 'background', tiedRect);
+  const foregroundCompose = createRankedCompose(focusCalls, 'foreground', tiedRect);
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
@@ -666,45 +817,32 @@ test('findComposeBody prefers the topmost visible compose body when none is focu
   assert.deepEqual(caretMoves, [foregroundCompose]);
 });
 
-test('findComposeBody breaks a tie between identically placed compose bodies on z-index', async function (t) {
+test('findComposeBody prefers a higher z-index over a higher-placed compose body', async function (t) {
   const caretMoves = [];
   const focusCalls = [];
 
-  // compareComposeBodies leads with z-index and every term after it is geometry, so the
-  // tie-break only decides anything once the rects tie outright. Both bodies here report the
-  // same top, the same left, and the same area, which leaves z-index as the sole term with an
-  // opinion — the test above cannot make that claim, since its rects differ by `top` and so
-  // `top` alone already picks the foreground copy.
+  // Each test above isolates one term, so none of them pins the *order* the terms are consulted
+  // in: where a single term has an opinion, moving it earlier or later changes nothing. Here
+  // z-index and `top` disagree outright — the topmost body is the one with the lower z-index — so
+  // the raised copy only wins if the comparator settles on z-index before it reads a rect.
+  // Swapping those two terms flips this result; terms that agree could never catch that.
   //
-  // DOM order is load-bearing for the same reason: `matches.sort` is stable, so a comparator
-  // that stopped consulting z-index would return 0 for this pair and hand the win to whichever
-  // element querySelectorAll yields first. Listing the background copy first is what turns that
-  // regression into a failure here instead of a silently identical result.
-  function createTiedCompose(label) {
-    return createComposeBody({
-      focus() {
-        focusCalls.push(label);
-      },
-      getBoundingClientRect() {
-        return { width: 320, height: 24, top: 120, left: 320 };
-      },
-    });
-  }
-
-  const backgroundCompose = createTiedCompose('background');
-  const foregroundCompose = createTiedCompose('foreground');
+  // The topmost copy is listed first, so dropping the z-index term fails here rather than
+  // resolving to DOM order and passing by accident.
+  const topmostCompose = createRankedCompose(focusCalls, 'topmost', { width: 320, height: 24, top: 120, left: 320 });
+  const raisedCompose = createRankedCompose(focusCalls, 'raised', { width: 320, height: 24, top: 240, left: 320 });
 
   const { messageListener } = createComposeSandbox(t, {
     document: {
       querySelectorAll(selector) {
         return selector.includes(':focus')
           ? []
-          : [backgroundCompose, foregroundCompose];
+          : [topmostCompose, raisedCompose];
       },
     },
     globals: {
       getComputedStyle(element) {
-        if (element === foregroundCompose) {
+        if (element === raisedCompose) {
           return { display: 'block', visibility: 'visible', zIndex: '20' };
         }
         return { display: 'block', visibility: 'visible', zIndex: '1' };
@@ -725,8 +863,8 @@ test('findComposeBody breaks a tie between identically placed compose bodies on 
   });
 
   assert.equal(response.success, true);
-  assert.deepEqual(focusCalls, ['foreground']);
-  assert.deepEqual(caretMoves, [foregroundCompose]);
+  assert.deepEqual(focusCalls, ['raised']);
+  assert.deepEqual(caretMoves, [raisedCompose]);
 });
 
 test('pending INSERT_LINKS requests are not evicted before they complete', function (t) {
