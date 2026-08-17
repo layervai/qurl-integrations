@@ -25,7 +25,7 @@ const (
 // EnterOutput is the repo-owned JSON shape for `qurl enter`. It projects the
 // qurl-go ResourceHandle into a stable, explicitly-tagged contract this repo
 // controls, so an SDK type change cannot silently alter `enter -o json` output.
-// It deliberately mirrors ALL ResourceHandle fields (RedirectURL, OpenSeconds) —
+// It deliberately mirrors ALL ResourceHandle fields (ResourceURL, OpenSeconds) —
 // the handle exposes nothing else. The `target_url` key matches resolve's JSON
 // output, and open_seconds carries omitempty because the SDK reports 0 as "not
 // provided".
@@ -38,7 +38,7 @@ type EnterOutput struct {
 // enterOutputFrom projects a qurl-go ResourceHandle into the repo-owned shape.
 func enterOutputFrom(handle *qurlsdk.ResourceHandle) EnterOutput {
 	return EnterOutput{
-		Target:      handle.RedirectURL,
+		Target:      handle.ResourceURL,
 		OpenSeconds: handle.OpenSeconds,
 	}
 }
@@ -179,7 +179,7 @@ func (f TableFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
 	wr.printf("%s\n\n", f.green.Sprint("Portal entered"))
-	wr.printf("%s\t%s\n", f.bold.Sprint("Target:"), handle.RedirectURL)
+	wr.printf("%s\t%s\n", f.bold.Sprint("Target:"), handle.ResourceURL)
 	// TODO(upstream-contract): see EnterOutput — 0 means "not provided" per qurl-go, not a 0-second grant.
 	if handle.OpenSeconds > 0 {
 		wr.printf("%s\t%ds\n", f.bold.Sprint("Access:"), handle.OpenSeconds)

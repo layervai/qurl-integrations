@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/layervai/qurl-go/qurl"
-	"github.com/layervai/qurl-go/qv2"
 )
 
 // enterForbiddenWords is the customer-surface jargon contract for `qurl enter`:
@@ -197,7 +196,7 @@ func TestStaticTrustConfig_IssuerKeyOnly_RelayFailsClosed(t *testing.T) {
 		t.Fatal("expected a non-nil (empty) relay allowlist")
 	}
 	// Any relay_url must be rejected by the empty allowlist.
-	if err := qv2.ValidateRelayURL("https://relay.qurl.link/", cfg.RelayAllowlist); !errors.Is(err, qv2.ErrRelayURL) {
+	if err := qurl.ValidateRelayURL("https://relay.qurl.link/", cfg.RelayAllowlist); !errors.Is(err, qurl.ErrRelayURL) {
 		t.Fatalf("expected ErrRelayURL for empty allowlist, got: %v", err)
 	}
 }

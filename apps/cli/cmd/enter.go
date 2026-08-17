@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-go/qurl"
-	"github.com/layervai/qurl-go/qv2"
 )
 
 // Friendly, jargon-free messages surfaced to customers. These are the ONLY
@@ -151,13 +150,13 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 		}
 		derByKID[kid] = der
 	}
-	ts, err := qv2.NewTrustStoreFromDER(derByKID)
+	ts, err := qurl.NewTrustStoreFromDER(derByKID)
 	if err != nil {
 		return qurl.Config{}, fmt.Errorf("build trust store: %w", err)
 	}
 
-	// qv2.NewRelayAllowlist already trims+lowercases each entry and drops empties
-	// (qv2/relay.go), so a padded value like " relay.host " is normalized and still
+	// qurl.NewRelayAllowlist already trims+lowercases each entry and drops empties
+	// (the qurl facade re-export of the relay allowlist), so a padded value like " relay.host " is normalized and still
 	// matches — passing the raw slice here is safe and no CLI-side trimming is needed.
 	// We reject a fully empty/whitespace entry explicitly only to surface a clear CLI
 	// error instead of the allowlist silently dropping it (which would mask a typo'd flag).
@@ -169,6 +168,6 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 
 	return qurl.Config{
 		TrustStore:     ts,
-		RelayAllowlist: qv2.NewRelayAllowlist(relays),
+		RelayAllowlist: qurl.NewRelayAllowlist(relays),
 	}, nil
 }
