@@ -28,7 +28,7 @@
 //     (DynamoDB Scan + GetItem, KMS Decrypt for the per-workspace key, and
 //     GET /v1/resources) and reports what it WOULD purge.
 //   - Mutating requires -dry-run=false. Against a prod-looking deployment
-//     (the -env label, a purge-target table name, or the qURL endpoint says
+//     (the -env label, an environment-bearing table name, or the qURL endpoint says
 //     "prod") it ALSO requires the explicit -allow-prod-purge opt-in — the
 //     "rail" that makes an irreversible prod write a deliberate act, not a
 //     flag-default accident. See looksProd for why workspace_state is not
@@ -193,22 +193,31 @@ func validateRails(f *flags) error {
 }
 
 // looksProd reports whether this run targets production: the operator label, a
-// "prod" substring in a resolved purge-target table name or the qurl-service
-// endpoint, or the canonical prod API origin — the endpoint is the clearest
-// prod signal, and the real one (api.layerv.ai) carries no "prod" substring, so
-// it gets its own check. Defense-in-depth: a forgotten -env=prod still trips the
+// "prod" substring in a resolved environment-bearing table name or the qurl-service
+// endpoint, or a layerv.ai endpoint — the endpoint is the clearest prod signal,
+// and the real one (api.layerv.ai) carries no "prod" substring, so it gets its
+// own check. That last check matches the whole layerv.ai domain, not the exact
+// api.layerv.ai host, so any *.layerv.ai endpoint trips: deliberately broad, so
+// don't narrow it to the canonical host — a prod endpoint on another subdomain
+// would stop tripping. Defense-in-depth: a forgotten -env=prod still trips the
 // rail when the wiring says prod. False positives just require the explicit
 // opt-in flag.
 //
-// f.workspaceStateTable is deliberately NOT scanned, because scanning it can
-// never trip: qurl-integrations-infra renders that table as
+// f.workspaceStateTable is deliberately NOT scanned, for one mechanical reason:
+// scanning it can never trip. qurl-integrations-infra renders that table as
 // "${local.project}-workspace-state" (qurl-bot-slack/terraform/workspace_state.tf)
 // with no var.environment interpolation, so it is bare
-// `qurl-bot-slack-workspace-state` in sandbox AND prod. The two purge-target
-// tables above DO carry the env (`qurl-bot-slack-production-channel-policies`,
-// via modules/qurl-slack-ddb), and they are the only tables this rail guards —
-// statecrawl reads workspace_state through auth.Provider.APIKey and never
-// mutates it. Don't re-add it: a check that cannot fire reads as coverage that
+// `qurl-bot-slack-workspace-state` in sandbox AND prod. The two names above DO
+// carry the env (`qurl-bot-slack-production-channel-policies`, via
+// modules/qurl-slack-ddb), which is the entire reason they are worth scanning.
+//
+// Carrying the environment is the ONLY criterion. Do NOT generalize this to
+// "tables statecrawl mutates" — that rule would be wrong and would cost real
+// coverage: the only table ever written is channel_policies (via
+// PurgeResourceFromChannel), and workspace_mappings is scanned despite never
+// being mutated, because its name carries the env and so CAN fire.
+//
+// Don't re-add workspace_state: a check that cannot fire reads as coverage that
 // isn't there. Prod stays covered by those two names plus the mandatory
 // QURL_ENDPOINT (validateConfig), which is api.layerv.ai in prod.
 //

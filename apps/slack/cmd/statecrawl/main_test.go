@@ -8,7 +8,7 @@ import (
 
 // Deployment-shaped fixture names, mirroring what qurl-integrations-infra
 // actually renders, so a case claiming to exercise "the sandbox wiring" asserts
-// against the real string. modules/qurl-slack-ddb prefixes the two purge-target
+// against the real string. modules/qurl-slack-ddb prefixes the two scanned
 // tables with `qurl-bot-slack-<env>-`; workspace_state is env-agnostic
 // (qurl-bot-slack/terraform/workspace_state.tf) and byte-identical in sandbox
 // and prod, which is exactly why looksProd does not scan it.
@@ -100,7 +100,7 @@ func TestParseFlags_ProdPurgeWithAllowAccepted(t *testing.T) {
 // The workspace-state table deliberately carries its real, environment-agnostic
 // infra name here rather than a "prod" one: it is not scanned (see looksProd),
 // so a prod-flavored value would make this test pass for a reason it does not
-// actually exercise, and would keep passing if the purge-target scan broke.
+// actually exercise, and would keep passing if the table-name scan broke.
 func TestParseFlags_ProdDetectedByTableName(t *testing.T) {
 	args := []string{
 		"-channel-policies-table", prodPoliciesTable,
@@ -152,15 +152,20 @@ func TestLooksProd(t *testing.T) {
 		{"mappings table prod", flags{workspaceMappingsTable: "qurl-bot-slack-prod-wm"}, true},
 		{"endpoint prod substring", flags{qurlEndpoint: "https://qurl-prod.example/v1"}, true},
 		{"endpoint canonical prod origin", flags{qurlEndpoint: "https://api.layerv.ai/v1"}, true},
+		// The endpoint check matches the whole layerv.ai domain, not the exact
+		// api.layerv.ai host. Pin that breadth: narrowing it to the canonical
+		// host would turn any other prod subdomain into a silent bypass of the
+		// rail, and nothing else here would catch that.
+		{"endpoint non-canonical layerv.ai host", flags{qurlEndpoint: "https://staging.layerv.ai/v1"}, true},
 		{"endpoint sandbox origin", flags{qurlEndpoint: "https://api.layerv.xyz/v1"}, false},
 		{"all sandbox", flags{envLabel: "sandbox", channelPoliciesTable: "qurl-sandbox-cp"}, false},
 
 		// workspace_state is NOT scanned — its infra-rendered name carries no
 		// environment in ANY deployment, so the check could never fire, and it
-		// is not a purge target (see looksProd's comment). Pin the absence: if
+		// carries no environment (see looksProd's comment). Pin the absence: if
 		// someone re-adds the dead loop entry, this case fails and points them
 		// at the reasoning rather than letting it read as real coverage.
-		{"state table prod alone does not trip", flags{workspaceStateTable: "qurl-prod-state"}, false},
+		{"state table is not scanned at all", flags{workspaceStateTable: "qurl-prod-state"}, false},
 
 		// Real deployment wirings, with the -env label an operator forgot to
 		// pass. Prod must still trip on what the rail actually guards; sandbox

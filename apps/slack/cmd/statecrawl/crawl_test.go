@@ -25,7 +25,9 @@ const (
 )
 
 // crawlFlags returns a flags value pointed at the qURL test server, in either
-// dry-run or apply mode. Tables are sandbox-named so the prod rail stays off.
+// dry-run or apply mode. The two scanned tables are sandbox-named so the prod
+// rail stays off; workspaceStateTable carries its real env-agnostic infra name,
+// which the rail does not look at either way.
 func crawlFlags(endpoint string, dryRun bool) *flags {
 	return &flags{
 		envLabel:               "sandbox",

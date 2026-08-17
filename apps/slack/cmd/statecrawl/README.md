@@ -44,10 +44,14 @@ finding and every mutation is an auditable record.
   resource list.
 - **Prod purge requires an explicit opt-in.** A mutating run against a
   prod-looking deployment — the `-env` label says `prod`/`production`, **or** a
-  resolved **purge-target** table name (`channel_policies` /
-  `workspace_mappings`) contains `prod`, **or** the qURL endpoint contains `prod`
-  or is the canonical prod origin `api.layerv.ai` (defense-in-depth) — is refused
-  unless you pass `-allow-prod-purge`. The reject error names the flag.
+  resolved **environment-bearing** table name (`channel_policies` /
+  `workspace_mappings` — the two whose infra names carry the env) contains `prod`, **or** the qURL endpoint contains `prod`
+  or **any `layerv.ai` host** (defense-in-depth) — is refused unless you pass
+  `-allow-prod-purge`. The reject error names the flag. That last check matches
+  the whole domain, not just the canonical prod origin `api.layerv.ai`: any
+  `*.layerv.ai` endpoint trips the rail. That breadth is deliberate — don't
+  narrow it to the exact host, or a prod endpoint on another subdomain stops
+  tripping.
   `workspace_state` is **not** part of this check: infra names that table
   `qurl-bot-slack-workspace-state` in every environment, so it carries no prod
   signal, and statecrawl only ever reads it. See `looksProd` in `main.go`.
