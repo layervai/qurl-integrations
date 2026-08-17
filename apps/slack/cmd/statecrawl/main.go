@@ -230,6 +230,10 @@ func looksProd(f *flags) bool {
 	case "prod", "production":
 		return true
 	}
+	// f.qurlEndpoint is scanned twice on purpose: here for a literal "prod"
+	// substring, and again below for the layerv.ai domain. The two signals are
+	// independent — a prod endpoint may carry either, both, or (as the
+	// canonical api.layerv.ai does) only the domain.
 	for _, v := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.qurlEndpoint} {
 		if strings.Contains(strings.ToLower(v), "prod") {
 			return true

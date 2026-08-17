@@ -21,18 +21,27 @@ const (
 	testKMSKeyARN        = "arn:aws:kms:us-east-1:111122223333:key/abc"
 )
 
-// baseArgs returns the minimal required flags so a test can focus on the rail
-// under exercise without tripping the missing-config check. Tables/endpoint are
-// passed explicitly so the result is hermetic regardless of the runner's env.
-func baseArgs(extra ...string) []string {
+// wiringArgs builds a complete flag set from an explicit deployment wiring, so
+// a test can state the shape it exercises — which tables, which endpoint —
+// without repeating the flag names or tripping the missing-config check. The
+// workspace-state table and CMK are fixed: neither varies by environment, and
+// no rail looks at them.
+func wiringArgs(policiesTable, mappingsTable, endpoint string, extra ...string) []string {
 	args := []string{
-		"-channel-policies-table", sandboxPoliciesTable,
-		"-workspace-mappings-table", sandboxMappingsTable,
+		"-channel-policies-table", policiesTable,
+		"-workspace-mappings-table", mappingsTable,
 		"-workspace-state-table", stateTableName,
 		"-kms-key-arn", testKMSKeyARN,
-		"-qurl-endpoint", "https://sandbox.qurl.example",
+		"-qurl-endpoint", endpoint,
 	}
 	return append(args, extra...)
+}
+
+// baseArgs is the sandbox wiring — the minimal required flags so a test can
+// focus on the rail under exercise. Passed explicitly rather than read from the
+// environment so the result is hermetic regardless of the runner's env.
+func baseArgs(extra ...string) []string {
+	return wiringArgs(sandboxPoliciesTable, sandboxMappingsTable, "https://sandbox.qurl.example", extra...)
 }
 
 func parse(t *testing.T, args []string) (*flags, error) {
@@ -102,15 +111,7 @@ func TestParseFlags_ProdPurgeWithAllowAccepted(t *testing.T) {
 // so a prod-flavored value would make this test pass for a reason it does not
 // actually exercise, and would keep passing if the table-name scan broke.
 func TestParseFlags_ProdDetectedByTableName(t *testing.T) {
-	args := []string{
-		"-channel-policies-table", prodPoliciesTable,
-		"-workspace-mappings-table", prodMappingsTable,
-		"-workspace-state-table", stateTableName,
-		"-kms-key-arn", testKMSKeyARN,
-		"-qurl-endpoint", "https://qurl.example",
-		"-dry-run=false",
-	}
-	_, err := parse(t, args)
+	_, err := parse(t, wiringArgs(prodPoliciesTable, prodMappingsTable, "https://qurl.example", "-dry-run=false"))
 	if err == nil {
 		t.Fatal("parseFlags accepted a purge against prod-named tables without -allow-prod-purge")
 	}
@@ -126,6 +127,26 @@ func TestParseFlags_SandboxPurgeNoAllowAccepted(t *testing.T) {
 	f, err := parse(t, baseArgs("-env", "sandbox", "-dry-run=false"))
 	if err != nil {
 		t.Fatalf("parseFlags rejected a sandbox purge without -allow-prod-purge: %v", err)
+	}
+	if f.dryRun {
+		t.Error("dryRun = true, want false")
+	}
+}
+
+// TestParseFlags_UnlabeledSandboxPurgeAccepted is the acceptance-path
+// complement to TestParseFlags_ProdDetectedByTableName: the same shape of run
+// with no -env label at all, wired entirely to sandbox, must be ACCEPTED
+// without -allow-prod-purge.
+//
+// Worth its own case because the sibling acceptance test passes -env sandbox,
+// so an explicit non-prod label is doing the work there. This one pins that an
+// UNLABELED run is not prod-by-default — a plausible "hardening" (treat a
+// missing label as prod) would break every unlabeled sandbox purge while
+// leaving every rejection test green.
+func TestParseFlags_UnlabeledSandboxPurgeAccepted(t *testing.T) {
+	f, err := parse(t, wiringArgs(sandboxPoliciesTable, sandboxMappingsTable, "https://api.layerv.xyz", "-dry-run=false"))
+	if err != nil {
+		t.Fatalf("parseFlags rejected an unlabeled all-sandbox purge: %v", err)
 	}
 	if f.dryRun {
 		t.Error("dryRun = true, want false")
