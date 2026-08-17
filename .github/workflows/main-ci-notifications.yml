@@ -16,6 +16,8 @@ on:
       - "chrome-extension: Build and Test"
       - "edge-extension: Build and Test"
       - "teams: Build and Test"
+      - "cli: Build and Test"
+      - "cli: Nightly"
       - "origins/s3-static-connector: Build and Publish"
       - "Shared Tests (All Apps)"
       - "e2e: Build and Test"
@@ -105,6 +107,12 @@ jobs:
               ;;
             "teams: Build and Test")
               impact="Teams app typecheck, lint, tests, or build failed on main. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
+              ;;
+            "cli: Build and Test")
+              impact="qURL CLI quality gates failed on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
+              ;;
+            "cli: Nightly")
+              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot) failed. No artifact is affected; triage whether this is a real regression or harness flake before the next CLI release."
               ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish failed. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."

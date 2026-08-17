@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean check-i18n-parity test-i18n-parity
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-actions-pins test-actions-pins test-install-script check-release-please-sync check-extension-lockstep check-notification-payload test-validated-base check-cli check-discord test-discord check-chrome-extension check-edge-extension check-teams check-e2e check-node pre-commit-install pre-commit-run clean check-i18n-parity test-i18n-parity
 
 VERSION ?= dev
 
@@ -14,9 +14,10 @@ fmt:
 
 # Pinned so local runs match CI exactly. Keep in sync with every pin site:
 # .github/workflows/slack.yml (2), .github/workflows/shared-test.yml (2),
-# .github/workflows/workflow-contract.yml (1), and .pre-commit-config.yaml's
-# golangci-lint rev. An unpinned PATH install drifts: newer golangci-lint
-# versions flag issues the pinned config is clean on.
+# .github/workflows/cli.yml (2), .github/workflows/workflow-contract.yml (1),
+# and .pre-commit-config.yaml's golangci-lint rev. An unpinned PATH install
+# drifts: newer golangci-lint versions flag issues the pinned config is clean
+# on.
 GOLANGCI_LINT_VERSION := v2.10.1
 
 lint:
@@ -141,6 +142,35 @@ endef
 # exactly, and `npm install` can rewrite package-lock.json — which both dirties
 # the tree and breaks the "this predicts CI" property. `--no-audit --no-fund`
 # only mute npm output; they do not change the tree.
+
+# cli.yml's quality gates for the host OS, so a contributor can run them
+# before pushing. Adding or removing a gate there means updating this target
+# too. What it deliberately cannot mirror: the three-OS matrix (only the host
+# OS runs here; the workflow's per-OS keyring setup is dormant until apps/cli
+# references a keyring, so omitting it matches CI today) and the sandbox
+# gate's vars.CLI_SANDBOX_E2E arming plus repo-wide serialization — the tagged
+# test command itself still runs. `goreleaser check` needs goreleaser on PATH,
+# like release-snapshot above. The 40 floor mirrors cli.yml's coverage gate;
+# raise both together once the v2 code lands.
+check-cli:
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./apps/cli/...
+	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./apps/cli/...
+	@COVERAGE=$$(go tool cover -func=coverage.out | grep ^total: | awk '{print $$3}' | tr -d '%'); \
+	echo "Total coverage: $${COVERAGE}%"; \
+	if [ "$$(echo "$$COVERAGE < 40" | bc -l)" -eq 1 ]; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below 40% threshold"; \
+		exit 1; \
+	fi
+	go vet ./apps/cli/...
+	go tool govulncheck ./apps/cli/...
+	QURL_TEST_HARNESS=1 go test -count=1 ./apps/cli/...
+	go test -tags=clisandbox -count=1 ./apps/cli/...
+	@goreleaser check; rc=$$?; \
+	if [ $$rc -eq 2 ]; then \
+		echo "warning: .goreleaser.yml valid but uses deprecated properties (exit 2) — matches cli.yml's tolerated state"; \
+	elif [ $$rc -ne 0 ]; then \
+		exit $$rc; \
+	fi
 
 # Kept verbose for local debugging — discord.yml adds --silent.
 test-discord:

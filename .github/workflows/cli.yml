@@ -1,0 +1,407 @@
+name: "cli: Build and Test"
+
+# Path filtering lives in the `changes` job below, NOT in `on: paths:`.
+# A workflow skipped by a path filter never reports its checks, so a
+# `cli / required` branch-protection rule would block every PR that
+# doesn't touch apps/cli/. The detector + always-running aggregate keeps
+# the check reporting on every PR — matching slack/discord/chrome-extension/shared.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # Stacked CLI PRs must run the same gates before their base reaches main.
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  changes:
+    name: cli / detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      # Reading this workflow's own run history is what lets the step below
+      # find the last SHA it actually validated.
+      actions: read
+    outputs:
+      # An unresolvable base forces every gate to run. A redundant run costs
+      # minutes; a wrongly narrow diff ships unvalidated code green (#1022).
+      cli: ${{ steps.base.outputs.force == 'true' && 'true' || steps.filter.outputs.cli }}
+    steps:
+      # On PRs, paths-filter uses the pull request API; push events need git
+      # history to compute the diff.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 0
+
+      # `cancel-in-progress: false` protects a run already in progress, not one
+      # still pending: GitHub keeps at most one pending run per concurrency
+      # group, so a burst of merges to main cancels the intermediate runs.
+      # Diffing this push alone would then skip the gates for changes that
+      # landed in those cancelled runs — every check green, app CI never having
+      # executed (#1022). Diff against the last validated SHA instead.
+      - name: Resolve validated base
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve-validated-base.sh
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        # Skipped when no base could be resolved. The job output already forces
+        # every gate true there, and running the filter anyway would let a
+        # filter error redden this job instead of honouring the fail-closed
+        # intent.
+        if: steps.base.outputs.force != 'true'
+        with:
+          # Empty on pull_request, where the push-only step above never ran and
+          # paths-filter takes its PR API path instead.
+          base: ${{ steps.base.outputs.sha }}
+          filters: |
+            cli:
+              # Source of truth for CLI-impacting paths on PR and main push events.
+              # No 'shared/**' here even though apps/cli imports it: shared-test.yml's
+              # `shared / test all` gate runs `go test ./...` — apps/cli included —
+              # on every shared/ change, so those changes are already validated.
+              # .goreleaser.yml is here because the goreleaser-check gate below is
+              # the only CI that validates it before release-cli consumes it.
+              - 'apps/cli/**'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci.yml'
+              - '.goreleaser.yml'
+              - '.github/workflows/cli.yml'
+
+  lint:
+    name: cli / lint
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify golangci-lint config
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1 config verify
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.10.1
+          verify: false # Avoid the action's network JSONSchema fetch; config verification runs in the previous pinned step.
+          args: --timeout=5m ./apps/cli/...
+
+  test:
+    name: cli / test
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests with coverage
+        run: |
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
+            ./apps/cli/...
+
+      # 40 is the intentional initial floor, not the target. The v2 rebuild
+      # replaces this tree, so pinning an ambition floor (85) to the old tree
+      # would be red on day one for coverage the rebuild is about to delete.
+      # Raise this — and the mirrored floor in Makefile `check-cli` — once the
+      # v2 code lands. The pre-v2 tree measured 71.9% when this gate shipped.
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          if [ "$(echo "$COVERAGE < 40" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below 40% threshold"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./apps/cli/...
+
+  govulncheck:
+    name: cli / govulncheck
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run govulncheck
+        run: go tool govulncheck ./apps/cli/...
+
+  matrix:
+    # Static display name on purpose — never interpolate ${{ matrix.os }} into
+    # it. The ciworkflows contract conscripts quality gates by this literal
+    # name, and the required aggregate's verifier renders it; an interpolated
+    # name would register three per-OS check contexts that neither the
+    # aggregate's needs set nor branch protection can enumerate.
+    name: cli / matrix
+    runs-on: ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # Switch the v2 suite will read to know it is running under CI's
+      # cross-platform harness with a real OS keyring available. Today's tests
+      # ignore it; exporting it now keeps this job's contract stable when the
+      # v2 code lands.
+      QURL_TEST_HARNESS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Keyring-backed credential-store tests are part of the CLI v2 plan, and
+      # CI keyrings start locked (macOS) or absent (Linux), so each OS needs
+      # arming before tests can touch them. Both setup steps are dormant — they
+      # no-op — until apps/cli actually references a keyring, so the pipeline
+      # lands ahead of the code without dead red. Windows needs no setup step:
+      # the Credential Manager API works headless as-is.
+      - name: Set up macOS keychain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if ! grep -riq keyring apps/cli; then
+            echo "apps/cli does not reference a keyring yet; leaving the default keychain alone"
+            exit 0
+          fi
+          # Ephemeral CI keychain: throwaway random password, auto-lock timeout
+          # cleared, made the default so keyring libraries find it unlocked.
+          password="$(uuidgen)"
+          security create-keychain -p "$password" qurl-ci.keychain
+          security set-keychain-settings qurl-ci.keychain
+          security default-keychain -s qurl-ci.keychain
+          security unlock-keychain -p "$password" qurl-ci.keychain
+
+      - name: Set up Linux keyring (gnome-keyring over D-Bus)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if ! grep -riq keyring apps/cli; then
+            echo "apps/cli does not reference a keyring yet; skipping gnome-keyring install"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnome-keyring dbus
+          # Arms the dbus-run-session wrapper in the test step below: the
+          # daemon must be unlocked inside the same session the tests run in,
+          # so the wrapper cannot live in this step.
+          echo "QURL_CLI_KEYRING_DBUS=1" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ "${QURL_CLI_KEYRING_DBUS:-}" = "1" ]; then
+            dbus-run-session -- bash -c 'printf "" | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/...'
+          else
+            go test -count=1 ./apps/cli/...
+          fi
+
+  sandbox-e2e:
+    name: cli / sandbox e2e
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 15
+    # One sandbox tenancy: every sandbox e2e run in this repo — PR-time here
+    # and the nightly extended pass — serializes through this group, and a run
+    # already in flight is never cancelled.
+    concurrency:
+      group: cli-sandbox-e2e
+      cancel-in-progress: false
+    # Beyond the changes detector, this gate is armed by the repo variable
+    # CLI_SANDBOX_E2E (unset today; set it to 'enabled' once the sandbox suite
+    # and its credentials exist) and runs only for same-repo refs — fork PRs
+    # will not get the sandbox credentials the suite needs. While disarmed the
+    # job skips, and the required aggregate's verifier reports that skip as
+    # expected rather than failing (see its sandbox-e2e carve-out).
+    if: >-
+      needs.changes.outputs.cli == 'true' &&
+      vars.CLI_SANDBOX_E2E == 'enabled' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Placeholder until the v2 sandbox suite lands: nothing carries the
+      # clisandbox build tag yet, so this runs the regular suite under the tag
+      # and passes. The notice below self-silences the moment the first tagged
+      # test file appears, at which point this becomes the real gate.
+      - name: Run sandbox e2e suite
+        run: |
+          go test -tags=clisandbox -count=1 ./apps/cli/...
+          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
+            echo "::notice::cli / sandbox e2e: no sandbox suite yet — no file carries the clisandbox build tag; this gate arms when the first tagged test lands"
+          fi
+
+  goreleaser-check:
+    name: cli / goreleaser check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.cli == 'true'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Config validation only — no Go toolchain, no build. The nightly
+      # snapshot job (cli-nightly.yml) is what exercises the real build
+      # pipeline; release-cli in release-please.yml is the publishing path
+      # both of them protect.
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: "~> v2"
+          install-only: true
+
+      # `goreleaser check` exits 1 on an invalid config and 2 on a valid one
+      # that uses deprecated properties. .goreleaser.yml is in the second
+      # state today (archives.builds, nfpms.builds, format_overrides.format,
+      # brews — the brews→casks migration is a Homebrew-install behaviour
+      # change that needs its own PR), and release-cli releases fine through
+      # it because `goreleaser release` only warns on deprecations. Failing
+      # this gate on exit 2 would therefore block every CLI PR on a release
+      # migration it must not smuggle in — so warn loudly on 2, fail on
+      # anything else. Once .goreleaser.yml is migrated, exit 2 stops
+      # occurring and this tolerance becomes dead code to remove.
+      - name: goreleaser check
+        shell: bash
+        run: |
+          set +e
+          goreleaser check
+          rc=$?
+          set -e
+          case "$rc" in
+            0)
+              ;;
+            2)
+              echo "::warning::goreleaser check: .goreleaser.yml is valid but uses deprecated properties (exit 2). Migrate them before GoReleaser hard-removes support and reddens release-cli."
+              ;;
+            *)
+              exit "$rc"
+              ;;
+          esac
+
+  required:
+    name: cli / required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    # Every CLI quality gate must be listed here; cli / required only
+    # validates jobs in this needs set. display_names below is annotation-only.
+    needs: [changes, lint, test, govulncheck, matrix, sandbox-e2e, goreleaser-check]
+    if: always()
+    steps:
+      - name: Verify CLI CI result
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CLI_CHANGED: ${{ needs.changes.outputs.cli }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::cli / detect changes concluded $CHANGES_RESULT"
+            exit 1
+          fi
+
+          case "$CLI_CHANGED" in
+            true)
+              ;;
+            false)
+              echo "No CLI-impacting changes detected; CLI CI is not required."
+              exit 0
+              ;;
+            *)
+              echo "::error::cli / detect changes emitted unexpected cli output: ${CLI_CHANGED:-<empty>}"
+              exit 1
+              ;;
+          esac
+
+          display_name() {
+            case "$1" in
+              lint)
+                echo "cli / lint"
+                ;;
+              test)
+                echo "cli / test"
+                ;;
+              govulncheck)
+                echo "cli / govulncheck"
+                ;;
+              matrix)
+                echo "cli / matrix"
+                ;;
+              sandbox-e2e)
+                echo "cli / sandbox e2e"
+                ;;
+              goreleaser-check)
+                echo "cli / goreleaser check"
+                ;;
+              *)
+                echo "$1"
+                ;;
+            esac
+          }
+
+          failed=0
+          needs_rows="$(jq -r 'to_entries[] | [.key, (.value.result // "")] | @tsv' <<<"$NEEDS_JSON")"
+          while IFS=$'\t' read -r job result; do
+            [ -n "$job" ] || continue
+            if [ "$job" = "changes" ]; then
+              # The change detector is checked above; it is not a CLI quality gate.
+              continue
+            fi
+            if [ "$job" = "sandbox-e2e" ] && [ "$result" = "skipped" ]; then
+              # The sandbox gate is additionally armed by vars.CLI_SANDBOX_E2E
+              # and same-repo refs (see its if:); while disarmed it skips by
+              # design, so report the skip loudly instead of failing. Every
+              # other conclusion of this gate — and every other gate's skip —
+              # still fails below.
+              echo "::notice::$(display_name "$job") concluded skipped (vars.CLI_SANDBOX_E2E disarmed or fork PR); not required"
+              continue
+            fi
+            if [ "$result" != "success" ]; then
+              # CLI-impacting changes require every quality gate listed in
+              # needs to run and pass; skipped/cancelled is a failed gate.
+              echo "::error::$(display_name "$job") concluded ${result:-<empty>}"
+              failed=1
+            fi
+          done <<<"$needs_rows"
+
+          exit "$failed"
