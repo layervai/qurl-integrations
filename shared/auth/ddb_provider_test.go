@@ -147,6 +147,12 @@ func requireCacheValidationProjection(t *testing.T, in *dynamodb.GetItemInput) {
 // lifecycle purge guard reads it (see the constant's comment), so a write that
 // stops refreshing it lets a delayed uninstall delete freshly reinstalled
 // credentials while every remaining check here still passes.
+//
+// The expression check matches the writers' hand-built SET string literally,
+// single spaces and all. That is deliberate — it pins the format as well as the
+// term — but it means a move to the AWS expression builder, which aliases names
+// and may space them differently, would fail here on formatting alone. Re-pin
+// the assertion to whatever that emits; do not read it as a dropped nano stamp.
 func requireDurableWorkspaceStateWrite(t *testing.T, in *dynamodb.UpdateItemInput, now time.Time) {
 	t.Helper()
 	const reservedOAuthStateTTLAttr = "ttl"
