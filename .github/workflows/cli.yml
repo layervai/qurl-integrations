@@ -84,6 +84,7 @@ jobs:
   lint:
     name: cli / lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     steps:
@@ -107,6 +108,7 @@ jobs:
   test:
     name: cli / test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     steps:
@@ -131,7 +133,7 @@ jobs:
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
           echo "Total coverage: ${COVERAGE}%"
-          if [ "$(echo "$COVERAGE < 40" | bc -l)" -eq 1 ]; then
+          if ! awk -v c="$COVERAGE" 'BEGIN { exit !(c+0 >= 40) }' </dev/null; then
             echo "::error::Coverage ${COVERAGE}% is below 40% threshold"
             exit 1
           fi
@@ -142,6 +144,7 @@ jobs:
   govulncheck:
     name: cli / govulncheck
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: changes
     if: needs.changes.outputs.cli == 'true'
     steps:

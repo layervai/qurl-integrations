@@ -157,7 +157,7 @@ check-cli:
 	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./apps/cli/...
 	@COVERAGE=$$(go tool cover -func=coverage.out | grep ^total: | awk '{print $$3}' | tr -d '%'); \
 	echo "Total coverage: $${COVERAGE}%"; \
-	if [ "$$(echo "$$COVERAGE < 40" | bc -l)" -eq 1 ]; then \
+	if ! awk -v c="$$COVERAGE" 'BEGIN { exit !(c+0 >= 40) }' </dev/null; then \
 		echo "FAIL: Coverage $${COVERAGE}% is below 40% threshold"; \
 		exit 1; \
 	fi
