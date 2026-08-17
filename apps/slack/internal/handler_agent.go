@@ -875,9 +875,10 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 // strict subset of those 13 and carries no history scope at all, so a deployment
 // reaching this seam runs an operator-expanded SLACK_BOT_SCOPES this repo cannot
 // see — but do not read the deployed set off the stored slack_bot_scopes
-// attribute (auth.DDBProvider.SetSlackBotToken writes it) either: it recorded
-// only the defaults against that same 13-scope token, so it reflects the grant
-// some earlier install observed rather than the one in force.
+// attribute either: auth.DDBProvider.SetSlackBotToken writes it from the
+// slackinstall OAuth callback, recording what Slack granted THAT install, and it
+// held only the defaults against that same 13-scope token — so it reflects the
+// grant some earlier install observed rather than the one in force.
 //
 // Still ASSUMED: the scan read conversations.history while this seam reads
 // conversations.replies — same message objects, same API family, not separately
