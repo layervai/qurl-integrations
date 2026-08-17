@@ -852,19 +852,18 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 // exists to prevent. An unreadable value is treated the way slackEventFiles treats
 // a shape it does not recognize — an attachment we cannot count.
 //
-// TODO(upstream-contract): this applies the event path's two-signal rule to a
-// DIFFERENT Slack surface, and the two were measured to disagree about WHICH
-// signal carries an upload. Do not read the signals as backing each other up here.
+// TODO(upstream-contract): on THIS surface `files` carries the upload and
+// `subtype` is the dead branch — the inverse of the event path, where Slack still
+// stamps file_share (see agentEventHasUpload). Both branches stay: between them,
+// the two surfaces need both. Do not read the two signals as backing each other
+// up here, because only one of them ever fires per surface.
 //
-// Measured 2026-08-14 against the live workspace (T09UP622L90): 4,668 messages
-// read back through conversations.history across 17 public, private and IM
-// conversations, 265 of them file-bearing. `file_share` appeared ZERO times —
-// every one came back as subtype "" with a populated files array. So on THIS
-// surface `files` carries the upload and `subtype` is the branch that never
-// fires, the exact inverse of the event path, where the same investigation
-// confirmed Slack still stamps file_share (a live "agent: unsupported media"
-// line carrying file_share_subtype=true; see agentEventHasUpload). Both branches
-// stay: between them, the two surfaces need both.
+// Measured 2026-08-14 against the live LayerV workspace: 4,668 messages read back
+// through conversations.history across 17 public, private and IM conversations,
+// 265 of them file-bearing. `file_share` appeared ZERO times — every one came
+// back as subtype "" with a populated files array. The event-side half of the
+// contrast came from a live "agent: unsupported media" line carrying
+// file_share_subtype=true.
 //
 // The same read settles the scope question this comment used to leave open. The
 // live bot token holds 13 scopes, files:read NOT among them, yet history still
@@ -875,10 +874,10 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 // files array arrives without files:read. slackinstall.DefaultBotScopes is a
 // strict subset of those 13 and carries no history scope at all, so a deployment
 // reaching this seam runs an operator-expanded SLACK_BOT_SCOPES this repo cannot
-// see — but do not read that set off the slack_bot_scopes attribute in
-// qurl-bot-slack-workspace-state either: it recorded only the defaults against
-// that same 13-scope token, so it reflects the grant some earlier install
-// observed rather than the one in force.
+// see — but do not read the deployed set off the stored slack_bot_scopes
+// attribute (auth.DDBProvider.SetSlackBotToken writes it) either: it recorded
+// only the defaults against that same 13-scope token, so it reflects the grant
+// some earlier install observed rather than the one in force.
 //
 // Still ASSUMED: the scan read conversations.history while this seam reads
 // conversations.replies — same message objects, same API family, not separately
