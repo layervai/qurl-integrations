@@ -37,6 +37,7 @@ type fakeDDBClient struct {
 	putInput     *dynamodb.PutItemInput
 	putErr       error
 	updateInput  *dynamodb.UpdateItemInput
+	updateCalls  int
 	updateFunc   func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
@@ -59,6 +60,9 @@ func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ 
 	return &dynamodb.PutItemOutput{}, f.putErr
 }
 func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	// updateInput is last-write-wins; updateCalls lets a caller that cares assert
+	// how many writes produced it (see requireStampsUpdatedAtNano).
+	f.updateCalls++
 	f.updateInput = in
 	if f.updateFunc != nil {
 		return f.updateFunc(ctx, in)
