@@ -38,7 +38,7 @@ type EnterOutput struct {
 // enterOutputFrom projects a qurl-go ResourceHandle into the repo-owned shape.
 func enterOutputFrom(handle *qurlsdk.ResourceHandle) EnterOutput {
 	return EnterOutput{
-		Target:      handle.RedirectURL,
+		Target:      handle.ResourceURL,
 		OpenSeconds: handle.OpenSeconds,
 	}
 }
@@ -179,7 +179,7 @@ func (f TableFormatter) FormatEnter(w io.Writer, handle *qurlsdk.ResourceHandle)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
 	wr.printf("%s\n\n", f.green.Sprint("Portal entered"))
-	wr.printf("%s\t%s\n", f.bold.Sprint("Target:"), handle.RedirectURL)
+	wr.printf("%s\t%s\n", f.bold.Sprint("Target:"), handle.ResourceURL)
 	// TODO(upstream-contract): see EnterOutput — 0 means "not provided" per qurl-go, not a 0-second grant.
 	if handle.OpenSeconds > 0 {
 		wr.printf("%s\t%ds\n", f.bold.Sprint("Access:"), handle.OpenSeconds)
