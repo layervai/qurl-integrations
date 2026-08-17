@@ -191,17 +191,34 @@ func validateRails(f *flags) error {
 }
 
 // looksProd reports whether this run targets production: the operator label, a
-// "prod" substring in any resolved table name or the qurl-service endpoint, or
-// the canonical prod API origin — the endpoint is the clearest prod signal, and
-// the real one (api.layerv.ai) carries no "prod" substring, so it gets its own
-// check. Defense-in-depth: a forgotten -env=prod still trips the rail when the
-// wiring says prod. False positives just require the explicit opt-in flag.
+// "prod" substring in a resolved purge-target table name or the qurl-service
+// endpoint, or the canonical prod API origin — the endpoint is the clearest
+// prod signal, and the real one (api.layerv.ai) carries no "prod" substring, so
+// it gets its own check. Defense-in-depth: a forgotten -env=prod still trips the
+// rail when the wiring says prod. False positives just require the explicit
+// opt-in flag.
+//
+// f.workspaceStateTable is deliberately NOT scanned, because scanning it can
+// never trip: qurl-integrations-infra renders that table as
+// "${local.project}-workspace-state" (qurl-bot-slack/terraform/workspace_state.tf)
+// with no var.environment interpolation, so it is bare
+// `qurl-bot-slack-workspace-state` in sandbox AND prod. The two purge-target
+// tables above DO carry the env (`qurl-bot-slack-production-channel-policies`,
+// via modules/qurl-slack-ddb), and they are the only tables this rail guards —
+// statecrawl reads workspace_state through auth.Provider.APIKey and never
+// mutates it. Don't re-add it: a check that cannot fire reads as coverage that
+// isn't there. Prod stays covered by those two names plus the mandatory
+// QURL_ENDPOINT (validateConfig), which is api.layerv.ai in prod.
+//
+// TODO(upstream-contract): if that table is ever renamed to interpolate the
+// environment, add it back to the loop and re-point the test that pins its
+// absence.
 func looksProd(f *flags) bool {
 	switch strings.ToLower(strings.TrimSpace(f.envLabel)) {
 	case "prod", "production":
 		return true
 	}
-	for _, v := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.workspaceStateTable, f.qurlEndpoint} {
+	for _, v := range []string{f.channelPoliciesTable, f.workspaceMappingsTable, f.qurlEndpoint} {
 		if strings.Contains(strings.ToLower(v), "prod") {
 			return true
 		}

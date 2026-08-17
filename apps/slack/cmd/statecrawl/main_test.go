@@ -6,15 +6,30 @@ import (
 	"testing"
 )
 
+// Deployment-shaped fixture names, mirroring what qurl-integrations-infra
+// actually renders, so a case claiming to exercise "the sandbox wiring" asserts
+// against the real string. modules/qurl-slack-ddb prefixes the two purge-target
+// tables with `qurl-bot-slack-<env>-`; workspace_state is env-agnostic
+// (qurl-bot-slack/terraform/workspace_state.tf) and byte-identical in sandbox
+// and prod, which is exactly why looksProd does not scan it.
+const (
+	sandboxPoliciesTable = "qurl-bot-slack-sandbox-channel-policies"
+	sandboxMappingsTable = "qurl-bot-slack-sandbox-workspace-mappings"
+	prodPoliciesTable    = "qurl-bot-slack-production-channel-policies"
+	prodMappingsTable    = "qurl-bot-slack-production-workspace-mappings"
+	stateTableName       = "qurl-bot-slack-workspace-state"
+	testKMSKeyARN        = "arn:aws:kms:us-east-1:111122223333:key/abc"
+)
+
 // baseArgs returns the minimal required flags so a test can focus on the rail
 // under exercise without tripping the missing-config check. Tables/endpoint are
 // passed explicitly so the result is hermetic regardless of the runner's env.
 func baseArgs(extra ...string) []string {
 	args := []string{
-		"-channel-policies-table", "qurl-bot-slack-sandbox-channel-policies",
-		"-workspace-mappings-table", "qurl-bot-slack-sandbox-workspace-mappings",
-		"-workspace-state-table", "qurl-sandbox-workspace-state",
-		"-kms-key-arn", "arn:aws:kms:us-east-1:111122223333:key/abc",
+		"-channel-policies-table", sandboxPoliciesTable,
+		"-workspace-mappings-table", sandboxMappingsTable,
+		"-workspace-state-table", stateTableName,
+		"-kms-key-arn", testKMSKeyARN,
 		"-qurl-endpoint", "https://sandbox.qurl.example",
 	}
 	return append(args, extra...)
@@ -81,12 +96,17 @@ func TestParseFlags_ProdPurgeWithAllowAccepted(t *testing.T) {
 
 // TestParseFlags_ProdDetectedByTableName is defense-in-depth: a forgotten
 // -env=prod still trips the rail when a resolved table name says prod.
+//
+// The workspace-state table deliberately carries its real, environment-agnostic
+// infra name here rather than a "prod" one: it is not scanned (see looksProd),
+// so a prod-flavored value would make this test pass for a reason it does not
+// actually exercise, and would keep passing if the purge-target scan broke.
 func TestParseFlags_ProdDetectedByTableName(t *testing.T) {
 	args := []string{
-		"-channel-policies-table", "qurl-bot-slack-prod-channel-policies",
-		"-workspace-mappings-table", "qurl-bot-slack-prod-workspace-mappings",
-		"-workspace-state-table", "qurl-prod-workspace-state",
-		"-kms-key-arn", "arn:aws:kms:us-east-1:111122223333:key/abc",
+		"-channel-policies-table", prodPoliciesTable,
+		"-workspace-mappings-table", prodMappingsTable,
+		"-workspace-state-table", stateTableName,
+		"-kms-key-arn", testKMSKeyARN,
 		"-qurl-endpoint", "https://qurl.example",
 		"-dry-run=false",
 	}
@@ -128,12 +148,36 @@ func TestLooksProd(t *testing.T) {
 		{"env prod", flags{envLabel: "prod"}, true},
 		{"env production", flags{envLabel: "Production"}, true},
 		{"env sandbox", flags{envLabel: "sandbox"}, false},
-		{"table prod", flags{channelPoliciesTable: "qurl-bot-slack-prod-cp"}, true},
-		{"state table prod", flags{workspaceStateTable: "qurl-prod-state"}, true},
+		{"policies table prod", flags{channelPoliciesTable: "qurl-bot-slack-prod-cp"}, true},
+		{"mappings table prod", flags{workspaceMappingsTable: "qurl-bot-slack-prod-wm"}, true},
 		{"endpoint prod substring", flags{qurlEndpoint: "https://qurl-prod.example/v1"}, true},
 		{"endpoint canonical prod origin", flags{qurlEndpoint: "https://api.layerv.ai/v1"}, true},
 		{"endpoint sandbox origin", flags{qurlEndpoint: "https://api.layerv.xyz/v1"}, false},
 		{"all sandbox", flags{envLabel: "sandbox", channelPoliciesTable: "qurl-sandbox-cp"}, false},
+
+		// workspace_state is NOT scanned — its infra-rendered name carries no
+		// environment in ANY deployment, so the check could never fire, and it
+		// is not a purge target (see looksProd's comment). Pin the absence: if
+		// someone re-adds the dead loop entry, this case fails and points them
+		// at the reasoning rather than letting it read as real coverage.
+		{"state table prod alone does not trip", flags{workspaceStateTable: "qurl-prod-state"}, false},
+
+		// Real deployment wirings, with the -env label an operator forgot to
+		// pass. Prod must still trip on what the rail actually guards; sandbox
+		// must NOT, or operators learn to pass -allow-prod-purge reflexively
+		// and the rail stops meaning anything.
+		{"real prod wiring, unlabeled", flags{
+			channelPoliciesTable:   prodPoliciesTable,
+			workspaceMappingsTable: prodMappingsTable,
+			workspaceStateTable:    stateTableName,
+			qurlEndpoint:           "https://api.layerv.ai",
+		}, true},
+		{"real sandbox wiring, unlabeled", flags{
+			channelPoliciesTable:   sandboxPoliciesTable,
+			workspaceMappingsTable: sandboxMappingsTable,
+			workspaceStateTable:    stateTableName,
+			qurlEndpoint:           "https://api.layerv.xyz",
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := looksProd(&tc.f); got != tc.want {
