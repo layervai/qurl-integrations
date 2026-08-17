@@ -105,7 +105,8 @@ version stream that something downstream pins to — not by merely publishing an
 
 Each app's workflow runs on every PR. A `changes` detector job inside it decides whether that
 app's quality gates actually execute, and an always-reporting aggregate check — `slack / required`,
-`discord / required`, `chrome-extension / required`, `teams / required`, `shared / required` —
+`discord / required`, `chrome-extension / required`, `edge-extension / required`,
+`teams / required`, `s3-static-connector / required`, `e2e / required`, `shared / required` —
 summarizes the result. Branch protection requires those aggregates, never the gates themselves.
 
 Path filtering deliberately lives in the detector rather than in `on: paths:`: a workflow skipped
@@ -113,6 +114,13 @@ by a trigger-level path filter never reports its checks at all, so a required ag
 block every PR that happens not to touch that app. The detector's filter is the source of truth
 for which paths need validation, and `shared-test.yml` runs all Go app tests when `shared/`
 is modified.
+
+That pattern is itself under test. `internal/ciworkflows` reads every file in
+`.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
+spec, leaves a quality gate out of `required.needs`, ships a verifier that treats a skipped gate
+as a pass, or makes the contract check conditional. Its check — `Workflow Contract` — is
+unfiltered and reports on every PR and merge group, because a check behind a paths filter cannot
+police the paths filters (#1081).
 
 ## License
 
