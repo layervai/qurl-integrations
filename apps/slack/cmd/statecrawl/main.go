@@ -205,7 +205,10 @@ func validateRails(f *flags) error {
 // opt-in flag.
 //
 // f.workspaceStateTable is deliberately NOT scanned, for one mechanical reason:
-// scanning it can never trip. qurl-integrations-infra renders that table as
+// no deployment can make it trip. (The name is an operator-supplied flag, so a
+// hand-typed prod-flavored value would once have tripped it — but that is a
+// value no environment actually renders, and the rail exists to read the real
+// wiring.) qurl-integrations-infra renders that table as
 // "${local.project}-workspace-state" (qurl-bot-slack/terraform/workspace_state.tf)
 // with no var.environment interpolation, so it is bare
 // `qurl-bot-slack-workspace-state` in sandbox AND prod. The two names above DO

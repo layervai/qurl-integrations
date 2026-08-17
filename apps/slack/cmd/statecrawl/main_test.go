@@ -181,11 +181,11 @@ func TestLooksProd(t *testing.T) {
 		{"endpoint sandbox origin", flags{qurlEndpoint: "https://api.layerv.xyz/v1"}, false},
 		{"all sandbox", flags{envLabel: "sandbox", channelPoliciesTable: "qurl-sandbox-cp"}, false},
 
-		// workspace_state is NOT scanned — its infra-rendered name carries no
-		// environment in ANY deployment, so the check could never fire, and it
-		// carries no environment (see looksProd's comment). Pin the absence: if
-		// someone re-adds the dead loop entry, this case fails and points them
-		// at the reasoning rather than letting it read as real coverage.
+		// workspace_state is NOT scanned: its infra-rendered name carries no
+		// environment in ANY deployment, so the check could never fire (see
+		// looksProd's comment). Pin the absence — if someone re-adds the dead
+		// loop entry, this case fails and points them at the reasoning rather
+		// than letting it read as real coverage.
 		{"state table is not scanned at all", flags{workspaceStateTable: "qurl-prod-state"}, false},
 
 		// Real deployment wirings, with the -env label an operator forgot to
