@@ -459,7 +459,13 @@ func TestInvalidOutputFormat(t *testing.T) {
 // runConfigCmd executes a config CLI command with HOME redirected to a temp dir.
 func runConfigCmd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	// os.UserHomeDir reads USERPROFILE on Windows and ignores HOME; without
+	// this the config tests write into the real user profile and poison
+	// later tests (first observed as a Windows-only TestNewClient_MissingAPIKey
+	// failure when the CI matrix gained a windows leg).
+	t.Setenv("USERPROFILE", tmp)
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	cmd := rootCmd("test")
@@ -475,6 +481,7 @@ func runConfigCmd(t *testing.T, args ...string) (string, error) {
 func TestConfigSetAndGet(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir ignores HOME
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	// Set a value
