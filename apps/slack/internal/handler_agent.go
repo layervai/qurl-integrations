@@ -880,12 +880,24 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 // held only the defaults against that same 13-scope token — so it reflects the
 // grant some earlier install observed rather than the one in force.
 //
-// Still ASSUMED: the scan read conversations.history while this seam reads
-// conversations.replies — same message objects, same API family, not separately
-// measured — and it was one workspace on one day, so a plan or Enterprise Grid
-// difference could still move it. If the files array stops arriving, captions
-// silently stop being annotated with every test still green, since the tests
-// supply both fields directly and never read Slack.
+// Still ASSUMED: it was one workspace on one day, so a plan or Enterprise Grid
+// difference could still move it. If the files array stops arriving, captions silently
+// stop being annotated with every test still green, since the tests supply both fields
+// directly and never read Slack.
+//
+// Re-run the measurement rather than re-deriving it: cmd/slack-history-upload-smoke
+// reads a live workspace, observes each message twice — once by JSON shape alone, once
+// through THIS function — and exits non-zero when the array has stopped arriving or the
+// two readings disagree. It reads conversations.replies alongside conversations.history,
+// which settles the surface caveat this comment used to carry. Operator-triggered like
+// cmd/slack-dm-smoke, so nothing runs it for you; run it when this comment's numbers
+// need to be true again.
+//
+// Offline, cmd/testdata/conversations_replies_uploads.json holds the file-entry shapes
+// that scan recorded — hosted, external, snippet, canvas, access_denied — and
+// TestAgentThreadHistorySeam_FullFileObjectShape drives them through the real seam. It
+// cannot see Slack change, which is the smoke's job; it keeps the decode honest against
+// an entry that actually looks like one in between runs.
 func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
 	var parsed slackEventFiles
 	if len(files) > 0 && json.Unmarshal(files, &parsed) != nil {

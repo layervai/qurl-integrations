@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -173,4 +175,93 @@ func TestAgentThreadHistorySeam_RejectsSlackErrorAndUnboundedHistory(t *testing.
 			t.Fatalf("error = %v, want page-cap error", err)
 		}
 	})
+}
+
+// TestAgentThreadHistorySeam_FullFileObjectShape runs the seam over file entries
+// carrying the field set the 2026-08-14 measurement recorded — hosted, external,
+// snippet, canvas and access_denied — instead of the {"id":"F1"} stub the tests above
+// use. The fixture is built to that documented shape rather than captured from Slack:
+// reading the live wire format is cmd/slack-history-upload-smoke's job, and this is
+// what keeps the offline decode chain honest between runs of it.
+//
+// What it adds over the stub is depth: entries with nested objects, explicit nulls and
+// keys this app has never heard of. {"id":"F1"} is a shape Slack never sends, so a
+// decode that handles it proves nothing about one that arrives. Measured, not assumed —
+// a decoder mutated to skip entries whose metadata came back explicitly null fails only
+// this test; TestAgentThreadHistorySeam_ReportsAttachments above stays green, because
+// its stub has no null to skip.
+//
+// The access_denied entry is what does that work. Every piece of its metadata is null
+// and it still occupies an array slot, which is exactly why presence detection survives
+// on a token without files:read.
+func TestAgentThreadHistorySeam_FullFileObjectShape(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile(filepath.Join("testdata", "conversations_replies_uploads.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	read := newSlackAgentThreadHistoryFuncWithTokenLookup(staticTokenLookup("xoxb-test"), "qurl-slack/test", srv.URL, srv.Client())
+	messages, err := read(context.Background(), "T1", "", "C1", "1723600000.000100", "")
+	if err != nil {
+		t.Fatalf("read history: %v", err)
+	}
+
+	want := []struct {
+		note     string
+		hasFiles bool
+	}{
+		{"plain question", false},
+		{"caption plus a hosted PDF", true},
+		{"external Drive file", true},
+		{"snippet, which is what Slack makes of a long paste", true},
+		{"canvas, which history reports even though the event does not", true},
+		{"a file the token may not read", true},
+		{"one readable and one denied entry", true},
+		{"an empty files array", false},
+		{"the agent's own reply", false},
+	}
+	if len(messages) != len(want) {
+		t.Fatalf("messages = %d, want %d", len(messages), len(want))
+	}
+	for i, expected := range want {
+		if messages[i].HasFiles != expected.hasFiles {
+			t.Errorf("message %d (%s) HasFiles = %v, want %v", i, expected.note, messages[i].HasFiles, expected.hasFiles)
+		}
+	}
+	// The file-only turn keeps its empty text rather than picking one up from the decode;
+	// noteAgentHistoryAttachment is what gives it something to say.
+	if messages[3].Text != "" {
+		t.Errorf("file-only message text = %q, want it left empty for the note to fill", messages[3].Text)
+	}
+	if messages[1].Text != "protect everything in this" {
+		t.Errorf("caption = %q, want the text carried alongside the files decode", messages[1].Text)
+	}
+
+	// Pin the fixture to the surface it claims to describe. The measurement found
+	// file_share ZERO times in 4,668 history messages: on this surface the array is the
+	// whole signal. A fixture that quietly grew a subtype would start proving the
+	// classifier works on a shape this API does not send, which is worse than no fixture.
+	var raw struct {
+		Messages []struct {
+			Subtype string          `json:"subtype"`
+			Files   json.RawMessage `json:"files"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	for i, message := range raw.Messages {
+		if message.Subtype != "" {
+			t.Errorf("fixture message %d has subtype %q; this surface was measured to send none", i, message.Subtype)
+		}
+		if want[i].hasFiles && len(message.Files) == 0 {
+			t.Errorf("fixture message %d is expected to carry files but has no files value", i)
+		}
+	}
 }

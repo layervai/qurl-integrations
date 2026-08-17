@@ -1,0 +1,212 @@
+{
+  "ok": true,
+  "has_more": false,
+  "messages": [
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "what can I reach from here?",
+      "ts": "1723600000.000100",
+      "thread_ts": "1723600000.000100"
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "protect everything in this",
+      "ts": "1723600000.000200",
+      "thread_ts": "1723600000.000100",
+      "files": [
+        {
+          "id": "F0000HOSTED",
+          "created": 1723599990,
+          "timestamp": 1723599990,
+          "name": "quarterly-plan.pdf",
+          "title": "quarterly-plan.pdf",
+          "mimetype": "application/pdf",
+          "filetype": "pdf",
+          "pretty_type": "PDF",
+          "user": "U000000USER",
+          "user_team": "T000000TEAM",
+          "editable": false,
+          "size": 24576,
+          "mode": "hosted",
+          "is_external": false,
+          "external_type": "",
+          "is_public": true,
+          "public_url_shared": false,
+          "display_as_bot": false,
+          "username": "",
+          "url_private": "https://files.slack.com/files-pri/T000000TEAM-F0000HOSTED/quarterly-plan.pdf",
+          "url_private_download": "https://files.slack.com/files-pri/T000000TEAM-F0000HOSTED/download/quarterly-plan.pdf",
+          "permalink": "https://example.slack.com/files/U000000USER/F0000HOSTED/quarterly-plan.pdf",
+          "permalink_public": "https://slack-files.com/T000000TEAM-F0000HOSTED-0000000000",
+          "file_access": "visible"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "and the linked one",
+      "ts": "1723600000.000300",
+      "thread_ts": "1723600000.000100",
+      "files": [
+        {
+          "id": "F00000EXTRN",
+          "created": 1723599991,
+          "timestamp": 1723599991,
+          "name": "roadmap",
+          "title": "roadmap",
+          "mimetype": "",
+          "filetype": "gdoc",
+          "pretty_type": "GDocs Document",
+          "user": "U000000USER",
+          "user_team": "T000000TEAM",
+          "editable": false,
+          "size": 0,
+          "mode": "external",
+          "is_external": true,
+          "external_type": "gdrive",
+          "external_id": "0000000000",
+          "is_public": false,
+          "public_url_shared": false,
+          "display_as_bot": false,
+          "url_private": "https://docs.google.com/document/d/0000000000/edit",
+          "permalink": "https://example.slack.com/files/U000000USER/F00000EXTRN/roadmap",
+          "file_access": "visible"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "",
+      "ts": "1723600000.000400",
+      "thread_ts": "1723600000.000100",
+      "files": [
+        {
+          "id": "F0000SNIPPT",
+          "created": 1723599992,
+          "timestamp": 1723599992,
+          "name": "-.txt",
+          "title": "Untitled",
+          "mimetype": "text/plain",
+          "filetype": "text",
+          "pretty_type": "Plain Text",
+          "user": "U000000USER",
+          "user_team": "T000000TEAM",
+          "editable": true,
+          "size": 4096,
+          "mode": "snippet",
+          "is_external": false,
+          "external_type": "",
+          "is_public": false,
+          "public_url_shared": false,
+          "display_as_bot": false,
+          "lines": 120,
+          "lines_more": 118,
+          "preview_is_truncated": true,
+          "url_private": "https://files.slack.com/files-pri/T000000TEAM-F0000SNIPPT/-.txt",
+          "permalink": "https://example.slack.com/files/U000000USER/F0000SNIPPT/-.txt",
+          "file_access": "visible"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "what does this canvas say?",
+      "ts": "1723600000.000500",
+      "thread_ts": "1723600000.000100",
+      "files": [
+        {
+          "id": "F0000CANVAS",
+          "created": 1723599993,
+          "timestamp": 1723599993,
+          "name": "Launch checklist",
+          "title": "Launch checklist",
+          "mimetype": "application/vnd.slack-docs",
+          "filetype": "quip",
+          "pretty_type": "Canvas",
+          "user": "U000000USER",
+          "user_team": "T000000TEAM",
+          "editable": true,
+          "size": 1024,
+          "mode": "quip",
+          "is_external": false,
+          "external_type": "",
+          "is_public": false,
+          "public_url_shared": false,
+          "display_as_bot": false,
+          "permalink": "https://example.slack.com/docs/T000000TEAM/F0000CANVAS",
+          "file_access": "visible"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "this one is restricted",
+      "ts": "1723600000.000600",
+      "thread_ts": "1723600000.000100",
+      "files": [
+        {
+          "id": "F0000DENIED",
+          "created": null,
+          "timestamp": null,
+          "name": null,
+          "title": null,
+          "mimetype": null,
+          "filetype": null,
+          "pretty_type": null,
+          "user": null,
+          "user_team": null,
+          "mode": null,
+          "file_access": "access_denied"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "two at once",
+      "ts": "1723600000.000700",
+      "thread_ts": "1723600000.000100",
+      "files": [
+        {
+          "id": "F0000HOSTD2",
+          "name": "notes.md",
+          "mimetype": "text/markdown",
+          "filetype": "markdown",
+          "mode": "hosted",
+          "size": 512,
+          "file_access": "visible"
+        },
+        {
+          "id": "F0000DENID2",
+          "name": null,
+          "mimetype": null,
+          "filetype": null,
+          "file_access": "access_denied"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "user": "U000000USER",
+      "text": "no attachment here",
+      "ts": "1723600000.000800",
+      "thread_ts": "1723600000.000100",
+      "files": []
+    },
+    {
+      "type": "message",
+      "app_id": "A00000QURL",
+      "bot_id": "B00000QURL",
+      "user": "U00000QURLB",
+      "text": "I can see the message, but not the file's contents.",
+      "ts": "1723600000.000900",
+      "thread_ts": "1723600000.000100"
+    }
+  ]
+}
