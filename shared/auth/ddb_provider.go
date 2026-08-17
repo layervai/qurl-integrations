@@ -82,7 +82,11 @@ const (
 	attrUpdatedAt     = "updated_at"
 	// Every workspace_state write must refresh attrUpdatedAtNano. Lifecycle
 	// purges use it as the reinstall-race guard; a writer that skips it can let a
-	// delayed uninstall purge delete freshly reinstalled credentials.
+	// delayed uninstall purge delete freshly reinstalled credentials. The
+	// converse binds equally: nothing may bump it gratuitously. A writer driven
+	// by ordinary traffic rather than by a real credential change holds the row
+	// newer than any teardown cutoff, making DeleteWorkspaceStateBeforeWithIdentity
+	// no-op and stranding credentials a delayed uninstall should have purged.
 	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"
@@ -94,21 +98,14 @@ const (
 	attrSlackAppID          = "slack_app_id"
 	attrSlackEnterpriseID   = "slack_enterprise_id"
 	// attrSlackBotScopes records what Slack GRANTED at the OAuth exchange, not
-	// what the live bot token carries. Slack upgrades an existing xoxb token's
-	// scopes IN PLACE when an app is reinstalled from its app config, and that
-	// path never traverses the install callback that feeds SetSlackBotToken — so
-	// this set goes stale silently, and nothing fails, because the stored
-	// ciphertext is still a working token. Measured on the live LayerV workspace
-	// 2026-08-14: four scopes stored against a token holding thirteen.
-	//
-	// It is install-time provenance for audits and support triage. Nothing reads
-	// it and nothing should refresh it: an opportunistic writer would bump
-	// attrUpdatedAtNano, which DeleteWorkspaceStateBeforeWithIdentity uses as its
-	// reinstall-race cutoff, so background writes on ordinary Web API traffic
-	// would hold the row newer than any cutoff and could make a delayed uninstall
-	// purge no-op — stranding credentials that should have been deleted. Code
-	// needing the live scope set should read Slack's x-oauth-scopes response
-	// header at call time instead of persisting it here.
+	// what the live bot token carries: reinstalling from the Slack app config
+	// widens an existing token's scopes in place, and that redirect never reaches
+	// SetSlackBotToken because Callback rejects it at the state guards. So the
+	// set goes stale with nothing failing — observed on the live LayerV workspace
+	// 2026-08-14, the four DefaultBotScopes values stored against a token
+	// carrying thirteen. No code path consumes it; it rides along in the
+	// unprojected GetItem SlackBotToken issues. See SetSlackBotToken for why
+	// nothing should refresh it.
 	attrSlackBotScopes = "slack_bot_scopes"
 )
 
@@ -275,9 +272,9 @@ type SlackBotTokenInstall struct {
 	BotUserID    string
 	AppID        string
 	EnterpriseID string
-	// Scopes is the grant Slack returned at THIS exchange. See attrSlackBotScopes
-	// for why the stored copy is not the live token's scope set, and why no reader
-	// should treat it as one.
+	// Scopes is the grant Slack returned at THIS exchange, persisted as the
+	// slack_bot_scopes column. It is not the live token's scope set — see that
+	// column's comment — and no reader should treat it as one.
 	Scopes []string
 }
 
@@ -970,6 +967,22 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 // SetSlackBotToken upserts the encrypted Slack bot token captured during Slack
 // app install or reinstall. It intentionally updates only Slack-specific
 // attributes so the qURL API key columns survive app reauthorization.
+//
+// It is the only writer of the row's Slack columns and the only one that should
+// be: slackinstall's Callback is its sole caller, so those columns describe one
+// OAuth exchange each. Do not add a writer that refreshes them from ordinary Web
+// API traffic — every write here bumps attrUpdatedAtNano, and a row held
+// perpetually fresh makes DeleteWorkspaceStateBeforeWithIdentity no-op, stranding
+// credentials a delayed uninstall should have purged.
+//
+// TODO(upstream-contract): a stale attrSlackBotScopes is harmless only while
+// Slack keeps an (app, workspace) pair's token byte-identical across reinstalls,
+// widening its grant in place. That is not hypothetical — ValidateSlackBotTokenShape
+// already accepts the rotating xoxe.xoxb- prefix, while slackinstall's
+// oauthAccessResponse captures neither refresh_token nor expires_in, so enabling
+// rotation on the Slack app leaves this row holding a dead credential and the
+// first 401 surfaces far from here. If that lands, capture the refresh token in
+// slackinstall.exchangeCode and persist it alongside the bot token.
 func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, install *SlackBotTokenInstall) error {
 	if workspaceID == "" {
 		return errors.New("DDBProvider.SetSlackBotToken: workspaceID is empty")

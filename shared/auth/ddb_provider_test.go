@@ -141,7 +141,13 @@ func requireCacheValidationProjection(t *testing.T, in *dynamodb.GetItemInput) {
 	}
 }
 
-func requireDurableWorkspaceWriteOmitsReservedTTL(t *testing.T, in *dynamodb.UpdateItemInput) {
+// requireDurableWorkspaceStateWrite pins the rules every durable workspace_state
+// write shares, so a refactor of one writer's expression cannot quietly drop them.
+// The attrUpdatedAtNano half is the one no other assertion would notice: the
+// lifecycle purge guard reads it (see the constant's comment), so a write that
+// stops refreshing it lets a delayed uninstall delete freshly reinstalled
+// credentials while every remaining check here still passes.
+func requireDurableWorkspaceStateWrite(t *testing.T, in *dynamodb.UpdateItemInput, now time.Time) {
 	t.Helper()
 	const reservedOAuthStateTTLAttr = "ttl"
 	if in == nil {
@@ -157,6 +163,16 @@ func requireDurableWorkspaceWriteOmitsReservedTTL(t *testing.T, in *dynamodb.Upd
 	}
 	if _, ok := in.ExpressionAttributeValues[":ttl"]; ok {
 		t.Fatal("durable workspace write binds reserved OAuth-state :ttl value")
+	}
+	if got := aws.ToString(in.UpdateExpression); !strings.Contains(got, attrUpdatedAtNano+" = :now_nano") {
+		t.Fatalf("durable workspace write must refresh %s, got %q", attrUpdatedAtNano, got)
+	}
+	nano, ok := in.ExpressionAttributeValues[":now_nano"].(*ddbtypes.AttributeValueMemberN)
+	if !ok {
+		t.Fatalf("durable workspace write must bind :now_nano as N, got %T", in.ExpressionAttributeValues[":now_nano"])
+	}
+	if want := strconv.FormatInt(now.UTC().UnixNano(), 10); nano.Value != want {
+		t.Fatalf("durable workspace write :now_nano = %q, want %q", nano.Value, want)
 	}
 }
 
@@ -1799,7 +1815,7 @@ func TestDDBProviderSetAPIKeyWithMetadataUpdatesKeyAndPreservesSlackAttrs(t *tes
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
 	}
-	requireDurableWorkspaceWriteOmitsReservedTTL(t, ddb.updateInput)
+	requireDurableWorkspaceStateWrite(t, ddb.updateInput, fixedNow)
 	if v, ok := ddb.updateInput.Key[attrTeamID].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != testTeamID {
 		t.Errorf("team_id wrong: %v", ddb.updateInput.Key[attrTeamID])
 	}
@@ -1870,7 +1886,7 @@ func TestDDBProviderSetAPIKeyWithMetadata(t *testing.T) {
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
 	}
-	requireDurableWorkspaceWriteOmitsReservedTTL(t, ddb.updateInput)
+	requireDurableWorkspaceStateWrite(t, ddb.updateInput, fixedNow)
 	values := ddb.updateInput.ExpressionAttributeValues
 	if v, ok := values[":key_id"].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != keyID {
 		t.Errorf("qurl_api_key_id wrong: %v", values[":key_id"])
@@ -2039,7 +2055,7 @@ func TestDDBProviderSetSlackBotToken(t *testing.T) {
 	if ddb.updateInput == nil {
 		t.Fatal("expected UpdateItem called")
 	}
-	requireDurableWorkspaceWriteOmitsReservedTTL(t, ddb.updateInput)
+	requireDurableWorkspaceStateWrite(t, ddb.updateInput, fixedNow)
 	values := ddb.updateInput.ExpressionAttributeValues
 	if v, ok := values[":token"].(*ddbtypes.AttributeValueMemberB); !ok || string(v.Value) != testSlackBotToken {
 		t.Errorf("slack token wrong: %v", values[":token"])
