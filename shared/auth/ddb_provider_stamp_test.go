@@ -51,6 +51,12 @@ type stampingWriter struct {
 // when a mutator is missing from this list, so it cannot silently fall behind the
 // implementation. The reverse drift needs no guard: each entry calls its method
 // directly, so a rename or removal is a compile error.
+//
+// Contract: every writer here persists through UpdateItem, which is why the
+// assertion reads fakeDDBClient.updateInput. A future writer that legitimately
+// upserts the whole row via PutItem would fail here for the wrong reason ("issued
+// no UpdateItem") — give requireStampsUpdatedAtNano a second capture path rather
+// than assuming the stamp is missing.
 func stampingWriters() []stampingWriter {
 	return []stampingWriter{
 		{
@@ -74,11 +80,17 @@ func stampingWriters() []stampingWriter {
 	}
 }
 
-// wholeRowDeleters are the workspace_state methods that remove the ENTIRE row
-// instead of editing attributes, mapped to why they are exempt from the stamp
-// invariant. There is no surviving row to stamp, and these are the readers of the
-// stamp rather than its writers.
-func wholeRowDeleters() map[string]string {
+// exemptMutators maps each Set*/Delete* method that does NOT carry the stamp
+// invariant to the reason it is exempt. Everything here today is a whole-row
+// deleter — no row survives to carry a stamp, and these are the stamp's readers
+// rather than its writers.
+//
+// It is deliberately one bucket keyed on a free-text reason rather than a
+// taxonomy. The Set*/Delete* net in TestWorkspaceStateMutatorsAreStampCovered
+// also catches methods that never touch workspace_state at all — a DI/config
+// setter like SetClock or SetEncryptor would trip it — and those belong here
+// with a reason saying so, not forced into a category that misdescribes them.
+func exemptMutators() map[string]string {
 	return map[string]string{
 		"DeleteWorkspaceState":                   "unconditional whole-row DeleteItem; no row survives to carry a stamp",
 		"DeleteWorkspaceStateWithIdentity":       "whole-row DeleteItem with ReturnValues=ALL_OLD; no row survives to carry a stamp",
@@ -114,7 +126,7 @@ func TestWorkspaceStateWritersStampUpdatedAtNano(t *testing.T) {
 
 // TestWorkspaceStateMutatorsAreStampCovered is the completeness half: it fails
 // when *DDBProvider grows a Set*/Delete* method that neither stampingWriters
-// covers nor wholeRowDeleters exempts. Without it, adding a fourth writer would
+// covers nor exemptMutators excuses. Without it, adding a fourth writer would
 // reintroduce the exact hole this file exists to close — the new writer would
 // simply have no test, the way SetSlackBotToken had none.
 func TestWorkspaceStateMutatorsAreStampCovered(t *testing.T) {
@@ -122,7 +134,14 @@ func TestWorkspaceStateMutatorsAreStampCovered(t *testing.T) {
 	for _, w := range stampingWriters() {
 		covered[w.method] = true
 	}
-	exempt := wholeRowDeleters()
+	exempt := exemptMutators()
+	// Membership is what exempts, so an entry can never be silently voided by an
+	// empty reason. Require the reason separately, and say so plainly.
+	for name, reason := range exempt {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("exemptMutators()[%q] has no reason — record why it is exempt from the %s invariant", name, attrUpdatedAtNano)
+		}
+	}
 
 	typ := reflect.TypeOf(&DDBProvider{})
 	for i := range typ.NumMethod() {
@@ -133,14 +152,15 @@ func TestWorkspaceStateMutatorsAreStampCovered(t *testing.T) {
 		if !strings.HasPrefix(name, "Set") && !strings.HasPrefix(name, "Delete") {
 			continue
 		}
-		if covered[name] || exempt[name] != "" {
+		if _, ok := exempt[name]; ok || covered[name] {
 			continue
 		}
 		t.Errorf("DDBProvider.%s mutates workspace_state but is not stamp-covered.\n"+
 			"If it edits attributes on a surviving row it MUST set %s from p.nowOrDefault() — "+
 			"the lifecycle purge guard's attribute_not_exists arm fails open, so an unstamped write "+
 			"lets a delayed uninstall purge delete what it just stored. Add it to stampingWriters().\n"+
-			"If it deletes the whole row instead, add it to wholeRowDeleters() with the reason.",
+			"If it deletes the whole row, or does not touch workspace_state at all, add it to "+
+			"exemptMutators() with the reason.",
 			name, attrUpdatedAtNano)
 	}
 }
