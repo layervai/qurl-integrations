@@ -171,8 +171,15 @@ func requireDurableWorkspaceStateWrite(t *testing.T, in *dynamodb.UpdateItemInpu
 	if !ok {
 		t.Fatalf("durable workspace write must bind :now_nano as N, got %T", in.ExpressionAttributeValues[":now_nano"])
 	}
-	if want := strconv.FormatInt(now.UTC().UnixNano(), 10); nano.Value != want {
-		t.Fatalf("durable workspace write :now_nano = %q, want %q", nano.Value, want)
+	// Compare through unixNanoAttr rather than re-deriving the format here: the
+	// assertion is about the writer binding the current clock, and reusing the
+	// production helper keeps it from drifting if that formatting ever changes.
+	wantNano, ok := unixNanoAttr(now).(*ddbtypes.AttributeValueMemberN)
+	if !ok {
+		t.Fatal("unixNanoAttr no longer produces an N attribute")
+	}
+	if nano.Value != wantNano.Value {
+		t.Fatalf("durable workspace write :now_nano = %q, want %q", nano.Value, wantNano.Value)
 	}
 }
 
