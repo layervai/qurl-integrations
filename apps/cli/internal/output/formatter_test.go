@@ -277,7 +277,7 @@ func TestJSONFormatResolve(t *testing.T) {
 
 func TestTableFormatEnter(t *testing.T) {
 	handle := &qurlsdk.ResourceHandle{
-		RedirectURL: "https://r_abc123test.qurl.site",
+		ResourceURL: "https://r_abc123test.qurl.site",
 		OpenSeconds: 305,
 	}
 
@@ -296,7 +296,7 @@ func TestTableFormatEnter(t *testing.T) {
 
 func TestTableFormatEnter_ZeroOpenSecondsOmitted(t *testing.T) {
 	handle := &qurlsdk.ResourceHandle{
-		RedirectURL: "https://r_abc123test.qurl.site",
+		ResourceURL: "https://r_abc123test.qurl.site",
 		OpenSeconds: 0,
 	}
 
@@ -317,7 +317,7 @@ func TestTableFormatEnter_ZeroOpenSecondsOmitted(t *testing.T) {
 
 func TestJSONFormatEnter(t *testing.T) {
 	handle := &qurlsdk.ResourceHandle{
-		RedirectURL: "https://r_abc123test.qurl.site",
+		ResourceURL: "https://r_abc123test.qurl.site",
 		OpenSeconds: 305,
 	}
 
@@ -345,7 +345,7 @@ func TestJSONFormatEnter(t *testing.T) {
 
 func TestJSONFormatEnter_ZeroOpenSecondsOmitted(t *testing.T) {
 	handle := &qurlsdk.ResourceHandle{
-		RedirectURL: "https://r_abc123test.qurl.site",
+		ResourceURL: "https://r_abc123test.qurl.site",
 		OpenSeconds: 0,
 	}
 
