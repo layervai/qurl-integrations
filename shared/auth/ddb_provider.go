@@ -93,7 +93,23 @@ const (
 	attrSlackBotUserID      = "slack_bot_user_id"
 	attrSlackAppID          = "slack_app_id"
 	attrSlackEnterpriseID   = "slack_enterprise_id"
-	attrSlackBotScopes      = "slack_bot_scopes"
+	// attrSlackBotScopes records what Slack GRANTED at the OAuth exchange, not
+	// what the live bot token carries. Slack upgrades an existing xoxb token's
+	// scopes IN PLACE when an app is reinstalled from its app config, and that
+	// path never traverses the install callback that feeds SetSlackBotToken — so
+	// this set goes stale silently, and nothing fails, because the stored
+	// ciphertext is still a working token. Measured on the live LayerV workspace
+	// 2026-08-14: four scopes stored against a token holding thirteen.
+	//
+	// It is install-time provenance for audits and support triage. Nothing reads
+	// it and nothing should refresh it: an opportunistic writer would bump
+	// attrUpdatedAtNano, which DeleteWorkspaceStateBeforeWithIdentity uses as its
+	// reinstall-race cutoff, so background writes on ordinary Web API traffic
+	// would hold the row newer than any cutoff and could make a delayed uninstall
+	// purge no-op — stranding credentials that should have been deleted. Code
+	// needing the live scope set should read Slack's x-oauth-scopes response
+	// header at call time instead of persisting it here.
+	attrSlackBotScopes = "slack_bot_scopes"
 )
 
 // Env var names — operator-set via the Fargate task definition (the
@@ -259,7 +275,10 @@ type SlackBotTokenInstall struct {
 	BotUserID    string
 	AppID        string
 	EnterpriseID string
-	Scopes       []string
+	// Scopes is the grant Slack returned at THIS exchange. See attrSlackBotScopes
+	// for why the stored copy is not the live token's scope set, and why no reader
+	// should treat it as one.
+	Scopes []string
 }
 
 // nowOrDefault is the safe clock accessor — NewDDBProvider always sets
