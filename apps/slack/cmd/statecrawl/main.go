@@ -27,12 +27,13 @@
 //   - -dry-run defaults TRUE. A dry run makes zero mutations: it only reads
 //     (DynamoDB Scan + GetItem, KMS Decrypt for the per-workspace key, and
 //     GET /v1/resources) and reports what it WOULD purge.
-//   - Mutating requires -dry-run=false. Against a prod-looking deployment
-//     (the -env label, an environment-bearing table name, or the qURL endpoint says
-//     "prod") it ALSO requires the explicit -allow-prod-purge opt-in — the
-//     "rail" that makes an irreversible prod write a deliberate act, not a
-//     flag-default accident. See looksProd for why workspace_state is not
-//     one of the scanned names.
+//   - Mutating requires -dry-run=false. Against a prod-looking deployment —
+//     the -env label says prod, an environment-bearing table name contains
+//     "prod", or the qURL endpoint is prod-looking (it contains "prod" OR is
+//     any layerv.ai host) — it ALSO requires the explicit -allow-prod-purge
+//     opt-in: the "rail" that makes an irreversible prod write a deliberate
+//     act, not a flag-default accident. See looksProd for the exact signals,
+//     and for why workspace_state is not one of the scanned names.
 //   - Only confirmed orphans (resource absent or revoked, verified against a
 //     fully paginated resource list) are ever purged. A workspace whose API key
 //     can't be resolved, or whose list fails, is reported indeterminate and
