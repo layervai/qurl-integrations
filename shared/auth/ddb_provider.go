@@ -83,6 +83,9 @@ const (
 	// Every workspace_state write must refresh attrUpdatedAtNano. Lifecycle
 	// purges use it as the reinstall-race guard; a writer that skips it can let a
 	// delayed uninstall purge delete freshly reinstalled credentials.
+	// TestWorkspaceStateWritersStampUpdatedAtNano enforces this across every
+	// writer, and TestWorkspaceStateMutatorsAreStampCovered fails when a new
+	// mutator lands without deciding which side of the invariant it sits on.
 	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"
@@ -1187,6 +1190,17 @@ func (p *DDBProvider) deleteWorkspaceState(ctx context.Context, workspaceID stri
 		input.ReturnValues = ddbtypes.ReturnValueAllOld
 	}
 	if !cutoff.IsZero() {
+		// The attribute_not_exists arm fails OPEN — an unstamped row is deleted —
+		// so rows last written before #820 introduced the stamp remain purgeable.
+		// Keep it: flipping to fail-closed would silently RETAIN the encrypted bot
+		// token on exactly those rows, which is the worse failure (Marketplace
+		// requires uninstall to forget it), and an unstamped row can reappear at any
+		// time from a PITR restore or an out-of-band operator write, so no one-time
+		// backfill retires the arm. What makes the arm safe is the invariant that
+		// every in-code writer stamps: the post-cutoff write this guard protects
+		// against (a reinstall's SetSlackBotToken, a fresh SetAPIKeyWithMetadata)
+		// installs a stamp newer than the cutoff, so the delayed purge falls to the
+		// second arm and no-ops. ddb_provider_stamp_test.go is what holds that.
 		input.ConditionExpression = aws.String("attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano")
 		input.ExpressionAttributeNames = map[string]string{
 			"#updated_at_nano": attrUpdatedAtNano,
