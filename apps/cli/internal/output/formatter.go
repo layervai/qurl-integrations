@@ -25,7 +25,7 @@ const (
 // EnterOutput is the repo-owned JSON shape for `qurl enter`. It projects the
 // qurl-go ResourceHandle into a stable, explicitly-tagged contract this repo
 // controls, so an SDK type change cannot silently alter `enter -o json` output.
-// It deliberately mirrors ALL ResourceHandle fields (RedirectURL, OpenSeconds) —
+// It deliberately mirrors ALL ResourceHandle fields (ResourceURL, OpenSeconds) —
 // the handle exposes nothing else. The `target_url` key matches resolve's JSON
 // output, and open_seconds carries omitempty because the SDK reports 0 as "not
 // provided".

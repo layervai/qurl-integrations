@@ -156,7 +156,7 @@ func staticTrustConfig(issuerKeys, relays []string) (qurl.Config, error) {
 	}
 
 	// qurl.NewRelayAllowlist already trims+lowercases each entry and drops empties
-	// (qv2/relay.go), so a padded value like " relay.host " is normalized and still
+	// (the qurl facade re-export of the relay allowlist), so a padded value like " relay.host " is normalized and still
 	// matches — passing the raw slice here is safe and no CLI-side trimming is needed.
 	// We reject a fully empty/whitespace entry explicitly only to surface a clear CLI
 	// error instead of the allowlist silently dropping it (which would mask a typo'd flag).
