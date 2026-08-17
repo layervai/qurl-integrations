@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.55.4
 	github.com/distribution/reference v0.6.0
 	github.com/fatih/color v1.19.0
-	github.com/layervai/qurl-go v0.5.2
+	github.com/layervai/qurl-go v0.5.3
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10

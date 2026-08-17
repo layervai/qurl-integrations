@@ -63,10 +63,10 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/invopop/jsonschema v0.14.0 h1:MHQqLhvpNUZfw+hM3AZDYK7jxO8FZoQeQM77g8iyZjg=
 github.com/invopop/jsonschema v0.14.0/go.mod h1:ygm6C2EaVNMBDPpaPlnOA2pFAxBnxGjFlMZABxm9n2I=
-github.com/layervai/qurl-conformance v0.12.3 h1:ruCvfnAEzgzBelnh/ujNk445a7ph6S5hxfSfM0mnjTg=
-github.com/layervai/qurl-conformance v0.12.3/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
-github.com/layervai/qurl-go v0.5.2 h1:rQ5+1N2XOkZcpikIuzvgiNsM9o23w5YKTRDwBdVkGIA=
-github.com/layervai/qurl-go v0.5.2/go.mod h1:4Jh+/cCsLue/wjN+CrK3HaSGtUnOWgIKB1QPiMXSZjA=
+github.com/layervai/qurl-conformance v0.12.5 h1:xqlvEriWnVWuFczir1DNs34efnM+nPo+VVJPT4qJAWY=
+github.com/layervai/qurl-conformance v0.12.5/go.mod h1:NHtczZdj7SRFqLj9iS4dCGyYZSZKfpILnBRhC53W7WA=
+github.com/layervai/qurl-go v0.5.3 h1:j5NruZYgZz6sDd7COaflDoG/YH3Ke/ie0FKuM348Qys=
+github.com/layervai/qurl-go v0.5.3/go.mod h1:6NrtVAx0fI5yv44TloEH7IIv0saAS216HLNirLgEunQ=
 github.com/lestrrat-go/blackmagic v1.0.4 h1:IwQibdnf8l2KoO+qC3uT4OaTWsW7tuRQXy9TRN9QanA=
 github.com/lestrrat-go/blackmagic v1.0.4/go.mod h1:6AWFyKNNj0zEXQYfTMPfZrAXUWUfTIZ5ECEUEJaijtw=
 github.com/lestrrat-go/httpcc v1.0.1 h1:ydWCStUeJLkpYyjLDHihupbn2tYmZ7m22BGkcvZZrIE=
