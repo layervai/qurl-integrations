@@ -128,6 +128,16 @@ at the OAuth-callback bind layer.
   `sub`: a different connection is a different qURL account.
   `AUTH0_EMAIL_CONNECTION` remains an override for a deployment whose
   passwordless connection is named something else.
+  **Deployment prerequisite:** because the connection is pinned rather than
+  hinted, the Auth0 application must have a passwordless connection named
+  `email` enabled before this ships — or `AUTH0_EMAIL_CONNECTION` must name
+  whatever it is called there. Nothing validates this at startup; the bot
+  cannot enumerate a tenant's connections, so a missing or differently-named
+  connection surfaces only as an Auth0 error at the `/authorize` redirect, and
+  it breaks **every** setup path (first install, `--rotate`, `--repoint`) for
+  every admin. Verify the connection name in the environment's Auth0
+  application, and run one `/qurl setup <email>` end to end, before promoting a
+  build carrying this pin.
   Migration note: a workspace whose key was minted under a different connection
   (for example Google) now signs in passwordless, so it authenticates as a
   different `sub` and therefore a different qURL account. Provenance-bearing
