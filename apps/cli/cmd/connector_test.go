@@ -670,6 +670,11 @@ func TestConnectorRunRefreshGates(t *testing.T) {
 		if !strings.Contains(res.stderr.String(), agent.EnvRefreshMode) {
 			t.Errorf("stderr must name %s:\n%s", agent.EnvRefreshMode, res.stderr.String())
 		}
+		// The customer rendering, not the raw operator string: headline
+		// parity with the other seven connector sentinels.
+		if !strings.Contains(res.stderr.String(), "recognized values") {
+			t.Errorf("expected the customer headline for an invalid refresh mode, got:\n%s", res.stderr.String())
+		}
 	})
 }
 
