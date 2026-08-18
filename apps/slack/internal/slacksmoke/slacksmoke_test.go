@@ -381,6 +381,10 @@ func TestIsEnvVarName(t *testing.T) {
 		{name: "SMOKE\x1bFORGED", want: false},
 		{name: "SMOKE\x00FORGED", want: false},
 		{name: "SMOKE\aFORGED", want: false},
+		// DEL is the control character a "reject C0" rewrite misses: ESC, NUL and BEL all
+		// sit below 0x20, so a guard written as r < 0x20 still rejects them while letting
+		// 0x7f through. It was pinned in the command-package duplicate #1138 deleted.
+		{name: "SMOKE\x7fFORGED", want: false},
 		{name: "UNICODE_É", want: false},
 	}
 	for _, tc := range tests {
