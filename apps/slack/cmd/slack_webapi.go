@@ -16,7 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
@@ -100,7 +100,7 @@ func newSlackOpenViewFuncWithTokenLookup(lookup slackBotTokenLookup, userAgent, 
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		raw, err := slacksmoke.ReadResponseBody("views.open", resp.Body, slackViewsOpenResponseBodyLimit)
+		raw, err := httpbody.ReadResponseBody("views.open", resp.Body, slackViewsOpenResponseBodyLimit)
 		if err != nil {
 			return err
 		}
@@ -378,7 +378,7 @@ func (p *slackWebAPIPoster) postOnce(ctx context.Context, ownerID string, body [
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := slacksmoke.ReadResponseBody(p.op, resp.Body, slackWebAPIResponseBodyLimit)
+	raw, err := httpbody.ReadResponseBody(p.op, resp.Body, slackWebAPIResponseBodyLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -933,7 +933,7 @@ func newSlackResolveConversationInfoFuncWithTokenLookup(lookup slackBotTokenLook
 			return internal.ConversationInfo{}, fmt.Errorf("conversations.info request: %w", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
-		raw, err := slacksmoke.ReadResponseBody("conversations.info", resp.Body, slackWebAPIResponseBodyLimit)
+		raw, err := httpbody.ReadResponseBody("conversations.info", resp.Body, slackWebAPIResponseBodyLimit)
 		if err != nil {
 			return internal.ConversationInfo{}, err
 		}
@@ -1052,7 +1052,7 @@ func fetchSlackAgentThreadHistoryPage(ctx context.Context, httpClient *http.Clie
 	if err != nil {
 		return slackAgentThreadHistoryPage{}, fmt.Errorf("conversations.replies request: %w", err)
 	}
-	raw, readErr := slacksmoke.ReadResponseBody("conversations.replies", resp.Body, slackAgentThreadHistoryResponseBodyLimit)
+	raw, readErr := httpbody.ReadResponseBody("conversations.replies", resp.Body, slackAgentThreadHistoryResponseBodyLimit)
 	_ = resp.Body.Close()
 	if readErr != nil {
 		return slackAgentThreadHistoryPage{}, readErr
@@ -1125,7 +1125,7 @@ func fetchSlackUserInfo(ctx context.Context, httpClient *http.Client, baseURL, u
 		return slackUserInfo{}, false, fmt.Errorf("users.info request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := slacksmoke.ReadResponseBody("users.info", resp.Body, slackWebAPIResponseBodyLimit)
+	raw, err := httpbody.ReadResponseBody("users.info", resp.Body, slackWebAPIResponseBodyLimit)
 	if err != nil {
 		return slackUserInfo{}, false, err
 	}
@@ -1241,7 +1241,7 @@ func fetchConversationsMembersPage(ctx context.Context, httpClient *http.Client,
 		return nil, "", fmt.Errorf("conversations.members request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := slacksmoke.ReadResponseBody("conversations.members", resp.Body, slackWebAPIResponseBodyLimit)
+	raw, err := httpbody.ReadResponseBody("conversations.members", resp.Body, slackWebAPIResponseBodyLimit)
 	if err != nil {
 		return nil, "", err
 	}
