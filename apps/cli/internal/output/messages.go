@@ -62,6 +62,16 @@ const (
 	// msgSavedTo confirms a completed download: destination, then size.
 	msgSavedTo = "Saved to %s (%d bytes)."
 
+	// msgAlreadyPublished is the stderr status note for publishing a URL
+	// that already has an active resource, in the modes whose stdout
+	// documents must not change shape (--quiet and JSON); full text mode
+	// says it in the document itself via msgPublishFoundExisting.
+	msgAlreadyPublished = "This target was already published; showing the existing resource."
+
+	// msgPublishFoundExisting is the text-document note for that same case:
+	// what happened, then the one next step.
+	msgPublishFoundExisting = "This URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource."
+
 	// Connector lifecycle renderings. Headlines say what happened in customer
 	// language; the operator detail (which stays technical) is appended by
 	// RenderError as an indented detail block where it adds facts the
@@ -136,6 +146,8 @@ func CustomerMessages() []string {
 		msgLoggedOut,
 		msgNothingStored,
 		msgSavedTo,
+		msgAlreadyPublished,
+		msgPublishFoundExisting,
 		msgConnectorTokenRequired,
 		hintConnectorTokenRequired,
 		msgConnectorIdentityConflict,
