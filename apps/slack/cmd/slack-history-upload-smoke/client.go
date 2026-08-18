@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -123,13 +122,9 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 		}
 		return 0, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSlackResponseBytes+1))
+	raw, err := slacksmoke.ReadResponseBody(method, resp.Body, maxSlackResponseBytes)
 	if err != nil {
-		return 0, fmt.Errorf("%s response read: %w", method, err)
-	}
-	if len(raw) > maxSlackResponseBytes {
-		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
-		return 0, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
+		return 0, err
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		// The status, content type and length are not user content, and without them an

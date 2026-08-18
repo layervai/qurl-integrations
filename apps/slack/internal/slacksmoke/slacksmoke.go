@@ -19,8 +19,9 @@
 // binary. The commands are operator-triggered and there is no CI run to catch the
 // difference at runtime either.
 //
-// Callers keep their own response-size ceiling and pass it to DrainResponseBody; see
-// that function for why the limit is a parameter rather than a constant here.
+// Callers keep their own response-size ceiling and pass it to ReadResponseBody and
+// DrainResponseBody; see the latter for why the limit is a parameter rather than a
+// constant here.
 package slacksmoke
 
 import (
@@ -73,6 +74,13 @@ var (
 	// ErrRequestTimeoutNotLess reports a -request-timeout that does not leave the
 	// overall budget room for more than one call.
 	ErrRequestTimeoutNotLess = errors.New("-request-timeout must be less than -timeout")
+
+	// ErrResponseTooLarge marks a response body that ran past the caller's ceiling.
+	// Unlike the sentinels above, this text is never printed: ReadResponseBody's error
+	// renders the operator-facing message and unwraps to this, so a caller can attach
+	// its own bookkeeping — slack-dm-smoke records a result code — by matching on the
+	// sentinel rather than on the message.
+	ErrResponseTooLarge = errors.New("response exceeded caller limit")
 )
 
 // NormalizeBaseURL trims and validates a Slack Web API base URL, returning it without
@@ -144,10 +152,40 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+// ReadResponseBody reads a Slack response body under the caller's ceiling, returning
+// the bytes or an error carrying the text both smoke commands print. method names the
+// Slack Web API method the read belongs to, which is what that text leads with.
+//
+// The read is limit+1 bytes — deliberately one past the ceiling — and an oversized body
+// is detected by having read that extra byte, rather than by trusting a Content-Length
+// the caller has no way to verify. The over-read and the comparison against it are why
+// this is one function rather than an idiom copied per command: reading limit bytes, or
+// comparing with >=, silently truncates a body that exactly fills the ceiling into a
+// JSON parse error, and an operator-triggered command has no CI run that would notice.
+// Nor could dupl, for the reason the package comment gives.
+//
+// An oversized body is drained before the error returns, for the connection-reuse reason
+// DrainResponseBody exists, and the error unwraps to ErrResponseTooLarge so a caller can
+// record its own code for that case. limit is a parameter, and a negative one is clamped,
+// both for the reasons given on DrainResponseBody.
+func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error) {
+	if limit < 0 {
+		limit = 0
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s response read: %w", method, err)
+	}
+	if int64(len(raw)) > limit {
+		DrainResponseBody(body, limit)
+		return nil, oversizeResponseError{method: method, limit: limit}
+	}
+	return raw, nil
+}
+
 // DrainResponseBody discards up to limit+1 bytes of body — one past the caller's
-// ceiling, matching the over-read the callers use to detect an oversized response. It
-// is a best-effort attempt at connection reuse; Close tears the response down if bytes
-// still remain.
+// ceiling, matching ReadResponseBody's over-read. It is a best-effort attempt at
+// connection reuse; Close tears the response down if bytes still remain.
 //
 // limit is a parameter rather than a package constant because the callers' ceilings
 // differ by two orders of magnitude — slack-dm-smoke reads small chat.postMessage
@@ -162,6 +200,24 @@ func DrainResponseBody(body io.Reader, limit int64) {
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, limit+1))
 }
+
+// oversizeResponseError renders the over-limit message operators read while unwrapping
+// to ErrResponseTooLarge. The wrapping is done with a type rather than a
+// fmt.Errorf("...: %w", ErrResponseTooLarge), because that would append the sentinel's
+// own text to a message that has to stay byte-identical to the one both commands
+// printed before this was hoisted.
+type oversizeResponseError struct {
+	method string
+	limit  int64
+}
+
+// Error renders the operator-facing message; the sentinel's text never appears in it.
+func (e oversizeResponseError) Error() string {
+	return fmt.Sprintf("%s response exceeded %d bytes", e.method, e.limit)
+}
+
+// Unwrap reports ErrResponseTooLarge, which is what callers match on.
+func (e oversizeResponseError) Unwrap() error { return ErrResponseTooLarge }
 
 // IsEnvVarName reports whether name is a POSIX environment variable name: a leading
 // letter or underscore, then letters, digits or underscores. The empty string is not
