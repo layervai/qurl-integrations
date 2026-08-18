@@ -44,6 +44,47 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Per-archive SPDX SBOMs (syft). qurl-connector ships an SPDX SBOM with its
+# customer image (docker-publish.yml, buildx `sbom: true`); this is the same
+# supply-chain surface for the CLI's archives — one `<archive>.sbom.json` per
+# tar.gz/zip, uploaded as a release asset and listed in checksums.txt, so the
+# checksum signature below transitively covers every SBOM document.
+sboms:
+  - artifacts: archive
+
+# Keyless Sigstore signature over the checksum manifest — qurl-connector's
+# proven cosign model (docker-publish.yml signs the image digest once, not
+# per-tag) adapted from image digests to blobs: sign ONCE over checksums.txt,
+# which enumerates the SHA-256 of every archive, deb/rpm, and SBOM, instead
+# of per-artifact signatures. cosign exchanges the release-cli job's OIDC
+# token (id-token: write in .github/workflows/release-please.yml) for a
+# short-lived Fulcio certificate whose SAN names this repo + workflow + ref,
+# and appends the signing event to the public Rekor transparency log; no key
+# material exists on our side. `--yes` skips the interactive Rekor-upload
+# confirmation (mandatory in CI). Consumers verify with the recipe in
+# RELEASING.md, and release-cli re-runs that exact recipe as a post-release
+# self-test. Snapshot builds (`make release-snapshot`, cli-nightly.yml) pass
+# `--skip=sign`: keyless signing needs GitHub's OIDC broker, which exists
+# only on Actions runs holding the id-token permission.
+#
+# Bundle format, NOT the older `--output-signature`/`--output-certificate`
+# pair: cosign v3 (the pinned signer is v3.0.6) emits the Sigstore bundle by
+# default and deprecates-and-IGNORES the classic output flags — a config
+# using them signs but writes no signature file at all, and v3.1+ hard-errors
+# ("must specify --bundle with --new-bundle-format"). The single
+# checksums.txt.sigstore.json embeds signature, Fulcio certificate, and the
+# Rekor inclusion proof, so verification works offline.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
 changelog:
   sort: asc
   filters:

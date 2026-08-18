@@ -65,10 +65,12 @@ vendor:
 	go mod vendor
 	go mod tidy
 
-## Release (requires goreleaser)
+## Release (requires goreleaser + syft; .goreleaser.yml's sboms block shells
+## out to syft). Signing is skipped: keyless cosign needs GitHub's OIDC
+## broker, which only exists on Actions runs — see `signs:` in .goreleaser.yml.
 
 release-snapshot: # Build release artifacts without publishing
-	goreleaser release --snapshot --clean
+	goreleaser release --snapshot --clean --skip=sign
 
 ## Security
 
