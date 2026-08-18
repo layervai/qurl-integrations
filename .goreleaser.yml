@@ -5,9 +5,12 @@ project_name: qurl
 before:
   hooks:
     - go mod tidy
-    # Generate man pages for inclusion in archives
+    # Generate man pages and shell completions for inclusion in archives.
+    # The cask below installs both from the archive by exact path — the old
+    # formula generated completions at install time, which casks cannot do.
     - go build -o /tmp/qurl-gendocs ./apps/cli/cmd/
     - /tmp/qurl-gendocs docs man -d manpages
+    - ./scripts/cli-completions.sh
 
 builds:
   - id: qurl
@@ -27,15 +30,16 @@ builds:
 
 archives:
   - id: qurl
-    builds:
+    ids:
       - qurl
     name_template: "qurl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
       - manpages/*
+      - completions/*
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
 
 checksum:
   name_template: "checksums.txt"
@@ -49,30 +53,65 @@ changelog:
       - "^ci:"
       - "^chore:"
 
-brews:
+# Successor to the deprecated `brews` formula pipe. The cask installs what the
+# formula would have — binary on PATH, completions, man pages, via the same
+# `brew install layervai/tap/qurl` (unqualified names resolve to the cask
+# because the tap has no formula of this name) — with three differences:
+#  - manpages/completions are exact shipped paths: casks can neither glob the
+#    way the formula's Dir["manpages/*.1"] did nor run the binary at install
+#    time. apps/cli/cmd/goreleaser_contract_test.go pins both lists to the
+#    real command tree so drift fails CI instead of breaking `brew install`
+#    at the next release.
+#  - Homebrew quarantines cask downloads (it never quarantined formula
+#    installs) and these binaries are unsigned, so without the post-install
+#    hook Gatekeeper blocks the first run on macOS.
+#  - Casks have no `test do` block; the nightly snapshot job covers build
+#    sanity instead.
+homebrew_casks:
   - name: qurl
     repository:
       owner: layervai
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://layerv.ai"
     description: "qURL CLI - manage secure links from the command line"
     license: "MIT"
-    install: |
-      bin.install "qurl"
-
-      # Shell completions
-      generate_completions_from_executable(bin/"qurl", "completion")
-
-      # Man pages (included in archive by goreleaser)
-      man1.install Dir["manpages/*.1"] if Dir.exist?("manpages")
-    test: |
-      assert_match version.to_s, shell_output("#{bin}/qurl version")
+    url:
+      verified: github.com/layervai/qurl-integrations/releases/download
+    manpages:
+      - manpages/qurl-completion.1
+      - manpages/qurl-config-get.1
+      - manpages/qurl-config-path.1
+      - manpages/qurl-config-profiles.1
+      - manpages/qurl-config-set.1
+      - manpages/qurl-config.1
+      - manpages/qurl-create.1
+      - manpages/qurl-delete.1
+      - manpages/qurl-enter.1
+      - manpages/qurl-extend.1
+      - manpages/qurl-get.1
+      - manpages/qurl-list.1
+      - manpages/qurl-mint.1
+      - manpages/qurl-quota.1
+      - manpages/qurl-resolve.1
+      - manpages/qurl-update.1
+      - manpages/qurl-version.1
+      - manpages/qurl.1
+    completions:
+      bash: completions/qurl.bash
+      zsh: completions/qurl.zsh
+      fish: completions/qurl.fish
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/qurl"]
+          end
 
 nfpms:
   - id: qurl
-    builds:
+    ids:
       - qurl
     vendor: LayerV
     homepage: "https://layerv.ai"
