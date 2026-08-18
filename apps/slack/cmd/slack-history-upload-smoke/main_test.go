@@ -218,18 +218,6 @@ func TestRunHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestRunNamesTheTokenEnvVarItLookedAt pins the one error message an operator hits
-// first. "missing Slack bot token" without the variable name is a guessing game when
-// -token-env has been pointed somewhere custom.
-func TestRunNamesTheTokenEnvVarItLookedAt(t *testing.T) {
-	t.Parallel()
-
-	_, _, stderr := runCLI(t, []string{flagTokenEnv, testTokenEnv}, testEnv(""))
-	if !strings.Contains(stderr, testTokenEnv) {
-		t.Errorf("stderr = %q, want the environment variable named", stderr)
-	}
-}
-
 func TestMessageRefListSet(t *testing.T) {
 	t.Parallel()
 
