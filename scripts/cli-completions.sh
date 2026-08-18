@@ -13,6 +13,8 @@ outdir="${2:-completions}"
 rm -rf "$outdir"
 mkdir -p "$outdir"
 
+# The CLI can also generate powershell completions; deliberately not shipped —
+# Homebrew casks have completion artifacts for these three shells only.
 for shell in bash zsh fish; do
   "$gendocs" completion "$shell" > "$outdir/qurl.$shell"
 done

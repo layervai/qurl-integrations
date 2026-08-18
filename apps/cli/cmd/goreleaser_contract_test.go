@@ -3,7 +3,9 @@ package main
 import (
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -81,16 +83,44 @@ func TestCaskManpagesMatchGeneratedManTree(t *testing.T) {
 }
 
 func TestCaskCompletionsMatchGeneratedFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("runs the sh completion script; the release before hooks never run on windows")
+	}
 	cfg := loadGoreleaserConfig(t)
 
-	// scripts/cli-completions.sh writes exactly these files into the archive.
-	want := map[string]string{
-		"bash": "completions/qurl.bash",
-		"zsh":  "completions/qurl.zsh",
-		"fish": "completions/qurl.fish",
+	// Run the real script (with a stub gendocs — only the file names matter
+	// here) so the cask's completions map is pinned to what the script
+	// actually writes, not to a second hardcoded copy of the same names.
+	stub := filepath.Join(t.TempDir(), "gendocs")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"stub $*\"\n"), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable for the script to invoke it; it lives in t.TempDir().
+		t.Fatalf("write stub gendocs: %v", err)
 	}
-	if got := cfg.HomebrewCasks[0].Completions; !maps.Equal(got, want) {
-		t.Fatalf("homebrew_casks[0].completions = %v, want %v", got, want)
+	outdir := filepath.Join(t.TempDir(), "completions")
+	script := filepath.Join("..", "..", "..", "scripts", "cli-completions.sh")
+	if out, err := exec.CommandContext(t.Context(), script, stub, outdir).CombinedOutput(); err != nil { //nolint:gosec // G204: script path and args are test-built literals and TempDir paths, not external input.
+		t.Fatalf("run %s: %v\n%s", script, err, out)
+	}
+
+	entries, err := os.ReadDir(outdir)
+	if err != nil {
+		t.Fatalf("read script output dir: %v", err)
+	}
+	written := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		written = append(written, "completions/"+entry.Name())
+	}
+	slices.Sort(written)
+
+	declared := slices.Sorted(maps.Values(cfg.HomebrewCasks[0].Completions))
+
+	if !slices.Equal(written, declared) {
+		t.Fatalf("homebrew_casks[0].completions out of sync with scripts/cli-completions.sh output\nscript wrote: %q\ndeclared:     %q", written, declared)
+	}
+	// The cask map must key the three shells Homebrew has completion
+	// artifacts for — a wrong key would render an invalid stanza.
+	wantShells := []string{"bash", "fish", "zsh"}
+	if gotShells := slices.Sorted(maps.Keys(cfg.HomebrewCasks[0].Completions)); !slices.Equal(gotShells, wantShells) {
+		t.Fatalf("homebrew_casks[0].completions keys = %q, want %q", gotShells, wantShells)
 	}
 }
 
