@@ -244,7 +244,7 @@ func prepareScanConfig(cfg *scanConfig) error {
 // The two nolints below are gosec's taint analysis reaching a flag value that reaches
 // an io.Writer. There is no XSS sink here — stderr on a CLI is not a browser — and
 // slacksmoke.IsEnvVarName has already constrained the value to a POSIX environment
-// before it gets this far, so it cannot carry a control character either.
+// variable name before it gets this far, so it cannot carry a control character either.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, slacksmoke.ErrMissingBotToken):
