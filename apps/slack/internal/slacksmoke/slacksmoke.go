@@ -163,11 +163,10 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // wrong fail in opposite directions. Reading only limit bytes loses the detection
 // entirely, handing back an over-limit body truncated to the ceiling with a nil error,
 // to die later as a JSON parse error. Comparing with >= instead refuses a body that
-// exactly fills the ceiling as though it had overflowed. Nothing caught either while
-// this was copied per command: the commands are operator-triggered, so no CI run
-// exercised them, and dupl was no backstop — it runs per package, these are two
-// package main directories, and at 78 tokens the block sat under its 150-token
-// threshold anyway.
+// exactly fills the ceiling as though it had overflowed. Neither had a backstop while
+// this was copied per command: on top of the blind spot the package comment describes,
+// the block ran 78 tokens against dupl's 150-token threshold, so size alone would have
+// kept it invisible.
 //
 // An oversized body is drained before the error returns, for the connection-reuse reason
 // DrainResponseBody exists, and the error unwraps to ErrResponseTooLarge so a caller can
@@ -176,6 +175,8 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // reason. Unclamped here, io.LimitReader reads nothing and the comparison below then
 // refuses every body — an empty one included — with the negative digits rendered into
 // the operator's message. Clamped, a negative ceiling behaves exactly as a zero one does.
+// Only that end is guarded: limit+1 still overflows at math.MaxInt64, which would read
+// nothing and accept an empty body as valid. No caller is anywhere near it.
 func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error) {
 	if limit < 0 {
 		limit = 0
