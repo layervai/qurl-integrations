@@ -144,6 +144,46 @@ func TestTransportRetries429ThenSucceeds(t *testing.T) {
 	}
 }
 
+// TestTransportBackoffIsContextAware pins the round-4 disposition: a context
+// canceled during the 429 backoff returns promptly with the context error
+// instead of finishing the sleep. No Sleep is injected, so this exercises
+// the real timer+select path against a 5-second Retry-After.
+func TestTransportBackoffIsContextAware(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ScriptRepeat(http.MethodGet, "/v1/resources", 3, apitest.Handler429(t, 5))
+
+	cfg := Config{
+		BaseURL:      srv.URL,
+		APIKey:       "lv_test_apitestingvalueapitestingvalue0123456789abc",
+		Version:      "test",
+		NewRequestID: func() string { return testRequestID },
+	}
+	client, err := New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err = client.List(ctx, ListOptions{})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("cancellation took %v; the backoff must return promptly, not wait out Retry-After", elapsed)
+	}
+	if got := len(srv.Requests()); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry after cancellation)", got)
+	}
+}
+
 func TestTransportRetryAfterFallbackAndCap(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}}
 	if d := retryDelay(resp, 1); d != 500*time.Millisecond {

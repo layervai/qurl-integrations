@@ -4,7 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -113,6 +116,66 @@ func TestSecretsInConfigRefused(t *testing.T) {
 				t.Errorf("err = %v, want ErrSecretInConfig", err)
 			}
 		})
+	}
+}
+
+// TestEnumValuesValidatedAtLoad pins the round-4 disposition: enum-valued
+// settings a config FILE spells wrongly are ErrConfigFile (the configuration
+// exit code), decided here in the config layer — the only place that knows
+// the value's source. Valid spellings and absent keys load clean.
+func TestEnumValuesValidatedAtLoad(t *testing.T) {
+	invalid := map[string]string{
+		"bad output":   "output: yaml\n",
+		"bad color":    "color: sometimes\n",
+		"cased output": "output: JSON\n",
+		"color on":     "color: on\n",
+	}
+	for name, body := range invalid {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(dir)
+			if !errors.Is(err, ErrConfigFile) {
+				t.Errorf("err = %v, want ErrConfigFile", err)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("output: json\ncolor: never\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("valid enums must load: %v", err)
+	}
+	if cfg.Output != "json" || cfg.Color != "never" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+
+	profiles := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profiles, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profiles, "bad.yaml"), []byte("output: table\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfile(dir, "bad"); !errors.Is(err, ErrConfigFile) {
+		t.Errorf("profile err = %v, want ErrConfigFile", err)
+	}
+}
+
+// TestEnumVocabulariesMatchOutputPackage pins config's duplicated enum
+// literals to the output package's authoritative constants (config sits
+// below output and cannot import it; this test can).
+func TestEnumVocabulariesMatchOutputPackage(t *testing.T) {
+	if want := []string{string(output.FormatText), string(output.FormatJSON)}; !slices.Equal(validOutputs, want) {
+		t.Errorf("validOutputs = %v, want output's %v", validOutputs, want)
+	}
+	if want := []string{output.ColorAuto, output.ColorAlways, output.ColorNever}; !slices.Equal(validColors, want) {
+		t.Errorf("validColors = %v, want output's %v", validColors, want)
 	}
 }
 

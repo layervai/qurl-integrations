@@ -1,6 +1,7 @@
 package qurlapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -45,10 +46,6 @@ func newTransport(cfg *Config) *transport {
 			},
 		}
 	}
-	sleep := cfg.Sleep
-	if sleep == nil {
-		sleep = time.Sleep
-	}
 	newRequestID := cfg.NewRequestID
 	if newRequestID == nil {
 		newRequestID = randomRequestID
@@ -57,8 +54,10 @@ func newTransport(cfg *Config) *transport {
 		next:         httpClient,
 		userAgent:    "qurl-cli/" + cfg.Version,
 		newRequestID: newRequestID,
-		sleep:        sleep,
-		verbose:      cfg.Verbose,
+		// nil means the context-aware timer path in backoff; tests inject a
+		// recorder.
+		sleep:   cfg.Sleep,
+		verbose: cfg.Verbose,
 	}
 }
 
@@ -87,11 +86,7 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 		wait := retryDelay(resp, attempt)
 		discardResponse(resp)
 		t.verbosef("< HTTP 429, retrying in %s", wait)
-		if req.Context().Err() != nil {
-			return nil, req.Context().Err()
-		}
-		t.sleep(wait)
-		if err := req.Context().Err(); err != nil {
+		if err := t.backoff(req.Context(), wait); err != nil {
 			return nil, err
 		}
 		if replay != nil {
@@ -101,6 +96,29 @@ func (t *transport) Do(req *http.Request) (*http.Response, error) {
 			}
 			req.Body = body
 		}
+	}
+}
+
+// backoff waits out one retry delay, context-aware: cancellation during the
+// wait returns promptly with the context's error instead of finishing the
+// sleep. The injected recorder (tests) is honored when present; the context
+// is still consulted on both sides of it so a canceled invocation never
+// proceeds to another attempt.
+func (t *transport) backoff(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if t.sleep != nil {
+		t.sleep(d)
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
