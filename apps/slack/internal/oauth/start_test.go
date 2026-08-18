@@ -490,15 +490,16 @@ func TestAuthorizeURLPromptCarriesLoginAndConsent(t *testing.T) {
 // a task definition or .env) must fall back to the passwordless pin rather than
 // send a blank connection, which Auth0 would reject.
 func TestAuthorizeURLConnectionOverrideWins(t *testing.T) {
+	const customConnection = "passwordless-otp"
 	for _, tt := range []struct {
 		name       string
 		configured string
 		want       string
 	}{
-		{name: "override wins", configured: "passwordless-otp", want: "passwordless-otp"},
+		{name: "override wins", configured: customConnection, want: customConnection},
 		{name: "empty falls back to passwordless", configured: "", want: defaultPasswordlessConnection},
 		{name: "whitespace-only falls back to passwordless", configured: "   ", want: defaultPasswordlessConnection},
-		{name: "override is trimmed", configured: "  passwordless-otp  ", want: "passwordless-otp"},
+		{name: "override is trimmed", configured: "  " + customConnection + "  ", want: customConnection},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newStartCfg()
