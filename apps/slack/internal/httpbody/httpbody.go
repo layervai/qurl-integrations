@@ -38,12 +38,12 @@ var ErrResponseTooLarge = errors.New("response exceeded caller limit")
 // to die later as a JSON parse error. Comparing with >= instead refuses a body that
 // exactly fills the ceiling as though it had overflowed.
 //
-// Nothing caught either while this was copied per call site. The smoke commands are
+// Neither had a backstop while this was copied per call site. The smoke commands are
 // operator-triggered, so no CI run exercised them; the Lambda's six copies do run under
 // test, but those tests pinned the refusal's text and not the drain behind it, which is
-// how one of the six came to be missing its drain entirely. dupl was no backstop for any
-// of them — it runs per package, package main directories cannot import each other, and
-// at 78 tokens the block sat under its 150-token threshold anyway.
+// how one of the six came to be missing its drain entirely. dupl caught none of it: the
+// block ran 78 tokens against its 150-token threshold, so size alone would have kept the
+// duplication invisible even within one package.
 //
 // An oversized body is drained before the error returns, for the reason DrainResponseBody
 // gives, and the error unwraps to ErrResponseTooLarge so a caller can record its own code
@@ -51,7 +51,9 @@ var ErrResponseTooLarge = errors.New("response exceeded caller limit")
 // negative one is clamped to zero, but NOT for that function's reason. Unclamped here,
 // io.LimitReader reads nothing and the comparison below then refuses every body — an
 // empty one included — with the negative digits rendered into the operator's message.
-// Clamped, a negative ceiling behaves exactly as a zero one does.
+// Clamped, a negative ceiling behaves exactly as a zero one does. Only that end is
+// guarded: limit+1 still overflows at math.MaxInt64, which would read nothing and accept
+// an empty body as valid. No caller is anywhere near it.
 func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error) {
 	if limit < 0 {
 		limit = 0
