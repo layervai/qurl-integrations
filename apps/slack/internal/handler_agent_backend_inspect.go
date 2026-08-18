@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/nethost"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -142,6 +142,13 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 	// Each confirmed summary mints a real one-time qURL, so it counts toward the
 	// workspace's qURL usage/quota the same way a `/qurl get` does — a summary is not
 	// a free "read". The confirm gate keeps this human-paced rather than model-driven.
+	//
+	// No reason rides along: this mint used to carry a machine-built "Slack agent
+	// summary lookup for $<token>" string, which qurl-service dropped on arrival
+	// (`reason` is not a property of either create schema; qurl-service#1402 makes
+	// sending it a 400). Nothing is lost — the confirm path that gates every inspect
+	// already writes the durable record via recordAgentAudit, where Action=inspect
+	// and Target=$<token> say the same thing and the operator can actually read it.
 	out, err := c.Create(ctx, client.CreateInput{
 		ResourceID:      resolved.ResourceID,
 		Label:           agentInspectLinkLabel,
@@ -149,7 +156,6 @@ func (b *agentBackend) InspectToken(ctx context.Context, tc *agent.TurnContext, 
 		OneTimeUse:      true,
 		MaxSessions:     resourceMaxSessions,
 		SessionDuration: agentInspectSessionDuration,
-		Reason:          "Slack agent summary lookup for $" + token,
 	})
 	if err != nil {
 		b.log.Error("agent inspect mint failed", "token", token, "resource_id", resolved.ResourceID, "error", err)
@@ -330,7 +336,7 @@ func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) er
 	if siteHost == "" {
 		return errors.New("qURL site missing host name")
 	}
-	if allowLoopback && isLoopbackHostname(linkHost) && isLoopbackHostname(siteHost) {
+	if allowLoopback && nethost.IsLoopback(linkHost) && nethost.IsLoopback(siteHost) {
 		return nil
 	}
 	if isInspectableQURLLinkHost(linkHost) {
@@ -384,14 +390,6 @@ func isInspectableFetchScheme(scheme string) bool {
 // isInspectableQURLLinkHost).
 func isInspectableQURLSiteHost(hostname string) bool {
 	return hostname == "qurl.site" || strings.HasSuffix(hostname, ".qurl.site")
-}
-
-func isLoopbackHostname(hostname string) bool {
-	if hostname == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(hostname)
-	return ip != nil && ip.IsLoopback()
 }
 
 func isProtectedInspectableContent(contentType, contentDisposition string) bool {

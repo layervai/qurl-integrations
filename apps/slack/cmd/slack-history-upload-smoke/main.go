@@ -1,0 +1,257 @@
+// Command slack-history-upload-smoke checks, against a live Slack workspace, that a
+// message read back through the Web API still describes its upload the way
+// internal.SlackMessageHasUpload assumes it does.
+//
+// It exists because that classifier's TODO(upstream-contract) names a rot path
+// nothing else observes. The thread-history seam annotates a rebuilt caption with
+// "an attachment was here" from the message's `files` array alone, and if Slack stops
+// populating that array every unit test stays green: they supply the field directly
+// and never read Slack. The measurement the comment cites was one workspace on one
+// day, run by hand. This is that measurement as a command, so the next person re-runs
+// it instead of re-deriving it — and it reads conversations.replies as well as
+// conversations.history, which is the "not separately measured" caveat the comment
+// leaves open.
+//
+// Read the three checks for what each one is, because they are not equal. The shape
+// tally — files_key_present, populated_arrays, uncountable_shapes — is the genuinely
+// independent evidence, and it is report-only. The tripwire that fails the command is
+// -min-uploads, whose oracle is the operator's belief that this workspace contains
+// uploads, not a second reading of the bytes. The classifier-disagreement check cannot
+// fire against SlackMessageHasUpload as written; it guards a future rewrite of that
+// function, not Slack changing underneath it.
+//
+// Operator-triggered, like slack-dm-smoke beside it, and for the same reason: it needs
+// a real bot token and a workspace whose conversations actually contain uploads, so
+// there is nothing for CI to run it against. Exit 0 means the contract still holds, 1
+// means it does not, 2 means the invocation was wrong.
+//
+// The token-handling helpers this command shares with slack-dm-smoke now live in
+// internal/slacksmoke, and the loopback predicate under it in internal/nethost. They
+// used to be byte-identical copies in each command, which nothing in CI could see drift
+// — two package main binaries cannot share unexported code, and dupl runs per package —
+// and they had already diverged once, when this command grew isEnvVarName and the
+// sibling did not.
+//
+// Read-only. Every call is a GET against conversations.list, conversations.history and
+// conversations.replies, and nothing is posted.
+//
+// No USER content reaches the report: file names, message text, user names and mimetypes
+// are never decoded into anything that gets marshaled, which is the field discipline
+// claimMediaNotice keeps on the event path. What the report does carry is counts,
+// conversation IDs, message timestamps, and bounded infrastructure diagnostics —
+// Slack's own error codes and needed/provided scope names, a redirect Location, a
+// Content-Type. Those come from the endpoint -base-url names rather than from a
+// workspace member, and they are the difference between a diagnosable failure and
+// "something went wrong", so they are deliberate. Every one of them passes through
+// sanitizeReportText, which strips control characters and caps the length, because
+// against a -base-url that is not Slack the content-free promise would otherwise be the
+// other end's to keep.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
+)
+
+const (
+	defaultUserAgent = "qurl-slack-history-upload-smoke"
+	// defaultOverallTimeout is sized for the default bounds against Slack's tier-3 limit
+	// of roughly 50 requests a minute. Those bounds allow one conversations.list page plus
+	// 25 conversations x (4 history pages + 5 thread samples) — about 226 requests, or
+	// ~4.5 minutes of pure rate-limit budget before a single 429 wait. A 5-minute budget
+	// truncated a default run, which reports as "did not finish within -timeout" and
+	// suppresses the upload check entirely.
+	defaultOverallTimeout = 20 * time.Minute
+	defaultRequestTimeout = 15 * time.Second
+
+	// minTimeoutFactor keeps the overall budget wide enough for the smallest useful
+	// scan: a conversations.list page, one conversations.history page, and one
+	// conversations.replies page.
+	minTimeoutFactor = 3
+)
+
+func main() {
+	os.Exit(run(context.Background(), os.Stdout, os.Stderr, os.Args[1:], os.Getenv, time.Now))
+}
+
+func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv func(string) string, now func() time.Time) int {
+	// A nil config is the stop signal, not the exit code: -h parses fine and exits 0
+	// while having nothing to run, so keying off the code alone runs the scan on a nil
+	// config.
+	cfg, tokenEnv, budget, code := parseFlags(stderr, args)
+	if cfg == nil {
+		return code
+	}
+	cfg.Token = getenv(tokenEnv)
+	cfg.StartedAt = now().UTC()
+	cfg.HTTPClient = slacksmoke.NewHTTPClient(budget.Request)
+
+	if err := prepareScanConfig(cfg); err != nil {
+		writeConfigValidationError(stderr, tokenEnv, err)
+		return 2
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, budget.Overall)
+	defer cancel()
+
+	result, err := runScan(runCtx, cfg)
+	if encErr := json.NewEncoder(stdout).Encode(result); encErr != nil {
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+		}
+		_, _ = fmt.Fprintf(stderr, "write result: %v\n", encErr)
+		return 1
+	}
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
+
+// parseFlags returns the config, the env var naming the token, the timeout budget, and
+// the exit code. A nil config means run should stop and return that code — which is 2
+// for a bad invocation and 0 for -h, where the flag package has already printed usage.
+// It deliberately does not read the environment or the clock; run owns both so tests
+// can supply them.
+func parseFlags(stderr io.Writer, args []string) (cfg *scanConfig, tokenEnv string, budget slacksmoke.TimeoutBudget, code int) {
+	fs := flag.NewFlagSet("slack-history-upload-smoke", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	var channels string
+	cfg = &scanConfig{}
+	fs.StringVar(&tokenEnv, "token-env", "SLACK_BOT_TOKEN", "environment variable containing the Slack bot token")
+	fs.StringVar(&cfg.BaseURL, "base-url", slacksmoke.DefaultAPIBaseURL, "Slack Web API base URL")
+	fs.StringVar(&cfg.UserAgent, "user-agent", defaultUserAgent, "HTTP User-Agent")
+	fs.StringVar(&channels, "channels", "", "comma-separated conversation IDs to scan; empty discovers them with conversations.list")
+	fs.StringVar(&cfg.ConversationTypes, "conversation-types", defaultConversationTypes, "conversations.list types filter, used only when -channels is empty")
+	fs.IntVar(&cfg.MaxConversations, "max-conversations", defaultMaxConversations, "stop after scanning this many conversations")
+	fs.IntVar(&cfg.MaxPages, "max-pages", defaultMaxPages, "conversations.history pages to read per conversation; also caps conversations.list paging")
+	fs.IntVar(&cfg.PageLimit, "page-limit", defaultPageLimit, "messages requested per page")
+	fs.IntVar(&cfg.MaxThreads, "max-threads", defaultMaxThreads, "threads sampled per conversation for the conversations.replies surface")
+	fs.BoolVar(&cfg.SkipReplies, "skip-replies", false, "scan conversations.history only, leaving the replies surface unmeasured")
+	fs.IntVar(&cfg.MinUploads, "min-uploads", 1, "fail unless the scan classifies at least this many distinct uploads; 0 disables the check and makes the run report-only")
+	fs.Var(&cfg.ExpectUploads, "expect-upload", "CHANNEL:TIMESTAMP of a message known to carry an upload; repeatable")
+	fs.BoolVar(&cfg.StrictUncountable, "strict-uncountable", false, "make an unrecognized files shape or an undecodable message fail the command rather than only report")
+	fs.StringVar(&cfg.WorkspaceShape, "workspace-shape", "", "operator note, for example Enterprise Grid org install")
+	fs.StringVar(&cfg.TokenOwner, "token-owner", "", "operator note for the token owner, for example workspace or enterprise")
+	fs.StringVar(&cfg.Scopes, "scopes", "", "operator note for Slack scopes on the tested app")
+	fs.DurationVar(&budget.Overall, "timeout", defaultOverallTimeout, "overall scan timeout")
+	fs.DurationVar(&budget.Request, "request-timeout", defaultRequestTimeout, "timeout for each Slack Web API request")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, "", budget, 0
+		}
+		return nil, "", budget, 2
+	}
+
+	tokenEnv = strings.TrimSpace(tokenEnv)
+	if tokenEnv == "" {
+		_, _ = fmt.Fprintln(stderr, "-token-env is required")
+		return nil, "", budget, 2
+	}
+	// Validated rather than trusted because it is echoed back in the "not set" error an
+	// operator hits first, and an unconstrained flag value there puts whatever it
+	// contains — newlines included — into the command's own diagnostics.
+	if !slacksmoke.IsEnvVarName(tokenEnv) {
+		_, _ = fmt.Fprintln(stderr, slacksmoke.ErrTokenEnvName.Error())
+		return nil, "", budget, 2
+	}
+	cfg.Channels = splitConversationIDs(channels)
+	if err := budget.Validate(minTimeoutFactor); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return nil, "", budget, 2
+	}
+	if failure := validateBounds(stderr, cfg); failure != 0 {
+		return nil, "", budget, failure
+	}
+	return cfg, tokenEnv, budget, 0
+}
+
+func validateBounds(stderr io.Writer, cfg *scanConfig) int {
+	switch {
+	case cfg.MaxConversations <= 0 || cfg.MaxConversations > maxConversationsCeiling:
+		_, _ = fmt.Fprintf(stderr, "-max-conversations must be between 1 and %d\n", maxConversationsCeiling)
+	case cfg.MaxPages <= 0 || cfg.MaxPages > maxPagesCeiling:
+		_, _ = fmt.Fprintf(stderr, "-max-pages must be between 1 and %d\n", maxPagesCeiling)
+	case cfg.PageLimit <= 0 || cfg.PageLimit > maxPageLimit:
+		_, _ = fmt.Fprintf(stderr, "-page-limit must be between 1 and %d\n", maxPageLimit)
+	case cfg.MaxThreads < 0:
+		_, _ = fmt.Fprintln(stderr, "-max-threads must not be negative")
+	case cfg.MinUploads < 0:
+		_, _ = fmt.Fprintln(stderr, "-min-uploads must not be negative")
+	case cfg.MaxThreads > maxThreadsCeiling:
+		_, _ = fmt.Fprintf(stderr, "-max-threads must be at most %d\n", maxThreadsCeiling)
+	// Refused rather than truncated. -channels is what an operator names when they know
+	// which conversations carry uploads, so silently dropping the tail would answer a
+	// different question than the one asked.
+	case len(cfg.Channels) > cfg.MaxConversations:
+		_, _ = fmt.Fprintf(stderr, "-channels names %d conversations but -max-conversations is %d; raise it or name fewer\n",
+			len(cfg.Channels), cfg.MaxConversations)
+	default:
+		return 0
+	}
+	return 2
+}
+
+// prepareScanConfig normalizes and validates everything that does not depend on the
+// network, so a bad invocation costs no Slack calls.
+func prepareScanConfig(cfg *scanConfig) error {
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = slacksmoke.NewHTTPClient(defaultRequestTimeout)
+	}
+	if cfg.StartedAt.IsZero() {
+		cfg.StartedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(cfg.UserAgent) == "" {
+		cfg.UserAgent = defaultUserAgent
+	}
+	if strings.TrimSpace(cfg.ConversationTypes) == "" {
+		cfg.ConversationTypes = defaultConversationTypes
+	}
+
+	var err error
+	if cfg.Token, err = slacksmoke.CleanToken(cfg.Token); err != nil {
+		return err
+	}
+	if slacksmoke.ContainsHTTPHeaderControl(cfg.UserAgent) {
+		return slacksmoke.ErrUserAgentControlCharacters
+	}
+	if cfg.BaseURL, err = slacksmoke.NormalizeBaseURL(cfg.BaseURL); err != nil {
+		return err
+	}
+	for _, id := range cfg.Channels {
+		if err := validateConversationID(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeConfigValidationError names the environment variable it looked at, which is the
+// difference between an actionable error and a guessing game once -token-env has been
+// pointed somewhere custom.
+//
+// The two nolints below are gosec's taint analysis reaching a flag value that reaches
+// an io.Writer. There is no XSS sink here — stderr on a CLI is not a browser — and
+// slacksmoke.IsEnvVarName has already constrained the value to a POSIX environment
+// before it gets this far, so it cannot carry a control character either.
+func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
+	switch {
+	case errors.Is(err, slacksmoke.ErrMissingBotToken):
+		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+	case errors.Is(err, slacksmoke.ErrBotTokenControlCharacters):
+		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+	default:
+		_, _ = fmt.Fprintln(stderr, err)
+	}
+}

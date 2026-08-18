@@ -1,578 +1,240 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
-// apiEnvelope wraps data in the qURL API response envelope.
-func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
-	t.Helper()
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"data": data,
-		"meta": map[string]any{"request_id": "req_test"},
-	}); err != nil {
-		t.Fatalf("encode response: %v", err)
+func TestLoginRejectsImplausibleKey(t *testing.T) {
+	res := runCLI(t, &runOpts{
+		args:  []string{"login"},
+		stdin: strings.NewReader("not-a-key\n"),
+	})
+	if res.code != 4 {
+		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())
 	}
 }
 
-// newMockServer creates a test server that handles qURL API routes.
-func newMockServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+func TestLoginEmptyPipeIsUsageErrorNotAHang(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"login"}, stdin: strings.NewReader("")})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+}
 
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurls":
-			apiEnvelope(t, w, map[string]any{
-				"resource_id": "r_test123",
-				"qurl_link":   "https://qurl.link/at_abc",
-				"qurl_site":   "https://r_test123.qurl.site",
-			})
+func TestVersionOutputShape(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"version"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d", res.code)
+	}
+	// The Homebrew formula asserts on this line's shape; keep it stable.
+	if !strings.HasPrefix(res.stdout.String(), "qurl version test (") {
+		t.Errorf("version output = %q, want the qurl version prefix", res.stdout.String())
+	}
+}
 
-		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
-			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
-			apiEnvelope(t, w, map[string]any{
-				"resource_id": id,
-				"target_url":  "https://example.com",
-				"status":      "active",
-				"description": "updated",
-				"created_at":  "2026-03-01T00:00:00Z",
-			})
-
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
-			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
-			apiEnvelope(t, w, map[string]any{
-				"resource_id": id,
-				"target_url":  "https://example.com",
-				"status":      "active",
-				"created_at":  "2026-03-01T00:00:00Z",
-			})
-
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/qurls":
-			if err := json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{
-					{
-						"resource_id": "r_1",
-						"target_url":  "https://example.com",
-						"status":      "active",
-						"created_at":  "2026-03-01T00:00:00Z",
-					},
-				},
-				"meta": map[string]any{
-					"request_id": "req_test",
-					"has_more":   false,
-				},
-			}); err != nil {
-				t.Fatalf("encode response: %v", err)
+func TestCompletionGeneratesScripts(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+		t.Run(shell, func(t *testing.T) {
+			res := runCLI(t, &runOpts{args: []string{"completion", shell}})
+			if res.code != 0 || res.stdout.Len() == 0 {
+				t.Fatalf("completion %s: exit=%d, %d bytes", shell, res.code, res.stdout.Len())
 			}
+		})
+	}
+	res := runCLI(t, &runOpts{args: []string{"completion", "tcsh"}})
+	if res.code != 2 {
+		t.Errorf("unsupported shell should be a usage error, got exit %d", res.code)
+	}
+}
 
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
+// TestDocsGeneratesManPagesAndMarkdown pins the release contract:
+// .goreleaser.yml runs `qurl docs man -d manpages` and ships the output.
+func TestDocsGeneratesManPagesAndMarkdown(t *testing.T) {
+	manDir := t.TempDir()
+	res := runCLI(t, &runOpts{args: []string{"docs", "man", "-d", manDir}})
+	if res.code != 0 {
+		t.Fatalf("docs man exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(manDir, "qurl.1")); err != nil {
+		t.Errorf("expected qurl.1 man page: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(manDir, "qurl-publish.1")); err != nil {
+		t.Errorf("expected qurl-publish.1 man page: %v", err)
+	}
 
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/resolve":
-			apiEnvelope(t, w, map[string]any{
-				"target_url":  "https://api.example.com",
-				"resource_id": "r_test",
-				"access_grant": map[string]any{
-					"expires_in": 305,
-					"src_ip":     "127.0.0.1",
-				},
-			})
+	mdDir := t.TempDir()
+	res = runCLI(t, &runOpts{args: []string{"docs", "markdown", "-d", mdDir}})
+	if res.code != 0 {
+		t.Fatalf("docs markdown exit = %d", res.code)
+	}
+	if _, err := os.Stat(filepath.Join(mdDir, "qurl_resolve.md")); err != nil {
+		t.Errorf("expected qurl_resolve.md: %v", err)
+	}
+}
 
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/mint_link"):
-			apiEnvelope(t, w, map[string]any{
-				"qurl_link":  "https://qurl.link/at_minted",
-				"expires_at": "2026-04-01T00:00:00Z",
-			})
+func TestUsageErrorsExitTwo(t *testing.T) {
+	cases := map[string][]string{
+		"unknown command": {"frobnicate"},
+		"unknown flag":    {"list", "--no-such-flag"},
+		"bad output":      {"-o", "yaml", "list"},
+		"bad color":       {"--color", "sometimes", "list"},
+		"missing operand": {"resolve"},
+		"extra operand":   {"whoami", "extra"},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			res := runCLI(t, &runOpts{args: args})
+			if res.code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+			}
+		})
+	}
+}
 
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/quota":
-			apiEnvelope(t, w, map[string]any{
-				"plan":         "pro",
-				"period_start": "2026-03-01T00:00:00Z",
-				"period_end":   "2026-03-31T00:00:00Z",
-				"usage": map[string]any{
-					"qurls_created":        42,
-					"active_qurls":         10,
-					"active_qurls_percent": 20.0,
-					"total_accesses":       100,
-				},
-			})
+func TestUnusableOperandExitEight(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"resolve", "not a CRID at all!"}})
+	if res.code != 8 {
+		t.Fatalf("exit = %d, want 8; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+}
 
-		default:
-			w.WriteHeader(http.StatusNotFound)
+// TestEndpointPrecedence pins flag > env > profile for the endpoint setting
+// end to end: each level is proven by the request actually landing on the
+// mock that level names.
+func TestEndpointPrecedence(t *testing.T) {
+	srv := apitest.NewServer(t)
+
+	t.Run("env", func(t *testing.T) {
+		res := runCLI(t, &runOpts{
+			args: []string{"list"},
+			env:  map[string]string{"QURL_API_KEY": testAPIKey, "QURL_ENDPOINT": srv.URL},
+		})
+		if res.code != 0 {
+			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 		}
-	}))
-}
+	})
 
-// runCmd executes a CLI command with the given args and returns stdout output.
-func runCmd(t *testing.T, srv *httptest.Server, args ...string) string {
-	t.Helper()
-	t.Setenv("QURL_API_KEY", "test-key")
-
-	cmd := rootCmd("test")
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-	cmd.SetArgs(append([]string{"--endpoint", srv.URL}, args...))
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute %v: %v\noutput: %s", args, err, buf.String())
-	}
-	return buf.String()
-}
-
-// runCmdErr executes a CLI command expecting an error, returns the error.
-func runCmdErr(t *testing.T, srv *httptest.Server, args ...string) error {
-	t.Helper()
-	t.Setenv("QURL_API_KEY", "test-key")
-
-	cmd := rootCmd("test")
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-	cmd.SetArgs(append([]string{"--endpoint", srv.URL}, args...))
-
-	return cmd.Execute()
-}
-
-func TestCreateCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "create", "https://example.com")
-	if !strings.Contains(out, "r_test123") {
-		t.Errorf("expected r_test123 in output:\n%s", out)
-	}
-}
-
-func TestCreateCommandInvalidURL(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "create", "not-a-url")
-	if err == nil {
-		t.Fatal("expected error for invalid URL")
-	}
-}
-
-func TestCreateCommandInvalidDuration(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "create", "https://example.com", "--expires", "forever")
-	if err == nil {
-		t.Fatal("expected error for invalid duration")
-	}
-}
-
-func TestGetCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "get", "r_abc")
-	if !strings.Contains(out, "r_abc") {
-		t.Errorf("expected r_abc in output:\n%s", out)
-	}
-}
-
-func TestGetCommandEmptyID(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "get", "   ")
-	if err == nil {
-		t.Fatal("expected error for empty resource ID")
-	}
-}
-
-func TestListCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "list", "--limit", "5")
-	if !strings.Contains(out, "r_1") {
-		t.Errorf("expected r_1 in output:\n%s", out)
-	}
-}
-
-func TestListCommandWithCursor(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cursor := r.URL.Query().Get("cursor")
-		if cursor != "page2" {
-			t.Errorf("expected cursor 'page2', got %q", cursor)
+	t.Run("flag beats env", func(t *testing.T) {
+		res := runCLI(t, &runOpts{
+			args: []string{"--endpoint", srv.URL, "list"},
+			env:  map[string]string{"QURL_API_KEY": testAPIKey, "QURL_ENDPOINT": "https://unreachable.invalid"},
+		})
+		if res.code != 0 {
+			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{
-				{
-					"resource_id": "r_page2",
-					"target_url":  "https://example.com",
-					"status":      "active",
-					"created_at":  "2026-03-01T00:00:00Z",
-				},
-			},
-			"meta": map[string]any{"request_id": "req_test"},
-		}); err != nil {
-			t.Fatalf("encode response: %v", err)
+	})
+
+	t.Run("profile", func(t *testing.T) {
+		dir := t.TempDir()
+		profileDir := filepath.Join(dir, "profiles")
+		if err := os.MkdirAll(profileDir, 0o700); err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer srv.Close()
+		if err := os.WriteFile(filepath.Join(profileDir, "sandbox.yaml"), []byte("endpoint: "+srv.URL+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res := runCLI(t, &runOpts{
+			args:      []string{"--profile", "sandbox", "list"},
+			configDir: dir,
+		})
+		if res.code != 0 {
+			t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+		}
+	})
+}
 
-	out := runCmd(t, srv, "list", "--cursor", "page2")
-	if !strings.Contains(out, "r_page2") {
-		t.Errorf("expected r_page2 in output:\n%s", out)
+func TestConfigFileWithSecretRefusedExitThree(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("api_key: lv_test_shouldnotbehere123456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, &runOpts{args: []string{"list"}, configDir: dir})
+	if res.code != 3 {
+		t.Fatalf("exit = %d, want 3; stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "must not contain an API key") {
+		t.Errorf("expected the no-secrets refusal, got %q", res.stderr.String())
 	}
 }
 
-func TestResolveCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "resolve", "at_testtoken")
-	if !strings.Contains(out, "https://api.example.com") {
-		t.Errorf("expected target URL in output:\n%s", out)
+func TestMissingCredentialExitFour(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"list"}, env: map[string]string{}})
+	if res.code != 4 {
+		t.Fatalf("exit = %d, want 4; stderr: %s", res.code, res.stderr.String())
 	}
-	if !strings.Contains(out, "305") {
-		t.Errorf("expected expires_in 305 in output:\n%s", out)
+	if !strings.Contains(res.stderr.String(), "QURL_API_KEY") {
+		t.Errorf("expected the remedy hint, got %q", res.stderr.String())
 	}
 }
 
-func TestResolveCommandInvalidToken(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
+// TestEnumSourceDecidesExitCode pins the round-4 disposition: the same
+// invalid enum value is a configuration error (exit 3) when a config FILE
+// says it, and a usage error (exit 2) when the flag or environment does —
+// the config layer knows the source, the resolution site does not.
+func TestEnumSourceDecidesExitCode(t *testing.T) {
+	fileCases := map[string]string{
+		"output": "output: yaml\n",
+		"color":  "color: sometimes\n",
+	}
+	for name, body := range fileCases {
+		t.Run("file "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			res := runCLI(t, &runOpts{args: []string{"list"}, configDir: dir})
+			if res.code != 3 {
+				t.Fatalf("exit = %d, want 3; stderr: %s", res.code, res.stderr.String())
+			}
+			if !strings.Contains(res.stderr.String(), "config.yaml") {
+				t.Errorf("the config-file error must name the file, got %q", res.stderr.String())
+			}
+		})
+	}
 
-	err := runCmdErr(t, srv, "resolve", "bad_token")
-	if err == nil {
-		t.Fatal("expected error for invalid access token")
+	argCases := map[string][]string{
+		"flag output": {"-o", "yaml", "list"},
+		"flag color":  {"--color", "sometimes", "list"},
+	}
+	for name, args := range argCases {
+		t.Run(name, func(t *testing.T) {
+			res := runCLI(t, &runOpts{args: args})
+			if res.code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+			}
+		})
+	}
+
+	envCases := map[string]map[string]string{
+		"env output": {"QURL_API_KEY": testAPIKey, "QURL_OUTPUT": "yaml"},
+		"env color":  {"QURL_API_KEY": testAPIKey, "QURL_COLOR": "sometimes"},
+	}
+	for name, env := range envCases {
+		t.Run(name, func(t *testing.T) {
+			res := runCLI(t, &runOpts{args: []string{"list"}, env: env})
+			if res.code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+			}
+		})
 	}
 }
 
-func TestDeleteCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	t.Setenv("QURL_API_KEY", "test-key")
-	cmd := rootCmd("test")
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-	cmd.SetIn(strings.NewReader("y\n"))
-	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "r_123"})
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute delete: %v\noutput: %s", err, buf.String())
+// TestWhoamiListedInHelp guards the command roster: every v2 command is
+// registered and visible.
+func TestWhoamiListedInHelp(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"--help"}})
+	if res.code != 0 {
+		t.Fatalf("help exit = %d", res.code)
 	}
-
-	out := buf.String()
-	if !strings.Contains(out, "revoked") {
-		t.Errorf("expected 'revoked' in output:\n%s", out)
-	}
-}
-
-func TestDeleteCommandWithYesFlag(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "delete", "--yes", "r_123")
-	if !strings.Contains(out, "revoked") {
-		t.Errorf("expected 'revoked' in output:\n%s", out)
-	}
-}
-
-func TestDeleteCommandDryRun(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "delete", "--dry-run", "r_123")
-	if !strings.Contains(out, "dry run") {
-		t.Errorf("expected 'dry run' in output:\n%s", out)
-	}
-	if strings.Contains(out, "revoked") {
-		t.Errorf("dry-run should not revoke:\n%s", out)
-	}
-}
-
-func TestDeleteCommandCanceled(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	t.Setenv("QURL_API_KEY", "test-key")
-	cmd := rootCmd("test")
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-	cmd.SetIn(strings.NewReader("n\n"))
-	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "r_123"})
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute delete: %v\noutput: %s", err, buf.String())
-	}
-
-	out := buf.String()
-	if !strings.Contains(out, "Canceled") {
-		t.Errorf("expected 'Canceled' in output:\n%s", out)
-	}
-}
-
-func TestUpdateCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "update", "r_abc", "--description", "updated")
-	if !strings.Contains(out, "r_abc") {
-		t.Errorf("expected r_abc in output:\n%s", out)
-	}
-}
-
-func TestUpdateCommandNoFlags(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "update", "r_abc")
-	if err == nil {
-		t.Fatal("expected error when no flags set")
-	}
-}
-
-func TestJSONOutput(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "-o", "json", "get", "r_abc")
-
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		t.Fatalf("expected valid JSON output: %v\n%s", err, out)
-	}
-	if parsed["resource_id"] != "r_abc" {
-		t.Errorf("got resource_id %q, want %q", parsed["resource_id"], "r_abc")
-	}
-}
-
-func TestMissingAPIKey(t *testing.T) {
-	t.Setenv("QURL_API_KEY", "")
-	cmd := rootCmd("test")
-	cmd.SetArgs([]string{"list"})
-
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for missing API key")
-	}
-}
-
-func TestVersionCommand(t *testing.T) {
-	t.Setenv("QURL_API_KEY", "test-key")
-	cmd := rootCmd("1.2.3")
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetArgs([]string{"version"})
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute version: %v", err)
-	}
-
-	if !strings.Contains(buf.String(), "1.2.3") {
-		t.Errorf("expected version 1.2.3 in output:\n%s", buf.String())
-	}
-}
-
-func TestVerboseFlag(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	// Verbose logging goes to os.Stderr (not cobra's err buffer).
-	// We verify the flag is accepted and the command succeeds.
-	out := runCmd(t, srv, "--verbose", "get", "r_abc")
-	if !strings.Contains(out, "r_abc") {
-		t.Errorf("expected r_abc in output:\n%s", out)
-	}
-}
-
-func TestExtendCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "extend", "r_abc", "--by", "24h")
-	if !strings.Contains(out, "r_abc") {
-		t.Errorf("expected r_abc in output:\n%s", out)
-	}
-}
-
-func TestExtendCommandRequiresBy(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "extend", "r_abc")
-	if err == nil {
-		t.Fatal("expected error when --by not provided")
-	}
-}
-
-func TestMintCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "mint", "r_abc")
-	if !strings.Contains(out, "minted") || !strings.Contains(out, "qurl.link") {
-		t.Errorf("expected mint output:\n%s", out)
-	}
-}
-
-func TestQuotaCommand(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "quota")
-	if !strings.Contains(out, "PRO") && !strings.Contains(out, "pro") {
-		t.Errorf("expected plan name in output:\n%s", out)
-	}
-}
-
-func TestDeleteCommandNoForceFlag(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	// --force flag should no longer exist
-	err := runCmdErr(t, srv, "delete", "--force", "r_123")
-	if err == nil {
-		t.Fatal("expected error: --force flag should not exist")
-	}
-}
-
-func TestInvalidOutputFormat(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	err := runCmdErr(t, srv, "--output", "yaml", "list")
-	if err == nil {
-		t.Fatal("expected error for invalid output format")
-	}
-}
-
-// --- Config subcommand integration tests ---
-
-// runConfigCmd executes a config CLI command with HOME redirected to a temp dir.
-func runConfigCmd(t *testing.T, args ...string) (string, error) {
-	t.Helper()
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	// os.UserHomeDir reads USERPROFILE on Windows and ignores HOME; without
-	// this the config tests write into the real user profile and poison
-	// later tests (first observed as a Windows-only TestNewClient_MissingAPIKey
-	// failure when the CI matrix gained a windows leg).
-	t.Setenv("USERPROFILE", tmp)
-	t.Setenv("QURL_API_KEY", "test-key")
-
-	cmd := rootCmd("test")
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-	cmd.SetArgs(args)
-
-	err := cmd.Execute()
-	return buf.String(), err
-}
-
-func TestConfigSetAndGet(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir ignores HOME
-	t.Setenv("QURL_API_KEY", "test-key")
-
-	// Set a value
-	setCmd := rootCmd("test")
-	var setBuf bytes.Buffer
-	setCmd.SetOut(&setBuf)
-	setCmd.SetErr(&setBuf)
-	setCmd.SetArgs([]string{"config", "set", "endpoint", "https://test.example.com"})
-	if err := setCmd.Execute(); err != nil {
-		t.Fatalf("config set: %v", err)
-	}
-	if !strings.Contains(setBuf.String(), "Set endpoint") {
-		t.Errorf("expected 'Set endpoint' in output: %s", setBuf.String())
-	}
-
-	// Get the value back (same HOME dir)
-	getCmd := rootCmd("test")
-	var getBuf bytes.Buffer
-	getCmd.SetOut(&getBuf)
-	getCmd.SetErr(&getBuf)
-	getCmd.SetArgs([]string{"config", "get", "endpoint"})
-	if err := getCmd.Execute(); err != nil {
-		t.Fatalf("config get: %v", err)
-	}
-	if !strings.Contains(getBuf.String(), "https://test.example.com") {
-		t.Errorf("expected endpoint value in output: %s", getBuf.String())
-	}
-}
-
-func TestConfigSetAPIKeyWarning(t *testing.T) {
-	out, err := runConfigCmd(t, "config", "set", "api_key", "lv_live_test")
-	if err != nil {
-		t.Fatalf("config set: %v", err)
-	}
-	if !strings.Contains(out, "plaintext") {
-		t.Errorf("expected plaintext warning in output: %s", out)
-	}
-}
-
-func TestConfigGetInvalidKey(t *testing.T) {
-	_, err := runConfigCmd(t, "config", "get", "nonexistent")
-	if err == nil {
-		t.Fatal("expected error for invalid key")
-	}
-}
-
-func TestConfigPath(t *testing.T) {
-	out, err := runConfigCmd(t, "config", "path")
-	if err != nil {
-		t.Fatalf("config path: %v", err)
-	}
-	if !strings.Contains(out, "config.yaml") {
-		t.Errorf("expected config.yaml in path output: %s", out)
-	}
-}
-
-func TestConfigProfiles(t *testing.T) {
-	out, err := runConfigCmd(t, "config", "profiles")
-	if err != nil {
-		t.Fatalf("config profiles: %v", err)
-	}
-	if !strings.Contains(out, "No profiles configured") {
-		t.Errorf("expected empty profiles message: %s", out)
-	}
-}
-
-// --- Quiet flag tests ---
-
-func TestCreateCommandQuiet(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "--quiet", "create", "https://example.com")
-	// Quiet mode should output just the link, not the full table
-	if !strings.Contains(out, "qurl.link") {
-		t.Errorf("expected link in quiet output: %s", out)
-	}
-	if strings.Contains(out, "qURL created") {
-		t.Error("quiet mode should not include table header")
-	}
-}
-
-func TestMintCommandQuiet(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "--quiet", "mint", "r_abc")
-	if !strings.Contains(out, "qurl.link") {
-		t.Errorf("expected link in quiet output: %s", out)
-	}
-	if strings.Contains(out, "Link minted") {
-		t.Error("quiet mode should not include table header")
+	for _, name := range []string{"publish", "resolve", "get", "list", "delete", "connector", "login", "logout", "whoami", "version", "completion"} {
+		if !strings.Contains(res.stdout.String(), name) {
+			t.Errorf("help does not list %q", name)
+		}
 	}
 }

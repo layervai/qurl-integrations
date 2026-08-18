@@ -59,6 +59,19 @@ const (
 	stateStoreRequestTimeout = 5 * time.Second
 )
 
+// defaultPasswordlessConnection is the Auth0 connection the Slack setup flow
+// signs in with unless AUTH0_EMAIL_CONNECTION overrides it. "email" is Auth0's
+// passwordless email connection and the same value qurl-desktop pins, so one
+// human keeps one Auth0 subject — and therefore one qURL account — across both
+// surfaces.
+//
+// TODO(upstream-contract): keep in lockstep with qurl-desktop's connection pin
+// (src/main/auth.ts, browserAuthorizationOptions). If either surface repoints
+// its connection without the other, the same human authenticates as two Auth0
+// subjects and their qURL accounts fork silently — nothing fails loudly,
+// because each surface works in isolation.
+const defaultPasswordlessConnection = "email"
+
 // apiKeyScopes is the qurl-service scope set requested by the legacy fallback
 // for the workspace API key and by the Auth0 user token that mints it. Returned
 // fresh on each call so an in-package caller can't mutate the slice and silently
@@ -238,9 +251,12 @@ type Config struct {
 	// qurl-service API), pasted into the `audience` param so the
 	// returned access_token actually carries the qurl:* scopes.
 	Auth0Audience string
-	// Auth0EmailConnection optionally forces an Auth0 connection for
-	// email-bound setup states. Empty sends only login_hint and lets the
-	// Auth0 application choose from its enabled connections.
+	// Auth0EmailConnection overrides the Auth0 connection pinned on every setup
+	// path. Empty pins defaultPasswordlessConnection ("email"), so the login
+	// method is a property of this surface rather than of the tenant's enabled
+	// connections. Set it only when a deployment named its passwordless
+	// connection differently — pointing it at a non-passwordless connection
+	// changes the login method for every workspace admin.
 	Auth0EmailConnection string
 
 	// SlackBaseURL is the public origin of the Slack bot (e.g.
@@ -436,12 +452,18 @@ func (c Config) Validate() error {
 
 // authorizeURL composes the Auth0 /authorize redirect target.
 //
-// prompt=consent keeps setup re-entry explicit: even when an existing
-// workspace key is reused, the admin still confirms the Auth0 account/email
-// that is allowed to keep the Slack workspace bound. Confirmation alone is not
-// a healthy-key rotation or qURL-account switch; the stored key must be revoked
-// first so validation fails 401 and the callback mints under the newly
-// authenticated account.
+// Two parameters decide WHO is allowed to bind the workspace, and both halves
+// are load-bearing. prompt=login re-authenticates the admin, so an ambient
+// Auth0 session cannot silently authorize a bind or a rotation; prompt=consent
+// keeps setup re-entry explicit, because Auth0 reuses a prior consent grant
+// without it and setup must actually issue a new token. connection pins the
+// login method to passwordless so the tenant's enabled connections cannot route
+// an admin to a different Auth0 subject — qurl-service keys accounts on the
+// id_token sub, so a different connection is a different qURL account.
+//
+// Neither replaces the callback's own gates: reuse still confirms the verified
+// email claim, and a rotation onto a different qURL account still fails closed
+// there rather than here.
 //
 //nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
 func authorizeURL(cfg Config, state string, verified VerifiedState) string {
@@ -469,11 +491,27 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 		q.Set("code_challenge", pkceCodeChallenge(verified.CodeVerifier))
 		q.Set("code_challenge_method", "S256")
 	}
-	q.Set("prompt", "consent")
+	// `login` on every path: setup and rotation both decide which qURL account
+	// a Slack workspace is bound to, and qurl-service keys accounts on the
+	// id_token sub. Riding an ambient Auth0 session — from qurl-desktop, the
+	// dashboard, or a previous bot run — lets whichever identity that session
+	// happens to hold silently claim or move the workspace. `consent` stays
+	// alongside it because Auth0 reuses a prior consent grant without it, and
+	// setup must actually issue a new token.
+	q.Set("prompt", "login consent")
+	// Passwordless is the Slack surface's login method, not a tenant-by-tenant
+	// choice: it is the lowest-friction path for a workspace admin, and it
+	// matches the connection qurl-desktop pins for the same human
+	// (src/main/auth.ts: connection 'email'), so both land on one Auth0
+	// subject instead of forking the account across connections.
+	// Auth0EmailConnection stays an override for a tenant that named its
+	// passwordless connection something else.
+	connection := strings.TrimSpace(cfg.Auth0EmailConnection)
+	if connection == "" {
+		connection = defaultPasswordlessConnection
+	}
+	q.Set("connection", connection)
 	if verified.Email != "" {
-		if connection := strings.TrimSpace(cfg.Auth0EmailConnection); connection != "" {
-			q.Set("connection", connection)
-		}
 		q.Set("login_hint", verified.Email)
 	}
 	u.RawQuery = q.Encode()

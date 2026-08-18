@@ -27,29 +27,21 @@ on:
       - "Validate issue templates"
     types: [completed]
 
-# The step authenticates to Slack with a webhook secret; no step reads the
-# workflow's GITHUB_TOKEN (there is no checkout and no API call), so deny
-# everything.
-permissions: {}
+# The notifier reads only the originating workflow's run history. That is what
+# lets it distinguish a benign, superseded cancellation from a genuinely
+# stranded commit; Slack still authenticates independently with its webhook.
+permissions:
+  actions: read
 
 jobs:
   notify-build-notifications:
     name: "Notify #build-notifications"
-    # `cancelled` is in the list below, but not for the reason this comment
-    # used to give. It claimed main cancellations are exceptional because the
-    # source app workflows do not auto-cancel default-branch runs. That was
-    # wrong: `cancel-in-progress: false` protects a run already in progress,
-    # not one still pending, and GitHub keeps at most one pending run per
-    # concurrency group — so a burst of merges to main routinely cancels the
-    # intermediate runs by supersession (#1022).
-    #
-    # Supersession is no longer a validation gap: each app workflow's `changes`
-    # job now diffs against the last SHA it validated, so the surviving run
-    # covers the cancelled commits too. It does still alert here, which is a
-    # cost rather than a feature — a genuinely cancelled pre-dispatch run
-    # leaves sandbox on the previous image with no deploy notification, and the
-    # workflow_run payload alone cannot tell the two apart. Narrowing this
-    # trigger is #1022's option 3 and remains open.
+    # `cancel-in-progress: false` protects a run already in progress, not one
+    # still pending. GitHub keeps at most one pending run per concurrency group,
+    # so a burst of merges to main routinely cancels intermediate runs by
+    # supersession (#1022). Keep cancelled runs in scope: the step below proves
+    # whether a newer run carries the commit and renders that benign case grey;
+    # a cancellation without a verified successor remains an amber alert.
     if: >-
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
       contains(fromJson('["push","schedule"]'), github.event.workflow_run.event) &&
@@ -60,9 +52,11 @@ jobs:
       - name: Post Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
           EVENT: ${{ github.event.workflow_run.event }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -70,6 +64,7 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           ACTOR: ${{ github.event.workflow_run.actor.login }}
+          COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
         run: |
           set -euo pipefail
 
@@ -83,8 +78,35 @@ jobs:
           short_sha="${HEAD_SHA:0:7}"
           commit_url="${REPOSITORY_URL}/commit/${HEAD_SHA}"
           actor_display="${ACTOR:-unknown}"
+          trigger_display="Push by ${actor_display}"
           if [[ "$EVENT" == "schedule" ]]; then
-            actor_display="schedule"
+            trigger_display="Scheduled"
+          fi
+
+          # GitHub cancels an older pending run immediately before it queues the
+          # replacement, so the workflow_run completion event can verify the
+          # successor synchronously. Query this exact workflow and originating
+          # event; a newer run from some unrelated workflow is not proof. Any API
+          # failure stays fail-closed as an unverified amber cancellation.
+          superseded_by=""
+          superseded_url=""
+          successor_lookup="not-needed"
+          if [[ "$CONCLUSION" == "cancelled" ]]; then
+            successor_lookup="failed"
+            successor=""
+            if successor="$(gh api --method GET \
+              "repos/${REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs" \
+              -f branch="$DEFAULT_BRANCH" \
+              -f event="$EVENT" \
+              -f per_page=100 \
+              --jq "([.workflow_runs[] | select(.run_number > ${RUN_NUMBER})] | min_by(.run_number)) // empty | [.run_number, .html_url] | @tsv" \
+              2>/dev/null)"; then
+              successor_lookup="complete"
+              if [[ -n "$successor" ]]; then
+                superseded_by="${successor%%$'\t'*}"
+                superseded_url="${successor#*$'\t'}"
+              fi
+            fi
           fi
 
           # These labels must stay in sync with `on.workflow_run.workflows`
@@ -94,105 +116,167 @@ jobs:
           # generic impact message.
           case "$WORKFLOW_NAME" in
             "slack: Build and Test")
-              impact="Slack bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Slack bot image until a hotfix lands."
+              impact="Slack bot deploy dispatch did not run. No new image was sent to qurl-integrations-infra, so sandbox remains on the prior Slack bot image until this workflow succeeds."
               ;;
             "discord: Build and Test")
-              impact="Discord bot deploy dispatch was skipped. No new image was sent to qurl-integrations-infra, so sandbox stays on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
+              impact="Discord bot deploy dispatch did not run. No new image was sent to qurl-integrations-infra, so sandbox remains on the prior Discord bot image; prod promotion will fail its sandbox gate. See <${REPOSITORY_URL}/pull/204|#204> for the hotfix pattern."
               ;;
             "chrome-extension: Build and Test")
-              impact="Chrome extension build, tests, or release packaging failed on main. Nothing auto-deploys from this workflow, so the breakage stays latent until Release Please cuts the next chrome-extension release — treat the packaged bundle from this SHA as unshippable to the Chrome Web Store until the run is repaired."
+              impact="Chrome extension build, tests, or release packaging did not complete successfully. Nothing auto-deploys from this workflow, so treat the packaged bundle from this SHA as unshippable to the Chrome Web Store until the run is repaired."
               ;;
             "edge-extension: Build and Test")
-              impact="Edge extension build, tests, or release packaging failed on main. Nothing auto-deploys from this workflow, so the breakage stays latent until Release Please cuts the next edge-extension release — treat the packaged bundle from this SHA as unshippable to Microsoft Edge Add-ons until the run is repaired."
+              impact="Edge extension build, tests, or release packaging did not complete successfully. Nothing auto-deploys from this workflow, so treat the packaged bundle from this SHA as unshippable to Microsoft Edge Add-ons until the run is repaired."
               ;;
             "teams: Build and Test")
-              impact="Teams app typecheck, lint, tests, or build failed on main. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
+              impact="Teams app typecheck, lint, tests, or build did not complete successfully. The Teams integration has no deploy dispatch yet, so no sandbox environment regressed — but this SHA is an unsound base for further Teams work until the run is fixed."
               ;;
             "cli: Build and Test")
-              impact="qURL CLI quality gates failed on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
+              impact="qURL CLI quality gates did not complete successfully on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
               ;;
             "cli: Nightly")
-              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot) failed. No artifact is affected; triage whether this is a real regression or harness flake before the next CLI release."
+              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot, release smoke) did not complete successfully. If the failing job is *release smoke*, the shipped release customers install today may be broken — its log names the broken chain link (tap, cask, quarantine postflight, binary, release machinery, release assets, signature, manifest, archive, tap pin). Otherwise no artifact is affected. Triage whether this is a real regression or harness flake before the next CLI release."
               ;;
             "origins/s3-static-connector: Build and Publish")
-              impact="Reusable S3 static connector image build or publish failed. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
+              impact="Reusable S3 static connector image build or publish did not complete successfully. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
               ;;
             "e2e: Build and Test")
-              impact="The e2e suite's offline gate — typecheck plus unit tests — failed on main. Only that subset runs in CI; the live suite needs credentials CI does not have, so this says e2e/'s own TypeScript is broken, not that a live integration regressed. No app is affected, but e2e/ cannot be trusted to catch one until the run is repaired."
+              impact="The e2e suite's offline gate — typecheck plus unit tests — did not complete successfully. Only that subset runs in CI; the live suite needs credentials CI does not have, so this does not prove a live integration regressed. No app is affected, but e2e/ cannot be trusted to catch one until the run is repaired."
               ;;
             "Shared Tests (All Apps)")
-              impact="Shared integration code failed after merge. Treat downstream app deploys from this SHA as suspect until the run is fixed or proven unrelated."
+              impact="Shared integration checks did not complete successfully after merge. Treat downstream app deploys from this SHA as suspect until the run is fixed or proven unrelated."
               ;;
             "CodeQL"|"Secrets Scan")
-              impact="Security CI failed on main. Review the run before trusting this SHA for deploy or promotion."
+              impact="Security CI did not complete successfully on main. Review the run before trusting this SHA for deploy or promotion."
               ;;
             "Release Please")
               # Keep in sync with the recovery notes in release-please.yml's header.
-              impact="Release automation failed on main. Release PRs, tags, or changelogs may be stale — and if the release-cli job failed, a CLI release may exist without binaries (installer 404s on the newest version, Homebrew tap not updated). Fix the cause, then re-run failed jobs on the linked run or dispatch Release Please with cli_tag=&lt;tag&gt;."
+              impact="Release automation did not complete successfully on main. Release PRs, tags, or changelogs may be stale — and if the release-cli job failed, a CLI release may exist without binaries (installer 404s on the newest version, Homebrew tap not updated). Fix the cause, then re-run failed jobs on the linked run or dispatch Release Please with cli_tag=&lt;tag&gt;."
               ;;
             "Validate issue templates")
-              impact="Issue-template validation failed on main. GitHub issue forms may be broken until the schema is fixed."
+              impact="Issue-template validation did not complete successfully on main. GitHub issue forms may be broken until the run succeeds."
               ;;
             *)
-              impact="Main CI failed before the repository reached a clean post-merge state. Review the run and open a hotfix PR against this SHA."
+              impact="Main CI did not complete successfully before the repository reached a clean post-merge state. Review the run and repair or re-run it against this SHA."
               ;;
           esac
+
+          # Match the shared qurl-service/NHP notification vocabulary: red for
+          # an actionable failure, amber when execution stopped without a proven
+          # successor, and neutral grey for a verified supersession.
+          case "$CONCLUSION" in
+            failure)
+              color="#dc3545"
+              emoji="x"
+              result_emoji=":x:"
+              status_text="failed"
+              ;;
+            timed_out)
+              color="#dc3545"
+              emoji="x"
+              result_emoji=":x:"
+              status_text="timed out"
+              ;;
+            cancelled)
+              if [[ -n "$superseded_by" ]]; then
+                color="#6c757d"
+                emoji="fast_forward"
+                result_emoji=":fast_forward:"
+                status_text="superseded by run #${superseded_by}"
+                impact="*Superseded — no action needed.* This run stopped early, but <${superseded_url}|run #${superseded_by}> is newer on \`${DEFAULT_BRANCH}\` and carries this commit forward."
+              else
+                color="#ffc107"
+                emoji="warning"
+                result_emoji=":warning:"
+                status_text="stopped early"
+                if [[ "$successor_lookup" == "complete" ]]; then
+                  impact="${impact} No newer \`${WORKFLOW_NAME}\` run was found on \`${DEFAULT_BRANCH}\`; re-run it after checking why it stopped."
+                else
+                  impact="${impact} GitHub's API could not verify a newer \`${WORKFLOW_NAME}\` run; treat this commit as not carried forward until run history proves otherwise."
+                fi
+              fi
+              ;;
+            *)
+              # The job-level gate admits only the three conclusions above.
+              # Keep a loud fallback in case that gate is widened independently.
+              color="#ffc107"
+              emoji="warning"
+              result_emoji=":grey_question:"
+              status_text="incomplete"
+              ;;
+          esac
+
+          commit_first_line="${COMMIT_MESSAGE%%$'\n'*}"
+          commit_first_line="${commit_first_line:0:100}"
+          commit_first_line="$(printf '%s' "$commit_first_line" | tr '`' "'")"
 
           # Values below use string interpolation, not `+` concatenation.
           # jq <= 1.7, which ubuntu-latest ships, parses object-construction
           # values under a restricted production that rejects a bare `+`
           # there — the parse error that broke this notifier until #1021.
           # An interpolation is always a jq Term, so it stays legal in any
-          # position, and it renders a non-string arg (say $run_number via
-          # --argjson) instead of failing at runtime. Keep it this way: jq
-          # 1.8 accepts both forms, so a newer local jq will not catch a
-          # regression — scripts/check-main-ci-notification-payload.sh gates
-          # it in CI.
+          # position, and it renders a future non-string arg instead of failing
+          # at runtime. Keep it this way: jq 1.8 accepts both forms, so a newer
+          # local jq will not catch a regression — the payload checker gates it
+          # under runner-matched jq in CI.
           payload="$(jq -n \
-            --arg text ":rotating_light: ${WORKFLOW_NAME} ${CONCLUSION} on ${DEFAULT_BRANCH} - ${short_sha}" \
-            --arg repository "$REPOSITORY" \
-            --arg repository_url "$REPOSITORY_URL" \
+            --arg text ":${emoji}: qURL Integrations CI ${status_text}: ${WORKFLOW_NAME} on ${DEFAULT_BRANCH} (${short_sha})" \
+            --arg color "$color" \
+            --arg emoji "$emoji" \
+            --arg status_text "$status_text" \
             --arg workflow "$WORKFLOW_NAME" \
             --arg conclusion "$CONCLUSION" \
+            --arg result_emoji "$result_emoji" \
             --arg branch "$DEFAULT_BRANCH" \
             --arg short_sha "$short_sha" \
             --arg commit_url "$commit_url" \
-            --arg run_number "$RUN_NUMBER" \
             --arg run_url "$RUN_URL" \
-            --arg actor "$actor_display" \
+            --arg trigger "$trigger_display" \
+            --arg commit_message "$commit_first_line" \
             --arg impact "$impact" \
             '{
               text: $text,
-              blocks: [
+              attachments: [
                 {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: "*:rotating_light: Main CI did not pass*\n`\($workflow)` completed with `\($conclusion)` on `\($branch)`."
-                  }
-                },
-                {
-                  type: "section",
-                  fields: [
-                    { type: "mrkdwn", text: "*Repository*\n<\($repository_url)|\($repository)>" },
-                    { type: "mrkdwn", text: "*Commit*\n<\($commit_url)|`\($short_sha)`>" },
-                    { type: "mrkdwn", text: "*Triggered by*\n\($actor)" },
-                    { type: "mrkdwn", text: "*Run*\n<\($run_url)|#\($run_number)>" }
-                  ]
-                },
-                {
-                  type: "section",
-                  text: {
-                    type: "mrkdwn",
-                    text: "*Impact*\n\($impact)"
-                  }
-                },
-                {
-                  type: "context",
-                  elements: [
+                  color: $color,
+                  blocks: [
                     {
-                      type: "mrkdwn",
-                      text: "Posted from `workflow_run`, so source-repo CI failures are visible even when no deploy workflow runs."
+                      type: "section",
+                      text: {
+                        type: "mrkdwn",
+                        text: ":\($emoji): *qURL Integrations CI* \($status_text)"
+                      }
+                    },
+                    {
+                      type: "section",
+                      fields: [
+                        { type: "mrkdwn", text: "*Workflow:*\n`\($workflow)`" },
+                        { type: "mrkdwn", text: "*Result:*\n\($result_emoji) `\($conclusion)`" },
+                        { type: "mrkdwn", text: "*Branch:*\n`\($branch)` (\($short_sha))" },
+                        { type: "mrkdwn", text: "*Trigger:*\n\($trigger)" }
+                      ]
+                    },
+                    (if $commit_message == "" then empty else {
+                      type: "section",
+                      text: {
+                        type: "mrkdwn",
+                        text: "*Commit:* `\($commit_message)`"
+                      }
+                    } end),
+                    {
+                      type: "section",
+                      text: {
+                        type: "mrkdwn",
+                        text: "*Impact*\n\($impact)"
+                      }
+                    },
+                    {
+                      type: "context",
+                      elements: [
+                        {
+                          type: "mrkdwn",
+                          text: "<\($commit_url)|\($short_sha)>  |  <\($run_url)|View workflow>"
+                        }
+                      ]
                     }
                   ]
                 }

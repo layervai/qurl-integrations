@@ -883,9 +883,30 @@ func hasUploadSignal(files slackEventFiles, subtype string) bool {
 // Still ASSUMED: the scan read conversations.history while this seam reads
 // conversations.replies — same message objects, same API family, not separately
 // measured — and it was one workspace on one day, so a plan or Enterprise Grid
-// difference could still move it. If the files array stops arriving, captions
-// silently stop being annotated with every test still green, since the tests
-// supply both fields directly and never read Slack.
+// difference could still move it. If the files array stops arriving, captions silently
+// stop being annotated with every test still green, since the tests supply both fields
+// directly and never read Slack.
+//
+// cmd/slack-history-upload-smoke is how to close both. It reads a live workspace,
+// observes each message twice — once by JSON shape alone, once through THIS function —
+// and reads conversations.replies alongside conversations.history, so the surface caveat
+// above is now measurable rather than merely stated. It has not been run against the
+// replies surface yet; when it is, record those numbers here and drop that caveat.
+// Operator-triggered like cmd/slack-dm-smoke, so nothing runs it for you.
+//
+// Read its verdict for what it is. The genuinely independent evidence is the shape tally
+// — files_key_present, populated_arrays, uncountable_shapes — and that is report-only.
+// The tripwire that fails the command is -min-uploads, whose oracle is the operator's
+// belief that the workspace contains uploads, not a second reading of the bytes. The
+// classifier-disagreement check cannot fire against the classifier as written; it is a
+// guard against a future rewrite of THIS function, not against Slack changing.
+//
+// Offline, cmd/testdata/conversations_replies_uploads.json carries file entries built to
+// the shapes above — plus a canvas entry, which is constructed rather than observed:
+// the scan recorded hosted, external and snippet files and one access_denied, not a
+// canvas. TestAgentThreadHistorySeam_FullFileObjectShape drives them through the real
+// seam. It cannot see Slack change, which is the smoke's job; it keeps the decode honest
+// against an entry that actually looks like one in between runs.
 func SlackMessageHasUpload(files json.RawMessage, subtype string) bool {
 	var parsed slackEventFiles
 	if len(files) > 0 && json.Unmarshal(files, &parsed) != nil {

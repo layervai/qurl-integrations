@@ -1,0 +1,486 @@
+package slacksmoke
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"testing/iotest"
+	"time"
+)
+
+const (
+	testToken       = "xoxb-test-token"
+	testAuthHeader  = "Authorization"
+	testLoopbackURL = "http://127.0.0.1:8080"
+	testHTTPSURL    = "https://slack.test"
+)
+
+// TestDefaultAPIBaseURL pins the literal. Every table case below compares the default
+// to itself, so a changed constant would survive them all.
+func TestDefaultAPIBaseURL(t *testing.T) {
+	if DefaultAPIBaseURL != "https://slack.com/api" {
+		t.Fatalf("DefaultAPIBaseURL = %q, want %q", DefaultAPIBaseURL, "https://slack.com/api")
+	}
+}
+
+func TestNormalizeBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr error
+	}{
+		{name: "empty defaults", raw: "", want: DefaultAPIBaseURL},
+		{name: "whitespace defaults", raw: "   ", want: DefaultAPIBaseURL},
+		{name: "https kept", raw: testHTTPSURL, want: testHTTPSURL},
+		{name: "trailing slash trimmed", raw: testHTTPSURL + "/api/", want: testHTTPSURL + "/api"},
+		{name: "default host trailing slash trimmed", raw: DefaultAPIBaseURL + "/", want: DefaultAPIBaseURL},
+		{name: "multiple trailing slashes trimmed", raw: testHTTPSURL + "/api///", want: testHTTPSURL + "/api"},
+		// The only case that trims the path away entirely, and not a cosmetic one:
+		// callers build method URLs as base + "/" + method, so a surviving "/" would
+		// double the separator in every request.
+		{name: "root path trimmed to bare host", raw: testHTTPSURL + "/", want: testHTTPSURL},
+		{name: "custom path preserved", raw: testHTTPSURL + "/api/~smoke/", want: testHTTPSURL + "/api/~smoke"},
+		{name: "http loopback ip allowed", raw: testLoopbackURL, want: testLoopbackURL},
+		{name: "http loopback keeps port and trims path", raw: "http://localhost:1234/api/", want: "http://localhost:1234/api"},
+		{name: "http ipv6 loopback keeps port and path", raw: "http://[::1]:1234/api", want: "http://[::1]:1234/api"},
+		{name: "http localhost allowed", raw: "http://localhost:8080", want: "http://localhost:8080"},
+		{name: "http ipv6 loopback allowed", raw: "http://[::1]:8080", want: "http://[::1]:8080"},
+		// The reason this function exists: a bearer token must not go out in plaintext
+		// to a host nobody can vouch for.
+		{name: "http public host refused", raw: "http://slack.test", wantErr: ErrBaseURLRequiresHTTPS},
+		{name: "http near-loopback host refused", raw: "http://localhost.evil.test", wantErr: ErrBaseURLRequiresHTTPS},
+		{name: "http non-loopback ip refused", raw: "http://8.8.8.8", wantErr: ErrBaseURLRequiresHTTPS},
+		{name: "userinfo refused", raw: "https://user:pass@slack.test", wantErr: ErrBaseURLUserinfo},
+		{name: "query refused", raw: testHTTPSURL + "?a=b", wantErr: ErrBaseURLQueryFragment},
+		{name: "fragment refused", raw: testHTTPSURL + "#f", wantErr: ErrBaseURLQueryFragment},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeBaseURL(tc.raw)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("NormalizeBaseURL(%q) error = %v, want %v", tc.raw, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeBaseURL(%q): %v", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Fatalf("NormalizeBaseURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeBaseURLRejectsUnparseable covers the inputs that fail the scheme/host
+// shape check rather than one of the named sentinels.
+func TestNormalizeBaseURLRejectsUnparseable(t *testing.T) {
+	for _, raw := range []string{"//slack.test", "slack.test", "://slack.test", "https://", "http://[::1"} {
+		t.Run(raw, func(t *testing.T) {
+			got, err := NormalizeBaseURL(raw)
+			if err == nil {
+				t.Fatalf("NormalizeBaseURL(%q) = %q, want an error", raw, got)
+			}
+			// Sentinel, not just non-nil: dropping the scheme/host shape check still
+			// errors, only via ErrBaseURLRequiresHTTPS, and would survive err != nil.
+			if !errors.Is(err, ErrBaseURLInvalid) {
+				t.Fatalf("NormalizeBaseURL(%q) error = %v, want ErrBaseURLInvalid", raw, err)
+			}
+		})
+	}
+}
+
+func TestCleanToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		token   string
+		want    string
+		wantErr error
+	}{
+		{name: "trimmed", token: "  " + testToken + "\t", want: testToken},
+		{name: "empty", token: "", wantErr: ErrMissingBotToken},
+		{name: "whitespace only", token: "   ", wantErr: ErrMissingBotToken},
+		{name: "newline", token: "xoxb-a\nb", wantErr: ErrBotTokenControlCharacters},
+		{name: "carriage return", token: "xoxb-a\rb", wantErr: ErrBotTokenControlCharacters},
+		{name: "del", token: "xoxb-a\x7fb", wantErr: ErrBotTokenControlCharacters},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CleanToken(tc.token)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("CleanToken(%q) error = %v, want %v", tc.token, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CleanToken(%q): %v", tc.token, err)
+			}
+			if got != tc.want {
+				t.Fatalf("CleanToken(%q) = %q, want %q", tc.token, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContainsHTTPHeaderControl(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{in: "qurl-slack-dm-smoke", want: false},
+		{in: "", want: false},
+		{in: "with space", want: false},
+		{in: "a\nb", want: true},
+		{in: "a\rb", want: true},
+		{in: "a\tb", want: true},
+		{in: "a\x00b", want: true},
+		{in: "a\x7fb", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := ContainsHTTPHeaderControl(tc.in); got != tc.want {
+				t.Fatalf("ContainsHTTPHeaderControl(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewHTTPClientDoesNotReplayTokenOnRedirect pins the promise the redirect policy
+// makes: a 3xx is surfaced, not followed, so the Authorization header never reaches
+// the host the response points at.
+func TestNewHTTPClientDoesNotReplayTokenOnRedirect(t *testing.T) {
+	// Guarded because the assertion below reads what a server goroutine would write in
+	// the failure this test exists to catch; an unsynchronized read there would race
+	// under -race exactly when the test is doing its job.
+	var mu sync.Mutex
+	var targetAuth string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		targetAuth = r.Header.Get(testAuthHeader)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, origin.URL, http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set(testAuthHeader, "Bearer "+testToken)
+
+	// Both httptest servers bind 127.0.0.1, so net/http's own cross-host header
+	// stripping does NOT apply here: a followed redirect really would carry the
+	// Authorization header to the target. If the two ever differed, the assertion
+	// below would pass because Go stripped the header, not because this policy did.
+	if originHost, targetHost := hostnameOf(t, origin.URL), hostnameOf(t, target.URL); originHost != targetHost {
+		t.Fatalf("origin host %q != target host %q; Go would strip Authorization itself, making this test vacuous", originHost, targetHost)
+	}
+
+	resp, err := NewHTTPClient(5 * time.Second).Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Errorf, not Fatalf: the Authorization check below is the security property this
+	// test is named for, and aborting here would mean it never ran at all.
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want %d (redirect must be surfaced, not followed)", resp.StatusCode, http.StatusFound)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if targetAuth != "" {
+		t.Fatalf("redirect target saw Authorization %q, want it never sent", targetAuth)
+	}
+}
+
+func hostnameOf(t *testing.T, raw string) string {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return parsed.Hostname()
+}
+
+func TestNewHTTPClientTimeout(t *testing.T) {
+	if got := NewHTTPClient(3 * time.Second).Timeout; got != 3*time.Second {
+		t.Fatalf("Timeout = %v, want %v", got, 3*time.Second)
+	}
+}
+
+// TestReadResponseBodyAcceptsBodyUpToLimit is the >= guard: a body that exactly fills
+// the ceiling is valid, and comparing with >= would refuse it as though it had
+// overflowed. It deliberately does NOT cover the other half of the off-by-one — with the
+// read shortened to limit bytes every size below still passes, because that mutation
+// only misreads bodies larger than the ceiling. The two oversize tests below are what
+// kill that one.
+func TestReadResponseBodyAcceptsBodyUpToLimit(t *testing.T) {
+	const limit = 64
+	for _, size := range []int{0, limit - 1, limit} {
+		want := strings.Repeat("a", size)
+		raw, err := ReadResponseBody("auth.test", strings.NewReader(want), limit)
+		if err != nil {
+			t.Fatalf("ReadResponseBody(_, %d bytes, %d) = %v, want nil", size, limit, err)
+		}
+		if string(raw) != want {
+			t.Fatalf("ReadResponseBody(_, %d bytes, %d) = %d bytes, want %d", size, limit, len(raw), size)
+		}
+	}
+}
+
+// TestReadResponseBodyRejectsOneByteOverLimit is the same guard in the other direction,
+// and pins the text alongside it: both smoke commands printed exactly this message
+// before it was hoisted, so the sentinel's own wording must not leak into it.
+func TestReadResponseBodyRejectsOneByteOverLimit(t *testing.T) {
+	const limit = 64
+	raw, err := ReadResponseBody("auth.test", strings.NewReader(strings.Repeat("a", limit+1)), limit)
+	if err == nil {
+		t.Fatal("ReadResponseBody = nil error, want an oversize refusal")
+	}
+	if raw != nil {
+		t.Fatalf("raw = %d bytes, want none alongside the error", len(raw))
+	}
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("ReadResponseBody = %v, want errors.Is ErrResponseTooLarge", err)
+	}
+	if want := "auth.test response exceeded 64 bytes"; err.Error() != want {
+		t.Fatalf("ReadResponseBody = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestReadResponseBodyDrainsOversizeBody pins the two reads an oversize response costs:
+// limit+1 to detect it, then DrainResponseBody's own limit+1. Returning the refusal
+// without the drain leaves the connection unreusable, which is what that function is for.
+func TestReadResponseBodyDrainsOversizeBody(t *testing.T) {
+	const (
+		limit = 16
+		total = 4096
+	)
+	src := strings.NewReader(strings.Repeat("a", total))
+	if _, err := ReadResponseBody("conversations.history", src, limit); err == nil {
+		t.Fatal("ReadResponseBody = nil error, want an oversize refusal")
+	}
+	if got, want := total-src.Len(), 2*(limit+1); got != want {
+		t.Fatalf("consumed %d bytes, want %d", got, want)
+	}
+}
+
+// TestReadResponseBodyWrapsReadError keeps a failed read distinguishable from an
+// oversize one. slack-dm-smoke records a different result code for each and tells them
+// apart with errors.Is, so a read failure matching the sentinel would be mislabeled.
+func TestReadResponseBodyWrapsReadError(t *testing.T) {
+	cause := errors.New("connection reset")
+	raw, err := ReadResponseBody("auth.test", iotest.ErrReader(cause), 64)
+	if raw != nil {
+		t.Fatalf("raw = %d bytes, want none alongside the error", len(raw))
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("ReadResponseBody = %v, want errors.Is %v", err, cause)
+	}
+	if errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("ReadResponseBody = %v, want a read failure, not ErrResponseTooLarge", err)
+	}
+	if want := "auth.test response read: connection reset"; err.Error() != want {
+		t.Fatalf("ReadResponseBody = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestReadResponseBodyClampsNegativeLimit pins what the clamp actually does, which is
+// the opposite of what mirroring DrainResponseBody's reasoning would suggest. Unclamped,
+// io.LimitReader reads nothing from a negative count and the comparison then refuses
+// every body — the empty one included — with the negative digits in the operator's
+// message. Clamped, a negative ceiling behaves exactly as a zero one does, so both halves
+// are asserted: empty is valid, anything longer is refused at zero.
+func TestReadResponseBodyClampsNegativeLimit(t *testing.T) {
+	raw, err := ReadResponseBody("auth.test", strings.NewReader(""), -5)
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("ReadResponseBody(_, empty, -5) = %q, %v, want empty body and nil", raw, err)
+	}
+	_, err = ReadResponseBody("auth.test", strings.NewReader("body"), -5)
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("ReadResponseBody(_, _, -5) = %v, want errors.Is ErrResponseTooLarge", err)
+	}
+	if want := "auth.test response exceeded 0 bytes"; err.Error() != want {
+		t.Fatalf("ReadResponseBody(_, _, -5) = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestDrainResponseBodyHonoursCallerLimit is the regression guard for the hazard that
+// motivated the limit parameter: when this function was duplicated per command it read
+// whichever maxSlackResponseBytes sat in the same file, so the same body drained a 64x
+// different budget depending on which copy ran.
+func TestDrainResponseBodyHonoursCallerLimit(t *testing.T) {
+	const total = 4096
+	for _, limit := range []int64{0, 16, 1024} {
+		src := strings.NewReader(strings.Repeat("a", total))
+		DrainResponseBody(src, limit)
+		if got := int64(total - src.Len()); got != limit+1 {
+			t.Fatalf("DrainResponseBody(_, %d) consumed %d bytes, want %d", limit, got, limit+1)
+		}
+	}
+	// A negative limit is clamped to zero, so it drains the same one byte a zero limit
+	// does — not the zero bytes io.LimitReader would read from a negative count.
+	src := strings.NewReader(strings.Repeat("a", total))
+	DrainResponseBody(src, -5)
+	if got := total - src.Len(); got != 1 {
+		t.Fatalf("DrainResponseBody(_, -5) consumed %d bytes, want 1", got)
+	}
+}
+
+func TestDrainResponseBodyStopsAtShortBody(t *testing.T) {
+	src := strings.NewReader("short")
+	DrainResponseBody(src, 1<<20)
+	if src.Len() != 0 {
+		t.Fatalf("unread = %d, want 0", src.Len())
+	}
+}
+
+func TestIsEnvVarName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "SLACK_BOT_TOKEN", want: true},
+		{name: "_LEADING_UNDERSCORE", want: true},
+		{name: "lower_case9", want: true},
+		{name: "A1", want: true},
+		{name: "", want: false},
+		{name: "9LEADING_DIGIT", want: false},
+		{name: "HAS-DASH", want: false},
+		{name: "HAS SPACE", want: false},
+		{name: "HAS.DOT", want: false},
+		// The value is echoed into the command's own stderr diagnostics, so a name
+		// carrying a newline is exactly what this rejects.
+		{name: "INJECT\nLINE", want: false},
+		// Newline is not the only control character these diagnostics must not carry.
+		// slack-history-upload-smoke's writeConfigValidationError suppresses two gosec
+		// G705 findings on the strength of this rejecting all of them — the suppression
+		// reasons from "cannot carry a control character either" — and slack-dm-smoke
+		// echoes the same flag value behind the same guard. ESC opens a terminal escape
+		// sequence, NUL ends the line early for whatever reads the log, and BEL is
+		// heard rather than seen. Each payload is a valid POSIX name apart from its
+		// single control character, so the row turns red only if the charset rule
+		// itself stops rejecting that rune; one carrying extra punctuation would be
+		// rejected for the punctuation and would survive the loosening it is meant to
+		// catch. slack-history-upload-smoke pins ESC at command depth too, but this is
+		// the shared rule both commands rest on, and NUL and BEL are pinned only here.
+		{name: "SMOKE\x1bFORGED", want: false},
+		{name: "SMOKE\x00FORGED", want: false},
+		{name: "SMOKE\aFORGED", want: false},
+		{name: "UNICODE_É", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsEnvVarName(tc.name); got != tc.want {
+				t.Fatalf("IsEnvVarName(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTimeoutBudgetValidate(t *testing.T) {
+	tests := []struct {
+		name      string
+		budget    TimeoutBudget
+		minFactor int
+		wantErr   error
+		wantText  string
+	}{
+		{
+			name:      "usable",
+			budget:    TimeoutBudget{Overall: 90 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+		},
+		{
+			name:      "exactly at factor",
+			budget:    TimeoutBudget{Overall: 30 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+		},
+		{
+			name:      "overall not positive",
+			budget:    TimeoutBudget{Overall: 0, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrOverallTimeoutNotPositive,
+			wantText:  "-timeout must be greater than 0",
+		},
+		{
+			// Both non-positive: without this case the first two checks are mutually
+			// exclusive across the table and swapping their order survives.
+			name:      "both non-positive reports overall first",
+			budget:    TimeoutBudget{},
+			minFactor: 3,
+			wantErr:   ErrOverallTimeoutNotPositive,
+			wantText:  "-timeout must be greater than 0",
+		},
+		{
+			name:      "request not positive",
+			budget:    TimeoutBudget{Overall: 90 * time.Second, Request: 0},
+			minFactor: 3,
+			wantErr:   ErrRequestTimeoutNotPositive,
+			wantText:  "-request-timeout must be greater than 0",
+		},
+		{
+			// Ordering matters: an equal pair must get this message rather than the
+			// multiplier one, which is why the check sits ahead of the factor guard.
+			name:      "request equals overall",
+			budget:    TimeoutBudget{Overall: 10 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrRequestTimeoutNotLess,
+			wantText:  "-request-timeout must be less than -timeout",
+		},
+		{
+			name:      "request exceeds overall",
+			budget:    TimeoutBudget{Overall: 5 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrRequestTimeoutNotLess,
+			wantText:  "-request-timeout must be less than -timeout",
+		},
+		{
+			name:      "below factor",
+			budget:    TimeoutBudget{Overall: 25 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+			wantText:  "-timeout must be at least 3x -request-timeout",
+		},
+		{
+			name:      "factor is caller supplied",
+			budget:    TimeoutBudget{Overall: 35 * time.Second, Request: 10 * time.Second},
+			minFactor: 4,
+			wantText:  "-timeout must be at least 4x -request-timeout",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.budget.Validate(tc.minFactor)
+			if tc.wantText == "" {
+				if err != nil {
+					t.Fatalf("Validate = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate = nil, want %q", tc.wantText)
+			}
+			// The text is the operator-facing contract: commands Fprintln it verbatim.
+			if err.Error() != tc.wantText {
+				t.Fatalf("Validate = %q, want %q", err.Error(), tc.wantText)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Validate = %v, want errors.Is %v", err, tc.wantErr)
+			}
+		})
+	}
+}

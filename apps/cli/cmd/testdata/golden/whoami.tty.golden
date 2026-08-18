@@ -1,0 +1,6 @@
+[1mOwner:[0m    own_cli_fixture
+[1mAuth:[0m     api_key
+[1mKey:[0m      key_fixturecli01 (lv_test_abcd)
+[1mKind:[0m     api_key
+[1mScopes:[0m   qurl:read, qurl:resolve, qurl:write
+[1mExpires:[0m  never

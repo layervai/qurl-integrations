@@ -161,8 +161,8 @@ $(printf '%s\n' "$PAGE_FLAT" \
     echo "Installed qurl v${VERSION} to ${INSTALL_DIR}/${BINARY}"
     echo ""
     echo "Get started:"
-    echo "  qurl config set api_key <your-api-key>"
-    echo "  qurl create https://example.com"
+    echo "  qurl login"
+    echo "  qurl publish https://example.com"
     echo "  qurl --help"
 }
 

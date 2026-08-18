@@ -1,97 +1,145 @@
 package main
 
 import (
-	"bufio"
-	"errors"
+	"crypto/subtle"
 	"fmt"
-	"os"
-	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
-	"github.com/layervai/qurl-integrations/shared/client"
+	"github.com/layervai/qurl-go/qurl"
+
+	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
 func resolveCmd(opts *globalOpts) *cobra.Command {
-	return &cobra.Command{
-		Use:   "resolve [access-token]",
-		Short: "Resolve a qURL access token (headless)",
-		Long: `Resolve a qURL access token to get the target URL and grant network access.
-After resolution, the target URL is accessible from your IP for the duration
-specified in the access grant.
+	var (
+		ttl time.Duration
+		yes bool
+	)
 
-The access token can be provided as an argument, via stdin, or interactively:
-  qurl resolve at_abc123           Argument (visible in shell history)
-  echo $TOKEN | qurl resolve       Stdin (safer)
-  qurl resolve                     Interactive prompt (hidden input)`,
-		Example: `  qurl resolve at_k8xqp9h2sj9lx7r4a
-  echo "$TOKEN" | qurl resolve
-  qurl resolve -o json`,
-		Args: cobra.MaximumNArgs(1),
+	cmd := &cobra.Command{
+		Use:   "resolve <CRID>",
+		Short: "Turn a CRID into a short-lived access link",
+		Long: `Resolve a CRID into a temporary access link for the resource it names.
+
+The link expires on its own; resolve again whenever you need a fresh one.
+Before anything is printed, the CLI verifies that the service's answer
+matches the CRID you asked for — a mismatched answer is discarded and the
+command exits with code 12 without printing a link.
+
+When stdout is not a terminal the command prints the bare link and nothing
+else, so it composes: curl "$(qurl resolve <CRID>)".`,
+		Example: "  qurl resolve " + exampleCRID + "\n" +
+			"  curl \"$(qurl resolve " + exampleCRID + ")\"",
+		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			token, err := readToken(cmd, args, "Access token: ")
+			assessment, err := cridux.Assess(args[0])
 			if err != nil {
 				return err
 			}
-
-			if err := validateAccessToken(token); err != nil {
+			printer := opts.printer()
+			if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), yes); err != nil {
 				return err
 			}
 
-			c, err := opts.newClient()
+			// The wire carries whole seconds; anything finer would silently
+			// truncate — and reportClamp would then misattribute the CLI's
+			// own rounding to the service. Refuse instead: a requested
+			// lifetime is never silently altered.
+			if ttl != 0 && (ttl < 0 || ttl != ttl.Truncate(time.Second)) {
+				return exitcode.UsageError(fmt.Errorf("--ttl %s must be a positive whole number of seconds", ttl))
+			}
+
+			client, err := opts.newClient()
 			if err != nil {
 				return err
 			}
-
-			result, err := c.Resolve(cmd.Context(), client.ResolveInput{
-				AccessToken: token,
+			result, err := client.Resolve(cmd.Context(), assessment.Input, qurlapi.ResolveOptions{
+				TTLSeconds: int(ttl.Seconds()),
 			})
 			if err != nil {
-				return fmt.Errorf("resolve qURL: %w", err)
+				return err
 			}
 
-			return opts.formatter().FormatResolve(cmd.OutOrStdout(), result)
+			if err := verifyResolved(assessment, result); err != nil {
+				return err
+			}
+			reportClamp(printer, ttl, result)
+			return printer.Resolve(result)
 		},
+	}
+
+	cmd.Flags().DurationVar(&ttl, "ttl", 0, "requested link lifetime, e.g. 5m or 1h (service may grant less)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
+
+	return cmd
+}
+
+// applyCRIDGuards prints local warnings and applies the environment guard
+// for parsed CRIDs. Warn-only cases proceed; a test CRID aimed at the
+// production endpoint refuses without --yes.
+func applyCRIDGuards(printer *output.Printer, assessment *cridux.Assessment, productionEndpoint, yes bool) error {
+	for _, warning := range assessment.Warnings {
+		printer.Warnf("%s", warning)
+	}
+	if assessment.Kind != cridux.KindCRID {
+		return nil
+	}
+	warning, err := cridux.EnvironmentGuard(assessment.CRID.Environment(), productionEndpoint, yes)
+	if err != nil {
+		return err
+	}
+	if warning != "" {
+		printer.Warnf("%s", warning)
+	}
+	return nil
+}
+
+// verifyResolved is the fail-closed client half of the CRID trust story,
+// applied before anything is emitted:
+//
+//   - resolved by CRID: the response must echo exactly that CRID;
+//   - resolved by resource key: the response CRID must derive from the key
+//     (the SDK's VerifyCRID);
+//   - resolved by an operand the CLI holds no anchor for (typo-warned or
+//     unknown forms): nothing to verify against, so nothing is enforced.
+//
+// Any failure returns a verification error: stdout stays empty and the run
+// exits with code 12.
+func verifyResolved(assessment *cridux.Assessment, result *qurlapi.Resolved) error {
+	switch assessment.Kind {
+	case cridux.KindCRID:
+		if result.CRID == "" {
+			return exitcode.VerificationError(msgVerifyMissing, qurl.ErrNoCRID)
+		}
+		if subtle.ConstantTimeCompare([]byte(result.CRID), []byte(assessment.Input)) != 1 {
+			return exitcode.VerificationError(msgVerifyMismatch, qurl.ErrCRIDMismatch)
+		}
+		return nil
+	case cridux.KindResourceKey:
+		if err := result.VerifyKey(assessment.KeyDER); err != nil {
+			return exitcode.VerificationError(msgVerifyMismatch, err)
+		}
+		return nil
+	case cridux.KindCRIDTypo, cridux.KindUnknown:
+		return nil
+	default:
+		return nil
 	}
 }
 
-// readToken reads a secret value from args, stdin, or an interactive prompt. The
-// prompt string labels the hidden interactive input (e.g. "Access token: ").
-func readToken(cmd *cobra.Command, args []string, prompt string) (string, error) {
-	// From argument
-	if len(args) > 0 {
-		return args[0], nil
+// reportClamp tells the user when the service granted a shorter lifetime
+// than --ttl requested (clamp-and-report, never silent).
+func reportClamp(printer *output.Printer, requested time.Duration, result *qurlapi.Resolved) {
+	if requested <= 0 || result.ExpiresInSeconds <= 0 {
+		return
 	}
-
-	// From stdin (piped)
-	stat, _ := os.Stdin.Stat()
-	if stat != nil && (stat.Mode()&os.ModeCharDevice) == 0 {
-		scanner := bufio.NewScanner(cmd.InOrStdin())
-		if scanner.Scan() {
-			token := strings.TrimSpace(scanner.Text())
-			if token != "" {
-				return token, nil
-			}
-		}
-		return "", errors.New("no token provided via stdin")
+	granted := time.Duration(result.ExpiresInSeconds) * time.Second
+	if granted < requested {
+		printer.Notef(msgTTLClamped, granted.String(), requested.String())
 	}
-
-	// Interactive prompt with hidden input
-	if _, err := fmt.Fprint(cmd.ErrOrStderr(), prompt); err != nil {
-		return "", err
-	}
-	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	if _, printErr := fmt.Fprintln(cmd.ErrOrStderr()); printErr != nil {
-		return "", printErr
-	}
-	if err != nil {
-		return "", fmt.Errorf("read token: %w", err)
-	}
-
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" {
-		return "", errors.New("no token provided")
-	}
-	return token, nil
 }

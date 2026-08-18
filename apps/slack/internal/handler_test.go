@@ -108,7 +108,16 @@ func (p *recordingAuthProvider) SupportsDeleteAPIKey() bool {
 func (p *recordingAuthProvider) DeleteAPIKey(_ context.Context, workspaceID string) error {
 	p.deleteCalls++
 	p.deleteWorkspaceID = workspaceID
-	return p.deleteErr
+	if p.deleteErr != nil {
+		return p.deleteErr
+	}
+	// Mirror DDBProvider.DeleteAPIKey, which REMOVEs the qURL credential columns
+	// (api key, data key, key id, prefix, account id) from the row while leaving
+	// the rest of it alone. Modeling the strip is what lets the disconnect tests
+	// assert that the RETAINED workspace_state row holds no qURL secret — the
+	// invariant that makes purgeScopeDisconnect safe.
+	p.apiKey = ""
+	return nil
 }
 
 func newUninstallAdminTestHandler(t *testing.T, provider *recordingAuthProvider) *Handler {

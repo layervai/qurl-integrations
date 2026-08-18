@@ -77,6 +77,14 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      # Required for cosign keyless signing (`signs:` in .goreleaser.yml) —
+      # cosign requests an OIDC token from GitHub
+      # (`ACTIONS_ID_TOKEN_REQUEST_TOKEN` / `_URL`, auto-discovered) and
+      # presents it to Fulcio to mint the short-lived signing certificate.
+      # Job-scoped rather than workflow-level, mirroring qurl-connector's
+      # docker-publish.yml: the release-please job above must not be able to
+      # mint certificates carrying this repo's release identity.
+      id-token: write
     env:
       CLI_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_tag || needs.release-please.outputs.cli_tag }}
     steps:
@@ -95,6 +103,32 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # cosign for the keyless `signs:` step in .goreleaser.yml and the
+      # self-test below. Pin copied from qurl-connector's docker-publish.yml:
+      # sigstore/cosign-installer v4.1.2
+      # (6f9f17788090df1f26f669e9d70d6ae9567deba6, 2026-05-07).
+      # `cosign-release` pins the cosign binary the installer fetches —
+      # without it, an upstream installer default-bump would silently change
+      # the binary that signs releases. Update it in lockstep with the action
+      # SHA, and keep RELEASING.md's "cosign v3.0+" consumer floor a subset
+      # of the version signed with here.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+
+      # syft for the `sboms:` step in .goreleaser.yml (GoReleaser shells out
+      # to `syft` on PATH). Same explicit-tool-pin rationale as cosign above:
+      # sbom-action v0.24.0's bundled default is syft v1.42.3 — pinning it as
+      # an input keeps a future action bump from silently changing the SBOM
+      # generator, and surfaces the tool bump as a one-line reviewable diff.
+      # Keep in lockstep with cli-nightly.yml's copy (the snapshot exercises
+      # the same SBOM path).
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: 'v1.42.3'
+
       # release.mode keep-existing (pinned in .goreleaser.yml): GoReleaser
       # uploads artifacts to the release release-please just created and
       # keeps its notes.
@@ -110,6 +144,29 @@ jobs:
           # this commit for several components at once, and GoReleaser's
           # auto-detection would otherwise pick one by version-sort luck.
           GORELEASER_CURRENT_TAG: ${{ env.CLI_TAG }}
+
+      # Self-test the signature with the EXACT consumer recipe from
+      # RELEASING.md — qurl-connector's docker-publish.yml runs the same
+      # post-sign verify against its documented recipe. If the documented
+      # identity/issuer and what Fulcio actually minted ever drift — a
+      # workflow rename, a recovery dispatch from a non-main ref, an OIDC
+      # claim change — the release fails loudly here instead of shipping
+      # artifacts whose published verification recipe is wrong.
+      #
+      # The identity is exact, not a regexp: unlike the connector's
+      # tag-triggered publish (whose SAN embeds the per-release tag ref and
+      # so needs `--certificate-identity-regexp`), this job always runs from
+      # refs/heads/main — release-please only triggers on main pushes, and
+      # recovery dispatches must be run from main. Rename cost: renaming this
+      # workflow file changes the identity; update this step and RELEASING.md
+      # in lockstep.
+      - name: Verify release signature (self-test)
+        run: |
+          cosign verify-blob \
+            --bundle dist/checksums.txt.sigstore.json \
+            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            dist/checksums.txt
 
       - name: Post recovery instructions on failure
         if: failure()

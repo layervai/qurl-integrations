@@ -144,14 +144,8 @@ var ErrUpdateResourceNoFieldsSet = errors.New("update resource: input has no fie
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
-// StatusExpired indicates the qURL's TTL has elapsed.
-const StatusExpired = "expired"
-
 // StatusRevoked indicates the qURL was manually revoked (deleted).
 const StatusRevoked = "revoked"
-
-// StatusConsumed indicates a one-time qURL has been used.
-const StatusConsumed = "consumed"
 
 // --- Resource type constants (mirrors qurl-service/api/openapi.yaml
 // `ResourceType` enum).
@@ -280,25 +274,6 @@ type ResponseMeta struct {
 
 // --- qURL types (match API schema) ---
 
-// QURL represents a qURL resource as returned by the API.
-type QURL struct {
-	ResourceID  string     `json:"resource_id"`
-	TargetURL   string     `json:"target_url"`
-	Status      string     `json:"status"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	OneTimeUse  bool       `json:"one_time_use"`
-	MaxSessions int        `json:"max_sessions,omitempty"`
-	// SessionDuration read-back is intentionally omitted (no consumer yet): an
-	// int field would couple the whole QURL decode to session_duration's wire
-	// type. Add it with a decode test when a consumer needs it. See qurl-service
-	// #778 for the wire shape (response is a number; CreateInput sends a string).
-	Description  string        `json:"description,omitempty"`
-	QURLSite     string        `json:"qurl_site,omitempty"`
-	QURLLink     string        `json:"qurl_link,omitempty"`
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
-}
-
 // AccessPolicy defines access restrictions for a qURL.
 //
 // All subfields MUST keep `omitempty` — `&AccessPolicy{}` is the
@@ -323,6 +298,13 @@ type AccessPolicy struct {
 // rather than serializing the zero value `""`, which would otherwise trip the
 // server's exclusivity check.
 type CreateInput struct {
+	// The json tags below document each field's wire NAME; CreateInput
+	// itself is never marshaled. Both endpoints serialize a declared body
+	// ([createQurlBody] / [createForResourceBody]) instead, because the
+	// service rejects unknown fields (qurl-service#1402) — so a field added
+	// here for client-side use cannot reach the wire just by existing.
+	// Adding a wire field means adding it to the matching body struct and
+	// to TestMintBodiesCarryOnlyDeclaredFields's allowed set.
 	TargetURL string `json:"target_url,omitempty"`
 	// ResourceID, when set, mints a qURL bound to an existing resource
 	// (e.g. an existing tunnel resource). Mutually exclusive with
@@ -344,12 +326,6 @@ type CreateInput struct {
 	// stays off the wire and inherits the server/plan default.
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	// Reason is forwarded to the audit log when set (e.g. an
-	// operator-supplied "for incident #123" annotation from the
-	// `/qurl get $alias reason:"…"` slash-command flag). The server
-	// writes this to the audit row only; it is not persisted on the
-	// resulting qURL.
-	Reason string `json:"reason,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so the API dedupes retried writes. See
@@ -415,11 +391,11 @@ func validateIdempotencyKey(key string) error {
 //     required for that endpoint.
 //
 // Note: Create takes a value receiver for backward-compat with the existing
-// callers in apps/slack and apps/cli; the new methods ([Client.CreateResource],
+// callers in apps/slack; the new methods ([Client.CreateResource],
 // [Client.UpdateResource]) take *Input pointers, which is the going-forward
 // idiom. Pointer migration tracked at #146.
 //
-//nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
+//nolint:gocritic // hugeParam: CreateInput is 120 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if input.TargetURL == "" && input.ResourceID == "" {
 		return nil, ErrCreateRequiresTarget
@@ -440,9 +416,6 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	if input.ResourceID != "" {
 		// /v1/resources/{id}/qurls — id rides in the path; the body
 		// drops target_url + resource_id and ships the policy subset.
-		// Reason ships in the body too (silently dropped by the server
-		// if not in its schema; harmless either way and matches the
-		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
 		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
@@ -452,12 +425,19 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 			MaxSessions:     input.MaxSessions,
 			SessionDuration: input.SessionDuration,
 			AccessPolicy:    input.AccessPolicy,
-			Reason:          input.Reason,
 		})
 	} else {
 		endpoint = c.baseURL + "/v1/qurls"
 		logLabel = "POST /v1/qurls"
-		body, err = json.Marshal(input)
+		body, err = json.Marshal(createQurlBody{
+			TargetURL:       input.TargetURL,
+			Label:           input.Label,
+			ExpiresIn:       input.ExpiresIn,
+			OneTimeUse:      input.OneTimeUse,
+			MaxSessions:     input.MaxSessions,
+			SessionDuration: input.SessionDuration,
+			AccessPolicy:    input.AccessPolicy,
+		})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
@@ -482,6 +462,26 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	return &out, nil
 }
 
+// createQurlBody is the wire shape for `POST /v1/qurls`. Mirrors the qURL
+// service's `CreateQurlRequest` schema.
+//
+// This is a DECLARED body rather than a marshal of [CreateInput] itself:
+// the service rejects unknown fields (qurl-service#1402 adds
+// `additionalProperties: false` to both create schemas), so a field added
+// to CreateInput for client-side use must not reach the wire just by
+// existing. Anything sent here has to be a property of CreateQurlRequest —
+// TestMintBodiesCarryOnlyDeclaredFields is the guard.
+type createQurlBody struct {
+	TargetURL string `json:"target_url,omitempty"`
+	// `label` per CreateQurlRequest (not `description`).
+	Label           string        `json:"label,omitempty"`
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+}
+
 // createForResourceBody is the wire shape for `POST
 // /v1/resources/{id}/qurls`. Mirrors the qURL service's
 // `CreateQurlForResourceRequest` schema (resource id rides in the URL
@@ -495,152 +495,6 @@ type createForResourceBody struct {
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	Reason          string        `json:"reason,omitempty"`
-}
-
-// Get retrieves a qURL by ID.
-func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurl QURL
-	if _, err := c.do(req, &qurl, "GET /v1/qurls/:id"); err != nil {
-		return nil, err
-	}
-	return &qurl, nil
-}
-
-// ListInput is the input for listing qURLs.
-type ListInput struct {
-	Limit  int
-	Cursor string
-	Status string
-	Query  string
-	Sort   string
-}
-
-// ListOutput is the output of listing qURLs.
-type ListOutput struct {
-	QURLs      []QURL `json:"qurls"`
-	NextCursor string `json:"next_cursor,omitempty"`
-	HasMore    bool   `json:"has_more,omitempty"`
-}
-
-// List retrieves a paginated list of qURLs.
-func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error) {
-	params := url.Values{}
-	if input.Limit > 0 {
-		params.Set("limit", strconv.Itoa(input.Limit))
-	}
-	if input.Cursor != "" {
-		params.Set("cursor", input.Cursor)
-	}
-	if input.Status != "" {
-		params.Set("status", input.Status)
-	}
-	if input.Query != "" {
-		params.Set("q", input.Query)
-	}
-	if input.Sort != "" {
-		params.Set("sort", input.Sort)
-	}
-
-	u := c.baseURL + "/v1/qurls"
-	if len(params) > 0 {
-		u += "?" + params.Encode()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurls []QURL
-	meta, err := c.do(req, &qurls, "GET /v1/qurls")
-	if err != nil {
-		return nil, err
-	}
-
-	out := &ListOutput{QURLs: qurls}
-	if meta != nil {
-		out.NextCursor = meta.NextCursor
-		out.HasMore = meta.HasMore
-	}
-	return out, nil
-}
-
-// Delete revokes a qURL by ID.
-func (c *Client) Delete(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	_, err = c.do(req, nil, "DELETE /v1/qurls/:id")
-	return err
-}
-
-// ExtendInput holds input for extending a qURL.
-type ExtendInput struct {
-	ExtendBy  string     `json:"extend_by,omitempty"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-}
-
-// Extend extends a qURL's expiration.
-// Both Extend and Update use PATCH /v1/qurls/:id — the server differentiates
-// by request body fields (extend_by/expires_at vs description).
-func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QURL, error) {
-	return c.patchQURL(ctx, id, input)
-}
-
-// UpdateInput holds input for updating a qURL's mutable properties.
-type UpdateInput struct {
-	Description *string `json:"description,omitempty"`
-}
-
-// Update updates a qURL's mutable properties.
-func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
-	return c.patchQURL(ctx, id, input)
-}
-
-// patchQURL sends a PATCH request to /v1/qurls/:id with the given body.
-func (c *Client) patchQURL(ctx context.Context, id string, input any) (*QURL, error) {
-	body, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("marshal patch input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurl QURL
-	if _, err := c.do(req, &qurl, "PATCH /v1/qurls/:id"); err != nil {
-		return nil, err
-	}
-	return &qurl, nil
-}
-
-// MintOutput holds the result of minting an access link.
-type MintOutput struct {
-	QURLLink  string     `json:"qurl_link"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-}
-
-// MintLink mints a new access link for a qURL.
-func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+url.PathEscape(id)+"/mint_link", http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var out MintOutput
-	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // --- Resources ---
@@ -675,15 +529,15 @@ type Resource struct {
 	Description  string `json:"description,omitempty"`
 	// Status is one of [StatusActive] or [StatusRevoked] per the
 	// `ResourceData` schema in qurl-service/api/openapi.yaml. The
-	// QURL-only [StatusConsumed] / [StatusExpired] don't apply at the
-	// resource level — resource state is binary (live or revoked);
-	// per-qURL TTL/one-time semantics are tracked on QURL instead.
+	// qURL-only wire statuses ("expired" / "consumed") don't apply at
+	// the resource level — resource state is binary (live or revoked);
+	// per-qURL TTL/one-time semantics live on the qURL objects, which
+	// this client no longer models (the token-era CLI was their only
+	// consumer).
 	Status string `json:"status"`
 	// CreatedAt uses `omitzero` (Go 1.24+) — it honors the time.Time
 	// zero value, eliding "0001-01-01T00:00:00Z" from the wire when
-	// the field is unset on a response. (QURL.CreatedAt still uses
-	// `json:"created_at"` without omitzero — that's a separate
-	// migration tracked outside this PR.)
+	// the field is unset on a response.
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	// UpdatedAt is also a time.Time + omitzero now that we're on
 	// Go 1.24+. The pre-1.24 *time.Time idiom is no longer needed —
@@ -1143,47 +997,6 @@ func (c *Client) ListResources(ctx context.Context, input ListResourcesInput) (*
 		out.HasMore = meta.HasMore
 	}
 	return out, nil
-}
-
-// --- Resolve ---
-
-// ResolveInput holds input for headless qURL resolution.
-type ResolveInput struct {
-	AccessToken string `json:"access_token"`
-}
-
-// ResolveOutput holds the result of a headless resolution.
-type ResolveOutput struct {
-	TargetURL   string       `json:"target_url"`
-	ResourceID  string       `json:"resource_id"`
-	AccessGrant *AccessGrant `json:"access_grant,omitempty"`
-}
-
-// AccessGrant describes the network access that was granted.
-type AccessGrant struct {
-	ExpiresIn int    `json:"expires_in"`
-	GrantedAt string `json:"granted_at"`
-	SrcIP     string `json:"src_ip"`
-}
-
-// Resolve resolves a qURL access token, triggering a network access request
-// to grant access for the caller's IP.
-func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
-	body, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("marshal resolve input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/resolve", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var out ResolveOutput
-	if _, err := c.do(req, &out, "POST /v1/resolve"); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // --- Quota ---
