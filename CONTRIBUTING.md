@@ -140,12 +140,15 @@ settings, update this section in the same operational change.
 App- and shared-impacting PRs report always-present aggregate checks that can be
 required by branch protection: `slack / required`, `discord / required`,
 `chrome-extension / required`, `edge-extension / required`, `teams / required`,
-`s3-static-connector / required`, `e2e / required`, and `shared / required`. The
+`cli / required`, `s3-static-connector / required`, `e2e / required`, and
+`shared / required`. The
 connector aggregate is new in #1042 (refs #1022), which moved
 `s3-static-connector.yml` off `on.push.paths` onto the `changes`-job pattern;
 adding it to branch protection is a separate settings change. `e2e / required`
 is new and needs that same settings change — until it is added, `e2e.yml`
-reports its result on every PR without gating any merge. Each workflow's
+reports its result on every PR without gating any merge. `cli / required` is
+newer still (it landed with the CLI v2 CI family) and needs the same settings
+change — until then, `cli.yml` likewise reports without gating. Each workflow's
 `changes` filter is the source of truth for which paths need validation. When
 that filter matches, the aggregate validates every quality gate listed in its
 workflow `needs:` set. When branch protection requires path-gated app/shared

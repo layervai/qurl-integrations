@@ -106,6 +106,18 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		unchangedOutput:      "No Teams-impacting changes detected",
 	},
 	{
+		name:                 "cli",
+		path:                 "cli.yml",
+		checkNamePrefix:      "cli / ",
+		changeOutput:         "cli",
+		changedEnv:           "CLI_CHANGED",
+		qualityGateCondition: "needs.changes.outputs.cli == 'true'",
+		detectChangesName:    "cli / detect changes",
+		requiredName:         "cli / required",
+		verifierStepName:     "Verify CLI CI result",
+		unchangedOutput:      "No CLI-impacting changes detected",
+	},
+	{
 		name:                 "s3-static-connector",
 		path:                 "s3-static-connector.yml",
 		checkNamePrefix:      "s3-static-connector / ",
