@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
@@ -70,6 +71,34 @@ func (c *capturedLogs) contains(substr string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return strings.Contains(c.buf.String(), substr)
+}
+
+func (c *capturedLogs) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// findAuditRecord returns the "audit" group of the first captured JSON log
+// record carrying the given event, or nil when none does. Non-JSON lines are
+// skipped rather than fatal: the captured sink sees every record the test
+// happens to produce, not only the one under assertion.
+func findAuditRecord(logs *capturedLogs, event string) map[string]any {
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Audit map[string]any `json:"audit"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			continue
+		}
+		if record.Audit != nil && record.Audit["event"] == event {
+			return record.Audit
+		}
+	}
+	return nil
 }
 
 // captureDefaultSlog redirects the default slog logger for one test and
