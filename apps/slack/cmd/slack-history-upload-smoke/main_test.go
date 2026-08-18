@@ -20,6 +20,9 @@ const (
 	flagReqTimeout  = "-request-timeout"
 	flagMaxPages    = "-max-pages"
 	testTimeoutSpan = "10s"
+	// A port nothing serves, so any invocation that wrongly reaches the network
+	// fails locally instead of calling the real Slack API.
+	testLoopbackURL = "https://127.0.0.1:1"
 )
 
 func testEnv(token string) func(string) string {
@@ -138,7 +141,7 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			args := append([]string{flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1"}, tt.args...)
+			args := append([]string{flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL}, tt.args...)
 			code, stdout, stderr := runCLI(t, args, testEnv(tt.env))
 			if code != 2 {
 				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
@@ -184,7 +187,7 @@ func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 			// ErrMissingBotToken branch, the one that prints the name. The loopback
 			// base URL keeps even a compound regression off the real Slack API.
 			code, stdout, stderr := runCLI(t, []string{
-				flagTokenEnv, tt.tokenEnv, flagBaseURL, "https://127.0.0.1:1",
+				flagTokenEnv, tt.tokenEnv, flagBaseURL, testLoopbackURL,
 			}, testEnv(""))
 			if code != 2 {
 				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
@@ -412,7 +415,7 @@ func TestRunRejectsAChannelListLongerThanTheCap(t *testing.T) {
 	t.Parallel()
 
 	code, stdout, stderr := runCLI(t, []string{
-		flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1",
+		flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL,
 		"-channels", "C0000000001,C0000000002,C0000000003", "-max-conversations", "2",
 	}, testEnv(testToken))
 	if code != 2 {
@@ -429,7 +432,7 @@ func TestRunBoundsMaxThreads(t *testing.T) {
 	t.Parallel()
 
 	code, _, stderr := runCLI(t, []string{
-		flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1",
+		flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL,
 		"-max-threads", "100000000",
 	}, testEnv(testToken))
 	if code != 2 {
