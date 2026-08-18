@@ -81,22 +81,15 @@ homebrew_casks:
       verified: github.com/layervai/qurl-integrations/releases/download
     manpages:
       - manpages/qurl-completion.1
-      - manpages/qurl-config-get.1
-      - manpages/qurl-config-path.1
-      - manpages/qurl-config-profiles.1
-      - manpages/qurl-config-set.1
-      - manpages/qurl-config.1
-      - manpages/qurl-create.1
       - manpages/qurl-delete.1
-      - manpages/qurl-enter.1
-      - manpages/qurl-extend.1
       - manpages/qurl-get.1
       - manpages/qurl-list.1
-      - manpages/qurl-mint.1
-      - manpages/qurl-quota.1
+      - manpages/qurl-login.1
+      - manpages/qurl-logout.1
+      - manpages/qurl-publish.1
       - manpages/qurl-resolve.1
-      - manpages/qurl-update.1
       - manpages/qurl-version.1
+      - manpages/qurl-whoami.1
       - manpages/qurl.1
     completions:
       bash: completions/qurl.bash

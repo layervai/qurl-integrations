@@ -1,186 +1,151 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
-func TestLoadSaveRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "config.yaml")
-
-	cfg := &Config{
-		APIKey:   "test-key",
-		Endpoint: "https://example.com",
-		Output:   "json",
-	}
-
-	if err := saveFile(p, cfg); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	loaded, err := loadFile(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-
-	if loaded.APIKey != cfg.APIKey {
-		t.Errorf("APIKey = %q, want %q", loaded.APIKey, cfg.APIKey)
-	}
-	if loaded.Endpoint != cfg.Endpoint {
-		t.Errorf("Endpoint = %q, want %q", loaded.Endpoint, cfg.Endpoint)
-	}
-	if loaded.Output != cfg.Output {
-		t.Errorf("Output = %q, want %q", loaded.Output, cfg.Output)
+func lookupFrom(env map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v, ok := env[key]
+		return v, ok
 	}
 }
 
-func TestLoadFileNotExist(t *testing.T) {
-	cfg, err := loadFile(filepath.Join(t.TempDir(), "nonexistent.yaml"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.APIKey != "" || cfg.Endpoint != "" || cfg.Output != "" {
-		t.Error("expected empty config for missing file")
-	}
-}
+// TestResolvePrecedence pins the one precedence chain every setting uses:
+// flag > env > config > default, at each boundary.
+func TestResolvePrecedence(t *testing.T) {
+	env := map[string]string{"QURL_ENDPOINT": "https://from-env.example"}
 
-func TestLoadFileCorruptYAML(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "bad.yaml")
-	if err := os.WriteFile(p, []byte("api_key: [unterminated\n  - broken: {nope"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := loadFile(p)
-	if err == nil {
-		t.Fatal("expected error for corrupt YAML")
-	}
-}
-
-func TestSetInvalidKey(t *testing.T) {
-	cfg := &Config{}
-	if err := cfg.Set("unknown_key", "value"); err == nil {
-		t.Fatal("expected error for unknown key")
-	}
-}
-
-func TestSetValidKeys(t *testing.T) {
-	cfg := &Config{}
-	keys := map[string]string{"api_key": "k1", "endpoint": "e1", "output": "o1"}
-	for key, val := range keys {
-		if err := cfg.Set(key, val); err != nil {
-			t.Errorf("Set(%q) unexpected error: %v", key, err)
-		}
-	}
-	if cfg.APIKey != "k1" || cfg.Endpoint != "e1" || cfg.Output != "o1" {
-		t.Error("Set did not update fields correctly")
-	}
-}
-
-func TestGetValues(t *testing.T) {
-	cfg := &Config{APIKey: "k", Endpoint: "e", Output: "o"}
-	tests := []struct {
-		key  string
-		want string
+	cases := []struct {
+		name        string
+		flag        string
+		env         map[string]string
+		configValue string
+		want        string
 	}{
-		{"api_key", "k"},
-		{"endpoint", "e"},
-		{"output", "o"},
-		{"unknown", ""},
+		{"flag wins over everything", "https://from-flag.example", env, "https://from-config.example", "https://from-flag.example"},
+		{"env wins over config", "", env, "https://from-config.example", "https://from-env.example"},
+		{"config wins over default", "", nil, "https://from-config.example", "https://from-config.example"},
+		{"default when nothing set", "", nil, "", DefaultEndpoint},
+		{"empty env value falls through", "", map[string]string{"QURL_ENDPOINT": ""}, "", DefaultEndpoint},
 	}
-	for _, tt := range tests {
-		if got := cfg.Get(tt.key); got != tt.want {
-			t.Errorf("Get(%q) = %q, want %q", tt.key, got, tt.want)
-		}
-	}
-}
-
-func TestIsValidKey(t *testing.T) {
-	for _, key := range []string{"api_key", "endpoint", "output"} {
-		if !IsValidKey(key) {
-			t.Errorf("IsValidKey(%q) = false, want true", key)
-		}
-	}
-	if IsValidKey("bogus") {
-		t.Error("IsValidKey(\"bogus\") = true, want false")
-	}
-}
-
-func TestFilePermissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// The 0600/0700 contract is explicitly POSIX ("on POSIX systems" in
-		// the credential-storage spec); Windows does not enforce POSIX mode
-		// bits and Go reports synthetic values there. Windows secret
-		// protection is the credential-manager path, asserted elsewhere.
-		t.Skip("POSIX permission bits are not enforced on Windows")
-	}
-	p := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &Config{APIKey: "secret"}
-	if err := saveFile(p, cfg); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	perm := info.Mode().Perm()
-	if perm != 0o600 {
-		t.Errorf("file permissions = %o, want 0600", perm)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Resolve(tc.flag, "QURL_ENDPOINT", lookupFrom(tc.env), tc.configValue, DefaultEndpoint)
+			if got != tc.want {
+				t.Errorf("Resolve = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestProfileNameValidation(t *testing.T) {
-	tests := []struct {
-		name    string
-		wantErr bool
-	}{
-		{"default", false},
-		{"staging", false},
-		{"my-profile", false},
-		{"test_123", false},
-		{"../../etc/passwd", true},
-		{"path/traversal", true},
-		{"has spaces", true},
-		{"", true},
+	for _, name := range []string{"sandbox", "team-a", "p_1", "A9"} {
+		if _, err := ProfilePath(t.TempDir(), name); err != nil {
+			t.Errorf("valid profile name %q rejected: %v", name, err)
+		}
 	}
-	for _, tt := range tests {
-		err := validateProfileName(tt.name)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("validateProfileName(%q) error = %v, wantErr %v", tt.name, err, tt.wantErr)
+	for _, name := range []string{"", "../evil", "a b", "dot.dot", "sla/sh"} {
+		_, err := ProfilePath(t.TempDir(), name)
+		if !errors.Is(err, ErrInvalidProfileName) {
+			t.Errorf("profile name %q: err = %v, want ErrInvalidProfileName", name, err)
 		}
 	}
 }
 
-func TestProfileIsolation(t *testing.T) {
+func TestLoadProfileMissingIsZeroConfig(t *testing.T) {
+	cfg, err := LoadProfile(t.TempDir(), "nonexistent")
+	if err != nil {
+		t.Fatalf("missing profile must not error: %v", err)
+	}
+	if cfg.Endpoint != "" || cfg.Output != "" || cfg.Color != "" {
+		t.Errorf("missing profile must yield the zero config, got %+v", cfg)
+	}
+}
+
+func TestLoadProfileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	// Override configDir for testing by using saveFile/loadFile directly
-	pDefault := filepath.Join(dir, "config.yaml")
-	pStaging := filepath.Join(dir, "profiles", "staging.yaml")
-
-	defaultCfg := &Config{APIKey: "default-key"}
-	stagingCfg := &Config{APIKey: "staging-key"}
-
-	if err := saveFile(pDefault, defaultCfg); err != nil {
+	profiles := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profiles, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveFile(pStaging, stagingCfg); err != nil {
+	body := []byte("endpoint: https://sandbox.example\noutput: json\ncolor: never\n")
+	if err := os.WriteFile(filepath.Join(profiles, "sandbox.yaml"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	loaded, err := loadFile(pDefault)
+	cfg, err := LoadProfile(dir, "sandbox")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.APIKey != "default-key" {
-		t.Errorf("default APIKey = %q, want %q", loaded.APIKey, "default-key")
+	if cfg.Endpoint != "https://sandbox.example" || cfg.Output != "json" || cfg.Color != "never" {
+		t.Errorf("unexpected profile contents: %+v", cfg)
 	}
+}
 
-	loadedStaging, err := loadFile(pStaging)
+func TestMalformedConfigIsTypedError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(":\tnot yaml ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(dir)
+	if !errors.Is(err, ErrConfigFile) {
+		t.Errorf("err = %v, want ErrConfigFile", err)
+	}
+}
+
+// TestSecretsInConfigRefused pins the no-secrets contract: api_key and
+// secret-ish keys make the whole file unusable, loudly.
+func TestSecretsInConfigRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"api_key":    "api_key: lv_live_abcdef1234567890abcdef\n",
+		"secret-ish": "client_secret: shhh\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(dir)
+			if !errors.Is(err, ErrSecretInConfig) {
+				t.Errorf("err = %v, want ErrSecretInConfig", err)
+			}
+		})
+	}
+}
+
+// TestLoadReadsHandWrittenFile pins the on-disk YAML shape a customer edits
+// by hand — the v2 config layer only reads config files, it never writes them.
+func TestLoadReadsHandWrittenFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(Path(dir), []byte("endpoint: https://sandbox.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loadedStaging.APIKey != "staging-key" {
-		t.Errorf("staging APIKey = %q, want %q", loadedStaging.APIKey, "staging-key")
+	if cfg.Endpoint != "https://sandbox.example" {
+		t.Errorf("load lost endpoint: %+v", cfg)
+	}
+}
+
+func TestIsProductionEndpoint(t *testing.T) {
+	cases := map[string]bool{
+		DefaultEndpoint:              true,
+		"https://API.LAYERV.AI":      true,
+		"https://api.layerv.ai/":     true,
+		"https://sandbox.layerv.ai":  false,
+		"http://127.0.0.1:8080":      false,
+		"http://localhost:3000":      false,
+		"not a url at all ::":        false,
+		"https://api.layerv.ai.evil": false,
+	}
+	for endpoint, want := range cases {
+		if got := IsProductionEndpoint(endpoint); got != want {
+			t.Errorf("IsProductionEndpoint(%q) = %v, want %v", endpoint, got, want)
+		}
 	}
 }

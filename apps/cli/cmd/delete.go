@@ -2,68 +2,86 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 func deleteCmd(opts *globalOpts) *cobra.Command {
-	var (
-		yes    bool
-		dryRun bool
-	)
+	var yes bool
 
 	cmd := &cobra.Command{
-		Use:               "delete <resource-id>",
-		Short:             "Revoke/delete a qURL",
-		Example:           "  qurl delete r_k8xqp9h2sj9 --yes",
-		Args:              cobra.ExactArgs(1),
-		Aliases:           []string{"revoke"},
-		ValidArgsFunction: resourceIDCompletion(opts),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id := args[0]
+		Use:   "delete <CRID>",
+		Short: "Delete a published resource",
+		Long: `Delete a published resource by its CRID.
 
-			if err := validateResourceID(id); err != nil {
+Deletion cannot be undone: the CRID stops resolving, and republishing the
+same target later mints a different CRID. Interactive runs confirm first;
+scripts and pipelines must pass --yes.`,
+		Example: "  qurl delete " + exampleCRID + "\n" +
+			"  qurl delete " + exampleCRID + " --yes",
+		Args: exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			assessment, err := cridux.Assess(args[0])
+			if err != nil {
 				return err
 			}
-
-			if dryRun {
-				_, err := fmt.Fprintf(cmd.OutOrStdout(), "Would revoke qURL %s (dry run, no changes made)\n", id)
+			printer := opts.printer()
+			if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), yes); err != nil {
 				return err
 			}
 
 			if !yes {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Revoke qURL %s? This cannot be undone. [y/N] ", id); err != nil {
+				confirmed, err := confirmDelete(opts, assessment.Input)
+				if err != nil {
 					return err
 				}
-				scanner := bufio.NewScanner(cmd.InOrStdin())
-				if !scanner.Scan() {
+				if !confirmed {
+					printer.Notef(msgDeleteCanceled)
 					return nil
-				}
-				answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-				if answer != "y" && answer != "yes" {
-					_, err := fmt.Fprintln(cmd.OutOrStdout(), "Canceled.")
-					return err
 				}
 			}
 
-			c, err := opts.newClient()
+			client, err := opts.newClient()
 			if err != nil {
 				return err
 			}
-
-			if err := c.Delete(cmd.Context(), id); err != nil {
-				return fmt.Errorf("delete qURL: %w", err)
+			result, err := client.Delete(cmd.Context(), assessment.Input)
+			if err != nil {
+				return err
 			}
-
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "qURL %s has been revoked.\n", id)
-			return err
+			if result.AlreadyGone {
+				// Idempotent delete: already-gone is the requested outcome.
+				printer.Notef(msgAlreadyGone)
+			}
+			return printer.Delete(assessment.Input, result.AlreadyGone)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without making changes")
+	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
+}
+
+// confirmDelete asks on the terminal. Without a terminal it refuses instead
+// of hanging a pipeline: non-interactive deletion requires --yes.
+func confirmDelete(opts *globalOpts, id string) (bool, error) {
+	if !opts.streams.InIsTTY {
+		return false, exitcode.UsageError(errors.New(msgNeedsYes))
+	}
+	// The prompt is conversation, not data: it goes to stderr.
+	if _, err := fmt.Fprintf(opts.streams.Err, "Delete %s? This cannot be undone. [y/N] ", id); err != nil {
+		return false, err
+	}
+	scanner := bufio.NewScanner(opts.streams.In)
+	if !scanner.Scan() {
+		return false, nil
+	}
+	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return answer == "y" || answer == "yes", nil
 }
