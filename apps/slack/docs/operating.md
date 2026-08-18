@@ -114,7 +114,14 @@ at the OAuth-callback bind layer.
   healthy-key rotation or qURL-account switch command.
   `--rotate`/`--repoint` send Auth0 `prompt=login consent`, so the owner
   re-authenticates instead of riding an existing SSO session; default setup
-  sends `prompt=consent` only. This matters because a consent screen proves
+  sends `prompt=consent` only. First-time setup therefore does **not**
+  guarantee an emailed one-time code: the Secure Access Agent has no OTP or
+  passwordless logic of its own, and with `prompt=consent` Auth0 reuses an
+  existing session when the browser already has one (for example from the
+  desktop app or the dashboard). An emailed code appears only when the tenant
+  has no live session for that browser and routes the `login_hint` to a
+  passwordless connection. To make the login method deterministic, pin
+  `AUTH0_EMAIL_CONNECTION`; the connection is otherwise the tenant's choice. This matters because a consent screen proves
   consent, not identity: without the re-login an explicit rotation could be
   approved from whatever Auth0 connection the browser happens to be signed in
   with, and qurl-service keys accounts on the id_token `sub`, so a different

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -397,11 +398,14 @@ func TestStartDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T)
 // and --repoint revoke the stored workspace key and mint a replacement, so
 // they must re-authenticate the human instead of riding whatever Auth0 SSO
 // session the browser already holds. Without `login`, a consent screen alone
-// can approve a rotation for a different Auth0 connection than the one that
-// minted the key — and qurl-service keys accounts on the id_token sub, so
-// that silently moves the workspace to a different qURL account.
+// can approve a rotation under a different Auth0 connection than the one that
+// minted the key — and qurl-service keys accounts on the id_token sub, so that
+// silently moves the workspace to a different qURL account.
+//
+// Covers BOTH state paths. Production runs the opaque StateStore path, so a
+// legacy-signed-state-only test would leave the shipping path unpinned.
 func TestStartForcesReauthOnExplicitKeyModes(t *testing.T) {
-	for _, tt := range []struct {
+	modes := []struct {
 		name       string
 		mode       SetupMode
 		wantPrompt string
@@ -409,28 +413,78 @@ func TestStartForcesReauthOnExplicitKeyModes(t *testing.T) {
 		{name: "reuse keeps consent only", mode: SetupModeReuse, wantPrompt: "consent"},
 		{name: "rotate forces login", mode: SetupModeRotate, wantPrompt: "login consent"},
 		{name: "repoint forces login", mode: SetupModeRepoint, wantPrompt: "login consent"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
+	}
+
+	for _, tt := range modes {
+		t.Run("signed state/"+tt.name, func(t *testing.T) {
 			cfg := newStartCfg()
 			state, err := MintStateWithEmailMode(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", tt.mode, cfg.Now())
 			if err != nil {
 				t.Fatalf("MintStateWithEmailMode: %v", err)
 			}
-			h := Start(cfg)
-			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
-			rec := httptest.NewRecorder()
-			h(rec, req)
-
-			if rec.Code != http.StatusFound {
-				t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
-			}
-			u, err := url.Parse(rec.Header().Get("Location"))
-			if err != nil {
-				t.Fatalf("parse Location: %v", err)
-			}
-			if got := u.Query().Get("prompt"); got != tt.wantPrompt {
-				t.Errorf("prompt: got %q want %q", got, tt.wantPrompt)
-			}
+			assertStartPrompt(t, cfg, state, tt.wantPrompt)
 		})
+
+		t.Run("stored state/"+tt.name, func(t *testing.T) {
+			cfg := newStartCfg()
+			store := newMemoryStateStore()
+			cfg.StateStore = store
+			state, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "admin@example.com", tt.mode, cfg.Now())
+			if err != nil {
+				t.Fatalf("MintStoredStateWithEmailMode: %v", err)
+			}
+			assertStartPrompt(t, cfg, state, tt.wantPrompt)
+		})
+	}
+}
+
+// assertStartPrompt drives Start and checks only the prompt parameter, so a
+// failure names the mode/state-path subtest rather than a shared helper.
+//
+//nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
+func assertStartPrompt(t *testing.T, cfg Config, state, wantPrompt string) {
+	t.Helper()
+	h := Start(cfg)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	u, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := u.Query().Get("prompt"); got != wantPrompt {
+		t.Errorf("prompt: got %q want %q", got, wantPrompt)
+	}
+}
+
+// TestAuthorizeURLPromptAlwaysRequestsConsent guards the invariant underneath
+// both prompt values: consent must never be dropped. Auth0 silently reuses a
+// prior consent grant without it, so a re-run of setup could complete without
+// issuing a new token — the reason `consent` was unconditional before the
+// explicit modes started adding `login`.
+func TestAuthorizeURLPromptAlwaysRequestsConsent(t *testing.T) {
+	cfg := newStartCfg()
+	for _, mode := range []SetupMode{SetupModeReuse, SetupModeRotate, SetupModeRepoint} {
+		raw := authorizeURL(cfg, "state-handle", VerifiedState{
+			TeamID: testStateTeamID,
+			UserID: testStateUserID,
+			Email:  "admin@example.com",
+			Mode:   mode,
+		})
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("mode %q: parse authorize URL: %v", mode, err)
+		}
+		prompt := u.Query().Get("prompt")
+		if !slices.Contains(strings.Fields(prompt), "consent") {
+			t.Errorf("mode %q: prompt %q must include consent", mode, prompt)
+		}
+		if mode.Explicit() != slices.Contains(strings.Fields(prompt), "login") {
+			t.Errorf("mode %q: prompt %q login presence should track SetupMode.Explicit() (%v)", mode, prompt, mode.Explicit())
+		}
 	}
 }
