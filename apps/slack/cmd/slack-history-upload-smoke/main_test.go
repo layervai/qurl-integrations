@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
 const (
@@ -181,13 +183,13 @@ func TestIsEnvVarName(t *testing.T) {
 	t.Parallel()
 
 	for _, name := range []string{"SLACK_BOT_TOKEN", "_x", "A1", "lower_case_9"} {
-		if !isEnvVarName(name) {
-			t.Errorf("isEnvVarName(%q) = false", name)
+		if !slacksmoke.IsEnvVarName(name) {
+			t.Errorf("slacksmoke.IsEnvVarName(%q) = false", name)
 		}
 	}
 	for _, name := range []string{"", "1TOKEN", "SLACK-TOKEN", "SLACK TOKEN", "SLACK\nTOKEN", "SLACK$TOKEN", "SLACK\x7fTOKEN"} {
-		if isEnvVarName(name) {
-			t.Errorf("isEnvVarName(%q) = true", name)
+		if slacksmoke.IsEnvVarName(name) {
+			t.Errorf("slacksmoke.IsEnvVarName(%q) = true", name)
 		}
 	}
 }
@@ -219,8 +221,8 @@ func TestNormalizeSlackBaseURL(t *testing.T) {
 	t.Parallel()
 
 	accepted := map[string]string{
-		"":                              defaultSlackAPIBaseURL,
-		"  ":                            defaultSlackAPIBaseURL,
+		"":                              slacksmoke.DefaultAPIBaseURL,
+		"  ":                            slacksmoke.DefaultAPIBaseURL,
 		"https://slack.example.com/api": "https://slack.example.com/api",
 		"https://slack.example.com/":    "https://slack.example.com",
 		"http://localhost:8080":         "http://localhost:8080",
@@ -228,18 +230,18 @@ func TestNormalizeSlackBaseURL(t *testing.T) {
 		"http://[::1]:8080":             "http://[::1]:8080",
 	}
 	for raw, want := range accepted {
-		got, err := normalizeSlackBaseURL(raw)
+		got, err := slacksmoke.NormalizeBaseURL(raw)
 		if err != nil {
-			t.Errorf("normalizeSlackBaseURL(%q): %v", raw, err)
+			t.Errorf("slacksmoke.NormalizeBaseURL(%q): %v", raw, err)
 			continue
 		}
 		if got != want {
-			t.Errorf("normalizeSlackBaseURL(%q) = %q, want %q", raw, got, want)
+			t.Errorf("slacksmoke.NormalizeBaseURL(%q) = %q, want %q", raw, got, want)
 		}
 	}
 	for _, raw := range []string{"http://slack.example.com", "slack.example.com", "https://x?a=b", "https://x#f", "https://u:p@x", "://"} {
-		if _, err := normalizeSlackBaseURL(raw); err == nil {
-			t.Errorf("normalizeSlackBaseURL(%q) must be rejected", raw)
+		if _, err := slacksmoke.NormalizeBaseURL(raw); err == nil {
+			t.Errorf("slacksmoke.NormalizeBaseURL(%q) must be rejected", raw)
 		}
 	}
 }
@@ -257,7 +259,7 @@ func TestPrepareScanConfigFillsDefaults(t *testing.T) {
 	if cfg.UserAgent != defaultUserAgent || cfg.ConversationTypes != defaultConversationTypes {
 		t.Errorf("cfg = %+v, want the blank fields defaulted", cfg)
 	}
-	if cfg.BaseURL != defaultSlackAPIBaseURL {
+	if cfg.BaseURL != slacksmoke.DefaultAPIBaseURL {
 		t.Errorf("base url = %q, want the Slack default", cfg.BaseURL)
 	}
 	if cfg.HTTPClient == nil || cfg.StartedAt.IsZero() {
@@ -310,13 +312,13 @@ func TestContainsHTTPHeaderControl(t *testing.T) {
 	t.Parallel()
 
 	for _, s := range []string{"xoxb-\ntest", "xoxb-\rtest", "xoxb-\x00test", "xoxb-\x7ftest"} {
-		if !containsHTTPHeaderControl(s) {
-			t.Errorf("containsHTTPHeaderControl(%q) = false", s)
+		if !slacksmoke.ContainsHTTPHeaderControl(s) {
+			t.Errorf("slacksmoke.ContainsHTTPHeaderControl(%q) = false", s)
 		}
 	}
 	for _, s := range []string{testToken, "qurl-slack-history-upload-smoke", "note with spaces"} {
-		if containsHTTPHeaderControl(s) {
-			t.Errorf("containsHTTPHeaderControl(%q) = true", s)
+		if slacksmoke.ContainsHTTPHeaderControl(s) {
+			t.Errorf("slacksmoke.ContainsHTTPHeaderControl(%q) = true", s)
 		}
 	}
 }

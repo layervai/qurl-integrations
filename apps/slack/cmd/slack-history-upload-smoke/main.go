@@ -25,13 +25,12 @@
 // there is nothing for CI to run it against. Exit 0 means the contract still holds, 1
 // means it does not, 2 means the invocation was wrong.
 //
-// The token-handling helpers below — normalizeSlackBaseURL, isLoopbackHost,
-// cleanSlackToken, containsHTTPHeaderControl, newSlackHTTPClient — are byte-identical
-// copies of slack-dm-smoke's. Two package main binaries cannot share unexported code,
-// and dupl runs per package, so nothing in CI can see them drift. They are the half of
-// both commands that keeps a bearer token from reaching a plaintext or attacker-named
-// host, so FIX BOTH COPIES or hoist them to a shared internal package; they have already
-// diverged once, when this command grew isEnvVarName and the sibling did not.
+// The token-handling helpers this command shares with slack-dm-smoke now live in
+// internal/slacksmoke, and the loopback predicate under it in internal/nethost. They
+// used to be byte-identical copies in each command, which nothing in CI could see drift
+// — two package main binaries cannot share unexported code, and dupl runs per package —
+// and they had already diverged once, when this command grew isEnvVarName and the
+// sibling did not.
 //
 // Read-only. Every call is a GET against conversations.list, conversations.history and
 // conversations.replies, and nothing is posted.
@@ -56,16 +55,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
 const (
-	defaultSlackAPIBaseURL = "https://slack.com/api"
-	defaultUserAgent       = "qurl-slack-history-upload-smoke"
+	defaultUserAgent = "qurl-slack-history-upload-smoke"
 	// defaultOverallTimeout is sized for the default bounds against Slack's tier-3 limit
 	// of roughly 50 requests a minute. Those bounds allow one conversations.list page plus
 	// 25 conversations x (4 history pages + 5 thread samples) — about 226 requests, or
@@ -79,16 +77,6 @@ const (
 	// scan: a conversations.list page, one conversations.history page, and one
 	// conversations.replies page.
 	minTimeoutFactor = 3
-)
-
-var (
-	errMissingSlackBotToken           = errors.New("missing Slack bot token")
-	errSlackBotTokenControlCharacters = errors.New("invalid Slack bot token: contains control characters")
-	errBaseURLRequiresHTTPS           = errors.New("-base-url must use https unless host is localhost or loopback")
-	errBaseURLQueryFragment           = errors.New("-base-url must not include query or fragment")
-	errBaseURLUserinfo                = errors.New("-base-url must not include userinfo")
-	errUserAgentControlCharacters     = errors.New("-user-agent contains control characters")
-	errTokenEnvName                   = errors.New("-token-env must be a POSIX environment variable name")
 )
 
 func main() {
@@ -105,14 +93,14 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 	}
 	cfg.Token = getenv(tokenEnv)
 	cfg.StartedAt = now().UTC()
-	cfg.HTTPClient = newSlackHTTPClient(budget.request)
+	cfg.HTTPClient = slacksmoke.NewHTTPClient(budget.Request)
 
 	if err := prepareScanConfig(cfg); err != nil {
 		writeConfigValidationError(stderr, tokenEnv, err)
 		return 2
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, budget.overall)
+	runCtx, cancel := context.WithTimeout(ctx, budget.Overall)
 	defer cancel()
 
 	result, err := runScan(runCtx, cfg)
@@ -130,26 +118,19 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 	return 0
 }
 
-// timeoutBudget is the pair of durations run applies, kept together so the ordering
-// of the two validations below reads as one rule rather than two flag checks.
-type timeoutBudget struct {
-	overall time.Duration
-	request time.Duration
-}
-
 // parseFlags returns the config, the env var naming the token, the timeout budget, and
 // the exit code. A nil config means run should stop and return that code — which is 2
 // for a bad invocation and 0 for -h, where the flag package has already printed usage.
 // It deliberately does not read the environment or the clock; run owns both so tests
 // can supply them.
-func parseFlags(stderr io.Writer, args []string) (cfg *scanConfig, tokenEnv string, budget timeoutBudget, code int) {
+func parseFlags(stderr io.Writer, args []string) (cfg *scanConfig, tokenEnv string, budget slacksmoke.TimeoutBudget, code int) {
 	fs := flag.NewFlagSet("slack-history-upload-smoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	var channels string
 	cfg = &scanConfig{}
 	fs.StringVar(&tokenEnv, "token-env", "SLACK_BOT_TOKEN", "environment variable containing the Slack bot token")
-	fs.StringVar(&cfg.BaseURL, "base-url", defaultSlackAPIBaseURL, "Slack Web API base URL")
+	fs.StringVar(&cfg.BaseURL, "base-url", slacksmoke.DefaultAPIBaseURL, "Slack Web API base URL")
 	fs.StringVar(&cfg.UserAgent, "user-agent", defaultUserAgent, "HTTP User-Agent")
 	fs.StringVar(&channels, "channels", "", "comma-separated conversation IDs to scan; empty discovers them with conversations.list")
 	fs.StringVar(&cfg.ConversationTypes, "conversation-types", defaultConversationTypes, "conversations.list types filter, used only when -channels is empty")
@@ -164,8 +145,8 @@ func parseFlags(stderr io.Writer, args []string) (cfg *scanConfig, tokenEnv stri
 	fs.StringVar(&cfg.WorkspaceShape, "workspace-shape", "", "operator note, for example Enterprise Grid org install")
 	fs.StringVar(&cfg.TokenOwner, "token-owner", "", "operator note for the token owner, for example workspace or enterprise")
 	fs.StringVar(&cfg.Scopes, "scopes", "", "operator note for Slack scopes on the tested app")
-	fs.DurationVar(&budget.overall, "timeout", defaultOverallTimeout, "overall scan timeout")
-	fs.DurationVar(&budget.request, "request-timeout", defaultRequestTimeout, "timeout for each Slack Web API request")
+	fs.DurationVar(&budget.Overall, "timeout", defaultOverallTimeout, "overall scan timeout")
+	fs.DurationVar(&budget.Request, "request-timeout", defaultRequestTimeout, "timeout for each Slack Web API request")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil, "", budget, 0
@@ -181,36 +162,19 @@ func parseFlags(stderr io.Writer, args []string) (cfg *scanConfig, tokenEnv stri
 	// Validated rather than trusted because it is echoed back in the "not set" error an
 	// operator hits first, and an unconstrained flag value there puts whatever it
 	// contains — newlines included — into the command's own diagnostics.
-	if !isEnvVarName(tokenEnv) {
-		_, _ = fmt.Fprintln(stderr, errTokenEnvName.Error())
+	if !slacksmoke.IsEnvVarName(tokenEnv) {
+		_, _ = fmt.Fprintln(stderr, slacksmoke.ErrTokenEnvName.Error())
 		return nil, "", budget, 2
 	}
 	cfg.Channels = splitConversationIDs(channels)
-	if failure := validateBudget(stderr, budget); failure != 0 {
-		return nil, "", budget, failure
+	if err := budget.Validate(minTimeoutFactor); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return nil, "", budget, 2
 	}
 	if failure := validateBounds(stderr, cfg); failure != 0 {
 		return nil, "", budget, failure
 	}
 	return cfg, tokenEnv, budget, 0
-}
-
-func validateBudget(stderr io.Writer, budget timeoutBudget) int {
-	switch {
-	case budget.overall <= 0:
-		_, _ = fmt.Fprintln(stderr, "-timeout must be greater than 0")
-	case budget.request <= 0:
-		_, _ = fmt.Fprintln(stderr, "-request-timeout must be greater than 0")
-	// Explicit before the factor guard so equal or exceeding values get the direct
-	// operator-facing error rather than the multiplier one.
-	case budget.request >= budget.overall:
-		_, _ = fmt.Fprintln(stderr, "-request-timeout must be less than -timeout")
-	case budget.overall < minTimeoutFactor*budget.request:
-		_, _ = fmt.Fprintf(stderr, "-timeout must be at least %dx -request-timeout\n", minTimeoutFactor)
-	default:
-		return 0
-	}
-	return 2
 }
 
 func validateBounds(stderr io.Writer, cfg *scanConfig) int {
@@ -243,7 +207,7 @@ func validateBounds(stderr io.Writer, cfg *scanConfig) int {
 // network, so a bad invocation costs no Slack calls.
 func prepareScanConfig(cfg *scanConfig) error {
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = newSlackHTTPClient(defaultRequestTimeout)
+		cfg.HTTPClient = slacksmoke.NewHTTPClient(defaultRequestTimeout)
 	}
 	if cfg.StartedAt.IsZero() {
 		cfg.StartedAt = time.Now().UTC()
@@ -256,13 +220,13 @@ func prepareScanConfig(cfg *scanConfig) error {
 	}
 
 	var err error
-	if cfg.Token, err = cleanSlackToken(cfg.Token); err != nil {
+	if cfg.Token, err = slacksmoke.CleanToken(cfg.Token); err != nil {
 		return err
 	}
-	if containsHTTPHeaderControl(cfg.UserAgent) {
-		return errUserAgentControlCharacters
+	if slacksmoke.ContainsHTTPHeaderControl(cfg.UserAgent) {
+		return slacksmoke.ErrUserAgentControlCharacters
 	}
-	if cfg.BaseURL, err = normalizeSlackBaseURL(cfg.BaseURL); err != nil {
+	if cfg.BaseURL, err = slacksmoke.NormalizeBaseURL(cfg.BaseURL); err != nil {
 		return err
 	}
 	for _, id := range cfg.Channels {
@@ -273,89 +237,21 @@ func prepareScanConfig(cfg *scanConfig) error {
 	return nil
 }
 
-// isEnvVarName reports whether name is a POSIX environment variable name: a leading
-// letter or underscore, then letters, digits or underscores.
-func isEnvVarName(name string) bool {
-	for i, r := range name {
-		switch {
-		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
-		case i > 0 && r >= '0' && r <= '9':
-		default:
-			return false
-		}
-	}
-	return name != ""
-}
-
 // writeConfigValidationError names the environment variable it looked at, which is the
 // difference between an actionable error and a guessing game once -token-env has been
 // pointed somewhere custom.
 //
 // The two nolints below are gosec's taint analysis reaching a flag value that reaches
 // an io.Writer. There is no XSS sink here — stderr on a CLI is not a browser — and
-// isEnvVarName has already constrained the value to a POSIX environment variable name
+// slacksmoke.IsEnvVarName has already constrained the value to a POSIX environment
 // before it gets this far, so it cannot carry a control character either.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
-	case errors.Is(err, errMissingSlackBotToken):
-		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; isEnvVarName constrains tokenEnv.
-	case errors.Is(err, errSlackBotTokenControlCharacters):
-		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; isEnvVarName constrains tokenEnv.
+	case errors.Is(err, slacksmoke.ErrMissingBotToken):
+		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+	case errors.Is(err, slacksmoke.ErrBotTokenControlCharacters):
+		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
 	default:
 		_, _ = fmt.Fprintln(stderr, err)
 	}
-}
-
-func normalizeSlackBaseURL(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		raw = defaultSlackAPIBaseURL
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid -base-url: %w", err)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("invalid -base-url")
-	}
-	if parsed.User != nil {
-		return "", errBaseURLUserinfo
-	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", errBaseURLQueryFragment
-	}
-	if parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		parsed.Path = strings.TrimRight(parsed.Path, "/")
-		return parsed.String(), nil
-	}
-	return "", errBaseURLRequiresHTTPS
-}
-
-func isLoopbackHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func cleanSlackToken(token string) (string, error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", errMissingSlackBotToken
-	}
-	if containsHTTPHeaderControl(token) {
-		return "", errSlackBotTokenControlCharacters
-	}
-	return token, nil
-}
-
-// containsHTTPHeaderControl reports whether s carries a byte that must never reach a
-// request header. Checked on the token and User-Agent because both are written into
-// headers verbatim.
-func containsHTTPHeaderControl(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool {
-		return r < ' ' || r == 0x7f
-	})
 }
