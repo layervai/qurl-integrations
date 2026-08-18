@@ -412,18 +412,24 @@ func writeRefreshMarker(dir string, m RefreshMarker) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("create registration refresh marker temporary file: %w", err)
 	}
+	// Windows refuses to rename a file with an open handle (a sharing
+	// violation Unix does not have), so the commit order is strictly
+	// write → sync → close → rename; the deferred cleanup only closes on
+	// an early error and removes the leftover temporary.
 	committed := false
+	closed := false
 	defer func() {
-		closeErr := tmp.Close()
+		if !closed {
+			retErr = errors.Join(retErr, tmp.Close())
+		}
 		if committed {
-			retErr = errors.Join(retErr, closeErr)
 			return
 		}
 		removeErr := os.Remove(tmpPath)
 		if errors.Is(removeErr, os.ErrNotExist) {
 			removeErr = nil
 		}
-		retErr = errors.Join(retErr, closeErr, removeErr, syncDir(dir))
+		retErr = errors.Join(retErr, removeErr, syncDir(dir))
 	}()
 	if err := tmp.Chmod(markerMode); err != nil {
 		return fmt.Errorf("set registration refresh marker temporary permissions: %w", err)
@@ -434,6 +440,10 @@ func writeRefreshMarker(dir string, m RefreshMarker) (retErr error) {
 	if err := tmp.Sync(); err != nil {
 		return fmt.Errorf("sync registration refresh marker temporary file: %w", err)
 	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close registration refresh marker temporary file: %w", err)
+	}
+	closed = true
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("commit registration refresh marker rename: %w", err)
 	}
