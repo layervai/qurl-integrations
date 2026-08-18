@@ -165,12 +165,7 @@ check-cli:
 	go tool govulncheck ./apps/cli/...
 	QURL_TEST_HARNESS=1 go test -count=1 ./apps/cli/...
 	go test -tags=clisandbox -count=1 ./apps/cli/...
-	@goreleaser check; rc=$$?; \
-	if [ $$rc -eq 2 ]; then \
-		echo "warning: .goreleaser.yml valid but uses deprecated properties (exit 2) — matches cli.yml's tolerated state"; \
-	elif [ $$rc -ne 0 ]; then \
-		exit $$rc; \
-	fi
+	goreleaser check
 
 # Kept verbose for local debugging — discord.yml adds --silent.
 test-discord:

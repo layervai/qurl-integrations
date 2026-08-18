@@ -294,32 +294,13 @@ jobs:
           install-only: true
 
       # `goreleaser check` exits 1 on an invalid config and 2 on a valid one
-      # that uses deprecated properties. .goreleaser.yml is in the second
-      # state today (archives.builds, nfpms.builds, format_overrides.format,
-      # brews — the brews→casks migration is a Homebrew-install behaviour
-      # change that needs its own PR), and release-cli releases fine through
-      # it because `goreleaser release` only warns on deprecations. Failing
-      # this gate on exit 2 would therefore block every CLI PR on a release
-      # migration it must not smuggle in — so warn loudly on 2, fail on
-      # anything else. Once .goreleaser.yml is migrated, exit 2 stops
-      # occurring and this tolerance becomes dead code to remove.
+      # that uses deprecated properties. Both fail this gate on purpose: a
+      # new upstream deprecation should redden CLI PRs here, where fixing it
+      # is cheap, instead of surfacing first in release-cli. (An exit-2
+      # tolerance lived here until .goreleaser.yml was migrated off its
+      # deprecated keys; keep the gate strict.)
       - name: goreleaser check
-        shell: bash
-        run: |
-          set +e
-          goreleaser check
-          rc=$?
-          set -e
-          case "$rc" in
-            0)
-              ;;
-            2)
-              echo "::warning::goreleaser check: .goreleaser.yml is valid but uses deprecated properties (exit 2). Migrate them before GoReleaser hard-removes support and reddens release-cli."
-              ;;
-            *)
-              exit "$rc"
-              ;;
-          esac
+        run: goreleaser check
 
   required:
     name: cli / required
