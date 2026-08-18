@@ -793,6 +793,13 @@ func TestSlashCommandUninstallRetainsSlackBotToken(t *testing.T) {
 	}
 	h.Wait()
 
+	// The safety invariant that makes retaining the row acceptable: the row that
+	// survives holds NO qURL credential. DeleteAPIKey stripped those columns
+	// before the purge ran, so a retained row is not a retained secret.
+	if _, err := h.cfg.AuthProvider.APIKey(context.Background(), testAdminTeamID); !errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		t.Fatalf("APIKey after disconnect: err = %v, want ErrWorkspaceNotConfigured — the retained row must hold no qURL credential", err)
+	}
+
 	// The load-bearing assertion: the Slack bot token survives a slash uninstall.
 	if provider.deleteStateCalls != 0 {
 		t.Fatalf("DeleteWorkspaceState calls = %d, want 0: `/qurl uninstall` leaves the Slack app installed, so deleting its still-valid bot token strands the workspace with no in-Slack recovery", provider.deleteStateCalls)
