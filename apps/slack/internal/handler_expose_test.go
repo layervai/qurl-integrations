@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1038,5 +1039,88 @@ func TestParseExposeURLCreateModalArgs(t *testing.T) {
 				t.Fatalf("got (target=%q alias=%q), want (target=%q alias=%q)", got.TargetURL, got.ChannelAlias, tc.wantTarget, tc.wantAlias)
 			}
 		})
+	}
+}
+
+// exposeClickOpenFailureText drives a Protect button click whose views.open
+// fails with openErr, and returns the text the admin actually sees on the
+// chooser's response_url.
+func exposeClickOpenFailureText(t *testing.T, actionID string, openErr error) string {
+	t.Helper()
+	ts := newAdminTestServers(t)
+	ts.seedAdmin(t)
+	ts.addCustomer(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		writeResourceListFixture(t, w, []map[string]any{
+			{testKeyResourceID: testResourceExposeID, testKeyType: client.ResourceTypeURL, fAttrAlias: testResourceExposeAlias, testKeyTargetURL: testResourceExposeURL, testKeyStatus: client.StatusActive},
+		}, "", false)
+	})
+	h := newAdminTestHandler(t, ts)
+	h.SetAliasStore(h.cfg.AdminStore)
+	// Return openErr for every token owner so the Grid fallback also exhausts and
+	// the classified message is what reaches the admin.
+	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return openErr }
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	body := listCreateQurlBlockActionsBody(t, testAdminTeamID, testAdminUserID, testExposeChannel, srv.URL, actionID, "")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("click ack = %d, want 200", w.Code)
+	}
+	return parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+}
+
+// TestExposeClickMissingBotTokenRoutesToReinstall is the regression guard for the
+// loop an admin hits after `/qurl uninstall` wiped the workspace's Slack bot
+// token: views.open fails with ErrSlackBotTokenNotConfigured, which no amount of
+// retrying can clear, but the button path used to answer every failure with
+// "tap the button again". The bare-verb path already classified this error; the
+// guided buttons — the entry point admins actually use — must too.
+func TestExposeClickMissingBotTokenRoutesToReinstall(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		actionID string
+	}{
+		{"connector", exposeConnectorActionID},
+		{"url", exposeURLActionID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exposeClickOpenFailureText(t, tc.actionID, auth.ErrSlackBotTokenNotConfigured)
+			if !strings.Contains(got, "needs the latest qURL Slack app install") {
+				t.Fatalf("missing-bot-token message = %q, want the Slack app reinstall guidance", got)
+			}
+			if strings.Contains(got, "Couldn't open the dialog") {
+				t.Fatalf("missing-bot-token message still tells the admin to retry, which can never succeed: %q", got)
+			}
+		})
+	}
+}
+
+// TestExposeClickTriggerExpiredKeepsRetryGuidance pins the other side: a stale
+// trigger IS retryable, so that path must keep telling the admin to run the
+// command again rather than sending them to reinstall the app.
+func TestExposeClickTriggerExpiredKeepsRetryGuidance(t *testing.T) {
+	got := exposeClickOpenFailureText(t, exposeConnectorActionID, ErrSlackTriggerExpired)
+	if !strings.Contains(got, "setup window expired") {
+		t.Fatalf("trigger-expired message = %q, want the expired-window copy", got)
+	}
+	if strings.Contains(got, "needs the latest qURL Slack app install") {
+		t.Fatalf("a retryable trigger expiry must not send the admin to reinstall: %q", got)
+	}
+}
+
+// TestExposeClickUnclassifiedFailureKeepsGenericRetry keeps the default arm
+// intact so an unrecognized views.open error still gets actionable copy.
+func TestExposeClickUnclassifiedFailureKeepsGenericRetry(t *testing.T) {
+	got := exposeClickOpenFailureText(t, exposeConnectorActionID, errors.New("boom"))
+	if !strings.Contains(got, "Couldn't open the dialog") {
+		t.Fatalf("unclassified failure message = %q, want the generic retry copy", got)
 	}
 }

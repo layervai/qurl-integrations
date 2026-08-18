@@ -49,9 +49,16 @@ const (
 )
 
 // exposeOpenFailedMessage is the ephemeral shown (via the chooser's
-// response_url) when a Protect button can't open its modal — a stale trigger, a
-// rate-limited views.open, or a render failure. Mirrors listEditOpenFailedMessage.
+// response_url) when a Protect button can't open its modal for a reason a retry
+// can actually clear — a render failure or an unclassified views.open error.
+// Failures where tapping again is futile get their own copy; see
+// exposeOpenFailureMessage. Mirrors listEditOpenFailedMessage.
 const exposeOpenFailedMessage = "Couldn't open the dialog. Run `/qurl-admin protect` and tap the button again."
+
+// exposeTriggerExpiredMessage covers both halves of "Slack's 3-second window
+// closed": an expired trigger_id and a views.open that outran its budget. Both
+// are genuinely retryable, and the retry is the same gesture.
+const exposeTriggerExpiredMessage = "Slack's setup window expired before the dialog opened. Run `/qurl-admin protect` and tap the button again."
 
 // exposeChooserBlocks builds the two-button picker posted by `/qurl-admin
 // protect`: "Protect qURL Connector" opens the connector setup chooser and

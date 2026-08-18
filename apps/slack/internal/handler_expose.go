@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
+	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -86,8 +87,13 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, slackTriggerOpenViewBudget)
 		defer openCancel()
 		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("protect connector: views.open failed", "error", err)
-			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
+			log.Warn("protect connector: views.open failed",
+				"error", err,
+				"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
+				"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+				"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			)
+			_ = h.postResponse(log, responseURL, ":warning: "+h.exposeOpenFailureMessage(err))
 		}
 	})
 	respondJSON(w, http.StatusOK, map[string]any{})
@@ -134,7 +140,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		openBudget := slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 		if openBudget <= 0 {
 			log.Warn("protect url: trigger expired before resource lookup")
-			_ = h.postResponse(log, responseURL, ":warning: Slack's setup window expired before the modal opened. Run `/qurl-admin protect` and tap the button again.")
+			_ = h.postResponse(log, responseURL, ":warning: "+exposeTriggerExpiredMessage)
 			return
 		}
 		fetchCtx, fetchCancel := context.WithTimeout(h.baseCtx, adminGateBudget)
@@ -158,17 +164,45 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 		openBudget = slackTriggerOpenViewBudgetRemaining(h.now().Sub(triggerReceivedAt))
 		if openBudget <= 0 {
 			log.Warn("protect url: trigger expired before views.open")
-			_ = h.postResponse(log, responseURL, ":warning: Slack's setup window expired before the modal opened. Run `/qurl-admin protect` and tap the button again.")
+			_ = h.postResponse(log, responseURL, ":warning: "+exposeTriggerExpiredMessage)
 			return
 		}
 		openCtx, openCancel := context.WithTimeout(h.baseCtx, openBudget)
 		defer openCancel()
 		if err := h.openViewWithGridFallback(openCtx, log, teamID, enterpriseID, triggerID, view); err != nil {
-			log.Warn("protect url: views.open failed", "error", err)
-			_ = h.postResponse(log, responseURL, ":warning: "+exposeOpenFailedMessage)
+			log.Warn("protect url: views.open failed",
+				"error", err,
+				"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
+				"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+				"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
+			)
+			_ = h.postResponse(log, responseURL, ":warning: "+h.exposeOpenFailureMessage(err))
 		}
 	})
 	respondJSON(w, http.StatusOK, map[string]any{})
+}
+
+// exposeOpenFailureMessage maps a views.open failure from a Protect button to
+// copy the admin can act on, mirroring the classification the bare-verb
+// `/qurl-admin protect-connector` path already does at its own views.open.
+//
+// The distinction that matters is whether tapping the button again can possibly
+// help. A workspace whose Slack bot token is missing — the state `/qurl
+// uninstall` used to leave behind — can never recover by retrying, because only
+// a fresh Slack app authorization writes that column. Telling those admins to
+// "tap the button again" loops them forever on the one failure that has a
+// concrete fix, so it routes to the install link instead.
+func (h *Handler) exposeOpenFailureMessage(err error) string {
+	switch {
+	case errors.Is(err, auth.ErrSlackBotTokenNotConfigured):
+		return h.latestSlackAppInstallMessage("Guided qURL setup", "run `/qurl-admin protect` and tap the button again")
+	case errors.Is(err, ErrSlackRateLimited):
+		return tunnelInstallRateLimitMessage(err)
+	case errors.Is(err, ErrSlackTriggerExpired), errors.Is(err, context.DeadlineExceeded):
+		return exposeTriggerExpiredMessage
+	default:
+		return exposeOpenFailedMessage
+	}
 }
 
 const (
