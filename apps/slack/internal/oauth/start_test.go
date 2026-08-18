@@ -59,11 +59,11 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("audience") != "https://api.qurl.invalid" {
 		t.Errorf("audience: %q", q.Get("audience"))
 	}
-	if q.Get("prompt") != "consent" {
-		t.Errorf("prompt: got %q want %q (setup re-entry forces consent)", q.Get("prompt"), "consent")
+	if q.Get("prompt") != "login consent" {
+		t.Errorf("prompt: got %q want %q (setup re-authenticates and forces consent)", q.Get("prompt"), "login consent")
 	}
-	if q.Get("connection") != "" {
-		t.Errorf("connection: got %q want empty for legacy setup", q.Get("connection"))
+	if q.Get("connection") != defaultPasswordlessConnection {
+		t.Errorf("connection: got %q want %q (passwordless is the Slack login method)", q.Get("connection"), defaultPasswordlessConnection)
 	}
 	if q.Get("login_hint") != "" {
 		t.Errorf("login_hint: got %q want empty for legacy setup", q.Get("login_hint"))
@@ -174,7 +174,7 @@ func TestStartUsesStoredOpaqueState(t *testing.T) {
 	}
 }
 
-func TestStartEmailSetupUsesLoginHintWithoutForcingConnection(t *testing.T) {
+func TestStartEmailSetupPinsPasswordlessConnection(t *testing.T) {
 	cfg := newStartCfg()
 	state, err := MintStateWithEmail(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "Admin@Example.COM", cfg.Now())
 	if err != nil {
@@ -194,8 +194,8 @@ func TestStartEmailSetupUsesLoginHintWithoutForcingConnection(t *testing.T) {
 		t.Fatalf("parse Location: %v", err)
 	}
 	q := u.Query()
-	if q.Get("connection") != "" {
-		t.Errorf("connection: got %q want empty so Auth0 app enabled connections choose the login method", q.Get("connection"))
+	if q.Get("connection") != defaultPasswordlessConnection {
+		t.Errorf("connection: got %q want %q so the tenant's enabled connections cannot route this away from passwordless", q.Get("connection"), defaultPasswordlessConnection)
 	}
 	if q.Get("login_hint") != "admin@example.com" {
 		t.Errorf("login_hint: got %q want normalized email", q.Get("login_hint"))
@@ -394,55 +394,45 @@ func TestStartDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T)
 	assertOAuthErrorPage(t, rec, "qURL setup is temporarily unavailable")
 }
 
-// TestStartForcesReauthOnExplicitKeyModes pins the prompt contract: --rotate
-// and --repoint revoke the stored workspace key and mint a replacement, so
-// they must re-authenticate the human instead of riding whatever Auth0 SSO
-// session the browser already holds. Without `login`, a consent screen alone
-// can approve a rotation under a different Auth0 connection than the one that
-// minted the key — and qurl-service keys accounts on the id_token sub, so that
-// silently moves the workspace to a different qURL account.
+// TestStartAlwaysReauthenticatesAndPinsPasswordless pins the login contract for
+// every setup path. Both first install and the explicit key operations decide
+// which qURL account a Slack workspace is bound to, and qurl-service keys
+// accounts on the id_token sub — so neither may ride an ambient Auth0 session
+// (from qurl-desktop, the dashboard, or a previous bot run) and neither may be
+// routed to a non-passwordless connection by tenant configuration.
 //
-// Covers BOTH state paths. Production runs the opaque StateStore path, so a
+// Covers BOTH state paths: production runs the opaque StateStore path, so a
 // legacy-signed-state-only test would leave the shipping path unpinned.
-func TestStartForcesReauthOnExplicitKeyModes(t *testing.T) {
-	modes := []struct {
-		name       string
-		mode       SetupMode
-		wantPrompt string
-	}{
-		{name: "reuse keeps consent only", mode: SetupModeReuse, wantPrompt: "consent"},
-		{name: "rotate forces login", mode: SetupModeRotate, wantPrompt: "login consent"},
-		{name: "repoint forces login", mode: SetupModeRepoint, wantPrompt: "login consent"},
-	}
-
-	for _, tt := range modes {
-		t.Run("signed state/"+tt.name, func(t *testing.T) {
+func TestStartAlwaysReauthenticatesAndPinsPasswordless(t *testing.T) {
+	for _, mode := range []SetupMode{SetupModeReuse, SetupModeRotate, SetupModeRepoint} {
+		t.Run("signed state/"+string(mode), func(t *testing.T) {
 			cfg := newStartCfg()
-			state, err := MintStateWithEmailMode(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", tt.mode, cfg.Now())
+			state, err := MintStateWithEmailMode(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", mode, cfg.Now())
 			if err != nil {
 				t.Fatalf("MintStateWithEmailMode: %v", err)
 			}
-			assertStartPrompt(t, cfg, state, tt.wantPrompt)
+			assertStartAuthParams(t, cfg, state)
 		})
 
-		t.Run("stored state/"+tt.name, func(t *testing.T) {
+		t.Run("stored state/"+string(mode), func(t *testing.T) {
 			cfg := newStartCfg()
 			store := newMemoryStateStore()
 			cfg.StateStore = store
-			state, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "admin@example.com", tt.mode, cfg.Now())
+			state, err := MintStoredStateWithEmailMode(context.Background(), store, testStateTeamID, testStateUserID, "admin@example.com", mode, cfg.Now())
 			if err != nil {
 				t.Fatalf("MintStoredStateWithEmailMode: %v", err)
 			}
-			assertStartPrompt(t, cfg, state, tt.wantPrompt)
+			assertStartAuthParams(t, cfg, state)
 		})
 	}
 }
 
-// assertStartPrompt drives Start and checks only the prompt parameter, so a
-// failure names the mode/state-path subtest rather than a shared helper.
+// assertStartAuthParams drives Start and checks only the two parameters that
+// decide WHO authorizes the setup, so a failure names the mode/state-path
+// subtest rather than a shared helper.
 //
 //nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
-func assertStartPrompt(t *testing.T, cfg Config, state, wantPrompt string) {
+func assertStartAuthParams(t *testing.T, cfg Config, state string) {
 	t.Helper()
 	h := Start(cfg)
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
@@ -456,17 +446,21 @@ func assertStartPrompt(t *testing.T, cfg Config, state, wantPrompt string) {
 	if err != nil {
 		t.Fatalf("parse Location: %v", err)
 	}
-	if got := u.Query().Get("prompt"); got != wantPrompt {
-		t.Errorf("prompt: got %q want %q", got, wantPrompt)
+	q := u.Query()
+	if got := q.Get("prompt"); got != "login consent" {
+		t.Errorf("prompt: got %q want %q", got, "login consent")
+	}
+	if got := q.Get("connection"); got != defaultPasswordlessConnection {
+		t.Errorf("connection: got %q want %q", got, defaultPasswordlessConnection)
 	}
 }
 
-// TestAuthorizeURLPromptAlwaysRequestsConsent guards the invariant underneath
-// both prompt values: consent must never be dropped. Auth0 silently reuses a
-// prior consent grant without it, so a re-run of setup could complete without
-// issuing a new token — the reason `consent` was unconditional before the
-// explicit modes started adding `login`.
-func TestAuthorizeURLPromptAlwaysRequestsConsent(t *testing.T) {
+// TestAuthorizeURLPromptCarriesLoginAndConsent guards the two halves of the
+// prompt independently. `login` stops an ambient session from authorizing the
+// bind; `consent` stops Auth0 from silently reusing a prior consent grant,
+// which would let a setup re-run complete without issuing a new token. Losing
+// either one is a silent failure, so assert both rather than the joined string.
+func TestAuthorizeURLPromptCarriesLoginAndConsent(t *testing.T) {
 	cfg := newStartCfg()
 	for _, mode := range []SetupMode{SetupModeReuse, SetupModeRotate, SetupModeRepoint} {
 		raw := authorizeURL(cfg, "state-handle", VerifiedState{
@@ -479,12 +473,56 @@ func TestAuthorizeURLPromptAlwaysRequestsConsent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mode %q: parse authorize URL: %v", mode, err)
 		}
-		prompt := u.Query().Get("prompt")
-		if !slices.Contains(strings.Fields(prompt), "consent") {
-			t.Errorf("mode %q: prompt %q must include consent", mode, prompt)
+		prompt := strings.Fields(u.Query().Get("prompt"))
+		for _, want := range []string{"login", "consent"} {
+			if !slices.Contains(prompt, want) {
+				t.Errorf("mode %q: prompt %v must include %q", mode, prompt, want)
+			}
 		}
-		if mode.Explicit() != slices.Contains(strings.Fields(prompt), "login") {
-			t.Errorf("mode %q: prompt %q login presence should track SetupMode.Explicit() (%v)", mode, prompt, mode.Explicit())
-		}
+	}
+}
+
+// TestAuthorizeURLConnectionOverrideWins keeps AUTH0_EMAIL_CONNECTION usable
+// for a tenant whose passwordless connection is not named "email". Without
+// this, pinning the default would strand any such deployment.
+func TestAuthorizeURLConnectionOverrideWins(t *testing.T) {
+	cfg := newStartCfg()
+	cfg.Auth0EmailConnection = "passwordless-otp"
+	raw := authorizeURL(cfg, "state-handle", VerifiedState{
+		TeamID: testStateTeamID,
+		UserID: testStateUserID,
+		Email:  "admin@example.com",
+		Mode:   SetupModeReuse,
+	})
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse authorize URL: %v", err)
+	}
+	if got := u.Query().Get("connection"); got != "passwordless-otp" {
+		t.Errorf("connection: got %q want the configured override", got)
+	}
+}
+
+// TestAuthorizeURLPinsConnectionWithoutEmail covers the legacy no-email state:
+// the connection must still be pinned even when there is no login_hint to
+// prefill, so an emailless setup cannot fall through to whichever connections
+// the Auth0 app happens to enable.
+func TestAuthorizeURLPinsConnectionWithoutEmail(t *testing.T) {
+	cfg := newStartCfg()
+	raw := authorizeURL(cfg, "state-handle", VerifiedState{
+		TeamID: testStateTeamID,
+		UserID: testStateUserID,
+		Mode:   SetupModeReuse,
+	})
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse authorize URL: %v", err)
+	}
+	q := u.Query()
+	if got := q.Get("connection"); got != defaultPasswordlessConnection {
+		t.Errorf("connection: got %q want %q", got, defaultPasswordlessConnection)
+	}
+	if got := q.Get("login_hint"); got != "" {
+		t.Errorf("login_hint: got %q want empty when state carries no email", got)
 	}
 }
