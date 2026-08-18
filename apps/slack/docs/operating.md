@@ -75,27 +75,29 @@ at the OAuth-callback bind layer.
   Rotation failure modes to expect:
   - If the signed-in account cannot revoke the current key, rotation fails
     closed before any replacement is minted.
-  - A stored row that predates key metadata (no `key_id`) rotates without
-    revoking, because Slack cannot identify the predecessor to revoke it. It
-    mints and stores the replacement, recording both the new `key_id` and the
-    signed-in `qurl_account_id`, and logs the abandoned key under
-    `setup_rotate_legacy_row_orphaned_key` with the owning `team_id`. Operators
-    should revoke that key in qURL API-key management; until they do, it stays
-    live and counts against the account's API-key plan limit. Recording those
-    two fields is what keeps this a one-time event: the next rotation takes the
-    normal revoke-then-replace route, and `--repoint` becomes possible. The
-    bound is one orphaned *key* per workspace rather than one log line, since
-    concurrent rotations mint idempotently but can each emit the event — dedupe
-    by `team_id`. `--repoint` never takes this path; mint-without-revoke is
-    scoped to `--rotate`, and a rotation with no verified qURL account fails
-    closed rather than storing empty provenance. Because nothing is revoked the
-    rotation is net +1 key, so an account already at its limit fails the mint
-    and sees a page saying the previous key could not be identified and is
-    still active — not the normal rotation's "previous key was revoked".
-    Refusing these rows (the previous behavior) protected nothing: the only
-    remaining route was `/qurl uninstall`, which abandons the same key and also
-    discards the Slack bot token and workspace binding, so a customer following
-    that path leaked one key per cycle.
+  - A stored row that predates key metadata (no `key_id`) rotates **without
+    revoking**, because Slack cannot identify the predecessor to revoke it.
+    For an on-call operator, the parts that matter:
+    - **What is left behind.** One live qURL key that Slack no longer
+      references, logged as `setup_rotate_legacy_row_orphaned_key` with the
+      owning `team_id`. Revoke it in qURL API-key management; until then it
+      counts against the account's API-key plan limit.
+    - **How often.** Once per workspace. The rotation records the new `key_id`
+      and the signed-in `qurl_account_id`, so the next rotation takes the
+      normal revoke-then-replace route and `--repoint` becomes possible. The
+      bound is one orphaned *key*, not one log line — concurrent rotations mint
+      idempotently but can each emit the event, so dedupe by `team_id`.
+    - **When it refuses.** A rotation with no verified qURL account fails
+      closed rather than storing empty provenance. `--repoint` never takes this
+      path at all; mint-without-revoke is scoped to `--rotate`.
+    - **At the plan limit.** Because nothing is revoked the rotation is net +1
+      key, so an account already at its limit fails the mint and sees a page
+      saying the previous key could not be identified and is still active —
+      not the normal rotation's "previous key was revoked".
+    - **Why not just refuse.** Refusing these rows (the previous behavior)
+      protected nothing: the only remaining route was `/qurl uninstall`, which
+      abandons the same key and also discards the Slack bot token and workspace
+      binding, so a customer following that path leaked one key per cycle.
   - Missing or revoked legacy stored keys without key identity ask qURL to
     provision the Slack workspace key; if qURL reports that the workspace is
     already connected but the stored key cannot be recovered, setup stops with

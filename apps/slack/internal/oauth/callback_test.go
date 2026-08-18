@@ -2936,6 +2936,11 @@ func TestCallbackLegacyRotationGenericMintFailureCopy(t *testing.T) {
 	if strings.Contains(body, "revoked the previous workspace key") {
 		t.Errorf("page must not claim a revoke happened: %s", body)
 	}
+	// --repoint still fails closed on a row with no key_id, so suggesting it
+	// here would hand this user a dead end until a rotate heals the row.
+	if strings.Contains(body, "--repoint") {
+		t.Errorf("legacy-path retry copy must not suggest --repoint: %s", body)
+	}
 	for _, entry := range readLogs() {
 		if entry["event"] == rotateLegacyRowOrphanEvent {
 			t.Fatalf("orphan event must not fire when the mint failed: %#v", entry)

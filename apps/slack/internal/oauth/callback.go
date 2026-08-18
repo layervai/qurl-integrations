@@ -1112,13 +1112,20 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 			predecessor = "This workspace's previous key could not be identified, so nothing was revoked and it is still active. Your"
 			genericPredecessor = "This workspace's previous qURL™ key could not be identified, so nothing was revoked and it is still active. A replacement could not be created."
 		}
+		// Steer the legacy path to --rotate only. A row that reached it has no
+		// key_id, and --repoint still fails closed on those, so suggesting it
+		// hands this user a dead end until a rotate succeeds and heals the row.
+		retry := "--rotate or --repoint"
+		if oldKeyID == "" {
+			retry = "--rotate"
+		}
 		if limitReached {
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				predecessor+" qURL™ account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with --rotate or --repoint again.")
+				predecessor+" qURL™ account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with "+retry+" again.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
-			genericPredecessor+" Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			genericPredecessor+" Run /qurl setup <email> with "+retry+" again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 
