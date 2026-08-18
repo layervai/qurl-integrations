@@ -451,8 +451,9 @@ Thread replies work — the lookup falls back to `conversations.replies` when
 Six flags shape the sample, and whatever you leave at its default is what the numbers
 describe. `-max-conversations` (25) caps how many conversations are scanned;
 `-conversation-types` (`public_channel,private_channel,im,mpim`) filters discovery;
-`-max-pages` (4) caps `conversations.history` pages per conversation and also bounds
-discovery paging; `-page-limit` (200) is messages per page; `-max-threads` (5) is threads
+`-max-pages` (4) caps `conversations.history` pages per conversation **and** bounds
+`conversations.list` paging — raising it to read deeper history widens discovery too,
+which is usually harmless because `-max-conversations` stops discovery first; `-page-limit` (200) is messages per page; `-max-threads` (5) is threads
 sampled per conversation on the replies surface; and `-skip-replies` drops that surface
 entirely. Every one of them is echoed back in the report's `bounds` block, so a reader
 can tell a 25-conversation workspace from a 25-conversation cap — and an all-zero

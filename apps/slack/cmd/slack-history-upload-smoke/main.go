@@ -25,11 +25,20 @@
 // there is nothing for CI to run it against. Exit 0 means the contract still holds, 1
 // means it does not, 2 means the invocation was wrong.
 //
-// Read-only and content-free. Every call is a GET against conversations.list,
-// conversations.history and conversations.replies; nothing is posted, and the output
-// carries counts, conversation IDs and message timestamps only. File names, message
-// text, user names and mimetypes are user content and never leave the process — the
-// same field discipline claimMediaNotice keeps on the event path.
+// Read-only. Every call is a GET against conversations.list, conversations.history and
+// conversations.replies, and nothing is posted.
+//
+// No USER content reaches the report: file names, message text, user names and mimetypes
+// are never decoded into anything that gets marshaled, which is the field discipline
+// claimMediaNotice keeps on the event path. What the report does carry is counts,
+// conversation IDs, message timestamps, and bounded infrastructure diagnostics —
+// Slack's own error codes and needed/provided scope names, a redirect Location, a
+// Content-Type. Those come from the endpoint -base-url names rather than from a
+// workspace member, and they are the difference between a diagnosable failure and
+// "something went wrong", so they are deliberate. Every one of them passes through
+// sanitizeReportText, which strips control characters and caps the length, because
+// against a -base-url that is not Slack the content-free promise would otherwise be the
+// other end's to keep.
 package main
 
 import (
