@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
@@ -445,12 +446,12 @@ func (c slackClient) postRaw(ctx context.Context, method string, body any) (apiC
 		if resp.StatusCode == http.StatusTooManyRequests {
 			result.RetryAfter = cleanSlackField(resp.Header.Get("Retry-After"))
 		}
-		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
+		httpbody.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		return result, out, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
-	raw, err := slacksmoke.ReadResponseBody(method, resp.Body, maxSlackResponseBytes)
+	raw, err := httpbody.ReadResponseBody(method, resp.Body, maxSlackResponseBytes)
 	if err != nil {
-		if errors.Is(err, slacksmoke.ErrResponseTooLarge) {
+		if errors.Is(err, httpbody.ErrResponseTooLarge) {
 			result.Error = apiErrorResponseTooLarge
 		} else {
 			result.Error = "response_read"

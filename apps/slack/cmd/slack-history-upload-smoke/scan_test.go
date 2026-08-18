@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
@@ -1428,8 +1429,8 @@ func TestGetOnceRejectsOversizeResponse(t *testing.T) {
 	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout)}
 	var out slackMessagesResponse
 	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
-	if !errors.Is(err, slacksmoke.ErrResponseTooLarge) {
-		t.Fatalf("get = %v, want errors.Is slacksmoke.ErrResponseTooLarge", err)
+	if !errors.Is(err, httpbody.ErrResponseTooLarge) {
+		t.Fatalf("get = %v, want errors.Is httpbody.ErrResponseTooLarge", err)
 	}
 	// Spelled out rather than built from the constant, so substituting a different
 	// ceiling fails here instead of quietly agreeing with itself.

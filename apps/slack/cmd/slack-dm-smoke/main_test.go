@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
@@ -1008,7 +1009,7 @@ func TestPostRawDrainsOversizeResponse(t *testing.T) {
 
 // TestPostRawRecordsReadErrorCode pins the else arm the hoist introduced. postRaw used
 // to set "response_read" unconditionally on a failed read; it now branches on
-// slacksmoke.ErrResponseTooLarge to pick between two codes, so a read that fails for any
+// httpbody.ErrResponseTooLarge to pick between two codes, so a read that fails for any
 // other reason has to come out response_read rather than inheriting the oversize label.
 // Deleting the else arm leaves every other test in this file green.
 func TestPostRawRecordsReadErrorCode(t *testing.T) {
@@ -1030,7 +1031,7 @@ func TestPostRawRecordsReadErrorCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("postRaw = nil error, want a read failure")
 	}
-	if errors.Is(err, slacksmoke.ErrResponseTooLarge) {
+	if errors.Is(err, httpbody.ErrResponseTooLarge) {
 		t.Fatalf("postRaw = %v, want a read failure, not the oversize sentinel", err)
 	}
 	if result.Error != "response_read" {

@@ -244,6 +244,32 @@ func TestSlackUserLookupFuncWithTokenLookup(t *testing.T) {
 	}
 }
 
+// TestSlackUserLookupDrainsOversizedResponse guards the drain users.info gained when
+// these reads moved onto httpbody. Alone among the six Slack reads in this file it
+// previously returned the oversize refusal without draining, so the body below — sized
+// past the ceiling but well inside the bounded drain's own limit+1 — reached EOF on
+// every other path and not this one. Reverting to a bare refusal here leaves sawEOF
+// false, which the assertion catches; the oversize error text alone would not.
+func TestSlackUserLookupDrainsOversizedResponse(t *testing.T) {
+	t.Parallel()
+	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", slackWebAPIResponseBodyLimit+1024))}
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
+	})}
+
+	lookup := newSlackUserLookupFuncWithTokenLookup(staticTokenLookup("xoxb-test"), testSlackWebAPIUserAgent, "https://slack.test/users.info", httpClient)
+	if _, err := lookup(context.Background(), "T_lookup", "", "UHUGE"); err == nil ||
+		!strings.Contains(err.Error(), "users.info response exceeded") {
+		t.Fatalf("SlackUserLookup oversized response error = %v, want response limit error", err)
+	}
+	if !body.sawEOF.Load() {
+		t.Fatal("oversized users.info body was not drained to EOF")
+	}
+	if !body.closed.Load() {
+		t.Fatal("oversized users.info body was not closed")
+	}
+}
+
 func TestSlackUserLookupFuncWithTokenLookupRequiresWorkspaceToken(t *testing.T) {
 	var httpCalls atomic.Int64
 	var gotOwners []string
