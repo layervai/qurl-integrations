@@ -8,6 +8,10 @@
 // nethost is separate from slacksmoke, which is where these two functions lived while
 // the smoke commands were their only callers.
 //
+// Leaf, but not yet shared: it sits under apps/slack/internal, so only this app can
+// import it. A second app needing the same read is the signal to move it to shared/,
+// not to copy it.
+//
 // Callers keep their own response-size ceiling and pass it to ReadResponseBody and
 // DrainResponseBody; see the latter for why the limit is a parameter rather than a
 // constant here.
