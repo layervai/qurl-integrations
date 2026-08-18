@@ -2908,3 +2908,70 @@ func TestCallbackRepointWithoutKeyIDStillFailsClosed(t *testing.T) {
 		t.Errorf("replacement mint calls = %d, want 0", replacementCalls)
 	}
 }
+
+// TestCallbackLegacyRotationGenericMintFailureCopy locks the non-quota failure
+// copy on the legacy path. Only the limit-reached variant was pinned, so a
+// regression could reintroduce the normal rotation's "previous key was revoked"
+// wording here — on a path where nothing was revoked and the old key is still
+// the workspace's live credential.
+func TestCallbackLegacyRotationGenericMintFailureCopy(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	minter.replacementMintErr = errors.New("qurl-service unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "still active") {
+		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+	if strings.Contains(body, "revoked the previous workspace key") {
+		t.Errorf("page must not claim a revoke happened: %s", body)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the mint failed: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent covers the
+// second failure mode the emit-after-ok ordering exists for. A successful mint
+// whose persist fails leaves the store holding the OLD key — so the workspace
+// keeps using it and the new key is the real orphan. Emitting the event here
+// would name the wrong key and tell an operator to revoke a live one.
+func TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.setErr = errors.New("ddb unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status: got 200, want an error page when the persist failed; body=%s", rec.Body.String())
+	}
+	// The mint did happen — this is exactly the window where a replacement
+	// exists upstream but Slack never stored it.
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 1 {
+		t.Errorf("replacement mint calls = %d, want 1 (persist, not mint, is what failed)", replacementCalls)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the persist failed — it would name the old key while the NEW one is the orphan: %#v", entry)
+		}
+	}
+}
