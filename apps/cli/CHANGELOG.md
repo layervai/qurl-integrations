@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/layervai/qurl-integrations/compare/v1.0.0...v1.1.0) (2026-08-18)
+
+
+### Features
+
+* **cli:** port the knock-only connector supervisor and link the FRP fork ([#1127](https://github.com/layervai/qurl-integrations/issues/1127)) ([047e1e5](https://github.com/layervai/qurl-integrations/commit/047e1e512f19f5f7fd76ab46a7d30de3359facd7))
+* **cli:** qurl connector run — serve a local app through the qURL platform ([#1130](https://github.com/layervai/qurl-integrations/issues/1130)) ([dcc40ee](https://github.com/layervai/qurl-integrations/commit/dcc40eeb3ef1006ec99814dc3c0dfedb0cfcf859))
+
+
+### Bug Fixes
+
+* **cli:** render the invalid refresh-mode sentinel in customer language ([#1131](https://github.com/layervai/qurl-integrations/issues/1131)) ([a06abef](https://github.com/layervai/qurl-integrations/commit/a06abef5c31a68d1fa0ea146d3fcc22d8fd28d25))
+
 ## [1.0.0](https://github.com/layervai/qurl-integrations/compare/v0.1.0...v1.0.0) (2026-08-18)
 
 
