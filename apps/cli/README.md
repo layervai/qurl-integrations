@@ -79,7 +79,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
-| Connector route | `--slug` | `QURL_CONNECTOR_SLUG` | `connector_slug` | — (required by `connector run`) |
+| Connector ID | `--id` | `QURL_CONNECTOR_ID` | `connector_id` | — (required by `connector run`) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -210,7 +210,7 @@ already-deleted resource succeeds idempotently and says so (JSON sets
 
 ### qurl connector run
 
-`qurl connector run --slug <name> --target <host:port>` serves an app
+`qurl connector run --id <id> --target <host:port>` serves an app
 running on your machine through the qURL platform. Your app keeps
 listening on localhost and the Connector connects outward — your machine
 never opens a listening port to the internet — while the platform
@@ -218,10 +218,19 @@ verifies each caller and grants access before any request is forwarded.
 
 | Flag | Description |
 |------|-------------|
-| `--slug` | Which Connector to run: its route name in qURL (or `connector_slug` in your profile) |
+| `--id` | Which Connector to run: its ID in qURL — the route name your app serves under (or `connector_id` in your profile) |
 | `--target` | The local app, as `host:port`; `:8080` means `127.0.0.1:8080` |
 | `--state-dir` | Where this machine's Connector identity lives (default: your user state directory) |
 | `--refresh-mode` | Self-healing gate after sustained failures: `manual` (default), `auto`, or `disabled` |
+
+The Connector ID is the same identity the standalone qurl-connector
+configures as `QURL_CONNECTOR_ID` (YAML `id:`), so one setting covers a
+machine that moves between the two tools. The names v1.1.0 briefly
+shipped still work, deprecated: `--slug` as a hidden alias of `--id`
+(passing both with different values is refused), and
+`QURL_CONNECTOR_SLUG` / `connector_slug` at lower precedence than their
+`id`-named counterparts. All three will be removed in the next major
+release.
 
 The first start enrolls this machine and needs a one-time enrollment
 token from the qURL console, supplied **only** via `QURL_CONNECTOR_TOKEN`

@@ -1,15 +1,16 @@
 Connectors publish apps running on your machine through the qURL platform.
 
-A Connector serves one local app under a route name (its slug). Callers
-never reach your machine directly: the platform verifies each caller and
-grants access before any request is forwarded to your app.
+A Connector serves one local app under its ID — the route name your app
+serves under. Callers never reach your machine directly: the platform
+verifies each caller and grants access before any request is forwarded
+to your app.
 
 Usage:
   qurl connector [flags]
   qurl connector [command]
 
 Examples:
-  qurl connector run --slug billing --target :8080
+  qurl connector run --id billing --target :8080
 
 Available Commands:
   run         Serve a local app through the qURL platform

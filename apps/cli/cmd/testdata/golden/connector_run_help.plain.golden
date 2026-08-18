@@ -1,9 +1,9 @@
 Serve a local app through the qURL platform.
 
 Your app keeps listening on localhost; this command connects outward and
-serves it under your Connector's route name (the slug). The platform
-verifies each caller and grants access per caller — your machine never
-opens a listening port to the internet.
+serves it under your Connector's ID — the route name your app serves
+under. The platform verifies each caller and grants access per caller —
+your machine never opens a listening port to the internet.
 
 The first start enrolls this machine and needs a one-time enrollment
 token: set QURL_CONNECTOR_TOKEN, or point QURL_CONNECTOR_TOKEN_FILE at a
@@ -23,13 +23,13 @@ Usage:
   qurl connector run [flags]
 
 Examples:
-  qurl connector run --slug billing --target :8080
-  QURL_CONNECTOR_TOKEN_FILE=/run/secrets/qurl-token qurl connector run --slug billing --target 127.0.0.1:3000
+  qurl connector run --id billing --target :8080
+  QURL_CONNECTOR_TOKEN_FILE=/run/secrets/qurl-token qurl connector run --id billing --target 127.0.0.1:3000
 
 Flags:
   -h, --help                  help for run
+      --id string             which Connector to run: its ID in qURL — the route name your app serves under (or set connector_id in your profile)
       --refresh-mode string   whether the Connector may refresh its platform assignment after sustained failures: manual, auto, or disabled (default manual)
-      --slug string           which Connector to run: its route name in qURL (or set connector_slug in your profile)
       --state-dir string      directory holding this Connector's identity (default: your user state directory)
       --target string         local app to serve, as host:port (":8080" means 127.0.0.1:8080)
 

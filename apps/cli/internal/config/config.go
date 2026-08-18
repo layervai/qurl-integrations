@@ -44,9 +44,17 @@ type Config struct {
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Output   string `yaml:"output,omitempty"`
 	Color    string `yaml:"color,omitempty"`
-	// ConnectorSlug names the Connector route `qurl connector run` serves
-	// when --slug is not passed. It is an identity, not a secret: the
-	// enrollment token and Connector state never live in config files.
+	// ConnectorID names the Connector `qurl connector run` serves when --id
+	// is not passed — its ID, the route name the app serves under, the same
+	// identity the standalone qurl-connector configures as QURL_CONNECTOR_ID
+	// / YAML `id:`. It is an identity, not a secret: the enrollment token
+	// and Connector state never live in config files.
+	ConnectorID string `yaml:"connector_id,omitempty"`
+	// ConnectorSlug is v1.1.0's spelling of ConnectorID, still read so an
+	// existing connector_slug profile keeps working; ConnectorID wins when
+	// both are set.
+	//
+	// Deprecated: remove at the next major.
 	ConnectorSlug string `yaml:"connector_slug,omitempty"`
 }
 
