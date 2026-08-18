@@ -2834,6 +2834,7 @@ func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
 // key is still live, and telling the admin otherwise would send them away
 // believing a working credential is dead.
 func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.existingKey = testOldAPIKey
 	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
@@ -2854,6 +2855,15 @@ func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
 	} {
 		if strings.Contains(body, claim) {
 			t.Errorf("page must not claim a revoke happened on the legacy path (%q): %s", claim, body)
+		}
+	}
+	// The orphan event must NOT fire here. Its operator_action says to revoke
+	// this workspace's pre-rotation key, and the mint failed — so that key is
+	// still the workspace's live credential. Acting on the event would take the
+	// workspace down.
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not be logged when the rotation failed: %#v", entry)
 		}
 	}
 	if !strings.Contains(body, "still active") {

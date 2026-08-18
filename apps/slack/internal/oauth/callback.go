@@ -762,13 +762,26 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 	// each uninstall/setup cycle otherwise adds another live key against the
 	// account's plan limit. The orphan is logged for operator cleanup.
 	if keyID == "" {
-		slog.Warn("oauth/callback rotating a legacy row with no stored key_id — previous key cannot be revoked from Slack and needs operator cleanup", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+		keyPrefix, ok := mintReplacementAndPersist(w, cfg, accessToken, teamID, "", userID, qurlAccountID)
+		if !ok {
+			// Deliberately silent on failure. The event tells an operator to
+			// revoke this workspace's pre-rotation key, and that is only true
+			// once the replacement is stored. A failed mint (this path is net
+			// +1 key, so an account at its plan limit fails here) or a failed
+			// persist leaves the workspace still using the old key — acting on
+			// the event then would revoke a live credential and take the
+			// workspace down. Staying quiet also keeps the event's
+			// once-per-workspace property honest: repeated quota-blocked
+			// attempts would otherwise re-emit it for the same team_id.
+			return "", false
+		}
+		slog.Warn("oauth/callback rotated a legacy row with no stored key_id — previous key could not be revoked from Slack and needs operator cleanup", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
 			"event", rotateLegacyRowOrphanEvent,
 			"team_id", teamID,
 			"mode", string(mode),
 			"qurl_account_id", qurlAccountID,
 			"operator_action", rotateLegacyRowOperatorAction)
-		return mintReplacementAndPersist(w, cfg, accessToken, teamID, "", userID, qurlAccountID)
+		return keyPrefix, true
 	}
 	if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, keyID)); err != nil {
 		slog.Error("oauth/callback rotation replacement idempotency key invalid before revoke", //nolint:gosec // G706: team_id/key_id are non-secret qURL identifiers needed for operator triage.
