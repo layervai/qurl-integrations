@@ -485,21 +485,38 @@ func TestAuthorizeURLPromptCarriesLoginAndConsent(t *testing.T) {
 // TestAuthorizeURLConnectionOverrideWins keeps AUTH0_EMAIL_CONNECTION usable
 // for a tenant whose passwordless connection is not named "email". Without
 // this, pinning the default would strand any such deployment.
+//
+// The whitespace case is not cosmetic: an env var set to " " (a stray value in
+// a task definition or .env) must fall back to the passwordless pin rather than
+// send a blank connection, which Auth0 would reject.
 func TestAuthorizeURLConnectionOverrideWins(t *testing.T) {
-	cfg := newStartCfg()
-	cfg.Auth0EmailConnection = "passwordless-otp"
-	raw := authorizeURL(cfg, "state-handle", VerifiedState{
-		TeamID: testStateTeamID,
-		UserID: testStateUserID,
-		Email:  "admin@example.com",
-		Mode:   SetupModeReuse,
-	})
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse authorize URL: %v", err)
-	}
-	if got := u.Query().Get("connection"); got != "passwordless-otp" {
-		t.Errorf("connection: got %q want the configured override", got)
+	for _, tt := range []struct {
+		name       string
+		configured string
+		want       string
+	}{
+		{name: "override wins", configured: "passwordless-otp", want: "passwordless-otp"},
+		{name: "empty falls back to passwordless", configured: "", want: defaultPasswordlessConnection},
+		{name: "whitespace-only falls back to passwordless", configured: "   ", want: defaultPasswordlessConnection},
+		{name: "override is trimmed", configured: "  passwordless-otp  ", want: "passwordless-otp"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newStartCfg()
+			cfg.Auth0EmailConnection = tt.configured
+			raw := authorizeURL(cfg, "state-handle", VerifiedState{
+				TeamID: testStateTeamID,
+				UserID: testStateUserID,
+				Email:  "admin@example.com",
+				Mode:   SetupModeReuse,
+			})
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatalf("parse authorize URL: %v", err)
+			}
+			if got := u.Query().Get("connection"); got != tt.want {
+				t.Errorf("connection: got %q want %q", got, tt.want)
+			}
+		})
 	}
 }
 
