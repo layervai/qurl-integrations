@@ -1530,11 +1530,15 @@ func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("run code = %d, want 2", code)
 	}
-	if strings.Contains(stderr.String(), "FORGED") {
-		t.Fatalf("stderr=%q, want the -token-env value never echoed", stderr.String())
+	// Exact equality, not "FORGED" is absent: the forgery this guards against is the
+	// middle line, a plausible-looking "SLACK_BOT_TOKEN is not set or is empty". A
+	// partial sanitizer that truncated at the last newline would drop the trailing
+	// sentinel and still emit the forged operator-facing line.
+	if want := slacksmoke.ErrTokenEnvName.Error() + "\n"; stderr.String() != want {
+		t.Fatalf("stderr=%q, want exactly %q", stderr.String(), want)
 	}
-	if !strings.Contains(stderr.String(), slacksmoke.ErrTokenEnvName.Error()) {
-		t.Fatalf("stderr=%q, want %q", stderr.String(), slacksmoke.ErrTokenEnvName.Error())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout=%q, want empty", stdout.String())
 	}
 }
 

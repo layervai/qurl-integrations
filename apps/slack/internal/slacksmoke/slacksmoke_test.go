@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,14 @@ const (
 	testHTTPSURL    = "https://slack.test"
 )
 
+// TestDefaultAPIBaseURL pins the literal. Every table case below compares the default
+// to itself, so a changed constant would survive them all.
+func TestDefaultAPIBaseURL(t *testing.T) {
+	if DefaultAPIBaseURL != "https://slack.com/api" {
+		t.Fatalf("DefaultAPIBaseURL = %q, want %q", DefaultAPIBaseURL, "https://slack.com/api")
+	}
+}
+
 func TestNormalizeBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -30,6 +39,7 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{name: "https kept", raw: testHTTPSURL, want: testHTTPSURL},
 		{name: "trailing slash trimmed", raw: testHTTPSURL + "/api/", want: testHTTPSURL + "/api"},
 		{name: "default host trailing slash trimmed", raw: DefaultAPIBaseURL + "/", want: DefaultAPIBaseURL},
+		{name: "multiple trailing slashes trimmed", raw: testHTTPSURL + "/api///", want: testHTTPSURL + "/api"},
 		{name: "custom path preserved", raw: testHTTPSURL + "/api/~smoke/", want: testHTTPSURL + "/api/~smoke"},
 		{name: "http loopback ip allowed", raw: testLoopbackURL, want: testLoopbackURL},
 		{name: "http loopback keeps port and trims path", raw: "http://localhost:1234/api/", want: "http://localhost:1234/api"},
@@ -69,8 +79,14 @@ func TestNormalizeBaseURL(t *testing.T) {
 func TestNormalizeBaseURLRejectsUnparseable(t *testing.T) {
 	for _, raw := range []string{"//slack.test", "slack.test", "://slack.test", "https://", "http://[::1"} {
 		t.Run(raw, func(t *testing.T) {
-			if got, err := NormalizeBaseURL(raw); err == nil {
+			got, err := NormalizeBaseURL(raw)
+			if err == nil {
 				t.Fatalf("NormalizeBaseURL(%q) = %q, want an error", raw, got)
+			}
+			// Sentinel, not just non-nil: dropping the scheme/host shape check still
+			// errors, only via ErrBaseURLRequiresHTTPS, and would survive err != nil.
+			if !errors.Is(err, ErrBaseURLInvalid) {
+				t.Fatalf("NormalizeBaseURL(%q) error = %v, want ErrBaseURLInvalid", raw, err)
 			}
 		})
 	}
@@ -160,20 +176,39 @@ func TestNewHTTPClientDoesNotReplayTokenOnRedirect(t *testing.T) {
 	}
 	req.Header.Set(testAuthHeader, "Bearer "+testToken)
 
+	// Both httptest servers bind 127.0.0.1, so net/http's own cross-host header
+	// stripping does NOT apply here: a followed redirect really would carry the
+	// Authorization header to the target. If the two ever differed, the assertion
+	// below would pass because Go stripped the header, not because this policy did.
+	if originHost, targetHost := hostnameOf(t, origin.URL), hostnameOf(t, target.URL); originHost != targetHost {
+		t.Fatalf("origin host %q != target host %q; Go would strip Authorization itself, making this test vacuous", originHost, targetHost)
+	}
+
 	resp, err := NewHTTPClient(5 * time.Second).Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Errorf, not Fatalf: the Authorization check below is the security property this
+	// test is named for, and aborting here would mean it never ran at all.
 	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("status = %d, want %d (redirect must be surfaced, not followed)", resp.StatusCode, http.StatusFound)
+		t.Errorf("status = %d, want %d (redirect must be surfaced, not followed)", resp.StatusCode, http.StatusFound)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if targetAuth != "" {
 		t.Fatalf("redirect target saw Authorization %q, want it never sent", targetAuth)
 	}
+}
+
+func hostnameOf(t *testing.T, raw string) string {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return parsed.Hostname()
 }
 
 func TestNewHTTPClientTimeout(t *testing.T) {
@@ -261,6 +296,15 @@ func TestTimeoutBudgetValidate(t *testing.T) {
 		{
 			name:      "overall not positive",
 			budget:    TimeoutBudget{Overall: 0, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrOverallTimeoutNotPositive,
+			wantText:  "-timeout must be greater than 0",
+		},
+		{
+			// Both non-positive: without this case the first two checks are mutually
+			// exclusive across the table and swapping their order survives.
+			name:      "both non-positive reports overall first",
+			budget:    TimeoutBudget{},
 			minFactor: 3,
 			wantErr:   ErrOverallTimeoutNotPositive,
 			wantText:  "-timeout must be greater than 0",
