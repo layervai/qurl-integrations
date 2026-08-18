@@ -1,0 +1,3 @@
+Error: No qURL API key is configured.
+
+  Hint: set QURL_API_KEY, or run `qurl login` once it can store keys for you.

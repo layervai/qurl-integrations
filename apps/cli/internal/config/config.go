@@ -1,80 +1,63 @@
-// Package config handles CLI configuration file loading and saving.
+// Package config loads qURL CLI configuration files and resolves setting
+// precedence. The precedence contract for every setting is:
+//
+//	command-line flag > environment variable > profile/config file > built-in default
+//
+// Config files never hold secrets: the API key lives in the credential store
+// (or the QURL_API_KEY environment variable), and a config file that tries to
+// smuggle one in is rejected outright rather than silently honored.
 package config
 
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds CLI configuration.
+// DefaultEndpoint is the production qURL API endpoint.
+const DefaultEndpoint = "https://api.layerv.ai"
+
+// productionHost is the host of DefaultEndpoint, used to classify whether a
+// configured endpoint talks to the production environment.
+const productionHost = "api.layerv.ai"
+
+// Sentinel errors for configuration failures. Every one maps to the same
+// configuration exit code; see internal/exitcode.
+var (
+	// ErrInvalidProfileName reports a profile name outside [A-Za-z0-9_-]+.
+	ErrInvalidProfileName = errors.New("cli: invalid profile name")
+	// ErrConfigFile reports a config file that exists but cannot be read or parsed.
+	ErrConfigFile = errors.New("cli: invalid config file")
+	// ErrSecretInConfig reports a config file carrying an api_key entry.
+	// Config files never hold secrets; the credential store and QURL_API_KEY do.
+	ErrSecretInConfig = errors.New("cli: config files must not contain an API key")
+)
+
+// Config holds the non-secret CLI settings a config file may carry.
 type Config struct {
-	APIKey   string `yaml:"api_key,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Output   string `yaml:"output,omitempty"`
-}
-
-var validKeys = map[string]bool{
-	"api_key":  true,
-	"endpoint": true,
-	"output":   true,
+	Color    string `yaml:"color,omitempty"`
 }
 
 var profileNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func validateProfileName(name string) error {
 	if !profileNamePattern.MatchString(name) {
-		return fmt.Errorf("invalid profile name %q: must contain only alphanumeric, hyphen, or underscore", name)
+		return fmt.Errorf("%w: %q must contain only alphanumeric, hyphen, or underscore characters", ErrInvalidProfileName, name)
 	}
 	return nil
 }
 
-// IsValidKey reports whether key is a recognized configuration key.
-func IsValidKey(key string) bool {
-	return validKeys[key]
-}
-
-// Get returns a config value by key.
-func (c *Config) Get(key string) string {
-	switch key {
-	case "api_key":
-		return c.APIKey
-	case "endpoint":
-		return c.Endpoint
-	case "output":
-		return c.Output
-	default:
-		return ""
-	}
-}
-
-// Set sets a config value by key.
-func (c *Config) Set(key, value string) error {
-	if !validKeys[key] {
-		return fmt.Errorf("unknown key %q (valid: api_key, endpoint, output)", key)
-	}
-	switch key {
-	case "api_key":
-		c.APIKey = value
-	case "endpoint":
-		c.Endpoint = value
-	case "output":
-		c.Output = value
-	}
-	return nil
-}
-
-// ValidKeys returns the list of valid configuration keys.
-func ValidKeys() []string {
-	return []string{"api_key", "endpoint", "output"}
-}
-
-// configDir returns the base config directory (~/.config/qurl).
-func configDir() string {
+// DefaultDir returns the base config directory (~/.config/qurl), or "" when
+// the home directory cannot be determined.
+func DefaultDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -82,65 +65,39 @@ func configDir() string {
 	return filepath.Join(home, ".config", "qurl")
 }
 
-// Path returns the default config file path.
-func Path() string {
-	dir := configDir()
+// Path returns the default config file path inside dir ("" when dir is "").
+func Path(dir string) string {
 	if dir == "" {
 		return ""
 	}
 	return filepath.Join(dir, "config.yaml")
 }
 
-// ProfilePath returns the config file path for a named profile.
-func ProfilePath(name string) (string, error) {
+// ProfilePath returns the config file path for a named profile inside dir.
+func ProfilePath(dir, name string) (string, error) {
 	if err := validateProfileName(name); err != nil {
 		return "", err
 	}
-	dir := configDir()
 	if dir == "" {
 		return "", nil
 	}
 	return filepath.Join(dir, "profiles", name+".yaml"), nil
 }
 
-// ListProfiles returns the names of available config profiles.
-func ListProfiles() ([]string, error) {
-	dir := configDir()
-	if dir == "" {
-		return nil, nil
-	}
-	profileDir := filepath.Join(dir, "profiles")
-	entries, err := os.ReadDir(profileDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read profiles dir: %w", err)
-	}
-	var names []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if ext := filepath.Ext(name); ext == ".yaml" || ext == ".yml" {
-			names = append(names, name[:len(name)-len(ext)])
-		}
-	}
-	return names, nil
+// Load reads the default config file inside dir. A missing file is not an
+// error: it yields the zero config so defaults apply.
+func Load(dir string) (*Config, error) {
+	return loadFile(Path(dir))
 }
 
-// Load reads the default config file.
-func Load() (*Config, error) {
-	return loadFile(Path())
-}
-
-// LoadProfile loads a named profile, falling back to the default config.
-func LoadProfile(name string) (*Config, error) {
+// LoadProfile loads a named profile from dir, falling back to the default
+// config file when name is empty. A named profile that does not exist is not
+// an error (it yields the zero config); an unreadable or malformed file is.
+func LoadProfile(dir, name string) (*Config, error) {
 	if name == "" {
-		return Load()
+		return Load(dir)
 	}
-	p, err := ProfilePath(name)
+	p, err := ProfilePath(dir, name)
 	if err != nil {
 		return nil, err
 	}
@@ -157,47 +114,83 @@ func loadFile(p string) (*Config, error) {
 		if os.IsNotExist(err) {
 			return &Config{}, nil
 		}
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("%w: read %s: %w", ErrConfigFile, p, err)
+	}
+
+	if err := rejectSecrets(data, p); err != nil {
+		return nil, err
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		return nil, fmt.Errorf("%w: parse %s: %w", ErrConfigFile, p, err)
 	}
 	return &cfg, nil
 }
 
-// Save writes the default config file with restricted permissions.
-func Save(cfg *Config) error {
-	return saveFile(Path(), cfg)
+// rejectSecrets refuses config files that carry credential-shaped keys. The
+// v2 contract is that config files hold no secrets, so an api_key entry left
+// over from an older setup is surfaced loudly instead of silently ignored —
+// silence would leave a live credential sitting in a plaintext file.
+func rejectSecrets(data []byte, path string) error {
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		// Structural problems are reported by the typed parse in loadFile.
+		return nil //nolint:nilerr // malformed YAML is diagnosed by the caller's typed parse
+	}
+	for key := range raw {
+		if key == "api_key" || strings.Contains(strings.ToLower(key), "secret") {
+			return fmt.Errorf("%w: remove %q from %s and use `qurl login` or QURL_API_KEY instead", ErrSecretInConfig, key, path)
+		}
+	}
+	return nil
 }
 
-// SaveProfile writes a named profile config file.
-// If name is empty, it saves to the default config file.
-func SaveProfile(name string, cfg *Config) error {
-	if name == "" {
-		return Save(cfg)
-	}
-	p, err := ProfilePath(name)
-	if err != nil {
-		return err
-	}
-	return saveFile(p, cfg)
+// Save writes the default config file inside dir with restricted permissions.
+func Save(dir string, cfg *Config) error {
+	return saveFile(Path(dir), cfg)
 }
 
 func saveFile(p string, cfg *Config) error {
 	if p == "" {
-		return errors.New("cannot determine config path")
+		return fmt.Errorf("%w: cannot determine config path", ErrConfigFile)
 	}
-
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+		return fmt.Errorf("%w: create config dir: %w", ErrConfigFile, err)
 	}
-
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return fmt.Errorf("%w: encode config: %w", ErrConfigFile, err)
 	}
+	return os.WriteFile(p, data, 0o600)
+}
 
-	return os.WriteFile(p, data, 0o600) // Restricted: may contain API key
+// Resolve returns the first non-empty value from: explicit flag value, the
+// named environment variable, the config file value, then the default. This
+// is the single precedence implementation every setting goes through.
+func Resolve(flagValue, envKey string, lookup func(string) (string, bool), configValue, defaultValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if lookup != nil {
+		if v, ok := lookup(envKey); ok && v != "" {
+			return v
+		}
+	}
+	if configValue != "" {
+		return configValue
+	}
+	return defaultValue
+}
+
+// IsProductionEndpoint reports whether endpoint addresses the production qURL
+// environment. Anything that is not the production host — sandboxes, local
+// mocks, self-hosted deployments — is treated as non-production, which errs
+// on the side of allowing test CRIDs through.
+func IsProductionEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Hostname(), productionHost)
 }

@@ -4,11 +4,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 )
 
+// docsCmd generates man pages and markdown docs from the command tree. It is
+// load-bearing for releases: .goreleaser.yml runs `qurl docs man -d manpages`
+// in its before hook and ships the result in every archive, so the command
+// name, modes, and -d flag are a distribution contract.
 func docsCmd() *cobra.Command {
 	var outDir string
 
@@ -16,17 +19,12 @@ func docsCmd() *cobra.Command {
 		Use:    "docs [man|markdown]",
 		Short:  "Generate documentation (man pages or markdown)",
 		Hidden: true,
-		Args:   cobra.ExactArgs(1),
+		Args:   exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := args[0]
 			if mode != "man" && mode != "markdown" {
 				return cmd.Usage()
 			}
-
-			// Disable color in generated docs and restore after.
-			origNoColor := color.NoColor
-			color.NoColor = true
-			defer func() { color.NoColor = origNoColor }()
 
 			dir := filepath.Clean(outDir)
 			if err := os.MkdirAll(dir, 0o750); err != nil {
