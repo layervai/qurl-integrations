@@ -111,10 +111,9 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 
 	// Spelled out rather than deferred to slacksmoke.ErrTokenEnvName: a sentinel sits on
 	// both sides of the comparison and moves with a reword, which would leave this
-	// wording — described to operators in docs/operating.md — pinned nowhere in the
-	// repo. The -base-url rows below spell theirs out for the same reason; slacksmoke
-	// records that these sentinels carry their operator-facing text verbatim, because
-	// commands print them as-is.
+	// operator-facing wording pinned nowhere in the repo. The -base-url rows below spell
+	// theirs out for the same reason — slacksmoke states that rule outright on its
+	// timeout sentinels, and these reach stderr the same way, printed as-is.
 	const wantTokenEnvName = "-token-env must be a POSIX environment variable name"
 
 	tests := []struct {
@@ -140,12 +139,8 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 		// it makes an empty wantStderr fail on its own, since no diagnostic here is a
 		// blank line.
 		//
-		// It follows that the flag.Parse rows spell out that package's "invalid value
-		// ... for flag ..." attribution, which pins the blame on the right flag.
-		//
-		// TestRunDoesNotEchoTokenEnvName below compares the whole stream, for a property
-		// this column does not have: only the first line is checked here, so a forged
-		// line appended after a legitimate diagnostic still satisfies every row.
+		// It follows that the two -expect-upload rows spell out that package's "invalid
+		// value ... for flag ..." attribution, which pins the blame on the right flag.
 		wantStderr string
 	}{
 		{"no token in the environment", nil, "", testTokenEnv + " is not set or is empty"},
@@ -153,16 +148,18 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 		{"token env name with a newline", []string{flagTokenEnv, "SLACK\nTOKEN"}, testToken, wantTokenEnvName},
 		{"token env name with a hyphen", []string{flagTokenEnv, "SLACK-TOKEN"}, testToken, wantTokenEnvName},
 		{"token env name starting with a digit", []string{flagTokenEnv, "1TOKEN"}, testToken, wantTokenEnvName},
-		// With "no token in the environment" above, this is the pair the two
-		// //nolint:gosec suppressions in writeConfigValidationError rest on: both
-		// branches echo the operator-supplied -token-env back, so the env name is part
-		// of what these two rows pin rather than incidental context. This branch is the
-		// one whose text was not pinned anywhere.
+		// This row and "no token in the environment" above are the two //nolint:gosec
+		// branches in writeConfigValidationError, so the echoed env name is part of what
+		// they pin — "missing Slack bot token" without it is a guessing game once
+		// -token-env has been pointed somewhere custom. This branch's text was pinned
+		// nowhere.
 		{"token with control characters", nil, "xoxb-\ntest", testTokenEnv + " contains control characters"},
 		{"user agent with control characters", []string{"-user-agent", "smoke\r\nX: y"}, testToken, "-user-agent contains control characters"},
 		{"non-https base url", []string{flagBaseURL, "http://slack.example.com"}, testToken, "-base-url must use https unless host is localhost or loopback"},
 		{"base url with query", []string{flagBaseURL, "https://slack.example.com?a=b"}, testToken, "-base-url must not include query or fragment"},
 		{"base url with userinfo", []string{flagBaseURL, "https://user:pw@slack.example.com"}, testToken, "-base-url must not include userinfo"},
+		// The one -base-url rejection with no command-level row. slacksmoke's own test
+		// matches this sentinel with errors.Is, so its text was pinned nowhere.
 		{"base url without a scheme", []string{flagBaseURL, "slack.example.com"}, testToken, "invalid -base-url"},
 		{"unparsable channel id", []string{"-channels", "not-a-channel"}, testToken, `invalid conversation ID: "not-a-channel"`},
 		{"expect-upload without a timestamp", []string{"-expect-upload", testChannel}, testToken, `invalid value "` + testChannel + `" for flag -expect-upload: -expect-upload must be CHANNEL:TIMESTAMP`},
@@ -189,8 +186,17 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 			if stdout != "" {
 				t.Errorf("stdout = %q, want nothing written for an invocation error", stdout)
 			}
-			if line, _, _ := strings.Cut(stderr, "\n"); line != tt.wantStderr {
+			line, rest, _ := strings.Cut(stderr, "\n")
+			if line != tt.wantStderr {
 				t.Errorf("stderr first line = %q, want exactly %q", line, tt.wantStderr)
+			}
+			// Nothing may follow the diagnostic except the flag package's usage block.
+			// Checking only the first line would otherwise let a regression append a
+			// forged second line — the failure the //nolint:gosec suppressions in
+			// writeConfigValidationError make possible — with the package staying green.
+			// The usage text itself is still not pinned, for the reason given above.
+			if rest != "" && !strings.HasPrefix(rest, "Usage of slack-history-upload-smoke:") {
+				t.Errorf("stderr after the first line = %q, want nothing or the usage block", rest)
 			}
 		})
 	}
@@ -256,18 +262,6 @@ func TestRunHelpExitsZero(t *testing.T) {
 	}
 	if stdout != "" {
 		t.Errorf("stdout = %q, want the usage on stderr only", stdout)
-	}
-}
-
-// TestRunNamesTheTokenEnvVarItLookedAt pins the one error message an operator hits
-// first. "missing Slack bot token" without the variable name is a guessing game when
-// -token-env has been pointed somewhere custom.
-func TestRunNamesTheTokenEnvVarItLookedAt(t *testing.T) {
-	t.Parallel()
-
-	_, _, stderr := runCLI(t, []string{flagTokenEnv, testTokenEnv}, testEnv(""))
-	if !strings.Contains(stderr, testTokenEnv) {
-		t.Errorf("stderr = %q, want the environment variable named", stderr)
 	}
 }
 
