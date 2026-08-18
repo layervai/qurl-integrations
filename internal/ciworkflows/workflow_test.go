@@ -165,6 +165,10 @@ type githubJob struct {
 	Name  string `yaml:"name"`
 	Needs any    `yaml:"needs"`
 	Steps []step `yaml:"steps"`
+	// Uses is set only on a job that calls a reusable workflow. Such a job
+	// reports its checks as "<this job> / <inner job>" rather than under its
+	// own name, which is why required_checks_test.go resolves it separately.
+	Uses string `yaml:"uses"`
 }
 
 type step struct {
@@ -514,7 +518,7 @@ func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, work
 	qualityGates := map[string]bool{}
 	for id, job := range workflow.Jobs {
 		needs := parseWorkflowNeeds(t, id, job.Needs)
-		if !looksLikeRequiredWorkflowQualityGate(spec, job, needs) {
+		if !looksLikeRequiredWorkflowQualityGate(spec, &job, needs) {
 			continue
 		}
 		if !containsString(needs, "changes") {
@@ -530,7 +534,7 @@ func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, work
 	return qualityGates
 }
 
-func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job githubJob, needs []string) bool {
+func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job *githubJob, needs []string) bool {
 	if !strings.HasPrefix(job.Name, spec.checkNamePrefix) {
 		return false
 	}
