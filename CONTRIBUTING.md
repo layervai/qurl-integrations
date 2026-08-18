@@ -161,13 +161,59 @@ context. It is separate from the existing
 `age-check / Check GitHub Actions pin ages` context, even though both contexts
 are produced by the same workflow file.
 
-The full required set is those nine aggregates plus `Workflow Contract`,
-`Validate GitHub Actions pins`, `age-check / Check GitHub Actions pin ages`,
-`age-check / check-docker-age`, `age-check / check-go-age`, and
-`age-check / check-pip-age` — fifteen in all. **Required contexts match
-case-sensitively**, and a context that matches no job does not fail open: it
-pins the merge box at "Expected — Waiting for status to be reported" until an
-admin overrides it.
+The full required set is the block below — those nine aggregates plus
+`Workflow Contract`, `Validate GitHub Actions pins`, and the four
+`age-check / *` contexts, fifteen in all. That block is the machine-readable
+source of truth: `internal/ciworkflows` parses it, so a context added, removed,
+or respelled belongs there first. **Required contexts match case-sensitively**,
+and a context that matches no job does not fail open: it pins the merge box at
+"Expected — Waiting for status to be reported" until an admin overrides it.
+
+<!-- BEGIN required-contexts -->
+
+```text
+slack / required
+discord / required
+chrome-extension / required
+edge-extension / required
+teams / required
+cli / required
+s3-static-connector / required
+e2e / required
+shared / required
+Workflow Contract
+Validate GitHub Actions pins
+age-check / Check GitHub Actions pin ages
+age-check / check-docker-age
+age-check / check-go-age
+age-check / check-pip-age
+```
+
+<!-- END required-contexts -->
+
+What that block buys, and what it does not. `internal/ciworkflows` asserts that
+every context in it resolves to a job this repo actually defines — a job's
+`name:`, its job id where it sets none, or the caller half of a
+`<caller-job> / <inner-job>` reusable call — and that its nine aggregates match
+`requiredWorkflowSpecs` and README.md exactly. A typo, a case slip, or a job
+rename that orphans a documented context fails `Workflow Contract` at PR time.
+
+It cannot read the live setting. That needs `administration: read`, which
+`GITHUB_TOKEN` cannot be granted at all (the workflow `permissions:` block has
+no such key) and which no repo or org secret here carries; branch protection is
+also unreadable unauthenticated, and this repo uses classic protection, so the
+low-permission rulesets endpoints return nothing. A settings edit that never
+touches this file therefore stays invisible to CI — the exact shape of the
+2026-08-14 incident below. Diff the two by hand as the last step of any
+protection change, with a `gh` login that has admin on the repo:
+
+```bash
+QURL_LIVE_BRANCH_PROTECTION=1 go test -run TestLiveBranchProtection -count=1 ./internal/ciworkflows/...
+```
+
+That test prints the live set against the documented one, context by context,
+and flags case-only differences by name. Without the variable it skips, so CI
+and everyday `go test ./...` runs never reach the API.
 
 On 2026-08-14 the required list was six contexts — `slack / required`,
 `Validate GitHub Actions pins`, and the four `age-check / *`. An edit that
