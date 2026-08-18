@@ -200,6 +200,10 @@ func cliSentinelCode(err error) (int, bool) {
 		// A freshly minted, verified link that then refuses to serve is the
 		// service answering outside its contract.
 		return ServerError, true
+	case errors.Is(err, consume.ErrUnopenableLink):
+		// A verified answer whose link is not a web URL is likewise the
+		// service outside its contract — never handed to a launcher.
+		return ServerError, true
 	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
 		return Auth, true
 	case errors.Is(err, config.ErrInvalidProfileName),

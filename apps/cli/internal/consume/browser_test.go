@@ -75,3 +75,25 @@ func TestLauncherOpenSurfacesFailure(t *testing.T) {
 		t.Fatalf("Open err = %v, want the runner's failure in the chain", err)
 	}
 }
+
+// TestOpenRefusesNonWebSchemes pins the launcher's scheme gate: CRID
+// verification proves the answer matches the CRID, not that the link is
+// browser-safe, so anything but http(s) is refused unlaunched.
+func TestOpenRefusesNonWebSchemes(t *testing.T) {
+	for _, link := range []string{"javascript:alert(1)", "file:///etc/passwd", "-http://x", "vbscript:x", ""} {
+		ran := false
+		l := &Launcher{GOOS: "darwin", Run: func(context.Context, []string) error { ran = true; return nil }}
+		err := l.Open(context.Background(), link)
+		if !errors.Is(err, ErrUnopenableLink) {
+			t.Errorf("Open(%q) err = %v, want ErrUnopenableLink", link, err)
+		}
+		if ran {
+			t.Errorf("Open(%q) launched the browser", link)
+		}
+	}
+	ok := false
+	l := &Launcher{GOOS: "darwin", Run: func(context.Context, []string) error { ok = true; return nil }}
+	if err := l.Open(context.Background(), "https://qurl.link/#qv2.x"); err != nil || !ok {
+		t.Errorf("https link must launch: err=%v launched=%t", err, ok)
+	}
+}

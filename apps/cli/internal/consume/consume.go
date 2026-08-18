@@ -64,6 +64,9 @@ const (
 	// wraps add the HTTP status.
 	MsgLinkFetch = "the download failed"
 
+	// MsgUnopenableLink frames a resolved link the browser must not open.
+	MsgUnopenableLink = "the service answered with a link this command won't open"
+
 	// The fixed fragments wraps append to MsgFileExists.
 	msgForceRemedy   = "pass --force to replace it"
 	msgDirectoryDest = "it is a directory — give a file path instead"
@@ -84,6 +87,9 @@ var (
 	// ErrLinkFetch reports a link host answer outside the download contract
 	// (server error).
 	ErrLinkFetch = errors.New(MsgLinkFetch)
+	// ErrUnopenableLink reports a verified resolve answer whose link is not
+	// a web URL — outside the service's contract (server error).
+	ErrUnopenableLink = errors.New(MsgUnopenableLink)
 )
 
 // Decide picks the action from local facts only: stdout's TTY-ness and the

@@ -423,3 +423,25 @@ func mustNotExistCmd(t *testing.T, path string) {
 		t.Errorf("%s exists (stat err %v), want absent", path, err)
 	}
 }
+
+// TestGetJSONModeRefusesBrowser pins the refuse-loudly symmetry: JSON mode
+// is a machine asking for data, and a spawned browser is not data — same
+// principle as the --file - refusal, applied before any network call.
+func TestGetJSONModeRefusesBrowser(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	browser := &fakeBrowser{}
+	res := runCLI(t, &runOpts{
+		args:    []string{"--endpoint", srv.URL, "-o", "json", "get", srv.Key.CRID},
+		tty:     true,
+		browser: browser,
+	})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	if len(browser.opened) != 0 {
+		t.Error("JSON mode must never launch a browser")
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("the refusal must fire before any request")
+	}
+}

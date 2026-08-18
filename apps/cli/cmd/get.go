@@ -63,6 +63,12 @@ use ` + "`qurl resolve`" + ` if you only need the link.`,
 				// flag.
 				return exitcode.UsageError(errors.New(msgFileDashJSON))
 			}
+			if flags.file == "" && opts.resolvedFormat == output.FormatJSON {
+				// JSON mode is a machine asking for data; spawning a
+				// browser as a side effect would surprise it — the same
+				// refuse-loudly principle as --file - above.
+				return exitcode.UsageError(errors.New(msgBrowserJSON))
+			}
 			return runGet(cmd.Context(), opts, args[0], flags)
 		},
 	}

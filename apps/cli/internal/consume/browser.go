@@ -3,6 +3,7 @@ package consume
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strings"
 )
@@ -55,8 +56,17 @@ type Launcher struct {
 }
 
 // Open launches the browser at link. The caller is responsible for only
-// passing links that already passed CRID verification.
+// passing links that already passed CRID verification; Open additionally
+// refuses anything but a web URL — CRID verification proves the answer
+// matches the CRID, not that the link is a browser-safe scheme, and a
+// launcher would happily act on file:// or javascript: (and some parse a
+// leading '-' as a flag). A verified answer failing this gate means the
+// service replied outside its contract.
 func (l *Launcher) Open(ctx context.Context, link string) error {
+	u, err := url.Parse(link)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return fmt.Errorf("%w: the resolved link is not a web URL", ErrUnopenableLink)
+	}
 	argv := append(BrowserCommand(l.LookupEnv, l.GOOS), link)
 	run := l.Run
 	if run == nil {

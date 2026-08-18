@@ -65,6 +65,10 @@ const (
 	// msgFileDashJSON refuses combining raw-byte output with the JSON
 	// document format.
 	msgFileDashJSON = "--file - streams the raw file bytes to stdout and can't be combined with --output json"
+
+	// msgBrowserJSON refuses browser-open under the JSON output mode: a
+	// machine asked for data, and a spawned browser is not data.
+	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl resolve --output json` for the link"
 )
 
 // customerMessages returns every fixed customer-facing string the cmd
@@ -85,5 +89,6 @@ func customerMessages() []string {
 		msgBrowserFailed,
 		msgFileNeedsPath,
 		msgFileDashJSON,
+		msgBrowserJSON,
 	}
 }
