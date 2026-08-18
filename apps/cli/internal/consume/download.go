@@ -36,7 +36,9 @@ func NewHTTPClient() *http.Client {
 }
 
 // Downloader fetches the bytes behind freshly minted, already-verified
-// access links. It is single-use and not safe for concurrent use.
+// access links. It is single-use and not safe for concurrent use (the
+// client-caching test reuses one instance only to assert the lazily built
+// Client is retained — a white-box check, not a supported pattern).
 type Downloader struct {
 	// Client performs the GETs; nil means NewHTTPClient's default, built on
 	// first use and kept on the Downloader so every request of one download
