@@ -443,3 +443,52 @@ func TestResolveSubSecondTTLRefused(t *testing.T) {
 		t.Error("sub-second ttl must be refused before any request")
 	}
 }
+
+// TestListJSONCarriesHasMore pins the scripting contract: has_more — not
+// next_cursor presence — is the pagination terminator, so the JSON
+// projection must carry it even on a zero-item page.
+func TestListJSONCarriesHasMore(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.Script(http.MethodGet, "/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, []map[string]any{}, map[string]any{"next_cursor": "page2", "has_more": true})
+	})
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "list"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), `"has_more": true`) {
+		t.Errorf("json list must carry has_more on an empty-but-more page; got %s", res.stdout.String())
+	}
+}
+
+// TestPublishJSONCarriesFoundExisting mirrors the text-mode note for scripts.
+func TestPublishJSONCarriesFoundExisting(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "-o", "json", "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), `"found_existing": true`) {
+		t.Errorf("json publish must carry found_existing; got %s", res.stdout.String())
+	}
+}
+
+// TestInsecureEndpointWarning pins the cleartext-credential warning table:
+// plain http warns only off-loopback (mocks and harnesses are exempt).
+func TestInsecureEndpointWarning(t *testing.T) {
+	cases := map[string]bool{
+		"http://api.example.com":    true,
+		"http://192.0.2.10":         true,
+		"https://api.example.com":   false,
+		"http://localhost:8080":     false,
+		"http://api.localhost:8080": false,
+		"http://127.0.0.1:8080":     false,
+		"http://[::1]:8080":         false,
+	}
+	for endpoint, wantWarn := range cases {
+		if got := insecureEndpointWarning(endpoint) != ""; got != wantWarn {
+			t.Errorf("insecureEndpointWarning(%q) warned=%t, want %t", endpoint, got, wantWarn)
+		}
+	}
+}

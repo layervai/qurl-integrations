@@ -19,6 +19,9 @@ type publishJSON struct {
 	Status     string     `json:"status,omitempty"`
 	CreatedAt  *time.Time `json:"created_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	// FoundExisting mirrors the text-mode already-published note for
+	// scripts; emitted only when true so the mint-path document is stable.
+	FoundExisting bool `json:"found_existing,omitempty"`
 }
 
 type resolveJSON struct {
@@ -40,8 +43,13 @@ type listItemJSON struct {
 }
 
 type listJSON struct {
-	Resources  []listItemJSON `json:"resources"`
-	NextCursor string         `json:"next_cursor,omitempty"`
+	Resources []listItemJSON `json:"resources"`
+	// HasMore — not next_cursor presence — is the pagination terminator
+	// (the platform legitimately serves short and even zero-item pages with
+	// has_more=true). false is the terminal signal, so the field is always
+	// emitted rather than omitempty'd away.
+	HasMore    bool   `json:"has_more"`
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 type deleteJSON struct {
@@ -65,12 +73,13 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
-			CRID:       res.CRID,
-			ResourceID: res.ResourceID,
-			TargetURL:  res.TargetURL,
-			Status:     res.Status,
-			CreatedAt:  res.CreatedAt,
-			ExpiresAt:  res.ExpiresAt,
+			CRID:          res.CRID,
+			ResourceID:    res.ResourceID,
+			TargetURL:     res.TargetURL,
+			Status:        res.Status,
+			CreatedAt:     res.CreatedAt,
+			ExpiresAt:     res.ExpiresAt,
+			FoundExisting: res.FoundExisting,
 		})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, primaryID(res.CRID, res.ResourceID))
@@ -166,7 +175,7 @@ func (p *Printer) resolveDetail(res *qurlapi.Resolved) string {
 func (p *Printer) List(page *qurlapi.ResourcePage) error {
 	switch {
 	case p.format == FormatJSON:
-		out := listJSON{Resources: make([]listItemJSON, 0, len(page.Items)), NextCursor: page.NextCursor}
+		out := listJSON{Resources: make([]listItemJSON, 0, len(page.Items)), HasMore: page.HasMore, NextCursor: page.NextCursor}
 		for _, item := range page.Items {
 			out.Resources = append(out.Resources, listItemJSON{
 				CRID:       item.CRID,

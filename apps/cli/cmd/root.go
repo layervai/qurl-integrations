@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -187,6 +189,26 @@ func (o *globalOpts) printer() *output.Printer {
 	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
 }
 
+// insecureEndpointWarning returns a warning when the endpoint would carry
+// the bearer credential over cleartext http to a non-loopback host. Loopback
+// is exempt: local mocks and harnesses are legitimately plain http. The
+// transport already refuses redirects so the credential cannot follow a
+// Location elsewhere; this closes the sibling misconfiguration.
+func insecureEndpointWarning(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	return fmt.Sprintf(msgInsecureEndpoint, endpoint)
+}
+
 // skipsSettings reports whether cmd (or an ancestor) must answer without
 // touching configuration: version, completion (and cobra's hidden __complete
 // machinery, which runs on every shell TAB), docs, and help. A malformed or
@@ -226,6 +248,9 @@ func (o *globalOpts) newClient() (qurlapi.Client, error) {
 	}
 	if err := auth.ValidateKeyShape(key); err != nil {
 		return nil, err
+	}
+	if warning := insecureEndpointWarning(o.resolvedEndpoint); warning != "" {
+		o.printer().Warnf("%s", warning)
 	}
 	return qurlapi.New(&qurlapi.Config{
 		BaseURL:      o.resolvedEndpoint,
