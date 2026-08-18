@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +17,11 @@ import (
 )
 
 const (
+	// defaultConversationTypes includes im and mpim on purpose: the agent's primary
+	// surface IS the DM, so a scan that skipped them would measure a narrower surface
+	// than the seam it is checking, and the recorded measurement covered them too. The
+	// command stays content-free either way — but it does read DM message objects into
+	// memory, so the runbook says so and -conversation-types narrows it.
 	defaultConversationTypes = "public_channel,private_channel,im,mpim"
 	defaultMaxConversations  = 25
 	defaultMaxPages          = 4
@@ -28,10 +32,17 @@ const (
 	// conversations.* read methods.
 	maxPageLimit = 1000
 
-	// maxThreadsCeiling bounds -max-threads the way maxPageLimit bounds -page-limit.
-	// Sampling more threads than a page can hold cannot find more threads, and the value
-	// sizes a per-page allocation.
+	// maxThreadsCeiling bounds -max-threads the way maxPageLimit bounds -page-limit:
+	// sampling more threads than a page can hold cannot find more threads.
 	maxThreadsCeiling = maxPageLimit
+
+	// maxConversationsCeiling and maxPagesCeiling exist so every bound flag has one.
+	// Without them -timeout was the only thing standing between a mistyped value and a
+	// scan that reads until the budget runs out, which then reports as a truncation
+	// rather than as the typo it was. Generous: the point is refusing absurd values, not
+	// second-guessing a deliberate one.
+	maxConversationsCeiling = 10_000
+	maxPagesCeiling         = 1_000
 
 	// maxSlackResponseBytes is deliberately far above the production seam's 512 KB
 	// (slackAgentThreadHistoryResponseBodyLimit): that one reads a bounded thread
@@ -50,9 +61,9 @@ const (
 	maxSlackReasonBytes = 200
 
 	// The two surface names double as the Web API method names they come from.
-	surfaceHistory          = "conversations.history"
-	methodConversationsList = "conversations.list"
-	surfaceReplies          = "conversations.replies"
+	methodConversationsHistory = "conversations.history"
+	methodConversationsList    = "conversations.list"
+	methodConversationsReplies = "conversations.replies"
 )
 
 var (
@@ -143,7 +154,13 @@ type messageObservation struct {
 	shape filesShape
 	// ts identifies the message across surfaces so the same one is not counted twice.
 	// A Slack timestamp, not content.
-	ts               string
+	ts string
+	// threadTS and replyCount are what threadParents selects on. Carried here rather than
+	// re-decoded because this envelope has already walked the message: reading them
+	// separately parsed every message a second time, on every history page, and threw the
+	// result away entirely under -skip-replies.
+	threadTS         string
+	replyCount       int
 	entries          int
 	fileShareSubtype bool
 	// classified is internal.SlackMessageHasUpload's verdict — the same function the
@@ -181,43 +198,50 @@ func (o messageObservation) missedUpload() bool {
 // replays a caption to the model stripped of the fact that it described a file, while
 // a false positive only annotates a caption that had nothing to annotate.
 //
-// The raw message is decoded twice on purpose. The map decode is how the shape reader
-// learns whether the `files` KEY was there at all, which a struct decode erases: an
-// absent key and an explicit null both land as a nil RawMessage. That distinction is
-// the whole point here, because "Slack stopped sending the array" and "Slack sent null
-// for a message with no files" look identical to the classifier and could not be more
-// different to an operator.
+// Telling an absent `files` key from an explicit null is the distinction the shape
+// column exists for — "Slack stopped sending the array" and "Slack sent null for a
+// message with no files" are indistinguishable to the classifier and could not be more
+// different to an operator. One decode is enough for it: json.RawMessage implements
+// Unmarshaler, and encoding/json calls Unmarshaler even for a JSON null, so an absent
+// key leaves the field nil while an explicit null stores the literal bytes "null". The
+// standard library pins that pair directly in TestNullRawMessage (encoding/json), and
+// TestObserveMessageDistinguishesAbsentFromNull holds it down from this side.
+//
+// Note the predicate is `!= nil`, not a length test: "null" is four bytes, so only an
+// absent key is nil.
 func observeMessage(raw json.RawMessage) (messageObservation, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return messageObservation{}, fmt.Errorf("message JSON: %w", err)
-	}
 	var envelope struct {
-		TS      string          `json:"ts"`
-		Subtype string          `json:"subtype"`
-		Files   json.RawMessage `json:"files"`
+		TS         string          `json:"ts"`
+		ThreadTS   string          `json:"thread_ts"`
+		ReplyCount int             `json:"reply_count"`
+		Subtype    string          `json:"subtype"`
+		Files      json.RawMessage `json:"files"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return messageObservation{}, fmt.Errorf("message envelope JSON: %w", err)
+		return messageObservation{}, fmt.Errorf("message JSON: %w", err)
 	}
 
-	files, keyPresent := fields["files"]
 	observation := messageObservation{
 		shape:            filesShapeAbsent,
 		ts:               envelope.TS,
+		threadTS:         envelope.ThreadTS,
+		replyCount:       envelope.ReplyCount,
 		fileShareSubtype: envelope.Subtype == slackSubtypeFileShare,
 		classified:       internal.SlackMessageHasUpload(envelope.Files, envelope.Subtype),
 	}
-	if keyPresent {
-		observation.shape, observation.entries = classifyFilesShape(files)
+	if envelope.Files != nil {
+		observation.shape, observation.entries = classifyFilesShape(envelope.Files)
 	}
 	return observation, nil
 }
 
 // classifyFilesShape buckets a present `files` value by JSON shape alone.
 func classifyFilesShape(files json.RawMessage) (shape filesShape, entries int) {
-	trimmed := strings.TrimSpace(string(files))
-	if trimmed == "null" {
+	// Compared directly rather than via TrimSpace: encoding/json hands a RawMessage its
+	// value unpadded, a guarantee this repo already pins in TestSlackEventFilesNestedDecodeIsUnpadded.
+	// Going through TrimSpace also copied the entire files array — potentially several KB
+	// — solely to test it against a four-byte literal.
+	if string(files) == "null" {
 		return filesShapeNull, 0
 	}
 	var decoded []json.RawMessage
@@ -376,12 +400,12 @@ func newScanResult(cfg *scanConfig) scanResult {
 			MaxThreads:        cfg.MaxThreads,
 			SkipReplies:       cfg.SkipReplies,
 		},
-		WorkspaceShape: cleanOperatorNote(cfg.WorkspaceShape),
-		TokenOwner:     cleanOperatorNote(cfg.TokenOwner),
-		Scopes:         cleanOperatorNote(cfg.Scopes),
+		WorkspaceShape: sanitizeReportText(cfg.WorkspaceShape),
+		TokenOwner:     sanitizeReportText(cfg.TokenOwner),
+		Scopes:         sanitizeReportText(cfg.Scopes),
 		Conversations:  []conversationResult{},
-		History:        surfaceTally{Surface: surfaceHistory},
-		Replies:        surfaceTally{Surface: surfaceReplies},
+		History:        surfaceTally{Surface: methodConversationsHistory},
+		Replies:        surfaceTally{Surface: methodConversationsReplies},
 	}
 }
 
@@ -408,26 +432,21 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 	}
 
 	ledger := map[string]struct{}{}
-	coverage := scanCoverage{}
+	truncated := false
 	for _, conversation := range conversations {
-		record, historyRead := scanConversation(ctx, client, cfg, conversation, &result, ledger)
-		if historyRead {
-			coverage.conversationsRead++
-		}
-		result.Conversations = append(result.Conversations, record)
+		result.Conversations = append(result.Conversations, scanConversation(ctx, client, cfg, conversation, &result, ledger))
 		if ctx.Err() != nil {
-			coverage.truncated = true
+			truncated = true
 			break
 		}
 	}
-	if !coverage.truncated {
+	if !truncated {
 		// Skipped on a truncated scan rather than run and failed: with the budget
 		// already gone, every lookup would error and each one would be reported as a
 		// classifier miss, burying the timeout under failures it caused.
 		result.ExpectedUploads = checkExpectations(ctx, client, cfg)
 	}
-	coverage.distinctUploads = len(ledger)
-	result.Contract = evaluateContract(cfg, &result, coverage)
+	result.Contract = evaluateContract(cfg, &result, len(ledger), truncated)
 	if !result.Contract.Holds {
 		return result, fmt.Errorf("upload-detection contract does not hold: %s", strings.Join(result.Contract.Failures, "; "))
 	}
@@ -437,24 +456,17 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 	return result, nil
 }
 
-// scanCoverage is how much of the workspace the scan actually got through. It gates the
-// counts-based failures in evaluateContract, which are only meaningful over a complete
-// read.
-type scanCoverage struct {
-	// conversationsRead counts conversations whose HISTORY surface was read. The replies
-	// sample is supplementary evidence on top of that; see scanConversation.
-	conversationsRead int
-	// distinctUploads is how many distinct MESSAGES classified as uploads across both
-	// surfaces. Deduplicated because a thread root arrives on each; see DistinctUploads.
-	distinctUploads int
-	truncated       bool
-}
-
 // evaluateContract turns the counts into the verdict. Read the failures as a list of
 // distinct things that can rot, not as severity levels: each one is on its own.
-func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage) contractVerdict {
+//
+// result.History.Conversations IS the coverage gate: it counts conversations whose
+// HISTORY surface was read, and that surface alone is a complete reading — the replies
+// sample is supplementary evidence on top of it (see scanConversation). distinctUploads
+// is passed rather than summed from the tallies because it is deduplicated across
+// surfaces; truncated is the only input that is not derivable from the report.
+func evaluateContract(cfg *scanConfig, result *scanResult, distinctUploads int, truncated bool) contractVerdict {
 	verdict := contractVerdict{
-		DistinctUploads:   coverage.distinctUploads,
+		DistinctUploads:   distinctUploads,
 		MinUploads:        cfg.MinUploads,
 		MissedUploads:     result.History.MissedUploads + result.Replies.MissedUploads,
 		UncountableShapes: result.History.UncountableShapes + result.Replies.UncountableShapes,
@@ -465,26 +477,25 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 	// files array has stopped arriving" would point the operator at Slack when the
 	// answer is a missing scope or an exhausted budget, so they suppress that failure
 	// rather than stacking with it.
+	conversationsRead := result.History.Conversations
 	switch {
-	case coverage.truncated:
+	case truncated:
 		verdict.Failures = append(verdict.Failures, "the scan did not finish within -timeout; these counts describe a partial read")
-	case coverage.conversationsRead == 0:
+	case conversationsRead == 0:
 		verdict.Failures = append(verdict.Failures, errNoConversationsRead.Error()+"; the scan proves nothing about the upload contract")
 	}
 	if verdict.MissedUploads > 0 {
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
 			"%d message(s) carried a populated files array that SlackMessageHasUpload did not report as an upload", verdict.MissedUploads))
 	}
-	if coverage.conversationsRead > 0 && !coverage.truncated && verdict.DistinctUploads < cfg.MinUploads {
+	if conversationsRead > 0 && !truncated && verdict.DistinctUploads < cfg.MinUploads {
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
 			"classified %d distinct upload(s), below -min-uploads %d; if this workspace does contain uploads, the files array has stopped arriving",
 			verdict.DistinctUploads, cfg.MinUploads))
 	}
-	// Both counts are the same class — something arrived that this command could not
-	// count — so one flag governs them. They were asymmetric before: an uncountable
-	// shape had a verdict field, a docs row and this flag, while a message that would not
-	// decode at all was tallied and then read by nothing, so a scan could report
-	// holds:true beside thousands of unreadable messages.
+	// Both counts mean the same thing — something arrived that this command could not
+	// count — so one flag governs both. An undecodable message must not be able to sit
+	// under holds:true any more than an unreadable files shape can.
 	if cfg.StrictUncountable && verdict.UncountableShapes > 0 {
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
 			"%d message(s) carried a files value that is not a JSON array, i.e. Slack changed the wire format", verdict.UncountableShapes))
@@ -511,10 +522,10 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 	return verdict
 }
 
-// cleanOperatorNote strips control characters from free text so it cannot corrupt the
+// sanitizeReportText strips control characters from free text so it cannot corrupt the
 // JSON report's readability. Used on operator notes and on strings copied out of Slack
 // response bodies, which is why it also bounds the length; see maxSlackReasonBytes.
-func cleanOperatorNote(note string) string {
+func sanitizeReportText(note string) string {
 	cleaned := strings.Map(func(r rune) rune {
 		if r < ' ' || r == 0x7f {
 			return -1
@@ -547,9 +558,21 @@ func validateConversationID(id string) error {
 }
 
 // splitConversationIDs accepts commas or whitespace. strings.FieldsFunc never yields an
-// empty field, so no further trimming or filtering is needed.
+// empty field, so no trimming is needed — but duplicates are removed, because scanning
+// one conversation twice reports the second pass with classified_uploads: 0 (the ledger
+// delta is already spent) while double-counting both surface tallies.
 func splitConversationIDs(raw string) []string {
-	return strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	seen := make(map[string]struct{}, len(fields))
+	ids := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if _, duplicate := seen[field]; duplicate {
+			continue
+		}
+		seen[field] = struct{}{}
+		ids = append(ids, field)
+	}
+	return ids
 }
 
 // conversationRef is a conversation the scan will read.
@@ -640,16 +663,16 @@ func conversationKind(isIM, isMPIM, isPrivate bool) string {
 // scanConversation reads one conversation's history, then samples its threads on the
 // replies surface. A per-conversation error is recorded and the scan moves on: one
 // channel the bot was removed from must not decide the measurement.
-// It reports historyRead separately from record.Error because the two answer different
-// questions. A conversation whose history read cleanly HAS been measured — that surface
-// alone is a complete reading — even if the supplementary replies sample then failed.
-// Inferring coverage from record.Error instead would let a rate-limited replies call
-// void a fully-read conversation, and a workspace where every thread sample 429s would
-// report "no conversation could be read" beside a non-zero upload count.
+// Coverage is credited by incrementing result.History.Conversations on the history read
+// alone, NOT by record.Error being empty. The two answer different questions: a
+// conversation whose history read cleanly HAS been measured, even if the supplementary
+// replies sample then failed. Keying coverage off record.Error let a rate-limited replies
+// call void a fully-read conversation, so a workspace where every thread sample 429s
+// reported "no conversation could be read" beside a non-zero upload count.
 //
-// The return values are named so the deferred delta below lands in what the caller
+// The return value is named so the deferred delta below lands in what the caller
 // receives; assigning a local after `return record` would be copied over and lost.
-func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig, conversation conversationRef, result *scanResult, ledger map[string]struct{}) (record conversationResult, historyRead bool) {
+func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig, conversation conversationRef, result *scanResult, ledger map[string]struct{}) (record conversationResult) {
 	record = conversationResult{ID: conversation.ID, Kind: conversation.Kind}
 	before := len(ledger)
 	// Whatever pages did come back before an error stay in the tally, so the delta is
@@ -660,15 +683,20 @@ func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig,
 		record.ClassifiedUploads = len(ledger) - before
 	}()
 
-	threads, err := readHistory(ctx, client, cfg, conversation.ID, &result.History, &record, ledger)
+	// Derived once, here, so readHistory does not have to know about -skip-replies and
+	// cannot select thread roots nobody will read.
+	threadBudget := cfg.MaxThreads
+	if cfg.SkipReplies {
+		threadBudget = 0
+	}
+	threads, err := readHistory(ctx, client, cfg, conversation.ID, threadBudget, &result.History, &record, ledger)
 	if err != nil {
 		record.Error = err.Error()
-		return record, false
+		return record
 	}
-	historyRead = true
 	result.History.Conversations++
 
-	if !cfg.SkipReplies && cfg.MaxThreads > 0 {
+	if threadBudget > 0 {
 		record.ThreadsSampled, err = readThreads(ctx, client, cfg, conversation.ID, threads, &result.Replies, &record, ledger)
 		if err != nil {
 			record.Error = err.Error()
@@ -680,12 +708,12 @@ func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig,
 			result.Replies.Conversations++
 		}
 	}
-	return record, historyRead
+	return record
 }
 
 // readHistory tallies a conversation's history pages and returns the thread parents
 // worth sampling on the replies surface.
-func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, channelID string, tally *surfaceTally, record *conversationResult, ledger map[string]struct{}) ([]string, error) {
+func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, channelID string, threadBudget int, tally *surfaceTally, record *conversationResult, ledger map[string]struct{}) ([]string, error) {
 	var threads []string
 	cursor := ""
 	for page := 0; page < cfg.MaxPages; page++ {
@@ -696,12 +724,12 @@ func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 			params.Set("cursor", cursor)
 		}
 		var out slackMessagesResponse
-		if err := client.get(ctx, surfaceHistory, params, &out); err != nil {
+		if err := client.get(ctx, methodConversationsHistory, params, &out); err != nil {
 			return nil, err
 		}
 		record.HistoryMessages += len(out.Messages)
-		tallyMessages(channelID, out.Messages, tally, ledger)
-		threads = append(threads, threadParents(out.Messages, cfg.MaxThreads-len(threads))...)
+		observed := tallyMessages(channelID, out.Messages, tally, ledger)
+		threads = append(threads, threadParents(observed, threadBudget-len(threads))...)
 		cursor = strings.TrimSpace(out.Metadata.NextCursor)
 		if cursor == "" {
 			break
@@ -722,11 +750,11 @@ func readThreads(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 		params.Set("ts", threadTS)
 		params.Set("limit", strconv.Itoa(cfg.PageLimit))
 		var out slackMessagesResponse
-		if err := client.get(ctx, surfaceReplies, params, &out); err != nil {
+		if err := client.get(ctx, methodConversationsReplies, params, &out); err != nil {
 			return sampled, err
 		}
 		record.RepliesMessages += len(out.Messages)
-		tallyMessages(channelID, out.Messages, tally, ledger)
+		_ = tallyMessages(channelID, out.Messages, tally, ledger)
 		sampled++
 	}
 	return sampled, nil
@@ -736,7 +764,8 @@ func readThreads(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 // uploads, in the cross-surface ledger. The ledger is keyed by channel and ts because the
 // same message legitimately appears on both surfaces, and only the per-surface tallies
 // should say so twice.
-func tallyMessages(channelID string, messages []json.RawMessage, tally *surfaceTally, ledger map[string]struct{}) {
+func tallyMessages(channelID string, messages []json.RawMessage, tally *surfaceTally, ledger map[string]struct{}) []messageObservation {
+	observed := make([]messageObservation, 0, len(messages))
 	for _, raw := range messages {
 		observation, err := observeMessage(raw)
 		if err != nil {
@@ -746,34 +775,32 @@ func tallyMessages(channelID string, messages []json.RawMessage, tally *surfaceT
 			continue
 		}
 		tally.add(observation)
+		observed = append(observed, observation)
+		// Safe as an unambiguous key because neither half can contain a colon: Slack
+		// conversation IDs are uppercase alphanumerics and a ts is digits and a dot.
 		if observation.classified && observation.ts != "" {
 			ledger[channelID+":"+observation.ts] = struct{}{}
 		}
 	}
+	return observed
 }
 
-// threadParents picks up to limit thread roots out of a history page, preferring the
-// ones with replies — those are the messages the production seam actually reads back.
-func threadParents(messages []json.RawMessage, limit int) []string {
+// threadParents picks up to limit thread roots out of an already-observed history page,
+// keeping only the ones with replies — those are the messages the production seam
+// actually reads back. A message whose thread_ts points elsewhere is a reply, not a root.
+func threadParents(observed []messageObservation, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
 	// Capped by the page as well as by the limit: -max-threads is operator-supplied,
 	// and sizing off it alone turns a fat-fingered value into a huge allocation per page.
-	parents := make([]string, 0, min(limit, len(messages)))
-	for _, raw := range messages {
-		var message struct {
-			TS         string `json:"ts"`
-			ThreadTS   string `json:"thread_ts"`
-			ReplyCount int    `json:"reply_count"`
-		}
-		if err := json.Unmarshal(raw, &message); err != nil {
+	parents := make([]string, 0, min(limit, len(observed)))
+	for _, observation := range observed {
+		if observation.replyCount <= 0 || observation.ts == "" ||
+			(observation.threadTS != "" && observation.threadTS != observation.ts) {
 			continue
 		}
-		if message.ReplyCount <= 0 || message.TS == "" || (message.ThreadTS != "" && message.ThreadTS != message.TS) {
-			continue
-		}
-		parents = append(parents, message.TS)
+		parents = append(parents, observation.ts)
 		if len(parents) >= limit {
 			break
 		}
@@ -790,12 +817,12 @@ func checkExpectations(ctx context.Context, client *slackClient, cfg *scanConfig
 	}
 	results := make([]expectationResult, 0, len(cfg.ExpectUploads))
 	for _, ref := range cfg.ExpectUploads {
-		results = append(results, checkExpectation(ctx, client, ref))
+		results = append(results, checkExpectation(ctx, client, cfg, ref))
 	}
 	return results
 }
 
-func checkExpectation(ctx context.Context, client *slackClient, ref messageRef) expectationResult {
+func checkExpectation(ctx context.Context, client *slackClient, cfg *scanConfig, ref messageRef) expectationResult {
 	result := expectationResult{messageRef: ref}
 	params := url.Values{}
 	params.Set("channel", ref.Channel)
@@ -804,7 +831,7 @@ func checkExpectation(ctx context.Context, client *slackClient, ref messageRef) 
 	params.Set("inclusive", "true")
 	params.Set("limit", "1")
 	var out slackMessagesResponse
-	if err := client.get(ctx, surfaceHistory, params, &out); err != nil {
+	if err := client.get(ctx, methodConversationsHistory, params, &out); err != nil {
 		result.Error = err.Error()
 		return result
 	}
@@ -821,7 +848,7 @@ func checkExpectation(ctx context.Context, client *slackClient, ref messageRef) 
 		// conversations.replies takes any ts in the thread, so ask it for the thread and
 		// pick the message back out by ts.
 		var err error
-		if raw, err = fetchThreadMessage(ctx, client, ref); err != nil {
+		if raw, err = fetchThreadMessage(ctx, client, cfg, ref); err != nil {
 			result.Error = err.Error()
 			return result
 		}
@@ -850,16 +877,17 @@ func messageHasTS(raw json.RawMessage, ts string) bool {
 }
 
 // fetchThreadMessage returns the single thread message whose ts matches ref, or an
-// empty slice when the thread does not contain it. It reads one page: an upload named
-// past reply 200 of a long thread reports "message not found" rather than a verdict,
-// which the contract now words as unverifiable rather than as a classifier defect.
-func fetchThreadMessage(ctx context.Context, client *slackClient, ref messageRef) ([]json.RawMessage, error) {
+// empty slice when the thread does not contain it. It reads ONE page, so an upload named
+// past the -page-limit'th reply of a long thread reports "message not found" rather than
+// a verdict — which the contract words as unverifiable rather than as a classifier
+// defect, so it cannot masquerade as evidence about SlackMessageHasUpload.
+func fetchThreadMessage(ctx context.Context, client *slackClient, cfg *scanConfig, ref messageRef) ([]json.RawMessage, error) {
 	params := url.Values{}
 	params.Set("channel", ref.Channel)
 	params.Set("ts", ref.TS)
-	params.Set("limit", strconv.Itoa(defaultPageLimit))
+	params.Set("limit", strconv.Itoa(cfg.PageLimit))
 	var out slackMessagesResponse
-	if err := client.get(ctx, surfaceReplies, params, &out); err != nil {
+	if err := client.get(ctx, methodConversationsReplies, params, &out); err != nil {
 		return nil, err
 	}
 	for _, raw := range out.Messages {
@@ -868,179 +896,4 @@ func fetchThreadMessage(ctx context.Context, client *slackClient, ref messageRef
 		}
 	}
 	return nil, nil
-}
-
-type slackResponseStatus struct {
-	OK       bool   `json:"ok"`
-	Error    string `json:"error"`
-	Needed   string `json:"needed"`
-	Provided string `json:"provided"`
-}
-
-type slackResponseMetadata struct {
-	NextCursor string `json:"next_cursor"`
-}
-
-// slackMessagesResponse keeps the messages raw so observeMessage can see the whole
-// object, including whether the `files` key was present at all.
-type slackMessagesResponse struct {
-	slackResponseStatus
-	Messages []json.RawMessage     `json:"messages"`
-	Metadata slackResponseMetadata `json:"response_metadata"`
-}
-
-type slackClient struct {
-	token      string
-	baseURL    string
-	userAgent  string
-	httpClient *http.Client
-	// sleep is the 429 wait, injected so tests do not spend real time in it.
-	sleep func(context.Context, time.Duration) error
-}
-
-// get issues one read and decodes it into out, retrying once when Slack rate-limits.
-// The retry is here rather than left to the operator because a tier-3 method read
-// across a couple of dozen conversations will hit 429 on a busy workspace, and a scan
-// that dies there measures nothing.
-func (c *slackClient) get(ctx context.Context, method string, params url.Values, out any) error {
-	retryAfter, err := c.getOnce(ctx, method, params, out)
-	if err == nil || retryAfter <= 0 {
-		return err
-	}
-	if retryAfter > maxRateLimitWait {
-		return fmt.Errorf("%s: rate limited, Retry-After %s exceeds the %s cap", method, retryAfter, maxRateLimitWait)
-	}
-	if sleepErr := c.wait(ctx, retryAfter); sleepErr != nil {
-		return sleepErr
-	}
-	_, err = c.getOnce(ctx, method, params, out)
-	return err
-}
-
-func (c *slackClient) wait(ctx context.Context, d time.Duration) error {
-	if c.sleep != nil {
-		return c.sleep(ctx, d)
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-// getOnce returns the Retry-After duration alongside the error when Slack rate-limits,
-// and zero otherwise, so get can tell a retryable refusal from a terminal one.
-func (c *slackClient) getOnce(ctx context.Context, method string, params url.Values, out any) (time.Duration, error) {
-	endpoint := c.baseURL + "/" + method
-	if encoded := params.Encode(); encoded != "" {
-		endpoint += "?" + encoded
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-	if err != nil {
-		return 0, fmt.Errorf("%s request build: %w", method, err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", c.userAgent)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("%s request: %w", method, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		drainSlackResponseBody(resp.Body)
-		return retryAfterDelay(resp.Header.Get("Retry-After")), fmt.Errorf("%s: rate limited", method)
-	}
-	if resp.StatusCode >= 300 {
-		drainSlackResponseBody(resp.Body)
-		// Location is carried for 3xx because redirects are surfaced rather than followed
-		// (see newSlackHTTPClient), and "returned HTTP 302" alone hides an SSO portal.
-		if location := cleanOperatorNote(resp.Header.Get("Location")); location != "" {
-			return 0, fmt.Errorf("%s returned HTTP %d redirecting to %s (not followed)", method, resp.StatusCode, location)
-		}
-		return 0, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSlackResponseBytes+1))
-	if err != nil {
-		return 0, fmt.Errorf("%s response read: %w", method, err)
-	}
-	if len(raw) > maxSlackResponseBytes {
-		drainSlackResponseBody(resp.Body)
-		return 0, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
-	}
-	if reason, limited := slackRateLimitedBody(raw); limited {
-		// A 200 whose body says ratelimited. slackWebAPIResponseFieldsError in
-		// slack_webapi.go treats this as a rate limit with a comment saying the branch is
-		// load-bearing; retrying only on the 429 STATUS would die where production backs
-		// off. See TODO(upstream-contract) on slackRateLimitedBody.
-		return retryAfterDelay(resp.Header.Get("Retry-After")), fmt.Errorf("%s: %s", method, reason)
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		// The status, content type and length are not user content, and without them an
-		// HTML SSO page from a corporate proxy is indistinguishable from a Slack outage.
-		// The body itself stays out: quoting it would be the obvious content leak.
-		return 0, fmt.Errorf("%s response is not JSON (HTTP %d, content-type %q, %d bytes)",
-			method, resp.StatusCode, cleanOperatorNote(resp.Header.Get("Content-Type")), len(raw))
-	}
-	return 0, slackStatusError(method, raw)
-}
-
-// slackStatusError re-reads the envelope's ok/error fields rather than requiring every
-// caller's out type to expose them, so a new read method cannot forget the check.
-func slackStatusError(method string, raw []byte) error {
-	var status slackResponseStatus
-	if err := json.Unmarshal(raw, &status); err != nil {
-		return fmt.Errorf("%s response status JSON invalid", method)
-	}
-	if status.OK {
-		return nil
-	}
-	reason := cleanOperatorNote(status.Error)
-	if reason == "" {
-		reason = "not_ok"
-	}
-	if needed := cleanOperatorNote(status.Needed); needed != "" {
-		return fmt.Errorf("%s: %s (needed %s, provided %s)", method, reason, needed, cleanOperatorNote(status.Provided))
-	}
-	return fmt.Errorf("%s: %s", method, reason)
-}
-
-// slackRateLimitedBody reports whether a 2xx response body is Slack's in-body rate
-// limit, and returns the reason for the error message.
-//
-// TODO(upstream-contract): mirrors the "ratelimited" code that
-// slackWebAPIResponseFieldsError maps to internal.NewSlackRateLimitError. If Slack
-// renames it, this scan resumes failing hard on a shape production still retries.
-func slackRateLimitedBody(raw []byte) (string, bool) {
-	var status slackResponseStatus
-	if err := json.Unmarshal(raw, &status); err != nil || status.OK {
-		return "", false
-	}
-	reason := cleanOperatorNote(status.Error)
-	return reason, reason == "ratelimited"
-}
-
-// retryAfterDelay reads Slack's Retry-After. Deliberately NOT named parseRetryAfter:
-// shared/client has a function by that name whose default is the opposite of this
-// one's — it returns 0 for a missing or garbled header, while a scan that cannot
-// read the header should still pause rather than hammer the endpoint.
-func retryAfterDelay(header string) time.Duration {
-	seconds, err := strconv.Atoi(strings.TrimSpace(header))
-	if err != nil || seconds < 0 {
-		return time.Second
-	}
-	if seconds == 0 {
-		return time.Second
-	}
-	return time.Duration(seconds) * time.Second
-}
-
-func drainSlackResponseBody(body io.Reader) {
-	// Best-effort connection reuse for moderately oversized bodies. Close tears down
-	// the response if bytes still remain.
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxSlackResponseBytes+1))
 }

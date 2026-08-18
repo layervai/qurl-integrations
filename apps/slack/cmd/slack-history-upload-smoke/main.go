@@ -40,7 +40,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -199,10 +198,10 @@ func validateBudget(stderr io.Writer, budget timeoutBudget) int {
 
 func validateBounds(stderr io.Writer, cfg *scanConfig) int {
 	switch {
-	case cfg.MaxConversations <= 0:
-		_, _ = fmt.Fprintln(stderr, "-max-conversations must be greater than 0")
-	case cfg.MaxPages <= 0:
-		_, _ = fmt.Fprintln(stderr, "-max-pages must be greater than 0")
+	case cfg.MaxConversations <= 0 || cfg.MaxConversations > maxConversationsCeiling:
+		_, _ = fmt.Fprintf(stderr, "-max-conversations must be between 1 and %d\n", maxConversationsCeiling)
+	case cfg.MaxPages <= 0 || cfg.MaxPages > maxPagesCeiling:
+		_, _ = fmt.Fprintf(stderr, "-max-pages must be between 1 and %d\n", maxPagesCeiling)
 	case cfg.PageLimit <= 0 || cfg.PageLimit > maxPageLimit:
 		_, _ = fmt.Fprintf(stderr, "-page-limit must be between 1 and %d\n", maxPageLimit)
 	case cfg.MaxThreads < 0:
@@ -342,13 +341,4 @@ func containsHTTPHeaderControl(s string) bool {
 	return strings.ContainsFunc(s, func(r rune) bool {
 		return r < ' ' || r == 0x7f
 	})
-}
-
-func newSlackHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 }

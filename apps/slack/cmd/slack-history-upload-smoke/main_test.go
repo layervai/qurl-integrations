@@ -43,8 +43,8 @@ func TestRunSucceedsWhenTheContractHolds(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(textMessage("100.1"), uploadMessage("100.2")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(textMessage("100.1"), uploadMessage("100.2")),
 	})
 
 	code, stdout, stderr := runCLI(t, []string{
@@ -73,8 +73,8 @@ func TestRunEmitsTheReportWhenTheContractBreaks(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(textMessage("100.1")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(textMessage("100.1")),
 	})
 
 	code, stdout, stderr := runCLI(t, []string{
@@ -298,11 +298,11 @@ func TestSplitConversationIDs(t *testing.T) {
 	}
 }
 
-func TestCleanOperatorNote(t *testing.T) {
+func TestSanitizeReportText(t *testing.T) {
 	t.Parallel()
 
-	if got := cleanOperatorNote("  Enterprise\tGrid\norg install  "); got != "EnterpriseGridorg install" {
-		t.Errorf("cleanOperatorNote = %q", got)
+	if got := sanitizeReportText("  Enterprise\tGrid\norg install  "); got != "EnterpriseGridorg install" {
+		t.Errorf("sanitizeReportText = %q", got)
 	}
 }
 
@@ -328,8 +328,8 @@ func TestRunCarriesOperatorNotesIntoTheReport(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(uploadMessage("100.1")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
 	})
 	code, stdout, stderr := runCLI(t, []string{
 		flagTokenEnv, testTokenEnv, flagBaseURL, srv.URL, flagMaxPages, "1",
@@ -394,7 +394,11 @@ func TestRunBoundsMaxThreads(t *testing.T) {
 func TestThreadParentsCapacityTracksThePage(t *testing.T) {
 	t.Parallel()
 
-	page := []json.RawMessage{json.RawMessage(`{"ts":"100.1","thread_ts":"100.1","reply_count":1}`)}
+	observation, err := observeMessage(json.RawMessage(`{"ts":"100.1","thread_ts":"100.1","reply_count":1}`))
+	if err != nil {
+		t.Fatalf("observeMessage: %v", err)
+	}
+	page := []messageObservation{observation}
 	got := threadParents(page, maxThreadsCeiling)
 	if len(got) != 1 {
 		t.Fatalf("threadParents = %v, want the one root", got)

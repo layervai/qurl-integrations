@@ -278,7 +278,7 @@ func TestMissedUploadIsOneDirectional(t *testing.T) {
 func TestSurfaceTallyBucketsEveryShape(t *testing.T) {
 	t.Parallel()
 
-	tally := surfaceTally{Surface: surfaceHistory}
+	tally := surfaceTally{Surface: methodConversationsHistory}
 	messages := []string{
 		textMessage("100.1"),
 		uploadMessage("100.2"),
@@ -296,12 +296,18 @@ func TestSurfaceTallyBucketsEveryShape(t *testing.T) {
 	tallyMessages(testChannel, raw, &tally, map[string]struct{}{})
 
 	want := surfaceTally{
-		Surface: surfaceHistory, Messages: 7, FilesKeyPresent: 5, PopulatedArrays: 2,
+		Surface: methodConversationsHistory, Messages: 7, FilesKeyPresent: 5, PopulatedArrays: 2,
 		FileEntries: 3, EmptyArrays: 1, NullFiles: 1, UncountableShapes: 1,
 		FileShareSubtypes: 1, ClassifiedUploads: 4, MissedUploads: 0, DecodeFailures: 1,
 	}
 	if tally != want {
 		t.Errorf("tally  = %+v\nwanted = %+v", tally, want)
+	}
+	// FilesKeyPresent is the sum of the four present-shape counters. Adding a fifth
+	// filesShape and forgetting one increment would break it silently, and this field is
+	// one of the three the docs name as the primary evidence.
+	if sum := tally.PopulatedArrays + tally.EmptyArrays + tally.NullFiles + tally.UncountableShapes; tally.FilesKeyPresent != sum {
+		t.Errorf("FilesKeyPresent = %d, want %d — the shape counters must total it", tally.FilesKeyPresent, sum)
 	}
 }
 
@@ -408,11 +414,8 @@ func TestEvaluateContract(t *testing.T) {
 			t.Parallel()
 			cfg := &scanConfig{MinUploads: tt.minUploads, StrictUncountable: tt.strictUncountable}
 			result := &scanResult{History: tt.history, Replies: tt.replies, ExpectedUploads: tt.expected}
-			verdict := evaluateContract(cfg, result, scanCoverage{
-				conversationsRead: tt.conversationsRead,
-				distinctUploads:   tt.distinctUploads,
-				truncated:         tt.truncated,
-			})
+			result.History.Conversations = tt.conversationsRead
+			verdict := evaluateContract(cfg, result, tt.distinctUploads, tt.truncated)
 			if verdict.Holds != tt.wantHolds {
 				t.Fatalf("holds = %v, want %v (failures: %v)", verdict.Holds, tt.wantHolds, verdict.Failures)
 			}
@@ -448,7 +451,7 @@ func TestEvaluateContract(t *testing.T) {
 func TestEvaluateContractSaysNothingAboutUploadsWhenItReadNothing(t *testing.T) {
 	t.Parallel()
 
-	verdict := evaluateContract(&scanConfig{MinUploads: 1}, &scanResult{}, scanCoverage{})
+	verdict := evaluateContract(&scanConfig{MinUploads: 1}, &scanResult{}, 0, false)
 	if verdict.Holds {
 		t.Fatal("a scan that read nothing must not report a holding contract")
 	}
@@ -466,12 +469,12 @@ func TestRunScanMeasuresBothSurfaces(t *testing.T) {
 
 	srv, fake := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			textMessage("100.1"),
 			`{"type":"message","user":"U1","text":"thread root","ts":"`+testThreadParent+`","thread_ts":"`+testThreadParent+`","reply_count":2}`,
 			uploadMessage("100.3"),
 		),
-		surfaceReplies: messagesBody(
+		methodConversationsReplies: messagesBody(
 			`{"type":"message","user":"U1","text":"thread root","ts":"`+testThreadParent+`","thread_ts":"`+testThreadParent+`"}`,
 			uploadMessage("100.4"),
 		),
@@ -496,7 +499,7 @@ func TestRunScanMeasuresBothSurfaces(t *testing.T) {
 	if result.Contract.DistinctUploads != 2 {
 		t.Errorf("distinct uploads = %d, want one per surface-unique message", result.Contract.DistinctUploads)
 	}
-	if got := fake.callCount(surfaceReplies); got != 1 {
+	if got := fake.callCount(methodConversationsReplies); got != 1 {
 		t.Errorf("conversations.replies calls = %d, want the one thread with replies", got)
 	}
 	if len(result.Conversations) != 1 || result.Conversations[0].ClassifiedUploads != 2 || result.Conversations[0].ThreadsSampled != 1 {
@@ -515,7 +518,7 @@ func TestRunScanDetectsTheFilesArrayDisappearing(t *testing.T) {
 		methodConversationsList: listBody(testChannel),
 		// The captions are still here. Only the files array is gone, and with it the
 		// only signal this surface has — the subtype stays "" exactly as measured.
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			`{"type":"message","user":"U1","text":"protect everything in this","ts":"100.1"}`,
 			`{"type":"message","user":"U1","text":"and this one too","ts":"100.2"}`,
 		),
@@ -552,7 +555,7 @@ func TestRunScanReportsUncountableShapeWithoutFailingByDefault(t *testing.T) {
 
 	bodies := map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			uploadMessage("100.1"),
 			`{"type":"message","user":"U1","text":"caption","ts":"100.2","files":{"id":"F1"}}`,
 		),
@@ -591,7 +594,7 @@ func TestRunScanContinuesPastAnUnreadableConversation(t *testing.T) {
 
 	const otherChannel = "C0000000002"
 	srv, fake := newFakeSlack(t, map[string]string{methodConversationsList: listBody(testChannel, otherChannel)})
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("channel") == testChannel {
 			_, _ = w.Write([]byte(`{"ok":false,"error":"not_in_channel"}`))
 			return
@@ -624,8 +627,8 @@ func TestRunScanFailsWhenEveryConversationIsUnreadable(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          `{"ok":false,"error":"missing_scope","needed":"channels:history","provided":"chat:write"}`,
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: `{"ok":false,"error":"missing_scope","needed":"channels:history","provided":"chat:write"}`,
 	})
 
 	result, err := runScan(context.Background(), testScanConfig(srv))
@@ -667,14 +670,14 @@ func TestRunScanSkipsChannelsTheBotIsNotIn(t *testing.T) {
 			`{"id":"C0000000010","is_member":true,"is_archived":true},` +
 			`{"id":"` + testChannel + `","is_member":true},` +
 			`{"id":"D0000000001","is_im":true}]}`,
-		surfaceHistory: messagesBody(uploadMessage("100.1")),
+		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
 	})
 
 	result, err := runScan(context.Background(), testScanConfig(srv))
 	if err != nil {
 		t.Fatalf("runScan: %v", err)
 	}
-	if got := fake.callCount(surfaceHistory); got != 2 {
+	if got := fake.callCount(methodConversationsHistory); got != 2 {
 		t.Errorf("history calls = %d, want only the member channel and the IM", got)
 	}
 	if len(result.Conversations) != 2 {
@@ -690,7 +693,7 @@ func TestRunScanSkipsChannelsTheBotIsNotIn(t *testing.T) {
 func TestRunScanHonorsExplicitChannels(t *testing.T) {
 	t.Parallel()
 
-	srv, fake := newFakeSlack(t, map[string]string{surfaceHistory: messagesBody(uploadMessage("100.1"))})
+	srv, fake := newFakeSlack(t, map[string]string{methodConversationsHistory: messagesBody(uploadMessage("100.1"))})
 	cfg := testScanConfig(srv)
 	cfg.Channels = []string{testChannel}
 
@@ -711,12 +714,12 @@ func TestCheckExpectationFallsBackToTheThread(t *testing.T) {
 	const replyTS = "1723600000.000200"
 	srv, fake := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceReplies: messagesBody(
+		methodConversationsReplies: messagesBody(
 			`{"user":"U1","text":"thread root","ts":"`+testThreadParent+`"}`,
 			`{"user":"U1","text":"caption","ts":"`+replyTS+`","files":[`+slackFileObject+`]}`,
 		),
 	})
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("latest") == replyTS {
 			// What Slack really returns for a threaded reply asked of history.
 			_, _ = w.Write([]byte(`{"ok":true,"messages":[]}`))
@@ -748,10 +751,10 @@ func TestCheckExpectationFailsTheScanWhenGroundTruthIsMissed(t *testing.T) {
 	t.Parallel()
 
 	srv, fake := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceReplies:          `{"ok":true,"messages":[]}`,
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsReplies: `{"ok":true,"messages":[]}`,
 	})
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("latest") != "" {
 			// The operator saw a file on this message; Slack no longer returns it.
 			_, _ = w.Write([]byte(`{"ok":true,"messages":[]}`))
@@ -781,7 +784,7 @@ func TestSlackClientRetriesOnceAfterRateLimit(t *testing.T) {
 	var attempts int
 	var mu sync.Mutex
 	srv, fake := newFakeSlack(t, nil)
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		attempts++
 		attempt := attempts
@@ -800,7 +803,7 @@ func TestSlackClientRetriesOnceAfterRateLimit(t *testing.T) {
 		sleep: func(_ context.Context, d time.Duration) error { slept = d; return nil },
 	}
 	var out slackMessagesResponse
-	if err := client.get(context.Background(), surfaceHistory, nil, &out); err != nil {
+	if err := client.get(context.Background(), methodConversationsHistory, nil, &out); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if len(out.Messages) != 1 {
@@ -815,7 +818,7 @@ func TestSlackClientRefusesAnUnreasonableRetryAfter(t *testing.T) {
 	t.Parallel()
 
 	srv, fake := newFakeSlack(t, nil)
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "600")
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
@@ -827,7 +830,7 @@ func TestSlackClientRefusesAnUnreasonableRetryAfter(t *testing.T) {
 		},
 	}
 	var out slackMessagesResponse
-	err := client.get(context.Background(), surfaceHistory, nil, &out)
+	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "exceeds the") {
 		t.Errorf("err = %v, want the capped-Retry-After refusal", err)
 	}
@@ -858,22 +861,32 @@ func TestRetryAfterDelay(t *testing.T) {
 func TestThreadParentsPicksOnlyRootsWithReplies(t *testing.T) {
 	t.Parallel()
 
-	messages := []json.RawMessage{
-		json.RawMessage(textMessage("100.1")),
-		json.RawMessage(`{"ts":"100.2","thread_ts":"100.2","reply_count":3}`),
+	// Built through observeMessage rather than by hand, so this pins the same decode the
+	// scan feeds threadParents from — not a second reading of the same fields.
+	messages := []string{
+		textMessage("100.1"),
+		`{"ts":"100.2","thread_ts":"100.2","reply_count":3}`,
 		// A reply, not a root: its thread_ts points elsewhere.
-		json.RawMessage(`{"ts":"100.3","thread_ts":"100.2"}`),
-		json.RawMessage(`{"ts":"100.4","reply_count":0}`),
-		json.RawMessage(`{"ts":"100.5","thread_ts":"100.5","reply_count":1}`),
+		`{"ts":"100.3","thread_ts":"100.2"}`,
+		`{"ts":"100.4","reply_count":0}`,
+		`{"ts":"100.5","thread_ts":"100.5","reply_count":1}`,
 	}
-	got := threadParents(messages, 5)
+	observed := make([]messageObservation, 0, len(messages))
+	for _, raw := range messages {
+		observation, err := observeMessage(json.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("observeMessage(%s): %v", raw, err)
+		}
+		observed = append(observed, observation)
+	}
+	got := threadParents(observed, 5)
 	if len(got) != 2 || got[0] != "100.2" || got[1] != "100.5" {
 		t.Errorf("threadParents = %v, want the two roots with replies", got)
 	}
-	if limited := threadParents(messages, 1); len(limited) != 1 {
+	if limited := threadParents(observed, 1); len(limited) != 1 {
 		t.Errorf("threadParents with limit 1 = %v", limited)
 	}
-	if none := threadParents(messages, 0); none != nil {
+	if none := threadParents(observed, 0); none != nil {
 		t.Errorf("threadParents with limit 0 = %v, want nil", none)
 	}
 }
@@ -885,8 +898,8 @@ func TestScanResultCarriesNoMessageContent(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(uploadMessage("100.1")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
 	})
 	result, err := runScan(context.Background(), testScanConfig(srv))
 	if err != nil {
@@ -917,7 +930,7 @@ func TestRunScanBlamesTheBudgetWhenItRunsOut(t *testing.T) {
 	srv, fake := newFakeSlack(t, map[string]string{methodConversationsList: listBody(testChannel, secondChannel)})
 	var mu sync.Mutex
 	var calls int
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		calls++
 		first := calls == 1
@@ -960,11 +973,11 @@ func TestRunScanKeepsAHistoryReadWhenTheThreadSampleFails(t *testing.T) {
 
 	srv, fake := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			uploadMessage("100.1"),
 			`{"type":"message","user":"U1","text":"root","ts":"`+testThreadParent+`","thread_ts":"`+testThreadParent+`","reply_count":2}`,
 		),
-		surfaceReplies: `{"ok":false,"error":"ratelimited"}`,
+		methodConversationsReplies: `{"ok":false,"error":"ratelimited"}`,
 	})
 
 	result, err := runScan(context.Background(), testScanConfig(srv))
@@ -982,12 +995,12 @@ func TestRunScanKeepsAHistoryReadWhenTheThreadSampleFails(t *testing.T) {
 	}
 	// The operator still has to see that the sample failed, and which surface failed it.
 	if !strings.Contains(result.Conversations[0].Error, "ratelimited") ||
-		!strings.Contains(result.Conversations[0].Error, surfaceReplies) {
+		!strings.Contains(result.Conversations[0].Error, methodConversationsReplies) {
 		t.Errorf("conversation error = %q, want the replies failure named", result.Conversations[0].Error)
 	}
 	// Two calls, not one: "ratelimited" in a 200 body is retried once, the way
 	// production's seam backs off on the same shape.
-	if got := fake.callCount(surfaceReplies); got != 2 {
+	if got := fake.callCount(methodConversationsReplies); got != 2 {
 		t.Errorf("replies calls = %d, want the sampled thread plus its one retry", got)
 	}
 }
@@ -998,8 +1011,8 @@ func TestRunScanFailsWhenEveryHistorySurfaceIsUnreadable(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          `{"ok":false,"error":"ratelimited"}`,
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: `{"ok":false,"error":"ratelimited"}`,
 	})
 	result, err := runScan(context.Background(), testScanConfig(srv))
 	if err == nil {
@@ -1025,7 +1038,8 @@ func TestEvaluateContractSeparatesUnverifiableFromUnclassified(t *testing.T) {
 			{messageRef: messageRef{Channel: testChannel, TS: "100.2"}, Found: true},
 		},
 	}
-	verdict := evaluateContract(&scanConfig{MinUploads: 1}, result, scanCoverage{conversationsRead: 1, distinctUploads: 3})
+	result.History.Conversations = 1
+	verdict := evaluateContract(&scanConfig{MinUploads: 1}, result, 3, false)
 	if verdict.Holds || len(verdict.Failures) != 2 {
 		t.Fatalf("verdict = %+v, want both expectations failing", verdict)
 	}
@@ -1046,10 +1060,10 @@ func TestEvaluateContractSeparatesUnverifiableFromUnclassified(t *testing.T) {
 func TestSurfaceTallyCountsAMissedUpload(t *testing.T) {
 	t.Parallel()
 
-	tally := surfaceTally{Surface: surfaceHistory}
+	tally := surfaceTally{Surface: methodConversationsHistory}
 	tally.add(messageObservation{shape: filesShapePopulated, entries: 2, classified: false})
 	want := surfaceTally{
-		Surface: surfaceHistory, Messages: 1, FilesKeyPresent: 1,
+		Surface: methodConversationsHistory, Messages: 1, FilesKeyPresent: 1,
 		PopulatedArrays: 1, FileEntries: 2, MissedUploads: 1,
 	}
 	if tally != want {
@@ -1066,7 +1080,7 @@ func TestReadHistoryFollowsCursorsAndStopsAtMaxPages(t *testing.T) {
 	t.Run("follows a cursor to the last page", func(t *testing.T) {
 		t.Parallel()
 		srv, fake := newFakeSlack(t, map[string]string{methodConversationsList: listBody(testChannel)})
-		fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+		fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("cursor") == "" {
 				_, _ = w.Write([]byte(`{"ok":true,"messages":[` + uploadMessage("100.1") +
 					`],"response_metadata":{"next_cursor":"page two"}}`))
@@ -1080,7 +1094,7 @@ func TestReadHistoryFollowsCursorsAndStopsAtMaxPages(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runScan: %v", err)
 		}
-		if got := fake.callCount(surfaceHistory); got != 2 {
+		if got := fake.callCount(methodConversationsHistory); got != 2 {
 			t.Errorf("history calls = %d, want the cursor followed once then stopped", got)
 		}
 		if result.History.Messages != 2 || result.History.ClassifiedUploads != 2 {
@@ -1092,7 +1106,7 @@ func TestReadHistoryFollowsCursorsAndStopsAtMaxPages(t *testing.T) {
 		t.Parallel()
 		srv, fake := newFakeSlack(t, map[string]string{
 			methodConversationsList: listBody(testChannel),
-			surfaceHistory: `{"ok":true,"messages":[` + uploadMessage("100.1") +
+			methodConversationsHistory: `{"ok":true,"messages":[` + uploadMessage("100.1") +
 				`],"response_metadata":{"next_cursor":"always more"}}`,
 		})
 		cfg := testScanConfig(srv)
@@ -1100,7 +1114,7 @@ func TestReadHistoryFollowsCursorsAndStopsAtMaxPages(t *testing.T) {
 		if _, err := runScan(context.Background(), cfg); err != nil {
 			t.Fatalf("runScan: %v", err)
 		}
-		if got := fake.callCount(surfaceHistory); got != 2 {
+		if got := fake.callCount(methodConversationsHistory); got != 2 {
 			t.Errorf("history calls = %d, want MaxPages to stop the loop", got)
 		}
 	})
@@ -1114,11 +1128,11 @@ func TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured(t *testing.T) {
 
 	srv, fake := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			uploadMessage("100.1"),
 			`{"type":"message","user":"U1","text":"root","ts":"`+testThreadParent+`","thread_ts":"`+testThreadParent+`","reply_count":4}`,
 		),
-		surfaceReplies: messagesBody(uploadMessage("100.2")),
+		methodConversationsReplies: messagesBody(uploadMessage("100.2")),
 	})
 	cfg := testScanConfig(srv)
 	cfg.SkipReplies = true
@@ -1127,7 +1141,7 @@ func TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runScan: %v", err)
 	}
-	if got := fake.callCount(surfaceReplies); got != 0 {
+	if got := fake.callCount(methodConversationsReplies); got != 0 {
 		t.Errorf("replies calls = %d, want none under -skip-replies", got)
 	}
 	if result.Replies.Messages != 0 || result.Replies.Conversations != 0 {
@@ -1191,9 +1205,9 @@ func TestRunScanCountsAThreadRootOnce(t *testing.T) {
 	root := `{"type":"message","user":"U1","text":"protect this","ts":"` + testThreadParent +
 		`","thread_ts":"` + testThreadParent + `","reply_count":1,"files":[` + slackFileObject + `]}`
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(root),
-		surfaceReplies:          messagesBody(root, textMessage("100.9")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(root),
+		methodConversationsReplies: messagesBody(root, textMessage("100.9")),
 	})
 
 	result, err := runScan(context.Background(), testScanConfig(srv))
@@ -1223,9 +1237,9 @@ func TestRunScanMinUploadsSeesThroughTheDuplicate(t *testing.T) {
 	root := `{"type":"message","user":"U1","text":"protect this","ts":"` + testThreadParent +
 		`","thread_ts":"` + testThreadParent + `","reply_count":1,"files":[` + slackFileObject + `]}`
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(root),
-		surfaceReplies:          messagesBody(root),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(root),
+		methodConversationsReplies: messagesBody(root),
 	})
 	cfg := testScanConfig(srv)
 	cfg.MinUploads = 2
@@ -1277,8 +1291,8 @@ func TestCheckExpectationRejectsAMessageThatIsNotTheOneNamed(t *testing.T) {
 	srv, _ := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
 		// Both lookups answer with a DIFFERENT message that happens to carry a file.
-		surfaceHistory: messagesBody(uploadMessage("100.1")),
-		surfaceReplies: messagesBody(uploadMessage("100.1")),
+		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
+		methodConversationsReplies: messagesBody(uploadMessage("100.1")),
 	})
 	cfg := testScanConfig(srv)
 	cfg.MaxThreads = 0
@@ -1304,14 +1318,14 @@ func TestRunScanCountsARepliesConversationWithAPartialSample(t *testing.T) {
 
 	srv, fake := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			`{"type":"message","user":"U1","text":"a","ts":"200.1","thread_ts":"200.1","reply_count":1}`,
 			`{"type":"message","user":"U1","text":"b","ts":"200.2","thread_ts":"200.2","reply_count":1}`,
 		),
 	})
 	var mu sync.Mutex
 	var calls int
-	fake.setHandler(surfaceReplies, func(w http.ResponseWriter, _ *http.Request) {
+	fake.setHandler(methodConversationsReplies, func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		calls++
 		first := calls == 1
@@ -1335,19 +1349,19 @@ func TestRunScanCountsARepliesConversationWithAPartialSample(t *testing.T) {
 	}
 }
 
-func TestCleanOperatorNoteBoundsALongReason(t *testing.T) {
+func TestSanitizeReportTextBoundsALongReason(t *testing.T) {
 	t.Parallel()
 
 	// Slack sends short enum codes, but against a -base-url that is not Slack the
 	// content-free promise would otherwise be the other end's to keep.
-	got := cleanOperatorNote(strings.Repeat("é", 500))
+	got := sanitizeReportText(strings.Repeat("é", 500))
 	if len(got) <= maxSlackReasonBytes || !strings.HasSuffix(got, "…(truncated)") {
-		t.Errorf("cleanOperatorNote length = %d, want it bounded and marked", len(got))
+		t.Errorf("sanitizeReportText length = %d, want it bounded and marked", len(got))
 	}
 	if !utf8.ValidString(got) {
 		t.Error("truncation must land on a rune boundary")
 	}
-	if short := cleanOperatorNote(" channel_not_found "); short != "channel_not_found" {
+	if short := sanitizeReportText(" channel_not_found "); short != "channel_not_found" {
 		t.Errorf("a real Slack reason must pass through untouched, got %q", short)
 	}
 }
@@ -1359,13 +1373,13 @@ func TestGetOnceReportsWhatArrivedWhenItIsNotJSON(t *testing.T) {
 	t.Parallel()
 
 	srv, fake := newFakeSlack(t, nil)
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<html><body>Sign in to continue — secret-plan.pdf</body></html>`))
 	})
 	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout)}
 	var out slackMessagesResponse
-	err := client.get(context.Background(), surfaceHistory, nil, &out)
+	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil {
 		t.Fatal("an HTML body must not decode as a Slack response")
 	}
@@ -1385,12 +1399,12 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 	t.Parallel()
 
 	srv, fake := newFakeSlack(t, nil)
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://sso.example.com/login", http.StatusFound)
 	})
 	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout)}
 	var out slackMessagesResponse
-	err := client.get(context.Background(), surfaceHistory, nil, &out)
+	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "sso.example.com") || !strings.Contains(err.Error(), "not followed") {
 		t.Errorf("err = %v, want the unfollowed redirect target named", err)
 	}
@@ -1402,7 +1416,7 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 func TestScanResultRecordsTheSampleItDescribes(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := newFakeSlack(t, map[string]string{surfaceHistory: messagesBody(uploadMessage("100.1"))})
+	srv, _ := newFakeSlack(t, map[string]string{methodConversationsHistory: messagesBody(uploadMessage("100.1"))})
 	cfg := testScanConfig(srv)
 	cfg.Channels = []string{testChannel}
 	cfg.MaxConversations = 7
@@ -1429,7 +1443,7 @@ func TestReadHistoryReportsUnreadPages(t *testing.T) {
 
 	srv, _ := newFakeSlack(t, map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: `{"ok":true,"messages":[` + uploadMessage("100.1") +
+		methodConversationsHistory: `{"ok":true,"messages":[` + uploadMessage("100.1") +
 			`],"response_metadata":{"next_cursor":"always more"}}`,
 	})
 	result, err := runScan(context.Background(), testScanConfig(srv))
@@ -1442,8 +1456,8 @@ func TestReadHistoryReportsUnreadPages(t *testing.T) {
 
 	// ...and a conversation that genuinely ended must not claim there is more.
 	endsSrv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(uploadMessage("100.1")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
 	})
 	ended, err := runScan(context.Background(), testScanConfig(endsSrv))
 	if err != nil {
@@ -1463,7 +1477,7 @@ func TestRunScanSurfacesDecodeFailures(t *testing.T) {
 
 	bodies := map[string]string{
 		methodConversationsList: listBody(testChannel),
-		surfaceHistory: messagesBody(
+		methodConversationsHistory: messagesBody(
 			uploadMessage("100.1"),
 			// Valid JSON inside the array, but not a shape this command can read.
 			`{"user":"U1","ts":"100.2","subtype":5}`,
@@ -1501,8 +1515,8 @@ func TestRunScanMinUploadsZeroIsReportOnly(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := newFakeSlack(t, map[string]string{
-		methodConversationsList: listBody(testChannel),
-		surfaceHistory:          messagesBody(textMessage("100.1")),
+		methodConversationsList:    listBody(testChannel),
+		methodConversationsHistory: messagesBody(textMessage("100.1")),
 	})
 	cfg := testScanConfig(srv)
 	cfg.MinUploads = 0
@@ -1570,7 +1584,7 @@ func TestRunScanRecordsEveryConversationKind(t *testing.T) {
 			`{"id":"G0000000001","is_member":true,"is_private":true},` +
 			`{"id":"D0000000001","is_im":true},` +
 			`{"id":"G0000000002","is_mpim":true}]}`,
-		surfaceHistory: messagesBody(uploadMessage("100.1")),
+		methodConversationsHistory: messagesBody(uploadMessage("100.1")),
 	})
 	result, err := runScan(context.Background(), testScanConfig(srv))
 	if err != nil {
@@ -1587,24 +1601,35 @@ func TestRunScanRecordsEveryConversationKind(t *testing.T) {
 	}
 }
 
-// TestSlackStatusErrorHandlesAnUnreadableEnvelope covers the branch reached when a
-// response decodes into the caller's type but not into the status envelope — the shape a
-// non-Slack endpoint returning a bare JSON array produces.
-func TestSlackStatusErrorHandlesAnUnreadableEnvelope(t *testing.T) {
+// TestSlackStatusError covers the verdict the single body parse now feeds.
+func TestSlackStatusError(t *testing.T) {
 	t.Parallel()
 
-	err := slackStatusError(surfaceHistory, []byte(`["not","an","envelope"]`))
-	if err == nil || !strings.Contains(err.Error(), "status JSON invalid") {
-		t.Errorf("err = %v, want the unreadable-envelope diagnosis", err)
-	}
-	// ok:true is the only shape that is not an error.
-	if err := slackStatusError(surfaceHistory, []byte(`{"ok":true}`)); err != nil {
+	if _, err := slackStatusError(methodConversationsHistory, nil, slackResponseStatus{OK: true}); err != nil {
 		t.Errorf("err = %v, want nil for an ok response", err)
 	}
 	// An error with no reason still has to say something.
-	if err := slackStatusError(surfaceHistory, []byte(`{"ok":false}`)); err == nil ||
-		!strings.Contains(err.Error(), "not_ok") {
+	_, err := slackStatusError(methodConversationsHistory, nil, slackResponseStatus{})
+	if err == nil || !strings.Contains(err.Error(), "not_ok") {
 		t.Errorf("err = %v, want the not_ok fallback", err)
+	}
+	// Slack's scope hints are the most actionable thing it returns; carry both.
+	_, err = slackStatusError(methodConversationsHistory, nil,
+		slackResponseStatus{Error: "missing_scope", Needed: "channels:history", Provided: "chat:write"})
+	if err == nil || !strings.Contains(err.Error(), "needed channels:history") ||
+		!strings.Contains(err.Error(), "provided chat:write") {
+		t.Errorf("err = %v, want both scope hints", err)
+	}
+	// The one refusal worth retrying reports how long to wait.
+	header := http.Header{}
+	header.Set("Retry-After", "4")
+	delay, err := slackStatusError(methodConversationsHistory, header, slackResponseStatus{Error: "ratelimited"})
+	if err == nil || delay != 4*time.Second {
+		t.Errorf("delay = %s, err = %v; want the in-body rate limit retried after its header", delay, err)
+	}
+	// ...and no other reason is retryable.
+	if delay, _ := slackStatusError(methodConversationsHistory, header, slackResponseStatus{Error: "missing_scope"}); delay != 0 {
+		t.Errorf("delay = %s for missing_scope, want no retry", delay)
 	}
 }
 
@@ -1618,7 +1643,7 @@ func TestSlackClientRetriesAnInBodyRateLimit(t *testing.T) {
 	var mu sync.Mutex
 	var attempts int
 	srv, fake := newFakeSlack(t, nil)
-	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		attempts++
 		attempt := attempts
@@ -1639,7 +1664,7 @@ func TestSlackClientRetriesAnInBodyRateLimit(t *testing.T) {
 		sleep:      func(_ context.Context, d time.Duration) error { slept = d; return nil },
 	}
 	var out slackMessagesResponse
-	if err := client.get(context.Background(), surfaceHistory, nil, &out); err != nil {
+	if err := client.get(context.Background(), methodConversationsHistory, nil, &out); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if len(out.Messages) != 1 {
@@ -1650,22 +1675,60 @@ func TestSlackClientRetriesAnInBodyRateLimit(t *testing.T) {
 	}
 }
 
-// TestSlackRateLimitedBodyOnlyMatchesTheRateLimit pins that no other ok:false reason is
-// treated as retryable — a missing scope must fail immediately, not twice.
-func TestSlackRateLimitedBodyOnlyMatchesTheRateLimit(t *testing.T) {
+// TestReadHistorySelectsNoThreadsWithoutABudget pins the gate that keeps -skip-replies
+// from paying for work nobody reads. The budget is derived once in scanConversation, so
+// readHistory neither knows nor asks about the flag.
+func TestReadHistorySelectsNoThreadsWithoutABudget(t *testing.T) {
 	t.Parallel()
 
-	if reason, limited := slackRateLimitedBody([]byte(`{"ok":false,"error":"ratelimited"}`)); !limited || reason != "ratelimited" {
-		t.Errorf("slackRateLimitedBody = (%q, %v), want the rate limit recognized", reason, limited)
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsHistory: messagesBody(
+			`{"type":"message","user":"U1","text":"root","ts":"` + testThreadParent + `","thread_ts":"` + testThreadParent + `","reply_count":9}`,
+		),
+	})
+	cfg := testScanConfig(srv)
+	client := &slackClient{
+		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent,
+		httpClient: newSlackHTTPClient(testRequestTimeout),
 	}
-	for _, body := range []string{
-		`{"ok":true}`,
-		`{"ok":false,"error":"missing_scope"}`,
-		`{"ok":false}`,
-		`not json`,
-	} {
-		if _, limited := slackRateLimitedBody([]byte(body)); limited {
-			t.Errorf("slackRateLimitedBody(%s) = true, want only the rate limit retried", body)
+	tally := surfaceTally{Surface: methodConversationsHistory}
+	record := conversationResult{ID: testChannel}
+
+	threads, err := readHistory(context.Background(), client, cfg, testChannel, 0, &tally, &record, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("readHistory: %v", err)
+	}
+	if len(threads) != 0 {
+		t.Errorf("threads = %v, want none selected without a budget", threads)
+	}
+	// The history surface is still fully measured — only the thread selection is skipped.
+	if tally.Messages != 1 {
+		t.Errorf("tally = %+v, want the page still counted", tally)
+	}
+
+	withBudget, err := readHistory(context.Background(), client, cfg, testChannel, 5, &tally, &record, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("readHistory: %v", err)
+	}
+	if len(withBudget) != 1 {
+		t.Errorf("threads = %v, want the root selected when there is a budget", withBudget)
+	}
+}
+
+// TestSplitConversationIDsDeduplicates pins that naming a channel twice does not scan it
+// twice. The second pass would report classified_uploads: 0 — its ledger delta is
+// already spent — while double-counting both surface tallies.
+func TestSplitConversationIDsDeduplicates(t *testing.T) {
+	t.Parallel()
+
+	got := splitConversationIDs("C1, C2 ,C1 C2  C3")
+	want := []string{"C1", "C2", "C3"}
+	if len(got) != len(want) {
+		t.Fatalf("splitConversationIDs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("splitConversationIDs = %v, want %v in first-seen order", got, want)
 		}
 	}
 }
