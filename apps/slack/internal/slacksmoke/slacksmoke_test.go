@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,7 +30,11 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{name: "whitespace defaults", raw: "   ", want: DefaultAPIBaseURL},
 		{name: "https kept", raw: testHTTPSURL, want: testHTTPSURL},
 		{name: "trailing slash trimmed", raw: testHTTPSURL + "/api/", want: testHTTPSURL + "/api"},
+		{name: "default host trailing slash trimmed", raw: DefaultAPIBaseURL + "/", want: DefaultAPIBaseURL},
+		{name: "custom path preserved", raw: testHTTPSURL + "/api/~smoke/", want: testHTTPSURL + "/api/~smoke"},
 		{name: "http loopback ip allowed", raw: testLoopbackURL, want: testLoopbackURL},
+		{name: "http loopback keeps port and trims path", raw: "http://localhost:1234/api/", want: "http://localhost:1234/api"},
+		{name: "http ipv6 loopback keeps port and path", raw: "http://[::1]:1234/api", want: "http://[::1]:1234/api"},
 		{name: "http localhost allowed", raw: "http://localhost:8080", want: "http://localhost:8080"},
 		{name: "http ipv6 loopback allowed", raw: "http://[::1]:8080", want: "http://[::1]:8080"},
 		// The reason this function exists: a bearer token must not go out in plaintext
@@ -63,7 +68,7 @@ func TestNormalizeBaseURL(t *testing.T) {
 // TestNormalizeBaseURLRejectsUnparseable covers the inputs that fail the scheme/host
 // shape check rather than one of the named sentinels.
 func TestNormalizeBaseURLRejectsUnparseable(t *testing.T) {
-	for _, raw := range []string{"//slack.test", "slack.test", "://slack.test", "https://"} {
+	for _, raw := range []string{"//slack.test", "slack.test", "://slack.test", "https://", "http://[::1"} {
 		t.Run(raw, func(t *testing.T) {
 			if got, err := NormalizeBaseURL(raw); err == nil {
 				t.Fatalf("NormalizeBaseURL(%q) = %q, want an error", raw, got)
@@ -161,9 +166,15 @@ func TestContainsHTTPHeaderControl(t *testing.T) {
 // makes: a 3xx is surfaced, not followed, so the Authorization header never reaches
 // the host the response points at.
 func TestNewHTTPClientDoesNotReplayTokenOnRedirect(t *testing.T) {
+	// Guarded because the assertion below reads what a server goroutine would write in
+	// the failure this test exists to catch; an unsynchronized read there would race
+	// under -race exactly when the test is doing its job.
+	var mu sync.Mutex
 	var targetAuth string
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		targetAuth = r.Header.Get(testAuthHeader)
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer target.Close()
@@ -188,6 +199,8 @@ func TestNewHTTPClientDoesNotReplayTokenOnRedirect(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d (redirect must be surfaced, not followed)", resp.StatusCode, http.StatusFound)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if targetAuth != "" {
 		t.Fatalf("redirect target saw Authorization %q, want it never sent", targetAuth)
 	}
