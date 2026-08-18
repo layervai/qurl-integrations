@@ -24,6 +24,9 @@ curl "$(qurl resolve <CRID>)"
 brew install layervai/tap/qurl
 ```
 
+Homebrew also installs the man pages and the bash/zsh/fish completions
+shipped in the release archive.
+
 **Debian / RPM** — download the `.deb` or `.rpm` for your architecture from
 the [latest release](https://github.com/layervai/qurl-integrations/releases)
 and install it with `dpkg -i` / `rpm -i`.
@@ -31,7 +34,8 @@ and install it with `dpkg -i` / `rpm -i`.
 **Prebuilt binaries** — download the archive for your OS and architecture
 (`linux`, `darwin`, `windows` × `amd64`, `arm64`) from the
 [releases page](https://github.com/layervai/qurl-integrations/releases),
-extract it, and put the `qurl` binary on your `PATH`.
+extract it, and put the `qurl` binary on your `PATH`. The archive carries
+the man pages and completion files alongside the binary.
 
 Confirm the install:
 
@@ -62,10 +66,30 @@ a mistyped key fails loudly instead of breaking every later command.
 `qurl whoami` shows which account and key identity the configured
 credential maps to.
 
-The API endpoint defaults to the production host `https://api.layerv.ai`.
-Override it with `--endpoint`, the `QURL_ENDPOINT` environment variable, or
-a profile file (`~/.config/qurl/profiles/<name>.yaml`, selected with
-`--profile` or `QURL_PROFILE`). Config files never hold secrets.
+## Configuration
+
+Every setting resolves through the same precedence chain:
+
+```
+command-line flag > environment variable > profile/config file > built-in default
+```
+
+| Setting | Flag | Environment | Config key | Default |
+|---------|------|-------------|------------|---------|
+| API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
+| Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
+| Color | `--color` | `QURL_COLOR` | `color` | `auto` |
+
+Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
+named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
+selected with `--profile` or `QURL_PROFILE`. A missing file simply means
+defaults apply. **Config files never hold secrets** — a file carrying an
+`api_key` entry is rejected outright rather than silently honored.
+
+Also honored: `NO_COLOR` (disables color while `--color` is `auto`), and
+`QURL_BROWSER` / `BROWSER` (which browser `qurl get` opens). Pointing the
+CLI at a plain-`http` endpoint on a non-local address warns that the key
+would travel unencrypted; loopback endpoints are exempt.
 
 ## Commands
 
@@ -73,7 +97,7 @@ a profile file (`~/.config/qurl/profiles/<name>.yaml`, selected with
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a URL as a protected resource and get its CRID |
 | `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
-| `qurl get <CRID>` | Fetch what a CRID points to: opens your browser on a terminal, or downloads with `--file <path>` (`--file -` streams raw bytes — gate pipelines on the exit status, since a mid-stream failure leaves already-written bytes behind; `--force` allows replacing an existing file) |
+| `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl delete <CRID>` | Delete a published resource |
 | `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
@@ -81,7 +105,154 @@ a profile file (`~/.config/qurl/profiles/<name>.yaml`, selected with
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
-Run `qurl <command> --help` for the full flag list. Global flags:
+Run `qurl <command> --help` for the full help text; installed man pages
+cover the same surface (`man qurl`, `man qurl-publish`, …).
+
+Commands that take a CRID assess it locally first: a likely typo (bad
+checksum, wrong alphabet) is warned about and still forwarded — the server
+is the only authoritative validator. Sending a **test-environment CRID to
+the production endpoint** is refused unless `--yes` is given; a production
+CRID aimed at a non-production endpoint warns and proceeds.
+
+### qurl publish
+
+`qurl publish <target-url>` registers the target and prints its CRID —
+last and alone on its line in text mode, so it is the easiest thing to
+select and copy; `--quiet` prints only the CRID.
+
+| Flag | Description |
+|------|-------------|
+| `--description <text>` | Human-readable description stored with the resource |
+| `--tag <tag>` | Tag stored with the resource (repeatable) |
+| `--alias <name>` | Memorable handle stored with the resource |
+
+Publishing is not idempotent: the same URL published twice normally
+creates two independent resources with two CRIDs. When the service
+instead answers with an already-existing resource, the CLI says so on
+stderr (and sets `found_existing` in JSON output).
+
+### qurl resolve
+
+`qurl resolve <CRID>` mints a temporary access link for the resource the
+CRID names. The link expires on its own; resolve again whenever you need
+a fresh one. When stdout is not a terminal the command prints the bare
+link and nothing else, so it composes: `curl "$(qurl resolve <CRID>)"`.
+
+| Flag | Description |
+|------|-------------|
+| `--ttl <duration>` | Requested link lifetime in whole seconds (e.g. `5m`, `1h`). The service may grant less; a shorter grant is reported on stderr, never silent. Sub-second or negative values are refused rather than rounded. |
+| `--yes` | Proceed without confirmation, including sending a test CRID to production |
+
+Before anything is printed, the CLI verifies the service's answer against
+the CRID you asked for; a mismatched answer is discarded and the command
+exits with code 12 without printing a link.
+
+### qurl get
+
+`qurl get <CRID>` resolves and verifies exactly like `qurl resolve`, then
+acts on the verified link — nothing is ever acted on unverified:
+
+- **On a terminal**, get prints the link, then opens it in your browser
+  (set `QURL_BROWSER` or `BROWSER` to choose which one).
+- **With `--file <path>`** it downloads to that path instead. The download
+  is atomic: bytes arrive in `<path>.part`, which becomes `<path>` only
+  when the download completes. Existing files are never replaced unless
+  `--force` is given, and an access link that expires mid-download is
+  refreshed and retried once automatically.
+- **With `--file -`** the raw bytes stream to stdout, clean for piping —
+  gate pipelines on the exit status, since a mid-stream failure leaves
+  already-written bytes behind.
+
+| Flag | Description |
+|------|-------------|
+| `--file <path>` | Download to this path instead of opening a browser (`-` = raw bytes to stdout) |
+| `--force` | Allow `--file` to replace an existing file |
+| `--yes` | Proceed without confirmation, including sending a test CRID to production |
+
+When stdout is not a terminal, get never opens a browser: pass `--file`,
+or use `qurl resolve` if you only need the link. With `-o json`, get is a
+machine asking for data, so browser mode and `--file -` are refused
+loudly; `--file <path> -o json` downloads and emits the outcome document.
+
+### qurl list
+
+`qurl list` prints one row per resource published under your account. The
+text table shortens each CRID from the middle so rows stay readable; JSON
+output and `--quiet` always carry the full CRID.
+
+| Flag | Description |
+|------|-------------|
+| `--limit <n>` | Maximum resources per page, 1–100 (default: service decides) |
+| `--cursor <cursor>` | Continue from a previous page's cursor |
+| `--status <status>` | Only resources with this status, e.g. `active` |
+| `--type <kind>` | Only resources of this kind: `url` or `tunnel` |
+
+When more results exist, text mode says so on stderr with the `--cursor`
+value to pass next. See [JSON output](#json-output--o-json) for the
+pagination contract scripts should follow.
+
+### qurl delete
+
+`qurl delete <CRID>` deletes a published resource. Deletion cannot be
+undone: the CRID stops resolving, and republishing the same target later
+mints a different CRID.
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Skip the confirmation prompt (required when stdin is not a terminal) |
+
+Interactive runs confirm first; scripts and pipelines must pass `--yes` —
+without a terminal the command refuses rather than hanging. Deleting an
+already-deleted resource succeeds idempotently and says so (JSON sets
+`already_gone`).
+
+### qurl login / logout / whoami
+
+`qurl login` reads the key from piped stdin or a hidden interactive
+prompt — never as an argument — validates its shape, checks it against
+the qURL service, and only then stores it (OS keyring preferred, the
+`~/.config/qurl/token` fallback where no keyring exists — see
+[Authentication](#authentication)). `qurl logout` removes the stored key
+from every backend that holds it; it does not touch `QURL_API_KEY` in
+your environment. `qurl whoami` shows the account and the key's own
+identity (id, kind, scopes, expiry) — identity only, no plan or usage
+data, so it is cheap enough for scripts and shell prompts (`--quiet`
+prints just the owner id).
+
+```bash
+op read op://team/qurl/key | qurl login
+qurl whoami -o json
+```
+
+### qurl completion
+
+`qurl completion <shell>` writes a completion script to stdout for
+`bash`, `zsh`, `fish`, or `powershell`:
+
+```bash
+eval "$(qurl completion bash)"
+qurl completion zsh > "${fpath[1]}/_qurl"
+qurl completion fish > ~/.config/fish/completions/qurl.fish
+```
+
+Homebrew installs the bash/zsh/fish completions for you.
+
+### qurl version
+
+`qurl version` prints one line — `qurl version <version> (<os>/<arch>)` —
+and its shape is a stable contract, so scripts may parse it
+(`qurl version | awk '{print $3}'`).
+
+`qurl version`, `qurl completion`, and `qurl help` deliberately read no
+configuration, credentials, or network: a broken config file can never
+brick shell startup or a version check.
+
+There is also a hidden maintenance command, `qurl docs [man|markdown] -d
+<dir>`, which generates the man pages and markdown docs from the command
+tree itself; release packaging runs it to produce the man pages shipped
+in every archive.
+
+## Global flags
 
 | Flag | Description |
 |------|-------------|
@@ -95,12 +266,51 @@ Run `qurl <command> --help` for the full flag list. Global flags:
 ## Scripting contract
 
 - **stdout carries data, stderr carries everything else.** `qurl resolve`
-  piped into another command prints the bare link and nothing more.
-- **Exit codes are stable:** 0 success · 1 general · 2 usage · 3
-  configuration · 4 authentication · 5 not found · 6 permission · 7
-  conflict · 8 invalid input · 9 rate limited · 10 server error · 11
-  service unavailable · 12 verification failed (nothing was printed) · 130
-  interrupted.
+  piped into another command prints the bare link and nothing more;
+  notes, warnings, and confirmation prompts go to stderr.
+- **`--quiet` prints only the primary value**, one per line: the CRID for
+  `publish`, the link for `resolve`, full CRIDs for `list`, the
+  destination path for a `get --file` download, the owner id for
+  `whoami` and `login`.
 - **Verification is built in:** before printing anything, `qurl resolve`
-  checks the service's answer against the CRID you asked for and discards
-  mismatches (exit 12).
+  and `qurl get` check the service's answer against the CRID you asked
+  for and discard mismatches (exit 12).
+
+### Exit codes
+
+Exit codes are stable. The meanings below mirror the CLI's single
+exit-code authority in code (`apps/cli/internal/exitcode`):
+
+| Code | Name | Meaning |
+|-----:|------|---------|
+| 0 | success | The command did what was asked. |
+| 1 | general | An unclassified failure, including features not yet available in this build. |
+| 2 | usage | The command line itself was wrong: flags, arguments, or missing confirmation. |
+| 3 | configuration | Configuration files or profiles are invalid. |
+| 4 | authentication | No credential, an implausible credential, or the service rejected the credential. |
+| 5 | not found | The resource does not exist or is retired — revoked and tombstoned resources included; the stderr message distinguishes them. |
+| 6 | permission | The credential lacks permission for this operation. |
+| 7 | conflict | The request conflicts with current state — including `--file` refusing to replace an existing destination without `--force`. |
+| 8 | invalid input | An operand or request rejected as invalid (by the service, or locally for inputs that can never be valid). |
+| 9 | rate limited | Still rate limited after the CLI's bounded automatic retries. |
+| 10 | server error | The service failed or answered outside its contract. |
+| 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. |
+| 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
+| 130 | interrupted | The run was canceled (Ctrl-C). |
+
+### JSON output (`-o json`)
+
+Every command's `-o json` document uses field names owned by this repo —
+a stable contract independent of upstream renames. Fields that only
+sometimes apply (`found_existing`, `already_gone`, a missing `crid` on
+older deployments) are omitted rather than emitted empty.
+
+For `qurl list`, **`has_more` — not `next_cursor` presence — is the
+pagination terminator.** The service legitimately serves short and even
+zero-item pages with `"has_more": true`, so consumers must keep following
+`next_cursor` until `"has_more": false`; `has_more` is always emitted for
+exactly that reason.
+
+```bash
+qurl list -o json | jq -r '.resources[].crid'
+```
