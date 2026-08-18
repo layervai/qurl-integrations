@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/nethost"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -1455,7 +1455,7 @@ func ValidateConnectorAPIURL(raw string) error {
 	if parsed.Scheme != resourceExposeSchemeHTTP {
 		return errConnectorAPIURLInvalid
 	}
-	if !slacksmoke.IsLoopbackHost(parsed.Hostname()) {
+	if !nethost.IsLoopback(parsed.Hostname()) {
 		return errConnectorAPIURLInvalid
 	}
 	return nil

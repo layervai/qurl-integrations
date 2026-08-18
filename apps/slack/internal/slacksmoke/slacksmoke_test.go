@@ -1,7 +1,6 @@
 package slacksmoke
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -72,35 +71,6 @@ func TestNormalizeBaseURLRejectsUnparseable(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			if got, err := NormalizeBaseURL(raw); err == nil {
 				t.Fatalf("NormalizeBaseURL(%q) = %q, want an error", raw, got)
-			}
-		})
-	}
-}
-
-func TestIsLoopbackHost(t *testing.T) {
-	tests := []struct {
-		host string
-		want bool
-	}{
-		{host: "localhost", want: true},
-		{host: "127.0.0.1", want: true},
-		{host: "127.5.6.7", want: true},
-		{host: "::1", want: true},
-		// The trim and lower are why the internal inspect and tunnel call sites could
-		// drop their own normalization; a copy without them answered false here.
-		{host: "  LocalHost  ", want: true},
-		{host: "LOCALHOST", want: true},
-		{host: "  127.0.0.1 ", want: true},
-		{host: "", want: false},
-		{host: "slack.test", want: false},
-		{host: "localhost.evil.test", want: false},
-		{host: "8.8.8.8", want: false},
-		{host: "0.0.0.0", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.host, func(t *testing.T) {
-			if got := IsLoopbackHost(tc.host); got != tc.want {
-				t.Fatalf("IsLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
 	}
@@ -218,12 +188,19 @@ func TestNewHTTPClientTimeout(t *testing.T) {
 // different budget depending on which copy ran.
 func TestDrainResponseBodyHonoursCallerLimit(t *testing.T) {
 	const total = 4096
-	for _, limit := range []int{0, 16, 1024} {
+	for _, limit := range []int64{0, 16, 1024} {
 		src := strings.NewReader(strings.Repeat("a", total))
 		DrainResponseBody(src, limit)
-		if got := total - src.Len(); got != limit+1 {
+		if got := int64(total - src.Len()); got != limit+1 {
 			t.Fatalf("DrainResponseBody(_, %d) consumed %d bytes, want %d", limit, got, limit+1)
 		}
+	}
+	// A negative limit must drain nothing rather than be read as an EOF-immediately
+	// count that silently skips the drain.
+	src := strings.NewReader(strings.Repeat("a", total))
+	DrainResponseBody(src, -5)
+	if got := total - src.Len(); got != 1 {
+		t.Fatalf("DrainResponseBody(_, -5) consumed %d bytes, want 1", got)
 	}
 }
 
@@ -263,80 +240,85 @@ func TestIsEnvVarName(t *testing.T) {
 	}
 }
 
-func TestValidateTimeoutBudget(t *testing.T) {
+func TestTimeoutBudgetValidate(t *testing.T) {
 	tests := []struct {
-		name       string
-		budget     TimeoutBudget
-		minFactor  int
-		wantCode   int
-		wantStderr string
+		name      string
+		budget    TimeoutBudget
+		minFactor int
+		wantErr   error
+		wantText  string
 	}{
 		{
 			name:      "usable",
 			budget:    TimeoutBudget{Overall: 90 * time.Second, Request: 10 * time.Second},
 			minFactor: 3,
-			wantCode:  0,
-		},
-		{
-			name:       "overall not positive",
-			budget:     TimeoutBudget{Overall: 0, Request: 10 * time.Second},
-			minFactor:  3,
-			wantCode:   2,
-			wantStderr: "-timeout must be greater than 0\n",
-		},
-		{
-			name:       "request not positive",
-			budget:     TimeoutBudget{Overall: 90 * time.Second, Request: 0},
-			minFactor:  3,
-			wantCode:   2,
-			wantStderr: "-request-timeout must be greater than 0\n",
-		},
-		{
-			// Ordering matters: an equal pair must get this message rather than the
-			// multiplier one, which is why the check sits ahead of the factor guard.
-			name:       "request equals overall",
-			budget:     TimeoutBudget{Overall: 10 * time.Second, Request: 10 * time.Second},
-			minFactor:  3,
-			wantCode:   2,
-			wantStderr: "-request-timeout must be less than -timeout\n",
-		},
-		{
-			name:       "request exceeds overall",
-			budget:     TimeoutBudget{Overall: 5 * time.Second, Request: 10 * time.Second},
-			minFactor:  3,
-			wantCode:   2,
-			wantStderr: "-request-timeout must be less than -timeout\n",
-		},
-		{
-			name:       "below factor",
-			budget:     TimeoutBudget{Overall: 25 * time.Second, Request: 10 * time.Second},
-			minFactor:  3,
-			wantCode:   2,
-			wantStderr: "-timeout must be at least 3x -request-timeout\n",
-		},
-		{
-			name:       "factor is caller supplied",
-			budget:     TimeoutBudget{Overall: 35 * time.Second, Request: 10 * time.Second},
-			minFactor:  4,
-			wantCode:   2,
-			wantStderr: "-timeout must be at least 4x -request-timeout\n",
 		},
 		{
 			name:      "exactly at factor",
 			budget:    TimeoutBudget{Overall: 30 * time.Second, Request: 10 * time.Second},
 			minFactor: 3,
-			wantCode:  0,
+		},
+		{
+			name:      "overall not positive",
+			budget:    TimeoutBudget{Overall: 0, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrOverallTimeoutNotPositive,
+			wantText:  "-timeout must be greater than 0",
+		},
+		{
+			name:      "request not positive",
+			budget:    TimeoutBudget{Overall: 90 * time.Second, Request: 0},
+			minFactor: 3,
+			wantErr:   ErrRequestTimeoutNotPositive,
+			wantText:  "-request-timeout must be greater than 0",
+		},
+		{
+			// Ordering matters: an equal pair must get this message rather than the
+			// multiplier one, which is why the check sits ahead of the factor guard.
+			name:      "request equals overall",
+			budget:    TimeoutBudget{Overall: 10 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrRequestTimeoutNotLess,
+			wantText:  "-request-timeout must be less than -timeout",
+		},
+		{
+			name:      "request exceeds overall",
+			budget:    TimeoutBudget{Overall: 5 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+			wantErr:   ErrRequestTimeoutNotLess,
+			wantText:  "-request-timeout must be less than -timeout",
+		},
+		{
+			name:      "below factor",
+			budget:    TimeoutBudget{Overall: 25 * time.Second, Request: 10 * time.Second},
+			minFactor: 3,
+			wantText:  "-timeout must be at least 3x -request-timeout",
+		},
+		{
+			name:      "factor is caller supplied",
+			budget:    TimeoutBudget{Overall: 35 * time.Second, Request: 10 * time.Second},
+			minFactor: 4,
+			wantText:  "-timeout must be at least 4x -request-timeout",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var stderr bytes.Buffer
-			got := ValidateTimeoutBudget(&stderr, tc.budget, tc.minFactor)
-			if got != tc.wantCode {
-				t.Fatalf("ValidateTimeoutBudget = %d, want %d", got, tc.wantCode)
+			err := tc.budget.Validate(tc.minFactor)
+			if tc.wantText == "" {
+				if err != nil {
+					t.Fatalf("Validate = %v, want nil", err)
+				}
+				return
 			}
-			if stderr.String() != tc.wantStderr {
-				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			if err == nil {
+				t.Fatalf("Validate = nil, want %q", tc.wantText)
+			}
+			// The text is the operator-facing contract: commands Fprintln it verbatim.
+			if err.Error() != tc.wantText {
+				t.Fatalf("Validate = %q, want %q", err.Error(), tc.wantText)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Validate = %v, want errors.Is %v", err, tc.wantErr)
 			}
 		})
 	}

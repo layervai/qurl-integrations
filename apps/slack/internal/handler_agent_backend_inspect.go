@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/nethost"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
-	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
@@ -330,7 +330,7 @@ func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) er
 	if siteHost == "" {
 		return errors.New("qURL site missing host name")
 	}
-	if allowLoopback && slacksmoke.IsLoopbackHost(linkHost) && slacksmoke.IsLoopbackHost(siteHost) {
+	if allowLoopback && nethost.IsLoopback(linkHost) && nethost.IsLoopback(siteHost) {
 		return nil
 	}
 	if isInspectableQURLLinkHost(linkHost) {

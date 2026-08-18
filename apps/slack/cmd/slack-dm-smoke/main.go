@@ -184,8 +184,9 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 		minTimeoutFactor = minDirectProbeFactor
 	}
 	budget := slacksmoke.TimeoutBudget{Overall: timeout, Request: requestTimeout}
-	if code := slacksmoke.ValidateTimeoutBudget(stderr, budget, minTimeoutFactor); code != 0 {
-		return code
+	if err := budget.Validate(minTimeoutFactor); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
 	}
 	cfg.StartedAt = now().UTC()
 	cfg.HTTPClient = slacksmoke.NewHTTPClient(requestTimeout)

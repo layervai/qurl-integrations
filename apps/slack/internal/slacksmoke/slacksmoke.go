@@ -3,11 +3,15 @@
 //
 // Everything here sits on the path a bot token travels, which is why it is one package
 // rather than a copy per command. NormalizeBaseURL is what keeps the token from being
-// sent to a plaintext or attacker-named host, IsLoopbackHost is that rule's only http
-// escape hatch, CleanToken and ContainsHTTPHeaderControl are the header-injection
-// guard, and NewHTTPClient's redirect policy is what stops the token being replayed
-// down a redirect chain. apps/slack/docs/operating.md makes operators that promise for
-// every command built on this package.
+// sent to a plaintext or attacker-named host, CleanToken and ContainsHTTPHeaderControl
+// are the header-injection guard, and NewHTTPClient's redirect policy is what stops the
+// token being replayed down a redirect chain. The https-unless-loopback rule is the one
+// apps/slack/docs/operating.md promises operators by name; the redirect policy is a
+// property of this code that the runbook does not restate.
+//
+// The loopback predicate itself lives in the nethost leaf package, because the request
+// handlers and the startup config check share it and must not depend on a package named
+// for the smoke commands.
 //
 // Each of these existed once per command before this package. Nothing in CI could see
 // the two copies drift: dupl runs per package, and package main binaries in separate
@@ -23,11 +27,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/nethost"
 )
 
 // DefaultAPIBaseURL is Slack's Web API root, used when a command's -base-url is empty.
@@ -40,6 +45,9 @@ var (
 	// ErrBotTokenControlCharacters reports a token that cannot be written into an
 	// Authorization header without risking request splitting.
 	ErrBotTokenControlCharacters = errors.New("invalid Slack bot token: contains control characters")
+	// ErrBaseURLInvalid reports a -base-url that is not a usable absolute URL. Wrapped
+	// around url.Parse's own error when there is one.
+	ErrBaseURLInvalid = errors.New("invalid -base-url")
 	// ErrBaseURLRequiresHTTPS reports a -base-url that would put a bearer token on the
 	// wire in plaintext.
 	ErrBaseURLRequiresHTTPS = errors.New("-base-url must use https unless host is localhost or loopback")
@@ -54,6 +62,17 @@ var (
 	// ErrTokenEnvName reports a -token-env that is not a POSIX environment variable
 	// name. See IsEnvVarName for why the flag is validated rather than trusted.
 	ErrTokenEnvName = errors.New("-token-env must be a POSIX environment variable name")
+
+	// ErrOverallTimeoutNotPositive reports a non-positive -timeout. This and the two
+	// below carry their operator-facing text verbatim, because commands print them
+	// as-is; TimeoutBudget.Validate's factor failure has no sentinel because its
+	// message is parameterized by the caller's minimum.
+	ErrOverallTimeoutNotPositive = errors.New("-timeout must be greater than 0")
+	// ErrRequestTimeoutNotPositive reports a non-positive -request-timeout.
+	ErrRequestTimeoutNotPositive = errors.New("-request-timeout must be greater than 0")
+	// ErrRequestTimeoutNotLess reports a -request-timeout that does not leave the
+	// overall budget room for more than one call.
+	ErrRequestTimeoutNotLess = errors.New("-request-timeout must be less than -timeout")
 )
 
 // NormalizeBaseURL trims and validates a Slack Web API base URL, returning it without
@@ -70,10 +89,10 @@ func NormalizeBaseURL(raw string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("invalid -base-url: %w", err)
+		return "", fmt.Errorf("%w: %w", ErrBaseURLInvalid, err)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("invalid -base-url")
+		return "", ErrBaseURLInvalid
 	}
 	if parsed.User != nil {
 		return "", ErrBaseURLUserinfo
@@ -81,25 +100,11 @@ func NormalizeBaseURL(raw string) (string, error) {
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", ErrBaseURLQueryFragment
 	}
-	if parsed.Scheme == "https" || (parsed.Scheme == "http" && IsLoopbackHost(parsed.Hostname())) {
+	if parsed.Scheme == "https" || (parsed.Scheme == "http" && nethost.IsLoopback(parsed.Hostname())) {
 		parsed.Path = strings.TrimRight(parsed.Path, "/")
 		return parsed.String(), nil
 	}
 	return "", ErrBaseURLRequiresHTTPS
-}
-
-// IsLoopbackHost reports whether host names the local machine, and so is the one place
-// a plaintext http base URL is allowed.
-//
-// It trims and lowercases before deciding, so a caller that has not already normalized
-// its input still gets the same answer.
-func IsLoopbackHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // CleanToken trims a Slack bot token and rejects one that cannot be written into an
@@ -139,17 +144,22 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-// DrainResponseBody reads up to limit+1 bytes from body and discards them, a
-// best-effort attempt at connection reuse for a moderately oversized response. Close
-// tears down the response if bytes still remain.
+// DrainResponseBody discards up to limit+1 bytes of body — one past the caller's
+// ceiling, matching the over-read the callers use to detect an oversized response. It
+// is a best-effort attempt at connection reuse; Close tears the response down if bytes
+// still remain.
 //
 // limit is a parameter rather than a package constant because the callers' ceilings
 // differ by two orders of magnitude — slack-dm-smoke reads small chat.postMessage
 // envelopes, while slack-history-upload-smoke reads whole conversations.history pages.
 // When this function was duplicated per command, the same body silently drained a 64x
-// different budget depending on which file it sat in.
-func DrainResponseBody(body io.Reader, limit int) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, int64(limit)+1))
+// different budget depending on which file it sat in. A negative limit drains nothing
+// rather than reading a negative count as EOF.
+func DrainResponseBody(body io.Reader, limit int64) {
+	if limit < 0 {
+		limit = 0
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, limit+1))
 }
 
 // IsEnvVarName reports whether name is a POSIX environment variable name: a leading
@@ -180,25 +190,24 @@ type TimeoutBudget struct {
 	Request time.Duration
 }
 
-// ValidateTimeoutBudget writes the first failing check to stderr and returns the
-// process exit code: 2 for a bad invocation, 0 when the budget is usable.
+// Validate returns the first failing check, or nil when the budget is usable. Callers
+// print it and exit; the package renders no operator text and knows no exit codes,
+// which is the same division the token and base-URL sentinels above keep.
 //
 // minFactor is how many whole request timeouts the overall budget must cover — the
 // smallest useful run for that command, which varies with the calls it makes.
-func ValidateTimeoutBudget(stderr io.Writer, budget TimeoutBudget, minFactor int) int {
+func (b TimeoutBudget) Validate(minFactor int) error {
 	switch {
-	case budget.Overall <= 0:
-		_, _ = fmt.Fprintln(stderr, "-timeout must be greater than 0")
-	case budget.Request <= 0:
-		_, _ = fmt.Fprintln(stderr, "-request-timeout must be greater than 0")
+	case b.Overall <= 0:
+		return ErrOverallTimeoutNotPositive
+	case b.Request <= 0:
+		return ErrRequestTimeoutNotPositive
 	// Explicit before the factor guard so equal or exceeding values get the direct
 	// operator-facing error rather than the multiplier one.
-	case budget.Request >= budget.Overall:
-		_, _ = fmt.Fprintln(stderr, "-request-timeout must be less than -timeout")
-	case budget.Overall < time.Duration(minFactor)*budget.Request:
-		_, _ = fmt.Fprintf(stderr, "-timeout must be at least %dx -request-timeout\n", minFactor)
-	default:
-		return 0
+	case b.Request >= b.Overall:
+		return ErrRequestTimeoutNotLess
+	case b.Overall < time.Duration(minFactor)*b.Request:
+		return fmt.Errorf("-timeout must be at least %dx -request-timeout", minFactor)
 	}
-	return 2
+	return nil
 }
