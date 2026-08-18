@@ -9,23 +9,22 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
 const (
-	defaultSlackAPIBaseURL = "https://slack.com/api"
-	defaultUserAgent       = "qurl-slack-dm-smoke"
-	defaultOverallTimeout  = 90 * time.Second
-	defaultRequestTimeout  = 10 * time.Second
-	minRequiredCallFactor  = 3
-	minDirectProbeFactor   = 4
-	maxSlackResponseBytes  = 64 * 1024
+	defaultUserAgent      = "qurl-slack-dm-smoke"
+	defaultOverallTimeout = 90 * time.Second
+	defaultRequestTimeout = 10 * time.Second
+	minRequiredCallFactor = 3
+	minDirectProbeFactor  = 4
+	maxSlackResponseBytes = 64 * 1024
 	// maxSmokeTextBytes is a conservative local cap for non-secret smoke text,
 	// not Slack's chat.postMessage ceiling.
 	maxSmokeTextBytes        = 4000
@@ -39,16 +38,10 @@ const (
 )
 
 var (
-	errMissingSlackBotToken           = errors.New("missing Slack bot token")
-	errSlackBotTokenControlCharacters = errors.New("invalid Slack bot token: contains control characters")
 	errMissingSlackUserID             = errors.New("missing Slack user ID")
 	errSlackUserIDSeparatorControl    = errors.New("invalid Slack user ID: contains comma, ASCII whitespace, or ASCII control characters")
 	errStrictDirectProbeRequiresProbe = errors.New("-strict-direct-user-probe requires -direct-user-probe")
-	errBaseURLRequiresHTTPS           = errors.New("-base-url must use https unless host is localhost or loopback")
-	errBaseURLQueryFragment           = errors.New("-base-url must not include query or fragment")
-	errBaseURLUserinfo                = errors.New("-base-url must not include userinfo")
 	errSmokeTextTooLong               = errors.New("smoke text is too long")
-	errUserAgentControlCharacters     = errors.New("-user-agent contains control characters")
 )
 
 type smokeConfig struct {
@@ -155,7 +148,7 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 	fs.StringVar(&tokenEnv, "token-env", "SLACK_BOT_TOKEN", "environment variable containing the Slack bot token")
 	fs.StringVar(&cfg.UserID, "user", "", "Slack user ID to receive the smoke DM")
 	fs.StringVar(&cfg.Text, "text", "", "non-secret smoke message text")
-	fs.StringVar(&cfg.BaseURL, "base-url", defaultSlackAPIBaseURL, "Slack Web API base URL")
+	fs.StringVar(&cfg.BaseURL, "base-url", slacksmoke.DefaultAPIBaseURL, "Slack Web API base URL")
 	fs.StringVar(&cfg.UserAgent, "user-agent", defaultUserAgent, "HTTP User-Agent")
 	fs.StringVar(&cfg.WorkspaceShape, "workspace-shape", "", "operator note, for example Enterprise Grid org install")
 	fs.StringVar(&cfg.TokenOwner, "token-owner", "", "operator note for the token owner, for example workspace or enterprise")
@@ -176,31 +169,26 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string, getenv fu
 		_, _ = fmt.Fprintln(stderr, "-token-env is required")
 		return 2
 	}
+	// Validated rather than trusted because it is echoed back in the "not set" error an
+	// operator hits first, and an unconstrained flag value there puts whatever it
+	// contains — newlines included — into the command's own diagnostics.
+	if !slacksmoke.IsEnvVarName(tokenEnv) {
+		_, _ = fmt.Fprintln(stderr, slacksmoke.ErrTokenEnvName.Error())
+		return 2
+	}
 	cfg.Token = getenv(tokenEnv)
-	if timeout <= 0 {
-		_, _ = fmt.Fprintln(stderr, "-timeout must be greater than 0")
-		return 2
-	}
-	if requestTimeout <= 0 {
-		_, _ = fmt.Fprintln(stderr, "-request-timeout must be greater than 0")
-		return 2
-	}
-	// Keep this explicit before the factor guard so equal/exceeding values get
-	// the direct operator-facing error.
-	if requestTimeout >= timeout {
-		_, _ = fmt.Fprintln(stderr, "-request-timeout must be less than -timeout")
-		return 2
-	}
+	// The factor is the smallest useful run: one round trip per required call, plus the
+	// extra one the direct-user probe adds.
 	minTimeoutFactor := minRequiredCallFactor
 	if cfg.DirectUserProbe {
 		minTimeoutFactor = minDirectProbeFactor
 	}
-	if timeout < time.Duration(minTimeoutFactor)*requestTimeout {
-		_, _ = fmt.Fprintf(stderr, "-timeout must be at least %dx -request-timeout\n", minTimeoutFactor)
-		return 2
+	budget := slacksmoke.TimeoutBudget{Overall: timeout, Request: requestTimeout}
+	if code := slacksmoke.ValidateTimeoutBudget(stderr, budget, minTimeoutFactor); code != 0 {
+		return code
 	}
 	cfg.StartedAt = now().UTC()
-	cfg.HTTPClient = newSlackHTTPClient(requestTimeout)
+	cfg.HTTPClient = slacksmoke.NewHTTPClient(requestTimeout)
 
 	if err := prepareSmokeConfig(&cfg); err != nil {
 		writeConfigValidationError(stderr, tokenEnv, err)
@@ -298,7 +286,7 @@ func runPreparedSmoke(ctx context.Context, cfg *smokeConfig) (smokeResult, error
 
 func prepareSmokeConfig(cfg *smokeConfig) error {
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = newSlackHTTPClient(defaultRequestTimeout)
+		cfg.HTTPClient = slacksmoke.NewHTTPClient(defaultRequestTimeout)
 	}
 	if cfg.StartedAt.IsZero() {
 		cfg.StartedAt = time.Now().UTC()
@@ -311,7 +299,7 @@ func prepareSmokeConfig(cfg *smokeConfig) error {
 	var err error
 	// Token errors come first for CLI UX, but cleaned user evidence is still
 	// preserved when direct callers receive the raw validation error.
-	cfg.Token, err = cleanSlackToken(cfg.Token)
+	cfg.Token, err = slacksmoke.CleanToken(cfg.Token)
 	if err != nil {
 		cfg.UserID = cleanedUserID
 		return err
@@ -320,13 +308,13 @@ func prepareSmokeConfig(cfg *smokeConfig) error {
 	if userIDErr != nil {
 		return userIDErr
 	}
-	if containsHTTPHeaderControl(cfg.UserAgent) {
-		return errUserAgentControlCharacters
+	if slacksmoke.ContainsHTTPHeaderControl(cfg.UserAgent) {
+		return slacksmoke.ErrUserAgentControlCharacters
 	}
 	if cfg.ForceDirectStrict && !cfg.DirectUserProbe {
 		return errStrictDirectProbeRequiresProbe
 	}
-	cfg.BaseURL, err = normalizeSlackBaseURL(cfg.BaseURL)
+	cfg.BaseURL, err = slacksmoke.NormalizeBaseURL(cfg.BaseURL)
 	if err != nil {
 		return err
 	}
@@ -357,42 +345,17 @@ func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 		_, _ = fmt.Fprintln(stderr, "-user contains comma, ASCII whitespace, or ASCII control characters")
 	case errors.Is(err, errStrictDirectProbeRequiresProbe):
 		_, _ = fmt.Fprintln(stderr, errStrictDirectProbeRequiresProbe.Error())
-	case errors.Is(err, errMissingSlackBotToken):
+	case errors.Is(err, slacksmoke.ErrMissingBotToken):
 		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv)
-	case errors.Is(err, errSlackBotTokenControlCharacters):
+	case errors.Is(err, slacksmoke.ErrBotTokenControlCharacters):
 		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv)
 	case errors.Is(err, errSmokeTextTooLong):
 		_, _ = fmt.Fprintf(stderr, "-text must be at most %d bytes after cleanup\n", maxSmokeTextBytes)
-	case errors.Is(err, errUserAgentControlCharacters):
-		_, _ = fmt.Fprintln(stderr, errUserAgentControlCharacters.Error())
+	case errors.Is(err, slacksmoke.ErrUserAgentControlCharacters):
+		_, _ = fmt.Fprintln(stderr, slacksmoke.ErrUserAgentControlCharacters.Error())
 	default:
 		_, _ = fmt.Fprintln(stderr, err)
 	}
-}
-
-func normalizeSlackBaseURL(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		raw = defaultSlackAPIBaseURL
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid -base-url: %w", err)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", errors.New("invalid -base-url")
-	}
-	if parsed.User != nil {
-		return "", errBaseURLUserinfo
-	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", errBaseURLQueryFragment
-	}
-	if parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		parsed.Path = strings.TrimRight(parsed.Path, "/")
-		return parsed.String(), nil
-	}
-	return "", errBaseURLRequiresHTTPS
 }
 
 func cleanSmokeMessageText(text string, startedAt time.Time) (string, error) {
@@ -420,26 +383,6 @@ func directUserProbeText(text string) string {
 	return text + directUserProbeSuffix
 }
 
-func isLoopbackHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func cleanSlackToken(token string) (string, error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", errMissingSlackBotToken
-	}
-	if containsHTTPHeaderControl(token) {
-		return "", errSlackBotTokenControlCharacters
-	}
-	return token, nil
-}
-
 func cleanSlackUserID(userID string) (string, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
@@ -453,15 +396,6 @@ func cleanSlackUserID(userID string) (string, error) {
 		return "", errSlackUserIDSeparatorControl
 	}
 	return userID, nil
-}
-
-func newSlackHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 }
 
 func defaultSmokeMessage(startedAt time.Time) string {
@@ -510,7 +444,7 @@ func (c slackClient) postRaw(ctx context.Context, method string, body any) (apiC
 		if resp.StatusCode == http.StatusTooManyRequests {
 			result.RetryAfter = cleanSlackField(resp.Header.Get("Retry-After"))
 		}
-		drainSlackResponseBody(resp.Body)
+		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		return result, out, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSlackResponseBytes+1))
@@ -519,7 +453,7 @@ func (c slackClient) postRaw(ctx context.Context, method string, body any) (apiC
 		return result, out, fmt.Errorf("%s response read: %w", method, err)
 	}
 	if len(raw) > maxSlackResponseBytes {
-		drainSlackResponseBody(resp.Body)
+		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		result.Error = apiErrorResponseTooLarge
 		return result, out, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
 	}
@@ -546,12 +480,6 @@ func (c slackClient) postRaw(ctx context.Context, method string, body any) (apiC
 	return result, out, nil
 }
 
-func drainSlackResponseBody(body io.Reader) {
-	// Best-effort connection reuse for moderately oversized bodies. Close tears
-	// down the response if bytes still remain.
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxSlackResponseBytes+1))
-}
-
 func classifyRequestError(ctx context.Context, err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -566,12 +494,6 @@ func classifyRequestError(ctx context.Context, err error) string {
 	default:
 		return apiErrorRequestFailed
 	}
-}
-
-func containsHTTPHeaderControl(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool {
-		return r < ' ' || r == 0x7f
-	})
 }
 
 func cleanSlackField(s string) string {
