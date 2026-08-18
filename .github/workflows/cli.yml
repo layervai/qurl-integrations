@@ -280,16 +280,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Placeholder until the v2 sandbox suite lands: nothing carries the
-      # clisandbox build tag yet, so this runs the regular suite under the tag
-      # and passes. The notice below self-silences the moment the first tagged
-      # test file appears, at which point this becomes the real gate.
+      # The clisandbox-tagged suites exist now, so this is the real gate. The
+      # CRID journey (apps/cli/cmd/sandbox_journey_test.go) arms itself from
+      # the env below and runs against the live sandbox; until the operator
+      # mints the QURL_SANDBOX_API_KEY secret it skips loudly by name while
+      # this step still proves the whole tree under the tag. Arming is
+      # layered on purpose: the job itself runs only when
+      # vars.CLI_SANDBOX_E2E == 'enabled' on a same-repo ref (see this job's
+      # if:, whose disarmed skip the required aggregate's verifier reports as
+      # expected), and the suite inside arms on its env contract. -v keeps a
+      # suite-level skip visible in the log instead of silent green.
+      #
+      # The Connector smoke (sandbox_connector_test.go) is deliberately NOT
+      # armed here: beyond an endpoint it needs QURL_CLI_SANDBOX_CONNECTOR,
+      # a slug, the Hub triple, and an enrolled state dir or a one-shot
+      # enrollment token — one-shots burn on first use, so a repo secret
+      # cannot carry one. It stays gated on its own variables and skips
+      # loudly; the journey suite does not require it.
       - name: Run sandbox e2e suite
-        run: |
-          go test -tags=clisandbox -count=1 ./apps/cli/...
-          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
-            echo "::notice::cli / sandbox e2e: no sandbox suite yet — no file carries the clisandbox build tag; this gate arms when the first tagged test lands"
-          fi
+        env:
+          QURL_API_KEY: ${{ secrets.QURL_SANDBOX_API_KEY }}
+          # The sandbox hostname is deliberately a secret, not a literal.
+          QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+        run: go test -tags=clisandbox -count=1 -v ./apps/cli/...
 
   goreleaser-check:
     name: cli / goreleaser check
