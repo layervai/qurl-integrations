@@ -338,8 +338,8 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 
 	coverage := scanCoverage{}
 	for _, conversation := range conversations {
-		record := scanConversation(ctx, client, cfg, conversation, &result)
-		if record.Error == "" {
+		record, historyRead := scanConversation(ctx, client, cfg, conversation, &result)
+		if historyRead {
 			coverage.conversationsRead++
 		}
 		result.Conversations = append(result.Conversations, record)
@@ -364,15 +364,18 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 	return result, nil
 }
 
-// evaluateContract turns the counts into the verdict. Read the failures as a list of
-// distinct things that can rot, not as severity levels: each one is on its own.
 // scanCoverage is how much of the workspace the scan actually got through. It gates the
-// counts-based failures below, which are only meaningful over a complete read.
+// counts-based failures in evaluateContract, which are only meaningful over a complete
+// read.
 type scanCoverage struct {
+	// conversationsRead counts conversations whose HISTORY surface was read. The replies
+	// sample is supplementary evidence on top of that; see scanConversation.
 	conversationsRead int
 	truncated         bool
 }
 
+// evaluateContract turns the counts into the verdict. Read the failures as a list of
+// distinct things that can rot, not as severity levels: each one is on its own.
 func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage) contractVerdict {
 	verdict := contractVerdict{
 		ClassifiedUploads: result.History.ClassifiedUploads + result.Replies.ClassifiedUploads,
@@ -404,10 +407,18 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
 			"%d message(s) carried a files value that is not a JSON array, i.e. Slack changed the wire format", verdict.UncountableShapes))
 	}
+	// Both arms fail — the operator asked for a verdict and has to get one — but they are
+	// different problems. Only the second is evidence about the classifier; the first is
+	// this command not managing to look, and wording it as a classifier defect sends the
+	// operator hunting a bug that the run never actually tested for.
 	for _, expectation := range result.ExpectedUploads {
-		if !expectation.Classified {
+		switch {
+		case expectation.Error != "":
 			verdict.Failures = append(verdict.Failures, fmt.Sprintf(
-				"-expect-upload %s:%s was not classified as an upload", expectation.Channel, expectation.TS))
+				"-expect-upload %s:%s could not be verified: %s", expectation.Channel, expectation.TS, expectation.Error))
+		case !expectation.Classified:
+			verdict.Failures = append(verdict.Failures, fmt.Sprintf(
+				"-expect-upload %s:%s was found but not classified as an upload", expectation.Channel, expectation.TS))
 		}
 	}
 	verdict.Holds = len(verdict.Failures) == 0
@@ -539,9 +550,16 @@ func conversationKind(isIM, isMPIM, isPrivate bool) string {
 // scanConversation reads one conversation's history, then samples its threads on the
 // replies surface. A per-conversation error is recorded and the scan moves on: one
 // channel the bot was removed from must not decide the measurement.
-// The return value is named so the deferred delta below lands in what the caller
+// It reports historyRead separately from record.Error because the two answer different
+// questions. A conversation whose history read cleanly HAS been measured — that surface
+// alone is a complete reading — even if the supplementary replies sample then failed.
+// Inferring coverage from record.Error instead would let a rate-limited replies call
+// void a fully-read conversation, and a workspace where every thread sample 429s would
+// report "no conversation could be read" beside a non-zero upload count.
+//
+// The return values are named so the deferred delta below lands in what the caller
 // receives; assigning a local after `return record` would be copied over and lost.
-func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig, conversation conversationRef, result *scanResult) (record conversationResult) {
+func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig, conversation conversationRef, result *scanResult) (record conversationResult, historyRead bool) {
 	record = conversationResult{ID: conversation.ID, Kind: conversation.Kind}
 	before := result.History.ClassifiedUploads + result.Replies.ClassifiedUploads
 	// Whatever pages did come back before an error stay in the tally, so the delta is
@@ -555,8 +573,9 @@ func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig,
 	threads, err := readHistory(ctx, client, cfg, conversation.ID, &result.History, &record)
 	if err != nil {
 		record.Error = err.Error()
-		return record
+		return record, false
 	}
+	historyRead = true
 	result.History.Conversations++
 
 	if !cfg.SkipReplies && cfg.MaxThreads > 0 {
@@ -567,7 +586,7 @@ func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig,
 			result.Replies.Conversations++
 		}
 	}
-	return record
+	return record, historyRead
 }
 
 // readHistory tallies a conversation's history pages and returns the thread parents

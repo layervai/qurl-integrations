@@ -358,7 +358,28 @@ func TestEvaluateContract(t *testing.T) {
 			expected:          []expectationResult{{messageRef: messageRef{Channel: testChannel, TS: "100.1"}, Found: true}},
 			minUploads:        1,
 			conversationsRead: 1,
-			wantFailure:       "-expect-upload " + testChannel + ":100.1 was not classified",
+			wantFailure:       "was found but not classified",
+		},
+		{
+			// The replies half of every verdict sum needs its own row: a wire-format
+			// break visible ONLY on conversations.replies is exactly what this command
+			// was built to see, and summing only the history side would hide it.
+			name:              "a missed upload on the replies surface alone",
+			history:           surfaceTally{ClassifiedUploads: 5},
+			replies:           surfaceTally{ClassifiedUploads: 2, MissedUploads: 1},
+			minUploads:        1,
+			conversationsRead: 1,
+			wantFailure:       "did not report as an upload",
+		},
+		{
+			// Same reasoning for the uncountable-shape sum.
+			name:              "an unrecognized shape on the replies surface alone",
+			history:           surfaceTally{ClassifiedUploads: 5},
+			replies:           surfaceTally{ClassifiedUploads: 2, UncountableShapes: 1},
+			minUploads:        1,
+			strictUncountable: true,
+			conversationsRead: 1,
+			wantFailure:       "Slack changed the wire format",
 		},
 	}
 	for _, tt := range tests {
@@ -369,6 +390,20 @@ func TestEvaluateContract(t *testing.T) {
 			verdict := evaluateContract(cfg, result, scanCoverage{conversationsRead: tt.conversationsRead, truncated: tt.truncated})
 			if verdict.Holds != tt.wantHolds {
 				t.Fatalf("holds = %v, want %v (failures: %v)", verdict.Holds, tt.wantHolds, verdict.Failures)
+			}
+			// Assert the evidence fields, not just Holds: dropping either replies term
+			// from the sums changes only these, and a Holds-only assertion sails past it.
+			if verdict.ClassifiedUploads != tt.history.ClassifiedUploads+tt.replies.ClassifiedUploads {
+				t.Errorf("classified uploads = %d, want both surfaces totalled", verdict.ClassifiedUploads)
+			}
+			if verdict.MissedUploads != tt.history.MissedUploads+tt.replies.MissedUploads {
+				t.Errorf("missed uploads = %d, want both surfaces totalled", verdict.MissedUploads)
+			}
+			if verdict.UncountableShapes != tt.history.UncountableShapes+tt.replies.UncountableShapes {
+				t.Errorf("uncountable shapes = %d, want both surfaces totalled", verdict.UncountableShapes)
+			}
+			if verdict.MinUploads != tt.minUploads {
+				t.Errorf("min uploads = %d, want %d carried into the report", verdict.MinUploads, tt.minUploads)
 			}
 			if tt.wantHolds {
 				return
@@ -883,5 +918,228 @@ func TestRunScanBlamesTheBudgetWhenItRunsOut(t *testing.T) {
 	// would error, and each error would be reported as a classifier miss.
 	if len(result.ExpectedUploads) != 0 {
 		t.Errorf("expected uploads = %+v, want none attempted on a truncated scan", result.ExpectedUploads)
+	}
+}
+
+// TestRunScanKeepsAHistoryReadWhenTheThreadSampleFails pins that the supplementary
+// replies sample cannot void what history already proved. Every conversation here reads
+// its history cleanly and then fails its thread sample — the shape a rate-limited run
+// takes, since the replies calls come after history in each conversation. Counting those
+// conversations as unread would report "no conversation could be read" beside a non-zero
+// upload count: a verdict that contradicts its own evidence.
+func TestRunScanKeepsAHistoryReadWhenTheThreadSampleFails(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory: messagesBody(
+			uploadMessage("100.1"),
+			`{"type":"message","user":"U1","text":"root","ts":"`+testThreadParent+`","thread_ts":"`+testThreadParent+`","reply_count":2}`,
+		),
+		surfaceReplies: `{"ok":false,"error":"ratelimited"}`,
+	})
+
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err != nil {
+		t.Fatalf("a failed thread sample must not fail a scan whose history read: %v", err)
+	}
+	if !result.Contract.Holds {
+		t.Fatalf("contract must hold: %v", result.Contract.Failures)
+	}
+	if result.History.ClassifiedUploads != 1 || result.History.Conversations != 1 {
+		t.Errorf("history = %+v, want the surface counted as read", result.History)
+	}
+	if result.Replies.Conversations != 0 {
+		t.Errorf("replies conversations = %d, want the failed sample uncounted", result.Replies.Conversations)
+	}
+	// The operator still has to see that the sample failed, and which surface failed it.
+	if !strings.Contains(result.Conversations[0].Error, "ratelimited") ||
+		!strings.Contains(result.Conversations[0].Error, surfaceReplies) {
+		t.Errorf("conversation error = %q, want the replies failure named", result.Conversations[0].Error)
+	}
+	if got := fake.callCount(surfaceReplies); got != 1 {
+		t.Errorf("replies calls = %d, want the one sampled thread", got)
+	}
+}
+
+// TestRunScanFailsWhenEveryHistorySurfaceIsUnreadable is the companion to the test
+// above: history itself failing IS the unreadable case, and must still say so.
+func TestRunScanFailsWhenEveryHistorySurfaceIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory:          `{"ok":false,"error":"ratelimited"}`,
+	})
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err == nil {
+		t.Fatal("a scan whose history reads all failed must fail")
+	}
+	if !strings.Contains(strings.Join(result.Contract.Failures, "; "), "no conversation could be read") {
+		t.Errorf("failures = %v, want the unreadable-workspace diagnosis", result.Contract.Failures)
+	}
+}
+
+// TestEvaluateContractSeparatesUnverifiableFromUnclassified pins that a lookup this
+// command could not perform is not reported as a classifier defect. Both fail the run —
+// the operator asked for a verdict — but only one of them is evidence about the
+// classifier, and blaming it for a transient fetch error sends the next reader hunting a
+// bug the run never tested for.
+func TestEvaluateContractSeparatesUnverifiableFromUnclassified(t *testing.T) {
+	t.Parallel()
+
+	result := &scanResult{
+		History: surfaceTally{ClassifiedUploads: 3},
+		ExpectedUploads: []expectationResult{
+			{messageRef: messageRef{Channel: testChannel, TS: "100.1"}, Error: "conversations.history: ratelimited"},
+			{messageRef: messageRef{Channel: testChannel, TS: "100.2"}, Found: true},
+		},
+	}
+	verdict := evaluateContract(&scanConfig{MinUploads: 1}, result, scanCoverage{conversationsRead: 1})
+	if verdict.Holds || len(verdict.Failures) != 2 {
+		t.Fatalf("verdict = %+v, want both expectations failing", verdict)
+	}
+	if !strings.Contains(verdict.Failures[0], "could not be verified") ||
+		!strings.Contains(verdict.Failures[0], "ratelimited") {
+		t.Errorf("failure[0] = %q, want the unverifiable wording carrying the cause", verdict.Failures[0])
+	}
+	if !strings.Contains(verdict.Failures[1], "found but not classified") {
+		t.Errorf("failure[1] = %q, want the classifier wording", verdict.Failures[1])
+	}
+}
+
+// TestSurfaceTallyCountsAMissedUpload wires the one counter no amount of real JSON can
+// reach. Against today's classifier a populated array always classifies, so
+// observeMessage cannot produce this observation — which is exactly why the counter
+// needs a direct test. Without it, deleting the increment leaves every other test green
+// and the "two independent readings disagreed" claim has no wiring at all.
+func TestSurfaceTallyCountsAMissedUpload(t *testing.T) {
+	t.Parallel()
+
+	tally := surfaceTally{Surface: surfaceHistory}
+	tally.add(messageObservation{shape: filesShapePopulated, entries: 2, classified: false})
+	want := surfaceTally{
+		Surface: surfaceHistory, Messages: 1, FilesKeyPresent: 1,
+		PopulatedArrays: 1, FileEntries: 2, MissedUploads: 1,
+	}
+	if tally != want {
+		t.Errorf("tally  = %+v\nwanted = %+v", tally, want)
+	}
+}
+
+// TestReadHistoryFollowsCursorsAndStopsAtMaxPages pins both halves of pagination: pages
+// after the first are tallied, and MaxPages actually stops a cursor that never ends.
+// Without the second half the bound is documented but never observed to bound anything.
+func TestReadHistoryFollowsCursorsAndStopsAtMaxPages(t *testing.T) {
+	t.Parallel()
+
+	t.Run("follows a cursor to the last page", func(t *testing.T) {
+		t.Parallel()
+		srv, fake := newFakeSlack(t, map[string]string{methodConversationsList: listBody(testChannel)})
+		fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("cursor") == "" {
+				_, _ = w.Write([]byte(`{"ok":true,"messages":[` + uploadMessage("100.1") +
+					`],"response_metadata":{"next_cursor":"page two"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(messagesBody(uploadMessage("100.2"))))
+		})
+		cfg := testScanConfig(srv)
+		cfg.MaxPages = 3
+		result, err := runScan(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("runScan: %v", err)
+		}
+		if got := fake.callCount(surfaceHistory); got != 2 {
+			t.Errorf("history calls = %d, want the cursor followed once then stopped", got)
+		}
+		if result.History.Messages != 2 || result.History.ClassifiedUploads != 2 {
+			t.Errorf("history = %+v, want both pages tallied", result.History)
+		}
+	})
+
+	t.Run("stops an endless cursor at MaxPages", func(t *testing.T) {
+		t.Parallel()
+		srv, fake := newFakeSlack(t, map[string]string{
+			methodConversationsList: listBody(testChannel),
+			surfaceHistory: `{"ok":true,"messages":[` + uploadMessage("100.1") +
+				`],"response_metadata":{"next_cursor":"always more"}}`,
+		})
+		cfg := testScanConfig(srv)
+		cfg.MaxPages = 2
+		if _, err := runScan(context.Background(), cfg); err != nil {
+			t.Fatalf("runScan: %v", err)
+		}
+		if got := fake.callCount(surfaceHistory); got != 2 {
+			t.Errorf("history calls = %d, want MaxPages to stop the loop", got)
+		}
+	})
+}
+
+// TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured pins the flag against its own
+// condition. Every other test reaches the same skip through MaxThreads == 0, so
+// inverting this half of the && would go unnoticed.
+func TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory: messagesBody(
+			uploadMessage("100.1"),
+			`{"type":"message","user":"U1","text":"root","ts":"`+testThreadParent+`","thread_ts":"`+testThreadParent+`","reply_count":4}`,
+		),
+		surfaceReplies: messagesBody(uploadMessage("100.2")),
+	})
+	cfg := testScanConfig(srv)
+	cfg.SkipReplies = true
+
+	result, err := runScan(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if got := fake.callCount(surfaceReplies); got != 0 {
+		t.Errorf("replies calls = %d, want none under -skip-replies", got)
+	}
+	if result.Replies.Messages != 0 || result.Replies.Conversations != 0 {
+		t.Errorf("replies = %+v, want the surface untouched", result.Replies)
+	}
+	if result.History.ClassifiedUploads != 1 {
+		t.Errorf("history = %+v, want the history surface still measured", result.History)
+	}
+}
+
+// TestNewSlackHTTPClientDoesNotFollowRedirects pins a security control that otherwise
+// never executes. -base-url is operator-supplied and the bearer token rides on every
+// request; restoring Go's default redirect following would replay it down a chain this
+// command never inspected.
+func TestNewSlackHTTPClientDoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+
+	var followed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/elsewhere" {
+			followed = true
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := newSlackHTTPClient(time.Second)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/conversations.history", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	if followed {
+		t.Error("the client followed a redirect; the bearer token must not be replayed down an uninspected chain")
+	}
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want the 302 surfaced rather than followed", resp.StatusCode)
 	}
 }
