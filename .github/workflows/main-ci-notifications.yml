@@ -134,7 +134,7 @@ jobs:
               impact="qURL CLI quality gates did not complete successfully on main. Nothing deploys from this workflow and released binaries are unaffected — CLI artifacts ship only when Release Please tags a release — but treat this SHA as an unsound base for the next CLI release until the run is repaired."
               ;;
             "cli: Nightly")
-              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot) did not complete successfully. No artifact is affected; triage whether this is a real regression or harness flake before the next CLI release."
+              impact="The nightly CLI deep pass (fuzz, extended sandbox e2e, GoReleaser snapshot, release smoke) did not complete successfully. If the failing job is *release smoke*, the shipped release customers install today may be broken — its log names the broken chain link (tap, cask, quarantine postflight, binary, release machinery, release assets, signature, manifest, archive, tap pin). Otherwise no artifact is affected. Triage whether this is a real regression or harness flake before the next CLI release."
               ;;
             "origins/s3-static-connector: Build and Publish")
               impact="Reusable S3 static connector image build or publish did not complete successfully. Website/stats deployments should stay pinned to the prior image digest until this run is repaired."
