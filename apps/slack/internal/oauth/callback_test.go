@@ -3019,3 +3019,59 @@ func TestCallbackLegacyRotationRefusesWithoutVerifiedAccount(t *testing.T) {
 		}
 	}
 }
+
+// TestCallbackLegacyRotationHealsRowForNextRotation drives the sequence the
+// "at most once per workspace" bound rests on: a legacy rotation, then a second
+// rotation on the now-healed row. The first mints without revoking and records
+// key identity; the second must take the normal revoke-then-replace path, so
+// the workspace cannot orphan a second key.
+//
+// The success test asserts the healing structurally (key_id is persisted). This
+// proves the consequence — that the recorded key_id actually routes the next
+// rotation away from the mint-without-revoke branch.
+func TestCallbackLegacyRotationHealsRowForNextRotation(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+
+	// First rotation: legacy row, nothing to revoke.
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(mintTestStateWithMode(t, &cfg, SetupModeRotate)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first rotation: got %d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revokedAfterFirst := len(minter.revokedKeys)
+	minter.revokeMu.Unlock()
+	if revokedAfterFirst != 0 {
+		t.Fatalf("first rotation must not revoke, got %d", revokedAfterFirst)
+	}
+	store.mu.Lock()
+	healed := store.setArgs
+	store.mu.Unlock()
+	if healed == nil || healed.KeyID == "" {
+		t.Fatalf("first rotation must persist key identity, got %#v", healed)
+	}
+
+	// Feed the persisted identity back as the stored row, as a later run would
+	// read it, and rotate again.
+	store.mu.Lock()
+	store.existingKey = healed.APIKey
+	store.existingKeyID = healed.KeyID
+	store.existingAccount = healed.QURLAccountID
+	store.setArgs = nil
+	store.mu.Unlock()
+
+	rec2 := httptest.NewRecorder()
+	h(rec2, callbackRequest(mintTestStateWithMode(t, &cfg, SetupModeRotate)))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second rotation: got %d want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revoked := append([]string(nil), minter.revokedKeys...)
+	minter.revokeMu.Unlock()
+	if len(revoked) != 1 || revoked[0] != healed.KeyID {
+		t.Errorf("second rotation must revoke the healed key_id %q, got %#v", healed.KeyID, revoked)
+	}
+}
