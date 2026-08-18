@@ -82,6 +82,13 @@ const (
 
 	hintConnectorRefreshApproval = "Hint: review why it stopped (see your previous run's output), then run `qurl connector run` once with --refresh-mode auto to approve the refresh, and return to manual afterwards. Automatic restarts are deliberately not treated as approval."
 
+	// msgConnectorRefreshModeInvalid renders agent.ErrRefreshModeInvalid —
+	// the env-sourced refresh mode carries a value that is not a mode.
+	msgConnectorRefreshModeInvalid = "The Connector's refresh-mode setting isn't one of the recognized values."
+
+	// hintConnectorRefreshModeInvalid names the variable and the vocabulary.
+	hintConnectorRefreshModeInvalid = "Hint: set LAYERV_AGENT_REGISTRATION_REFRESH_MODE to manual, auto, or disabled (or pass --refresh-mode)."
+
 	// msgConnectorRefreshDisabled renders agent.ErrRefreshDisabled.
 	msgConnectorRefreshDisabled = "This Connector needs its qURL platform assignment refreshed, but refreshes are disabled by its configuration."
 
@@ -136,6 +143,8 @@ func CustomerMessages() []string {
 		msgConnectorRefreshApproval,
 		hintConnectorRefreshApproval,
 		msgConnectorRefreshDisabled,
+		msgConnectorRefreshModeInvalid,
+		hintConnectorRefreshModeInvalid,
 		hintConnectorRefreshDisabled,
 		msgConnectorRefreshExhausted,
 		hintConnectorRefreshExhausted,

@@ -69,6 +69,8 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		headline, hint = msgConnectorRefreshApproval, hintConnectorRefreshApproval
 	case errors.Is(err, agent.ErrRefreshDisabled):
 		headline, hint = msgConnectorRefreshDisabled, hintConnectorRefreshDisabled
+	case errors.Is(err, agent.ErrRefreshModeInvalid):
+		headline, hint = msgConnectorRefreshModeInvalid, hintConnectorRefreshModeInvalid
 	case errors.Is(err, agent.ErrRefreshAlreadyAttempted):
 		headline, hint = msgConnectorRefreshExhausted, hintConnectorRefreshExhausted
 	case errors.Is(err, hub.ErrConfig):
