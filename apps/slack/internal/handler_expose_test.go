@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1056,8 +1057,13 @@ func exposeClickOpenFailureText(t *testing.T, actionID string, openErr error) st
 	})
 	h := newAdminTestHandler(t, ts)
 	h.SetAliasStore(h.cfg.AdminStore)
-	// Return openErr for every token owner so the Grid fallback also exhausts and
-	// the classified message is what reaches the admin.
+	// Injecting at cfg.OpenView reproduces the production origin exactly: the
+	// workspace bot-token lookup happens INSIDE the function main.go binds to
+	// OpenView (newSlackOpenViewFuncWithTokenLookup), which wraps a failed lookup
+	// as "views.open token lookup: %w". So a token-lookup failure reaches this
+	// handler as an error returned by cfg.OpenView, which is what these tests
+	// hand back. Returning it for every token owner also exhausts the Enterprise
+	// Grid fallback, so the classified message is what reaches the admin.
 	h.cfg.OpenView = func(context.Context, string, string, []byte) error { return openErr }
 
 	captured := &capturedResponseURL{}
@@ -1092,7 +1098,11 @@ func TestExposeClickMissingBotTokenRoutesToReinstall(t *testing.T) {
 		{"url", exposeURLActionID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := exposeClickOpenFailureText(t, tc.actionID, auth.ErrSlackBotTokenNotConfigured)
+			// Wrapped the way newSlackOpenViewFuncWithTokenLookup wraps it, so the
+			// test proves errors.Is still matches through production's wrapping
+			// rather than only through a bare sentinel.
+			openErr := fmt.Errorf("views.open token lookup: %w", auth.ErrSlackBotTokenNotConfigured)
+			got := exposeClickOpenFailureText(t, tc.actionID, openErr)
 			if !strings.Contains(got, "needs the latest qURL Slack app install") {
 				t.Fatalf("missing-bot-token message = %q, want the Slack app reinstall guidance", got)
 			}
@@ -1122,5 +1132,28 @@ func TestExposeClickUnclassifiedFailureKeepsGenericRetry(t *testing.T) {
 	got := exposeClickOpenFailureText(t, exposeConnectorActionID, errors.New("boom"))
 	if !strings.Contains(got, "Couldn't open the dialog") {
 		t.Fatalf("unclassified failure message = %q, want the generic retry copy", got)
+	}
+}
+
+// TestExposeClickRateLimitedSurfacesRetryAfter covers the rate-limit arm, which
+// is the one that threads the error into a different helper
+// (tunnelInstallRateLimitMessage) and so is the most likely to drift silently.
+func TestExposeClickRateLimitedSurfacesRetryAfter(t *testing.T) {
+	got := exposeClickOpenFailureText(t, exposeConnectorActionID, NewSlackRateLimitError("30"))
+	if !strings.Contains(got, "30") {
+		t.Fatalf("rate-limited message = %q, want Slack's Retry-After hint", got)
+	}
+	if strings.Contains(got, "needs the latest qURL Slack app install") {
+		t.Fatalf("a rate limit is transient and must not send the admin to reinstall: %q", got)
+	}
+}
+
+// TestExposeClickDeadlineExceededUsesExpiredWindowCopy covers the arm for a
+// views.open that outran its budget — the async case the early openBudget<=0
+// guards cannot catch.
+func TestExposeClickDeadlineExceededUsesExpiredWindowCopy(t *testing.T) {
+	got := exposeClickOpenFailureText(t, exposeConnectorActionID, context.DeadlineExceeded)
+	if !strings.Contains(got, "setup window expired") {
+		t.Fatalf("deadline-exceeded message = %q, want the expired-window copy", got)
 	}
 }
