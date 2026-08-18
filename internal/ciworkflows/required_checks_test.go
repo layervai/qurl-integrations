@@ -215,6 +215,10 @@ func TestContributingCountsMatchTheDocumentedSet(t *testing.T) {
 		pattern *regexp.Regexp
 		want    int
 	}{
+		// Each pattern is pinned to a specific sentence in the Merge-result
+		// checks section, so that prose is load-bearing: reword it and the
+		// exactly-one-match assertion below fails loudly rather than passing
+		// on no match. Update the pattern in the same edit.
 		{name: "aggregate count", pattern: regexp.MustCompile(`branch protection requires all (\w+):`), want: len(aggregateContexts(documented))},
 		{name: "full set count", pattern: regexp.MustCompile(`contexts, (\w+) in all`), want: len(documented)},
 	}
@@ -493,17 +497,26 @@ func unresolvedContextHint(wanted string, reported workflowContexts) string {
 		return "; job " + strconv.Quote(match) + " differs only in case, and required contexts match case-sensitively, so this one can never be satisfied"
 	}
 
+	// "<a> / <b>" is how an aggregate job names itself and also how a reusable
+	// call renders, so the string alone does not say which shape was intended.
+	// Suggest the reusable fix only on evidence: assuming it sends the reader
+	// after a missing caller job when an aggregate was simply renamed.
 	caller, _, isPrefixed := strings.Cut(wanted, contextSeparator)
 	if isPrefixed {
 		if match, ok := caseInsensitiveKey(reported.reusable, caller); ok {
 			return "; the reusable-workflow caller is spelled " + strconv.Quote(match) + ", not " + strconv.Quote(caller)
 		}
-		return "; no job named or keyed " + strconv.Quote(caller) +
-			" calls a reusable workflow, which is what a \"<caller-job> / <inner-job>\" context requires"
 	}
 
 	if candidates := sameFirstWord(wanted, reported.direct); len(candidates) > 0 {
 		return "; jobs with a similar name: " + strings.Join(candidates, ", ")
+	}
+	if isPrefixed {
+		if candidates := sameFirstWord(caller, reported.reusable); len(candidates) > 0 {
+			return "; reusable-workflow callers with a similar name: " + strings.Join(candidates, ", ")
+		}
+		return "; no job reports it directly, and no job named or keyed " + strconv.Quote(caller) +
+			" calls a reusable workflow"
 	}
 	return fmt.Sprintf("; none of the %d job names scanned resemble it", len(reported.direct))
 }
