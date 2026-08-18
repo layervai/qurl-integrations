@@ -54,21 +54,23 @@ func (p *Printer) ellipsis() string {
 // keeping both the distinctive head and the checksum-bearing tail visible.
 // Inputs at or under max come back untouched.
 func (p *Printer) middleEllipsis(s string, maxLen int) string {
-	marker := p.ellipsis()
-	if len(s) <= maxLen || maxLen <= len(marker)+2 {
+	marker := []rune(p.ellipsis())
+	runes := []rune(s)
+	if len(runes) <= maxLen || maxLen <= len(marker)+2 {
 		return s
 	}
 	keep := maxLen - len(marker)
 	head := keep / 2
 	tail := keep - head
-	return s[:head] + marker + s[len(s)-tail:]
+	return string(runes[:head]) + string(marker) + string(runes[len(runes)-tail:])
 }
 
 // truncateEnd shortens s to at most max characters, marking the cut.
 func (p *Printer) truncateEnd(s string, maxLen int) string {
-	marker := p.ellipsis()
-	if len(s) <= maxLen || maxLen <= len(marker) {
+	marker := []rune(p.ellipsis())
+	runes := []rune(s)
+	if len(runes) <= maxLen || maxLen <= len(marker) {
 		return s
 	}
-	return s[:maxLen-len(marker)] + marker
+	return string(runes[:maxLen-len(marker)]) + string(marker)
 }

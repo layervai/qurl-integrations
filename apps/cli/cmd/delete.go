@@ -32,8 +32,8 @@ scripts and pipelines must pass --yes.`,
 				return err
 			}
 			printer := opts.printer()
-			for _, warning := range assessment.Warnings {
-				printer.Warnf("%s", warning)
+			if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), yes); err != nil {
+				return err
 			}
 
 			if !yes {
@@ -59,11 +59,11 @@ scripts and pipelines must pass --yes.`,
 				// Idempotent delete: already-gone is the requested outcome.
 				printer.Notef(msgAlreadyGone)
 			}
-			return printer.Delete(assessment.Input)
+			return printer.Delete(assessment.Input, result.AlreadyGone)
 		},
 	}
 
-	cmd.Flags().BoolVar(&yes, "yes", false, "delete without asking for confirmation")
+	cmd.Flags().BoolVar(&yes, "yes", false, "proceed without confirmation, including sending a test CRID to production")
 
 	return cmd
 }

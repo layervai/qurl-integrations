@@ -146,25 +146,6 @@ func rejectSecrets(data []byte, path string) error {
 	return nil
 }
 
-// Save writes the default config file inside dir with restricted permissions.
-func Save(dir string, cfg *Config) error {
-	return saveFile(Path(dir), cfg)
-}
-
-func saveFile(p string, cfg *Config) error {
-	if p == "" {
-		return fmt.Errorf("%w: cannot determine config path", ErrConfigFile)
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return fmt.Errorf("%w: create config dir: %w", ErrConfigFile, err)
-	}
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("%w: encode config: %w", ErrConfigFile, err)
-	}
-	return os.WriteFile(p, data, 0o600)
-}
-
 // Resolve returns the first non-empty value from: explicit flag value, the
 // named environment variable, the config file value, then the default. This
 // is the single precedence implementation every setting goes through.

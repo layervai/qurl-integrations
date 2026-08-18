@@ -116,9 +116,11 @@ func TestSecretsInConfigRefused(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTrip(t *testing.T) {
+// TestLoadReadsHandWrittenFile pins the on-disk YAML shape a customer edits
+// by hand — the v2 config layer only reads config files, it never writes them.
+func TestLoadReadsHandWrittenFile(t *testing.T) {
 	dir := t.TempDir()
-	if err := Save(dir, &Config{Endpoint: "https://sandbox.example"}); err != nil {
+	if err := os.WriteFile(Path(dir), []byte("endpoint: https://sandbox.example\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(dir)
@@ -126,7 +128,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Endpoint != "https://sandbox.example" {
-		t.Errorf("round trip lost endpoint: %+v", cfg)
+		t.Errorf("load lost endpoint: %+v", cfg)
 	}
 }
 

@@ -47,6 +47,9 @@ type listJSON struct {
 type deleteJSON struct {
 	ID      string `json:"id"`
 	Deleted bool   `json:"deleted"`
+	// AlreadyGone is emitted only for the idempotent re-delete, so the
+	// common case's document (and its golden) stays unchanged.
+	AlreadyGone bool `json:"already_gone,omitempty"`
 }
 
 // listCRIDWidth is the middle-ellipsis budget for the text CRID column; JSON
@@ -249,14 +252,19 @@ func (p *Printer) listExpires(t *time.Time) string {
 
 // Delete renders a delete outcome. The text confirmation is a status message
 // for humans and goes to stderr; --quiet echoes the identifier to stdout so
-// scripts can pipeline it; JSON emits the outcome document.
-func (p *Printer) Delete(id string) error {
+// scripts can pipeline it; JSON emits the outcome document. When the resource
+// was already gone the caller has said so on stderr, so the text confirmation
+// is suppressed rather than contradicting it; JSON reports the same fact as a
+// field instead.
+func (p *Printer) Delete(id string, alreadyGone bool) error {
 	switch {
 	case p.format == FormatJSON:
-		return p.writeJSON(deleteJSON{ID: id, Deleted: true})
+		return p.writeJSON(deleteJSON{ID: id, Deleted: true, AlreadyGone: alreadyGone})
 	case p.quiet:
 		_, err := fmt.Fprintln(p.out, id)
 		return err
+	case alreadyGone:
+		return nil
 	default:
 		_, err := fmt.Fprintf(p.err, "Deleted %s.\n", id)
 		return err

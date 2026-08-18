@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-go/qurl"
 
@@ -98,11 +99,22 @@ func TestTextHelpers(t *testing.T) {
 
 	long := strings.Repeat("x", 60)
 	short := p.middleEllipsis(long, 24)
-	if len(short) > 24 || !strings.Contains(short, "…") {
-		t.Errorf("middleEllipsis = %q (len %d)", short, len(short))
+	if utf8.RuneCountInString(short) > 24 || !strings.Contains(short, "…") {
+		t.Errorf("middleEllipsis = %q (runes %d)", short, utf8.RuneCountInString(short))
 	}
 	if got := p.middleEllipsis("short", 24); got != "short" {
 		t.Errorf("middleEllipsis must not touch short values, got %q", got)
+	}
+
+	// Multi-byte inputs must be cut on rune boundaries (target columns can
+	// carry IDN hosts and non-ASCII paths); a byte-sliced cut would emit
+	// invalid UTF-8 into the table.
+	wide := strings.Repeat("ü", 30)
+	if got := p.middleEllipsis(wide, 24); !utf8.ValidString(got) || utf8.RuneCountInString(got) != 24 {
+		t.Errorf("middleEllipsis multibyte = %q (valid=%t runes=%d)", got, utf8.ValidString(got), utf8.RuneCountInString(got))
+	}
+	if got := p.truncateEnd(wide, 24); !utf8.ValidString(got) || utf8.RuneCountInString(got) != 24 {
+		t.Errorf("truncateEnd multibyte = %q (valid=%t runes=%d)", got, utf8.ValidString(got), utf8.RuneCountInString(got))
 	}
 
 	ap := newTestPrinter(&out, &errBuf, FormatText, false, false, true)
@@ -133,7 +145,7 @@ func TestStreamDiscipline(t *testing.T) {
 	// Delete confirmation is prose.
 	out.Reset()
 	errBuf.Reset()
-	if err := p.Delete("someid"); err != nil {
+	if err := p.Delete("someid", false); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -141,6 +153,17 @@ func TestStreamDiscipline(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "Deleted someid.") {
 		t.Errorf("stderr = %q", errBuf.String())
+	}
+
+	// Already-gone suppresses the confirmation: the caller's note has said it,
+	// and a second "Deleted" line would contradict it.
+	out.Reset()
+	errBuf.Reset()
+	if err := p.Delete("someid", true); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 || errBuf.Len() != 0 {
+		t.Errorf("already-gone delete must render nothing: stdout=%q stderr=%q", out.String(), errBuf.String())
 	}
 
 	// Warnings never touch stdout.

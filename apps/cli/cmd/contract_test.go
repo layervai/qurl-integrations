@@ -220,6 +220,27 @@ func TestDeleteIsIdempotentAtCLILevel(t *testing.T) {
 	if !strings.Contains(res.stderr.String(), "already deleted") {
 		t.Errorf("expected the already-gone note, got %q", res.stderr.String())
 	}
+	if strings.Contains(res.stderr.String(), "Deleted ") {
+		t.Errorf("already-gone must not also claim a fresh deletion, got %q", res.stderr.String())
+	}
+}
+
+// TestDeleteTestCRIDOnProductionRefusedWithoutYes pins the same environment
+// guard on the destructive command that resolve carries: a test CRID aimed
+// at the production endpoint is refused before any request without --yes.
+func TestDeleteTestCRIDOnProductionRefusedWithoutYes(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", "https://api.layerv.ai", "delete", srv.Key.CRID}})
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if !strings.Contains(res.stderr.String(), "production") {
+		t.Errorf("expected the environment-guard message, got %q", res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("the guard must fire before any request")
+	}
 }
 
 // TestResolveAfterDeleteIsOwnerTruthful pins the revoked path: resolving a
