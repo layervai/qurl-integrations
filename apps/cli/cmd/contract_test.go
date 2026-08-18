@@ -332,9 +332,12 @@ func TestPublishNoCRIDKeepsResourceID(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
-	if !strings.Contains(res.stdout.String(), "Resource ID:\t"+srv.Key.ResourceID) &&
-		!strings.Contains(res.stdout.String(), srv.Key.ResourceID) {
-		t.Errorf("no-CRID publish must still show an identifier, got %q", res.stdout.String())
+	// tabwriter turns the label's tab into padding, so assert the label and
+	// the value separately rather than a single tab-joined string that can
+	// never match.
+	stdout := res.stdout.String()
+	if !strings.Contains(stdout, "Resource ID:") || !strings.Contains(stdout, srv.Key.ResourceID) {
+		t.Errorf("no-CRID publish must still show the labeled resource id, got %q", stdout)
 	}
 	if !strings.Contains(res.stderr.String(), "did not return a CRID") {
 		t.Errorf("expected the no-CRID warning, got %q", res.stderr.String())

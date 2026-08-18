@@ -142,7 +142,11 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		return err
 	}
 
-	if res.FoundExisting {
+	// The note says the existing CRID is shown, so it may only appear when
+	// one actually follows. The combination is unreachable in practice —
+	// found_existing is newer than CRID minting — but the wording is
+	// unconditional, so the guard keeps it from ever contradicting itself.
+	if res.FoundExisting && res.CRID != "" {
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
 	if res.CRID != "" {
