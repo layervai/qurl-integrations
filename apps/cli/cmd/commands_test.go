@@ -9,27 +9,6 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
-// TestStubsReturnCleanNotAvailableExit1 pins the stub contract: commands
-// whose platform calls land in later steps exist with full surfaces and
-// fail fast with the uniform message, exit 1, nothing on stdout, no hang.
-func TestStubsReturnCleanNotAvailableExit1(t *testing.T) {
-	cases := [][]string{
-		{"get", "aeh2" + strings.Repeat("a", 56)},
-	}
-	for _, args := range cases {
-		t.Run(args[0], func(t *testing.T) {
-			res := runCLI(t, &runOpts{args: args})
-			if res.code != 1 {
-				t.Fatalf("exit = %d, want 1; stderr: %s", res.code, res.stderr.String())
-			}
-			mustEmptyStdout(t, res)
-			if !strings.Contains(res.stderr.String(), "isn't available in this build") {
-				t.Errorf("expected the uniform stub message, got %q", res.stderr.String())
-			}
-		})
-	}
-}
-
 func TestLoginRejectsImplausibleKey(t *testing.T) {
 	res := runCLI(t, &runOpts{
 		args:  []string{"login"},

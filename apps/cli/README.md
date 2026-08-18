@@ -73,7 +73,7 @@ a profile file (`~/.config/qurl/profiles/<name>.yaml`, selected with
 |---------|-------------|
 | `qurl publish <target-url>` | Publish a URL as a protected resource and get its CRID |
 | `qurl resolve <CRID>` | Turn a CRID into a short-lived access link |
-| `qurl get <CRID>` | Fetch what a CRID points to (arrives in an upcoming release) |
+| `qurl get <CRID>` | Fetch what a CRID points to: opens your browser on a terminal, or downloads with `--file <path>` (`--file -` streams raw bytes; `--force` allows replacing an existing file) |
 | `qurl list` | List your published resources |
 | `qurl delete <CRID>` | Delete a published resource |
 | `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
