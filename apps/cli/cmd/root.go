@@ -69,12 +69,17 @@ type globalOpts struct {
 	redirectFRPLogs func()
 
 	// Resolved in PersistentPreRunE.
-	resolved             bool
-	resolvedEndpoint     string
-	resolvedFormat       output.Format
-	outColor             bool
-	errColorOn           bool
-	ascii                bool
+	resolved           bool
+	resolvedEndpoint   string
+	resolvedFormat     output.Format
+	outColor           bool
+	errColorOn         bool
+	ascii              bool
+	profileConnectorID string
+	// profileConnectorSlug carries the deprecated v1.1.0 profile key
+	// (connector_slug), honored below profileConnectorID.
+	//
+	// Deprecated: remove at the next major.
 	profileConnectorSlug string
 }
 
@@ -237,7 +242,8 @@ func (o *globalOpts) resolveSettings() error {
 	// Free-form profile settings the connector command resolves flag-first at
 	// its own run time (config.Resolve needs the flag value, which only the
 	// command has).
-	o.profileConnectorSlug = cfg.ConnectorSlug
+	o.profileConnectorID = cfg.ConnectorID
+	o.profileConnectorSlug = cfg.ConnectorSlug //nolint:staticcheck // deliberate compatibility read of the deprecated v1.1.0 key; dies with it at the next major
 	o.resolved = true
 	return nil
 }
