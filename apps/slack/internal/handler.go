@@ -1945,7 +1945,13 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
 	defer cancel()
 
-	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`."
+	// The trailing sentence is the honest boundary of what this command does. It
+	// clears qURL's per-workspace data but deliberately leaves the Slack app —
+	// and the bot token Slack issued to it — in place, because only a fresh Slack
+	// app authorization can ever re-issue that token (see purgeScopeDisconnect).
+	// An admin who wants the token gone too has to remove the app in Slack, which
+	// fires app_uninstalled and runs the full purge.
+	const localSlackDataPurgeScheduledReply = "Local Slack app data for this workspace is being cleared; Slack features stay disconnected until the recorded workspace owner runs `/qurl setup <email>`. The qURL Slack app itself stays installed — to remove it and the Slack token it was granted, remove qURL from your workspace's Slack app management page."
 
 	// Shown only on the revoked=true paths (204/404), which are unreachable for a
 	// self-revoke (see classifyUninstallRevokeError) — defensive for #806. The
@@ -1986,7 +1992,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 			}
 			for _, workspaceID := range ids {
 				purgeCtx, purgeCancel := context.WithTimeout(baseCtx, lifecyclePurgeTimeout)
-				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff)
+				h.purgeWorkspaceWithRetry(purgeCtx, purgeLog.With("workspace_id", workspaceID), workspaceID, purgeCutoff, purgeScopeDisconnect)
 				purgeCancel()
 			}
 		})

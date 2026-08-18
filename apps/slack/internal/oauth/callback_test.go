@@ -1727,32 +1727,56 @@ func TestCallbackExplicitRotationRevokesOldKeyBeforeReplacementMint(t *testing.T
 	minter.validateMu.Unlock()
 }
 
-func TestCallbackExplicitRotationRequiresStoredKeyID(t *testing.T) {
+// TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke covers the row that
+// predates stored key identity. Slack cannot revoke a key it never recorded, so
+// rotation mints without revoking rather than refusing.
+//
+// Refusing was the previous behavior and it protected nothing: the owner's only
+// remaining route was /qurl uninstall, which abandons the same un-revokable key
+// (local-only disconnect) and additionally discards the Slack bot token and
+// workspace binding — and each uninstall/setup cycle mints another live key
+// against the account's plan limit (3 on free tier).
+func TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
 	store.existingKey = testOldAPIKey
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
 
 	h := Callback(cfg)
 	rec := httptest.NewRecorder()
 	h(rec, callbackRequest(state))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status: got %d want 409 (missing key_id, body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (legacy-row rotation should succeed, body=%s)", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revoked := append([]string(nil), minter.revokedKeys...)
+	minter.revokeMu.Unlock()
+	if len(revoked) != 0 {
+		t.Errorf("revoke must not run without a known key_id, got %#v", revoked)
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 1 {
+		t.Errorf("replacement mint calls = %d, want 1", replacementCalls)
 	}
 	store.mu.Lock()
-	if store.setArgs != nil {
-		t.Fatal("SetAPIKeyWithMetadata must not run without a stored key_id")
-	}
+	setArgs := store.setArgs
 	store.mu.Unlock()
-	minter.revokeMu.Lock()
-	if len(minter.revokedKeys) != 0 {
-		t.Errorf("revoke must not run without key_id, got %#v", minter.revokedKeys)
+	if setArgs == nil {
+		t.Fatal("replacement key must be persisted so the workspace keeps working")
 	}
-	minter.revokeMu.Unlock()
-	minter.mintMu.Lock()
-	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
-		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	// The rotation must record key identity, so this workspace takes the normal
+	// revoke-then-replace path next time instead of orphaning a second key.
+	if setArgs.KeyID == "" {
+		t.Error("rotation must store the new key_id so the next rotation can revoke it")
 	}
-	minter.mintMu.Unlock()
+	// And it must record provenance, which is what completes the self-heal: a
+	// row that arrives here has neither, and --repoint stays blocked until the
+	// account is known. Without this the row would be repoint-blocked forever.
+	if setArgs.QURLAccountID == "" {
+		t.Error("rotation must store qurl_account_id so a later --repoint can prove same-vs-cross account")
+	}
 }
 
 func TestCallbackExplicitRotationValidatesReplacementIdempotencyBeforeRevoke(t *testing.T) {
@@ -2772,5 +2796,287 @@ func TestCallbackSkipsBindWhenAdminStoreNil(t *testing.T) {
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
 		t.Error("SetAPIKeyWithMetadata must still run in the sandbox path so the API-key surface is functional")
+	}
+}
+
+// TestCallbackLegacyRotationLogsOrphanEvent pins the operator's only handle on
+// the key this path deliberately abandons. Without a findable event the leaked
+// key is invisible until the account hits its API-key plan limit.
+func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	var found map[string]any
+	for _, rec := range readLogs() {
+		if rec["event"] == rotateLegacyRowOrphanEvent {
+			found = rec
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a %q log record so operators can find the abandoned key", rotateLegacyRowOrphanEvent)
+	}
+	// qurl_account_id is the operator's primary handle: it names which qURL
+	// account holds the abandoned key, so an empty value here would leave them
+	// with a team_id and no way to locate the key in API-key management.
+	for _, field := range []string{"team_id", "mode", "qurl_account_id", "operator_action"} {
+		if v, ok := found[field]; !ok || v == "" {
+			t.Errorf("orphan log record missing %q: %#v", field, found)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke covers the one new
+// failure mode this path introduces: it is net +1 key (nothing is revoked), so
+// an account already at its plan limit fails the mint. The page must not repeat
+// the normal rotation's "previous key was revoked" copy — on this path the old
+// key is still live, and telling the admin otherwise would send them away
+// believing a working credential is dead.
+func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (quota), body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Match the misleading claims specifically. A bare "was revoked" substring
+	// would also hit the correct copy's "nothing was revoked".
+	for _, claim := range []string{
+		"previous workspace key was revoked",
+		"revoked the previous workspace key",
+	} {
+		if strings.Contains(body, claim) {
+			t.Errorf("page must not claim a revoke happened on the legacy path (%q): %s", claim, body)
+		}
+	}
+	// The orphan event must NOT fire here. Its operator_action says to revoke
+	// this workspace's pre-rotation key, and the mint failed — so that key is
+	// still the workspace's live credential. Acting on the event would take the
+	// workspace down.
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not be logged when the rotation failed: %#v", entry)
+		}
+	}
+	if !strings.Contains(body, "still active") {
+		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+}
+
+// TestCallbackRepointWithoutKeyIDStillFailsClosed fences the scope of the
+// mint-without-revoke relaxation. It is reachable only by --rotate; a --repoint
+// that reaches the same missing-key_id state must keep failing closed rather
+// than silently minting. The state is unreachable today (provenance and key_id
+// are persisted together), so this guards the invariant rather than a live path
+// — if that ever changes, mint-without-revoke must not widen to account moves.
+func TestCallbackRepointWithoutKeyIDStillFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	// Provenance present and matching, so the earlier cross-account and
+	// legacy-repoint guards both pass and control reaches the key_id branch.
+	store.existingAccount = testAdminSub
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (repoint must not mint without a key_id), body=%s", rec.Code, rec.Body.String())
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 0 {
+		t.Errorf("replacement mint calls = %d, want 0", replacementCalls)
+	}
+}
+
+// TestCallbackLegacyRotationGenericMintFailureCopy locks the non-quota failure
+// copy on the legacy path. Only the limit-reached variant was pinned, so a
+// regression could reintroduce the normal rotation's "previous key was revoked"
+// wording here — on a path where nothing was revoked and the old key is still
+// the workspace's live credential.
+func TestCallbackLegacyRotationGenericMintFailureCopy(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	minter.replacementMintErr = errors.New("qurl-service unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502, body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "still active") {
+		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+	if strings.Contains(body, "revoked the previous workspace key") {
+		t.Errorf("page must not claim a revoke happened: %s", body)
+	}
+	// --repoint still fails closed on a row with no key_id, so suggesting it
+	// here would hand this user a dead end until a rotate heals the row.
+	if strings.Contains(body, "--repoint") {
+		t.Errorf("legacy-path retry copy must not suggest --repoint: %s", body)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the mint failed: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent covers the
+// second failure mode the emit-after-ok ordering exists for. A successful mint
+// whose persist fails leaves the store holding the OLD key — so the workspace
+// keeps using it and the new key is the real orphan. Emitting the event here
+// would name the wrong key and tell an operator to revoke a live one.
+func TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	store.setErr = errors.New("ddb unavailable")
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status: got 200, want an error page when the persist failed; body=%s", rec.Body.String())
+	}
+	// The mint did happen — this is exactly the window where a replacement
+	// exists upstream but Slack never stored it.
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 1 {
+		t.Errorf("replacement mint calls = %d, want 1 (persist, not mint, is what failed)", replacementCalls)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the persist failed — it would name the old key while the NEW one is the orphan: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationRefusesWithoutVerifiedAccount pins the fail-closed
+// guard on the mint-without-revoke branch. Everything this path produces is
+// keyed on the signed-in account: the persisted provenance that unblocks a
+// later --repoint, and the orphan event's handle for finding the abandoned key.
+// Minting with an empty account would report success while leaving the row
+// permanently repoint-blocked and emitting an event no operator can act on.
+//
+// Upstream gates make this unreachable in production, but they live on two
+// other surfaces (the slash command's AdminStore requirement and
+// checkBindAllowed's empty-sub refusal) and this branch can see neither.
+func TestCallbackLegacyRotationRefusesWithoutVerifiedAccount(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	// No IDTokenVerifier override: the callback reaches this branch with no
+	// verified qURL account.
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (no verified account), body=%s", rec.Code, rec.Body.String())
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 0 {
+		t.Errorf("replacement mint calls = %d, want 0 — nothing should be minted without provenance to record", replacementCalls)
+	}
+	store.mu.Lock()
+	setArgs := store.setArgs
+	store.mu.Unlock()
+	if setArgs != nil {
+		t.Errorf("nothing should be persisted without a verified account: %#v", setArgs)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the rotation was refused: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationHealsRowForNextRotation drives the sequence the
+// "at most once per workspace" bound rests on: a legacy rotation, then a second
+// rotation on the now-healed row. The first mints without revoking and records
+// key identity; the second must take the normal revoke-then-replace path, so
+// the workspace cannot orphan a second key.
+//
+// The success test asserts the healing structurally (key_id is persisted). This
+// proves the consequence — that the recorded key_id actually routes the next
+// rotation away from the mint-without-revoke branch.
+func TestCallbackLegacyRotationHealsRowForNextRotation(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+
+	// First rotation: legacy row, nothing to revoke.
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(mintTestStateWithMode(t, &cfg, SetupModeRotate)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first rotation: got %d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revokedAfterFirst := len(minter.revokedKeys)
+	minter.revokeMu.Unlock()
+	if revokedAfterFirst != 0 {
+		t.Fatalf("first rotation must not revoke, got %d", revokedAfterFirst)
+	}
+	store.mu.Lock()
+	healed := store.setArgs
+	store.mu.Unlock()
+	if healed == nil || healed.KeyID == "" {
+		t.Fatalf("first rotation must persist key identity, got %#v", healed)
+	}
+
+	// Feed the persisted identity back as the stored row, as a later run would
+	// read it, and rotate again.
+	store.mu.Lock()
+	store.existingKey = healed.APIKey
+	store.existingKeyID = healed.KeyID
+	store.existingAccount = healed.QURLAccountID
+	store.setArgs = nil
+	store.mu.Unlock()
+
+	rec2 := httptest.NewRecorder()
+	h(rec2, callbackRequest(mintTestStateWithMode(t, &cfg, SetupModeRotate)))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second rotation: got %d want 200, body=%s", rec2.Code, rec2.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revoked := append([]string(nil), minter.revokedKeys...)
+	minter.revokeMu.Unlock()
+	if len(revoked) != 1 || revoked[0] != healed.KeyID {
+		t.Errorf("second rotation must revoke the healed key_id %q, got %#v", healed.KeyID, revoked)
 	}
 }
