@@ -20,8 +20,10 @@ type publishJSON struct {
 	CreatedAt  *time.Time `json:"created_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	// FoundExisting mirrors the text-mode already-published note for
-	// scripts; emitted only when true so the mint-path document is stable.
-	FoundExisting bool `json:"found_existing,omitempty"`
+	// scripts. Always emitted — explicit false on a fresh publish — so
+	// scripts can rely on the key being present, including against
+	// platform versions that do not send the flag yet.
+	FoundExisting bool `json:"found_existing"`
 }
 
 type resolveJSON struct {
@@ -75,8 +77,15 @@ const (
 )
 
 // Publish renders a publish result. Text mode prints the CRID last, alone on
-// its line, so it is the easiest thing to select and copy.
+// its line, so it is the easiest thing to select and copy. Publishing an
+// already-published URL returns the existing resource, and the rendering
+// says so: the text document itself carries the story (headline plus note),
+// while --quiet and JSON keep their stdout documents unchanged and note the
+// replay on stderr.
 func (p *Printer) Publish(res *qurlapi.Published) error {
+	if res.FoundExisting && (p.format == FormatJSON || p.quiet) {
+		p.Notef(msgAlreadyPublished)
+	}
 	switch {
 	case p.format == FormatJSON:
 		return p.writeJSON(publishJSON{
@@ -96,9 +105,20 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 	}
 }
 
+// publishText renders the publish document. The raw platform resource id is
+// deliberately absent whenever a CRID exists: the CRID is the customer-facing
+// identity, and nothing in the CLI accepts a resource id as input. It comes
+// back only when the service minted no CRID, so the document still carries
+// some identifier — the same fallback --quiet makes through primaryID, and
+// the one cmd's no-CRID warning points the reader at. JSON always keeps the
+// raw field.
 func (p *Printer) publishText(res *qurlapi.Published) error {
+	headline := "Published"
+	if res.FoundExisting {
+		headline = "Already published"
+	}
 	ew := &errWriter{w: p.out}
-	ew.printf("%s\n\n", p.green("Published"))
+	ew.printf("%s\n\n", p.green(headline))
 	if ew.err != nil {
 		return ew.err
 	}
@@ -106,7 +126,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
-	twe.printf("  %s\t%s\n", p.bold("Resource ID:"), res.ResourceID)
+	if res.CRID == "" && res.ResourceID != "" {
+		twe.printf("  %s\t%s\n", p.bold("Resource ID:"), res.ResourceID)
+	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}
@@ -120,6 +142,13 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		return err
 	}
 
+	// The note says the existing CRID is shown, so it may only appear when
+	// one actually follows. The combination is unreachable in practice —
+	// found_existing is newer than CRID minting — but the wording is
+	// unconditional, so the guard keeps it from ever contradicting itself.
+	if res.FoundExisting && res.CRID != "" {
+		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
+	}
 	if res.CRID != "" {
 		ew.printf("\n%s %s\n", p.bold("CRID:"), res.CRID)
 	}
