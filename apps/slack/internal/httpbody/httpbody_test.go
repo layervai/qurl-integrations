@@ -7,11 +7,12 @@ import (
 	"testing/iotest"
 )
 
-// TestReadResponseBodyAcceptsBodyUpToLimit is the off-by-one guard in the direction
-// that fails silently. A body that exactly fills the ceiling is valid, and rejecting it
-// — which reading limit bytes, or comparing with >=, would do — surfaces as a JSON
-// parse error on a response that was fine — on the Lambda's hot path as much as in a
-// smoke command no CI run exercises.
+// TestReadResponseBodyAcceptsBodyUpToLimit is the >= guard: a body that exactly fills
+// the ceiling is valid, and comparing with >= would refuse it as though it had
+// overflowed. It deliberately does NOT cover the other half of the off-by-one — with the
+// read shortened to limit bytes every size below still passes, because that mutation
+// only misreads bodies larger than the ceiling. The two oversize tests below are what
+// kill that one.
 func TestReadResponseBodyAcceptsBodyUpToLimit(t *testing.T) {
 	const limit = 64
 	for _, size := range []int{0, limit - 1, limit} {
@@ -84,11 +85,18 @@ func TestReadResponseBodyWrapsReadError(t *testing.T) {
 	}
 }
 
-// TestReadResponseBodyClampsNegativeLimit mirrors DrainResponseBody's clamp. Without it
-// io.LimitReader treats a negative count as immediate EOF, so a nonsensical ceiling
-// would return an empty body as valid rather than refusing it.
+// TestReadResponseBodyClampsNegativeLimit pins what the clamp actually does, which is
+// the opposite of what mirroring DrainResponseBody's reasoning would suggest. Unclamped,
+// io.LimitReader reads nothing from a negative count and the comparison then refuses
+// every body — the empty one included — with the negative digits in the operator's
+// message. Clamped, a negative ceiling behaves exactly as a zero one does, so both halves
+// are asserted: empty is valid, anything longer is refused at zero.
 func TestReadResponseBodyClampsNegativeLimit(t *testing.T) {
-	_, err := ReadResponseBody("auth.test", strings.NewReader("body"), -5)
+	raw, err := ReadResponseBody("auth.test", strings.NewReader(""), -5)
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("ReadResponseBody(_, empty, -5) = %q, %v, want empty body and nil", raw, err)
+	}
+	_, err = ReadResponseBody("auth.test", strings.NewReader("body"), -5)
 	if !errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("ReadResponseBody(_, _, -5) = %v, want errors.Is ErrResponseTooLarge", err)
 	}

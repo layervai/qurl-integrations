@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
@@ -1409,6 +1410,32 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "sso.example.com") || !strings.Contains(err.Error(), "not followed") {
 		t.Errorf("err = %v, want the unfollowed redirect target named", err)
+	}
+}
+
+// TestGetOnceRejectsOversizeResponse pins the wiring the hoist left behind in this
+// caller: that getOnce hands slacksmoke.ReadResponseBody THIS command's ceiling and
+// propagates the refusal. The over-read and comparison are covered by slacksmoke's own
+// tests; what only a caller test can catch is the constant going astray — swapping this
+// command's 4 MiB for the DM smoke's 64 KiB is exactly the hazard ReadResponseBody's doc
+// names as the reason limit is a parameter, and nothing here failed on it before.
+func TestGetOnceRejectsOversizeResponse(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, nil)
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxSlackResponseBytes+1)))
+	})
+	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout)}
+	var out slackMessagesResponse
+	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
+	if !errors.Is(err, httpbody.ErrResponseTooLarge) {
+		t.Fatalf("get = %v, want errors.Is httpbody.ErrResponseTooLarge", err)
+	}
+	// Spelled out rather than built from the constant, so substituting a different
+	// ceiling fails here instead of quietly agreeing with itself.
+	if want := "conversations.history response exceeded 4194304 bytes"; err.Error() != want {
+		t.Fatalf("get = %q, want %q", err.Error(), want)
 	}
 }
 

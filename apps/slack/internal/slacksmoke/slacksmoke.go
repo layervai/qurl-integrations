@@ -173,7 +173,7 @@ type TimeoutBudget struct {
 }
 
 // Validate returns the first failing check, or nil when the budget is usable. Callers
-// print it and exit; the package renders no operator text and knows no exit codes,
+// print it and exit; the package itself does no printing and knows no exit codes,
 // which is the same division the token and base-URL sentinels above keep.
 //
 // minFactor is how many whole request timeouts the overall budget must cover — the

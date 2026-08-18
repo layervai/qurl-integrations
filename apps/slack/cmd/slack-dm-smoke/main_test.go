@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 	"unicode/utf8"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/httpbody"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
@@ -1002,6 +1004,38 @@ func TestPostRawDrainsOversizeResponse(t *testing.T) {
 	}
 	if !body.closed {
 		t.Fatal("oversize response body was not closed")
+	}
+}
+
+// TestPostRawRecordsReadErrorCode pins the else arm the hoist introduced. postRaw used
+// to set "response_read" unconditionally on a failed read; it now branches on
+// httpbody.ErrResponseTooLarge to pick between two codes, so a read that fails for any
+// other reason has to come out response_read rather than inheriting the oversize label.
+// Deleting the else arm leaves every other test in this file green.
+func TestPostRawRecordsReadErrorCode(t *testing.T) {
+	t.Parallel()
+
+	client := slackClient{
+		token:     testSmokeToken,
+		baseURL:   testSlackAPIBaseURL,
+		userAgent: defaultUserAgent,
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(iotest.ErrReader(errors.New("connection reset"))),
+			}, nil
+		})},
+	}
+	result, _, err := client.postRaw(context.Background(), "auth.test", nil)
+	if err == nil {
+		t.Fatal("postRaw = nil error, want a read failure")
+	}
+	if errors.Is(err, httpbody.ErrResponseTooLarge) {
+		t.Fatalf("postRaw = %v, want a read failure, not the oversize sentinel", err)
+	}
+	if result.Error != "response_read" {
+		t.Fatalf("result.Error = %q, want %q", result.Error, "response_read")
 	}
 }
 

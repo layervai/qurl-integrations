@@ -26,22 +26,32 @@ import (
 var ErrResponseTooLarge = errors.New("response exceeded caller limit")
 
 // ReadResponseBody reads a Slack response body under the caller's ceiling, returning
-// the bytes or an error carrying the text callers print. method names the Slack Web API
-// method the read belongs to, which is what that text leads with.
+// the bytes or an error carrying the text its callers print. method names the Slack Web
+// API method the read belongs to, which is what that text leads with.
 //
-// The read is limit+1 bytes — deliberately one past the ceiling — and an oversized body
+// The read is limit+1 bytes — deliberately one past the ceiling — so an oversized body
 // is detected by having read that extra byte, rather than by trusting a Content-Length
 // the caller has no way to verify. The over-read and the comparison against it are why
-// this is one function rather than an idiom copied per call site: reading limit bytes,
-// or comparing with >=, silently truncates a body that exactly fills the ceiling into a
-// JSON parse error. Nothing in CI would catch that drift between copies — dupl's
-// threshold is 150 tokens and the idiom is a third of that, which is how one of the six
-// Lambda copies came to be missing its drain entirely.
+// this is one function rather than an idiom copied per call site: the two ways to get it
+// wrong fail in opposite directions. Reading only limit bytes loses the detection
+// entirely, handing back an over-limit body truncated to the ceiling with a nil error,
+// to die later as a JSON parse error. Comparing with >= instead refuses a body that
+// exactly fills the ceiling as though it had overflowed.
 //
-// An oversized body is drained before the error returns, and the error unwraps to
-// ErrResponseTooLarge so a caller can record its own code for that case. limit is a
-// parameter, and a negative one is clamped, both for the reasons given on
-// DrainResponseBody.
+// Nothing caught either while this was copied per call site. The smoke commands are
+// operator-triggered, so no CI run exercised them; the Lambda's six copies do run under
+// test, but those tests pinned the refusal's text and not the drain behind it, which is
+// how one of the six came to be missing its drain entirely. dupl was no backstop for any
+// of them — it runs per package, package main directories cannot import each other, and
+// at 78 tokens the block sat under its 150-token threshold anyway.
+//
+// An oversized body is drained before the error returns, for the reason DrainResponseBody
+// gives, and the error unwraps to ErrResponseTooLarge so a caller can record its own code
+// for that case. limit is a parameter for the reason given on DrainResponseBody; a
+// negative one is clamped to zero, but NOT for that function's reason. Unclamped here,
+// io.LimitReader reads nothing and the comparison below then refuses every body — an
+// empty one included — with the negative digits rendered into the operator's message.
+// Clamped, a negative ceiling behaves exactly as a zero one does.
 func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error) {
 	if limit < 0 {
 		limit = 0
@@ -59,18 +69,20 @@ func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error
 
 // DrainResponseBody discards up to limit+1 bytes of body — one past the caller's
 // ceiling, matching ReadResponseBody's over-read. It is a best-effort attempt at
-// connection reuse; Close tears the response down if bytes still remain.
+// connection reuse; Close tears the response down if bytes still remain. It takes no
+// method name because, unlike ReadResponseBody, it renders no message.
 //
-// The bound is what makes this safe to share with the Lambda. Draining is only ever
-// worth what a reused connection saves, and it is worth nothing at all against Slack
-// today: slack.com serves HTTP/2, where the transport reuses the connection whether the
-// body is drained, bounded-drained, or not read at all — a RST_STREAM does not close
-// the TCP connection. Only on an HTTP/1.1 fallback does the drain decide reuse, and
-// there a bounded and an unbounded drain behave identically for any body below
-// 2*limit+2 bytes, which covers every realistic overshoot. Past that the bounded form
-// hangs up rather than spending the rest of the client timeout discarding bytes from a
-// peer that just broke the ceiling — the right trade for a per-invocation-billed
-// Lambda, and the one apps/cli already makes in its own two drains.
+// The bound is what makes this safe to share with the Lambda, and it costs less than it
+// looks. Draining is only ever worth what a reused connection saves, and against Slack
+// that is nothing today: slack.com serves HTTP/2, where the transport reuses the
+// connection whether the body is drained, bounded-drained, or not read at all — closing
+// an undrained body sends RST_STREAM, which does not close the TCP connection. Only on
+// an HTTP/1.1 fallback does the drain decide reuse, and there a bounded and an unbounded
+// drain behave identically for any body below 2*limit+2 bytes, which covers every
+// realistic overshoot. Past that the bounded form hangs up rather than spending the rest
+// of the client timeout discarding bytes from a peer that just broke the ceiling — the
+// right trade for a per-invocation-billed Lambda, and the one apps/cli already makes in
+// both of its own drains.
 //
 // limit is a parameter rather than a package constant because the callers' ceilings
 // differ by two orders of magnitude — slack-dm-smoke reads small chat.postMessage
@@ -87,10 +99,13 @@ func DrainResponseBody(body io.Reader, limit int64) {
 }
 
 // oversizeResponseError renders the over-limit message operators read while unwrapping
-// to ErrResponseTooLarge. The wrapping is done with a type rather than a
-// fmt.Errorf("...: %w", ErrResponseTooLarge), because that would append the sentinel's
-// own text to a message that has to stay byte-identical to the one every caller printed
-// before this was hoisted.
+// to ErrResponseTooLarge. The obvious fmt.Errorf("...: %w", ErrResponseTooLarge) is out
+// because it appends the sentinel's own text to a message that has to stay
+// byte-identical to the one every caller printed before this was hoisted. An infix
+// fmt.Errorf("%s %w %d bytes", method, ErrResponseTooLarge, limit) does render those
+// exact bytes, but only by cutting the sentinel down to the fragment "response
+// exceeded", which reads as a typo at its declaration and cannot be understood away
+// from this call site. The type is what keeps the sentinel a standalone sentence.
 type oversizeResponseError struct {
 	method string
 	limit  int64
