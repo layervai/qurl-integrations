@@ -69,9 +69,10 @@ jobs:
           filters: |
             cli:
               # Source of truth for CLI-impacting paths on PR and main push events.
-              # No 'shared/**' here even though apps/cli imports it: shared-test.yml's
-              # `shared / test all` gate runs `go test ./...` — apps/cli included —
-              # on every shared/ change, so those changes are already validated.
+              # No 'shared/**' here: the v2 CLI does not import shared/ at all, and
+              # even if an import returns, shared-test.yml's `shared / test all` gate
+              # runs `go test ./...` — apps/cli included — on every shared/ change,
+              # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
               - 'apps/cli/**'

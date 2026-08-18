@@ -16,7 +16,7 @@ apps/                Per-integration apps (released apps get independent release
   discord/           Discord app — one-time qURL links for files & locations (Node.js)
   chrome-extension/  Chrome extension — Gmail file uploads as expiring qURL links (MV3)
   edge-extension/    Edge extension — Gmail file uploads as expiring qURL links (MV3)
-  cli/               CLI — create & manage qURLs from the terminal (Go)
+  cli/               CLI — publish, resolve, and manage qURL resources by CRID (Go)
   teams/             Microsoft Teams OAuth security core — no routes/SDK yet (TypeScript)
   zapier/            Zapier integration (planned)
 origins/             Reusable origin images for qURL Connector-protected resources
@@ -24,8 +24,6 @@ origins/             Reusable origin images for qURL Connector-protected resourc
 shared/              Shared Go libraries used by the Go apps
   client/            qURL API client
   auth/              API key helpers
-  events/            Webhook event parsing
-  formatting/        Chat message templates
   observability/     OpenTelemetry setup
 ```
 
@@ -44,7 +42,7 @@ Language SDKs and the qURL MCP server live in standalone repositories:
 The Slack, Discord, and CLI apps connect to the qURL API:
 
 - **Endpoint** — the qURL API is `https://api.layerv.ai`, set via `QURL_ENDPOINT`. Required for Slack; the CLI and Discord use it by default.
-- **Authentication** — an API key (`lv_live_…`) in `QURL_API_KEY`.
+- **Authentication** — an API key (`lv_live_…`) in `QURL_API_KEY`. The CLI can also store one on the machine with `qurl login` (OS keyring preferred); see [apps/cli/README.md](apps/cli/README.md#authentication).
 
 The Chrome and Edge extensions upload to a qURL file server instead; see their [Chrome README](apps/chrome-extension/README.md) and [Edge README](apps/edge-extension/README.md) for configuration.
 

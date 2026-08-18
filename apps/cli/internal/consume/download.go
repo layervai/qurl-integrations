@@ -38,7 +38,9 @@ func NewHTTPClient() *http.Client {
 // Downloader fetches the bytes behind freshly minted, already-verified
 // access links. It is single-use and not safe for concurrent use.
 type Downloader struct {
-	// Client performs the GETs; nil means NewHTTPClient's default.
+	// Client performs the GETs; nil means NewHTTPClient's default, built on
+	// first use and kept on the Downloader so every request of one download
+	// — the expiry retry included — shares one connection pool.
 	Client Doer
 	// Mint resolves a fresh access link. The closure the CLI injects
 	// re-runs CRID verification on every call, so the retry path is exactly
@@ -178,11 +180,14 @@ func (d *Downloader) get(ctx context.Context) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build download request: %w", err)
 	}
-	client := d.Client
-	if client == nil {
-		client = NewHTTPClient()
+	if d.Client == nil {
+		// Lazy-init once and keep it: the expiry retry must reach the same
+		// transport the drained first response's connection was returned to,
+		// or discard's drain-for-reuse buys nothing and the retry pays a
+		// second dial.
+		d.Client = NewHTTPClient()
 	}
-	return client.Do(req)
+	return d.Client.Do(req)
 }
 
 func linkExpired(resp *http.Response) bool {
