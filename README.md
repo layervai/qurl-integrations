@@ -106,8 +106,9 @@ version stream that something downstream pins to — not by merely publishing an
 Each app's workflow runs on every PR. A `changes` detector job inside it decides whether that
 app's quality gates actually execute, and an always-reporting aggregate check — `slack / required`,
 `discord / required`, `chrome-extension / required`, `edge-extension / required`,
-`teams / required`, `s3-static-connector / required`, `e2e / required`, `shared / required` —
-summarizes the result. Branch protection requires those aggregates, never the gates themselves.
+`teams / required`, `cli / required`, `s3-static-connector / required`, `e2e / required`,
+`shared / required` — summarizes the result. Branch protection requires those aggregates, never
+the gates themselves.
 
 Path filtering deliberately lives in the detector rather than in `on: paths:`: a workflow skipped
 by a trigger-level path filter never reports its checks at all, so a required aggregate would

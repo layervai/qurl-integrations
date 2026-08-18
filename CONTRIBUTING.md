@@ -144,15 +144,10 @@ branch protection requires all nine: `slack / required`, `discord / required`,
 `shared / required`. The connector aggregate arrived in #1042 (refs #1022),
 which moved `s3-static-connector.yml` off `on.push.paths` onto the
 `changes`-job pattern; `cli / required` arrived with the CLI v2 CI family in
-#1109. This section used to track those as still awaiting a branch-protection
-change; the required list had in fact drifted further than that, carrying just
-one aggregate (`slack / required`) as of 2026-08-14. The eight that existed
-then were added with the repair described below, and `cli / required` followed
-when #1109 merged. Each workflow's `changes` filter is the source of truth for
-which paths need validation. When that filter matches, the aggregate validates
-every quality gate listed in its workflow `needs:` set. Branch protection
-requires only these aggregate checks, never the internally skipped expensive
-jobs.
+#1109. Each workflow's `changes` filter is the source of truth for which paths
+need validation. When that filter matches, the aggregate validates every
+quality gate listed in its workflow `needs:` set. Branch protection requires
+only these aggregate checks, never the internally skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external
@@ -168,22 +163,38 @@ are produced by the same workflow file.
 
 The full required set is those nine aggregates plus `Workflow Contract`,
 `Validate GitHub Actions pins`, and the four `age-check / *` contexts —
-fifteen in all. **Required contexts match case-sensitively.** From 2026-08-14
-to 2026-08-17 the required list was a single context spelled `Workflow
-contract` (lowercase `c`), which no job ever reports, so nothing gated and
-every merge went through an admin override. The context was added shortly
-before the workflow that reports it, which is what kept the typo invisible:
-until that workflow merges, a misspelled context and a correctly spelled one
-look identical — both simply never report. The API call that adds a context
-*replaces* the list rather than appending to it, so the same edit also dropped
-the six contexts required until then. When changing required contexts, send the
-complete desired set in one `PATCH`, spell each one exactly as the job's
-`name:` renders it, and verify with `gh pr checks <open-PR> --required` — it
-prints `no required checks reported` when a context matches nothing, which is
-the only cheap way to catch a typo. Note that PRs opened by release-please
-carry no checks at all, because GitHub does not fire `pull_request` workflows
-for events created by `GITHUB_TOKEN`; that PR needs an admin override to merge
-regardless of this set.
+fifteen in all. **Required contexts match case-sensitively**, and a context
+that matches no job does not fail open: it pins the merge box at
+"Expected — Waiting for status to be reported" until an admin overrides it.
+
+On 2026-08-14 the required list was six contexts — `slack / required`,
+`Validate GitHub Actions pins`, and the four `age-check / *`. An edit that
+day replaced all six with a single context spelled `Workflow contract`,
+lowercase `c`, which no job reports. For the next three days every merge was
+blocked by that phantom check and landed through an admin override, with none
+of the six real contexts validating anything. The fix was to correct the
+setting rather than rename the job: `Workflow Contract` is the spelling
+README.md and `internal/ciworkflows` already pin, so renaming would have
+broken both.
+
+Two things made the mistake easy. The API call that adds a context *replaces*
+the list rather than appending to it, so adding one check silently dropped the
+rest. And the context was required about an hour before #1092 merged the
+workflow that reports it, during which a misspelled context and a correct one
+are indistinguishable — both simply never report.
+
+When changing required contexts, send the complete desired set in one `PATCH`
+and spell each exactly as the check renders: a job's `name:` where it sets
+one, its job id where it doesn't, and `<caller-job> / <inner-job>` for
+reusable workflow calls, whose inner half is defined in the upstream repo.
+Verify with `gh pr checks <open-PR> --required`, which prints `no required
+checks reported` when a context matches nothing — the cheapest way to catch a
+typo.
+
+PRs opened by release-please carry no checks at all, because GitHub does not
+fire `pull_request` workflows for events created by `GITHUB_TOKEN` — the same
+recursion guard `release-please.yml` documents for tag pushes. Those PRs need
+an admin override to merge regardless of the required set.
 
 ## Code Conventions
 
