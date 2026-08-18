@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
 // slackFileObject is a Slack `files` entry carrying the field set the 2026-08-14 scan
@@ -142,7 +144,7 @@ func testScanConfig(srv *httptest.Server) *scanConfig {
 		PageLimit:         defaultPageLimit,
 		MaxThreads:        defaultMaxThreads,
 		MinUploads:        1,
-		HTTPClient:        newSlackHTTPClient(testRequestTimeout),
+		HTTPClient:        slacksmoke.NewHTTPClient(testRequestTimeout),
 		Sleep:             func(context.Context, time.Duration) error { return nil },
 		StartedAt:         time.Unix(1723600000, 0).UTC(),
 	}
@@ -799,7 +801,7 @@ func TestSlackClientRetriesOnceAfterRateLimit(t *testing.T) {
 
 	var slept time.Duration
 	client := &slackClient{
-		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout),
+		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout),
 		sleep: func(_ context.Context, d time.Duration) error { slept = d; return nil },
 	}
 	var out slackMessagesResponse
@@ -823,7 +825,7 @@ func TestSlackClientRefusesAnUnreasonableRetryAfter(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 	client := &slackClient{
-		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout),
+		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout),
 		sleep: func(context.Context, time.Duration) error {
 			t.Error("a Retry-After past the cap must not park the scan")
 			return nil
@@ -1175,7 +1177,7 @@ func TestNewSlackHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := newSlackHTTPClient(time.Second)
+	client := slacksmoke.NewHTTPClient(time.Second)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/conversations.history", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
@@ -1377,7 +1379,7 @@ func TestGetOnceReportsWhatArrivedWhenItIsNotJSON(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<html><body>Sign in to continue — secret-plan.pdf</body></html>`))
 	})
-	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout)}
+	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout)}
 	var out slackMessagesResponse
 	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil {
@@ -1402,7 +1404,7 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://sso.example.com/login", http.StatusFound)
 	})
-	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout)}
+	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout)}
 	var out slackMessagesResponse
 	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "sso.example.com") || !strings.Contains(err.Error(), "not followed") {
@@ -1660,7 +1662,7 @@ func TestSlackClientRetriesAnInBodyRateLimit(t *testing.T) {
 	var slept time.Duration
 	client := &slackClient{
 		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent,
-		httpClient: newSlackHTTPClient(testRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(testRequestTimeout),
 		sleep:      func(_ context.Context, d time.Duration) error { slept = d; return nil },
 	}
 	var out slackMessagesResponse
@@ -1689,7 +1691,7 @@ func TestReadHistorySelectsNoThreadsWithoutABudget(t *testing.T) {
 	cfg := testScanConfig(srv)
 	client := &slackClient{
 		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent,
-		httpClient: newSlackHTTPClient(testRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(testRequestTimeout),
 	}
 	tally := surfaceTally{Surface: methodConversationsHistory}
 	record := conversationResult{ID: testChannel}

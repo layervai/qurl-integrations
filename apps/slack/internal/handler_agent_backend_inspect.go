@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/agent"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/nethost"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -330,7 +330,7 @@ func inspectAllowedEntryHost(qurlLink, qurlSite *url.URL, allowLoopback bool) er
 	if siteHost == "" {
 		return errors.New("qURL site missing host name")
 	}
-	if allowLoopback && isLoopbackHostname(linkHost) && isLoopbackHostname(siteHost) {
+	if allowLoopback && nethost.IsLoopback(linkHost) && nethost.IsLoopback(siteHost) {
 		return nil
 	}
 	if isInspectableQURLLinkHost(linkHost) {
@@ -384,14 +384,6 @@ func isInspectableFetchScheme(scheme string) bool {
 // isInspectableQURLLinkHost).
 func isInspectableQURLSiteHost(hostname string) bool {
 	return hostname == "qurl.site" || strings.HasSuffix(hostname, ".qurl.site")
-}
-
-func isLoopbackHostname(hostname string) bool {
-	if hostname == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(hostname)
-	return ip != nil && ip.IsLoopback()
 }
 
 func isProtectedInspectableContent(contentType, contentDisposition string) bool {

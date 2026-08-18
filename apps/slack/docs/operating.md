@@ -399,7 +399,8 @@ Record the result in the PR or issue using this shape. If `conversations.open`
 returns `ok:true` without a usable `channel.id`, the smoke records that
 production step as `missing_dm_channel_id`; treat it as a failed DM-open step
 even though Slack's raw response said `ok:true`. Pre-flight validation errors
-such as invalid flags, empty token/user input, or unsafe `-base-url` exit before
+such as invalid flags, empty token/user input, a `-token-env` that is not a
+POSIX environment variable name, or unsafe `-base-url` exit before
 contacting Slack and print stderr only; JSON evidence is emitted for runtime
 smoke attempts.
 

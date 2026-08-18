@@ -1,7 +1,7 @@
 // The Slack Web API transport for this command: one read method, one retry, and the
-// response envelope every read shares. It lives beside newSlackHTTPClient rather than in
-// main.go, because the no-redirect policy that constructor sets is what several comments
-// here depend on — a bearer token rides on every one of these requests.
+// response envelope every read shares. The no-redirect policy that slacksmoke.NewHTTPClient
+// sets is what several comments here depend on — a bearer token rides on every one of
+// these requests.
 package main
 
 import (
@@ -14,16 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
 
-func newSlackHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
+)
 
 type slackResponseStatus struct {
 	OK       bool   `json:"ok"`
@@ -118,13 +111,13 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		drainSlackResponseBody(resp.Body)
+		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		return retryAfterDelay(resp.Header.Get("Retry-After")), fmt.Errorf("%s: rate limited", method)
 	}
 	if resp.StatusCode >= 300 {
-		drainSlackResponseBody(resp.Body)
+		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		// Location is carried for 3xx because redirects are surfaced rather than followed
-		// (see newSlackHTTPClient), and "returned HTTP 302" alone hides an SSO portal.
+		// (see slacksmoke.NewHTTPClient), and "returned HTTP 302" alone hides an SSO portal.
 		if location := sanitizeReportText(resp.Header.Get("Location")); location != "" {
 			return 0, fmt.Errorf("%s returned HTTP %d redirecting to %s (not followed)", method, resp.StatusCode, location)
 		}
@@ -135,7 +128,7 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 		return 0, fmt.Errorf("%s response read: %w", method, err)
 	}
 	if len(raw) > maxSlackResponseBytes {
-		drainSlackResponseBody(resp.Body)
+		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		return 0, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
@@ -189,10 +182,4 @@ func retryAfterDelay(header string) time.Duration {
 		return time.Second
 	}
 	return time.Duration(seconds) * time.Second
-}
-
-func drainSlackResponseBody(body io.Reader) {
-	// Best-effort connection reuse for moderately oversized bodies. Close tears down
-	// the response if bytes still remain.
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxSlackResponseBytes+1))
 }

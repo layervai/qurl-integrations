@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slacksmoke"
 )
 
 const (
@@ -840,8 +842,8 @@ func TestRunSmokeRejectsUserAgentControlCharacters(t *testing.T) {
 		BaseURL:   testSlackAPIBaseURL,
 		UserAgent: "qurl-smoke\nbad",
 	})
-	if !errors.Is(err, errUserAgentControlCharacters) {
-		t.Fatalf("runSmoke error = %v, want %v", err, errUserAgentControlCharacters)
+	if !errors.Is(err, slacksmoke.ErrUserAgentControlCharacters) {
+		t.Fatalf("runSmoke error = %v, want %v", err, slacksmoke.ErrUserAgentControlCharacters)
 	}
 	if result.UserID != testAdminUserID {
 		t.Fatalf("result user_id = %q, want sanitized user id evidence", result.UserID)
@@ -860,8 +862,8 @@ func TestRunSmokeRejectsInsecureRemoteBaseURL(t *testing.T) {
 		Text:    testSmokeText,
 		BaseURL: "http://slack.example/api",
 	})
-	if !errors.Is(err, errBaseURLRequiresHTTPS) {
-		t.Fatalf("runSmoke error = %v, want %v", err, errBaseURLRequiresHTTPS)
+	if !errors.Is(err, slacksmoke.ErrBaseURLRequiresHTTPS) {
+		t.Fatalf("runSmoke error = %v, want %v", err, slacksmoke.ErrBaseURLRequiresHTTPS)
 	}
 	if result.UserID != testAdminUserID {
 		t.Fatalf("result user_id = %q, want sanitized user id evidence", result.UserID)
@@ -883,12 +885,12 @@ func TestNormalizeSlackBaseURL(t *testing.T) {
 		{
 			name: "empty defaults",
 			raw:  "",
-			want: defaultSlackAPIBaseURL,
+			want: slacksmoke.DefaultAPIBaseURL,
 		},
 		{
 			name: "trims https trailing slash",
 			raw:  "https://slack.com/api/",
-			want: defaultSlackAPIBaseURL,
+			want: slacksmoke.DefaultAPIBaseURL,
 		},
 		{
 			name: "returns parsed clean URL",
@@ -913,17 +915,17 @@ func TestNormalizeSlackBaseURL(t *testing.T) {
 		{
 			name:    "rejects query",
 			raw:     "https://slack.com/api?x=1",
-			wantErr: errBaseURLQueryFragment,
+			wantErr: slacksmoke.ErrBaseURLQueryFragment,
 		},
 		{
 			name:    "rejects fragment",
 			raw:     "https://slack.com/api#token",
-			wantErr: errBaseURLQueryFragment,
+			wantErr: slacksmoke.ErrBaseURLQueryFragment,
 		},
 		{
 			name:    "rejects userinfo",
 			raw:     "https://user:pass@slack.com/api",
-			wantErr: errBaseURLUserinfo,
+			wantErr: slacksmoke.ErrBaseURLUserinfo,
 		},
 		{
 			name:    "rejects malformed URL",
@@ -935,18 +937,18 @@ func TestNormalizeSlackBaseURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := normalizeSlackBaseURL(tc.raw)
+			got, err := slacksmoke.NormalizeBaseURL(tc.raw)
 			if tc.wantErr != nil {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr.Error()) {
-					t.Fatalf("normalizeSlackBaseURL(%q) error = %v, want %v", tc.raw, err, tc.wantErr)
+					t.Fatalf("slacksmoke.NormalizeBaseURL(%q) error = %v, want %v", tc.raw, err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("normalizeSlackBaseURL(%q): %v", tc.raw, err)
+				t.Fatalf("slacksmoke.NormalizeBaseURL(%q): %v", tc.raw, err)
 			}
 			if got != tc.want {
-				t.Fatalf("normalizeSlackBaseURL(%q) = %q, want %q", tc.raw, got, tc.want)
+				t.Fatalf("slacksmoke.NormalizeBaseURL(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
 	}
@@ -964,7 +966,7 @@ func TestPostRawRejectsOversizeResponse(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    srv.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "auth.test", map[string]string{})
 	if err == nil || !strings.Contains(err.Error(), "exceeded") {
@@ -1015,7 +1017,7 @@ func TestPostRawReturnsHTTPStatusError(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    srv.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "auth.test", map[string]string{})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
@@ -1043,7 +1045,7 @@ func TestPostRawDoesNotFollowRedirect(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    redirector.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "auth.test", nil)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
@@ -1072,7 +1074,7 @@ func TestPostRawRecordsRetryAfterForRateLimit(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    srv.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "chat.postMessage", map[string]string{})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 429") {
@@ -1097,7 +1099,7 @@ func TestPostRawRateLimitWinsOverOversizeBody(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    srv.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "chat.postMessage", nil)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 429") {
@@ -1131,7 +1133,7 @@ func TestPostRawIgnoresRetryAfterOnSuccess(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    srv.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "auth.test", map[string]string{})
 	if err != nil {
@@ -1155,7 +1157,7 @@ func TestPostRawInvalidJSONErrorOmitsResponseBody(t *testing.T) {
 		token:      testSmokeToken,
 		baseURL:    srv.URL,
 		userAgent:  defaultUserAgent,
-		httpClient: newSlackHTTPClient(defaultRequestTimeout),
+		httpClient: slacksmoke.NewHTTPClient(defaultRequestTimeout),
 	}
 	result, _, err := client.postRaw(context.Background(), "auth.test", map[string]string{})
 	if err == nil || !strings.Contains(err.Error(), "response JSON") {
@@ -1383,6 +1385,16 @@ func TestRunRejectsInvalidArgs(t *testing.T) {
 			wantStderr: "-token-env is required",
 		},
 		{
+			name:       "token env name with dash",
+			args:       []string{testFlagTokenEnv, "SMOKE-TOKEN", testFlagUser, testAdminUserID},
+			wantStderr: slacksmoke.ErrTokenEnvName.Error(),
+		},
+		{
+			name:       "token env name with leading digit",
+			args:       []string{testFlagTokenEnv, "9SMOKE", testFlagUser, testAdminUserID},
+			wantStderr: slacksmoke.ErrTokenEnvName.Error(),
+		},
+		{
 			name:       "missing user",
 			args:       []string{testFlagTokenEnv, testSmokeTokenEnv},
 			env:        map[string]string{testSmokeTokenEnv: testSmokeToken},
@@ -1499,6 +1511,34 @@ func TestRunRejectsInvalidArgs(t *testing.T) {
 				t.Fatalf("stderr=%q, want %q", stderr.String(), tc.wantStderr)
 			}
 		})
+	}
+}
+
+// TestRunDoesNotEchoTokenEnvName pins the half of the drift this command was missing:
+// -token-env is echoed back in the "not set" error an operator hits first, so without
+// the POSIX-name guard an arbitrary flag value — newlines included — reached
+// slack-dm-smoke's own stderr diagnostics. slack-history-upload-smoke already had it.
+func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
+	t.Parallel()
+
+	const injected = "SMOKE\nSLACK_BOT_TOKEN is not set or is empty\nFORGED"
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), &stdout, &stderr,
+		[]string{testFlagTokenEnv, injected, testFlagUser, testAdminUserID},
+		func(string) string { return "" },
+		func() time.Time { return time.Unix(1800000000, 0).UTC() })
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2", code)
+	}
+	// Exact equality, not "FORGED" is absent: the forgery this guards against is the
+	// middle line, a plausible-looking "SLACK_BOT_TOKEN is not set or is empty". A
+	// partial sanitizer that truncated at the last newline would drop the trailing
+	// sentinel and still emit the forged operator-facing line.
+	if want := slacksmoke.ErrTokenEnvName.Error() + "\n"; stderr.String() != want {
+		t.Fatalf("stderr=%q, want exactly %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout=%q, want empty", stdout.String())
 	}
 }
 

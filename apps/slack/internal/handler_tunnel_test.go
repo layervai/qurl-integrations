@@ -5131,3 +5131,48 @@ func TestCredentialConfirmsKindFirst(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateConnectorAPIURLLoopbackHostCasing pins the property that used to be
+// guaranteed locally by a strings.ToLower at the call site and now lives in
+// nethost.IsLoopback. Nothing else calls ValidateConnectorAPIURL directly — its
+// coverage is incidental through handler paths — so an upper-case loopback host
+// regressing here would surface as a failed install, not a failed test.
+func TestValidateConnectorAPIURLLoopbackHostCasing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr error
+	}{
+		{name: "uppercase localhost over http", raw: "http://LOCALHOST:8080/v1"},
+		{name: "mixed case localhost over http", raw: "http://LocalHost:8080/v1"},
+		{name: "lowercase localhost over http", raw: "http://localhost:8080/v1"},
+		{name: "loopback ip over http", raw: "http://127.0.0.1:8080/v1"},
+		{name: "uppercase public host over http", raw: "http://EXAMPLE.COM/v1", wantErr: errConnectorAPIURLInvalid},
+		{name: "public host over http", raw: "http://example.com/v1", wantErr: errConnectorAPIURLInvalid},
+		// The one deliberate behavior delta from moving this predicate into nethost:
+		// url.URL.Hostname can return surrounding Unicode whitespace from a URL that
+		// parsed cleanly, and nethost.IsLoopback trims where the old call site did not.
+		// Pinned so re-tightening or further loosening trips a test rather than shipping.
+		{name: "loopback with trailing nbsp over http", raw: "http://localhost\u00a0:8080/v1"},
+		// Interior whitespace survives the trim, so this stays rejected.
+		{name: "nbsp separated impostor host over http", raw: "http://localhost\u00a0.evil.com/v1", wantErr: errConnectorAPIURLInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateConnectorAPIURL(tc.raw)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("ValidateConnectorAPIURL(%q) = %v, want nil", tc.raw, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ValidateConnectorAPIURL(%q) = %v, want %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
