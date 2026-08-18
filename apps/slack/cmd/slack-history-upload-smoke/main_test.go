@@ -230,23 +230,6 @@ func TestRunNamesTheTokenEnvVarItLookedAt(t *testing.T) {
 	}
 }
 
-// TestIsEnvVarName pins the charset that keeps writeConfigValidationError's echo of
-// this flag safe to print.
-func TestIsEnvVarName(t *testing.T) {
-	t.Parallel()
-
-	for _, name := range []string{"SLACK_BOT_TOKEN", "_x", "A1", "lower_case_9"} {
-		if !slacksmoke.IsEnvVarName(name) {
-			t.Errorf("slacksmoke.IsEnvVarName(%q) = false", name)
-		}
-	}
-	for _, name := range []string{"", "1TOKEN", "SLACK-TOKEN", "SLACK TOKEN", "SLACK\nTOKEN", "SLACK$TOKEN", "SLACK\x7fTOKEN"} {
-		if slacksmoke.IsEnvVarName(name) {
-			t.Errorf("slacksmoke.IsEnvVarName(%q) = true", name)
-		}
-	}
-}
-
 func TestMessageRefListSet(t *testing.T) {
 	t.Parallel()
 
@@ -266,35 +249,6 @@ func TestMessageRefListSet(t *testing.T) {
 		var rejected messageRefList
 		if err := rejected.Set(raw); err == nil {
 			t.Errorf("Set(%q) must be rejected", raw)
-		}
-	}
-}
-
-func TestNormalizeSlackBaseURL(t *testing.T) {
-	t.Parallel()
-
-	accepted := map[string]string{
-		"":                              slacksmoke.DefaultAPIBaseURL,
-		"  ":                            slacksmoke.DefaultAPIBaseURL,
-		"https://slack.example.com/api": "https://slack.example.com/api",
-		"https://slack.example.com/":    "https://slack.example.com",
-		"http://localhost:8080":         "http://localhost:8080",
-		"http://127.0.0.1:8080/":        "http://127.0.0.1:8080",
-		"http://[::1]:8080":             "http://[::1]:8080",
-	}
-	for raw, want := range accepted {
-		got, err := slacksmoke.NormalizeBaseURL(raw)
-		if err != nil {
-			t.Errorf("slacksmoke.NormalizeBaseURL(%q): %v", raw, err)
-			continue
-		}
-		if got != want {
-			t.Errorf("slacksmoke.NormalizeBaseURL(%q) = %q, want %q", raw, got, want)
-		}
-	}
-	for _, raw := range []string{"http://slack.example.com", "slack.example.com", "https://x?a=b", "https://x#f", "https://u:p@x", "://"} {
-		if _, err := slacksmoke.NormalizeBaseURL(raw); err == nil {
-			t.Errorf("slacksmoke.NormalizeBaseURL(%q) must be rejected", raw)
 		}
 	}
 }
@@ -358,21 +312,6 @@ func TestSanitizeReportText(t *testing.T) {
 
 	if got := sanitizeReportText("  Enterprise\tGrid\norg install  "); got != "EnterpriseGridorg install" {
 		t.Errorf("sanitizeReportText = %q", got)
-	}
-}
-
-func TestContainsHTTPHeaderControl(t *testing.T) {
-	t.Parallel()
-
-	for _, s := range []string{"xoxb-\ntest", "xoxb-\rtest", "xoxb-\x00test", "xoxb-\x7ftest"} {
-		if !slacksmoke.ContainsHTTPHeaderControl(s) {
-			t.Errorf("slacksmoke.ContainsHTTPHeaderControl(%q) = false", s)
-		}
-	}
-	for _, s := range []string{testToken, "qurl-slack-history-upload-smoke", "note with spaces"} {
-		if slacksmoke.ContainsHTTPHeaderControl(s) {
-			t.Errorf("slacksmoke.ContainsHTTPHeaderControl(%q) = true", s)
-		}
 	}
 }
 

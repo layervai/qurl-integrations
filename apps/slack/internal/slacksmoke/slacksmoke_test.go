@@ -41,6 +41,10 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{name: "trailing slash trimmed", raw: testHTTPSURL + "/api/", want: testHTTPSURL + "/api"},
 		{name: "default host trailing slash trimmed", raw: DefaultAPIBaseURL + "/", want: DefaultAPIBaseURL},
 		{name: "multiple trailing slashes trimmed", raw: testHTTPSURL + "/api///", want: testHTTPSURL + "/api"},
+		// The only case that trims the path away entirely, and not a cosmetic one:
+		// callers build method URLs as base + "/" + method, so a surviving "/" would
+		// double the separator in every request.
+		{name: "root path trimmed to bare host", raw: testHTTPSURL + "/", want: testHTTPSURL},
 		{name: "custom path preserved", raw: testHTTPSURL + "/api/~smoke/", want: testHTTPSURL + "/api/~smoke"},
 		{name: "http loopback ip allowed", raw: testLoopbackURL, want: testLoopbackURL},
 		{name: "http loopback keeps port and trims path", raw: "http://localhost:1234/api/", want: "http://localhost:1234/api"},
