@@ -1,0 +1,7 @@
+# Byte-exact test fixtures must survive every OS checkout unchanged. GitHub's
+# Windows runners ship git with core.autocrlf=true, which rewrites LF to CRLF
+# at checkout — any test comparing output byte-for-byte against a checked-in
+# golden then fails on the `cli / matrix` windows-latest leg (and only there).
+# `-text` opts these paths out of all line-ending conversion everywhere.
+**/testdata/** -text
+*.golden -text
