@@ -55,6 +55,25 @@ func TestGoldens(t *testing.T) {
 			stdoutGolden: true,
 		},
 		{
+			// Publishing a URL that already has an active resource: the
+			// text document says so itself, so stderr stays empty.
+			name:         "publish_existing",
+			args:         func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			variants:     []string{"tty", "plain"},
+			stdoutGolden: true,
+		},
+		{
+			// The JSON document only gains found_existing: true; the replay
+			// note is a stderr status line.
+			name:         "publish_existing",
+			args:         func(*apitest.Server) []string { return []string{"publish", "https://example.com/data"} },
+			prepare:      func(srv *apitest.Server) { srv.SetPublishFoundExisting(true) },
+			variants:     []string{"json"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
 			name:         "resolve",
 			args:         func(srv *apitest.Server) []string { return []string{"resolve", srv.Key.CRID} },
 			variants:     goldenVariants(),

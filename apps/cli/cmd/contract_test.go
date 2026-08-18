@@ -274,8 +274,8 @@ func TestResolveInsufficientScope(t *testing.T) {
 	}
 }
 
-// TestPublishFoundExistingNote pins the already-published UX: success plus a
-// stderr note, never an error.
+// TestPublishFoundExistingNote pins the already-published UX under --quiet:
+// success plus a stderr note, never an error, and stdout stays CRID-only.
 func TestPublishFoundExistingNote(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
@@ -288,6 +288,59 @@ func TestPublishFoundExistingNote(t *testing.T) {
 	}
 	if got, want := res.stdout.String(), srv.Key.CRID+"\n"; got != want {
 		t.Errorf("stdout = %q, want the CRID", got)
+	}
+}
+
+// TestPublishFoundExistingTextAnatomy pins the replay document in text mode:
+// exit 0, the "Already published" headline, the explanatory note with its
+// next step, no raw resource id, and the CRID still last, alone on its line.
+func TestPublishFoundExistingTextAnatomy(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishFoundExisting(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	// The document itself tells the story in text mode; the stderr note
+	// belongs to --quiet and JSON only, so any stderr here is double-noting.
+	if res.stderr.Len() != 0 {
+		t.Errorf("text mode must not also note the replay on stderr, got %q", res.stderr.String())
+	}
+	stdout := res.stdout.String()
+	if !strings.HasPrefix(stdout, "Already published\n") {
+		t.Errorf("headline must say the resource already existed, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "already has an active resource") || !strings.Contains(stdout, "Delete it first") {
+		t.Errorf("expected the what-happened note with its next step, got %q", stdout)
+	}
+	if strings.Contains(stdout, "Resource ID:") {
+		t.Errorf("the raw resource id must not render in text mode, got %q", stdout)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if last, want := lines[len(lines)-1], "CRID: "+srv.Key.CRID; last != want {
+		t.Errorf("last line = %q, want %q (the CRID must stay last)", last, want)
+	}
+}
+
+// TestPublishNoCRIDKeepsResourceID pins the fallback the no-CRID warning
+// names: when the service mints no CRID, the text document must still carry
+// an identifier, so the resource id row comes back for exactly that case.
+func TestPublishNoCRIDKeepsResourceID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishOmitCRID(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	// tabwriter turns the label's tab into padding, so assert the label and
+	// the value separately rather than a single tab-joined string that can
+	// never match.
+	stdout := res.stdout.String()
+	if !strings.Contains(stdout, "Resource ID:") || !strings.Contains(stdout, srv.Key.ResourceID) {
+		t.Errorf("no-CRID publish must still show the labeled resource id, got %q", stdout)
+	}
+	if !strings.Contains(res.stderr.String(), "did not return a CRID") {
+		t.Errorf("expected the no-CRID warning, got %q", res.stderr.String())
 	}
 }
 
@@ -461,7 +514,10 @@ func TestListJSONCarriesHasMore(t *testing.T) {
 	}
 }
 
-// TestPublishJSONCarriesFoundExisting mirrors the text-mode note for scripts.
+// TestPublishJSONCarriesFoundExisting mirrors the text-mode note for
+// scripts: the replay document states found_existing: true and still carries
+// the existing resource's CRID. The fresh-publish document's explicit
+// found_existing: false is pinned by the publish JSON golden.
 func TestPublishJSONCarriesFoundExisting(t *testing.T) {
 	srv := apitest.NewServer(t)
 	srv.SetPublishFoundExisting(true)
@@ -471,6 +527,9 @@ func TestPublishJSONCarriesFoundExisting(t *testing.T) {
 	}
 	if !strings.Contains(res.stdout.String(), `"found_existing": true`) {
 		t.Errorf("json publish must carry found_existing; got %s", res.stdout.String())
+	}
+	if !strings.Contains(res.stdout.String(), `"crid": "`+srv.Key.CRID+`"`) {
+		t.Errorf("replay json must carry the existing resource's CRID; got %s", res.stdout.String())
 	}
 }
 
