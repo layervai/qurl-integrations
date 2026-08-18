@@ -338,6 +338,21 @@ func newSmokeResult(cfg *smokeConfig) smokeResult {
 	}
 }
 
+// writeConfigValidationError mirrors slack-history-upload-smoke's function of the same
+// name. Naming the environment variable is the difference between an actionable error
+// and a guessing game once -token-env has been pointed somewhere custom, and echoing it
+// is safe: stderr on a CLI is not a browser, and slacksmoke.IsEnvVarName has already
+// constrained tokenEnv to a POSIX environment variable name back in run, so it cannot
+// carry a control character either.
+//
+// That mirror carries two //nolint:gosec G705 directives on the matching Fprintf lines
+// and this copy carries none — a toolchain artifact, not a weaker safety argument. gosec
+// taints the result of any call that received a tainted argument, so there, where
+// tokenEnv comes back from parseFlags(stderr, args), it arrives tainted; here it is a
+// local in run that never crosses a call boundary, so the analysis never reaches it.
+// Copying the directives over is not an option — nolintlint runs with allow-unused off
+// and fails an unused directive — so if a refactor ever lifts the flag parsing out of
+// run, add them at that point.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, errMissingSlackUserID):
