@@ -45,6 +45,10 @@ const (
 	aggregateSuffix  = contextSeparator + "required"
 
 	liveProtectionEnv = "QURL_LIVE_BRANCH_PROTECTION"
+	// Pinned to the canonical repo rather than derived from the local remote:
+	// the docs in this checkout describe upstream's protection, so a fork
+	// should still diff against upstream. A fork with its own protection is
+	// not what this test is for.
 	protectionRepo    = "layervai/qurl-integrations"
 	protectionAPIPath = "repos/" + protectionRepo + "/branches/main/protection/required_status_checks"
 )
@@ -56,6 +60,8 @@ const (
 // its job id where it sets none, and "<caller-job> / <inner-job>" for a
 // reusable-workflow call.
 func TestDocumentedRequiredContextsResolveToWorkflowJobs(t *testing.T) {
+	t.Parallel()
+
 	reported := workflowReportedContexts(t)
 
 	upstream := []string{}
@@ -103,6 +109,8 @@ func TestDocumentedRequiredContextsResolveToWorkflowJobs(t *testing.T) {
 // one caller breaks that assumption — and should fail here rather than quietly
 // widen it.
 func TestReusableCallerJobsCoverTheirDocumentedContexts(t *testing.T) {
+	t.Parallel()
+
 	reported := workflowReportedContexts(t)
 
 	wanted := map[string]int{}
@@ -136,6 +144,8 @@ func TestReusableCallerJobsCoverTheirDocumentedContexts(t *testing.T) {
 // half, so an aggregate cannot become required-in-practice while the docs
 // still describe the old set.
 func TestDocumentedAggregatesMatchRequiredWorkflowSpecs(t *testing.T) {
+	t.Parallel()
+
 	registered := make([]string, 0, len(requiredWorkflowSpecs))
 	for i := range requiredWorkflowSpecs {
 		registered = append(registered, requiredWorkflowSpecs[i].requiredName)
@@ -151,6 +161,8 @@ func TestDocumentedAggregatesMatchRequiredWorkflowSpecs(t *testing.T) {
 // README's list exists only to mirror the aggregates, so an extra name there
 // is as wrong as a missing one.
 func TestReadmeAggregatesMatchDocumentedAggregates(t *testing.T) {
+	t.Parallel()
+
 	assertSameContexts(t,
 		contributingPath+" required-contexts block", aggregateContexts(documentedRequiredContexts(t)),
 		readmePath, backtickedAggregates(readRepoFile(t, readmePath)))
@@ -161,6 +173,8 @@ func TestReadmeAggregatesMatchDocumentedAggregates(t *testing.T) {
 // that section also narrates the 2026-08-14 incident, and a historical
 // sentence legitimately names contexts without re-listing the current set.
 func TestContributingProseAggregatesAreDocumented(t *testing.T) {
+	t.Parallel()
+
 	documented := stringSet(aggregateContexts(documentedRequiredContexts(t)))
 
 	prose := backtickedAggregates(readRepoFile(t, contributingPath))
@@ -180,6 +194,8 @@ func TestContributingProseAggregatesAreDocumented(t *testing.T) {
 // touching the docs and the live setting would silence the check that polices
 // every other workflow.
 func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
+	t.Parallel()
+
 	if documented := stringSet(documentedRequiredContexts(t)); !documented[workflowContractCheckName] {
 		t.Errorf("%s required-contexts block omits %q, the check that runs this package", contributingPath, workflowContractCheckName)
 	}
@@ -189,6 +205,8 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 // in the prose. A truncated list reads as plausible; a list of fifteen
 // described as "fifteen in all" that now holds fourteen does not.
 func TestContributingCountsMatchTheDocumentedSet(t *testing.T) {
+	t.Parallel()
+
 	documented := documentedRequiredContexts(t)
 	body := readRepoFile(t, contributingPath)
 
@@ -203,6 +221,8 @@ func TestContributingCountsMatchTheDocumentedSet(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			// Exactly one match, not the first of several: silently reading the
 			// wrong occurrence is the same class of quiet miss this file exists
 			// to remove.
@@ -250,12 +270,32 @@ func TestLiveBranchProtectionMatchesDocumentedContexts(t *testing.T) {
 	}
 
 	var live struct {
-		Strict   bool     `json:"strict"`
+		Strict bool `json:"strict"`
+		// contexts is deprecated in favor of checks, and both are populated
+		// today. Read checks first so this keeps working when the old field
+		// goes away: an empty contexts would otherwise read as "every
+		// documented context is missing" — a spurious full mismatch from the
+		// one assertion whose whole job is to be believed.
+		Checks []struct {
+			Context string `json:"context"`
+		} `json:"checks"`
 		Contexts []string `json:"contexts"`
 	}
 	if err := json.Unmarshal(body, &live); err != nil {
 		t.Fatalf("parse %s response: %v", protectionAPIPath, err)
 	}
+
+	source, required := "checks[].context", make([]string, 0, len(live.Checks))
+	for _, check := range live.Checks {
+		required = append(required, check.Context)
+	}
+	if len(required) == 0 {
+		// Not a fatal: protection really having no required checks is itself
+		// drift worth reporting, and it surfaces below as every documented
+		// context missing.
+		source, required = "contexts", live.Contexts
+	}
+	t.Logf("read %d live context(s) from %s", len(required), source)
 
 	// Strict is what makes a green check mean "green against current main".
 	// Without it the documented set can be complete and still gate nothing
@@ -266,7 +306,7 @@ func TestLiveBranchProtectionMatchesDocumentedContexts(t *testing.T) {
 
 	assertSameContexts(t,
 		contributingPath+" required-contexts block", documentedRequiredContexts(t),
-		"live "+protectionRepo+" main protection", live.Contexts)
+		"live "+protectionRepo+" main protection", required)
 }
 
 // numberWords covers the counts this repo's docs plausibly spell out. A count
