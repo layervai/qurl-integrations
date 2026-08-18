@@ -36,15 +36,17 @@ at the OAuth-callback bind layer.
   → `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying an email
   address on setup stores it in signed state, sends Auth0 `login_hint`, and
   requires the verified Auth0 email claim to match before any workspace bind
-  or key mint. By default the Secure Access Agent does not force an Auth0 `connection`; the
-  Auth0 application and tenant-level Actions own the login method and the
-  cross-connection uniqueness policy. Prefer passwordless on the existing
-  database connection when available, or enforce account-linking /
-  duplicate-deny behavior before enabling a separate passwordless `email`
-  connection for the same audience. `AUTH0_EMAIL_CONNECTION` is an optional
-  recovery override when a deployment must force a specific connection. The
-  callback's security gate is the verified email claim, not the connection
-  hint by itself. If a workspace already has a qURL API key and qurl-service
+  or key mint. The Secure Access Agent pins Auth0 `connection=email`
+  (passwordless) and `prompt=login consent` on every setup path, so the login
+  method is a property of this surface rather than of tenant configuration —
+  see the prompt/connection contract below. `AUTH0_EMAIL_CONNECTION` overrides
+  the connection name for a deployment that named its passwordless connection
+  differently. Tenant-level Actions still own cross-connection uniqueness:
+  pinning one connection removes the routine way a single human acquires two
+  subjects, but account-linking / duplicate-deny is still what reconciles a
+  human who already has identities on more than one connection. The callback's
+  security gate remains the verified email claim, not the connection pin by
+  itself. If a workspace already has a qURL API key and qurl-service
   still accepts it, normal setup reuses that key instead of minting another one.
   Explicit owner requests (`/qurl setup <email> --rotate` and `--repoint`) take
   the rotation path instead. Both first strongly read the stored key identity in
@@ -112,6 +114,37 @@ at the OAuth-callback bind layer.
   without stored key metadata is tracked in layervai/qurl-service#910.
   Rerunning setup without `--rotate`/`--repoint` is intentionally not a
   healthy-key rotation or qURL-account switch command.
+  Every setup path — first install, `--rotate`, and `--repoint` — sends Auth0
+  `prompt=login consent` and pins `connection=email`. Both halves of `prompt`
+  are load-bearing: `login` stops an ambient Auth0 session (from the desktop
+  app, the dashboard, or a previous bot run) from authorizing the bind, so the
+  admin always re-authenticates, and `consent` stops Auth0 from reusing a prior
+  consent grant, which would let a re-run complete without issuing a new token.
+  A consent screen on its own proves consent, not identity.
+  Passwordless is the Slack login method, not a per-tenant choice. It is the
+  lowest-friction path for a workspace admin, and `email` is the connection
+  qurl-desktop pins for the same human, so both surfaces resolve to one Auth0
+  subject. That matters because qurl-service keys accounts on the id_token
+  `sub`: a different connection is a different qURL account.
+  `AUTH0_EMAIL_CONNECTION` remains an override for a deployment whose
+  passwordless connection is named something else.
+  **Deployment prerequisite:** because the connection is pinned rather than
+  hinted, the Auth0 application must have a passwordless connection named
+  `email` enabled before this ships — or `AUTH0_EMAIL_CONNECTION` must name
+  whatever it is called there. Nothing validates this at startup; the bot
+  cannot enumerate a tenant's connections, so a missing or differently-named
+  connection surfaces only as an Auth0 error at the `/authorize` redirect, and
+  it breaks **every** setup path (first install, `--rotate`, `--repoint`) for
+  every admin. Verify the connection name in the environment's Auth0
+  application, and run one `/qurl setup <email>` end to end, before promoting a
+  build carrying this pin.
+  Migration note: a workspace whose key was minted under a different connection
+  (for example Google) now signs in passwordless, so it authenticates as a
+  different `sub` and therefore a different qURL account. Provenance-bearing
+  rows fail closed on that with the cross-account page and route to the
+  operator-assisted transfer — the intended outcome, since the alternative was
+  silently rotating a workspace onto whichever account the browser happened to
+  hold. Rows with no recorded `qurl_account_id` have no such guard.
   Keys are field-level encrypted at rest using KMS envelope encryption, with
   `workspace_id` bound as AAD.
   Rollout order: the Slack app may deploy before the qURL API binding route is
@@ -972,7 +1005,7 @@ that accidentally carried a numeric value.
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API. Must not contain surrounding whitespace. |
 | `AUTH0_EXPECTED_AUDIENCE` | No | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
-| `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
+| `AUTH0_EMAIL_CONNECTION` | No | Overrides the Auth0 connection pinned during `/qurl setup <email>`. Empty pins `email`, Auth0's passwordless email connection and the same one qurl-desktop uses, so one human keeps one Auth0 subject across surfaces. Set this only when the deployment's passwordless connection is named something else; pointing it at a non-passwordless connection changes the login method for every workspace admin. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |
