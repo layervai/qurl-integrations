@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,6 +18,8 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
@@ -48,32 +52,55 @@ type globalOpts struct {
 	// tests inject a recorder so no real browser ever starts under test.
 	openBrowser func(ctx context.Context, link string) error
 
+	// Connector seams. openConnectorRuntime walks the agent enroll/open
+	// ladder (production: agent.Open) and newConnectorKnocker builds the
+	// per-cycle platform client from the opened runtime (production:
+	// knock.NewNative over the runtime's binding); tests inject fakes so cmd
+	// tests never touch the real UDP wire. tuneConnectorSupervisor, when
+	// non-nil, adjusts the supervisor config before construction — test-only,
+	// mirroring the supervisor package's own timing seams.
+	openConnectorRuntime    func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
+	newConnectorKnocker     func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
+	tuneConnectorSupervisor func(cfg *supervisor.Config)
+	// redirectFRPLogs rebinds the FRP library's process-global logger to this
+	// invocation's stderr (production default). The cmd test binary injects a
+	// no-op and pins the global once in TestMain instead, because its
+	// in-process tunnel server logs through the same global concurrently.
+	redirectFRPLogs func()
+
 	// Resolved in PersistentPreRunE.
-	resolved         bool
-	resolvedEndpoint string
-	resolvedFormat   output.Format
-	outColor         bool
-	errColorOn       bool
-	ascii            bool
+	resolved             bool
+	resolvedEndpoint     string
+	resolvedFormat       output.Format
+	outColor             bool
+	errColorOn           bool
+	ascii                bool
+	profileConnectorSlug string
 }
 
 // rootOption is a test hook for injecting process context.
 type rootOption func(*globalOpts)
 
 // Main wires the real process context and runs the CLI. It returns the exit
-// code; main() is the only caller of os.Exit.
+// code; main() is the only caller of os.Exit. SIGTERM joins the interrupt
+// set for the long-running serve command (`connector run` under an
+// orchestrator stops via SIGTERM); on Windows the extra signal is simply
+// never delivered.
 func Main(version string) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	root, opts := newRoot(version, output.Detect())
 	return run(ctx, root, opts)
 }
 
 // run executes the tree, renders any error to stderr, and maps it to the one
-// exit code.
+// exit code. A cancellation the user caused (Ctrl-C / SIGTERM) keeps the
+// Interrupted exit code but renders no error anatomy: the interrupt was the
+// user's own act, and commands that want a farewell print their own note
+// (connector run's msgConnectorStopped).
 func run(ctx context.Context, root *cobra.Command, opts *globalOpts) int {
 	err := root.ExecuteContext(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		output.RenderError(opts.streams.Err, err, opts.errColor())
 	}
 	return exitcode.FromError(err)
@@ -101,6 +128,15 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 		// injected environment the rest of the CLI uses.
 		launcher := &consume.Launcher{LookupEnv: opts.lookupEnv, GOOS: runtime.GOOS}
 		opts.openBrowser = launcher.Open
+	}
+	if opts.openConnectorRuntime == nil {
+		opts.openConnectorRuntime = agent.Open
+	}
+	if opts.newConnectorKnocker == nil {
+		opts.newConnectorKnocker = newNativeConnectorKnocker
+	}
+	if opts.redirectFRPLogs == nil {
+		opts.redirectFRPLogs = func() { redirectFRPLogsToStderr(opts) }
 	}
 
 	cmd := &cobra.Command{
@@ -157,6 +193,7 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 		getCmd(opts),
 		listCmd(opts),
 		deleteCmd(opts),
+		connectorCmd(opts),
 		loginCmd(opts),
 		logoutCmd(opts),
 		whoamiCmd(opts),
@@ -197,6 +234,10 @@ func (o *globalOpts) resolveSettings() error {
 	o.outColor = output.ResolveColor(colorMode, o.lookupEnv, o.streams.OutIsTTY)
 	o.errColorOn = output.ResolveColor(colorMode, o.lookupEnv, o.streams.ErrIsTTY)
 	o.ascii = output.ResolveASCII(o.lookupEnv)
+	// Free-form profile settings the connector command resolves flag-first at
+	// its own run time (config.Resolve needs the flag value, which only the
+	// command has).
+	o.profileConnectorSlug = cfg.ConnectorSlug
 	o.resolved = true
 	return nil
 }

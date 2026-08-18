@@ -44,6 +44,10 @@ type Config struct {
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Output   string `yaml:"output,omitempty"`
 	Color    string `yaml:"color,omitempty"`
+	// ConnectorSlug names the Connector route `qurl connector run` serves
+	// when --slug is not passed. It is an identity, not a secret: the
+	// enrollment token and Connector state never live in config files.
+	ConnectorSlug string `yaml:"connector_slug,omitempty"`
 }
 
 // Enum vocabularies for config-file values. These mirror the output
