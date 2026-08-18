@@ -88,9 +88,9 @@ func TestRunnerRestartRequestWinsOverServiceReturn(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	restartCause := fmt.Errorf("%w: redial refresh budget", errTooManyKnockFailures)
+	restartCause := fmt.Errorf("%w: redial refresh budget", ErrTooManyKnockFailures)
 	r.requestRestart(restartCause)
-	if err := <-done; !errors.Is(err, errTooManyKnockFailures) {
+	if err := <-done; !errors.Is(err, ErrTooManyKnockFailures) {
 		t.Fatalf("Run = %v, want the restart cause", err)
 	}
 }
@@ -182,7 +182,7 @@ func TestOnFirstLoginSuccessMismatchLogsNeitherValue(t *testing.T) {
 func TestEmitSessionEventsDecisionTable(t *testing.T) {
 	tokenReject := errors.New("login to the server failed: knock_invalid: knock token rejected")
 	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
-	restart := fmt.Errorf("%w: refresh budget", errTooManyKnockFailures)
+	restart := fmt.Errorf("%w: refresh budget", ErrTooManyKnockFailures)
 	cases := []struct {
 		name        string
 		admitted    bool
@@ -275,7 +275,7 @@ func TestClassifyRunError(t *testing.T) {
 		{"nil", nil, ""},
 		{"canceled", context.Canceled, "context_canceled"},
 		{"deadline", context.DeadlineExceeded, "context_canceled"},
-		{"knock budget", fmt.Errorf("wrapped: %w", errTooManyKnockFailures), "too_many_knock_failures"},
+		{"knock budget", fmt.Errorf("wrapped: %w", ErrTooManyKnockFailures), "too_many_knock_failures"},
 		{"typed op error", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("refused")}, "dial_error"},
 		{"typed timeout", wrappedTimeoutErr{}, "dial_error"},
 		{"frp login phrasing wins over dial substring", errors.New("login to the server failed: dial tcp 10.0.0.1:7000: i/o timeout"), "login_failed"},

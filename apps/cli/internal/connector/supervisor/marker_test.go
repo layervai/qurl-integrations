@@ -41,7 +41,7 @@ func TestEpisodeLadderArmsRealMarkerOnBudgetExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runErr := sup.Run(context.Background()); !errors.Is(runErr, errTooManyKnockFailures) {
+	if runErr := sup.Run(context.Background()); !errors.Is(runErr, ErrTooManyKnockFailures) {
 		t.Fatalf("Run = %v, want the budget exit", runErr)
 	}
 
@@ -81,7 +81,7 @@ func TestEpisodeLadderBudgetExitDoesNotRearmAttemptedEpisode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runErr := sup.Run(context.Background()); !errors.Is(runErr, errTooManyKnockFailures) {
+	if runErr := sup.Run(context.Background()); !errors.Is(runErr, ErrTooManyKnockFailures) {
 		t.Fatalf("Run = %v, want the budget exit", runErr)
 	}
 
@@ -128,6 +128,50 @@ func TestEpisodeLadderHealthyCycleClearsRealMarker(t *testing.T) {
 	}
 }
 
+// TestHealthyCyclesLatchTheMarkerClear pins the in-process already-cleared
+// latch: consecutive confirmed-healthy cycles hit the marker store exactly
+// once, and any unhealthy knock re-arms the next healthy cycle's clear so the
+// latch never elides a clear that could matter.
+func TestHealthyCyclesLatchTheMarkerClear(t *testing.T) {
+	t.Parallel()
+	marker := &fakeMarker{}
+	log := &runnerLog{}
+	knocker := &fakeKnocker{script: []knockResp{
+		healthyKnockResp("h.example:1"),
+		healthyKnockResp("h.example:1"),
+		healthyKnockResp("h.example:1"),
+		{err: errors.New("transient blip")},
+		healthyKnockResp("h.example:1"),
+	}}
+	cfg := testConfig(knocker, makeFactory(log, nil))
+	cfg.Marker = marker
+	sup, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- sup.Run(ctx) }()
+
+	// Three healthy cycles (runners 1-3): the first clears, the latch elides
+	// the next two. The failed fourth knock spawns no runner but resets the
+	// latch; the healthy fifth knock (runner 4) must clear again.
+	for i := range 4 {
+		waitForRunners(t, log, i+1)
+		close(log.snapshot()[i].done)
+	}
+	// Runner 5 existing proves runner 4's cycle fully reconciled.
+	waitForRunners(t, log, 5)
+
+	if _, cleared := marker.snapshot(); cleared != 2 {
+		t.Fatalf("marker clears = %d, want exactly 2 (one per healthy episode boundary, latched in between)", cleared)
+	}
+	cancel()
+	closeAllRunners(log)
+	<-done
+}
+
 // TestMarkerFaultsAreLoggedNotFatal: a marker store that fails must not
 // change the supervisor's exit semantics in either direction.
 func TestMarkerFaultsAreLoggedNotFatal(t *testing.T) {
@@ -149,7 +193,7 @@ func TestMarkerFaultsAreLoggedNotFatal(t *testing.T) {
 	close(log.snapshot()[0].done) // healthy cycle → clear fails, logged only
 	waitForRunners(t, log, 2)
 	close(log.snapshot()[1].done) // token-rejected cycle → budget exit → arm fails, logged only
-	if runErr := <-done; !errors.Is(runErr, errTooManyKnockFailures) {
+	if runErr := <-done; !errors.Is(runErr, ErrTooManyKnockFailures) {
 		t.Fatalf("Run = %v, want the budget exit despite marker faults", runErr)
 	}
 }

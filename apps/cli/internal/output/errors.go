@@ -12,6 +12,9 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 )
 
 // RenderError writes the customer-facing rendering of err to w (stderr).
@@ -38,12 +41,54 @@ func renderErrorLines(p *Printer, err error) []string {
 	if errors.Is(err, auth.ErrNoCredential) {
 		return []string{head + " " + msgNoCredential, "", "  " + p.dim(hintNoCredential)}
 	}
+	if lines, ok := connectorErrorLines(p, head, err); ok {
+		return lines
+	}
 
 	var apiErr *qurlapi.Error
 	if errors.As(err, &apiErr) {
 		return apiErrorLines(p, head, apiErr)
 	}
 	return []string{head + " " + err.Error()}
+}
+
+// connectorErrorLines is the customer-language translation of the Connector
+// lifecycle sentinels: a plain-language headline, the operator-facing detail
+// (the wrapped error text, which stays technical and is where env names and
+// reasons live), and the one §17.1 hint. The token-required posture omits the
+// detail block — its headline and hint already carry everything the wrapped
+// message says.
+func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
+	headline, hint, includeDetail := "", "", true
+	switch {
+	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
+		headline, hint, includeDetail = msgConnectorTokenRequired, hintConnectorTokenRequired, false
+	case errors.Is(err, agent.ErrIdentityConflict):
+		headline, hint = msgConnectorIdentityConflict, hintConnectorIdentityConflict
+	case errors.Is(err, agent.ErrRefreshApprovalRequired):
+		headline, hint = msgConnectorRefreshApproval, hintConnectorRefreshApproval
+	case errors.Is(err, agent.ErrRefreshDisabled):
+		headline, hint = msgConnectorRefreshDisabled, hintConnectorRefreshDisabled
+	case errors.Is(err, agent.ErrRefreshAlreadyAttempted):
+		headline, hint = msgConnectorRefreshExhausted, hintConnectorRefreshExhausted
+	case errors.Is(err, hub.ErrConfig):
+		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
+	case supervisor.IsTooManyKnockFailures(err):
+		headline, hint = msgConnectorRetryBudget, hintConnectorRetryBudget
+	default:
+		return nil, false
+	}
+	lines := []string{head + " " + headline}
+	if includeDetail {
+		lines = append(lines, "")
+		// errors.Join renders multi-line; keep every line inside the indented
+		// detail block.
+		for _, detail := range strings.Split(err.Error(), "\n") {
+			lines = append(lines, "  "+detail)
+		}
+	}
+	lines = append(lines, "", "  "+p.dim(hint))
+	return lines, true
 }
 
 // apiErrorLines is the RFC 7807 anatomy: headline with status, detail

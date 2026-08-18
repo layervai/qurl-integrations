@@ -37,16 +37,24 @@ type Config struct {
 	// endpoint). The SDK origin is derived from it; see ResourceSDKOrigin.
 	APIBaseURL string
 
-	// EnrollmentToken is the one-shot enrollment credential, flag-first.
-	// When empty, the QURL_CONNECTOR_TOKEN_FILE / QURL_CONNECTOR_TOKEN
-	// fallbacks apply. It is only consulted (and only spent) on a first
-	// registration; warm opens and refreshes use the persisted device
+	// EnrollmentToken is an explicit one-shot enrollment credential for
+	// embedders and tests. The CLI command deliberately never binds it — the
+	// token must never travel through argv, so the customer surface is
+	// QURL_CONNECTOR_TOKEN_FILE / QURL_CONNECTOR_TOKEN only, which apply
+	// whenever this is empty. It is only consulted (and only spent) on a
+	// first registration; warm opens and refreshes use the persisted device
 	// identity.
 	EnrollmentToken string
 
 	// StateDir overrides state-directory resolution (flag-first). Empty
 	// falls through to the state package's env/XDG chain.
 	StateDir string
+
+	// RefreshMode is the flag-first override for the operator's assignment
+	// refresh gate (manual|auto|disabled). Empty falls through to the
+	// LAYERV_AGENT_REGISTRATION_REFRESH_MODE environment contract, then to
+	// manual; see ResolveRefreshMode.
+	RefreshMode string
 
 	// AgentID optionally pins the persisted native agent identity,
 	// flag-first. Empty falls back to the LAYERV_AGENT_ID override, then to
@@ -124,7 +132,39 @@ var allowedRegistrationKeyKinds = []qurl.RegistrationKeyKind{
 	qurl.RegistrationKeyKindAgent,
 }
 
-var errRefreshAlreadyAttempted = errors.New("native assignment refresh already attempted")
+// The customer-surfaced failure identities of the Connector lifecycle ladder.
+// Exported deliberately: every exported Err* under apps/cli enters the CLI's
+// exit-code contract through internal/exitcode's AST tripwire, which forces a
+// decided exit-code row (and a rendering decision) for each. The wrapped
+// message carries the operator detail; internal/output owns the
+// customer-language rendering.
+var (
+	// ErrEnrollmentTokenRequired refuses a first registration when this
+	// machine has no persisted Connector identity and no enrollment token is
+	// configured. Raised BEFORE any network I/O: an empty credential can
+	// never register, so spending a network attempt on it would only move
+	// this refusal several layers away from its remedy.
+	ErrEnrollmentTokenRequired = errors.New("enrollment token required for the first registration")
+
+	// ErrIdentityConflict refuses a runtime whose persisted native identity
+	// disagrees with the operator-configured one. Proceeding under either
+	// identity would silently serve as the other.
+	ErrIdentityConflict = errors.New("configured agent identity conflicts with the persisted native agent identity")
+
+	// ErrRefreshApprovalRequired is the manual-mode gate: a required
+	// assignment refresh waits for an explicitly approved start instead of
+	// consuming the episode's one refresh on an unattended restart.
+	ErrRefreshApprovalRequired = errors.New("native assignment refresh requires explicit operator approval")
+
+	// ErrRefreshDisabled is the disabled-mode gate: the operator's standing
+	// configuration forbids the assignment refresh this state requires.
+	ErrRefreshDisabled = errors.New("native assignment refresh is disabled while a refresh is required")
+
+	// ErrRefreshAlreadyAttempted reports that this failure episode's one
+	// assignment refresh was already consumed and the Connector still cannot
+	// open its persisted assignment.
+	ErrRefreshAlreadyAttempted = errors.New("native assignment refresh already attempted")
+)
 
 // Open opens the Connector runtime: it resolves the state directory and Hub
 // bootstrap, then follows the lifecycle ladder —
@@ -164,7 +204,7 @@ func Open(ctx context.Context, cfg *Config) (_ *Runtime, retErr error) {
 	}
 	clientOpts := []qurl.AgentResourceClientOption{qurl.WithAgentClientBaseURL(origin)}
 	agentID := cfg.agentID()
-	mode, err := RefreshMode()
+	mode, err := ResolveRefreshMode(cfg.RefreshMode)
 	if err != nil {
 		return nil, err
 	}
@@ -240,6 +280,13 @@ func registerRuntime(
 	if err != nil {
 		return nil, err
 	}
+	if credential == "" && errors.Is(openErr, qurl.ErrAgentStateNotFound) {
+		// No stored identity and no token: refuse BEFORE the SDK is invoked.
+		// This is the zero-network token-required path — an empty credential
+		// can never register, and qurl-go would spend a bounded native
+		// transaction discovering that far from the remedy.
+		return nil, fmt.Errorf("%w: set %s, or point %s at a file holding one (this machine has no stored Connector identity yet)", ErrEnrollmentTokenRequired, EnvEnrollmentToken, EnvEnrollmentTokenFile)
+	}
 	registerOpts := []qurl.AgentRuntimeRegistrationOption{
 		qurl.WithAgentRuntimeHub(hubBootstrap),
 		qurl.WithAgentRuntimeMetadata(Hostname(), ClientVersionMeta(cfg.Version)),
@@ -258,9 +305,6 @@ func registerRuntime(
 	client, binding, err := registerAgentRuntime(ctx, credential, stateStore, registerOpts...)
 	if err != nil {
 		logRegistrationFailure(ctx, logger, err, credential)
-		if credential == "" && errors.Is(openErr, qurl.ErrAgentStateNotFound) {
-			return nil, fmt.Errorf("enrollment token required for the first registration (pass --token, or set %s or %s): %w", EnvEnrollmentTokenFile, EnvEnrollmentToken, err)
-		}
 		// qurl-go bounds each native leg itself, so a stalled first
 		// registration surfaces here as a no-reply/recovery error after its
 		// bounded budget — it does not hang indefinitely. When the parent
@@ -307,9 +351,9 @@ func refreshRuntime(
 ) (*Runtime, error) {
 	switch mode {
 	case RefreshModeDisabled:
-		return nil, fmt.Errorf("native assignment refresh is disabled while a refresh is required (%s); deliberately clear and reprovision %s or set %s=manual|auto", marker.Reason, stateDir, EnvRefreshMode)
+		return nil, fmt.Errorf("%w (%s); deliberately clear and reprovision %s or set %s=manual|auto", ErrRefreshDisabled, marker.Reason, stateDir, EnvRefreshMode)
 	case RefreshModeManual:
-		return nil, fmt.Errorf("native assignment refresh requires explicit operator approval (%s): inspect the failure, then run exactly one start with %s=auto and restore manual after a healthy connection; an orchestrator restart is not approval", marker.Reason, EnvRefreshMode)
+		return nil, fmt.Errorf("%w (%s): inspect the failure, then run exactly one start with %s=auto and restore manual after a healthy connection; an orchestrator restart is not approval", ErrRefreshApprovalRequired, marker.Reason, EnvRefreshMode)
 	case RefreshModeAuto:
 	default:
 		return nil, fmt.Errorf("unsupported registration refresh mode %q", mode)
@@ -355,7 +399,7 @@ func refreshRuntime(
 }
 
 func refreshAlreadyAttemptedError(cause error) error {
-	result := fmt.Errorf("%w in this failure episode; investigate Hub reachability or deliberately reprovision", errRefreshAlreadyAttempted)
+	result := fmt.Errorf("%w in this failure episode; investigate Hub reachability or deliberately reprovision", ErrRefreshAlreadyAttempted)
 	if cause != nil {
 		result = errors.Join(result, fmt.Errorf("warm-open after attempted refresh: %w", cause))
 	}
@@ -373,7 +417,7 @@ func assembleRuntime(client *qurl.Client, binding *qurl.AgentRuntimeBinding, sto
 	}
 	if configuredAgentID = strings.TrimSpace(configuredAgentID); configuredAgentID != "" && binding.AgentID != configuredAgentID {
 		binding.Destroy()
-		return nil, fmt.Errorf("configured agent identity %q conflicts with persisted native agent identity %q; use the persisted identity or deliberately clear and reprovision this state", configuredAgentID, binding.AgentID)
+		return nil, fmt.Errorf("%w: configured %q, persisted %q; use the persisted identity or deliberately clear and reprovision this state", ErrIdentityConflict, configuredAgentID, binding.AgentID)
 	}
 	if store == nil {
 		binding.Destroy()

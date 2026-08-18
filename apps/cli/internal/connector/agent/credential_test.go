@@ -110,7 +110,23 @@ func TestRefreshModeTable(t *testing.T) {
 		}
 	}
 	t.Setenv(EnvRefreshMode, "sometimes")
-	if _, err := RefreshMode(); err == nil {
-		t.Fatal("RefreshMode accepted unsupported policy")
+	if _, err := RefreshMode(); !errors.Is(err, ErrRefreshModeInvalid) {
+		t.Fatalf("RefreshMode on unsupported policy = %v, want ErrRefreshModeInvalid", err)
+	}
+}
+
+// TestResolveRefreshModeFlagFirst pins the --refresh-mode precedence: a
+// non-empty explicit value wins over the environment, an empty one falls
+// through to it, and an invalid explicit value is rejected with the sentinel.
+func TestResolveRefreshModeFlagFirst(t *testing.T) {
+	t.Setenv(EnvRefreshMode, RefreshModeDisabled)
+	if got, err := ResolveRefreshMode(" AUTO "); err != nil || got != RefreshModeAuto {
+		t.Fatalf("ResolveRefreshMode(explicit auto) = (%q, %v), want auto over the env", got, err)
+	}
+	if got, err := ResolveRefreshMode(""); err != nil || got != RefreshModeDisabled {
+		t.Fatalf("ResolveRefreshMode(\"\") = (%q, %v), want the env value", got, err)
+	}
+	if _, err := ResolveRefreshMode("sometimes"); !errors.Is(err, ErrRefreshModeInvalid) {
+		t.Fatalf("ResolveRefreshMode(invalid) = %v, want ErrRefreshModeInvalid", err)
 	}
 }

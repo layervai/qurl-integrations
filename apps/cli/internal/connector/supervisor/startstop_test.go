@@ -114,10 +114,10 @@ func TestStopSurfacesAutonomousFailure(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve loop did not exit on its knock budget")
 	}
-	if err := sup.Stop(context.Background()); !errors.Is(err, errTooManyKnockFailures) {
-		t.Fatalf("Stop = %v, want the loop's errTooManyKnockFailures exit", err)
+	if err := sup.Stop(context.Background()); !errors.Is(err, ErrTooManyKnockFailures) {
+		t.Fatalf("Stop = %v, want the loop's ErrTooManyKnockFailures exit", err)
 	}
-	if err := sup.Err(); !errors.Is(err, errTooManyKnockFailures) {
+	if err := sup.Err(); !errors.Is(err, ErrTooManyKnockFailures) {
 		t.Fatalf("Err = %v, want the recorded budget exit", err)
 	}
 }

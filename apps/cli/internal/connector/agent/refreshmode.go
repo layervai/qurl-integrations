@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -20,10 +21,25 @@ const (
 	RefreshModeDisabled = "disabled"
 )
 
-// RefreshMode resolves the operator's refresh-mode gate. Empty defaults to
-// manual; anything but manual/auto/disabled is rejected.
-func RefreshMode() (string, error) {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv(EnvRefreshMode)))
+// ErrRefreshModeInvalid rejects a refresh-mode spelling outside
+// manual|auto|disabled. Exported into the CLI's exit-code contract for the
+// ENVIRONMENT path only: the command layer validates its --refresh-mode flag
+// itself (a flag typo is a usage error), so reaching this sentinel means the
+// standing LAYERV_AGENT_REGISTRATION_REFRESH_MODE configuration is wrong.
+var ErrRefreshModeInvalid = errors.New("registration refresh mode must be manual, auto, or disabled")
+
+// ResolveRefreshMode resolves the operator's refresh-mode gate, flag-first:
+// a non-empty explicit value (the command's --refresh-mode flag) wins, then
+// the LAYERV_AGENT_REGISTRATION_REFRESH_MODE environment contract, then the
+// manual default. Case-insensitive; anything but manual/auto/disabled is
+// rejected.
+func ResolveRefreshMode(explicit string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(explicit))
+	source := "--refresh-mode"
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(os.Getenv(EnvRefreshMode)))
+		source = EnvRefreshMode
+	}
 	if mode == "" {
 		mode = RefreshModeManual
 	}
@@ -31,6 +47,12 @@ func RefreshMode() (string, error) {
 	case RefreshModeManual, RefreshModeAuto, RefreshModeDisabled:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("%s must be manual, auto, or disabled; got %q", EnvRefreshMode, mode)
+		return "", fmt.Errorf("%w; %s got %q", ErrRefreshModeInvalid, source, mode)
 	}
+}
+
+// RefreshMode resolves the gate from the environment alone; kept for callers
+// with no explicit override.
+func RefreshMode() (string, error) {
+	return ResolveRefreshMode("")
 }

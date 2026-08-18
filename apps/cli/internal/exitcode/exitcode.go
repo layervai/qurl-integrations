@@ -24,6 +24,9 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/hub"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
@@ -148,6 +151,10 @@ func FromError(err error) int {
 		return code
 	}
 
+	if code, ok := connectorSentinelCode(err); ok {
+		return code
+	}
+
 	if code, ok := apiErrorCode(err); ok {
 		return code
 	}
@@ -210,6 +217,64 @@ func cliSentinelCode(err error) (int, bool) {
 		errors.Is(err, config.ErrConfigFile),
 		errors.Is(err, config.ErrSecretInConfig):
 		return Config, true
+	default:
+		return 0, false
+	}
+}
+
+// connectorSentinelCode maps the `qurl connector run` lifecycle sentinels.
+// Each choice is documented at its case because the conditions do not all
+// share one row of the §16.5 table.
+func connectorSentinelCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, agent.ErrEnrollmentTokenRequired):
+		// A missing enrollment credential is the Auth row's "no credential"
+		// for the Connector surface: the enrollment token is the credential
+		// this command needed and did not have.
+		return Auth, true
+	case errors.Is(err, agent.ErrIdentityConflict):
+		// The command and its inputs are valid; they conflict with the
+		// identity already persisted on this machine — exactly the Conflict
+		// row's "request conflicts with current state", resolved by dropping
+		// the override or deliberately reprovisioning.
+		return Conflict, true
+	case errors.Is(err, agent.ErrRefreshApprovalRequired):
+		// The manual gate is a missing-confirmation stop, the same shape as
+		// delete's --yes guard (msgNeedsYes → Usage): the remedy is re-running
+		// once with the explicit approval flag, not fixing configuration or
+		// waiting out the platform.
+		return Usage, true
+	case errors.Is(err, agent.ErrRefreshDisabled):
+		// Disabled mode is standing operator configuration forbidding the
+		// refresh this state requires; the remedy is changing that
+		// configuration, so it takes the Config row — not Usage, because an
+		// unattended restart hits it with a perfectly valid command line.
+		return Config, true
+	case errors.Is(err, agent.ErrRefreshModeInvalid):
+		// Only the environment path reaches this sentinel (the command
+		// validates its own flag as a usage error first), so a bad spelling
+		// here is broken standing configuration.
+		return Config, true
+	case errors.Is(err, agent.ErrRefreshAlreadyAttempted):
+		// The one self-heal this episode allows already ran and the platform
+		// still is not serving this Connector: an Unavailable posture, kin to
+		// the budget exit below, not a mistake the caller made.
+		return Unavailable, true
+	case errors.Is(err, hub.ErrConfig):
+		// The QURL_CONNECTOR_HUB_* trust triple (or a dark build missing its
+		// production pin) is configuration in the §16.5 sense even though it
+		// lives in the environment: the config files row is the closest
+		// remedy class, and Usage would wrongly blame the command line.
+		return Config, true
+	case supervisor.IsTooManyKnockFailures(err):
+		// The budget exit means the platform's access-granting path stayed
+		// unusable across the whole retry budget: the service "cannot be
+		// reached or is not serving this surface" — the Unavailable row.
+		// Matched via the predicate the supervisor exports for exactly this
+		// interpretation. Ordering note: FromError maps context.Canceled
+		// before this, so an exhaustion whose final cause was the user's own
+		// interrupt still exits 130.
+		return Unavailable, true
 	default:
 		return 0, false
 	}
