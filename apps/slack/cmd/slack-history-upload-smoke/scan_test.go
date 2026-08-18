@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1512,5 +1513,94 @@ func TestRunScanMinUploadsZeroIsReportOnly(t *testing.T) {
 	}
 	if result.Contract.MinUploads != 0 || result.Contract.DistinctUploads != 0 {
 		t.Errorf("contract = %+v, want the disabled threshold visible in the report", result.Contract)
+	}
+}
+
+// TestWaitHonorsTheContext covers the real-timer path, which no other test reaches:
+// every scan test injects a sleep func, so a 429 arriving during a live run would be the
+// first time this code executes.
+func TestWaitHonorsTheContext(t *testing.T) {
+	t.Parallel()
+
+	client := &slackClient{}
+	if err := client.wait(context.Background(), time.Millisecond); err != nil {
+		t.Errorf("wait: %v", err)
+	}
+
+	// A cancelled context must abandon the wait rather than park for Retry-After.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.wait(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Errorf("wait on a cancelled context = %v, want context.Canceled", err)
+	}
+}
+
+func TestConversationKind(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		isIM, isMPIM, isPrivate bool
+		want                    string
+	}{
+		{isIM: true, want: "im"},
+		{isMPIM: true, want: "mpim"},
+		{isPrivate: true, want: "private_channel"},
+		{want: "public_channel"},
+		// An IM flagged private is still an IM: the arms are ordered most-specific first.
+		{isIM: true, isPrivate: true, want: "im"},
+	}
+	for _, tt := range tests {
+		if got := conversationKind(tt.isIM, tt.isMPIM, tt.isPrivate); got != tt.want {
+			t.Errorf("conversationKind(%v,%v,%v) = %q, want %q", tt.isIM, tt.isMPIM, tt.isPrivate, got, tt.want)
+		}
+	}
+}
+
+// TestRunScanRecordsEveryConversationKind pins that the kinds reach the report, which is
+// how an operator tells a measurement over public channels from one that included DMs.
+func TestRunScanRecordsEveryConversationKind(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: `{"ok":true,"channels":[` +
+			`{"id":"C0000000001","is_member":true},` +
+			`{"id":"G0000000001","is_member":true,"is_private":true},` +
+			`{"id":"D0000000001","is_im":true},` +
+			`{"id":"G0000000002","is_mpim":true}]}`,
+		surfaceHistory: messagesBody(uploadMessage("100.1")),
+	})
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	want := []string{"public_channel", "private_channel", "im", "mpim"}
+	if len(result.Conversations) != len(want) {
+		t.Fatalf("conversations = %+v, want %d", result.Conversations, len(want))
+	}
+	for i, kind := range want {
+		if result.Conversations[i].Kind != kind {
+			t.Errorf("conversation %d kind = %q, want %q", i, result.Conversations[i].Kind, kind)
+		}
+	}
+}
+
+// TestSlackStatusErrorHandlesAnUnreadableEnvelope covers the branch reached when a
+// response decodes into the caller's type but not into the status envelope — the shape a
+// non-Slack endpoint returning a bare JSON array produces.
+func TestSlackStatusErrorHandlesAnUnreadableEnvelope(t *testing.T) {
+	t.Parallel()
+
+	err := slackStatusError(surfaceHistory, []byte(`["not","an","envelope"]`))
+	if err == nil || !strings.Contains(err.Error(), "status JSON invalid") {
+		t.Errorf("err = %v, want the unreadable-envelope diagnosis", err)
+	}
+	// ok:true is the only shape that is not an error.
+	if err := slackStatusError(surfaceHistory, []byte(`{"ok":true}`)); err != nil {
+		t.Errorf("err = %v, want nil for an ok response", err)
+	}
+	// An error with no reason still has to say something.
+	if err := slackStatusError(surfaceHistory, []byte(`{"ok":false}`)); err == nil ||
+		!strings.Contains(err.Error(), "not_ok") {
+		t.Errorf("err = %v, want the not_ok fallback", err)
 	}
 }
