@@ -69,6 +69,11 @@ func readSecret(opts *globalOpts, prompt string) (string, error) {
 	if _, err := fmt.Fprint(opts.streams.Err, prompt); err != nil {
 		return "", err
 	}
+	// Deliberate seam gap: term.ReadPassword needs a real terminal fd, so the
+	// hidden-prompt read bypasses the injected opts.streams.In that selected
+	// this branch (via InIsTTY). The piped path above stays fully injectable;
+	// this branch is only reachable on a real TTY, where os.Stdin is the
+	// stream the injector wrapped anyway.
 	secretBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	if _, printErr := fmt.Fprintln(opts.streams.Err); printErr != nil {
 		return "", printErr

@@ -176,6 +176,13 @@ func (c *client) List(ctx context.Context, opts ListOptions) (*ResourcePage, err
 // Deletion is idempotent end to end: 204 means revoked now, and a 404 (the
 // row was hard-deleted and reaped) means the desired state already holds —
 // both are success. AlreadyGone reports the 404 case so the UX can say so.
+//
+// TODO(upstream-contract): 204-or-404 is the verified platform contract for
+// re-delete — DELETE on an already-revoked resource answers 204 (the soft
+// revoke is idempotent), so the resolve-side gone family (400 `revoked`,
+// 410 `resource_tombstoned`) is not expected here and deliberately not
+// treated as success. If the platform ever starts answering 410 for a
+// delete on a tombstoned row, widen this switch in lockstep.
 func (c *client) Delete(ctx context.Context, id string) (*DeleteResult, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("%w: resource identifier must not be empty", qurl.ErrInvalidResourceRequest)

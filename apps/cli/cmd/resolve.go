@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -43,6 +44,14 @@ else, so it composes: curl "$(qurl resolve <CRID>)".`,
 			printer := opts.printer()
 			if err := applyCRIDGuards(printer, assessment, opts.productionEndpoint(), yes); err != nil {
 				return err
+			}
+
+			// The wire carries whole seconds; a sub-second duration would
+			// silently truncate to "no TTL requested", violating the
+			// clamp-and-report rule that a requested lifetime is never
+			// silently dropped.
+			if ttl > 0 && ttl < time.Second {
+				return exitcode.UsageError(fmt.Errorf("--ttl %s is under one second; the shortest requestable lifetime is 1s", ttl))
 			}
 
 			client, err := opts.newClient()

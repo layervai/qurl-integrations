@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -108,7 +109,10 @@ Authentication: set QURL_API_KEY (recommended for scripts and CI), or use
 			}
 			return exitcode.UsageError(fmt.Errorf("unknown command %q — run `qurl --help` for the command list", args[0]))
 		},
-		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if skipsSettings(cmd) {
+				return nil
+			}
 			return opts.resolveSettings()
 		},
 	}
@@ -181,6 +185,25 @@ func (o *globalOpts) resolveSettings() error {
 // printer builds the per-invocation Printer from the resolved settings.
 func (o *globalOpts) printer() *output.Printer {
 	return output.New(o.streams, o.resolvedFormat, o.quiet, o.outColor, o.ascii, o.now)
+}
+
+// skipsSettings reports whether cmd (or an ancestor) must answer without
+// touching configuration: version, completion (and cobra's hidden __complete
+// machinery, which runs on every shell TAB), docs, and help. A malformed or
+// secret-bearing legacy config file must never brick shell startup
+// (`eval "$(qurl completion bash)"`) or `qurl version`; none of these
+// commands read settings, credentials, or the network.
+func skipsSettings(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "version", "completion", "docs", "help":
+			return true
+		}
+		if strings.HasPrefix(c.Name(), "__complete") {
+			return true
+		}
+	}
+	return false
 }
 
 // errColor answers whether stderr rendering gets color, falling back to a

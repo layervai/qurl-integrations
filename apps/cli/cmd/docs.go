@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
+
+	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
 // docsCmd generates man pages and markdown docs from the command tree. It is
@@ -23,7 +26,7 @@ func docsCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := args[0]
 			if mode != "man" && mode != "markdown" {
-				return cmd.Usage()
+				return exitcode.UsageError(fmt.Errorf("docs mode must be \"man\" or \"markdown\", got %q", mode))
 			}
 
 			dir := filepath.Clean(outDir)

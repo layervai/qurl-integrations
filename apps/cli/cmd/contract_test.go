@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -400,4 +402,44 @@ func flipCRIDChar(c byte) string {
 		return "b"
 	}
 	return "a"
+}
+
+// TestVersionAndCompletionSurviveBrokenConfig pins the shell-init contract:
+// a malformed or secret-bearing legacy config file must never brick
+// `eval "$(qurl completion bash)"` or `qurl version` — neither command
+// touches settings, credentials, or the network.
+func TestVersionAndCompletionSurviveBrokenConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("api_key: lv_live_shouldnotbehere000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"version"}, {"completion", "bash"}} {
+		res := runCLI(t, &runOpts{args: args, configDir: dir})
+		if res.code != 0 {
+			t.Errorf("%v exit = %d with a secret-bearing config; stderr: %s", args, res.code, res.stderr.String())
+		}
+	}
+}
+
+// TestDocsRejectsUnknownMode pins usage discipline on the hidden docs
+// command: an invalid mode is a usage error, not a zero-exit help print.
+func TestDocsRejectsUnknownMode(t *testing.T) {
+	res := runCLI(t, &runOpts{args: []string{"docs", "bogus"}})
+	if res.code != 2 {
+		t.Errorf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+}
+
+// TestResolveSubSecondTTLRefused pins clamp-and-report: a requested lifetime
+// is never silently dropped, and a sub-second --ttl would truncate to zero
+// on the whole-second wire.
+func TestResolveSubSecondTTLRefused(t *testing.T) {
+	srv := apitest.NewServer(t) // never contacted
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "resolve", srv.Key.CRID, "--ttl", "500ms"}})
+	if res.code != 2 {
+		t.Errorf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+	}
+	if len(srv.Requests()) != 0 {
+		t.Error("sub-second ttl must be refused before any request")
+	}
 }
