@@ -110,30 +110,51 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 		name string
 		args []string
 		env  string
+		// wantStderr is matched with strings.Contains rather than compared exactly:
+		// the three rows that fail inside flag.Parse — the unknown flag and both
+		// -expect-upload rows — get the flag package's whole ~1.8KB usage block
+		// appended after the message, so an exact column would inline that usage text
+		// into the table and be rewritten by every new flag, for no added signal.
+		//
+		// slack-dm-smoke's TestRunDoesNotEchoTokenEnvName compares exactly on purpose,
+		// and that reasoning does not carry over here: what it defends against is a
+		// forged whole line, so a partial sanitizer truncating at the last newline
+		// would drop the trailing sentinel and still emit a plausible operator-facing
+		// diagnostic that Contains accepts. These rows pin which diagnostic an
+		// operator gets, not that stderr is free of an injected one.
+		wantStderr string
 	}{
-		{"no token in the environment", nil, ""},
-		{"blank token env name", []string{flagTokenEnv, "  "}, testToken},
-		{"token env name with a newline", []string{flagTokenEnv, "SLACK\nTOKEN"}, testToken},
-		{"token env name with a hyphen", []string{flagTokenEnv, "SLACK-TOKEN"}, testToken},
-		{"token env name starting with a digit", []string{flagTokenEnv, "1TOKEN"}, testToken},
-		{"token with control characters", nil, "xoxb-\ntest"},
-		{"user agent with control characters", []string{"-user-agent", "smoke\r\nX: y"}, testToken},
-		{"non-https base url", []string{flagBaseURL, "http://slack.example.com"}, testToken},
-		{"base url with query", []string{flagBaseURL, "https://slack.example.com?a=b"}, testToken},
-		{"base url with userinfo", []string{flagBaseURL, "https://user:pw@slack.example.com"}, testToken},
-		{"unparsable channel id", []string{"-channels", "not-a-channel"}, testToken},
-		{"expect-upload without a timestamp", []string{"-expect-upload", testChannel}, testToken},
-		{"expect-upload with a non-numeric timestamp", []string{"-expect-upload", testChannel + ":yesterday"}, testToken},
-		{"zero timeout", []string{flagTimeout, "0"}, testToken},
-		{"zero request timeout", []string{flagReqTimeout, "0"}, testToken},
-		{"request timeout at the overall budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, testTimeoutSpan}, testToken},
-		{"request timeout too close to the budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, "5s"}, testToken},
-		{"zero conversations", []string{"-max-conversations", "0"}, testToken},
-		{"zero pages", []string{flagMaxPages, "0"}, testToken},
-		{"page limit past Slack's ceiling", []string{"-page-limit", "1001"}, testToken},
-		{"negative threads", []string{"-max-threads", "-1"}, testToken},
-		{"negative min uploads", []string{"-min-uploads", "-1"}, testToken},
-		{"unknown flag", []string{"-nope"}, testToken},
+		{"no token in the environment", nil, "", testTokenEnv + " is not set or is empty"},
+		{"blank token env name", []string{flagTokenEnv, "  "}, testToken, "-token-env is required"},
+		{"token env name with a newline", []string{flagTokenEnv, "SLACK\nTOKEN"}, testToken, slacksmoke.ErrTokenEnvName.Error()},
+		{"token env name with a hyphen", []string{flagTokenEnv, "SLACK-TOKEN"}, testToken, slacksmoke.ErrTokenEnvName.Error()},
+		{"token env name starting with a digit", []string{flagTokenEnv, "1TOKEN"}, testToken, slacksmoke.ErrTokenEnvName.Error()},
+		// With "no token in the environment" above, this is the pair the two
+		// //nolint:gosec suppressions in writeConfigValidationError rest on: both
+		// branches echo the operator-supplied -token-env back, so the env name is part
+		// of what these two rows pin rather than incidental context. This branch is the
+		// one whose text was not pinned anywhere.
+		{"token with control characters", nil, "xoxb-\ntest", testTokenEnv + " contains control characters"},
+		{"user agent with control characters", []string{"-user-agent", "smoke\r\nX: y"}, testToken, "-user-agent contains control characters"},
+		{"non-https base url", []string{flagBaseURL, "http://slack.example.com"}, testToken, "-base-url must use https unless host is localhost or loopback"},
+		{"base url with query", []string{flagBaseURL, "https://slack.example.com?a=b"}, testToken, "-base-url must not include query or fragment"},
+		{"base url with userinfo", []string{flagBaseURL, "https://user:pw@slack.example.com"}, testToken, "-base-url must not include userinfo"},
+		{"unparsable channel id", []string{"-channels", "not-a-channel"}, testToken, `invalid conversation ID: "not-a-channel"`},
+		{"expect-upload without a timestamp", []string{"-expect-upload", testChannel}, testToken, "-expect-upload must be CHANNEL:TIMESTAMP"},
+		// The tail rather than the "-expect-upload must be CHANNEL:TIMESTAMP" prefix it
+		// wraps: the row above already covers that prefix, so matching it here would
+		// pass on either branch and pin neither.
+		{"expect-upload with a non-numeric timestamp", []string{"-expect-upload", testChannel + ":yesterday"}, testToken, `timestamp "yesterday" is not a Slack ts`},
+		{"zero timeout", []string{flagTimeout, "0"}, testToken, "-timeout must be greater than 0"},
+		{"zero request timeout", []string{flagReqTimeout, "0"}, testToken, "-request-timeout must be greater than 0"},
+		{"request timeout at the overall budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, testTimeoutSpan}, testToken, "-request-timeout must be less than -timeout"},
+		{"request timeout too close to the budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, "5s"}, testToken, "-timeout must be at least 3x -request-timeout"},
+		{"zero conversations", []string{"-max-conversations", "0"}, testToken, "-max-conversations must be between 1 and 10000"},
+		{"zero pages", []string{flagMaxPages, "0"}, testToken, "-max-pages must be between 1 and 1000"},
+		{"page limit past Slack's ceiling", []string{"-page-limit", "1001"}, testToken, "-page-limit must be between 1 and 1000"},
+		{"negative threads", []string{"-max-threads", "-1"}, testToken, "-max-threads must not be negative"},
+		{"negative min uploads", []string{"-min-uploads", "-1"}, testToken, "-min-uploads must not be negative"},
+		{"unknown flag", []string{"-nope"}, testToken, "flag provided but not defined: -nope"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,8 +167,14 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 			if stdout != "" {
 				t.Errorf("stdout = %q, want nothing written for an invocation error", stdout)
 			}
-			if strings.TrimSpace(stderr) == "" {
-				t.Error("an invocation error must say what was wrong")
+			// Guards the column itself: strings.Contains against "" is trivially
+			// true, so a row added without a wantStderr would silently reopen the
+			// hole this closes rather than fail.
+			if tt.wantStderr == "" {
+				t.Fatal("every row must pin the diagnostic it expects")
+			}
+			if !strings.Contains(stderr, tt.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, tt.wantStderr)
 			}
 		})
 	}
