@@ -591,11 +591,11 @@ func TestWorkspaceStatePurgeCutoffUsesDDBProviderClock(t *testing.T) {
 }
 
 // TestSlashCommandUninstallPurgesWorkspace fences the `/qurl uninstall` extension:
-// after the existing qURL-key delete, the command must also forget the rest of
-// the workspace (bot token via DeleteWorkspaceState, mappings, policies), so an
-// uninstall leaves nothing behind. The provider here implements
-// workspaceStateDeleter; DeleteAPIKey clears the qURL columns and purgeWorkspace
-// then sweeps the row + mappings + policies.
+// after the existing qURL-key delete, the command must also forget the workspace's
+// mappings, policies, and agent state. The workspace_state ROW is deliberately
+// exempt — see TestSlashCommandUninstallRetainsSlackBotToken — because the Slack
+// app is still installed and its bot token is still the only way back to
+// modals/DMs. DeleteAPIKey has already cleared the qURL columns from that row.
 func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 	h, provider, _ := newLifecycleTestHandler(t)
 
@@ -609,12 +609,9 @@ func TestSlashCommandUninstallPurgesWorkspace(t *testing.T) {
 	// The full purge runs on a tracked async goroutine (off the slash ack's sync
 	// budget); drain it before asserting the rest of the workspace is gone.
 	h.Wait()
-	// New behavior: the workspace_state row (bot token + all) is removed too.
-	if provider.deleteStateCalls != 1 {
-		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (uninstall must forget the bot token)", provider.deleteStateCalls)
-	}
-	if provider.deleteStateWorkspaceID != testAdminTeamID {
-		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
+	// The workspace_state row survives: the Slack app is still installed.
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 (slash uninstall must keep the still-valid bot token)", provider.deleteStateCalls)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 	// Success copy stays accurate (recordingAuthProvider's DeleteAPIKey returns
@@ -668,9 +665,9 @@ func TestSlashCommandUninstallGridOrgInstallPurgesTeamAndEnterpriseKeys(t *testi
 	}
 	h.Wait()
 
-	wantIDs := testAdminTeamID + "," + testEnterpriseID
-	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
-		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
+	// Neither partition's workspace_state row is deleted: both installs are live.
+	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != "" {
+		t.Fatalf("DeleteWorkspaceState ids = %q, want none (slash uninstall keeps still-valid bot tokens)", got)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testEnterpriseID)
@@ -697,9 +694,10 @@ func TestSlashCommandUninstallGridWorkspaceInstallKeepsEnterpriseKey(t *testing.
 	}
 	h.Wait()
 
-	wantIDs := testAdminTeamID
-	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != wantIDs {
-		t.Fatalf("DeleteWorkspaceState ids = %q, want %q", got, wantIDs)
+	// The team's row survives (Slack app still installed); the enterprise partition
+	// was never in scope for a workspace-level install either way.
+	if got := strings.Join(provider.deleteStateWorkspaceIDs, ","); got != "" {
+		t.Fatalf("DeleteWorkspaceState ids = %q, want none (slash uninstall keeps the still-valid bot token)", got)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 	assertLifecycleAgentStatePresent(t, h.cfg.AgentStore, testEnterpriseID)
@@ -727,11 +725,8 @@ func TestSlashCommandUninstallPurgesWorkspaceWhenAPIKeyAlreadyCleared(t *testing
 		t.Fatalf("uninstall reply missing Slack reconnect impact: %q", resp[respFieldText])
 	}
 	h.Wait()
-	if provider.deleteStateCalls != 1 {
-		t.Fatalf("DeleteWorkspaceState calls = %d, want 1 (already-cleared uninstall must still forget bot state)", provider.deleteStateCalls)
-	}
-	if provider.deleteStateWorkspaceID != testAdminTeamID {
-		t.Fatalf("DeleteWorkspaceState workspaceID = %q, want %q", provider.deleteStateWorkspaceID, testAdminTeamID)
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 (already-cleared uninstall still keeps the bot token)", provider.deleteStateCalls)
 	}
 	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 
@@ -768,5 +763,59 @@ func TestHandleEvent_NonLifecycleEventNotPurged(t *testing.T) {
 
 	if provider.deleteStateCalls != 0 {
 		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 for a non-lifecycle event", provider.deleteStateCalls)
+	}
+}
+
+// TestSlashCommandUninstallRetainsSlackBotToken fences the boundary between the
+// two teardown signals, which are NOT interchangeable:
+//
+//   - app_uninstalled / tokens_revoked: Slack removed the app. The bot token is
+//     already dead, so the whole workspace_state row goes (Marketplace
+//     "uninstall forgets the token").
+//   - `/qurl uninstall`: the Slack app is STILL installed. Its bot token is still
+//     valid and is the only credential that can open modals, DM, or publish App
+//     Home. DeleteAPIKey has already removed the qURL columns, so deleting the
+//     rest of the row only strands the workspace: nothing reachable from inside
+//     Slack can rewrite a bot token (slackinstall.Callback is the sole writer, and
+//     it needs a fresh Slack app authorization).
+//
+// Regression: the slash path used to share purgeWorkspace's full-row delete with
+// the lifecycle path, which bricked every bot-token-backed flow after an
+// uninstall→setup cycle while `/qurl setup` reported success.
+func TestSlashCommandUninstallRetainsSlackBotToken(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+
+	resp := slashUninstallAsAdmin(t, h)
+
+	// The qURL key delete still gates the reply and still happens.
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
+	}
+	h.Wait()
+
+	// The load-bearing assertion: the Slack bot token survives a slash uninstall.
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0: `/qurl uninstall` leaves the Slack app installed, so deleting its still-valid bot token strands the workspace with no in-Slack recovery", provider.deleteStateCalls)
+	}
+
+	// Everything that is NOT install-scoped still gets forgotten, so the
+	// disconnect is still a real disconnect.
+	assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
+	_, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID)
+	var ae *slackdata.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusNotFound {
+		t.Fatalf("ListAdmins after uninstall: err = %v, want 404 *Error", err)
+	}
+	for _, ch := range []string{"C_one", "C_two"} {
+		entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, ch)
+		if err != nil {
+			t.Fatalf("GetChannelPolicy(%q) after uninstall: %v", ch, err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("GetChannelPolicy(%q) after uninstall = %v, want empty", ch, entries)
+		}
+	}
+	if !strings.Contains(resp[respFieldText], "disconnected from this workspace") {
+		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
 	}
 }
