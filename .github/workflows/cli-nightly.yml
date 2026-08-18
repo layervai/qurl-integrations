@@ -1,0 +1,120 @@
+name: "cli: Nightly"
+
+# Deep CLI exercises too slow or too stateful for the per-PR gates in cli.yml:
+# fuzzing, an extended sandbox pass, and a full GoReleaser snapshot build.
+#
+# Deliberately NO job keyed `required` here: internal/ciworkflows conscripts
+# any workflow with a required aggregate into requiredWorkflowSpecs, and a
+# nightly has no PR to gate — its failures surface through Main CI
+# Notifications (this workflow is registered there; keep the trigger list and
+# case arm in sync when renaming).
+on:
+  schedule:
+    # 03:47 UTC — off-peak for US and EU working hours, and offset from the
+    # top of the hour to dodge GitHub's scheduled-load spikes.
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-nightly
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: cli-nightly / fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Discovers Fuzz targets under apps/cli at run time, so this job arms
+      # itself when the v2 code lands its first fuzz test and no-ops loudly
+      # until then. `go test -fuzz` accepts exactly one target pattern in one
+      # package per invocation, hence the loop. FUZZ_TIME is per target; the
+      # job timeout above is the aggregate ceiling — revisit both once enough
+      # targets exist to approach it.
+      - name: Fuzz CLI packages
+        shell: bash
+        env:
+          FUZZ_TIME: 5m
+        run: |
+          found=0
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            dir="$(dirname "$file")"
+            while IFS= read -r target; do
+              [ -n "$target" ] || continue
+              found=1
+              echo "fuzzing ${target} in ${dir} for ${FUZZ_TIME}"
+              go test -run '^$' -fuzz "^${target}\$" -fuzztime "$FUZZ_TIME" "./${dir}"
+            done <<<"$(grep -hoE '^func Fuzz[A-Za-z0-9_]*' "$file" | sed 's/^func //' | sort -u)"
+          done <<<"$(grep -rlE --include='*_test.go' '^func Fuzz[A-Za-z0-9_]*\(' apps/cli || true)"
+          if [ "$found" -eq 0 ]; then
+            echo "no fuzz targets under apps/cli yet; nothing to fuzz (this job arms when the first FuzzXxx test lands)"
+          fi
+
+  sandbox-extended:
+    name: cli-nightly / sandbox e2e extended
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Same arming variable as cli.yml's sandbox-e2e gate, and the same
+    # repo-wide serialization group: there is one sandbox tenancy, and the
+    # nightly must queue behind (never cancel) a PR-time run.
+    if: vars.CLI_SANDBOX_E2E == 'enabled'
+    concurrency:
+      group: cli-sandbox-e2e
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Extended: -count=3 re-runs the suite to shake out flaky or stateful
+      # sandbox behaviour a single PR-time pass misses. Placeholder semantics
+      # match cli.yml's sandbox-e2e step: nothing carries the clisandbox tag
+      # yet, and the notice self-silences when the first tagged test lands.
+      - name: Run extended sandbox e2e suite
+        run: |
+          go test -tags=clisandbox -count=3 ./apps/cli/...
+          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
+            echo "::notice::cli-nightly / sandbox e2e extended: no sandbox suite yet — no file carries the clisandbox build tag"
+          fi
+
+  snapshot:
+    name: cli-nightly / goreleaser snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # GoReleaser derives snapshot versions from tag history and refuses
+          # shallow clones.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Unlike `cli / goreleaser check` (config validation only), the snapshot
+      # exercises the real release pipeline without publishing: every OS/arch
+      # build, archives, deb/rpm packaging, and the before-hooks that build the
+      # binary and generate man pages via the hidden `qurl docs man` command —
+      # the closest CI gets to release-please.yml's release-cli job ahead of an
+      # actual tag.
+      - name: Build snapshot release
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
