@@ -70,8 +70,15 @@ const (
 	// machine asked for data, and a spawned browser is not data.
 	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl resolve --output json` for the link"
 
-	// msgConnectorSlugRequired refuses connector run without a route name.
-	msgConnectorSlugRequired = "--slug is required: pass your Connector's route name, or set connector_slug in your profile"
+	// msgConnectorIDRequired refuses connector run without a Connector ID.
+	msgConnectorIDRequired = "--id is required: pass your Connector's ID — the route name your app serves under — or set connector_id in your profile"
+
+	// msgConnectorIDConflict refuses --id and its deprecated --slug alias
+	// disagreeing; the first %q is --id's value, the second the alias's. It
+	// deliberately names the deprecated flag the customer just typed — the
+	// only jargon-gate-exempt string (see jargonExemptMessages) — and is
+	// removed at the next major together with the alias itself.
+	msgConnectorIDConflict = "--id and --slug disagree (%q vs %q): --slug is a deprecated alias of --id, so pass only --id"
 
 	// msgConnectorTargetRequired refuses connector run without a local app.
 	msgConnectorTargetRequired = "--target is required: the local app to serve, as host:port (\":8080\" means 127.0.0.1:8080)"
@@ -84,8 +91,8 @@ const (
 	// configuration error instead; only the flag is a usage error.
 	msgConnectorRefreshModeInvalid = "--refresh-mode must be manual, auto, or disabled; got %q"
 
-	// msgConnectorServing announces the serve loop on stderr; the slug, then
-	// the local target being served.
+	// msgConnectorServing announces the serve loop on stderr; the Connector
+	// ID (as the platform records it), then the local target being served.
 	msgConnectorServing = "Starting Connector %q for your local app at %s. Press Ctrl-C to stop."
 
 	// msgConnectorStopped acknowledges a graceful signal-initiated stop.
@@ -111,7 +118,8 @@ func customerMessages() []string {
 		msgFileNeedsPath,
 		msgFileDashJSON,
 		msgBrowserJSON,
-		msgConnectorSlugRequired,
+		msgConnectorIDRequired,
+		msgConnectorIDConflict,
 		msgConnectorTargetRequired,
 		msgConnectorTargetInvalid,
 		msgConnectorRefreshModeInvalid,
