@@ -82,14 +82,16 @@ const (
 	attrUpdatedAt     = "updated_at"
 	// Every workspace_state write must refresh attrUpdatedAtNano. Lifecycle
 	// purges use it as the reinstall-race guard; a writer that skips it can let a
-	// delayed uninstall purge delete freshly reinstalled credentials. The
-	// converse binds equally: nothing may bump it gratuitously. A writer driven
-	// by ordinary traffic rather than by a real credential change holds the row
-	// newer than any teardown cutoff, making DeleteWorkspaceStateBeforeWithIdentity
-	// no-op and stranding credentials a delayed uninstall should have purged.
-	// TestWorkspaceStateWritersStampUpdatedAtNano enforces the first half across
-	// every writer, and TestWorkspaceStateMutatorsAreStampCovered fails when a new
+	// delayed uninstall purge delete freshly reinstalled credentials.
+	// TestWorkspaceStateWritersStampUpdatedAtNano enforces that across every
+	// writer, and TestWorkspaceStateMutatorsAreStampCovered fails when a new
 	// mutator lands without deciding which side of the invariant it sits on.
+	//
+	// The converse binds equally: nothing may bump it gratuitously. A writer
+	// driven by ordinary traffic rather than by a real credential change holds
+	// the row newer than any teardown cutoff, making
+	// DeleteWorkspaceStateBeforeWithIdentity no-op and stranding credentials a
+	// delayed uninstall should have purged.
 	attrUpdatedAtNano = "updated_at_unix_nano"
 
 	attrSlackBotToken       = "slack_bot_token"
