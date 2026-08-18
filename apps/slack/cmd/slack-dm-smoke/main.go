@@ -348,8 +348,8 @@ func newSmokeResult(cfg *smokeConfig) smokeResult {
 // That mirror carries two //nolint:gosec directives citing G705 on the matching Fprintf
 // lines and this copy carries none — a toolchain artifact, not a weaker safety argument.
 // gosec taints the result of any call that received a tainted argument, and there
-// tokenEnv comes back from parseFlags(stderr, args), which main hands os.Stderr and
-// os.Args. Here nothing tainted ever flows in. fs.Parse(args) does receive a tainted
+// tokenEnv comes back from parseFlags(stderr, args), whose arguments run forwards from
+// the os.Stderr and os.Args that main gave it. Here nothing tainted ever flows in. fs.Parse(args) does receive a tainted
 // argument, but it fills tokenEnv by writing through the pointer fs.StringVar registered
 // earlier, and the analysis follows call results, not pointer writes. The one call
 // result stored into tokenEnv is strings.TrimSpace(tokenEnv), whose sole argument is
