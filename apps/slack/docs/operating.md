@@ -115,31 +115,26 @@ at the OAuth-callback bind layer.
   Rerunning setup without `--rotate`/`--repoint` is intentionally not a
   healthy-key rotation or qURL-account switch command.
   Every setup path — first install, `--rotate`, and `--repoint` — sends Auth0
-  `prompt=login consent` and pins `connection=email`. `login` stops an ambient
-  Auth0 session (from the desktop app, the dashboard, or a previous bot run)
-  from authorizing the bind, so the admin always re-authenticates; `consent`
-  stops Auth0 from reusing a prior consent grant, which would let a re-run
-  complete without issuing a new token. Both halves are load-bearing: setup and
-  rotation each decide which qURL account a workspace is bound to.
+  `prompt=login consent` and pins `connection=email`. Both halves of `prompt`
+  are load-bearing: `login` stops an ambient Auth0 session (from the desktop
+  app, the dashboard, or a previous bot run) from authorizing the bind, so the
+  admin always re-authenticates, and `consent` stops Auth0 from reusing a prior
+  consent grant, which would let a re-run complete without issuing a new token.
+  A consent screen on its own proves consent, not identity.
   Passwordless is the Slack login method, not a per-tenant choice. It is the
-  lowest-friction path for a workspace admin, and `email` is the same
-  connection qurl-desktop pins for the same human, so both surfaces resolve to
-  one Auth0 subject instead of forking the account across connections — and
-  qurl-service keys accounts on the id_token `sub`, so a different connection
-  is a different qURL account. `AUTH0_EMAIL_CONNECTION` remains an override for
-  a deployment whose passwordless connection is named something else.
-  Migration note: a workspace whose key was minted under a different
-  connection (for example Google) now signs in passwordless, which is a
+  lowest-friction path for a workspace admin, and `email` is the connection
+  qurl-desktop pins for the same human, so both surfaces resolve to one Auth0
+  subject. That matters because qurl-service keys accounts on the id_token
+  `sub`: a different connection is a different qURL account.
+  `AUTH0_EMAIL_CONNECTION` remains an override for a deployment whose
+  passwordless connection is named something else.
+  Migration note: a workspace whose key was minted under a different connection
+  (for example Google) now signs in passwordless, so it authenticates as a
   different `sub` and therefore a different qURL account. Provenance-bearing
   rows fail closed on that with the cross-account page and route to the
   operator-assisted transfer — the intended outcome, since the alternative was
   silently rotating a workspace onto whichever account the browser happened to
-  hold. Rows with no recorded `qurl_account_id` have no such guard. This matters because a consent screen proves
-  consent, not identity: without the re-login an explicit rotation could be
-  approved from whatever Auth0 connection the browser happens to be signed in
-  with, and qurl-service keys accounts on the id_token `sub`, so a different
-  connection is a different qURL account. Rows with no recorded
-  `qurl_account_id` have no cross-account guard to catch that.
+  hold. Rows with no recorded `qurl_account_id` have no such guard.
   Keys are field-level encrypted at rest using KMS envelope encryption, with
   `workspace_id` bound as AAD.
   Rollout order: the Slack app may deploy before the qURL API binding route is

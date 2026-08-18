@@ -64,6 +64,12 @@ const (
 // passwordless email connection and the same value qurl-desktop pins, so one
 // human keeps one Auth0 subject — and therefore one qURL account — across both
 // surfaces.
+//
+// TODO(upstream-contract): keep in lockstep with qurl-desktop's connection pin
+// (src/main/auth.ts, browserAuthorizationOptions). If either surface repoints
+// its connection without the other, the same human authenticates as two Auth0
+// subjects and their qURL accounts fork silently — nothing fails loudly,
+// because each surface works in isolation.
 const defaultPasswordlessConnection = "email"
 
 // apiKeyScopes is the qurl-service scope set requested by the legacy fallback
