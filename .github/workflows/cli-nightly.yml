@@ -107,14 +107,26 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # syft for the `sboms:` step in .goreleaser.yml, so the snapshot
+      # exercises SBOM generation exactly like release-cli. Keep the pin and
+      # `syft-version` in lockstep with release-please.yml's copy.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: 'v1.42.3'
+
       # Unlike `cli / goreleaser check` (config validation only), the snapshot
       # exercises the real release pipeline without publishing: every OS/arch
-      # build, archives, deb/rpm packaging, and the before-hooks that build the
-      # binary and generate man pages via the hidden `qurl docs man` command —
-      # the closest CI gets to release-please.yml's release-cli job ahead of an
-      # actual tag.
+      # build, archives, deb/rpm packaging, SBOM generation, and the
+      # before-hooks that build the binary and generate man pages via the
+      # hidden `qurl docs man` command — the closest CI gets to
+      # release-please.yml's release-cli job ahead of an actual tag.
+      # `--skip=sign` because the one release step a snapshot cannot exercise
+      # is keyless cosign: it needs GitHub's OIDC broker plus the id-token
+      # permission, which this job deliberately does not hold. The signature
+      # path is covered at release time by release-cli's post-sign self-test.
       - name: Build snapshot release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: "~> v2"
-          args: release --snapshot --clean
+          args: release --snapshot --clean --skip=sign
