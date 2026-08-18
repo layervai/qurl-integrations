@@ -116,11 +116,17 @@ func TestCaskCompletionsMatchGeneratedFiles(t *testing.T) {
 	if !slices.Equal(written, declared) {
 		t.Fatalf("homebrew_casks[0].completions out of sync with scripts/cli-completions.sh output\nscript wrote: %q\ndeclared:     %q", written, declared)
 	}
-	// The cask map must key the three shells Homebrew has completion
-	// artifacts for — a wrong key would render an invalid stanza.
-	wantShells := []string{"bash", "fish", "zsh"}
-	if gotShells := slices.Sorted(maps.Keys(cfg.HomebrewCasks[0].Completions)); !slices.Equal(gotShells, wantShells) {
-		t.Fatalf("homebrew_casks[0].completions keys = %q, want %q", gotShells, wantShells)
+	// Pin the shell→file pairing too: the value-set check above is
+	// satisfiable by a swapped mapping (bash: qurl.zsh / zsh: qurl.bash),
+	// which Homebrew would install as the wrong shell's completion. The
+	// three keys are the shells Homebrew has completion artifacts for.
+	for _, shell := range []string{"bash", "fish", "zsh"} {
+		if got, want := cfg.HomebrewCasks[0].Completions[shell], "completions/qurl."+shell; got != want {
+			t.Fatalf("homebrew_casks[0].completions[%q] = %q, want %q", shell, got, want)
+		}
+	}
+	if n := len(cfg.HomebrewCasks[0].Completions); n != 3 {
+		t.Fatalf("homebrew_casks[0].completions has %d entries, want 3", n)
 	}
 }
 
