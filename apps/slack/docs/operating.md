@@ -81,8 +81,13 @@ at the OAuth-callback bind layer.
     `setup_rotate_legacy_row_orphaned_key` with the owning `team_id`. Operators
     should revoke that key in qURL API-key management; until they do it stays
     live and counts against the account's API-key plan limit. This path runs at
-    most once per workspace, because the rotation records the new `key_id` and
-    the next rotation takes the normal revoke-then-replace route. Because
+    most once per workspace, because the rotation records the new `key_id` (and
+    the signed-in `qurl_account_id`, which is what unblocks a later
+    `--repoint`), so the next rotation takes the normal revoke-then-replace
+    route. The bound is one orphaned *key* per workspace, not one log line —
+    concurrent rotations mint idempotently but can each emit the event, so
+    dedupe by `team_id`. `--repoint` never takes this path: mint-without-revoke
+    is scoped to `--rotate`. Because
     nothing is revoked, this rotation is net +1 key, so an account already at
     its API-key limit fails the mint — the page says the previous key could not
     be identified and is still active, rather than the normal rotation's

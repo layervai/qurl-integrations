@@ -1738,6 +1738,7 @@ func TestCallbackExplicitRotationRevokesOldKeyBeforeReplacementMint(t *testing.T
 // against the account's plan limit (3 on free tier).
 func TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
 	store.existingKey = testOldAPIKey
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
 
@@ -1769,6 +1770,12 @@ func TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke(t *testing.T) {
 	// revoke-then-replace path next time instead of orphaning a second key.
 	if setArgs.KeyID == "" {
 		t.Error("rotation must store the new key_id so the next rotation can revoke it")
+	}
+	// And it must record provenance, which is what completes the self-heal: a
+	// row that arrives here has neither, and --repoint stays blocked until the
+	// account is known. Without this the row would be repoint-blocked forever.
+	if setArgs.QURLAccountID == "" {
+		t.Error("rotation must store qurl_account_id so a later --repoint can prove same-vs-cross account")
 	}
 }
 
@@ -2798,6 +2805,7 @@ func TestCallbackSkipsBindWhenAdminStoreNil(t *testing.T) {
 func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
 	readLogs := captureDefaultSlogJSON(t)
 	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
 	store.existingKey = testOldAPIKey
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
 
@@ -2818,9 +2826,10 @@ func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
 	if found == nil {
 		t.Fatalf("expected a %q log record so operators can find the abandoned key", rotateLegacyRowOrphanEvent)
 	}
-	// team_id is what an operator matches the orphaned key against; the other
-	// fields tell them which account holds it and what to do.
-	for _, field := range []string{"team_id", "mode", "operator_action"} {
+	// qurl_account_id is the operator's primary handle: it names which qURL
+	// account holds the abandoned key, so an empty value here would leave them
+	// with a team_id and no way to locate the key in API-key management.
+	for _, field := range []string{"team_id", "mode", "qurl_account_id", "operator_action"} {
 		if v, ok := found[field]; !ok || v == "" {
 			t.Errorf("orphan log record missing %q: %#v", field, found)
 		}
@@ -2868,5 +2877,34 @@ func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
 	}
 	if !strings.Contains(body, "still active") {
 		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+}
+
+// TestCallbackRepointWithoutKeyIDStillFailsClosed fences the scope of the
+// mint-without-revoke relaxation. It is reachable only by --rotate; a --repoint
+// that reaches the same missing-key_id state must keep failing closed rather
+// than silently minting. The state is unreachable today (provenance and key_id
+// are persisted together), so this guards the invariant rather than a live path
+// — if that ever changes, mint-without-revoke must not widen to account moves.
+func TestCallbackRepointWithoutKeyIDStillFailsClosed(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
+	store.existingKey = testOldAPIKey
+	// Provenance present and matching, so the earlier cross-account and
+	// legacy-repoint guards both pass and control reaches the key_id branch.
+	store.existingAccount = testAdminSub
+	state := mintTestStateWithMode(t, &cfg, SetupModeRepoint)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (repoint must not mint without a key_id), body=%s", rec.Code, rec.Body.String())
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 0 {
+		t.Errorf("replacement mint calls = %d, want 0", replacementCalls)
 	}
 }

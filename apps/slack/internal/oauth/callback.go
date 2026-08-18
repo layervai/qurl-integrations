@@ -761,7 +761,7 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 	// un-revokable key behind; only this one keeps the workspace working, and
 	// each uninstall/setup cycle otherwise adds another live key against the
 	// account's plan limit. The orphan is logged for operator cleanup.
-	if keyID == "" {
+	if keyID == "" && mode == SetupModeRotate {
 		keyPrefix, ok := mintReplacementAndPersist(w, cfg, accessToken, teamID, "", userID, qurlAccountID)
 		if !ok {
 			// Deliberately silent on failure. The event tells an operator to
@@ -770,9 +770,12 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 			// +1 key, so an account at its plan limit fails here) or a failed
 			// persist leaves the workspace still using the old key — acting on
 			// the event then would revoke a live credential and take the
-			// workspace down. Staying quiet also keeps the event's
-			// once-per-workspace property honest: repeated quota-blocked
-			// attempts would otherwise re-emit it for the same team_id.
+			// workspace down. Staying quiet also keeps the event honest for
+			// sequential retries: repeated quota-blocked attempts would
+			// otherwise re-emit it for the same team_id. The invariant is "at
+			// most one orphaned KEY per workspace", not one log line —
+			// concurrent legacy rotations can both mint (idempotently, so one
+			// key) and both log, which an operator dedups by team_id.
 			return "", false
 		}
 		slog.Warn("oauth/callback rotated a legacy row with no stored key_id — previous key could not be revoked from Slack and needs operator cleanup", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
@@ -782,6 +785,20 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 			"qurl_account_id", qurlAccountID,
 			"operator_action", rotateLegacyRowOperatorAction)
 		return keyPrefix, true
+	}
+	if keyID == "" {
+		// --repoint on a row with no key_id. Unreachable today: provenance and
+		// key_id are only ever persisted together (both SetAPIKeyWithMetadata
+		// sites write them from one mint, and a mint without a key_id fails),
+		// so a repoint that got past the provenance guard above must have a
+		// key_id. Kept as a structural fence rather than an upstream-invariant
+		// assumption: mint-without-revoke is scoped to rotation, and if that
+		// invariant ever breaks this must not silently widen to repoint.
+		slog.Warn("oauth/callback repoint refused because stored key has no key_id", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+			"team_id", teamID, "mode", string(mode))
+		renderOAuthErrorPage(w, http.StatusConflict, "Can't repoint qURL key from Slack",
+			"This workspace was connected before Slack stored qURL™ key identity, so a qURL account move can't be verified safely. Run /qurl setup <email> with --rotate to refresh the key, or contact LayerV support.")
+		return "", false
 	}
 	if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, keyID)); err != nil {
 		slog.Error("oauth/callback rotation replacement idempotency key invalid before revoke", //nolint:gosec // G706: team_id/key_id are non-secret qURL identifiers needed for operator triage.
@@ -1061,7 +1078,7 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 		genericPredecessor := "qURL™ revoked the previous workspace key, but a replacement could not be created."
 		if oldKeyID == "" {
 			predecessor = "This workspace's previous key could not be identified, so nothing was revoked and it is still active. Your"
-			genericPredecessor = "This workspace's previous key could not be identified, so nothing was revoked and it is still active. A replacement could not be created."
+			genericPredecessor = "This workspace's previous qURL™ key could not be identified, so nothing was revoked and it is still active. A replacement could not be created."
 		}
 		if limitReached {
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
