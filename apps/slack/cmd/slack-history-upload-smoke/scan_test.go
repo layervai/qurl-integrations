@@ -1527,11 +1527,11 @@ func TestWaitHonorsTheContext(t *testing.T) {
 		t.Errorf("wait: %v", err)
 	}
 
-	// A cancelled context must abandon the wait rather than park for Retry-After.
+	// A canceled context must abandon the wait rather than park for Retry-After.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := client.wait(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("wait on a cancelled context = %v, want context.Canceled", err)
+		t.Errorf("wait on a canceled context = %v, want context.Canceled", err)
 	}
 }
 
