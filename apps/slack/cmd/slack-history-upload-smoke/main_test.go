@@ -194,7 +194,9 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 			// Checking only the first line would otherwise let a regression append a
 			// forged second line — the failure the //nolint:gosec suppressions in
 			// writeConfigValidationError make possible — with the package staying green.
-			// The usage text itself is still not pinned, for the reason given above.
+			// The usage text itself is still not pinned, for the reason given above — but
+			// its header is a fourth piece of stdlib wording this table leans on, and a
+			// Go release rewording it fails the same three rows as the others.
 			if rest != "" && !strings.HasPrefix(rest, "Usage of slack-history-upload-smoke:") {
 				t.Errorf("stderr after the first line = %q, want nothing or the usage block", rest)
 			}
