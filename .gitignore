@@ -27,6 +27,9 @@ Thumbs.db
 # Build artifacts
 dist/
 release/
+# Generated at the repo root by .goreleaser.yml's before hooks
+/manpages/
+/completions/
 
 # Secrets — never commit these
 .env
