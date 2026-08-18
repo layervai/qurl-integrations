@@ -120,21 +120,21 @@ at the OAuth-callback bind layer.
   from authorizing the bind, so the admin always re-authenticates; `consent`
   stops Auth0 from reusing a prior consent grant, which would let a re-run
   complete without issuing a new token. Both halves are load-bearing: setup and
-  rotation each decide which qURL account a workspace is bound to, and
-  qurl-service keys accounts on the id_token `sub`.
+  rotation each decide which qURL account a workspace is bound to.
   Passwordless is the Slack login method, not a per-tenant choice. It is the
   lowest-friction path for a workspace admin, and `email` is the same
   connection qurl-desktop pins for the same human, so both surfaces resolve to
-  one Auth0 subject instead of forking the account across connections.
-  `AUTH0_EMAIL_CONNECTION` remains an override for a deployment whose
-  passwordless connection is named something else.
+  one Auth0 subject instead of forking the account across connections — and
+  qurl-service keys accounts on the id_token `sub`, so a different connection
+  is a different qURL account. `AUTH0_EMAIL_CONNECTION` remains an override for
+  a deployment whose passwordless connection is named something else.
   Migration note: a workspace whose key was minted under a different
   connection (for example Google) now signs in passwordless, which is a
   different `sub` and therefore a different qURL account. Provenance-bearing
   rows fail closed on that with the cross-account page and route to the
   operator-assisted transfer — the intended outcome, since the alternative was
   silently rotating a workspace onto whichever account the browser happened to
-  hold. Legacy rows with no recorded `qurl_account_id` have no such guard. This matters because a consent screen proves
+  hold. Rows with no recorded `qurl_account_id` have no such guard. This matters because a consent screen proves
   consent, not identity: without the re-login an explicit rotation could be
   approved from whatever Auth0 connection the browser happens to be signed in
   with, and qurl-service keys accounts on the id_token `sub`, so a different
