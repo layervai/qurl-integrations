@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // slackFileObject is a Slack `files` entry carrying the field set the 2026-08-14 scan
@@ -47,6 +48,9 @@ const slackDeniedFileObject = `{"id":"F00000000BB","name":null,"mimetype":null,"
 const (
 	testChannel      = "C0000000001"
 	testThreadParent = "1723600000.000100"
+	// testRequestTimeout is generous: these tests assert behavior, not timing, and the
+	// fakes answer immediately.
+	testRequestTimeout = 30 * time.Second
 )
 
 func uploadMessage(ts string) string {
@@ -130,7 +134,7 @@ func testScanConfig(srv *httptest.Server) *scanConfig {
 		PageLimit:         defaultPageLimit,
 		MaxThreads:        defaultMaxThreads,
 		MinUploads:        1,
-		HTTPClient:        srv.Client(),
+		HTTPClient:        newSlackHTTPClient(testRequestTimeout),
 		StartedAt:         time.Unix(1723600000, 0).UTC(),
 	}
 }
@@ -280,7 +284,7 @@ func TestSurfaceTallyBucketsEveryShape(t *testing.T) {
 	for _, message := range messages {
 		raw = append(raw, json.RawMessage(message))
 	}
-	tallyMessages(raw, &tally)
+	tallyMessages(testChannel, raw, &tally, map[string]struct{}{})
 
 	want := surfaceTally{
 		Surface: surfaceHistory, Messages: 7, FilesKeyPresent: 5, PopulatedArrays: 2,
@@ -303,13 +307,15 @@ func TestEvaluateContract(t *testing.T) {
 		minUploads        int
 		strictUncountable bool
 		conversationsRead int
+		distinctUploads   int
 		truncated         bool
 		wantHolds         bool
 		wantFailure       string
 	}{
 		{
 			name: "uploads found on both surfaces", history: surfaceTally{ClassifiedUploads: 3},
-			replies: surfaceTally{ClassifiedUploads: 2}, minUploads: 1, conversationsRead: 2, wantHolds: true,
+			replies: surfaceTally{ClassifiedUploads: 2}, minUploads: 1, conversationsRead: 2,
+			distinctUploads: 4, wantHolds: true,
 		},
 		{
 			name: "no conversation could be read", minUploads: 1, conversationsRead: 0,
@@ -335,6 +341,7 @@ func TestEvaluateContract(t *testing.T) {
 			history:           surfaceTally{ClassifiedUploads: 5, MissedUploads: 2},
 			minUploads:        1,
 			conversationsRead: 1,
+			distinctUploads:   5,
 			wantFailure:       "did not report as an upload",
 		},
 		{
@@ -342,6 +349,7 @@ func TestEvaluateContract(t *testing.T) {
 			history:           surfaceTally{ClassifiedUploads: 5, UncountableShapes: 1},
 			minUploads:        1,
 			conversationsRead: 1,
+			distinctUploads:   5,
 			wantHolds:         true,
 		},
 		{
@@ -350,6 +358,7 @@ func TestEvaluateContract(t *testing.T) {
 			minUploads:        1,
 			strictUncountable: true,
 			conversationsRead: 1,
+			distinctUploads:   5,
 			wantFailure:       "Slack changed the wire format",
 		},
 		{
@@ -358,6 +367,7 @@ func TestEvaluateContract(t *testing.T) {
 			expected:          []expectationResult{{messageRef: messageRef{Channel: testChannel, TS: "100.1"}, Found: true}},
 			minUploads:        1,
 			conversationsRead: 1,
+			distinctUploads:   5,
 			wantFailure:       "was found but not classified",
 		},
 		{
@@ -369,6 +379,7 @@ func TestEvaluateContract(t *testing.T) {
 			replies:           surfaceTally{ClassifiedUploads: 2, MissedUploads: 1},
 			minUploads:        1,
 			conversationsRead: 1,
+			distinctUploads:   6,
 			wantFailure:       "did not report as an upload",
 		},
 		{
@@ -379,6 +390,7 @@ func TestEvaluateContract(t *testing.T) {
 			minUploads:        1,
 			strictUncountable: true,
 			conversationsRead: 1,
+			distinctUploads:   6,
 			wantFailure:       "Slack changed the wire format",
 		},
 	}
@@ -387,14 +399,18 @@ func TestEvaluateContract(t *testing.T) {
 			t.Parallel()
 			cfg := &scanConfig{MinUploads: tt.minUploads, StrictUncountable: tt.strictUncountable}
 			result := &scanResult{History: tt.history, Replies: tt.replies, ExpectedUploads: tt.expected}
-			verdict := evaluateContract(cfg, result, scanCoverage{conversationsRead: tt.conversationsRead, truncated: tt.truncated})
+			verdict := evaluateContract(cfg, result, scanCoverage{
+				conversationsRead: tt.conversationsRead,
+				distinctUploads:   tt.distinctUploads,
+				truncated:         tt.truncated,
+			})
 			if verdict.Holds != tt.wantHolds {
 				t.Fatalf("holds = %v, want %v (failures: %v)", verdict.Holds, tt.wantHolds, verdict.Failures)
 			}
 			// Assert the evidence fields, not just Holds: dropping either replies term
 			// from the sums changes only these, and a Holds-only assertion sails past it.
-			if verdict.ClassifiedUploads != tt.history.ClassifiedUploads+tt.replies.ClassifiedUploads {
-				t.Errorf("classified uploads = %d, want both surfaces totalled", verdict.ClassifiedUploads)
+			if verdict.DistinctUploads != tt.distinctUploads {
+				t.Errorf("distinct uploads = %d, want %d", verdict.DistinctUploads, tt.distinctUploads)
 			}
 			if verdict.MissedUploads != tt.history.MissedUploads+tt.replies.MissedUploads {
 				t.Errorf("missed uploads = %d, want both surfaces totalled", verdict.MissedUploads)
@@ -465,8 +481,11 @@ func TestRunScanMeasuresBothSurfaces(t *testing.T) {
 	if result.Replies.Messages != 2 || result.Replies.ClassifiedUploads != 1 || result.Replies.Conversations != 1 {
 		t.Errorf("replies = %+v", result.Replies)
 	}
-	if result.Contract.ClassifiedUploads != 2 {
-		t.Errorf("classified uploads = %d, want both surfaces totalled", result.Contract.ClassifiedUploads)
+	// Both surfaces saw an upload the other did not, so the distinct count is 2 — and the
+	// thread root they share is not what makes it 2. TestRunScanCountsAThreadRootOnce
+	// pins the deduplication itself.
+	if result.Contract.DistinctUploads != 2 {
+		t.Errorf("distinct uploads = %d, want one per surface-unique message", result.Contract.DistinctUploads)
 	}
 	if got := fake.callCount(surfaceReplies); got != 1 {
 		t.Errorf("conversations.replies calls = %d, want the one thread with replies", got)
@@ -768,7 +787,7 @@ func TestSlackClientRetriesOnceAfterRateLimit(t *testing.T) {
 
 	var slept time.Duration
 	client := &slackClient{
-		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: srv.Client(),
+		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout),
 		sleep: func(_ context.Context, d time.Duration) error { slept = d; return nil },
 	}
 	var out slackMessagesResponse
@@ -792,7 +811,7 @@ func TestSlackClientRefusesAnUnreasonableRetryAfter(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
 	client := &slackClient{
-		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: srv.Client(),
+		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout),
 		sleep: func(context.Context, time.Duration) error {
 			t.Error("a Retry-After past the cap must not park the scan")
 			return nil
@@ -995,7 +1014,7 @@ func TestEvaluateContractSeparatesUnverifiableFromUnclassified(t *testing.T) {
 			{messageRef: messageRef{Channel: testChannel, TS: "100.2"}, Found: true},
 		},
 	}
-	verdict := evaluateContract(&scanConfig{MinUploads: 1}, result, scanCoverage{conversationsRead: 1})
+	verdict := evaluateContract(&scanConfig{MinUploads: 1}, result, scanCoverage{conversationsRead: 1, distinctUploads: 3})
 	if verdict.Holds || len(verdict.Failures) != 2 {
 		t.Fatalf("verdict = %+v, want both expectations failing", verdict)
 	}
@@ -1141,5 +1160,222 @@ func TestNewSlackHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusFound {
 		t.Errorf("status = %d, want the 302 surfaced rather than followed", resp.StatusCode)
+	}
+}
+
+// TestRunScanCountsAThreadRootOnce pins the deduplication the tripwire rests on.
+// conversations.replies returns the thread parent as its first message and
+// conversations.history already returned it, so summing the two surfaces reports two
+// uploads for a workspace that contains one — and -min-uploads, which the runbook tells
+// operators to raise when they know how many to expect, would pass on the phantom.
+func TestRunScanCountsAThreadRootOnce(t *testing.T) {
+	t.Parallel()
+
+	// One upload-bearing message in the whole workspace, and it is a thread root.
+	root := `{"type":"message","user":"U1","text":"protect this","ts":"` + testThreadParent +
+		`","thread_ts":"` + testThreadParent + `","reply_count":1,"files":[` + slackFileObject + `]}`
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory:          messagesBody(root),
+		surfaceReplies:          messagesBody(root, textMessage("100.9")),
+	})
+
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	// Each surface faithfully reports what IT returned — that is what the two tallies are
+	// for — so both count the root.
+	if result.History.ClassifiedUploads != 1 || result.Replies.ClassifiedUploads != 1 {
+		t.Errorf("history = %+v, replies = %+v; each surface must report what it returned",
+			result.History, result.Replies)
+	}
+	if result.Contract.DistinctUploads != 1 {
+		t.Errorf("distinct uploads = %d, want 1: the workspace contains one upload",
+			result.Contract.DistinctUploads)
+	}
+	if result.Conversations[0].ClassifiedUploads != 1 {
+		t.Errorf("conversation uploads = %d, want the same distinct rule", result.Conversations[0].ClassifiedUploads)
+	}
+}
+
+// TestRunScanMinUploadsSeesThroughTheDuplicate is the consequence spelled out: with the
+// old summing rule this workspace passed -min-uploads 2 on a single real upload.
+func TestRunScanMinUploadsSeesThroughTheDuplicate(t *testing.T) {
+	t.Parallel()
+
+	root := `{"type":"message","user":"U1","text":"protect this","ts":"` + testThreadParent +
+		`","thread_ts":"` + testThreadParent + `","reply_count":1,"files":[` + slackFileObject + `]}`
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory:          messagesBody(root),
+		surfaceReplies:          messagesBody(root),
+	})
+	cfg := testScanConfig(srv)
+	cfg.MinUploads = 2
+
+	result, err := runScan(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("one real upload must not satisfy -min-uploads 2")
+	}
+	if !strings.Contains(strings.Join(result.Contract.Failures, "; "), "1 distinct upload") {
+		t.Errorf("failures = %v, want the distinct count named", result.Contract.Failures)
+	}
+}
+
+// TestRunScanFillsTheVerdictWhenDiscoveryFails pins the one path that used to return a
+// zero-value contract block. The runbook tells the operator the report IS the diagnosis,
+// so "min_uploads": 0 on a run configured with 7, and an empty failures array, made that
+// instruction false exactly where it mattered.
+func TestRunScanFillsTheVerdictWhenDiscoveryFails(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: `{"ok":false,"error":"missing_scope","needed":"channels:read","provided":"chat:write"}`,
+	})
+	cfg := testScanConfig(srv)
+	cfg.MinUploads = 7
+
+	result, err := runScan(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("discovery failure must fail the scan")
+	}
+	if result.Contract.Holds {
+		t.Error("contract must not hold")
+	}
+	if result.Contract.MinUploads != 7 {
+		t.Errorf("min_uploads = %d, want the configured 7 rather than the zero value", result.Contract.MinUploads)
+	}
+	if len(result.Contract.Failures) == 0 ||
+		!strings.Contains(strings.Join(result.Contract.Failures, "; "), "channels:read") {
+		t.Errorf("failures = %v, want the discovery error carried into the report", result.Contract.Failures)
+	}
+}
+
+// TestCheckExpectationRejectsAMessageThatIsNotTheOneNamed pins the guard on the one
+// check whose oracle is a human. Verdicting on whatever the lookup happened to return
+// would be worse here than anywhere else in the command.
+func TestCheckExpectationRejectsAMessageThatIsNotTheOneNamed(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		// Both lookups answer with a DIFFERENT message that happens to carry a file.
+		surfaceHistory: messagesBody(uploadMessage("100.1")),
+		surfaceReplies: messagesBody(uploadMessage("100.1")),
+	})
+	cfg := testScanConfig(srv)
+	cfg.MaxThreads = 0
+	cfg.ExpectUploads = messageRefList{{Channel: testChannel, TS: "999.9"}}
+
+	result, err := runScan(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("a lookup that returned a different message must not pass as a verdict")
+	}
+	if len(result.ExpectedUploads) != 1 || result.ExpectedUploads[0].Found {
+		t.Fatalf("expected uploads = %+v, want the mismatch rejected", result.ExpectedUploads)
+	}
+	if !strings.Contains(strings.Join(result.Contract.Failures, "; "), "could not be verified") {
+		t.Errorf("failures = %v, want the unverifiable wording", result.Contract.Failures)
+	}
+}
+
+// TestRunScanCountsARepliesConversationWithAPartialSample pins that threads measured
+// before an error still count their conversation, so the report cannot show
+// replies.messages > 0 beside replies.conversations = 0.
+func TestRunScanCountsARepliesConversationWithAPartialSample(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory: messagesBody(
+			`{"type":"message","user":"U1","text":"a","ts":"200.1","thread_ts":"200.1","reply_count":1}`,
+			`{"type":"message","user":"U1","text":"b","ts":"200.2","thread_ts":"200.2","reply_count":1}`,
+		),
+	})
+	var mu sync.Mutex
+	var calls int
+	fake.setHandler(surfaceReplies, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			_, _ = w.Write([]byte(messagesBody(uploadMessage("200.3"))))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+	})
+
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if result.Replies.Messages == 0 {
+		t.Fatalf("replies = %+v, want the first thread's messages tallied", result.Replies)
+	}
+	if result.Replies.Conversations != 1 {
+		t.Errorf("replies conversations = %d, want the partially sampled conversation counted", result.Replies.Conversations)
+	}
+}
+
+func TestCleanOperatorNoteBoundsALongReason(t *testing.T) {
+	t.Parallel()
+
+	// Slack sends short enum codes, but against a -base-url that is not Slack the
+	// content-free promise would otherwise be the other end's to keep.
+	got := cleanOperatorNote(strings.Repeat("é", 500))
+	if len(got) <= maxSlackReasonBytes || !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("cleanOperatorNote length = %d, want it bounded and marked", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Error("truncation must land on a rune boundary")
+	}
+	if short := cleanOperatorNote(" channel_not_found "); short != "channel_not_found" {
+		t.Errorf("a real Slack reason must pass through untouched, got %q", short)
+	}
+}
+
+// TestGetOnceReportsWhatArrivedWhenItIsNotJSON pins the detail an operator needs at 2am.
+// A corporate proxy answering with an HTML SSO page is otherwise indistinguishable from
+// a Slack outage, and the body itself must stay out of the error.
+func TestGetOnceReportsWhatArrivedWhenItIsNotJSON(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, nil)
+	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><body>Sign in to continue — secret-plan.pdf</body></html>`))
+	})
+	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout)}
+	var out slackMessagesResponse
+	err := client.get(context.Background(), surfaceHistory, nil, &out)
+	if err == nil {
+		t.Fatal("an HTML body must not decode as a Slack response")
+	}
+	for _, want := range []string{"not JSON", "HTTP 200", "text/html"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "secret-plan") || strings.Contains(err.Error(), "Sign in") {
+		t.Errorf("err = %q leaked the body; only the status, type and length are safe", err)
+	}
+}
+
+// TestGetOnceNamesARedirectTarget pins the companion detail: redirects are surfaced
+// rather than followed, and a bare "returned HTTP 302" hides an SSO portal.
+func TestGetOnceNamesARedirectTarget(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, nil)
+	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://sso.example.com/login", http.StatusFound)
+	})
+	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: newSlackHTTPClient(testRequestTimeout)}
+	var out slackMessagesResponse
+	err := client.get(context.Background(), surfaceHistory, nil, &out)
+	if err == nil || !strings.Contains(err.Error(), "sso.example.com") || !strings.Contains(err.Error(), "not followed") {
+		t.Errorf("err = %v, want the unfollowed redirect target named", err)
 	}
 }

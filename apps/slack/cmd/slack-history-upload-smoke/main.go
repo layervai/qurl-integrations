@@ -195,6 +195,14 @@ func validateBounds(stderr io.Writer, cfg *scanConfig) int {
 		_, _ = fmt.Fprintln(stderr, "-max-threads must not be negative")
 	case cfg.MinUploads < 0:
 		_, _ = fmt.Fprintln(stderr, "-min-uploads must not be negative")
+	case cfg.MaxThreads > maxThreadsCeiling:
+		_, _ = fmt.Fprintf(stderr, "-max-threads must be at most %d\n", maxThreadsCeiling)
+	// Refused rather than truncated. -channels is what an operator names when they know
+	// which conversations carry uploads, so silently dropping the tail would answer a
+	// different question than the one asked.
+	case len(cfg.Channels) > cfg.MaxConversations:
+		_, _ = fmt.Fprintf(stderr, "-channels names %d conversations but -max-conversations is %d; raise it or name fewer\n",
+			len(cfg.Channels), cfg.MaxConversations)
 	default:
 		return 0
 	}

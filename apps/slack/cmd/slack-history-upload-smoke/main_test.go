@@ -57,7 +57,7 @@ func TestRunSucceedsWhenTheContractHolds(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("stdout is not the JSON report: %v (%q)", err, stdout)
 	}
-	if !result.Contract.Holds || result.Contract.ClassifiedUploads != 1 {
+	if !result.Contract.Holds || result.Contract.DistinctUploads != 1 {
 		t.Errorf("contract = %+v", result.Contract)
 	}
 	if result.StartedAt != fixedNow().Format(time.RFC3339) {
@@ -349,5 +349,57 @@ func TestRunCarriesOperatorNotesIntoTheReport(t *testing.T) {
 	}
 	if !strings.Contains(result.Scopes, "channels:history") {
 		t.Errorf("scopes = %q", result.Scopes)
+	}
+}
+
+// TestRunRejectsAChannelListLongerThanTheCap pins that a deliberate -channels list is
+// refused rather than silently truncated. -channels is what an operator names when they
+// know which conversations carry uploads, so measuring a subset would answer a different
+// question than the one asked — and the report would not say so.
+func TestRunRejectsAChannelListLongerThanTheCap(t *testing.T) {
+	t.Parallel()
+
+	code, stdout, stderr := runCLI(t, []string{
+		flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1",
+		"-channels", "C0000000001,C0000000002,C0000000003", "-max-conversations", "2",
+	}, testEnv(testToken))
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stderr, "names 3 conversations but -max-conversations is 2") {
+		t.Errorf("stderr = %q, want both numbers named", stderr)
+	}
+}
+
+// TestRunBoundsMaxThreads pins the ceiling that keeps -max-threads from sizing a huge
+// per-page allocation. -page-limit has always had one; this had only a negative check.
+func TestRunBoundsMaxThreads(t *testing.T) {
+	t.Parallel()
+
+	code, _, stderr := runCLI(t, []string{
+		flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1",
+		"-max-threads", "100000000",
+	}, testEnv(testToken))
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "-max-threads must be at most") {
+		t.Errorf("stderr = %q, want the ceiling named", stderr)
+	}
+}
+
+// TestThreadParentsCapacityTracksThePage pins the allocation bound directly: sizing the
+// slice off -max-threads alone turns a large flag value into a huge allocation for every
+// history page, before a single reply is read.
+func TestThreadParentsCapacityTracksThePage(t *testing.T) {
+	t.Parallel()
+
+	page := []json.RawMessage{json.RawMessage(`{"ts":"100.1","thread_ts":"100.1","reply_count":1}`)}
+	got := threadParents(page, maxThreadsCeiling)
+	if len(got) != 1 {
+		t.Fatalf("threadParents = %v, want the one root", got)
+	}
+	if cap(got) > len(page) {
+		t.Errorf("capacity = %d for a %d-message page; the limit must not size the allocation", cap(got), len(page))
 	}
 }

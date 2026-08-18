@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 )
@@ -26,6 +27,11 @@ const (
 	// conversations.* read methods.
 	maxPageLimit = 1000
 
+	// maxThreadsCeiling bounds -max-threads the way maxPageLimit bounds -page-limit.
+	// Sampling more threads than a page can hold cannot find more threads, and the value
+	// sizes a per-page allocation.
+	maxThreadsCeiling = maxPageLimit
+
 	// maxSlackResponseBytes is deliberately far above the production seam's 512 KB
 	// (slackAgentThreadHistoryResponseBodyLimit): that one reads a bounded thread
 	// window, while this reads whole history pages whose messages carry full file
@@ -35,6 +41,12 @@ const (
 	// maxRateLimitWait bounds how long a single 429 may park the scan. Slack's
 	// Retry-After is advisory and the overall timeout still applies on top.
 	maxRateLimitWait = 30 * time.Second
+
+	// maxSlackReasonBytes bounds an error string copied out of a response body into the
+	// report. Slack sends short enum codes, so this never truncates a real one — but the
+	// package comment promises a content-free report, and against a -base-url that is not
+	// Slack that promise would otherwise be the other end's to keep.
+	maxSlackReasonBytes = 200
 
 	// The two surface names double as the Web API method names they come from.
 	surfaceHistory          = "conversations.history"
@@ -124,7 +136,10 @@ const (
 
 // messageObservation is one message seen twice.
 type messageObservation struct {
-	shape            filesShape
+	shape filesShape
+	// ts identifies the message across surfaces so the same one is not counted twice.
+	// A Slack timestamp, not content.
+	ts               string
 	entries          int
 	fileShareSubtype bool
 	// classified is internal.SlackMessageHasUpload's verdict — the same function the
@@ -174,6 +189,7 @@ func observeMessage(raw json.RawMessage) (messageObservation, error) {
 		return messageObservation{}, fmt.Errorf("message JSON: %w", err)
 	}
 	var envelope struct {
+		TS      string          `json:"ts"`
 		Subtype string          `json:"subtype"`
 		Files   json.RawMessage `json:"files"`
 	}
@@ -184,6 +200,7 @@ func observeMessage(raw json.RawMessage) (messageObservation, error) {
 	files, keyPresent := fields["files"]
 	observation := messageObservation{
 		shape:            filesShapeAbsent,
+		ts:               envelope.TS,
 		fileShareSubtype: envelope.Subtype == slackSubtypeFileShare,
 		classified:       internal.SlackMessageHasUpload(envelope.Files, envelope.Subtype),
 	}
@@ -287,8 +304,13 @@ type expectationResult struct {
 
 // contractVerdict is the answer the command exists to give.
 type contractVerdict struct {
-	Holds             bool     `json:"holds"`
-	ClassifiedUploads int      `json:"classified_uploads"`
+	Holds bool `json:"holds"`
+	// DistinctUploads counts upload-bearing MESSAGES, not per-surface hits. Summing the
+	// two surfaces would double-count every thread root: conversations.replies returns
+	// the parent as its first message and conversations.history already returned it, so
+	// a workspace with one upload can report two — and -min-uploads, the tripwire this
+	// number feeds, would pass on the phantom.
+	DistinctUploads   int      `json:"distinct_uploads"`
 	MinUploads        int      `json:"min_uploads"`
 	MissedUploads     int      `json:"missed_uploads"`
 	UncountableShapes int      `json:"uncountable_shapes"`
@@ -333,12 +355,17 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 
 	conversations, err := resolveConversations(ctx, client, cfg)
 	if err != nil {
+		// The verdict has to be filled in even here. Returning the zero value would put
+		// "min_uploads": 0 in a report run with -min-uploads 7, and leave the failures
+		// array empty on the one path where the operator is told to read the report.
+		result.Contract = contractVerdict{MinUploads: cfg.MinUploads, Failures: []string{err.Error()}}
 		return result, err
 	}
 
+	ledger := map[string]struct{}{}
 	coverage := scanCoverage{}
 	for _, conversation := range conversations {
-		record, historyRead := scanConversation(ctx, client, cfg, conversation, &result)
+		record, historyRead := scanConversation(ctx, client, cfg, conversation, &result, ledger)
 		if historyRead {
 			coverage.conversationsRead++
 		}
@@ -354,6 +381,7 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 		// classifier miss, burying the timeout under failures it caused.
 		result.ExpectedUploads = checkExpectations(ctx, client, cfg)
 	}
+	coverage.distinctUploads = len(ledger)
 	result.Contract = evaluateContract(cfg, &result, coverage)
 	if !result.Contract.Holds {
 		return result, fmt.Errorf("upload-detection contract does not hold: %s", strings.Join(result.Contract.Failures, "; "))
@@ -371,14 +399,17 @@ type scanCoverage struct {
 	// conversationsRead counts conversations whose HISTORY surface was read. The replies
 	// sample is supplementary evidence on top of that; see scanConversation.
 	conversationsRead int
-	truncated         bool
+	// distinctUploads is how many distinct MESSAGES classified as uploads across both
+	// surfaces. Deduplicated because a thread root arrives on each; see DistinctUploads.
+	distinctUploads int
+	truncated       bool
 }
 
 // evaluateContract turns the counts into the verdict. Read the failures as a list of
 // distinct things that can rot, not as severity levels: each one is on its own.
 func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage) contractVerdict {
 	verdict := contractVerdict{
-		ClassifiedUploads: result.History.ClassifiedUploads + result.Replies.ClassifiedUploads,
+		DistinctUploads:   coverage.distinctUploads,
 		MinUploads:        cfg.MinUploads,
 		MissedUploads:     result.History.MissedUploads + result.Replies.MissedUploads,
 		UncountableShapes: result.History.UncountableShapes + result.Replies.UncountableShapes,
@@ -398,10 +429,10 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
 			"%d message(s) carried a populated files array that SlackMessageHasUpload did not report as an upload", verdict.MissedUploads))
 	}
-	if coverage.conversationsRead > 0 && !coverage.truncated && verdict.ClassifiedUploads < cfg.MinUploads {
+	if coverage.conversationsRead > 0 && !coverage.truncated && verdict.DistinctUploads < cfg.MinUploads {
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
-			"classified %d upload(s), below -min-uploads %d; if this workspace does contain uploads, the files array has stopped arriving",
-			verdict.ClassifiedUploads, cfg.MinUploads))
+			"classified %d distinct upload(s), below -min-uploads %d; if this workspace does contain uploads, the files array has stopped arriving",
+			verdict.DistinctUploads, cfg.MinUploads))
 	}
 	if cfg.StrictUncountable && verdict.UncountableShapes > 0 {
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
@@ -425,15 +456,25 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 	return verdict
 }
 
-// cleanOperatorNote strips control characters from a free-text operator note so it
-// cannot corrupt the JSON report's readability.
+// cleanOperatorNote strips control characters from free text so it cannot corrupt the
+// JSON report's readability. Used on operator notes and on strings copied out of Slack
+// response bodies, which is why it also bounds the length; see maxSlackReasonBytes.
 func cleanOperatorNote(note string) string {
-	return strings.Map(func(r rune) rune {
+	cleaned := strings.Map(func(r rune) rune {
 		if r < ' ' || r == 0x7f {
 			return -1
 		}
 		return r
 	}, strings.TrimSpace(note))
+	if len(cleaned) <= maxSlackReasonBytes {
+		return cleaned
+	}
+	// Trimmed on a rune boundary so the report stays valid UTF-8.
+	truncated := cleaned[:maxSlackReasonBytes]
+	for truncated != "" && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated + "…(truncated)"
 }
 
 func validateConversationID(id string) error {
@@ -472,11 +513,10 @@ type conversationRef struct {
 // would be zero for a reason that has nothing to do with the upload contract.
 func resolveConversations(ctx context.Context, client *slackClient, cfg *scanConfig) ([]conversationRef, error) {
 	if len(cfg.Channels) > 0 {
+		// No cap applied here: validateBounds refuses a -channels list longer than
+		// -max-conversations rather than letting this quietly measure a subset.
 		refs := make([]conversationRef, 0, len(cfg.Channels))
 		for _, id := range cfg.Channels {
-			if len(refs) >= cfg.MaxConversations {
-				break
-			}
 			refs = append(refs, conversationRef{ID: id})
 		}
 		return refs, nil
@@ -559,18 +599,18 @@ func conversationKind(isIM, isMPIM, isPrivate bool) string {
 //
 // The return values are named so the deferred delta below lands in what the caller
 // receives; assigning a local after `return record` would be copied over and lost.
-func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig, conversation conversationRef, result *scanResult) (record conversationResult, historyRead bool) {
+func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig, conversation conversationRef, result *scanResult, ledger map[string]struct{}) (record conversationResult, historyRead bool) {
 	record = conversationResult{ID: conversation.ID, Kind: conversation.Kind}
-	before := result.History.ClassifiedUploads + result.Replies.ClassifiedUploads
+	before := len(ledger)
 	// Whatever pages did come back before an error stay in the tally, so the delta is
 	// taken on every path out. A conversation that failed halfway measured half a
 	// conversation; discarding that would understate the workspace, and the error is
 	// recorded beside it either way.
 	defer func() {
-		record.ClassifiedUploads = result.History.ClassifiedUploads + result.Replies.ClassifiedUploads - before
+		record.ClassifiedUploads = len(ledger) - before
 	}()
 
-	threads, err := readHistory(ctx, client, cfg, conversation.ID, &result.History, &record)
+	threads, err := readHistory(ctx, client, cfg, conversation.ID, &result.History, &record, ledger)
 	if err != nil {
 		record.Error = err.Error()
 		return record, false
@@ -579,10 +619,14 @@ func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig,
 	result.History.Conversations++
 
 	if !cfg.SkipReplies && cfg.MaxThreads > 0 {
-		record.ThreadsSampled, err = readThreads(ctx, client, cfg, conversation.ID, threads, &result.Replies, &record)
+		record.ThreadsSampled, err = readThreads(ctx, client, cfg, conversation.ID, threads, &result.Replies, &record, ledger)
 		if err != nil {
 			record.Error = err.Error()
-		} else if record.ThreadsSampled > 0 {
+		}
+		// Counted on both paths: a sample that failed on its third thread still measured
+		// two, and their messages are already in the tally. Skipping the increment would
+		// report replies.messages > 0 beside replies.conversations = 0.
+		if record.ThreadsSampled > 0 {
 			result.Replies.Conversations++
 		}
 	}
@@ -591,7 +635,7 @@ func scanConversation(ctx context.Context, client *slackClient, cfg *scanConfig,
 
 // readHistory tallies a conversation's history pages and returns the thread parents
 // worth sampling on the replies surface.
-func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, channelID string, tally *surfaceTally, record *conversationResult) ([]string, error) {
+func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, channelID string, tally *surfaceTally, record *conversationResult, ledger map[string]struct{}) ([]string, error) {
 	var threads []string
 	cursor := ""
 	for page := 0; page < cfg.MaxPages; page++ {
@@ -606,7 +650,7 @@ func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 			return nil, err
 		}
 		record.HistoryMessages += len(out.Messages)
-		tallyMessages(out.Messages, tally)
+		tallyMessages(channelID, out.Messages, tally, ledger)
 		threads = append(threads, threadParents(out.Messages, cfg.MaxThreads-len(threads))...)
 		cursor = strings.TrimSpace(out.Metadata.NextCursor)
 		if cursor == "" {
@@ -619,7 +663,7 @@ func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 // readThreads tallies the replies surface for the sampled threads. This is the half
 // the manual measurement never covered: production reads conversations.replies, and
 // "same message objects, same API family" was an assumption, not a reading.
-func readThreads(ctx context.Context, client *slackClient, cfg *scanConfig, channelID string, threads []string, tally *surfaceTally, record *conversationResult) (int, error) {
+func readThreads(ctx context.Context, client *slackClient, cfg *scanConfig, channelID string, threads []string, tally *surfaceTally, record *conversationResult, ledger map[string]struct{}) (int, error) {
 	sampled := 0
 	for _, threadTS := range threads {
 		params := url.Values{}
@@ -631,13 +675,17 @@ func readThreads(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 			return sampled, err
 		}
 		record.RepliesMessages += len(out.Messages)
-		tallyMessages(out.Messages, tally)
+		tallyMessages(channelID, out.Messages, tally, ledger)
 		sampled++
 	}
 	return sampled, nil
 }
 
-func tallyMessages(messages []json.RawMessage, tally *surfaceTally) {
+// tallyMessages records each message on its surface and, for the ones that classify as
+// uploads, in the cross-surface ledger. The ledger is keyed by channel and ts because the
+// same message legitimately appears on both surfaces, and only the per-surface tallies
+// should say so twice.
+func tallyMessages(channelID string, messages []json.RawMessage, tally *surfaceTally, ledger map[string]struct{}) {
 	for _, raw := range messages {
 		observation, err := observeMessage(raw)
 		if err != nil {
@@ -647,6 +695,9 @@ func tallyMessages(messages []json.RawMessage, tally *surfaceTally) {
 			continue
 		}
 		tally.add(observation)
+		if observation.classified && observation.ts != "" {
+			ledger[channelID+":"+observation.ts] = struct{}{}
+		}
 	}
 }
 
@@ -656,7 +707,9 @@ func threadParents(messages []json.RawMessage, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
-	parents := make([]string, 0, limit)
+	// Capped by the page as well as by the limit: -max-threads is operator-supplied,
+	// and sizing off it alone turns a fat-fingered value into a huge allocation per page.
+	parents := make([]string, 0, min(limit, len(messages)))
 	for _, raw := range messages {
 		var message struct {
 			TS         string `json:"ts"`
@@ -704,7 +757,13 @@ func checkExpectation(ctx context.Context, client *slackClient, ref messageRef) 
 		result.Error = err.Error()
 		return result
 	}
+	// Confirmed rather than assumed, the way the thread fallback below already does. This
+	// is the one check whose oracle is a human, so verdicting on the wrong message would
+	// be worse here than anywhere else in the command.
 	raw := out.Messages
+	if len(raw) > 0 && !messageHasTS(raw[0], ref.TS) {
+		raw = nil
+	}
 	if len(raw) == 0 {
 		// conversations.history does not return thread replies, and an upload posted
 		// into a thread is exactly the kind of message an operator picks for this flag.
@@ -731,8 +790,18 @@ func checkExpectation(ctx context.Context, client *slackClient, ref messageRef) 
 	return result
 }
 
+// messageHasTS reports whether a raw message carries exactly this ts.
+func messageHasTS(raw json.RawMessage, ts string) bool {
+	var message struct {
+		TS string `json:"ts"`
+	}
+	return json.Unmarshal(raw, &message) == nil && message.TS == ts
+}
+
 // fetchThreadMessage returns the single thread message whose ts matches ref, or an
-// empty slice when the thread does not contain it.
+// empty slice when the thread does not contain it. It reads one page: an upload named
+// past reply 200 of a long thread reports "message not found" rather than a verdict,
+// which the contract now words as unverifiable rather than as a classifier defect.
 func fetchThreadMessage(ctx context.Context, client *slackClient, ref messageRef) ([]json.RawMessage, error) {
 	params := url.Values{}
 	params.Set("channel", ref.Channel)
@@ -743,13 +812,7 @@ func fetchThreadMessage(ctx context.Context, client *slackClient, ref messageRef
 		return nil, err
 	}
 	for _, raw := range out.Messages {
-		var message struct {
-			TS string `json:"ts"`
-		}
-		if err := json.Unmarshal(raw, &message); err != nil {
-			continue
-		}
-		if message.TS == ref.TS {
+		if messageHasTS(raw, ref.TS) {
 			return []json.RawMessage{raw}, nil
 		}
 	}
@@ -843,6 +906,11 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 	}
 	if resp.StatusCode >= 300 {
 		drainSlackResponseBody(resp.Body)
+		// Location is carried for 3xx because redirects are surfaced rather than followed
+		// (see newSlackHTTPClient), and "returned HTTP 302" alone hides an SSO portal.
+		if location := cleanOperatorNote(resp.Header.Get("Location")); location != "" {
+			return 0, fmt.Errorf("%s returned HTTP %d redirecting to %s (not followed)", method, resp.StatusCode, location)
+		}
 		return 0, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSlackResponseBytes+1))
@@ -854,7 +922,11 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 		return 0, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return 0, fmt.Errorf("%s response JSON invalid", method)
+		// The status, content type and length are not user content, and without them an
+		// HTML SSO page from a corporate proxy is indistinguishable from a Slack outage.
+		// The body itself stays out: quoting it would be the obvious content leak.
+		return 0, fmt.Errorf("%s response is not JSON (HTTP %d, content-type %q, %d bytes)",
+			method, resp.StatusCode, cleanOperatorNote(resp.Header.Get("Content-Type")), len(raw))
 	}
 	return 0, slackStatusError(method, raw)
 }
