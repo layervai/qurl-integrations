@@ -38,6 +38,10 @@ type Client interface {
 	// Delete revokes the resource identified by id. Deletion is idempotent:
 	// a resource that is already gone is success, reported via AlreadyGone.
 	Delete(ctx context.Context, id string) (*DeleteResult, error)
+	// Me returns the identity behind the configured credential. Cheap by
+	// platform contract (no repository reads server-side), so login can
+	// validate keys with it and whoami can call it freely.
+	Me(ctx context.Context) (*Identity, error)
 }
 
 // PublishOptions carries the optional publish metadata.

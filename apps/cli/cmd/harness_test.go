@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -21,12 +24,56 @@ func rootCmd(version string) *cobra.Command {
 	return root
 }
 
-// testAPIKey is a shape-valid test credential for the harness environment.
-const testAPIKey = "lv_test_abcdefghij0123456789"
+// testAPIKey is a shape-valid test credential for the harness environment:
+// the pinned 51-character wire format (prefix + 43 URL-safe base-64 chars).
+const testAPIKey = "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+
+// testAPIKeyStored is a second shape-valid key, distinguishable from
+// testAPIKey, for asserting which credential source a command actually used.
+const testAPIKeyStored = "lv_test_storedstoredstoredstoredstoredstored0123456"
 
 // fixedNow is the harness clock: one day after the mock server's canned
 // created_at timestamps, so relative times render deterministically.
 var fixedNow = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
+
+// fakeKeyring is the harness's OS-keyring stand-in, injected so cmd tests
+// never touch a developer's real keyring. It obeys the CredentialStore
+// contract Chain keys on: an empty available keyring wraps ErrNoCredential,
+// an unavailable one errors any other way.
+type fakeKeyring struct {
+	key         string
+	unavailable bool
+}
+
+var errFakeKeyringDown = errors.New("no keyring daemon on this bus")
+
+func (f *fakeKeyring) Name() string { return "OS keyring" }
+func (f *fakeKeyring) Save(key string) error {
+	if f.unavailable {
+		return errFakeKeyringDown
+	}
+	f.key = key
+	return nil
+}
+func (f *fakeKeyring) Load() (string, error) {
+	if f.unavailable {
+		return "", errFakeKeyringDown
+	}
+	if f.key == "" {
+		return "", fmt.Errorf("%w: nothing stored", auth.ErrNoCredential)
+	}
+	return f.key, nil
+}
+func (f *fakeKeyring) Delete() (bool, error) {
+	if f.unavailable {
+		return false, errFakeKeyringDown
+	}
+	if f.key == "" {
+		return false, nil
+	}
+	f.key = ""
+	return true, nil
+}
 
 // runOpts configures one CLI invocation under test.
 type runOpts struct {
@@ -38,6 +85,10 @@ type runOpts struct {
 
 	configDir string
 	sleeps    *[]time.Duration
+	// keyring is the injected OS-keyring stand-in; nil means an empty,
+	// available fake. The file side of the chain is always the real file
+	// store rooted at configDir.
+	keyring *fakeKeyring
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -75,6 +126,11 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		ErrIsTTY: o.tty,
 	}
 
+	kr := o.keyring
+	if kr == nil {
+		kr = &fakeKeyring{}
+	}
+
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
 		g.lookupEnv = func(key string) (string, bool) {
 			v, ok := env[key]
@@ -83,6 +139,9 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		g.configDir = configDir
 		g.now = func() time.Time { return fixedNow }
 		g.newRequestID = func() string { return "cli-req-fixed" }
+		g.newCredentialStore = func(dir string, onFileRead func()) *auth.Chain {
+			return auth.NewChain(kr, auth.NewFileStore(dir), onFileRead)
+		}
 		if o.sleeps != nil {
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }
 		} else {

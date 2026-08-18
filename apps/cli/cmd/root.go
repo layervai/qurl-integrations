@@ -39,6 +39,9 @@ type globalOpts struct {
 	now          func() time.Time
 	sleep        func(time.Duration)
 	newRequestID func() string
+	// newCredentialStore builds the storage chain; tests inject a fake
+	// keyring so unit tests never touch a developer's real one.
+	newCredentialStore func(dir string, onFileRead func()) *auth.Chain
 
 	// Resolved in PersistentPreRunE.
 	resolved         bool
@@ -84,6 +87,9 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 	}
 	if opts.configDir == "" {
 		opts.configDir = config.DefaultDir()
+	}
+	if opts.newCredentialStore == nil {
+		opts.newCredentialStore = auth.NewStore
 	}
 
 	cmd := &cobra.Command{
@@ -237,18 +243,36 @@ func (o *globalOpts) errColor() bool {
 	return output.ResolveColor(output.ColorAuto, o.lookupEnv, o.streams.ErrIsTTY)
 }
 
+// credentialStore builds this invocation's storage chain, wired so any read
+// served from the file fallback warns (once) that the OS keyring is
+// unavailable and the key sits in a mode-0600 file.
+func (o *globalOpts) credentialStore() *auth.Chain {
+	return o.newCredentialStore(o.configDir, func() {
+		o.printer().Warnf("%s", msgKeyringUnavailable)
+	})
+}
+
 // newClient resolves the credential and builds the one API client. There is
 // deliberately no --api-key flag: argv leaks into shell history and process
 // lists, so the key comes from QURL_API_KEY (hermetic — the credential store
-// is bypassed entirely) or from the store `qurl login` manages.
+// is bypassed entirely) or from the store `qurl login` manages (the OS
+// keyring, falling back to the 0600 credential file where no keyring is
+// available).
 func (o *globalOpts) newClient() (qurlapi.Client, error) {
-	key, _, err := auth.Resolve(o.lookupEnv, auth.NewFileStore(o.configDir))
+	key, _, err := auth.Resolve(o.lookupEnv, o.credentialStore())
 	if err != nil {
 		return nil, err
 	}
 	if err := auth.ValidateKeyShape(key); err != nil {
 		return nil, err
 	}
+	return o.apiClient(key)
+}
+
+// apiClient builds the API client around one explicit key. login uses it
+// directly (the key it validates is the one just typed, never a stored one);
+// everything else goes through newClient.
+func (o *globalOpts) apiClient(key string) (qurlapi.Client, error) {
 	if warning := insecureEndpointWarning(o.resolvedEndpoint); warning != "" {
 		o.printer().Warnf("%s", warning)
 	}

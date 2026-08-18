@@ -134,3 +134,33 @@ func HandlerInsufficientScope403(t *testing.T) http.HandlerFunc {
 			"this key does not carry the scope this operation requires")
 	}
 }
+
+// HandlerAPIKeyInvalid401 answers as the platform does for a key it does not
+// recognize (revoked or never minted): 401 `api_key_invalid`.
+func HandlerAPIKeyInvalid401(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		WriteProblem(t, w, http.StatusUnauthorized, "api_key_invalid", "Unauthorized",
+			"the provided API key is not valid")
+	}
+}
+
+// HandlerAPIKeyExpired401 answers as the platform does for a key past its
+// expiry: 401 `api_key_expired`.
+func HandlerAPIKeyExpired401(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		WriteProblem(t, w, http.StatusUnauthorized, "api_key_expired", "Unauthorized",
+			"the provided API key has expired")
+	}
+}
+
+// HandlerAccountFrozen403 answers as the platform does when the account
+// behind an otherwise-valid key is frozen: 403 `account_frozen`.
+func HandlerAccountFrozen403(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		WriteProblem(t, w, http.StatusForbidden, "account_frozen", "Forbidden",
+			"this account is frozen")
+	}
+}

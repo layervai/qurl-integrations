@@ -7,12 +7,12 @@
 //  1. The QURL_API_KEY environment variable — hermetic mode. When set, the
 //     credential store is bypassed entirely: nothing is read from or written
 //     to disk, which is what CI jobs and containers want.
-//  2. The credential store. This build ships the plain-file fallback store;
-//     an OS-secure store backend lands in a later step behind the same
-//     CredentialStore interface.
+//  2. The credential store: the OS keyring first, with a mode-0600 file
+//     fallback used only where the keyring is unavailable. See Chain.
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -43,15 +43,20 @@ const (
 
 // CredentialStore persists the API key between runs. Implementations must
 // never write the key anywhere a config file could pick it up.
+//
+// Load error contract: an error wrapping ErrNoCredential means the backend
+// works but holds nothing; any other error means the backend itself is
+// unavailable or broken. Chain relies on that distinction to decide when the
+// file fallback may be consulted.
 type CredentialStore interface {
 	// Save stores the key, replacing any previous one.
 	Save(key string) error
 	// Load returns the stored key, or an error wrapping ErrNoCredential
 	// when nothing is stored.
 	Load() (string, error)
-	// Delete removes the stored key. Deleting when nothing is stored is not
-	// an error.
-	Delete() error
+	// Delete removes the stored key, reporting whether one was removed.
+	// Deleting when nothing is stored is not an error.
+	Delete() (removed bool, err error)
 	// Name describes the backend for user-facing messages (e.g. "file").
 	Name() string
 }
@@ -75,36 +80,82 @@ func Resolve(lookup func(string) (string, bool), store CredentialStore) (string,
 	return key, SourceStore, nil
 }
 
-// ValidateKeyShape checks that key is plausibly a qURL API key before it is
-// sent anywhere. The check is deliberately shallow — prefix plus a sane
-// remainder — because the service is the authority on real keys.
-// TODO(upstream-contract): qurl-service mints 51-character keys today
-// (lv_live_/lv_test_ + 43); the length floor here stays loose so a service-side
-// length change does not brick the CLI.
+// The pinned qURL API key wire format.
+//
+// TODO(upstream-contract): mirrors qurl-service's single canonical key
+// construction — internal/domain/apikey.go (APIKeyLivePrefix/APIKeyTestPrefix,
+// APIKeySecretBytes=32, APIKeySecretLength=51) and generateAPIKeySecret in
+// internal/service/apikey_service.go: prefix + 32 random bytes as unpadded
+// URL-safe base-64, i.e. 8 + 43 = 51 characters over [A-Za-z0-9_-] after the
+// prefix. If the service ever changes the mint format, update these in
+// lockstep.
+const (
+	keyPrefixLive = "lv_live_"
+	keyPrefixTest = "lv_test_"
+	// keySecretLength is the character count after the prefix.
+	keySecretLength = 43
+	// keyLength is the full wire length of a qURL API key.
+	keyLength = len(keyPrefixLive) + keySecretLength
+)
+
+// ValidateKeyShape checks that key has the exact shape of a qURL API key
+// before it is sent anywhere: a live or test prefix followed by 43 characters
+// of unpadded URL-safe base-64 alphabet. The service remains the authority on
+// whether the key is real; this gate only stops obvious mistakes (a pasted
+// fragment, the wrong secret entirely) from going on the wire.
 func ValidateKeyShape(key string) error {
-	rest, ok := strings.CutPrefix(key, "lv_live_")
+	rest, ok := strings.CutPrefix(key, keyPrefixLive)
 	if !ok {
-		rest, ok = strings.CutPrefix(key, "lv_test_")
+		rest, ok = strings.CutPrefix(key, keyPrefixTest)
 	}
 	if !ok {
 		return fmt.Errorf("%w: it should start with lv_live_ or lv_test_", ErrInvalidKey)
 	}
-	if len(rest) < 16 {
-		return fmt.Errorf("%w: it is too short", ErrInvalidKey)
+	if len(rest) != keySecretLength {
+		return fmt.Errorf("%w: a full key is %d characters, this value is %d", ErrInvalidKey, keyLength, len(key))
 	}
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]
 		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-		if !isAlpha && (c < '0' || c > '9') {
+		isDigit := c >= '0' && c <= '9'
+		if !isAlpha && !isDigit && c != '-' && c != '_' {
 			return fmt.Errorf("%w: it contains unexpected characters", ErrInvalidKey)
 		}
 	}
 	return nil
 }
 
+// The file fallback's on-disk contract is qurl-go's FileCredentials, so a key
+// saved by `qurl login` on a machine without an OS keyring is the same
+// credential the SDK (and the Connector installer) read — one credential per
+// machine, not one per tool.
+//
+// TODO(upstream-contract): mirrors qurl-go v0.5.3 qurl/client.go —
+// UserIssuerStatePath = ".config/qurl/token" (the per-user credential file
+// resolveCredentials reads) and the credentialState JSON document
+// {"bearer_token": ...} its FileCredentials provider decodes. The SDK's
+// readPrivateStateFile (qurl/private_state.go) refuses symlinks, non-regular
+// files, file modes wider than 0600, and group/other-writable parent
+// directories, which is why Save pins 0600/0700 below. If the SDK moves the
+// path or the document shape, update these in lockstep.
+const (
+	// credentialFileName is the file inside the CLI config directory; with
+	// the default directory (~/.config/qurl) the full path is exactly the
+	// SDK's UserIssuerStatePath.
+	credentialFileName = "token"
+)
+
+// credentialFile is qurl-go's credentialState document. Only bearer_token is
+// written by the CLI; authorization is read-tolerated so a file written by
+// another LayerV tool is diagnosed rather than misparsed.
+type credentialFile struct {
+	Authorization string `json:"authorization,omitempty"`
+	BearerToken   string `json:"bearer_token,omitempty"`
+}
+
 // fileStore is the plain-file fallback CredentialStore: one key in one file
-// with owner-only permissions. It exists so the CLI works everywhere before
-// the OS-secure backend lands, and remains the fallback after.
+// with owner-only permissions, in the exact place and shape qurl-go's
+// FileCredentials reads. It is used only where the OS keyring is unavailable.
 type fileStore struct {
 	path string
 }
@@ -113,18 +164,23 @@ type fileStore struct {
 // (normally the CLI config directory). The key is stored in a separate file,
 // never in config.yaml.
 func NewFileStore(dir string) CredentialStore {
-	return &fileStore{path: filepath.Join(dir, "credential")}
+	return &fileStore{path: filepath.Join(dir, credentialFileName)}
 }
 
 // Name identifies the backend in user-facing messages.
 func (s *fileStore) Name() string { return "file" }
 
-// Save writes the key with owner-only permissions.
+// Save writes the key as the SDK's credential document with owner-only
+// permissions (the SDK refuses anything wider on read).
 func (s *fileStore) Save(key string) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("create credential dir: %w", err)
 	}
-	return os.WriteFile(s.path, []byte(key+"\n"), 0o600)
+	doc, err := json.Marshal(credentialFile{BearerToken: key})
+	if err != nil {
+		return fmt.Errorf("encode credential file: %w", err)
+	}
+	return os.WriteFile(s.path, append(doc, '\n'), 0o600)
 }
 
 // Load reads the stored key; a missing or empty file is ErrNoCredential.
@@ -136,18 +192,33 @@ func (s *fileStore) Load() (string, error) {
 		}
 		return "", fmt.Errorf("read credential file: %w", err)
 	}
-	key := strings.TrimSpace(string(data))
-	if key == "" {
+	if strings.TrimSpace(string(data)) == "" {
 		return "", fmt.Errorf("%w: the credential file is empty", ErrNoCredential)
+	}
+	var doc credentialFile
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("%w: the credential file at %s is not in the expected format — run `qurl login` to rewrite it", ErrInvalidKey, s.path)
+	}
+	key := strings.TrimSpace(doc.BearerToken)
+	if key == "" {
+		if strings.TrimSpace(doc.Authorization) != "" {
+			// Another LayerV tool stored a raw authorization header here; the
+			// CLI manages API keys only. Refuse rather than misuse it.
+			return "", fmt.Errorf("%w: the credential file at %s does not hold a qURL API key — run `qurl login` to replace it", ErrInvalidKey, s.path)
+		}
+		return "", fmt.Errorf("%w: the credential file holds no key", ErrNoCredential)
 	}
 	return key, nil
 }
 
 // Delete removes the stored key; deleting nothing is a no-op.
-func (s *fileStore) Delete() error {
+func (s *fileStore) Delete() (bool, error) {
 	err := os.Remove(s.path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove credential file: %w", err)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove credential file: %w", err)
 	}
-	return nil
+	return true, nil
 }

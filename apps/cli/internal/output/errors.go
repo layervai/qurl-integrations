@@ -84,7 +84,9 @@ func apiErrorLines(p *Printer, head string, apiErr *qurlapi.Error) []string {
 // problem code (the platform's stable contract; titles and details are
 // prose), with status classes as the fallback. The "gone" family shares
 // exit code 5 but deliberately differs here: 404 stays ambiguous, while
-// the owner-visible revoked and retired states are told the truth.
+// the owner-visible revoked and retired states are told the truth. The 403
+// family splits the same way: account_frozen is an account-standing
+// condition, not a permissions problem, and says so.
 func errorHint(apiErr *qurlapi.Error) string {
 	switch {
 	case strings.EqualFold(apiErr.Code, "revoked"):
@@ -93,6 +95,12 @@ func errorHint(apiErr *qurlapi.Error) string {
 		return hintRetired
 	case strings.EqualFold(apiErr.Code, "insufficient_scope"):
 		return hintScope
+	case strings.EqualFold(apiErr.Code, "account_frozen"):
+		return hintFrozen
+	case strings.EqualFold(apiErr.Code, "api_key_expired"):
+		return hintExpired
+	case strings.EqualFold(apiErr.Code, "api_key_invalid"):
+		return hintKeyInvalid
 	case strings.EqualFold(apiErr.Code, "quota_exceeded"):
 		return hintQuotaExceeded
 	case apiErr.StatusCode == http.StatusUnauthorized:

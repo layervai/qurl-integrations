@@ -15,8 +15,6 @@ import (
 func TestStubsReturnCleanNotAvailableExit1(t *testing.T) {
 	cases := [][]string{
 		{"get", "aeh2" + strings.Repeat("a", 56)},
-		{"logout"},
-		{"whoami"},
 	}
 	for _, args := range cases {
 		t.Run(args[0], func(t *testing.T) {
@@ -29,19 +27,6 @@ func TestStubsReturnCleanNotAvailableExit1(t *testing.T) {
 				t.Errorf("expected the uniform stub message, got %q", res.stderr.String())
 			}
 		})
-	}
-}
-
-func TestLoginValidatesPipedKeyThenReportsStorageUnavailable(t *testing.T) {
-	res := runCLI(t, &runOpts{
-		args:  []string{"login"},
-		stdin: strings.NewReader(testAPIKey + "\n"),
-	})
-	if res.code != 1 {
-		t.Fatalf("exit = %d, want 1 (validated, storage not shipped); stderr: %s", res.code, res.stderr.String())
-	}
-	if !strings.Contains(res.stderr.String(), "QURL_API_KEY") {
-		t.Errorf("expected the interim remedy in the message, got %q", res.stderr.String())
 	}
 }
 
