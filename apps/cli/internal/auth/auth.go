@@ -87,19 +87,23 @@ func Resolve(lookup func(string) (string, bool), store CredentialStore) (string,
 // APIKeySecretBytes=32, APIKeySecretLength=51) and generateAPIKeySecret in
 // internal/service/apikey_service.go: prefix + 32 random bytes as unpadded
 // URL-safe base-64, i.e. 8 + 43 = 51 characters over [A-Za-z0-9_-] after the
-// prefix. If the service ever changes the mint format, update these in
-// lockstep.
+// prefix. The prefix and charset are pinned exactly; the length is a FLOOR
+// (today's mint, 43 after the prefix) rather than an exact match, so a
+// server-side move to longer keys cannot brick already-shipped CLIs while a
+// truncated paste is still caught. If the service ever changes the prefix,
+// charset, or shortens the mint, update these in lockstep.
 const (
 	keyPrefixLive = "lv_live_"
 	keyPrefixTest = "lv_test_"
-	// keySecretLength is the character count after the prefix.
+	// keySecretLength is today's minted character count after the prefix,
+	// enforced as a minimum.
 	keySecretLength = 43
-	// keyLength is the full wire length of a qURL API key.
+	// keyLength is today's full wire length of a qURL API key.
 	keyLength = len(keyPrefixLive) + keySecretLength
 )
 
-// ValidateKeyShape checks that key has the exact shape of a qURL API key
-// before it is sent anywhere: a live or test prefix followed by 43 characters
+// ValidateKeyShape checks that key has the shape of a qURL API key before it
+// is sent anywhere: a live or test prefix followed by at least 43 characters
 // of unpadded URL-safe base-64 alphabet. The service remains the authority on
 // whether the key is real; this gate only stops obvious mistakes (a pasted
 // fragment, the wrong secret entirely) from going on the wire.
@@ -111,8 +115,8 @@ func ValidateKeyShape(key string) error {
 	if !ok {
 		return fmt.Errorf("%w: it should start with lv_live_ or lv_test_", ErrInvalidKey)
 	}
-	if len(rest) != keySecretLength {
-		return fmt.Errorf("%w: a full key is %d characters, this value is %d", ErrInvalidKey, keyLength, len(key))
+	if len(rest) < keySecretLength {
+		return fmt.Errorf("%w: a full key is at least %d characters, this value is %d", ErrInvalidKey, keyLength, len(key))
 	}
 	for i := 0; i < len(rest); i++ {
 		c := rest[i]

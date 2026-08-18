@@ -75,10 +75,11 @@ func (s *keyringStore) Load() (string, error) {
 	return key, nil
 }
 
-// Delete removes the stored key. A keyring that is unavailable is reported as
-// an error so callers can decide whether that matters (logout treats it as
-// "not holding": a keyring this process cannot reach also could not have
-// served the credential in this environment).
+// Delete removes the stored key. Any failure is reported so callers can
+// classify it: Chain.RemoveAll swallows it only when the keyring is
+// unreachable (a keyring this process cannot reach also could not have
+// served the credential in this environment) and propagates it when a
+// reachable keyring genuinely failed to delete.
 func (s *keyringStore) Delete() (bool, error) {
 	if err := s.fns.del(s.service, keyringUser); err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {

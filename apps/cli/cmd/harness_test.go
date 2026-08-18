@@ -39,10 +39,12 @@ var fixedNow = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
 // fakeKeyring is the harness's OS-keyring stand-in, injected so cmd tests
 // never touch a developer's real keyring. It obeys the CredentialStore
 // contract Chain keys on: an empty available keyring wraps ErrNoCredential,
-// an unavailable one errors any other way.
+// an unavailable one errors any other way (reads included), and deleteErr
+// models a reachable keyring whose delete genuinely fails.
 type fakeKeyring struct {
 	key         string
 	unavailable bool
+	deleteErr   error
 }
 
 var errFakeKeyringDown = errors.New("no keyring daemon on this bus")
@@ -67,6 +69,9 @@ func (f *fakeKeyring) Load() (string, error) {
 func (f *fakeKeyring) Delete() (bool, error) {
 	if f.unavailable {
 		return false, errFakeKeyringDown
+	}
+	if f.deleteErr != nil {
+		return false, f.deleteErr
 	}
 	if f.key == "" {
 		return false, nil

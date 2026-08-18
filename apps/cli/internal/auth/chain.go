@@ -19,9 +19,12 @@ const (
 // keyring reports itself unavailable (no D-Bus session, locked or absent
 // keychain, unsupported platform) — a keyring that works but holds no key is
 // an authoritative "nothing stored", so a stale fallback file cannot shadow
-// it. Every read served from the file fallback triggers onFileRead once per
-// Chain (i.e. once per command invocation), which is how commands warn that
-// the key sits in a plain file.
+// it; serving that authoritative empty answer also reclaims any stale
+// fallback file (best-effort), so the on-disk state converges with what the
+// CLI reports instead of a dead key sitting in the file forever, invisible
+// to every read. Every read served from the file fallback triggers
+// onFileRead once per Chain (i.e. once per command invocation), which is how
+// commands warn that the key sits in a plain file.
 //
 // Chain implements CredentialStore, so auth.Resolve's hermetic contract is
 // unchanged: with QURL_API_KEY set, none of this is ever touched.
@@ -56,13 +59,14 @@ func (c *Chain) Save(key string) error {
 // tried first; any keyring failure falls back to the 0600 file. On a
 // successful keyring save the fallback file is removed so a previously
 // fallen-back key cannot linger on disk (and diverge from the keyring) after
-// the keyring becomes available again.
+// the keyring becomes available again. That cleanup is genuinely
+// best-effort: the key IS stored, and an available keyring shadows the file
+// on every read, so a stale file that cannot be removed right now must not
+// turn a successful login into a failure.
 func (c *Chain) SaveTo(key string) (Backend, error) {
 	keyringErr := c.keyring.Save(key)
 	if keyringErr == nil {
-		if _, err := c.file.Delete(); err != nil {
-			return BackendKeyring, err
-		}
+		_, _ = c.file.Delete()
 		return BackendKeyring, nil
 	}
 	if err := c.file.Save(key); err != nil {
@@ -85,7 +89,12 @@ func (c *Chain) LoadFrom() (string, Backend, error) {
 		return key, BackendKeyring, nil
 	}
 	if errors.Is(err, ErrNoCredential) {
-		// The keyring works and is empty: authoritative.
+		// The keyring works and is empty: authoritative — no key is
+		// configured. Reclaim any stale fallback file (best-effort) so the
+		// on-disk state converges with that answer; without this, a key
+		// stored while the keyring was down would sit in the file forever,
+		// invisible to every read yet reported as "no key configured".
+		_, _ = c.file.Delete()
 		return "", "", err
 	}
 	// The keyring is unavailable; the file fallback is in effect.
@@ -107,19 +116,41 @@ func (c *Chain) Delete() (bool, error) {
 }
 
 // RemoveAll removes the credential from every backend that holds one and
-// reports which ones did. An unavailable keyring counts as "not holding":
+// reports which ones did. An UNREACHABLE keyring counts as "not holding":
 // a keyring this process cannot reach also could not have served the
 // credential in this environment, and treating it as an error would make
-// logout fail on every machine that never had a keyring at all. The file
-// backend is always cleared regardless of what the keyring said.
+// logout fail on every machine that never had a keyring at all. A keyring
+// that IS reachable and still fails to delete is a different matter — the
+// key may genuinely remain stored, and reporting success (worse, "nothing
+// to remove") would be a lie — so that failure propagates, joined with any
+// file failure. Reachability is probed with a read, the one operation whose
+// error vocabulary the store contract pins (ErrNoCredential = reachable but
+// empty; anything else = unreachable). The file backend is always cleared
+// regardless of what the keyring said.
 func (c *Chain) RemoveAll() ([]Backend, error) {
 	var removed []Backend
-	if ok, err := c.keyring.Delete(); err == nil && ok {
+	var errs []error
+	kok, kerr := c.keyring.Delete()
+	if kok {
 		removed = append(removed, BackendKeyring)
+	} else if kerr != nil && c.keyringReachable() {
+		errs = append(errs, kerr)
 	}
-	ok, err := c.file.Delete()
-	if ok {
+	fok, ferr := c.file.Delete()
+	if fok {
 		removed = append(removed, BackendFile)
 	}
-	return removed, err
+	if ferr != nil {
+		errs = append(errs, ferr)
+	}
+	return removed, errors.Join(errs...)
+}
+
+// keyringReachable reports whether the keyring backend answers at all: a
+// successful read, or the contract's reachable-but-empty ErrNoCredential.
+// Only consulted to classify a failed delete, so the extra read stays off
+// the happy path.
+func (c *Chain) keyringReachable() bool {
+	_, err := c.keyring.Load()
+	return err == nil || errors.Is(err, ErrNoCredential)
 }

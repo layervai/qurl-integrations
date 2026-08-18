@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -128,6 +129,25 @@ func TestLogoutRemovesEveryBackend(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr.String(), "nothing to remove") {
 		t.Errorf("second logout must say nothing was stored, got %q", res.stderr.String())
+	}
+}
+
+// TestLogoutSurfacesReachableKeyringDeleteFailure pins the honesty contract:
+// when a reachable keyring genuinely fails to delete, logout must exit
+// non-zero and must not claim a clean logout — least of all "nothing to
+// remove" — because the key may still sit in the keyring.
+func TestLogoutSurfacesReachableKeyringDeleteFailure(t *testing.T) {
+	kr := &fakeKeyring{key: testAPIKeyStored, deleteErr: errors.New("the collection refused the deletion")}
+	res := runCLI(t, &runOpts{args: []string{"logout"}, env: map[string]string{}, keyring: kr})
+	if res.code == 0 {
+		t.Fatalf("exit = 0; a failed keyring delete must not report a clean logout (stderr: %s)", res.stderr.String())
+	}
+	mustEmptyStdout(t, res)
+	if strings.Contains(res.stderr.String(), "nothing to remove") {
+		t.Errorf("must not claim nothing was stored while the key remains, got %q", res.stderr.String())
+	}
+	if !strings.Contains(res.stderr.String(), "refused the deletion") {
+		t.Errorf("the underlying failure must be visible, got %q", res.stderr.String())
 	}
 }
 

@@ -130,11 +130,17 @@ func TestValidateKeyShape(t *testing.T) {
 			t.Errorf("%s: valid key rejected: %v", name, err)
 		}
 	}
+	// The length gate is a floor, not an exact match: a server-side move to
+	// longer keys must not brick this CLI, so longer-than-today's-mint
+	// values pass the local gate (the service stays the authority).
+	if err := ValidateKeyShape(testKeyStored + "xY7_-z"); err != nil {
+		t.Errorf("longer-than-today's-mint key rejected: %v", err)
+	}
 	for name, key := range map[string]string{
 		"wrong prefix":  "at_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL",
 		"no prefix":     "abcdefghij0123456789abcdef",
 		"too short":     "lv_live_abcdefghij0123456789",
-		"too long":      testKeyStored + "x",
+		"truncated":     testKeyStored[:keyLength-1],
 		"bad chars":     "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDE!!",
 		"padding chars": "lv_test_abcdefghijklmnopqrstuvwxyz0123456789ABCDE==",
 		"empty":         "",
@@ -254,12 +260,16 @@ func TestFileStoreDiagnosesForeignDocuments(t *testing.T) {
 	}
 }
 
-// fakeKeyring is the unit-test keyring backend. state selects behavior:
-// available (empty or holding a key) or unavailable (every call errors the
-// way a missing D-Bus session or locked keychain does).
+// fakeKeyring is the unit-test keyring backend. Three modes: available
+// (empty or holding a key), unavailable (every call errors the way a missing
+// D-Bus session or locked keychain does — reads included), and
+// available-but-failing (reads work; the named operation errors), which is
+// how a reachable backend that genuinely fails an operation looks.
 type fakeKeyring struct {
 	key         string
 	unavailable bool
+	saveErr     error // available, but Save fails
+	deleteErr   error // available, but Delete fails
 	saves       int
 }
 
@@ -269,6 +279,9 @@ func (f *fakeKeyring) Name() string { return wantKeyringName }
 func (f *fakeKeyring) Save(key string) error {
 	if f.unavailable {
 		return errKeyringDown
+	}
+	if f.saveErr != nil {
+		return f.saveErr
 	}
 	f.key = key
 	f.saves++
@@ -286,6 +299,9 @@ func (f *fakeKeyring) Load() (string, error) {
 func (f *fakeKeyring) Delete() (bool, error) {
 	if f.unavailable {
 		return false, errKeyringDown
+	}
+	if f.deleteErr != nil {
+		return false, f.deleteErr
 	}
 	if f.key == "" {
 		return false, nil
@@ -310,16 +326,34 @@ func TestChainLoadPrefersKeyring(t *testing.T) {
 	}
 }
 
-func TestChainEmptyKeyringIsAuthoritative(t *testing.T) {
-	fileProbe := &probeStore{key: testKeyStored}
-	chain := NewChain(&fakeKeyring{}, fileProbe, nil)
+// TestChainEmptyKeyringIsAuthoritativeAndReclaimsStaleFile pins two halves
+// of the authoritative-empty answer: a key sitting in the fallback file is
+// never served past an available-but-empty keyring, and that stale file is
+// reclaimed on the spot — otherwise it would sit on disk forever, invisible
+// to every read yet reported as "no key configured".
+func TestChainEmptyKeyringIsAuthoritativeAndReclaimsStaleFile(t *testing.T) {
+	dir := t.TempDir()
+	file := NewFileStore(dir)
+	if err := file.Save(testKeyStored); err != nil {
+		t.Fatal(err)
+	}
+	chain := NewChain(&fakeKeyring{}, file, func() {
+		t.Error("an authoritative empty answer must not fire the file-fallback warning")
+	})
 
 	_, _, err := chain.LoadFrom()
 	if !errors.Is(err, ErrNoCredential) {
-		t.Fatalf("err = %v, want ErrNoCredential", err)
+		t.Fatalf("err = %v, want ErrNoCredential (the stale file must not shadow the keyring)", err)
 	}
-	if fileProbe.touched {
-		t.Error("an available-but-empty keyring is authoritative; the file fallback must not be consulted")
+	if _, err := file.Load(); !errors.Is(err, ErrNoCredential) {
+		t.Errorf("stale fallback file must be reclaimed, Load = %v", err)
+	}
+
+	// The reclamation is best-effort: a file backend that fails its delete
+	// does not change the authoritative answer.
+	failing := NewChain(&fakeKeyring{}, &fakeKeyring{key: testKeyStored, deleteErr: errors.New("read-only volume")}, nil)
+	if _, _, err := failing.LoadFrom(); !errors.Is(err, ErrNoCredential) {
+		t.Errorf("failing reclamation: err = %v, want ErrNoCredential", err)
 	}
 }
 
@@ -370,6 +404,24 @@ func TestChainSavePrefersKeyringAndClearsStaleFile(t *testing.T) {
 	}
 	if _, err := file.Load(); !errors.Is(err, ErrNoCredential) {
 		t.Errorf("stale fallback file must be cleared on a keyring save, Load = %v", err)
+	}
+}
+
+// TestChainSaveCleanupIsBestEffort pins finding-2's disposition: when the
+// keyring took the key, a stale-file cleanup failure must not turn the
+// successful login into an error — the key IS stored, and an available
+// keyring shadows the file on every read.
+func TestChainSaveCleanupIsBestEffort(t *testing.T) {
+	kr := &fakeKeyring{}
+	staleFile := &fakeKeyring{key: "lv_test_stalestalestalestalestalestalestalestale012", deleteErr: errors.New("read-only volume")}
+	chain := NewChain(kr, staleFile, nil)
+
+	backend, err := chain.SaveTo(testKeyStored)
+	if err != nil {
+		t.Fatalf("SaveTo = %v; a failed stale-file cleanup must not fail the save", err)
+	}
+	if backend != BackendKeyring || kr.key != testKeyStored {
+		t.Errorf("backend=%q keyring=%q, want the keyring holding the key", backend, kr.key)
 	}
 }
 
@@ -443,6 +495,45 @@ func TestChainRemoveAllClearsEveryBackend(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != BackendFile {
 		t.Errorf("removed = %v, want just the file when the keyring is unavailable", removed)
+	}
+}
+
+// TestChainRemoveAllPropagatesReachableKeyringFailure pins finding-1's
+// disposition: an UNREACHABLE keyring stays "not holding" (covered above),
+// but a keyring that answers reads and still fails its delete may genuinely
+// retain the key — that failure must surface, never be papered over as a
+// clean logout. The file backend is still cleared, and a file failure joins
+// the keyring one.
+func TestChainRemoveAllPropagatesReachableKeyringFailure(t *testing.T) {
+	deleteRefused := errors.New("the collection refused the deletion")
+
+	dir := t.TempDir()
+	file := NewFileStore(dir)
+	if err := file.Save(testKeyStored); err != nil {
+		t.Fatal(err)
+	}
+	chain := NewChain(&fakeKeyring{key: testKeyStored, deleteErr: deleteRefused}, file, nil)
+
+	removed, err := chain.RemoveAll()
+	if !errors.Is(err, deleteRefused) {
+		t.Fatalf("err = %v, want the reachable keyring's delete failure propagated", err)
+	}
+	if len(removed) != 1 || removed[0] != BackendFile {
+		t.Errorf("removed = %v, want the file still cleared alongside the failure", removed)
+	}
+	if _, err := file.Load(); !errors.Is(err, ErrNoCredential) {
+		t.Error("file backend must be cleared even when the keyring delete fails")
+	}
+
+	// Both backends failing: both causes stay reachable through the join.
+	fileRefused := errors.New("credential file is on a read-only volume")
+	both := NewChain(
+		&fakeKeyring{key: testKeyStored, deleteErr: deleteRefused},
+		&fakeKeyring{key: testKeyStored, deleteErr: fileRefused},
+		nil,
+	)
+	if _, err := both.RemoveAll(); !errors.Is(err, deleteRefused) || !errors.Is(err, fileRefused) {
+		t.Errorf("joined err = %v, want both causes reachable", err)
 	}
 }
 
