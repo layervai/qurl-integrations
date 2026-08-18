@@ -91,6 +91,7 @@ func (h *Handler) handleExposeConnectorClick(w http.ResponseWriter, payload *int
 				"error", err,
 				"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
 				"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+				"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
 				"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
 			)
 			_ = h.postResponse(log, responseURL, ":warning: "+h.exposeOpenFailureMessage(err))
@@ -174,6 +175,7 @@ func (h *Handler) handleExposeURLClick(w http.ResponseWriter, payload *interacti
 				"error", err,
 				"slack_bot_token_not_configured", errors.Is(err, auth.ErrSlackBotTokenNotConfigured),
 				"slack_trigger_expired", errors.Is(err, ErrSlackTriggerExpired),
+				"slack_views_open_deadline_exceeded", errors.Is(err, context.DeadlineExceeded),
 				"slack_rate_limited", errors.Is(err, ErrSlackRateLimited),
 			)
 			_ = h.postResponse(log, responseURL, ":warning: "+h.exposeOpenFailureMessage(err))
