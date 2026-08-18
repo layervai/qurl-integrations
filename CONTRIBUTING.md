@@ -162,10 +162,12 @@ context. It is separate from the existing
 are produced by the same workflow file.
 
 The full required set is those nine aggregates plus `Workflow Contract`,
-`Validate GitHub Actions pins`, and the four `age-check / *` contexts —
-fifteen in all. **Required contexts match case-sensitively**, and a context
-that matches no job does not fail open: it pins the merge box at
-"Expected — Waiting for status to be reported" until an admin overrides it.
+`Validate GitHub Actions pins`, `age-check / Check GitHub Actions pin ages`,
+`age-check / check-docker-age`, `age-check / check-go-age`, and
+`age-check / check-pip-age` — fifteen in all. **Required contexts match
+case-sensitively**, and a context that matches no job does not fail open: it
+pins the merge box at "Expected — Waiting for status to be reported" until an
+admin overrides it.
 
 On 2026-08-14 the required list was six contexts — `slack / required`,
 `Validate GitHub Actions pins`, and the four `age-check / *`. An edit that
@@ -180,10 +182,10 @@ broken both.
 Two things made the mistake easy. `PATCH .../required_status_checks`
 *replaces* the `contexts` list rather than appending to it — only
 `POST .../required_status_checks/contexts` appends — so adding one check that
-way silently dropped the rest. And the context was required an hour and a
-quarter before #1092 merged the workflow that reports it, during which a
-misspelled context and a correct one are indistinguishable — both simply never
-report.
+way silently dropped the rest. And the requirement was added an hour and a
+quarter before #1092 merged the workflow behind it, so for that window nothing
+distinguished a typo from a workflow that had not landed yet: neither
+reports.
 
 When changing required contexts, send the complete desired set in one `PATCH`
 and spell each exactly as the check renders: a job's `name:` where it sets
