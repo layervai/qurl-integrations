@@ -119,10 +119,10 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 		// appended after the message, so an exact column would inline that usage text
 		// into the table and be rewritten by every new flag, for no added signal.
 		//
-		// slack-dm-smoke's TestRunDoesNotEchoTokenEnvName compares exactly on purpose,
-		// and that reasoning does not carry over here: what it defends against is a
-		// forged whole line, so a partial sanitizer truncating at the last newline
-		// would drop the trailing sentinel and still emit a plausible operator-facing
+		// TestRunDoesNotEchoTokenEnvName below compares exactly on purpose, and that
+		// reasoning does not carry over here: what it defends against is a forged
+		// whole line, so a partial sanitizer truncating at the last newline would
+		// drop the trailing sentinel and still emit a plausible operator-facing
 		// diagnostic that Contains accepts. These rows pin which diagnostic an
 		// operator gets, not that stderr is free of an injected one.
 		wantStderr string
