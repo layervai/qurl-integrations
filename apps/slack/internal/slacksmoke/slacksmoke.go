@@ -164,7 +164,8 @@ func DrainResponseBody(body io.Reader, limit int64) {
 }
 
 // IsEnvVarName reports whether name is a POSIX environment variable name: a leading
-// letter or underscore, then letters, digits or underscores.
+// letter or underscore, then letters, digits or underscores. The empty string is not
+// one.
 //
 // Commands validate -token-env with this rather than trusting it, because the flag
 // value is echoed back in the "not set" error an operator hits first, and an
