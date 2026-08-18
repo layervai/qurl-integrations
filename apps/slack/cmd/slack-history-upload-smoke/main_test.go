@@ -157,33 +157,49 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 // writeConfigValidationError rest on: -token-env is echoed back verbatim in the errors
 // an operator hits first, so parseFlags has to reject a name that is not a POSIX
 // environment variable before any of that echo can run.
-// TestRunRejectsBadInvocationBeforeCallingSlack covers a name of this shape, but
-// asserts only exit 2 and a non-empty stderr — which a forged diagnostic satisfies.
+// TestRunRejectsBadInvocationBeforeCallingSlack covers names of this shape, but asserts
+// only exit 2 and a non-empty stderr — which a forged diagnostic satisfies.
 func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 	t.Parallel()
 
-	const injected = "SMOKE\nSLACK_BOT_TOKEN is not set or is empty\nFORGED"
-	// The empty environment is what makes this exercise the echo rather than route
-	// around it: with the guard gone this name resolves to no token, and the
-	// resulting ErrMissingBotToken is the branch writeConfigValidationError prints
-	// the name into. That empty token is also what stops the run before any Slack
-	// call; the loopback base URL is here only so a regression in both checks at
-	// once still fails locally rather than reaching the real API.
-	code, stdout, stderr := runCLI(t, []string{
-		flagTokenEnv, injected, flagBaseURL, "https://127.0.0.1:1",
-	}, testEnv(""))
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
+	tests := []struct {
+		name     string
+		tokenEnv string
+	}{
+		// A whole forged diagnostic, middle line included. Spaces would get this
+		// rejected on their own, so it demonstrates the payload rather than isolating
+		// a rule.
+		{"forged diagnostic", "SMOKE\nSLACK_BOT_TOKEN is not set or is empty\nFORGED"},
+		// Valid POSIX apart from the ESC, so this row is the one that fails if the
+		// charset stops rejecting terminal escapes — the suppressions claim the value
+		// "cannot carry a control character", not merely that it cannot carry a
+		// newline, and the row above is too punctuated to notice.
+		{"terminal escape", "SMOKE\x1bFORGED"},
 	}
-	// Exact equality, not "FORGED" is absent: the forgery this guards against is the
-	// middle line, a plausible-looking "SLACK_BOT_TOKEN is not set or is empty". A
-	// partial sanitizer that truncated at the last newline would drop the trailing
-	// sentinel and still emit the forged operator-facing line.
-	if want := slacksmoke.ErrTokenEnvName.Error() + "\n"; stderr != want {
-		t.Errorf("stderr = %q, want exactly %q", stderr, want)
-	}
-	if stdout != "" {
-		t.Errorf("stdout = %q, want nothing written for an invocation error", stdout)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// testEnv answers only for testTokenEnv, so these names resolve to no
+			// token: with the guard gone the run lands in writeConfigValidationError's
+			// ErrMissingBotToken branch, the one that prints the name. The loopback
+			// base URL keeps even a compound regression off the real Slack API.
+			code, stdout, stderr := runCLI(t, []string{
+				flagTokenEnv, tt.tokenEnv, flagBaseURL, "https://127.0.0.1:1",
+			}, testEnv(""))
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
+			}
+			// Exact equality, not "FORGED" is absent: the forgery this guards against
+			// is the middle line, a plausible-looking "SLACK_BOT_TOKEN is not set or
+			// is empty". A partial sanitizer that truncated at the last newline would
+			// drop the trailing sentinel and still emit the forged operator-facing line.
+			if want := slacksmoke.ErrTokenEnvName.Error() + "\n"; stderr != want {
+				t.Errorf("stderr = %q, want exactly %q", stderr, want)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want nothing written for an invocation error", stdout)
+			}
+		})
 	}
 }
 
