@@ -819,3 +819,31 @@ func TestSlashCommandUninstallRetainsSlackBotToken(t *testing.T) {
 		t.Fatalf("uninstall reply missing confirmation: %q", resp[respFieldText])
 	}
 }
+
+// TestPurgeWorkspaceScopeControlsWorkspaceStateDelete exercises purgeWorkspace
+// directly on both scopes, rather than only reaching them through the lifecycle
+// and slash handlers. It is the narrowest statement of the invariant this fix
+// introduced: the scope, and nothing else, decides whether the bot token row is
+// deleted. The rest of the cascade runs either way.
+func TestPurgeWorkspaceScopeControlsWorkspaceStateDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		scope           purgeScope
+		wantStateDelete int
+	}{
+		{"full deletes the row", purgeScopeFull, 1},
+		{"disconnect retains the row", purgeScopeDisconnect, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, provider, _ := newLifecycleTestHandler(t)
+			if err := h.purgeWorkspace(context.Background(), slog.Default(), testAdminTeamID, fixedNow, tc.scope); err != nil {
+				t.Fatalf("purgeWorkspace(%v): %v", tc.scope, err)
+			}
+			if provider.deleteStateCalls != tc.wantStateDelete {
+				t.Fatalf("DeleteWorkspaceState calls = %d, want %d", provider.deleteStateCalls, tc.wantStateDelete)
+			}
+			// Both scopes still forget the non-install-scoped data.
+			assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
+		})
+	}
+}

@@ -376,14 +376,18 @@ type workspaceStateBeforeIdentityDeleter interface {
 	DeleteWorkspaceStateBeforeWithIdentity(ctx context.Context, workspaceID string, cutoff time.Time) (auth.DeletedWorkspaceStateIdentity, error)
 }
 
-// purgeWorkspace forgets every trace of a Slack workspace's bot data across the
-// per-workspace DynamoDB tables. It is the storage cascade behind both a Slack
-// lifecycle teardown (app_uninstalled / tokens_revoked) and the `/qurl uninstall`
-// command:
+// purgeWorkspace forgets a Slack workspace's bot data across the per-workspace
+// DynamoDB tables. It is the storage cascade behind both a Slack lifecycle
+// teardown (app_uninstalled / tokens_revoked) and the `/qurl uninstall` command.
+// How much it forgets depends on the scope: purgeScopeFull forgets every trace,
+// while purgeScopeDisconnect deliberately retains the workspace_state row so a
+// still-installed Slack app keeps the bot token only it can use (see purgeScope).
 //
 //   - workspace_state (auth provider): the encrypted Slack bot token + its data
 //     key, the encrypted qURL API key + its data key, and all install/setup
-//     metadata. Removed via the workspaceStateDeleter capability.
+//     metadata. Removed via the workspaceStateDeleter capability on
+//     purgeScopeFull ONLY; retained wholesale on purgeScopeDisconnect, where
+//     DeleteAPIKey has already stripped the qURL credential columns.
 //   - workspace_mappings (AdminStore): owner + admin set + agent toggle, plus
 //     TTL-backed synthetic slash-command rate-limit counters.
 //   - channel_policies (AdminStore): every channel's alias_bindings and
