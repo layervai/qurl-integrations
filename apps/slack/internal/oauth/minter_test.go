@@ -1320,3 +1320,45 @@ func TestHTTPAPIKeyMinterMintWorkspaceParseFailure(t *testing.T) {
 		t.Errorf("expected json.SyntaxError in chain, got %v", err)
 	}
 }
+
+// TestMintWorkspaceReplacementAPIKeyAcceptsEmptyOldKeyID locks the legacy-row
+// rotation at the unit boundary. This used to return an "empty oldKeyID" error,
+// which made --rotate unusable for exactly the rows that most needed it. The
+// idempotency key must still be header-safe and stable: it is what lets a
+// persist-failure retry recover the same replacement instead of spending
+// another key against the account's plan limit.
+func TestMintWorkspaceReplacementAPIKeyAcceptsEmptyOldKeyID(t *testing.T) {
+	var gotIdempotencyKey string
+	var gotScopes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIdempotencyKey = r.Header.Get("Idempotency-Key")
+		var body mintRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		gotScopes = body.Scopes
+		writeLegacyMintSuccess(t, w)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	minted, err := m.MintWorkspaceReplacementAPIKey(context.Background(), "tok", testTeamID, "")
+	if err != nil {
+		t.Fatalf("MintWorkspaceReplacementAPIKey with empty oldKeyID: %v", err)
+	}
+	if minted.APIKey != testAPIKey || minted.KeyID != testKeyID {
+		t.Errorf("unexpected fields: %+v", minted)
+	}
+	if want := replacementIdempotencyKey(testTeamID, ""); gotIdempotencyKey != want {
+		t.Errorf("Idempotency-Key = %q, want %q", gotIdempotencyKey, want)
+	}
+	// qurl-service rejects headers outside 32-256 chars; the constant prefix
+	// carries this even with an empty key id, but assert it rather than assume.
+	if len(gotIdempotencyKey) < 32 || len(gotIdempotencyKey) > 256 || strings.ContainsAny(gotIdempotencyKey, " \t\r\n") {
+		t.Errorf("Idempotency-Key = %q (len %d), want header-safe 32-256 chars", gotIdempotencyKey, len(gotIdempotencyKey))
+	}
+	// The whole reason a legacy row rotates is to pick up qurl:agent.
+	if strings.Join(gotScopes, ",") != strings.Join(apiKeyScopes(), ",") {
+		t.Errorf("scopes = %v, want %v", gotScopes, apiKeyScopes())
+	}
+}
