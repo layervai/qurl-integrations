@@ -25,6 +25,14 @@
 // there is nothing for CI to run it against. Exit 0 means the contract still holds, 1
 // means it does not, 2 means the invocation was wrong.
 //
+// The token-handling helpers below — normalizeSlackBaseURL, isLoopbackHost,
+// cleanSlackToken, containsHTTPHeaderControl, newSlackHTTPClient — are byte-identical
+// copies of slack-dm-smoke's. Two package main binaries cannot share unexported code,
+// and dupl runs per package, so nothing in CI can see them drift. They are the half of
+// both commands that keeps a bearer token from reaching a plaintext or attacker-named
+// host, so FIX BOTH COPIES or hoist them to a shared internal package; they have already
+// diverged once, when this command grew isEnvVarName and the sibling did not.
+//
 // Read-only. Every call is a GET against conversations.list, conversations.history and
 // conversations.replies, and nothing is posted.
 //

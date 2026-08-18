@@ -472,6 +472,13 @@ truncates — which reports as a budget failure and suppresses the upload check 
 producing a wrong verdict. A single `429` is retried once after Slack's `Retry-After`, up
 to 30 seconds; anything longer is reported rather than waited out.
 
+Note the asymmetry in how a rate limit lands. One hit while reading a conversation is
+recorded against that conversation and the scan carries on, but one on
+`conversations.list` ends the run: discovery has to succeed before there is anything to
+measure, and a partial conversation list would produce a report that looks complete while
+describing a sample nobody chose. On a busy workspace, either re-run or name the
+conversations yourself with `-channels`, which skips discovery entirely.
+
 Record the result in the PR or issue using this shape. If the numbers disagree with the
 ones in `SlackMessageHasUpload`'s comment, update that comment in the same change — a
 stale measurement is worse than none, because the next reader will trust it.
