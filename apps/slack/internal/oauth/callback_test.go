@@ -2845,6 +2845,7 @@ func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
 func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
 	readLogs := captureDefaultSlogJSON(t)
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{email: testAdminEmail, sub: testAdminSub}
 	store.existingKey = testOldAPIKey
 	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
@@ -2972,6 +2973,49 @@ func TestCallbackLegacyRotationPersistFailureSuppressesOrphanEvent(t *testing.T)
 	for _, entry := range readLogs() {
 		if entry["event"] == rotateLegacyRowOrphanEvent {
 			t.Fatalf("orphan event must not fire when the persist failed — it would name the old key while the NEW one is the orphan: %#v", entry)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationRefusesWithoutVerifiedAccount pins the fail-closed
+// guard on the mint-without-revoke branch. Everything this path produces is
+// keyed on the signed-in account: the persisted provenance that unblocks a
+// later --repoint, and the orphan event's handle for finding the abandoned key.
+// Minting with an empty account would report success while leaving the row
+// permanently repoint-blocked and emitting an event no operator can act on.
+//
+// Upstream gates make this unreachable in production, but they live on two
+// other surfaces (the slash command's AdminStore requirement and
+// checkBindAllowed's empty-sub refusal) and this branch can see neither.
+func TestCallbackLegacyRotationRefusesWithoutVerifiedAccount(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	// No IDTokenVerifier override: the callback reaches this branch with no
+	// verified qURL account.
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 (no verified account), body=%s", rec.Code, rec.Body.String())
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 0 {
+		t.Errorf("replacement mint calls = %d, want 0 — nothing should be minted without provenance to record", replacementCalls)
+	}
+	store.mu.Lock()
+	setArgs := store.setArgs
+	store.mu.Unlock()
+	if setArgs != nil {
+		t.Errorf("nothing should be persisted without a verified account: %#v", setArgs)
+	}
+	for _, entry := range readLogs() {
+		if entry["event"] == rotateLegacyRowOrphanEvent {
+			t.Fatalf("orphan event must not fire when the rotation was refused: %#v", entry)
 		}
 	}
 }

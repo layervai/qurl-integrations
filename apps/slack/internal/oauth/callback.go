@@ -762,6 +762,38 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 	// each uninstall/setup cycle otherwise adds another live key against the
 	// account's plan limit. The orphan is logged for operator cleanup.
 	if keyID == "" && mode == SetupModeRotate {
+		if qurlAccountID == "" {
+			// Both things this branch produces are keyed on the account: the
+			// persisted provenance that unblocks a later --repoint, and the
+			// orphan event's handle for locating the abandoned key. Storing an
+			// empty account would leave the row repoint-blocked forever while
+			// reporting success, and would emit an orphan event no operator can
+			// act on — a silent, permanent degradation.
+			//
+			// Two upstream gates already make this unreachable (the slash
+			// surface rejects explicit modes when AdminStore is nil, and
+			// checkBindAllowed fails closed on an empty sub when it is wired),
+			// but that invariant spans two surfaces and this branch cannot see
+			// either. Fail closed rather than inherit it.
+			slog.Error("oauth/callback legacy rotation refused — no verified qURL account to record", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+				"team_id", teamID, "mode", string(mode))
+			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't confirm your qURL account",
+				"qURL™ could not confirm the signed-in account needed to rotate this workspace key, and nothing was changed. Run /qurl setup <email> with --rotate again. If it keeps failing, please contact your qURL administrator.")
+			return "", false
+		}
+		// Mirror the normal path's pre-mint validation so a malformed key
+		// surfaces as the dedicated page rather than a generic upstream mint
+		// failure. minter_test pins that the empty-oldKeyID form stays inside
+		// qurl-service's 32-256 header bounds, so this should never fire — but
+		// the two branches disagreeing on whether to check is the kind of
+		// asymmetry that rots.
+		if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, "")); err != nil {
+			slog.Error("oauth/callback legacy rotation replacement idempotency key invalid", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+				"error", err, "team_id", teamID)
+			renderOAuthErrorPage(w, http.StatusInternalServerError, "Couldn't rotate qURL key",
+				"Slack could not build a safe qURL™ retry key for this workspace. No key was changed. Contact LayerV support to rotate this workspace key.")
+			return "", false
+		}
 		keyPrefix, ok := mintReplacementAndPersist(w, cfg, accessToken, teamID, "", userID, qurlAccountID)
 		if !ok {
 			// Deliberately silent on failure. The event tells an operator to
