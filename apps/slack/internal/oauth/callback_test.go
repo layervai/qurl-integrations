@@ -2791,3 +2791,72 @@ func TestCallbackSkipsBindWhenAdminStoreNil(t *testing.T) {
 		t.Error("SetAPIKeyWithMetadata must still run in the sandbox path so the API-key surface is functional")
 	}
 }
+
+// TestCallbackLegacyRotationLogsOrphanEvent pins the operator's only handle on
+// the key this path deliberately abandons. Without a findable event the leaked
+// key is invisible until the account hits its API-key plan limit.
+func TestCallbackLegacyRotationLogsOrphanEvent(t *testing.T) {
+	readLogs := captureDefaultSlogJSON(t)
+	cfg, store, _ := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	var found map[string]any
+	for _, rec := range readLogs() {
+		if rec["event"] == rotateLegacyRowOrphanEvent {
+			found = rec
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a %q log record so operators can find the abandoned key", rotateLegacyRowOrphanEvent)
+	}
+	// team_id is what an operator matches the orphaned key against; the other
+	// fields tell them which account holds it and what to do.
+	for _, field := range []string{"team_id", "mode", "operator_action"} {
+		if v, ok := found[field]; !ok || v == "" {
+			t.Errorf("orphan log record missing %q: %#v", field, found)
+		}
+	}
+}
+
+// TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke covers the one new
+// failure mode this path introduces: it is net +1 key (nothing is revoked), so
+// an account already at its plan limit fails the mint. The page must not repeat
+// the normal rotation's "previous key was revoked" copy — on this path the old
+// key is still live, and telling the admin otherwise would send them away
+// believing a working credential is dead.
+func TestCallbackLegacyRotationAtKeyLimitDoesNotClaimRevoke(t *testing.T) {
+	cfg, store, minter := newCallbackCfgStoreMinter(t)
+	store.existingKey = testOldAPIKey
+	minter.replacementMintErr = ErrAPIKeyProvisioningQuotaReached
+	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (quota), body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// Match the misleading claims specifically. A bare "was revoked" substring
+	// would also hit the correct copy's "nothing was revoked".
+	for _, claim := range []string{
+		"previous workspace key was revoked",
+		"revoked the previous workspace key",
+	} {
+		if strings.Contains(body, claim) {
+			t.Errorf("page must not claim a revoke happened on the legacy path (%q): %s", claim, body)
+		}
+	}
+	if !strings.Contains(body, "still active") {
+		t.Errorf("page should tell the admin the previous key is still live: %s", body)
+	}
+}

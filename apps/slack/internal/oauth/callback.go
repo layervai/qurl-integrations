@@ -1041,13 +1041,22 @@ func mintReplacementAndPersist(w http.ResponseWriter, cfg Config, accessToken, t
 			"error", err,
 			"team_id", teamID,
 			"api_key_limit_reached", limitReached)
+		// A legacy row (empty oldKeyID) revoked nothing, so the copy must not
+		// claim it did — the previous key is still live, and telling an admin
+		// otherwise sends them away believing a working credential is dead.
+		predecessor := "The previous workspace key was revoked, but your"
+		genericPredecessor := "qURL™ revoked the previous workspace key, but a replacement could not be created."
+		if oldKeyID == "" {
+			predecessor = "This workspace's previous key could not be identified, so nothing was revoked and it is still active. Your"
+			genericPredecessor = "This workspace's previous key could not be identified, so nothing was revoked and it is still active. A replacement could not be created."
+		}
 		if limitReached {
 			renderOAuthErrorPage(w, http.StatusConflict, "qURL key limit reached",
-				"The previous workspace key was revoked, but your qURL™ account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with --rotate or --repoint again.")
+				predecessor+" qURL™ account is at its API-key limit, so a replacement couldn't be created. Revoke a key you no longer use, then run /qurl setup <email> with --rotate or --repoint again.")
 			return "", false
 		}
 		renderOAuthErrorPage(w, http.StatusBadGateway, "Couldn't rotate qURL key",
-			"qURL™ revoked the previous workspace key, but a replacement could not be created. Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
+			genericPredecessor+" Run /qurl setup <email> with --rotate or --repoint again in a few minutes. If it keeps failing, please contact your qURL administrator.")
 		return "", false
 	}
 

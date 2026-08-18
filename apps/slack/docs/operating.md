@@ -82,7 +82,11 @@ at the OAuth-callback bind layer.
     should revoke that key in qURL API-key management; until they do it stays
     live and counts against the account's API-key plan limit. This path runs at
     most once per workspace, because the rotation records the new `key_id` and
-    the next rotation takes the normal revoke-then-replace route. Refusing
+    the next rotation takes the normal revoke-then-replace route. Because
+    nothing is revoked, this rotation is net +1 key, so an account already at
+    its API-key limit fails the mint — the page says the previous key could not
+    be identified and is still active, rather than the normal rotation's
+    "previous key was revoked". Refusing
     these rows (the previous behavior) protected nothing — the only remaining
     route was `/qurl uninstall`, which abandons the same key and also discards
     the Slack bot token and workspace binding, so a customer following that

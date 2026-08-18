@@ -402,7 +402,9 @@ func bindingMintFromResponse(body []byte) (WorkspaceAPIKeyMint, error) {
 }
 
 // MintWorkspaceReplacementAPIKey mints a fresh workspace key for an explicit
-// owner-requested rotation after the previous key has already been revoked.
+// owner-requested rotation — either after the previous key has been revoked,
+// or, when oldKeyID is empty, for a row that predates stored key identity and
+// therefore has no key to revoke.
 // It deliberately does not hit the external binding create endpoint: a healthy
 // existing binding owns first-setup replay and returns already_exists here.
 // qURL request authorization only checks the API key and scopes, so this
