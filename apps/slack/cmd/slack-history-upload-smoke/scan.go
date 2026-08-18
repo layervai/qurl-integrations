@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
@@ -81,6 +82,9 @@ type scanConfig struct {
 	Scopes            string
 	HTTPClient        *http.Client
 	StartedAt         time.Time
+	// Sleep overrides the rate-limit wait. Nil means a real timer, which is what the CLI
+	// uses; tests inject one so a fake returning "ratelimited" costs no wall-clock time.
+	Sleep func(context.Context, time.Duration) error
 }
 
 // messageRef names one message an operator has looked at in Slack and knows carries
@@ -391,6 +395,7 @@ func runScan(ctx context.Context, cfg *scanConfig) (scanResult, error) {
 		baseURL:    cfg.BaseURL,
 		userAgent:  cfg.UserAgent,
 		httpClient: cfg.HTTPClient,
+		sleep:      cfg.Sleep,
 	}
 
 	conversations, err := resolveConversations(ctx, client, cfg)
@@ -541,15 +546,10 @@ func validateConversationID(id string) error {
 	return nil
 }
 
+// splitConversationIDs accepts commas or whitespace. strings.FieldsFunc never yields an
+// empty field, so no further trimming or filtering is needed.
 func splitConversationIDs(raw string) []string {
-	fields := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' })
-	ids := make([]string, 0, len(fields))
-	for _, field := range fields {
-		if trimmed := strings.TrimSpace(field); trimmed != "" {
-			ids = append(ids, trimmed)
-		}
-	}
-	return ids
+	return strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
 }
 
 // conversationRef is a conversation the scan will read.
@@ -953,7 +953,7 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		drainSlackResponseBody(resp.Body)
-		return parseRetryAfter(resp.Header.Get("Retry-After")), fmt.Errorf("%s: rate limited", method)
+		return retryAfterDelay(resp.Header.Get("Retry-After")), fmt.Errorf("%s: rate limited", method)
 	}
 	if resp.StatusCode >= 300 {
 		drainSlackResponseBody(resp.Body)
@@ -971,6 +971,13 @@ func (c *slackClient) getOnce(ctx context.Context, method string, params url.Val
 	if len(raw) > maxSlackResponseBytes {
 		drainSlackResponseBody(resp.Body)
 		return 0, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
+	}
+	if reason, limited := slackRateLimitedBody(raw); limited {
+		// A 200 whose body says ratelimited. slackWebAPIResponseFieldsError in
+		// slack_webapi.go treats this as a rate limit with a comment saying the branch is
+		// load-bearing; retrying only on the 429 STATUS would die where production backs
+		// off. See TODO(upstream-contract) on slackRateLimitedBody.
+		return retryAfterDelay(resp.Header.Get("Retry-After")), fmt.Errorf("%s: %s", method, reason)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		// The status, content type and length are not user content, and without them an
@@ -1002,7 +1009,26 @@ func slackStatusError(method string, raw []byte) error {
 	return fmt.Errorf("%s: %s", method, reason)
 }
 
-func parseRetryAfter(header string) time.Duration {
+// slackRateLimitedBody reports whether a 2xx response body is Slack's in-body rate
+// limit, and returns the reason for the error message.
+//
+// TODO(upstream-contract): mirrors the "ratelimited" code that
+// slackWebAPIResponseFieldsError maps to internal.NewSlackRateLimitError. If Slack
+// renames it, this scan resumes failing hard on a shape production still retries.
+func slackRateLimitedBody(raw []byte) (string, bool) {
+	var status slackResponseStatus
+	if err := json.Unmarshal(raw, &status); err != nil || status.OK {
+		return "", false
+	}
+	reason := cleanOperatorNote(status.Error)
+	return reason, reason == "ratelimited"
+}
+
+// retryAfterDelay reads Slack's Retry-After. Deliberately NOT named parseRetryAfter:
+// shared/client has a function by that name whose default is the opposite of this
+// one's — it returns 0 for a missing or garbled header, while a scan that cannot
+// read the header should still pause rather than hammer the endpoint.
+func retryAfterDelay(header string) time.Duration {
 	seconds, err := strconv.Atoi(strings.TrimSpace(header))
 	if err != nil || seconds < 0 {
 		return time.Second

@@ -143,6 +143,7 @@ func testScanConfig(srv *httptest.Server) *scanConfig {
 		MaxThreads:        defaultMaxThreads,
 		MinUploads:        1,
 		HTTPClient:        newSlackHTTPClient(testRequestTimeout),
+		Sleep:             func(context.Context, time.Duration) error { return nil },
 		StartedAt:         time.Unix(1723600000, 0).UTC(),
 	}
 }
@@ -832,7 +833,7 @@ func TestSlackClientRefusesAnUnreasonableRetryAfter(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfter(t *testing.T) {
+func TestRetryAfterDelay(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -848,8 +849,8 @@ func TestParseRetryAfter(t *testing.T) {
 		{"-3", time.Second},
 	}
 	for _, tt := range tests {
-		if got := parseRetryAfter(tt.header); got != tt.want {
-			t.Errorf("parseRetryAfter(%q) = %s, want %s", tt.header, got, tt.want)
+		if got := retryAfterDelay(tt.header); got != tt.want {
+			t.Errorf("retryAfterDelay(%q) = %s, want %s", tt.header, got, tt.want)
 		}
 	}
 }
@@ -984,8 +985,10 @@ func TestRunScanKeepsAHistoryReadWhenTheThreadSampleFails(t *testing.T) {
 		!strings.Contains(result.Conversations[0].Error, surfaceReplies) {
 		t.Errorf("conversation error = %q, want the replies failure named", result.Conversations[0].Error)
 	}
-	if got := fake.callCount(surfaceReplies); got != 1 {
-		t.Errorf("replies calls = %d, want the one sampled thread", got)
+	// Two calls, not one: "ratelimited" in a 200 body is retried once, the way
+	// production's seam backs off on the same shape.
+	if got := fake.callCount(surfaceReplies); got != 2 {
+		t.Errorf("replies calls = %d, want the sampled thread plus its one retry", got)
 	}
 }
 
@@ -1602,5 +1605,67 @@ func TestSlackStatusErrorHandlesAnUnreadableEnvelope(t *testing.T) {
 	if err := slackStatusError(surfaceHistory, []byte(`{"ok":false}`)); err == nil ||
 		!strings.Contains(err.Error(), "not_ok") {
 		t.Errorf("err = %v, want the not_ok fallback", err)
+	}
+}
+
+// TestSlackClientRetriesAnInBodyRateLimit pins the shape production's seam calls
+// load-bearing: Slack answers HTTP 200 with {"ok":false,"error":"ratelimited"}, and
+// slackWebAPIResponseFieldsError maps that to a rate-limit error rather than a terminal
+// one. Retrying only on the 429 STATUS made this scan die where production backs off.
+func TestSlackClientRetriesAnInBodyRateLimit(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var attempts int
+	srv, fake := newFakeSlack(t, nil)
+	fake.setHandler(surfaceHistory, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		attempts++
+		attempt := attempts
+		mu.Unlock()
+		if attempt == 1 {
+			w.Header().Set("Retry-After", "2")
+			// HTTP 200, not 429 — that is the whole point.
+			_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+			return
+		}
+		_, _ = w.Write([]byte(messagesBody(uploadMessage("100.1"))))
+	})
+
+	var slept time.Duration
+	client := &slackClient{
+		token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent,
+		httpClient: newSlackHTTPClient(testRequestTimeout),
+		sleep:      func(_ context.Context, d time.Duration) error { slept = d; return nil },
+	}
+	var out slackMessagesResponse
+	if err := client.get(context.Background(), surfaceHistory, nil, &out); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(out.Messages) != 1 {
+		t.Errorf("messages = %d, want the retry to have succeeded", len(out.Messages))
+	}
+	if slept != 2*time.Second {
+		t.Errorf("slept = %s, want the Retry-After from the 200 response", slept)
+	}
+}
+
+// TestSlackRateLimitedBodyOnlyMatchesTheRateLimit pins that no other ok:false reason is
+// treated as retryable — a missing scope must fail immediately, not twice.
+func TestSlackRateLimitedBodyOnlyMatchesTheRateLimit(t *testing.T) {
+	t.Parallel()
+
+	if reason, limited := slackRateLimitedBody([]byte(`{"ok":false,"error":"ratelimited"}`)); !limited || reason != "ratelimited" {
+		t.Errorf("slackRateLimitedBody = (%q, %v), want the rate limit recognized", reason, limited)
+	}
+	for _, body := range []string{
+		`{"ok":true}`,
+		`{"ok":false,"error":"missing_scope"}`,
+		`{"ok":false}`,
+		`not json`,
+	} {
+		if _, limited := slackRateLimitedBody([]byte(body)); limited {
+			t.Errorf("slackRateLimitedBody(%s) = true, want only the rate limit retried", body)
+		}
 	}
 }
