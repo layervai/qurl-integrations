@@ -301,6 +301,11 @@ func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 	if res.code != 0 {
 		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
 	}
+	// The document itself tells the story in text mode; the stderr note
+	// belongs to --quiet and JSON only, so any stderr here is double-noting.
+	if res.stderr.Len() != 0 {
+		t.Errorf("text mode must not also note the replay on stderr, got %q", res.stderr.String())
+	}
 	stdout := res.stdout.String()
 	if !strings.HasPrefix(stdout, "Already published\n") {
 		t.Errorf("headline must say the resource already existed, got %q", stdout)
