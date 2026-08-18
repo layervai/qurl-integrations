@@ -20,6 +20,9 @@ const (
 	flagReqTimeout  = "-request-timeout"
 	flagMaxPages    = "-max-pages"
 	testTimeoutSpan = "10s"
+	// A port nothing serves, so any invocation that wrongly reaches the network
+	// fails locally instead of calling the real Slack API.
+	testLoopbackURL = "https://127.0.0.1:1"
 )
 
 func testEnv(token string) func(string) string {
@@ -138,7 +141,7 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			args := append([]string{flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1"}, tt.args...)
+			args := append([]string{flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL}, tt.args...)
 			code, stdout, stderr := runCLI(t, args, testEnv(tt.env))
 			if code != 2 {
 				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
@@ -148,6 +151,56 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 			}
 			if strings.TrimSpace(stderr) == "" {
 				t.Error("an invocation error must say what was wrong")
+			}
+		})
+	}
+}
+
+// TestRunDoesNotEchoTokenEnvName pins the claim the two //nolint:gosec suppressions in
+// writeConfigValidationError rest on: -token-env is echoed back verbatim in the errors
+// an operator hits first, so parseFlags has to reject a name that is not a POSIX
+// environment variable before any of that echo can run.
+// TestRunRejectsBadInvocationBeforeCallingSlack covers names of this shape, but asserts
+// only exit 2 and a non-empty stderr — which a forged diagnostic satisfies.
+func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		tokenEnv string
+	}{
+		// A whole forged diagnostic, middle line included. Spaces would get this
+		// rejected on their own, so it demonstrates the payload rather than isolating
+		// a rule.
+		{"forged diagnostic", "SMOKE\nSLACK_BOT_TOKEN is not set or is empty\nFORGED"},
+		// Valid POSIX apart from the ESC, so this row is the one that fails if the
+		// charset stops rejecting terminal escapes — the suppressions claim the value
+		// "cannot carry a control character", not merely that it cannot carry a
+		// newline, and the row above is too punctuated to notice.
+		{"terminal escape", "SMOKE\x1bFORGED"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// testEnv answers only for testTokenEnv, so these names resolve to no
+			// token: with the guard gone the run lands in writeConfigValidationError's
+			// ErrMissingBotToken branch, the one that prints the name. The loopback
+			// base URL keeps even a compound regression off the real Slack API.
+			code, stdout, stderr := runCLI(t, []string{
+				flagTokenEnv, tt.tokenEnv, flagBaseURL, testLoopbackURL,
+			}, testEnv(""))
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", code, stdout, stderr)
+			}
+			// Exact equality, not "FORGED" is absent: the forgery this guards against
+			// is the middle line, a plausible-looking "SLACK_BOT_TOKEN is not set or
+			// is empty". A partial sanitizer that truncated at the last newline would
+			// drop the trailing sentinel and still emit the forged operator-facing line.
+			if want := slacksmoke.ErrTokenEnvName.Error() + "\n"; stderr != want {
+				t.Errorf("stderr = %q, want exactly %q", stderr, want)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want nothing written for an invocation error", stdout)
 			}
 		})
 	}
@@ -362,7 +415,7 @@ func TestRunRejectsAChannelListLongerThanTheCap(t *testing.T) {
 	t.Parallel()
 
 	code, stdout, stderr := runCLI(t, []string{
-		flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1",
+		flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL,
 		"-channels", "C0000000001,C0000000002,C0000000003", "-max-conversations", "2",
 	}, testEnv(testToken))
 	if code != 2 {
@@ -379,7 +432,7 @@ func TestRunBoundsMaxThreads(t *testing.T) {
 	t.Parallel()
 
 	code, _, stderr := runCLI(t, []string{
-		flagTokenEnv, testTokenEnv, flagBaseURL, "https://127.0.0.1:1",
+		flagTokenEnv, testTokenEnv, flagBaseURL, testLoopbackURL,
 		"-max-threads", "100000000",
 	}, testEnv(testToken))
 	if code != 2 {
