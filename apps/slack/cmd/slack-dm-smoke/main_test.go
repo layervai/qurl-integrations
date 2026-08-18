@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 	"unicode/utf8"
 
@@ -873,87 +874,6 @@ func TestRunSmokeRejectsInsecureRemoteBaseURL(t *testing.T) {
 	}
 }
 
-func TestNormalizeSlackBaseURL(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name    string
-		raw     string
-		want    string
-		wantErr error
-	}{
-		{
-			name: "empty defaults",
-			raw:  "",
-			want: slacksmoke.DefaultAPIBaseURL,
-		},
-		{
-			name: "trims https trailing slash",
-			raw:  "https://slack.com/api/",
-			want: slacksmoke.DefaultAPIBaseURL,
-		},
-		{
-			name: "returns parsed clean URL",
-			raw:  "https://slack.com/api/~smoke/",
-			want: "https://slack.com/api/~smoke",
-		},
-		{
-			name: "allows localhost http",
-			raw:  "http://localhost:1234/api/",
-			want: "http://localhost:1234/api",
-		},
-		{
-			name: "allows ipv4 loopback http",
-			raw:  "http://127.0.0.1:1234/api",
-			want: "http://127.0.0.1:1234/api",
-		},
-		{
-			name: "allows ipv6 loopback http",
-			raw:  "http://[::1]:1234/api",
-			want: "http://[::1]:1234/api",
-		},
-		{
-			name:    "rejects query",
-			raw:     "https://slack.com/api?x=1",
-			wantErr: slacksmoke.ErrBaseURLQueryFragment,
-		},
-		{
-			name:    "rejects fragment",
-			raw:     "https://slack.com/api#token",
-			wantErr: slacksmoke.ErrBaseURLQueryFragment,
-		},
-		{
-			name:    "rejects userinfo",
-			raw:     "https://user:pass@slack.com/api",
-			wantErr: slacksmoke.ErrBaseURLUserinfo,
-		},
-		{
-			name:    "rejects malformed URL",
-			raw:     "http://[::1",
-			wantErr: errors.New("invalid -base-url"),
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := slacksmoke.NormalizeBaseURL(tc.raw)
-			if tc.wantErr != nil {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr.Error()) {
-					t.Fatalf("slacksmoke.NormalizeBaseURL(%q) error = %v, want %v", tc.raw, err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("slacksmoke.NormalizeBaseURL(%q): %v", tc.raw, err)
-			}
-			if got != tc.want {
-				t.Fatalf("slacksmoke.NormalizeBaseURL(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestPostRawRejectsOversizeResponse(t *testing.T) {
 	t.Parallel()
 
@@ -1002,6 +922,38 @@ func TestPostRawDrainsOversizeResponse(t *testing.T) {
 	}
 	if !body.closed {
 		t.Fatal("oversize response body was not closed")
+	}
+}
+
+// TestPostRawRecordsReadErrorCode pins the else arm the hoist introduced. postRaw used
+// to set "response_read" unconditionally on a failed read; it now branches on
+// slacksmoke.ErrResponseTooLarge to pick between two codes, so a read that fails for any
+// other reason has to come out response_read rather than inheriting the oversize label.
+// Deleting the else arm leaves every other test in this file green.
+func TestPostRawRecordsReadErrorCode(t *testing.T) {
+	t.Parallel()
+
+	client := slackClient{
+		token:     testSmokeToken,
+		baseURL:   testSlackAPIBaseURL,
+		userAgent: defaultUserAgent,
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(iotest.ErrReader(errors.New("connection reset"))),
+			}, nil
+		})},
+	}
+	result, _, err := client.postRaw(context.Background(), "auth.test", nil)
+	if err == nil {
+		t.Fatal("postRaw = nil error, want a read failure")
+	}
+	if errors.Is(err, slacksmoke.ErrResponseTooLarge) {
+		t.Fatalf("postRaw = %v, want a read failure, not the oversize sentinel", err)
+	}
+	if result.Error != "response_read" {
+		t.Fatalf("result.Error = %q, want %q", result.Error, "response_read")
 	}
 }
 

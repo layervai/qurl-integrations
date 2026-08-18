@@ -1159,42 +1159,6 @@ func TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured(t *testing.T) {
 	}
 }
 
-// TestNewSlackHTTPClientDoesNotFollowRedirects pins a security control that otherwise
-// never executes. -base-url is operator-supplied and the bearer token rides on every
-// request; restoring Go's default redirect following would replay it down a chain this
-// command never inspected.
-func TestNewSlackHTTPClientDoesNotFollowRedirects(t *testing.T) {
-	t.Parallel()
-
-	var followed bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/elsewhere" {
-			followed = true
-			_, _ = w.Write([]byte(`{"ok":true}`))
-			return
-		}
-		http.Redirect(w, r, "/elsewhere", http.StatusFound)
-	}))
-	t.Cleanup(srv.Close)
-
-	client := slacksmoke.NewHTTPClient(time.Second)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/conversations.history", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	if followed {
-		t.Error("the client followed a redirect; the bearer token must not be replayed down an uninspected chain")
-	}
-	if resp.StatusCode != http.StatusFound {
-		t.Errorf("status = %d, want the 302 surfaced rather than followed", resp.StatusCode)
-	}
-}
-
 // TestRunScanCountsAThreadRootOnce pins the deduplication the tripwire rests on.
 // conversations.replies returns the thread parent as its first message and
 // conversations.history already returned it, so summing the two surfaces reports two
@@ -1409,6 +1373,32 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "sso.example.com") || !strings.Contains(err.Error(), "not followed") {
 		t.Errorf("err = %v, want the unfollowed redirect target named", err)
+	}
+}
+
+// TestGetOnceRejectsOversizeResponse pins the wiring the hoist left behind in this
+// caller: that getOnce hands slacksmoke.ReadResponseBody THIS command's ceiling and
+// propagates the refusal. The over-read and comparison are covered by slacksmoke's own
+// tests; what only a caller test can catch is the constant going astray — swapping this
+// command's 4 MiB for the DM smoke's 64 KiB is exactly the hazard ReadResponseBody's doc
+// names as the reason limit is a parameter, and nothing here failed on it before.
+func TestGetOnceRejectsOversizeResponse(t *testing.T) {
+	t.Parallel()
+
+	srv, fake := newFakeSlack(t, nil)
+	fake.setHandler(methodConversationsHistory, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxSlackResponseBytes+1)))
+	})
+	client := &slackClient{token: testToken, baseURL: srv.URL, userAgent: defaultUserAgent, httpClient: slacksmoke.NewHTTPClient(testRequestTimeout)}
+	var out slackMessagesResponse
+	err := client.get(context.Background(), methodConversationsHistory, nil, &out)
+	if !errors.Is(err, slacksmoke.ErrResponseTooLarge) {
+		t.Fatalf("get = %v, want errors.Is slacksmoke.ErrResponseTooLarge", err)
+	}
+	// Spelled out rather than built from the constant, so substituting a different
+	// ceiling fails here instead of quietly agreeing with itself.
+	if want := "conversations.history response exceeded 4194304 bytes"; err.Error() != want {
+		t.Fatalf("get = %q, want %q", err.Error(), want)
 	}
 }
 

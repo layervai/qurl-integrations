@@ -448,15 +448,14 @@ func (c slackClient) postRaw(ctx context.Context, method string, body any) (apiC
 		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
 		return result, out, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxSlackResponseBytes+1))
+	raw, err := slacksmoke.ReadResponseBody(method, resp.Body, maxSlackResponseBytes)
 	if err != nil {
-		result.Error = "response_read"
-		return result, out, fmt.Errorf("%s response read: %w", method, err)
-	}
-	if len(raw) > maxSlackResponseBytes {
-		slacksmoke.DrainResponseBody(resp.Body, maxSlackResponseBytes)
-		result.Error = apiErrorResponseTooLarge
-		return result, out, fmt.Errorf("%s response exceeded %d bytes", method, maxSlackResponseBytes)
+		if errors.Is(err, slacksmoke.ErrResponseTooLarge) {
+			result.Error = apiErrorResponseTooLarge
+		} else {
+			result.Error = "response_read"
+		}
+		return result, out, err
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		result.Error = "response_json"
