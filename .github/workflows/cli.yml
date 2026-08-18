@@ -219,6 +219,13 @@ jobs:
           fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gnome-keyring dbus
+          # gnome-keyring-daemon cannot create/unlock the default collection
+          # unless the keyrings directory already exists with owner-only
+          # permissions. This preparation (and the unlock in the test step)
+          # is zalando/go-keyring's own CI recipe — the upstream-proven shape.
+          mkdir -p "$HOME/.cache/"
+          mkdir -p "$HOME/.local/share/keyrings/"
+          chmod 700 -R "$HOME/.local/"
           # Arms the dbus-run-session wrapper in the test step below: the
           # daemon must be unlocked inside the same session the tests run in,
           # so the wrapper cannot live in this step.
@@ -228,7 +235,16 @@ jobs:
         shell: bash
         run: |
           if [ "${QURL_CLI_KEYRING_DBUS:-}" = "1" ]; then
-            dbus-run-session -- bash -c 'printf "" | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/...'
+            # The unlock password must be non-empty and piped to the daemon
+            # inside the same D-Bus session the tests run in; an empty
+            # password leaves the Secret Service refusing every store with
+            # "failed to unlock correct collection
+            # '/org/freedesktop/secrets/aliases/default'". The incantation is
+            # copied from zalando/go-keyring's own CI (a throwaway password
+            # for an ephemeral runner keyring, not a secret). -eo pipefail
+            # makes a failed unlock redden this step itself instead of
+            # surfacing as a confusing failure inside the tests.
+            dbus-run-session -- bash -c "set -eo pipefail; echo 'somecredstorepass' | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/..."
           else
             go test -count=1 ./apps/cli/...
           fi

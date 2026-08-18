@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +14,16 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 )
 
+// testRequestID is the harness's fixed X-Request-Id value.
+const testRequestID = "unit-req"
+
 func newTestClient(t *testing.T, srv *apitest.Server, sleeps *[]time.Duration) Client {
 	t.Helper()
 	cfg := Config{
 		BaseURL:      srv.URL,
 		APIKey:       "lv_test_apitestingvalue123456789",
 		Version:      "test",
-		NewRequestID: func() string { return "unit-req" },
+		NewRequestID: func() string { return testRequestID },
 	}
 	if sleeps != nil {
 		cfg.Sleep = func(d time.Duration) { *sleeps = append(*sleeps, d) }
@@ -137,6 +141,46 @@ func TestTransportRetries429ThenSucceeds(t *testing.T) {
 	}
 	if got := len(srv.Requests()); got != 3 {
 		t.Errorf("attempts = %d, want 3", got)
+	}
+}
+
+// TestTransportBackoffIsContextAware pins the round-4 disposition: a context
+// canceled during the 429 backoff returns promptly with the context error
+// instead of finishing the sleep. No Sleep is injected, so this exercises
+// the real timer+select path against a 5-second Retry-After.
+func TestTransportBackoffIsContextAware(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.ScriptRepeat(http.MethodGet, "/v1/resources", 3, apitest.Handler429(t, 5))
+
+	cfg := Config{
+		BaseURL:      srv.URL,
+		APIKey:       "lv_test_apitestingvalueapitestingvalue0123456789abc",
+		Version:      "test",
+		NewRequestID: func() string { return testRequestID },
+	}
+	client, err := New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err = client.List(ctx, ListOptions{})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("cancellation took %v; the backoff must return promptly, not wait out Retry-After", elapsed)
+	}
+	if got := len(srv.Requests()); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry after cancellation)", got)
 	}
 }
 
@@ -276,6 +320,131 @@ func TestProblemErrorParsesPinnedEnvelope(t *testing.T) {
 	limited := (&restReply{status: 429, header: retryHeader, body: []byte(`{}`)}).problem()
 	if !errors.As(limited, &e) || e.RetryAfter != 7 {
 		t.Errorf("retry-after: %+v", e)
+	}
+}
+
+// TestMeParsesIdentityEnvelope pins the GET /v1/me success contract: the
+// envelope decodes into the repo-owned Identity, key_prefix echoes the
+// presented credential, and the CLI headers ride the same shared transport.
+func TestMeParsesIdentityEnvelope(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newTestClient(t, srv, nil)
+
+	id, err := client.Me(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.OwnerID != apitest.MeOwnerID || id.AuthType != "api_key" {
+		t.Errorf("identity = %+v", id)
+	}
+	if id.Key == nil {
+		t.Fatal("api_key block must project into Key")
+	}
+	if id.Key.KeyID != apitest.MeKeyID || id.Key.Kind != "api_key" {
+		t.Errorf("key identity = %+v", id.Key)
+	}
+	if want := []string{"qurl:read", "qurl:resolve", "qurl:write"}; !slices.Equal(id.Key.Scopes, want) {
+		t.Errorf("scopes = %v, want the platform's alphabetical %v", id.Key.Scopes, want)
+	}
+	if id.Key.KeyPrefix != "lv_test_apit" {
+		t.Errorf("key_prefix = %q, want the presented key's first 12 chars", id.Key.KeyPrefix)
+	}
+	if id.Key.ExpiresAt != nil {
+		t.Errorf("non-expiring fixture must project a nil expiry, got %v", id.Key.ExpiresAt)
+	}
+
+	req := srv.Requests()[0]
+	if req.Method != http.MethodGet || req.Path != "/v1/me" {
+		t.Errorf("request = %s %s, want GET /v1/me", req.Method, req.Path)
+	}
+	if req.Header.Get("User-Agent") != "qurl-cli/test" || req.Header.Get("X-Request-Id") != testRequestID {
+		t.Errorf("identity call missing the CLI headers: %+v", req.Header)
+	}
+}
+
+// TestMeIdentityVariants covers the envelope's optional parts: an expiring
+// key carries its expiry; a response without the api_key block (non-key
+// authentication) projects a nil Key; a response missing owner_id is outside
+// the contract.
+func TestMeIdentityVariants(t *testing.T) {
+	srv := apitest.NewServer(t)
+	client := newTestClient(t, srv, nil)
+
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"owner_id":  "own_expiring",
+			"auth_type": "api_key",
+			"api_key": map[string]any{
+				"key_id":     "key_expiring0001",
+				"kind":       "api_key",
+				"scopes":     []string{"qurl:read"},
+				"expires_at": "2026-03-15T00:00:00Z",
+			},
+		}, nil)
+	})
+	id, err := client.Me(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Key == nil || id.Key.ExpiresAt == nil || !id.Key.ExpiresAt.Equal(time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("expiring key projection = %+v", id.Key)
+	}
+
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{
+			"owner_id":  "own_jwt",
+			"auth_type": "jwt",
+		}, nil)
+	})
+	id, err = client.Me(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.OwnerID != "own_jwt" || id.Key != nil {
+		t.Errorf("keyless identity = %+v", id)
+	}
+
+	srv.Script(http.MethodGet, "/v1/me", func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteEnvelope(t, w, http.StatusOK, map[string]any{"auth_type": "api_key"}, nil)
+	})
+	if _, err := client.Me(context.Background()); !errors.Is(err, qurl.ErrInvalidAPIResponse) {
+		t.Errorf("missing owner_id: err = %v, want ErrInvalidAPIResponse", err)
+	}
+}
+
+// TestMeFailureCodes pins each platform failure the login/whoami flows key
+// on: the typed Error carries the status and problem code for 401
+// api_key_invalid, 401 api_key_expired, 403 insufficient_scope, and 403
+// account_frozen.
+func TestMeFailureCodes(t *testing.T) {
+	cases := map[string]struct {
+		handler    http.HandlerFunc
+		wantStatus int
+		wantCode   string
+	}{
+		"invalid": {apitest.HandlerAPIKeyInvalid401(t), http.StatusUnauthorized, "api_key_invalid"},
+		"expired": {apitest.HandlerAPIKeyExpired401(t), http.StatusUnauthorized, "api_key_expired"},
+		"scope":   {apitest.HandlerInsufficientScope403(t), http.StatusForbidden, "insufficient_scope"},
+		"frozen":  {apitest.HandlerAccountFrozen403(t), http.StatusForbidden, "account_frozen"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.NewServer(t)
+			srv.Script(http.MethodGet, "/v1/me", tc.handler)
+			client := newTestClient(t, srv, nil)
+
+			_, err := client.Me(context.Background())
+			var apiErr *Error
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v, want the typed Error", err)
+			}
+			if apiErr.StatusCode != tc.wantStatus || apiErr.Code != tc.wantCode {
+				t.Errorf("got HTTP %d %q, want HTTP %d %q", apiErr.StatusCode, apiErr.Code, tc.wantStatus, tc.wantCode)
+			}
+			if apiErr.RequestID == "" {
+				t.Error("failure must carry the request id for support")
+			}
+		})
 	}
 }
 

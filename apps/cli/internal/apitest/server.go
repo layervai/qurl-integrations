@@ -127,6 +127,9 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/resources":
 		s.handlePublish(w, r)
 
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
+		s.handleMe(w, r)
+
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resolve"):
 		s.handleResolve(w, r)
 
@@ -183,6 +186,39 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"status":      "active",
 		"created_at":  "2026-03-01T00:00:00Z",
 	}, meta)
+}
+
+// Fixed identity fixtures for the default GET /v1/me answer, stable so
+// goldens can pin whoami/login renderings.
+const (
+	MeOwnerID = "own_cli_fixture"
+	MeKeyID   = "key_fixturecli01"
+)
+
+// handleMe answers the identity echo the way the platform does: entirely from
+// the presented credential. key_prefix mirrors the first 12 characters of the
+// bearer the client actually sent, so contract tests see exactly which key
+// authenticated. Scopes come back alphabetical (a platform contract), and
+// expires_at is omitted — the default fixture is a non-expiring key.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if bearer == "" || bearer == r.Header.Get("Authorization") {
+		WriteProblem(s.t, w, http.StatusUnauthorized, "unauthorized", "Unauthorized", "Authentication required")
+		return
+	}
+	apiKey := map[string]any{
+		"key_id": MeKeyID,
+		"kind":   "api_key",
+		"scopes": []string{"qurl:read", "qurl:resolve", "qurl:write"},
+	}
+	if len(bearer) >= 12 {
+		apiKey["key_prefix"] = bearer[:12]
+	}
+	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
+		"owner_id":  MeOwnerID,
+		"auth_type": "api_key",
+		"api_key":   apiKey,
+	}, nil)
 }
 
 // handleResolve enforces the pinned resolve bind rule — the body must be

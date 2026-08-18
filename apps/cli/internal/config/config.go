@@ -46,6 +46,39 @@ type Config struct {
 	Color    string `yaml:"color,omitempty"`
 }
 
+// Enum vocabularies for config-file values. These mirror the output
+// package's Format and color-mode constants (config cannot import output —
+// it sits below it); config_test pins the two vocabularies together so they
+// cannot drift.
+var (
+	validOutputs = []string{"text", "json"}
+	validColors  = []string{"auto", "always", "never"}
+)
+
+// validate rejects enum-valued settings a config file spelled wrongly. The
+// config layer is the only place that knows the value came from a FILE, so
+// this is what routes a config-file typo to the configuration exit code
+// (ErrConfigFile → 3) while the same typo on a flag or environment variable
+// stays a usage error (exit 2) at the resolution site.
+func (c *Config) validate(path string) error {
+	if err := validateEnum(path, "output", c.Output, validOutputs); err != nil {
+		return err
+	}
+	return validateEnum(path, "color", c.Color, validColors)
+}
+
+func validateEnum(path, setting, value string, valid []string) error {
+	if value == "" {
+		return nil
+	}
+	for _, v := range valid {
+		if value == v {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s: %s %q is not valid — use %s", ErrConfigFile, path, setting, value, strings.Join(valid, " or "))
+}
+
 var profileNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func validateProfileName(name string) error {
@@ -124,6 +157,9 @@ func loadFile(p string) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("%w: parse %s: %w", ErrConfigFile, p, err)
+	}
+	if err := cfg.validate(p); err != nil {
+		return nil, err
 	}
 	return &cfg, nil
 }

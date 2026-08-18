@@ -13,9 +13,10 @@ const (
 	// error for stubbed capabilities (exit code 1).
 	msgNotImplemented = "this isn't available in this build of the qURL CLI yet — it arrives in an upcoming release"
 
-	// msgLoginStorage explains the login stub: the command validates the key
-	// but cannot store it yet.
-	msgLoginStorage = "storing keys with `qurl login` isn't available in this build yet — export QURL_API_KEY instead"
+	// msgKeyringUnavailable is the file-fallback warning: emitted by login
+	// when the key had to be stored in the fallback file, and once per
+	// invocation by any command that reads the key from that file.
+	msgKeyringUnavailable = "OS keyring storage isn't available on this system; your qURL API key is kept in a file only your user can read (mode 0600)"
 
 	// msgVerifyMismatch is printed (stderr only) when a resolve response
 	// fails CRID verification; nothing is emitted on stdout and the exit
@@ -60,7 +61,7 @@ const (
 func customerMessages() []string {
 	return []string{
 		msgNotImplemented,
-		msgLoginStorage,
+		msgKeyringUnavailable,
 		msgVerifyMismatch,
 		msgVerifyMissing,
 		msgNeedsYes,

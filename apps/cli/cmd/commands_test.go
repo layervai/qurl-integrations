@@ -15,8 +15,6 @@ import (
 func TestStubsReturnCleanNotAvailableExit1(t *testing.T) {
 	cases := [][]string{
 		{"get", "aeh2" + strings.Repeat("a", 56)},
-		{"logout"},
-		{"whoami"},
 	}
 	for _, args := range cases {
 		t.Run(args[0], func(t *testing.T) {
@@ -29,19 +27,6 @@ func TestStubsReturnCleanNotAvailableExit1(t *testing.T) {
 				t.Errorf("expected the uniform stub message, got %q", res.stderr.String())
 			}
 		})
-	}
-}
-
-func TestLoginValidatesPipedKeyThenReportsStorageUnavailable(t *testing.T) {
-	res := runCLI(t, &runOpts{
-		args:  []string{"login"},
-		stdin: strings.NewReader(testAPIKey + "\n"),
-	})
-	if res.code != 1 {
-		t.Fatalf("exit = %d, want 1 (validated, storage not shipped); stderr: %s", res.code, res.stderr.String())
-	}
-	if !strings.Contains(res.stderr.String(), "QURL_API_KEY") {
-		t.Errorf("expected the interim remedy in the message, got %q", res.stderr.String())
 	}
 }
 
@@ -206,6 +191,58 @@ func TestMissingCredentialExitFour(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr.String(), "QURL_API_KEY") {
 		t.Errorf("expected the remedy hint, got %q", res.stderr.String())
+	}
+}
+
+// TestEnumSourceDecidesExitCode pins the round-4 disposition: the same
+// invalid enum value is a configuration error (exit 3) when a config FILE
+// says it, and a usage error (exit 2) when the flag or environment does —
+// the config layer knows the source, the resolution site does not.
+func TestEnumSourceDecidesExitCode(t *testing.T) {
+	fileCases := map[string]string{
+		"output": "output: yaml\n",
+		"color":  "color: sometimes\n",
+	}
+	for name, body := range fileCases {
+		t.Run("file "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			res := runCLI(t, &runOpts{args: []string{"list"}, configDir: dir})
+			if res.code != 3 {
+				t.Fatalf("exit = %d, want 3; stderr: %s", res.code, res.stderr.String())
+			}
+			if !strings.Contains(res.stderr.String(), "config.yaml") {
+				t.Errorf("the config-file error must name the file, got %q", res.stderr.String())
+			}
+		})
+	}
+
+	argCases := map[string][]string{
+		"flag output": {"-o", "yaml", "list"},
+		"flag color":  {"--color", "sometimes", "list"},
+	}
+	for name, args := range argCases {
+		t.Run(name, func(t *testing.T) {
+			res := runCLI(t, &runOpts{args: args})
+			if res.code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+			}
+		})
+	}
+
+	envCases := map[string]map[string]string{
+		"env output": {"QURL_API_KEY": testAPIKey, "QURL_OUTPUT": "yaml"},
+		"env color":  {"QURL_API_KEY": testAPIKey, "QURL_COLOR": "sometimes"},
+	}
+	for name, env := range envCases {
+		t.Run(name, func(t *testing.T) {
+			res := runCLI(t, &runOpts{args: []string{"list"}, env: env})
+			if res.code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr: %s", res.code, res.stderr.String())
+			}
+		})
 	}
 }
 

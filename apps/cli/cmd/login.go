@@ -14,10 +14,15 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 )
 
-// loginCmd validates a qURL API key and will store it once the secure
-// storage backend lands (a later step). The key is never accepted as a
-// command-line argument or flag: argv leaks into shell history and process
-// lists. It is read from a pipe or typed at a hidden prompt.
+// loginCmd validates a qURL API key against the platform and stores it. The
+// key is never accepted as a command-line argument or flag: argv leaks into
+// shell history and process lists. It is read from a pipe or typed at a
+// hidden prompt.
+//
+// Order matters and is pinned by tests: the key is validated first — shape
+// locally, then for real against the platform's identity endpoint — and
+// stored only after the platform accepted it. A mistyped key is rejected
+// loudly instead of being saved and breaking every later command.
 func loginCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -28,12 +33,16 @@ The key is read from standard input when piped, or typed at a hidden prompt
 — never passed as an argument, so it stays out of shell history. Keys look
 like lv_live_... (production) or lv_test_... (test).
 
+The key is checked against the qURL service first and stored only once the
+service confirms it. It goes into your OS keyring; on systems without one,
+it falls back to a file only your user can read, and the CLI says so.
+
 In scripts and CI, skip login entirely and set QURL_API_KEY; when that
 variable is set the CLI uses it and touches nothing on disk.`,
 		Example: `  qurl login
   op read op://team/qurl/key | qurl login`,
 		Args: noArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			key, err := readSecret(opts, "qURL API key (input hidden): ")
 			if err != nil {
 				return err
@@ -41,9 +50,24 @@ variable is set the CLI uses it and touches nothing on disk.`,
 			if err := auth.ValidateKeyShape(key); err != nil {
 				return err
 			}
-			// Storage arrives with the secure credential-store step; validate
-			// now, refuse loudly rather than silently dropping the key.
-			return exitcode.NotImplemented(msgLoginStorage)
+			client, err := opts.apiClient(key)
+			if err != nil {
+				return err
+			}
+			// Validate before anything touches storage: a key the platform
+			// rejects is never stored.
+			id, err := client.Me(cmd.Context())
+			if err != nil {
+				return err
+			}
+			backend, err := opts.credentialStore().SaveTo(key)
+			if err != nil {
+				return fmt.Errorf("save the key: %w", err)
+			}
+			if backend == auth.BackendFile {
+				opts.printer().Warnf("%s", msgKeyringUnavailable)
+			}
+			return opts.printer().Login(id, backend)
 		},
 	}
 	return cmd

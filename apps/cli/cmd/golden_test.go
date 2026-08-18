@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
@@ -20,6 +21,12 @@ type goldenCase struct {
 	env      func(srv *apitest.Server) map[string]string
 	variants []string
 	wantCode int
+	// stdin is piped input (login's key); empty means an empty pipe.
+	stdin string
+	// keyring builds the injected keyring stand-in per variant run (a fresh
+	// one each run, so a mutating command cannot bleed into the next
+	// variant); nil means the harness default (empty, available).
+	keyring func() *fakeKeyring
 	// stdoutGolden/stderrGolden select which streams are golden-compared;
 	// a stream not selected must be byte-empty.
 	stdoutGolden bool
@@ -127,6 +134,103 @@ func TestGoldens(t *testing.T) {
 			stderrGolden: true,
 		},
 		{
+			name:         "whoami",
+			args:         func(*apitest.Server) []string { return []string{"whoami"} },
+			variants:     goldenVariants(),
+			stdoutGolden: true,
+		},
+		{
+			name:         "login",
+			args:         func(*apitest.Server) []string { return []string{"login"} },
+			stdin:        testAPIKey + "\n",
+			variants:     []string{"tty", "plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "login",
+			args:         func(*apitest.Server) []string { return []string{"login"} },
+			stdin:        testAPIKey + "\n",
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// The keyring-unavailable save: the key lands in the credential
+			// file and the warning says so.
+			name:         "login_fallback",
+			args:         func(*apitest.Server) []string { return []string{"login"} },
+			stdin:        testAPIKey + "\n",
+			keyring:      func() *fakeKeyring { return &fakeKeyring{unavailable: true} },
+			variants:     []string{"plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "logout",
+			args:         func(*apitest.Server) []string { return []string{"logout"} },
+			keyring:      func() *fakeKeyring { return &fakeKeyring{key: testAPIKeyStored} },
+			variants:     []string{"tty", "plain"},
+			stderrGolden: true,
+		},
+		{
+			name:         "logout",
+			args:         func(*apitest.Server) []string { return []string{"logout"} },
+			keyring:      func() *fakeKeyring { return &fakeKeyring{key: testAPIKeyStored} },
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// Idempotent logout with nothing stored anywhere: exit 0, a note.
+			name:         "logout_none",
+			args:         func(*apitest.Server) []string { return []string{"logout"} },
+			variants:     []string{"plain"},
+			stderrGolden: true,
+		},
+		{
+			// login with a key the platform does not recognize: exit 4.
+			name: "error_login_invalid",
+			args: func(*apitest.Server) []string { return []string{"login"} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyInvalid401(t))
+			},
+			stdin:        testAPIKey + "\n",
+			variants:     []string{"plain"},
+			wantCode:     4,
+			stderrGolden: true,
+		},
+		{
+			// login with an expired key: exit 4 and the new-key remedy.
+			name: "error_login_expired",
+			args: func(*apitest.Server) []string { return []string{"login"} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAPIKeyExpired401(t))
+			},
+			stdin:        testAPIKey + "\n",
+			variants:     []string{"plain"},
+			wantCode:     4,
+			stderrGolden: true,
+		},
+		{
+			// A frozen account is an account-standing condition (exit 6 with
+			// the standing message), not a generic forbidden.
+			name: "error_frozen",
+			args: func(*apitest.Server) []string { return []string{"whoami"} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodGet, "/v1/me", apitest.HandlerAccountFrozen403(t))
+			},
+			variants:     []string{"plain"},
+			wantCode:     6,
+			stderrGolden: true,
+		},
+		{
+			name: "error_scope",
+			args: func(*apitest.Server) []string { return []string{"whoami"} },
+			prepare: func(srv *apitest.Server) {
+				srv.Script(http.MethodGet, "/v1/me", apitest.HandlerInsufficientScope403(t))
+			},
+			variants:     []string{"plain"},
+			wantCode:     6,
+			stderrGolden: true,
+		},
+		{
 			name: "error_ratelimited",
 			args: func(*apitest.Server) []string { return []string{"list"} },
 			prepare: func(srv *apitest.Server) {
@@ -155,6 +259,12 @@ func TestGoldens(t *testing.T) {
 					args: append([]string{"--endpoint", srv.URL}, args...),
 					env:  env,
 					tty:  variant == "tty",
+				}
+				if tc.stdin != "" {
+					o.stdin = strings.NewReader(tc.stdin)
+				}
+				if tc.keyring != nil {
+					o.keyring = tc.keyring()
 				}
 				if variant == "json" {
 					o.args = append(o.args, "-o", "json")

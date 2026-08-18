@@ -48,8 +48,19 @@ The CLI looks for the key in this order:
 
 1. `QURL_API_KEY` environment variable — recommended for scripts and CI.
    When set, nothing on disk is read or written.
-2. The credential store managed by `qurl login` (this build validates keys;
-   storing them arrives in an upcoming release).
+2. The key `qurl login` stored: in your OS keyring (Keychain on macOS,
+   Credential Manager on Windows, the freedesktop Secret Service on Linux),
+   or — only where no keyring is available — in `~/.config/qurl/token`, a
+   file readable by your user alone. Commands warn when the key is served
+   from that file. Other LayerV tools (the SDK, the Connector) read only
+   that file, never the keyring — so on keyring machines, give them the
+   key via `QURL_API_KEY` rather than expecting them to see `qurl login`'s.
+
+`qurl login` checks the key against the qURL service before storing it, so
+a mistyped key fails loudly instead of breaking every later command.
+`qurl logout` removes the stored key from every place it may sit, and
+`qurl whoami` shows which account and key identity the configured
+credential maps to.
 
 The API endpoint defaults to the production host `https://api.layerv.ai`.
 Override it with `--endpoint`, the `QURL_ENDPOINT` environment variable, or
@@ -65,8 +76,8 @@ a profile file (`~/.config/qurl/profiles/<name>.yaml`, selected with
 | `qurl get <CRID>` | Fetch what a CRID points to (arrives in an upcoming release) |
 | `qurl list` | List your published resources |
 | `qurl delete <CRID>` | Delete a published resource |
-| `qurl login` / `qurl logout` | Manage the stored API key (storage arrives in an upcoming release) |
-| `qurl whoami` | Show which account your key belongs to (arrives in an upcoming release) |
+| `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
+| `qurl whoami` | Show which account and key identity your credential maps to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
 | `qurl version` | Print version information |
 
