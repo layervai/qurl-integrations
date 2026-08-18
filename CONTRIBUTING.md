@@ -198,6 +198,13 @@ every context in it resolves to a job this repo actually defines — a job's
 `requiredWorkflowSpecs` and README.md exactly. A typo, a case slip, or a job
 rename that orphans a documented context fails `Workflow Contract` at PR time.
 
+The four `age-check / *` contexts are the one partial exception. Only their
+caller half — the `age-check` job in each `dependency-age-check-*.yml` — is
+defined here; the inner half is a job in the reusable workflow upstream. So a
+respelled *inner* name (`check-goo-age`) still resolves offline, and the count
+check only catches a caller going missing. Those four inner spellings are
+checked by the live diff below and nothing else.
+
 It cannot read the live setting. That needs `administration: read`, which
 `GITHUB_TOKEN` cannot be granted at all (the workflow `permissions:` block has
 no such key) and which no repo or org secret here carries; branch protection is
