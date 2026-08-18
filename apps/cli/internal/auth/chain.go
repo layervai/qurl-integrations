@@ -97,9 +97,17 @@ func (c *Chain) LoadFrom() (string, Backend, error) {
 		// read (e.g. logged in over SSH without D-Bus, later opened a
 		// desktop session whose fresh keyring is empty).
 		fkey, ferr := c.file.Load()
-		if ferr != nil || fkey == "" {
-			// Nothing stranded (or an unreadable/foreign file, which this
-			// branch never surfaced before either): the empty answer stands.
+		if ferr != nil {
+			if errors.Is(ferr, ErrNoCredential) {
+				// Nothing stranded: the empty answer stands.
+				return "", "", err
+			}
+			// A corrupt or foreign token file: surface the file store's
+			// crafted guidance rather than a misleading "no key configured"
+			// — this is exactly where a hand-edited file sits.
+			return "", "", ferr
+		}
+		if fkey == "" {
 			return "", "", err
 		}
 		if c.keyring.Save(fkey) == nil {

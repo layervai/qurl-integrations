@@ -52,7 +52,9 @@ The CLI looks for the key in this order:
    Credential Manager on Windows, the freedesktop Secret Service on Linux),
    or — only where no keyring is available — in `~/.config/qurl/token`, a
    file readable by your user alone. Commands warn when the key is served
-   from that file.
+   from that file. Other LayerV tools (the SDK, the Connector) read only
+   that file, never the keyring — so on keyring machines, give them the
+   key via `QURL_API_KEY` rather than expecting them to see `qurl login`'s.
 
 `qurl login` checks the key against the qURL service before storing it, so
 a mistyped key fails loudly instead of breaking every later command.

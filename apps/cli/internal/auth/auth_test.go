@@ -326,11 +326,12 @@ func TestChainLoadPrefersKeyring(t *testing.T) {
 	}
 }
 
-// TestChainEmptyKeyringIsAuthoritativeAndReclaimsStaleFile pins two halves
-// of the authoritative-empty answer: a key sitting in the fallback file is
-// never served past an available-but-empty keyring, and that stale file is
-// reclaimed on the spot — otherwise it would sit on disk forever, invisible
-// to every read yet reported as "no key configured".
+// TestChainEmptyKeyringPromotesStrandedFileKey pins the convergence contract
+// for an available-but-empty keyring: a key stranded in the fallback file is
+// promoted into the keyring (never silently discarded — that would log the
+// user out on a read), a keyring that refuses the write serves the file key
+// with the plain-file warning instead of erasing it, and with no stranded
+// file the empty answer stands.
 func TestChainEmptyKeyringPromotesStrandedFileKey(t *testing.T) {
 	dir := t.TempDir()
 	file := NewFileStore(dir)
@@ -375,6 +376,18 @@ func TestChainEmptyKeyringPromotesStrandedFileKey(t *testing.T) {
 	empty := NewChain(&fakeKeyring{}, NewFileStore(t.TempDir()), nil)
 	if _, _, err := empty.LoadFrom(); !errors.Is(err, ErrNoCredential) {
 		t.Errorf("no file: err = %v, want ErrNoCredential", err)
+	}
+
+	// A corrupt/foreign token file surfaces the file store's crafted
+	// guidance, not a misleading "no key configured" — this is exactly
+	// where a hand-edited file sits.
+	corruptDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(corruptDir, credentialFileName), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := NewChain(&fakeKeyring{}, NewFileStore(corruptDir), nil)
+	if _, _, err := corrupt.LoadFrom(); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("corrupt file: err = %v, want the file store's ErrInvalidKey guidance", err)
 	}
 }
 

@@ -208,7 +208,7 @@ func TestLogoutProjections(t *testing.T) {
 		if err := p.Logout(nil); err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.TrimSpace(out.String()); got != `{"removed": []}` && !strings.Contains(got, `"removed": []`) {
+		if got := out.String(); !strings.Contains(got, `"removed": []`) {
 			t.Errorf("empty removal = %s, want an explicit empty array", got)
 		}
 	})

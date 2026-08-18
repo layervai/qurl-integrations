@@ -130,9 +130,12 @@ func ValidateKeyShape(key string) error {
 }
 
 // The file fallback's on-disk contract is qurl-go's FileCredentials, so a key
-// saved by `qurl login` on a machine without an OS keyring is the same
-// credential the SDK (and the Connector installer) read — one credential per
-// machine, not one per tool.
+// saved by `qurl login` on a machine WITHOUT an OS keyring is the same
+// credential the SDK (and the Connector installer) read. That cross-tool
+// sharing is a property of the keyring-less fallback only: on keyring
+// machines the credential lives in the OS keyring, which file-only readers
+// never consult (and the chain removes the file precisely so the two can't
+// diverge) — SDK-based tools there take QURL_API_KEY instead.
 //
 // TODO(upstream-contract): mirrors qurl-go v0.5.3 qurl/client.go —
 // UserIssuerStatePath = ".config/qurl/token" (the per-user credential file
