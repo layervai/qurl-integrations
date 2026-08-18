@@ -331,29 +331,50 @@ func TestChainLoadPrefersKeyring(t *testing.T) {
 // never served past an available-but-empty keyring, and that stale file is
 // reclaimed on the spot — otherwise it would sit on disk forever, invisible
 // to every read yet reported as "no key configured".
-func TestChainEmptyKeyringIsAuthoritativeAndReclaimsStaleFile(t *testing.T) {
+func TestChainEmptyKeyringPromotesStrandedFileKey(t *testing.T) {
 	dir := t.TempDir()
 	file := NewFileStore(dir)
 	if err := file.Save(testKeyStored); err != nil {
 		t.Fatal(err)
 	}
-	chain := NewChain(&fakeKeyring{}, file, func() {
-		t.Error("an authoritative empty answer must not fire the file-fallback warning")
+	kr := &fakeKeyring{}
+	chain := NewChain(kr, file, func() {
+		t.Error("a successful promotion must not fire the file-fallback warning")
 	})
 
-	_, _, err := chain.LoadFrom()
-	if !errors.Is(err, ErrNoCredential) {
-		t.Fatalf("err = %v, want ErrNoCredential (the stale file must not shadow the keyring)", err)
+	key, backend, err := chain.LoadFrom()
+	if err != nil || key != testKeyStored || backend != BackendKeyring {
+		t.Fatalf("promotion: key=%q backend=%q err=%v, want the stranded key served from the keyring", key, backend, err)
+	}
+	if kr.key != testKeyStored {
+		t.Errorf("keyring must now hold the promoted key, has %q", kr.key)
 	}
 	if _, err := file.Load(); !errors.Is(err, ErrNoCredential) {
-		t.Errorf("stale fallback file must be reclaimed, Load = %v", err)
+		t.Errorf("promoted fallback file must be reclaimed, Load = %v", err)
 	}
 
-	// The reclamation is best-effort: a file backend that fails its delete
-	// does not change the authoritative answer.
-	failing := NewChain(&fakeKeyring{}, &fakeKeyring{key: testKeyStored, deleteErr: errors.New("read-only volume")}, nil)
-	if _, _, err := failing.LoadFrom(); !errors.Is(err, ErrNoCredential) {
-		t.Errorf("failing reclamation: err = %v, want ErrNoCredential", err)
+	// A keyring that answers reads but refuses the promotion write serves
+	// the file key with the usual plain-file warning — never erases it.
+	warns := 0
+	stubborn := NewChain(&fakeKeyring{saveErr: errors.New("collection is read-only")}, file, func() { warns++ })
+	if err := file.Save(testKeyStored); err != nil {
+		t.Fatal(err)
+	}
+	key, backend, err = stubborn.LoadFrom()
+	if err != nil || key != testKeyStored || backend != BackendFile {
+		t.Fatalf("refused promotion: key=%q backend=%q err=%v, want the file fallback", key, backend, err)
+	}
+	if warns != 1 {
+		t.Errorf("refused promotion must warn once, warned %d times", warns)
+	}
+	if got, err := file.Load(); err != nil || got != testKeyStored {
+		t.Errorf("refused promotion must leave the file intact, Load = %q, %v", got, err)
+	}
+
+	// No stranded file at all: the empty keyring's answer stands.
+	empty := NewChain(&fakeKeyring{}, NewFileStore(t.TempDir()), nil)
+	if _, _, err := empty.LoadFrom(); !errors.Is(err, ErrNoCredential) {
+		t.Errorf("no file: err = %v, want ErrNoCredential", err)
 	}
 }
 

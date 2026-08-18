@@ -89,13 +89,30 @@ func (c *Chain) LoadFrom() (string, Backend, error) {
 		return key, BackendKeyring, nil
 	}
 	if errors.Is(err, ErrNoCredential) {
-		// The keyring works and is empty: authoritative — no key is
-		// configured. Reclaim any stale fallback file (best-effort) so the
-		// on-disk state converges with that answer; without this, a key
-		// stored while the keyring was down would sit in the file forever,
-		// invisible to every read yet reported as "no key configured".
-		_, _ = c.file.Delete()
-		return "", "", err
+		// The keyring works and is empty. A fallback file can only exist
+		// here because login ran while the keyring was down — that key is a
+		// valid credential, not a shadow (there is nothing in the keyring to
+		// shadow), so PROMOTE it into the keyring rather than discarding it:
+		// the state converges without silently logging the user out on a
+		// read (e.g. logged in over SSH without D-Bus, later opened a
+		// desktop session whose fresh keyring is empty).
+		fkey, ferr := c.file.Load()
+		if ferr != nil || fkey == "" {
+			// Nothing stranded (or an unreadable/foreign file, which this
+			// branch never surfaced before either): the empty answer stands.
+			return "", "", err
+		}
+		if c.keyring.Save(fkey) == nil {
+			_, _ = c.file.Delete()
+			return fkey, BackendKeyring, nil
+		}
+		// The keyring answers reads but refused the write: serve the file
+		// key with the usual plain-file warning instead of erasing it.
+		if c.onFileRead != nil && !c.warned {
+			c.warned = true
+			c.onFileRead()
+		}
+		return fkey, BackendFile, nil
 	}
 	// The keyring is unavailable; the file fallback is in effect.
 	key, ferr := c.file.Load()
