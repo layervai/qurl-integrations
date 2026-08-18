@@ -1,7 +1,10 @@
 name: "cli: Nightly"
 
-# Deep CLI exercises too slow or too stateful for the per-PR gates in cli.yml:
-# fuzzing, an extended sandbox pass, and a full GoReleaser snapshot build.
+# Deep CLI exercises too slow or too stateful for the per-PR gates in cli.yml
+# — fuzzing, an extended sandbox pass, a full GoReleaser snapshot build — plus
+# one no PR can gate at all: a customer-path smoke of the latest SHIPPED
+# release (PRs validate the tree; the release smoke validates what
+# `brew install layervai/tap/qurl` serves customers today).
 #
 # Deliberately NO job keyed `required` here: internal/ciworkflows conscripts
 # any workflow with a required aggregate into requiredWorkflowSpecs, and a
@@ -130,3 +133,229 @@ jobs:
         with:
           version: "~> v2"
           args: release --snapshot --clean --skip=sign
+
+  # Customer-path smoke of the latest SHIPPED release — the surface neither a
+  # PR gate nor the snapshot build can cover, because it validates what is
+  # live for customers rather than what is in the tree: install exactly the
+  # way RELEASING.md tells customers to, then walk the signing chain end to
+  # end (tap → cask → quarantine postflight → binary contract → release
+  # assets → cosign signature → signed manifest → cask↔manifest pin tie).
+  #
+  # Deliberately NO checkout: everything this job consumes must come from the
+  # public tap and the public release page, or it is not the customer path.
+  # Each failure names the broken chain link in a `::error::` annotation.
+  #
+  # A failure here can mean customers are broken TODAY (dead tap, missing
+  # assets, bad signature) — the `cli: Nightly` impact arm in
+  # main-ci-notifications.yml is the alerting path and says so. One benign
+  # window: a release publishing at this exact moment can briefly serve a
+  # cask whose assets are still uploading (release-please.yml's recovery
+  # notes describe the same minutes-long window); a failure that vanishes on
+  # re-run during a release is that race, not a broken chain.
+  release-smoke:
+    name: cli-nightly / release smoke
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      # Runner hygiene, not part of the assertion surface: the tap is cloned
+      # fresh at HEAD either way; these just keep the job fast and stop brew
+      # from mutating unrelated runner state mid-smoke.
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Install from the public tap
+        shell: bash
+        run: |
+          # Tap add and install run separately so a failure names which link
+          # broke. The tap is public — no token, exactly like a customer.
+          if ! brew tap layervai/tap; then
+            echo "::error::release smoke: TAP link broken — 'brew tap layervai/tap' failed; github.com/layervai/homebrew-tap is unreachable or not a valid tap"
+            exit 1
+          fi
+          # The unqualified name resolves to the cask: the tap has no formula
+          # of this name (see homebrew_casks in .goreleaser.yml). Homebrew
+          # itself verifies the download against the cask's pinned sha256
+          # here; the verify step below ties that pin back to the signed
+          # manifest, which is what makes this install part of the chain.
+          if ! brew install layervai/tap/qurl; then
+            echo "::error::release smoke: CASK link broken — 'brew install layervai/tap/qurl' failed; the tap resolved but the cask did not install (invalid cask Ruby, dead download URL, or archive/sha mismatch)"
+            exit 1
+          fi
+
+      - name: Assert the cask postflight stripped quarantine
+        shell: bash
+        run: |
+          # Homebrew quarantines cask downloads and these binaries are
+          # unsigned, so the cask carries a post-install hook that strips the
+          # xattr (see homebrew_casks in .goreleaser.yml). Assert the
+          # guarantee itself instead of waiting for Gatekeeper: CI runners
+          # often run with assessment relaxed, so `qurl version` succeeding
+          # would not prove a customer's first run is unblocked — an absent
+          # quarantine xattr on the staged binary does.
+          if ! bin="$(command -v qurl)"; then
+            echo "::error::release smoke: CASK link broken — install succeeded but 'qurl' is not on PATH (cask binary stanza broken)"
+            exit 1
+          fi
+          real="$(readlink -f "$bin")"
+          if xattr -p com.apple.quarantine "$real" >/dev/null 2>&1; then
+            echo "::error::release smoke: QUARANTINE-POSTFLIGHT link broken — ${real} still carries com.apple.quarantine; the cask's xattr hook did not strip it, so a customer's first run is Gatekeeper-blocked"
+            exit 1
+          fi
+          echo "quarantine postflight OK: ${real} carries no com.apple.quarantine"
+
+      - name: Assert the version contract
+        id: version
+        shell: bash
+        run: |
+          # The output shape is a distribution contract (apps/cli/cmd/
+          # version.go): the Homebrew install test asserts on it, and the
+          # asset download below derives the release tag from it.
+          if ! out="$(qurl version)"; then
+            echo "::error::release smoke: BINARY link broken — 'qurl version' would not run; the quarantine step passed, so suspect the binary itself (bad build, wrong arch), not Gatekeeper"
+            exit 1
+          fi
+          echo "$out"
+          if ! grep -Eq '^qurl version [0-9]+\.[0-9]+\.[0-9]+ \(darwin/(arm64|amd64)\)$' <<<"$out"; then
+            echo "::error::release smoke: BINARY link broken — 'qurl version' printed '${out}', want 'qurl version <semver> (darwin/<arch>)'; 'dev' here means the release build lost its ldflags version stamp"
+            exit 1
+          fi
+          ver="$(awk '{print $3}' <<<"$out")"
+          # The brew-asserted half of the contract: the binary must report
+          # the version the cask says it installed.
+          cask_ver="$(brew info --cask --json=v2 layervai/tap/qurl | jq -r '.casks[0].version')"
+          if [ "$ver" != "$cask_ver" ]; then
+            echo "::error::release smoke: BINARY link broken — binary reports ${ver} but the cask installed ${cask_ver:-<unreadable>}; version stamping and the cask drifted"
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Exercise the release-machinery surfaces
+        shell: bash
+        run: |
+          # The two plumbing commands the release pipeline itself runs
+          # (.goreleaser.yml before-hooks): completions ship in the archive
+          # via scripts/cli-completions.sh (`qurl completion <shell>`), man
+          # pages via the hidden `qurl docs man`. If they rot in the shipped
+          # binary, the NEXT release's before-hooks break — catch it here.
+          # (No pipe into grep: `grep -q` exiting early would SIGPIPE qurl
+          # under pipefail and fail this step for the wrong reason.)
+          if ! comp="$(qurl completion bash)" || [ -z "$comp" ]; then
+            echo "::error::release smoke: RELEASE-MACHINERY link broken — 'qurl completion bash' failed or emitted nothing"
+            exit 1
+          fi
+          mandir="$(mktemp -d)"
+          if ! qurl docs man -d "$mandir"; then
+            echo "::error::release smoke: RELEASE-MACHINERY link broken — 'qurl docs man' failed; the release before-hook runs this exact command to generate the shipped man pages"
+            exit 1
+          fi
+          if [ ! -s "${mandir}/qurl.1" ]; then
+            echo "::error::release smoke: RELEASE-MACHINERY link broken — 'qurl docs man' ran but wrote no qurl.1"
+            exit 1
+          fi
+
+      # Same pinned installer action and explicit cosign version as
+      # release-please.yml's release-cli job: the verify below must run the
+      # tool family RELEASING.md prescribes (v3.x — v2 verification of
+      # v3-emitted bundles is not an exercised path). Update the SHA and
+      # cosign-release in lockstep with release-please.yml's copy.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+
+      - name: Download release assets for the installed version
+        id: assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # The exact assets RELEASING.md tells a customer to download, for
+          # the exact version the tap just installed (CLI tags are bare
+          # v<semver> — see release-please.yml).
+          tag="v${VERSION}"
+          case "$(uname -m)" in
+            arm64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *)
+              echo "::error::release smoke: unexpected runner architecture '$(uname -m)' — update this step's arch map"
+              exit 1
+              ;;
+          esac
+          archive="qurl_${VERSION}_darwin_${arch}.tar.gz"
+          dl="$(mktemp -d)"
+          if ! gh release download "$tag" \
+            --repo layervai/qurl-integrations \
+            --pattern checksums.txt \
+            --pattern checksums.txt.sigstore.json \
+            --pattern "$archive" \
+            --dir "$dl"; then
+            echo "::error::release smoke: RELEASE-ASSETS link broken — could not download from release ${tag}, the version the tap installed; the release or all three assets are missing"
+            exit 1
+          fi
+          # gh exits 0 when ANY pattern matched, so assert each file landed.
+          for f in checksums.txt checksums.txt.sigstore.json "$archive"; do
+            if [ ! -s "${dl}/${f}" ]; then
+              echo "::error::release smoke: RELEASE-ASSETS link broken — release ${tag} is missing asset ${f}"
+              exit 1
+            fi
+          done
+          {
+            echo "dir=$dl"
+            echo "archive=$archive"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the signing chain
+        shell: bash
+        env:
+          DL_DIR: ${{ steps.assets.outputs.dir }}
+          ARCHIVE: ${{ steps.assets.outputs.archive }}
+          TAG: ${{ steps.assets.outputs.tag }}
+        run: |
+          cd "$DL_DIR"
+
+          # 1. Signature: the EXACT consumer recipe from RELEASING.md
+          # ("Verify a release") — same identity and issuer pins, the same
+          # command release-cli re-runs as its post-sign self-test. If the
+          # recipe changes there, change it here in lockstep.
+          if ! cosign verify-blob \
+            --bundle checksums.txt.sigstore.json \
+            --certificate-identity 'https://github.com/layervai/qurl-integrations/.github/workflows/release-please.yml@refs/heads/main' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            checksums.txt; then
+            echo "::error::release smoke: SIGNATURE link broken — cosign rejected checksums.txt.sigstore.json for ${TAG}: unsigned, signed by something other than release-please.yml on main, or a failed Rekor proof. RELEASING.md calls this 'do not install'."
+            exit 1
+          fi
+
+          # 2. Manifest: the now-trusted checksums.txt must enumerate the
+          # darwin archive the cask serves this runner's architecture.
+          manifest_sha="$(awk -v f="$ARCHIVE" '$2 == f {print $1}' checksums.txt)"
+          if [ -z "$manifest_sha" ]; then
+            echo "::error::release smoke: MANIFEST link broken — signed checksums.txt for ${TAG} has no line for ${ARCHIVE}"
+            exit 1
+          fi
+
+          # 3. Archive: RELEASING.md's documented macOS command, verbatim
+          # (only the archive is on disk, so --ignore-missing checks exactly
+          # its line — proven present in step 2).
+          if ! shasum -a 256 --check --ignore-missing checksums.txt; then
+            echo "::error::release smoke: ARCHIVE link broken — ${ARCHIVE} does not match its digest in the signed manifest"
+            exit 1
+          fi
+
+          # 4. Tie the install to the signature. Homebrew already verified
+          # the staged bytes against the cask's pinned sha256 during install,
+          # so cask pin == signed digest proves the bytes brew installed are
+          # the bytes the release signed — without depending on brew's
+          # download cache surviving to be re-hashed.
+          cask_sha="$(brew info --cask --json=v2 layervai/tap/qurl | jq -r '.casks[0].sha256')"
+          if [ -z "$cask_sha" ] || [ "$cask_sha" = "null" ] || [ "$cask_sha" = "no_check" ]; then
+            echo "::error::release smoke: cask pin unreadable — brew info returned '${cask_sha:-<empty>}' for the cask sha256 (cask or brew JSON shape changed); update this step rather than skipping the tie check"
+            exit 1
+          fi
+          if [ "$cask_sha" != "$manifest_sha" ]; then
+            echo "::error::release smoke: TAP-PIN link broken — the cask pins sha256 ${cask_sha} for ${ARCHIVE} but the signed manifest says ${manifest_sha}; what brew installed is NOT what the release signed"
+            exit 1
+          fi
+          echo "signing chain verified for ${TAG}: signature OK, ${ARCHIVE} matches the signed manifest, cask pin matches the signed digest"
