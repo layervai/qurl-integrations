@@ -392,3 +392,45 @@ func TestStartDoesNotFallbackToLegacyStateOnStoreAvailabilityError(t *testing.T)
 	}
 	assertOAuthErrorPage(t, rec, "qURL setup is temporarily unavailable")
 }
+
+// TestStartForcesReauthOnExplicitKeyModes pins the prompt contract: --rotate
+// and --repoint revoke the stored workspace key and mint a replacement, so
+// they must re-authenticate the human instead of riding whatever Auth0 SSO
+// session the browser already holds. Without `login`, a consent screen alone
+// can approve a rotation for a different Auth0 connection than the one that
+// minted the key — and qurl-service keys accounts on the id_token sub, so
+// that silently moves the workspace to a different qURL account.
+func TestStartForcesReauthOnExplicitKeyModes(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		mode       SetupMode
+		wantPrompt string
+	}{
+		{name: "reuse keeps consent only", mode: SetupModeReuse, wantPrompt: "consent"},
+		{name: "rotate forces login", mode: SetupModeRotate, wantPrompt: "login consent"},
+		{name: "repoint forces login", mode: SetupModeRepoint, wantPrompt: "login consent"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newStartCfg()
+			state, err := MintStateWithEmailMode(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, "admin@example.com", tt.mode, cfg.Now())
+			if err != nil {
+				t.Fatalf("MintStateWithEmailMode: %v", err)
+			}
+			h := Start(cfg)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+			rec := httptest.NewRecorder()
+			h(rec, req)
+
+			if rec.Code != http.StatusFound {
+				t.Fatalf("status: got %d want %d (body=%s)", rec.Code, http.StatusFound, rec.Body.String())
+			}
+			u, err := url.Parse(rec.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("parse Location: %v", err)
+			}
+			if got := u.Query().Get("prompt"); got != tt.wantPrompt {
+				t.Errorf("prompt: got %q want %q", got, tt.wantPrompt)
+			}
+		})
+	}
+}

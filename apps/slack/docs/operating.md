@@ -112,6 +112,14 @@ at the OAuth-callback bind layer.
   without stored key metadata is tracked in layervai/qurl-service#910.
   Rerunning setup without `--rotate`/`--repoint` is intentionally not a
   healthy-key rotation or qURL-account switch command.
+  `--rotate`/`--repoint` send Auth0 `prompt=login consent`, so the owner
+  re-authenticates instead of riding an existing SSO session; default setup
+  sends `prompt=consent` only. This matters because a consent screen proves
+  consent, not identity: without the re-login an explicit rotation could be
+  approved from whatever Auth0 connection the browser happens to be signed in
+  with, and qurl-service keys accounts on the id_token `sub`, so a different
+  connection is a different qURL account. Rows with no recorded
+  `qurl_account_id` have no cross-account guard to catch that.
   Keys are field-level encrypted at rest using KMS envelope encryption, with
   `workspace_id` bound as AAD.
   Rollout order: the Slack app may deploy before the qURL API binding route is

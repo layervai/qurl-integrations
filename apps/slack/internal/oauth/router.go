@@ -469,7 +469,20 @@ func authorizeURL(cfg Config, state string, verified VerifiedState) string {
 		q.Set("code_challenge", pkceCodeChallenge(verified.CodeVerifier))
 		q.Set("code_challenge_method", "S256")
 	}
-	q.Set("prompt", "consent")
+	// Explicit key operations revoke the stored workspace key and mint a
+	// replacement, so they must re-authenticate the human rather than accept
+	// whatever Auth0 session the browser already holds — a consent screen
+	// proves consent, not identity. `login` also stops a rotation from
+	// silently landing on a different Auth0 connection (and therefore a
+	// different qurl-service account, which is keyed on the id_token sub)
+	// than the one that minted the key. Default setup keeps bare `consent`:
+	// it has no key to destroy, and forcing a re-login on first install is
+	// friction on the onboarding path.
+	if verified.Mode.Explicit() {
+		q.Set("prompt", "login consent")
+	} else {
+		q.Set("prompt", "consent")
+	}
 	if verified.Email != "" {
 		if connection := strings.TrimSpace(cfg.Auth0EmailConnection); connection != "" {
 			q.Set("connection", connection)
