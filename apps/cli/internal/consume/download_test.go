@@ -318,6 +318,33 @@ func TestStreamToRetriesOnExpiry(t *testing.T) {
 	}
 }
 
+// TestNilClientIsCachedAcrossRetry pins the lazy-init contract: with no
+// injected Client, the first request builds the default client and KEEPS it,
+// so the expiry retry runs on the same connection pool the drained first
+// response was returned to (a fresh client per request would make discard's
+// drain-for-reuse pointless).
+func TestNilClientIsCachedAcrossRetry(t *testing.T) {
+	payload := []byte("same pool")
+	host := newDownloadHost(t, payload, http.StatusGone, 0)
+
+	var out bytes.Buffer
+	mints := 0
+	d := &Downloader{Mint: host.mint(&mints)}
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("StreamTo after one expiry: %v", err)
+	}
+	cached := d.Client
+	if cached == nil {
+		t.Fatal("Client = nil after a download; want the default client cached on the Downloader")
+	}
+	if _, err := d.StreamTo(context.Background(), &out); err != nil {
+		t.Fatalf("second StreamTo: %v", err)
+	}
+	if d.Client != cached {
+		t.Error("Client was rebuilt between downloads; want the first default client kept")
+	}
+}
+
 // TestMintFailurePropagatesUnwrapped pins that resolve/verification errors
 // keep their identity (and so their exit codes) through the downloader.
 func TestMintFailurePropagatesUnwrapped(t *testing.T) {
