@@ -98,6 +98,8 @@ version stream that something downstream pins to — not by merely publishing an
 - Only commits touching an app's directory trigger its release; `shared/` changes ship with each
   app's next release
 - Each released app gets its own `CHANGELOG.md` once its first release lands
+- CLI release assets are keyless-signed (cosign/Sigstore) and ship per-archive SPDX SBOMs — the
+  consumer verification recipe lives in [RELEASING.md](RELEASING.md)
 
 ## CI
 
