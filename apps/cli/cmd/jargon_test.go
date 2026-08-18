@@ -50,6 +50,22 @@ var forbiddenWords = []string{
 	"serverid",
 	"cell",
 	"firewall",
+	// Customers configure a Connector by its ID (the standalone
+	// qurl-connector's term: QURL_CONNECTOR_ID / `id:`); "slug" is
+	// platform-wire vocabulary that must never resurface. The hidden
+	// deprecated --slug alias is exempt structurally (hidden flags and
+	// hidden commands are skipped below), and the one message that must
+	// name that alias is listed in jargonExemptMessages.
+	"slug",
+}
+
+// jargonExemptMessages are the few customer strings allowed to carry a
+// banned word because they exist to steer customers OFF it: a conflict with
+// a deprecated surface can only be named by naming that surface. Every
+// entry dies with the surface it names — msgConnectorIDConflict goes at the
+// next major together with the --slug alias.
+var jargonExemptMessages = map[string]bool{
+	msgConnectorIDConflict: true,
 }
 
 // isAlnumToken reports whether w is only [a-z0-9] (already-lowercased).
@@ -138,14 +154,23 @@ func TestNoJargonInCustomerMessages(t *testing.T) {
 	if len(all) == 0 {
 		t.Fatal("no customer messages collected; the gate would be vacuous")
 	}
+	exempted := 0
 	for _, msg := range all {
 		if msg == "" {
 			t.Error("empty customer message registered")
 			continue
 		}
+		if jargonExemptMessages[msg] {
+			exempted++
+			continue
+		}
 		if bad, found := findForbiddenJargon(msg); found {
 			t.Errorf("customer message leaked jargon %q: %q", bad, msg)
 		}
+	}
+	if exempted != len(jargonExemptMessages) {
+		t.Errorf("jargonExemptMessages matched %d registered messages, want %d — a stale exemption is a hole in the gate",
+			exempted, len(jargonExemptMessages))
 	}
 }
 
@@ -160,6 +185,7 @@ func TestFindForbiddenJargon(t *testing.T) {
 		"base64 blob",
 		"crc mismatch",
 		"opens the firewall",
+		"pass your Connector's slug",
 	} {
 		if _, found := findForbiddenJargon(bad); !found {
 			t.Errorf("expected jargon detected in %q", bad)
@@ -172,6 +198,7 @@ func TestFindForbiddenJargon(t *testing.T) {
 		"under the hood",
 		"a miscellaneous provider",
 		"created just now",
+		"a sluggish response",
 	} {
 		if w, found := findForbiddenJargon(ok); found {
 			t.Errorf("false positive: %q flagged on %q", w, ok)
