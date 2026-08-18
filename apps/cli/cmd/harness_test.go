@@ -80,6 +80,19 @@ func (f *fakeKeyring) Delete() (bool, error) {
 	return true, nil
 }
 
+// fakeBrowser is the harness's browser-launcher stand-in: it records every
+// link the CLI tried to open and never starts a process. The seam is always
+// injected, so no test run can ever launch a real browser.
+type fakeBrowser struct {
+	opened []string
+	err    error
+}
+
+func (f *fakeBrowser) open(_ context.Context, link string) error {
+	f.opened = append(f.opened, link)
+	return f.err
+}
+
 // runOpts configures one CLI invocation under test.
 type runOpts struct {
 	args  []string
@@ -94,6 +107,9 @@ type runOpts struct {
 	// available fake. The file side of the chain is always the real file
 	// store rooted at configDir.
 	keyring *fakeKeyring
+	// browser is the injected launcher recorder; nil means a fresh recorder
+	// (pass one to assert on what was — or was not — opened).
+	browser *fakeBrowser
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -135,6 +151,10 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 	if kr == nil {
 		kr = &fakeKeyring{}
 	}
+	browser := o.browser
+	if browser == nil {
+		browser = &fakeBrowser{}
+	}
 
 	root, opts := newRoot("test", streams, func(g *globalOpts) {
 		g.lookupEnv = func(key string) (string, bool) {
@@ -147,6 +167,7 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		g.newCredentialStore = func(dir string, onFileRead func()) *auth.Chain {
 			return auth.NewChain(kr, auth.NewFileStore(dir), onFileRead)
 		}
+		g.openBrowser = browser.open
 		if o.sleeps != nil {
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }
 		} else {

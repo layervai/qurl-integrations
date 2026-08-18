@@ -60,6 +60,13 @@ type deleteJSON struct {
 	AlreadyGone bool `json:"already_gone,omitempty"`
 }
 
+type downloadJSON struct {
+	CRID string `json:"crid,omitempty"`
+	File string `json:"file"`
+	// Bytes is the payload size actually written.
+	Bytes int64 `json:"bytes"`
+}
+
 // listCRIDWidth is the middle-ellipsis budget for the text CRID column; JSON
 // and --quiet always carry the full value.
 const (
@@ -277,6 +284,25 @@ func (p *Printer) Delete(id string, alreadyGone bool) error {
 	default:
 		_, err := fmt.Fprintf(p.err, "Deleted %s.\n", id)
 		return err
+	}
+}
+
+// Downloaded renders a completed --file download. The file itself is the
+// data, so the text confirmation is a status message for humans and goes to
+// stderr; --quiet echoes the destination path to stdout for pipelines; JSON
+// emits the outcome document.
+func (p *Printer) Downloaded(crid, path string, bytes int64) error {
+	switch {
+	case p.format == FormatJSON:
+		return p.writeJSON(downloadJSON{CRID: crid, File: path, Bytes: bytes})
+	case p.quiet:
+		_, err := fmt.Fprintln(p.out, path)
+		return err
+	default:
+		// Best-effort like every stderr status line: the file is already in
+		// place, so a broken stderr must not turn success into failure.
+		_, _ = fmt.Fprintf(p.err, msgSavedTo+"\n", path, bytes)
+		return nil
 	}
 }
 

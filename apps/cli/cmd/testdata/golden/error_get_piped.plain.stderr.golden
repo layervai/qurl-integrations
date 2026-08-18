@@ -1,0 +1,1 @@
+Error: this output is piped, and a browser is only opened on a terminal. Add --file <path> to download the file (--file - streams the raw bytes), or use `qurl resolve` to print an access link

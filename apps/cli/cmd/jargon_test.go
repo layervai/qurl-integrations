@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/pflag"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
@@ -129,6 +130,7 @@ func TestNoJargonOnHelpSurfaces(t *testing.T) {
 func TestNoJargonInCustomerMessages(t *testing.T) {
 	all := make([]string, 0, 64)
 	all = append(all, customerMessages()...)
+	all = append(all, consume.CustomerMessages()...)
 	all = append(all, cridux.Messages()...)
 	all = append(all, qurlapi.CustomerMessages()...)
 	all = append(all, output.CustomerMessages()...)
