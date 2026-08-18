@@ -232,6 +232,11 @@ func classifyFilesShape(files json.RawMessage) (shape filesShape, entries int) {
 // slackSubtypeFileShare mirrors internal's constant, which is unexported. Only the
 // tally uses it; the classification itself goes through SlackMessageHasUpload, so a
 // drift here shows up as a tally that stops counting rather than as a wrong verdict.
+//
+// TODO(upstream-contract): this is a Slack wire value copied into a second place. If
+// Slack renames the subtype, this tally silently reports zero file_share messages —
+// which is also what a healthy history surface reports, so the two are indistinguishable
+// from the output alone.
 const slackSubtypeFileShare = "file_share"
 
 // surfaceTally is the per-surface measurement. Counts only: no file name, message
@@ -290,7 +295,10 @@ type conversationResult struct {
 	RepliesMessages   int    `json:"replies_messages,omitempty"`
 	ThreadsSampled    int    `json:"threads_sampled,omitempty"`
 	ClassifiedUploads int    `json:"classified_uploads"`
-	Error             string `json:"error,omitempty"`
+	// MorePages is true when -max-pages ran out with a cursor still outstanding. Without
+	// it a conversation holding 50,000 messages reports the same 800 as one holding 800.
+	MorePages bool   `json:"more_pages,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // expectationResult is one -expect-upload ground truth checked against the classifier.
@@ -314,11 +322,33 @@ type contractVerdict struct {
 	MinUploads        int      `json:"min_uploads"`
 	MissedUploads     int      `json:"missed_uploads"`
 	UncountableShapes int      `json:"uncountable_shapes"`
+	DecodeFailures    int      `json:"decode_failures"`
 	Failures          []string `json:"failures,omitempty"`
+}
+
+// scanBounds is what shaped the sample. Without it a replies block of all zeros means
+// any of four things — -skip-replies, -max-threads 0, no thread had replies, or every
+// replies call failed — and only the last is visible from the per-conversation errors.
+// Since the replies surface is the whole reason this command reads more than history,
+// an all-zero block that silently means "never measured" is the worst ambiguity here.
+//
+// The base URL is included for the same reason: a fat-fingered -base-url pointed at a
+// mock otherwise produces a report that looks entirely normal. It is operator input, not
+// user content.
+type scanBounds struct {
+	BaseURL           string `json:"base_url"`
+	ConversationTypes string `json:"conversation_types,omitempty"`
+	ExplicitChannels  int    `json:"explicit_channels,omitempty"`
+	MaxConversations  int    `json:"max_conversations"`
+	MaxPages          int    `json:"max_pages"`
+	PageLimit         int    `json:"page_limit"`
+	MaxThreads        int    `json:"max_threads"`
+	SkipReplies       bool   `json:"skip_replies"`
 }
 
 type scanResult struct {
 	StartedAt       string               `json:"started_at"`
+	Bounds          scanBounds           `json:"bounds"`
 	WorkspaceShape  string               `json:"workspace_shape,omitempty"`
 	TokenOwner      string               `json:"token_owner,omitempty"`
 	Scopes          string               `json:"scopes,omitempty"`
@@ -331,7 +361,17 @@ type scanResult struct {
 
 func newScanResult(cfg *scanConfig) scanResult {
 	return scanResult{
-		StartedAt:      cfg.StartedAt.UTC().Format(time.RFC3339),
+		StartedAt: cfg.StartedAt.UTC().Format(time.RFC3339),
+		Bounds: scanBounds{
+			BaseURL:           cfg.BaseURL,
+			ConversationTypes: cfg.ConversationTypes,
+			ExplicitChannels:  len(cfg.Channels),
+			MaxConversations:  cfg.MaxConversations,
+			MaxPages:          cfg.MaxPages,
+			PageLimit:         cfg.PageLimit,
+			MaxThreads:        cfg.MaxThreads,
+			SkipReplies:       cfg.SkipReplies,
+		},
 		WorkspaceShape: cleanOperatorNote(cfg.WorkspaceShape),
 		TokenOwner:     cleanOperatorNote(cfg.TokenOwner),
 		Scopes:         cleanOperatorNote(cfg.Scopes),
@@ -413,6 +453,7 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 		MinUploads:        cfg.MinUploads,
 		MissedUploads:     result.History.MissedUploads + result.Replies.MissedUploads,
 		UncountableShapes: result.History.UncountableShapes + result.Replies.UncountableShapes,
+		DecodeFailures:    result.History.DecodeFailures + result.Replies.DecodeFailures,
 	}
 	// Both branches below are about this command's REACH rather than Slack's wire
 	// format, and both bottom out at zero uploads. Saying either one alongside "the
@@ -434,9 +475,18 @@ func evaluateContract(cfg *scanConfig, result *scanResult, coverage scanCoverage
 			"classified %d distinct upload(s), below -min-uploads %d; if this workspace does contain uploads, the files array has stopped arriving",
 			verdict.DistinctUploads, cfg.MinUploads))
 	}
+	// Both counts are the same class — something arrived that this command could not
+	// count — so one flag governs them. They were asymmetric before: an uncountable
+	// shape had a verdict field, a docs row and this flag, while a message that would not
+	// decode at all was tallied and then read by nothing, so a scan could report
+	// holds:true beside thousands of unreadable messages.
 	if cfg.StrictUncountable && verdict.UncountableShapes > 0 {
 		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
 			"%d message(s) carried a files value that is not a JSON array, i.e. Slack changed the wire format", verdict.UncountableShapes))
+	}
+	if cfg.StrictUncountable && verdict.DecodeFailures > 0 {
+		verdict.Failures = append(verdict.Failures, fmt.Sprintf(
+			"%d message(s) could not be decoded at all, i.e. Slack changed the message shape", verdict.DecodeFailures))
 	}
 	// Both arms fail — the operator asked for a verdict and has to get one — but they are
 	// different problems. Only the second is evidence about the classifier; the first is
@@ -657,6 +707,7 @@ func readHistory(ctx context.Context, client *slackClient, cfg *scanConfig, chan
 			break
 		}
 	}
+	record.MorePages = cursor != ""
 	return threads, nil
 }
 

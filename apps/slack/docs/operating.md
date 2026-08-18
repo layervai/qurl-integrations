@@ -419,7 +419,10 @@ confirmed the array arrives without it, and a file the token may not read still 
 an entry with `file_access: "access_denied"` and null metadata. Only override
 `-base-url` for a trusted Slack Web API endpoint or a local test server — **the smoke
 sends the bearer token to that base URL**. Remote overrides must use HTTPS; HTTP is
-accepted only for localhost or loopback.
+accepted only for localhost or loopback, and redirects are surfaced rather than followed
+so the token is never replayed down an uninspected chain. The smoke honors Go's standard
+`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` handling; treat configured proxies as part of
+the trusted network path.
 
 Exit 0 means the contract still holds. Exit 1 means it does not, and the report on
 stdout is the diagnosis — read it, do not just read the exit code. Exit 2 is a bad
@@ -436,6 +439,8 @@ reads the replies surface, and the recorded scan only covered history.
 | `the files array has stopped arriving` | Nothing classified as an upload. Against a workspace that does contain uploads, this is the rot the TODO names. Raise `-min-uploads` above 1 when you know roughly how many to expect. |
 | `did not report as an upload` | A populated `files` array the classifier called text-only. This cannot happen with today's classifier, so treat it as a regression in `SlackMessageHasUpload`, not in Slack. |
 | `Slack changed the wire format` | A `files` value that is not a JSON array. Reported by default and only fatal under `-strict-uncountable`; it is the history-surface twin of the `files_field_present=true` / `files_visible=0` pair `claimMediaNotice` flags on the event path. |
+| `could not be decoded at all` | A message this command could not read as a message. Same class as the row above and governed by the same `-strict-uncountable` flag; `contract.decode_failures` carries the count either way. |
+| `could not be verified` | An `-expect-upload` lookup that failed or found nothing. This is *not* evidence about the classifier — the run never got as far as asking it. |
 
 `-expect-upload C0123456789:1723600000.000200` is the one check whose oracle is a human
 rather than a second reading of the same bytes: name a message you can see carries a
@@ -443,11 +448,28 @@ file, repeat the flag for more, and the smoke fails if the classifier does not a
 Thread replies work — the lookup falls back to `conversations.replies` when
 `conversations.history` does not return the timestamp.
 
-Bounds default to 25 conversations, 4 history pages each at 200 messages, and 5 threads
-sampled per conversation; widen them for a fuller measurement, and note that whatever
-you leave at the default is the sample the numbers describe. `-timeout` is the total
-budget and must be at least three times `-request-timeout`. A single `429` is retried
-once after Slack's `Retry-After`, up to 30 seconds.
+Six flags shape the sample, and whatever you leave at its default is what the numbers
+describe. `-max-conversations` (25) caps how many conversations are scanned;
+`-conversation-types` (`public_channel,private_channel,im,mpim`) filters discovery;
+`-max-pages` (4) caps `conversations.history` pages per conversation and also bounds
+discovery paging; `-page-limit` (200) is messages per page; `-max-threads` (5) is threads
+sampled per conversation on the replies surface; and `-skip-replies` drops that surface
+entirely. Every one of them is echoed back in the report's `bounds` block, so a reader
+can tell a 25-conversation workspace from a 25-conversation cap — and an all-zero
+`replies` block that means "skipped" from one that means "measured and found nothing".
+A conversation cut off by `-max-pages` is flagged `more_pages` on its own line.
+
+`-min-uploads 0` turns the tripwire off and makes the run report-only. That is a
+legitimate mode for a first look at an unfamiliar workspace, but it disables the primary
+check: read `contract.min_uploads` before trusting a `holds: true`.
+
+`-timeout` (20 minutes) is the total budget and must be at least three times
+`-request-timeout`. The default is sized for the default bounds: about 226 requests
+against Slack's tier-3 limit of roughly 50 a minute, or ~4.5 minutes of pure rate-limit
+budget before any `429` wait. Widen the bounds and you must widen this too, or the run
+truncates — which reports as a budget failure and suppresses the upload check rather than
+producing a wrong verdict. A single `429` is retried once after Slack's `Retry-After`, up
+to 30 seconds; anything longer is reported rather than waited out.
 
 Record the result in the PR or issue using this shape. If the numbers disagree with the
 ones in `SlackMessageHasUpload`'s comment, update that comment in the same change — a
@@ -457,12 +479,18 @@ stale measurement is worse than none, because the next reader will trust it.
 Workspace shape:
 Token owner:
 Slack scopes:
+Bounds (from the report's bounds block):
 Conversations scanned:
 history: messages=<n> files_key_present=<n> classified_uploads=<n> file_share_subtypes=<n>
 replies: messages=<n> files_key_present=<n> classified_uploads=<n> file_share_subtypes=<n>
-Uncountable shapes: <n>
+Distinct uploads: <n>  (deduplicated across surfaces — a thread root arrives on both)
+Uncountable shapes: <n>; decode failures: <n>
 Contract holds: <yes/no>; failures:
 ```
+
+The replies figures are the ones `SlackMessageHasUpload`'s comment still lists as
+assumed: the recorded measurement covered `conversations.history` only. A run that
+reports them is what lets that caveat be dropped.
 
 ## Binding-backed setup visibility
 

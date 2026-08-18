@@ -184,16 +184,25 @@ func TestAgentThreadHistorySeam_RejectsSlackErrorAndUnboundedHistory(t *testing.
 // reading the live wire format is cmd/slack-history-upload-smoke's job, and this is
 // what keeps the offline decode chain honest between runs of it.
 //
-// What it adds over the stub is depth: entries with nested objects, explicit nulls and
-// keys this app has never heard of. {"id":"F1"} is a shape Slack never sends, so a
-// decode that handles it proves nothing about one that arrives. Measured, not assumed —
-// a decoder mutated to skip entries whose metadata came back explicitly null fails only
-// this test; TestAgentThreadHistorySeam_ReportsAttachments above stays green, because
-// its stub has no null to skip.
+// What it adds over the stub is DEPTH, not branch reach. On the branches of
+// slackEventFiles.UnmarshalJSON this is a strict subset of
+// TestAgentThreadHistorySeam_ReportsAttachments above, which also covers file_share, a
+// non-array shape and explicit null. What it covers instead is what a real entry looks
+// like: nested objects, explicitly null metadata, and keys this app has never heard of.
+// {"id":"F1"} is a shape Slack never sends, so a decode that handles it proves nothing
+// about one that arrives.
 //
-// The access_denied entry is what does that work. Every piece of its metadata is null
-// and it still occupies an array slot, which is exactly why presence detection survives
-// on a token without files:read.
+// Measured, and narrower than it first looks. A decoder mutated to skip entries whose
+// metadata is present-but-literally-null fails only this test — the stub has no null to
+// skip. The idiomatic pointer form of the same mutation (a []struct{Name *string} that
+// skips nil names) kills BOTH, because an absent key is also nil there. So the unique
+// coverage is the present-and-null case specifically.
+//
+// That coverage rests entirely on message 5, the all-null access_denied entry. Message 6
+// pairs a denied entry with a readable one, so it stays true under the mutation and
+// cannot stand in. The self-check below pins message 5's nulls for that reason: dropping
+// it on the grounds that message 6 "already covers access_denied" would delete this
+// test's only unique claim while leaving it looking like it still covers denied files.
 func TestAgentThreadHistorySeam_FullFileObjectShape(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +271,26 @@ func TestAgentThreadHistorySeam_FullFileObjectShape(t *testing.T) {
 		}
 		if want[i].hasFiles && len(message.Files) == 0 {
 			t.Errorf("fixture message %d is expected to carry files but has no files value", i)
+		}
+	}
+
+	// Pin the property this test's unique coverage depends on: message 5's sole entry
+	// must carry its metadata keys with literal null values. Present-and-null is what the
+	// stub cannot express; an entry that merely OMITS those keys would look identical to
+	// the stub and this test would stop proving anything the other one doesn't.
+	const deniedIndex = 5
+	var denied []map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Messages[deniedIndex].Files, &denied); err != nil {
+		t.Fatalf("decode fixture message %d files: %v", deniedIndex, err)
+	}
+	if len(denied) != 1 {
+		t.Fatalf("fixture message %d must carry exactly one entry, got %d", deniedIndex, len(denied))
+	}
+	for _, key := range []string{"name", "mimetype", "filetype", "user", "mode"} {
+		value, present := denied[0][key]
+		if !present || string(value) != "null" {
+			t.Errorf("fixture message %d entry %q = %s (present=%v), want an explicit null",
+				deniedIndex, key, value, present)
 		}
 	}
 }

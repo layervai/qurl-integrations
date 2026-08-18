@@ -40,10 +40,17 @@ const slackFileObject = `{
   "file_access": "visible"
 }`
 
-// slackDeniedFileObject is the shape the same scan saw for a file the token could not
+// slackDeniedFileObject is the shape the scan recorded for a file the token could not
 // read: null metadata, file_access access_denied, and STILL an entry in the array.
 // Presence detection has to survive it, which is the whole reason it is here.
-const slackDeniedFileObject = `{"id":"F00000000BB","name":null,"mimetype":null,"filetype":null,"file_access":"access_denied"}`
+//
+// Kept field-for-field in step with the denied entry in
+// cmd/testdata/conversations_replies_uploads.json. The two describe one observed file,
+// and letting them disagree about which fields come back null would leave the repo with
+// two contradictory records of it and no way to tell which is right.
+const slackDeniedFileObject = `{"id":"F00000000BB","created":null,"timestamp":null,"name":null,` +
+	`"title":null,"mimetype":null,"filetype":null,"pretty_type":null,"user":null,` +
+	`"user_team":null,"mode":null,"file_access":"access_denied"}`
 
 const (
 	testChannel      = "C0000000001"
@@ -1122,6 +1129,11 @@ func TestRunScanSkipRepliesLeavesTheSurfaceUnmeasured(t *testing.T) {
 	if result.Replies.Messages != 0 || result.Replies.Conversations != 0 {
 		t.Errorf("replies = %+v, want the surface untouched", result.Replies)
 	}
+	// The zeros above are ambiguous on their own — skipped, no threads, or every call
+	// failed all look identical — so the report has to say which.
+	if !result.Bounds.SkipReplies {
+		t.Error("the report must record that the replies surface was skipped, not just show zeros")
+	}
 	if result.History.ClassifiedUploads != 1 {
 		t.Errorf("history = %+v, want the history surface still measured", result.History)
 	}
@@ -1377,5 +1389,128 @@ func TestGetOnceNamesARedirectTarget(t *testing.T) {
 	err := client.get(context.Background(), surfaceHistory, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "sso.example.com") || !strings.Contains(err.Error(), "not followed") {
 		t.Errorf("err = %v, want the unfollowed redirect target named", err)
+	}
+}
+
+// TestScanResultRecordsTheSampleItDescribes pins the bounds block. Whatever is left at a
+// default IS the sample the numbers describe, so a report showing 25 conversations is
+// otherwise indistinguishable from a workspace that has exactly 25.
+func TestScanResultRecordsTheSampleItDescribes(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{surfaceHistory: messagesBody(uploadMessage("100.1"))})
+	cfg := testScanConfig(srv)
+	cfg.Channels = []string{testChannel}
+	cfg.MaxConversations = 7
+	cfg.MaxThreads = 2
+	cfg.PageLimit = 50
+
+	result, err := runScan(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	want := scanBounds{
+		BaseURL: srv.URL, ConversationTypes: defaultConversationTypes, ExplicitChannels: 1,
+		MaxConversations: 7, MaxPages: 1, PageLimit: 50, MaxThreads: 2,
+	}
+	if result.Bounds != want {
+		t.Errorf("bounds = %+v\nwanted   = %+v", result.Bounds, want)
+	}
+}
+
+// TestReadHistoryReportsUnreadPages pins that a conversation cut off by -max-pages says
+// so. Without it, 50,000 messages and 800 messages produce the same line.
+func TestReadHistoryReportsUnreadPages(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory: `{"ok":true,"messages":[` + uploadMessage("100.1") +
+			`],"response_metadata":{"next_cursor":"always more"}}`,
+	})
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if !result.Conversations[0].MorePages {
+		t.Error("a conversation stopped by -max-pages must say pages were left unread")
+	}
+
+	// ...and a conversation that genuinely ended must not claim there is more.
+	endsSrv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory:          messagesBody(uploadMessage("100.1")),
+	})
+	ended, err := runScan(context.Background(), testScanConfig(endsSrv))
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if ended.Conversations[0].MorePages {
+		t.Error("a conversation whose cursor ran out must not report more pages")
+	}
+}
+
+// TestRunScanSurfacesDecodeFailures pins the count that used to be tallied and then read
+// by nothing: a scan could report holds:true beside thousands of unreadable messages,
+// while an uncountable files shape — the same class of problem — had a verdict field, a
+// docs row and a flag.
+func TestRunScanSurfacesDecodeFailures(t *testing.T) {
+	t.Parallel()
+
+	bodies := map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory: messagesBody(
+			uploadMessage("100.1"),
+			// Valid JSON inside the array, but not a shape this command can read.
+			`{"user":"U1","ts":"100.2","subtype":5}`,
+		),
+	}
+	srv, _ := newFakeSlack(t, bodies)
+	result, err := runScan(context.Background(), testScanConfig(srv))
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if result.History.DecodeFailures != 1 || result.Contract.DecodeFailures != 1 {
+		t.Errorf("decode failures: surface = %d, verdict = %d, want 1 in both",
+			result.History.DecodeFailures, result.Contract.DecodeFailures)
+	}
+	if !result.Contract.Holds {
+		t.Errorf("one undecodable message must not fail the default scan: %v", result.Contract.Failures)
+	}
+
+	strictSrv, _ := newFakeSlack(t, bodies)
+	strictCfg := testScanConfig(strictSrv)
+	strictCfg.StrictUncountable = true
+	strictResult, err := runScan(context.Background(), strictCfg)
+	if err == nil {
+		t.Fatal("-strict-uncountable must fail on an undecodable message")
+	}
+	if !strings.Contains(strings.Join(strictResult.Contract.Failures, "; "), "could not be decoded at all") {
+		t.Errorf("failures = %v, want the decode diagnosis", strictResult.Contract.Failures)
+	}
+}
+
+// TestRunScanMinUploadsZeroIsReportOnly pins that 0 disables the tripwire deliberately
+// rather than by accident. The verdict still carries min_uploads so a reader can see the
+// primary check was off, which is the only thing that keeps holds:true honest here.
+func TestRunScanMinUploadsZeroIsReportOnly(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newFakeSlack(t, map[string]string{
+		methodConversationsList: listBody(testChannel),
+		surfaceHistory:          messagesBody(textMessage("100.1")),
+	})
+	cfg := testScanConfig(srv)
+	cfg.MinUploads = 0
+
+	result, err := runScan(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if !result.Contract.Holds {
+		t.Errorf("-min-uploads 0 must not fail on zero uploads: %v", result.Contract.Failures)
+	}
+	if result.Contract.MinUploads != 0 || result.Contract.DistinctUploads != 0 {
+		t.Errorf("contract = %+v, want the disabled threshold visible in the report", result.Contract)
 	}
 }

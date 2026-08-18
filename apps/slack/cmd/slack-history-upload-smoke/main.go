@@ -12,6 +12,14 @@
 // conversations.history, which is the "not separately measured" caveat the comment
 // leaves open.
 //
+// Read the three checks for what each one is, because they are not equal. The shape
+// tally — files_key_present, populated_arrays, uncountable_shapes — is the genuinely
+// independent evidence, and it is report-only. The tripwire that fails the command is
+// -min-uploads, whose oracle is the operator's belief that this workspace contains
+// uploads, not a second reading of the bytes. The classifier-disagreement check cannot
+// fire against SlackMessageHasUpload as written; it guards a future rewrite of that
+// function, not Slack changing underneath it.
+//
 // Operator-triggered, like slack-dm-smoke beside it, and for the same reason: it needs
 // a real bot token and a workspace whose conversations actually contain uploads, so
 // there is nothing for CI to run it against. Exit 0 means the contract still holds, 1
@@ -42,8 +50,14 @@ import (
 const (
 	defaultSlackAPIBaseURL = "https://slack.com/api"
 	defaultUserAgent       = "qurl-slack-history-upload-smoke"
-	defaultOverallTimeout  = 5 * time.Minute
-	defaultRequestTimeout  = 15 * time.Second
+	// defaultOverallTimeout is sized for the default bounds against Slack's tier-3 limit
+	// of roughly 50 requests a minute. Those bounds allow one conversations.list page plus
+	// 25 conversations x (4 history pages + 5 thread samples) — about 226 requests, or
+	// ~4.5 minutes of pure rate-limit budget before a single 429 wait. A 5-minute budget
+	// truncated a default run, which reports as "did not finish within -timeout" and
+	// suppresses the upload check entirely.
+	defaultOverallTimeout = 20 * time.Minute
+	defaultRequestTimeout = 15 * time.Second
 
 	// minTimeoutFactor keeps the overall budget wide enough for the smallest useful
 	// scan: a conversations.list page, one conversations.history page, and one
@@ -128,9 +142,9 @@ func parseFlags(stderr io.Writer, args []string) (cfg *scanConfig, tokenEnv stri
 	fs.IntVar(&cfg.PageLimit, "page-limit", defaultPageLimit, "messages requested per page")
 	fs.IntVar(&cfg.MaxThreads, "max-threads", defaultMaxThreads, "threads sampled per conversation for the conversations.replies surface")
 	fs.BoolVar(&cfg.SkipReplies, "skip-replies", false, "scan conversations.history only, leaving the replies surface unmeasured")
-	fs.IntVar(&cfg.MinUploads, "min-uploads", 1, "fail unless the scan classifies at least this many uploads")
+	fs.IntVar(&cfg.MinUploads, "min-uploads", 1, "fail unless the scan classifies at least this many distinct uploads; 0 disables the check and makes the run report-only")
 	fs.Var(&cfg.ExpectUploads, "expect-upload", "CHANNEL:TIMESTAMP of a message known to carry an upload; repeatable")
-	fs.BoolVar(&cfg.StrictUncountable, "strict-uncountable", false, "make an unrecognized files shape fail the command rather than only report")
+	fs.BoolVar(&cfg.StrictUncountable, "strict-uncountable", false, "make an unrecognized files shape or an undecodable message fail the command rather than only report")
 	fs.StringVar(&cfg.WorkspaceShape, "workspace-shape", "", "operator note, for example Enterprise Grid org install")
 	fs.StringVar(&cfg.TokenOwner, "token-owner", "", "operator note for the token owner, for example workspace or enterprise")
 	fs.StringVar(&cfg.Scopes, "scopes", "", "operator note for Slack scopes on the tested app")
