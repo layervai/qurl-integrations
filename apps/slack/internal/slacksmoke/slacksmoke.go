@@ -153,8 +153,9 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // differ by two orders of magnitude — slack-dm-smoke reads small chat.postMessage
 // envelopes, while slack-history-upload-smoke reads whole conversations.history pages.
 // When this function was duplicated per command, the same body silently drained a 64x
-// different budget depending on which file it sat in. A negative limit drains nothing
-// rather than reading a negative count as EOF.
+// different budget depending on which file it sat in. A negative limit is clamped to
+// zero, so it drains at most one byte rather than having io.LimitReader treat a
+// negative count as immediate EOF and skip the drain entirely.
 func DrainResponseBody(body io.Reader, limit int64) {
 	if limit < 0 {
 		limit = 0
@@ -182,8 +183,8 @@ func IsEnvVarName(name string) bool {
 }
 
 // TimeoutBudget pairs the two durations a smoke command runs under, kept together so
-// the ordering of the checks in ValidateTimeoutBudget reads as one rule rather than as
-// separate flag validations.
+// the ordering of the checks in Validate reads as one rule rather than as separate
+// flag validations.
 type TimeoutBudget struct {
 	// Overall bounds the whole run; Request bounds each individual Slack call.
 	Overall time.Duration

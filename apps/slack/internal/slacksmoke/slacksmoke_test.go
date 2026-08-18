@@ -230,8 +230,8 @@ func TestDrainResponseBodyHonoursCallerLimit(t *testing.T) {
 			t.Fatalf("DrainResponseBody(_, %d) consumed %d bytes, want %d", limit, got, limit+1)
 		}
 	}
-	// A negative limit must drain nothing rather than be read as an EOF-immediately
-	// count that silently skips the drain.
+	// A negative limit is clamped to zero, so it drains the same one byte a zero limit
+	// does — not the zero bytes io.LimitReader would read from a negative count.
 	src := strings.NewReader(strings.Repeat("a", total))
 	DrainResponseBody(src, -5)
 	if got := total - src.Len(); got != 1 {
