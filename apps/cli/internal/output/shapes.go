@@ -106,9 +106,12 @@ func (p *Printer) Publish(res *qurlapi.Published) error {
 }
 
 // publishText renders the publish document. The raw platform resource id is
-// deliberately absent: the CRID is the customer-facing identity, and nothing
-// in the CLI accepts a resource id as input. JSON keeps the raw field, and
-// --quiet falls back to it only when no CRID was minted (primaryID).
+// deliberately absent whenever a CRID exists: the CRID is the customer-facing
+// identity, and nothing in the CLI accepts a resource id as input. It comes
+// back only when the service minted no CRID, so the document still carries
+// some identifier — the same fallback --quiet makes through primaryID, and
+// the one cmd's no-CRID warning points the reader at. JSON always keeps the
+// raw field.
 func (p *Printer) publishText(res *qurlapi.Published) error {
 	headline := "Published"
 	if res.FoundExisting {
@@ -123,6 +126,9 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 	tw := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
 	twe := &errWriter{w: tw}
 	twe.printf("  %s\t%s\n", p.bold("Target:"), res.TargetURL)
+	if res.CRID == "" && res.ResourceID != "" {
+		twe.printf("  %s\t%s\n", p.bold("Resource ID:"), res.ResourceID)
+	}
 	if res.Status != "" {
 		twe.printf("  %s\t%s\n", p.bold("Status:"), res.Status)
 	}

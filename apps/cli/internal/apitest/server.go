@@ -36,6 +36,7 @@ type Server struct {
 	resolveQURL          string
 	downloadPayload      []byte
 	publishFoundExisting bool
+	publishOmitCRID      bool
 }
 
 // DownloadPath is the mock's link-host route: SetResolveQURL(srv.URL +
@@ -99,6 +100,15 @@ func (s *Server) SetPublishFoundExisting(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.publishFoundExisting = v
+}
+
+// SetPublishOmitCRID makes publish answer without a crid, the shape an
+// older deployment returns before it mints CRIDs. The CLI warns and falls
+// back to the resource id in that case.
+func (s *Server) SetPublishOmitCRID(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishOmitCRID = v
 }
 
 // SetResolveQURL overrides the qurl field of resolve responses; download
@@ -208,14 +218,19 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if s.publishFoundExisting {
 		meta["found_existing"] = true
 	}
+	omitCRID := s.publishOmitCRID
 	s.mu.Unlock()
-	WriteEnvelope(s.t, w, http.StatusCreated, map[string]any{
+	data := map[string]any{
 		"resource_id": s.Key.ResourceID,
 		"crid":        s.Key.CRID,
 		"target_url":  body.TargetURL,
 		"status":      "active",
 		"created_at":  "2026-03-01T00:00:00Z",
-	}, meta)
+	}
+	if omitCRID {
+		delete(data, "crid")
+	}
+	WriteEnvelope(s.t, w, http.StatusCreated, data, meta)
 }
 
 // Fixed identity fixtures for the default GET /v1/me answer, stable so

@@ -322,6 +322,25 @@ func TestPublishFoundExistingTextAnatomy(t *testing.T) {
 	}
 }
 
+// TestPublishNoCRIDKeepsResourceID pins the fallback the no-CRID warning
+// names: when the service mints no CRID, the text document must still carry
+// an identifier, so the resource id row comes back for exactly that case.
+func TestPublishNoCRIDKeepsResourceID(t *testing.T) {
+	srv := apitest.NewServer(t)
+	srv.SetPublishOmitCRID(true)
+	res := runCLI(t, &runOpts{args: []string{"--endpoint", srv.URL, "publish", "https://example.com/data"}})
+	if res.code != 0 {
+		t.Fatalf("exit = %d, stderr: %s", res.code, res.stderr.String())
+	}
+	if !strings.Contains(res.stdout.String(), "Resource ID:\t"+srv.Key.ResourceID) &&
+		!strings.Contains(res.stdout.String(), srv.Key.ResourceID) {
+		t.Errorf("no-CRID publish must still show an identifier, got %q", res.stdout.String())
+	}
+	if !strings.Contains(res.stderr.String(), "did not return a CRID") {
+		t.Errorf("expected the no-CRID warning, got %q", res.stderr.String())
+	}
+}
+
 // TestListZeroItemPageWithMoreDoesNotSayNotFound pins the has_more rule:
 // empty pages with more behind them must not read as "nothing found".
 func TestListZeroItemPageWithMoreDoesNotSayNotFound(t *testing.T) {
