@@ -36,15 +36,17 @@ at the OAuth-callback bind layer.
   → `/oauth/qurl/start` → Auth0 → `/oauth/qurl/callback`. Supplying an email
   address on setup stores it in signed state, sends Auth0 `login_hint`, and
   requires the verified Auth0 email claim to match before any workspace bind
-  or key mint. By default the Secure Access Agent does not force an Auth0 `connection`; the
-  Auth0 application and tenant-level Actions own the login method and the
-  cross-connection uniqueness policy. Prefer passwordless on the existing
-  database connection when available, or enforce account-linking /
-  duplicate-deny behavior before enabling a separate passwordless `email`
-  connection for the same audience. `AUTH0_EMAIL_CONNECTION` is an optional
-  recovery override when a deployment must force a specific connection. The
-  callback's security gate is the verified email claim, not the connection
-  hint by itself. If a workspace already has a qURL API key and qurl-service
+  or key mint. The Secure Access Agent pins Auth0 `connection=email`
+  (passwordless) and `prompt=login consent` on every setup path, so the login
+  method is a property of this surface rather than of tenant configuration —
+  see the prompt/connection contract below. `AUTH0_EMAIL_CONNECTION` overrides
+  the connection name for a deployment that named its passwordless connection
+  differently. Tenant-level Actions still own cross-connection uniqueness:
+  pinning one connection removes the routine way a single human acquires two
+  subjects, but account-linking / duplicate-deny is still what reconciles a
+  human who already has identities on more than one connection. The callback's
+  security gate remains the verified email claim, not the connection pin by
+  itself. If a workspace already has a qURL API key and qurl-service
   still accepts it, normal setup reuses that key instead of minting another one.
   Explicit owner requests (`/qurl setup <email> --rotate` and `--repoint`) take
   the rotation path instead. Both first strongly read the stored key identity in
@@ -73,9 +75,31 @@ at the OAuth-callback bind layer.
     same-account by intent) and records the account for next time, which is how an
     owner self-heals a legacy row so future `--repoint` works.
   Rotation failure modes to expect:
-  - If the stored row predates key metadata, or if the signed-in account cannot
-    revoke the current key, rotation fails closed before any replacement is
-    minted.
+  - If the signed-in account cannot revoke the current key, rotation fails
+    closed before any replacement is minted.
+  - A stored row that predates key metadata (no `key_id`) rotates **without
+    revoking**, because Slack cannot identify the predecessor to revoke it.
+    For an on-call operator, the parts that matter:
+    - **What is left behind.** One live qURL key that Slack no longer
+      references, logged as `setup_rotate_legacy_row_orphaned_key` with the
+      owning `team_id`. Revoke it in qURL API-key management; until then it
+      counts against the account's API-key plan limit.
+    - **How often.** Once per workspace. The rotation records the new `key_id`
+      and the signed-in `qurl_account_id`, so the next rotation takes the
+      normal revoke-then-replace route and `--repoint` becomes possible. The
+      bound is one orphaned *key*, not one log line — concurrent rotations mint
+      idempotently but can each emit the event, so dedupe by `team_id`.
+    - **When it refuses.** A rotation with no verified qURL account fails
+      closed rather than storing empty provenance. `--repoint` never takes this
+      path at all; mint-without-revoke is scoped to `--rotate`.
+    - **At the plan limit.** Because nothing is revoked the rotation is net +1
+      key, so an account already at its limit fails the mint and sees a page
+      saying the previous key could not be identified and is still active —
+      not the normal rotation's "previous key was revoked".
+    - **Why not just refuse.** Refusing these rows (the previous behavior)
+      protected nothing: the only remaining route was `/qurl uninstall`, which
+      abandons the same key and also discards the Slack bot token and workspace
+      binding, so a customer following that path leaked one key per cycle.
   - Missing or revoked legacy stored keys without key identity ask qURL to
     provision the Slack workspace key; if qURL reports that the workspace is
     already connected but the stored key cannot be recovered, setup stops with
@@ -112,6 +136,37 @@ at the OAuth-callback bind layer.
   without stored key metadata is tracked in layervai/qurl-service#910.
   Rerunning setup without `--rotate`/`--repoint` is intentionally not a
   healthy-key rotation or qURL-account switch command.
+  Every setup path — first install, `--rotate`, and `--repoint` — sends Auth0
+  `prompt=login consent` and pins `connection=email`. Both halves of `prompt`
+  are load-bearing: `login` stops an ambient Auth0 session (from the desktop
+  app, the dashboard, or a previous bot run) from authorizing the bind, so the
+  admin always re-authenticates, and `consent` stops Auth0 from reusing a prior
+  consent grant, which would let a re-run complete without issuing a new token.
+  A consent screen on its own proves consent, not identity.
+  Passwordless is the Slack login method, not a per-tenant choice. It is the
+  lowest-friction path for a workspace admin, and `email` is the connection
+  qurl-desktop pins for the same human, so both surfaces resolve to one Auth0
+  subject. That matters because qurl-service keys accounts on the id_token
+  `sub`: a different connection is a different qURL account.
+  `AUTH0_EMAIL_CONNECTION` remains an override for a deployment whose
+  passwordless connection is named something else.
+  **Deployment prerequisite:** because the connection is pinned rather than
+  hinted, the Auth0 application must have a passwordless connection named
+  `email` enabled before this ships — or `AUTH0_EMAIL_CONNECTION` must name
+  whatever it is called there. Nothing validates this at startup; the bot
+  cannot enumerate a tenant's connections, so a missing or differently-named
+  connection surfaces only as an Auth0 error at the `/authorize` redirect, and
+  it breaks **every** setup path (first install, `--rotate`, `--repoint`) for
+  every admin. Verify the connection name in the environment's Auth0
+  application, and run one `/qurl setup <email>` end to end, before promoting a
+  build carrying this pin.
+  Migration note: a workspace whose key was minted under a different connection
+  (for example Google) now signs in passwordless, so it authenticates as a
+  different `sub` and therefore a different qURL account. Provenance-bearing
+  rows fail closed on that with the cross-account page and route to the
+  operator-assisted transfer — the intended outcome, since the alternative was
+  silently rotating a workspace onto whichever account the browser happened to
+  hold. Rows with no recorded `qurl_account_id` have no such guard.
   Keys are field-level encrypted at rest using KMS envelope encryption, with
   `workspace_id` bound as AAD.
   Rollout order: the Slack app may deploy before the qURL API binding route is
@@ -366,7 +421,8 @@ Record the result in the PR or issue using this shape. If `conversations.open`
 returns `ok:true` without a usable `channel.id`, the smoke records that
 production step as `missing_dm_channel_id`; treat it as a failed DM-open step
 even though Slack's raw response said `ok:true`. Pre-flight validation errors
-such as invalid flags, empty token/user input, or unsafe `-base-url` exit before
+such as invalid flags, empty token/user input, a `-token-env` that is not a
+POSIX environment variable name, or unsafe `-base-url` exit before
 contacting Slack and print stderr only; JSON evidence is emitted for runtime
 smoke attempts.
 
@@ -380,6 +436,125 @@ Direct user probe, if run: chat.postMessage(U...)=<ok/error>
 Forced failure: instructions posted? <yes/no>; key usable? <yes/no>; user-facing copy:
 Operator setup notes:
 ```
+
+### History upload-detection smoke
+
+Run this smoke when you need the numbers in `SlackMessageHasUpload`'s
+`TODO(upstream-contract)` to be true again — before trusting thread continuity in a new
+workspace shape, after a Slack changelog touches the `files` field, or on whatever
+cadence you decide the risk deserves. Nothing runs it for you.
+
+It exists because that classifier has no other observer. When the agent rebuilds a
+thread through `conversations.replies`, a message that carried an upload is annotated so
+the model knows the caption described a file it never saw. On that surface the `files`
+array is the whole signal — the 2026-08-14 scan found `file_share` zero times in 4,668
+messages — so if Slack stops populating it, captions are silently replayed as ordinary
+text and every unit test in the repo stays green, because they supply the field
+themselves and never read Slack.
+
+The smoke is read-only: `conversations.list`, `conversations.history` and
+`conversations.replies`, all GET, nothing posted. Its JSON report carries counts,
+conversation IDs and message timestamps only — no file name, message text, user name or
+mimetype leaves the process.
+
+```sh
+printf 'Slack bot token: ' >&2
+read -rs SLACK_BOT_TOKEN
+printf '\n' >&2
+export SLACK_BOT_TOKEN
+go run ./apps/slack/cmd/slack-history-upload-smoke \
+  -workspace-shape 'single workspace install' \
+  -token-owner workspace \
+  -scopes 'channels:history,groups:history,im:history,mpim:history'
+```
+
+The token needs the history scopes for the conversation types you are scanning, and
+`conversations.list` access unless you name conversations yourself with
+`-channels C0123456789,C9876543210`. It does **not** need `files:read`: the same scan
+confirmed the array arrives without it, and a file the token may not read still occupies
+an entry with `file_access: "access_denied"` and null metadata. Only override
+`-base-url` for a trusted Slack Web API endpoint or a local test server — **the smoke
+sends the bearer token to that base URL**. Remote overrides must use HTTPS; HTTP is
+accepted only for localhost or loopback, and redirects are surfaced rather than followed
+so the token is never replayed down an uninspected chain. The smoke honors Go's standard
+`HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` handling; treat configured proxies as part of
+the trusted network path.
+
+Exit 0 means the contract still holds. Exit 1 means it does not, and the report on
+stdout is the diagnosis — read it, do not just read the exit code. Exit 2 is a bad
+invocation, checked before any Slack call.
+
+Each message is observed twice: once by a reader that only asks what JSON shape the
+`files` value has, and once through `SlackMessageHasUpload` itself. Read the report's
+two surface blocks — `history` and `replies` — as separate measurements; production
+reads the replies surface, and the recorded scan only covered history.
+
+| Failure | What it means |
+|---------|---------------|
+| `no conversation could be read` | Scope or membership, not wire format. The scan proves nothing about the contract until this is fixed. |
+| `the files array has stopped arriving` | Nothing classified as an upload. Against a workspace that does contain uploads, this is the rot the TODO names. Raise `-min-uploads` above 1 when you know roughly how many to expect. |
+| `did not report as an upload` | A populated `files` array the classifier called text-only. This cannot happen with today's classifier, so treat it as a regression in `SlackMessageHasUpload`, not in Slack. |
+| `Slack changed the wire format` | A `files` value that is not a JSON array. Reported by default and only fatal under `-strict-uncountable`; it is the history-surface twin of the `files_field_present=true` / `files_visible=0` pair `claimMediaNotice` flags on the event path. |
+| `could not be decoded at all` | A message this command could not read as a message. Same class as the row above and governed by the same `-strict-uncountable` flag; `contract.decode_failures` carries the count either way. |
+| `could not be verified` | An `-expect-upload` lookup that failed or found nothing. This is *not* evidence about the classifier — the run never got as far as asking it. |
+
+`-expect-upload C0123456789:1723600000.000200` is the one check whose oracle is a human
+rather than a second reading of the same bytes: name a message you can see carries a
+file, repeat the flag for more, and the smoke fails if the classifier does not agree.
+Thread replies work — the lookup falls back to `conversations.replies` when
+`conversations.history` does not return the timestamp.
+
+Six flags shape the sample, and whatever you leave at its default is what the numbers
+describe. `-max-conversations` (25) caps how many conversations are scanned;
+`-conversation-types` (`public_channel,private_channel,im,mpim`) filters discovery;
+`-max-pages` (4) caps `conversations.history` pages per conversation **and** bounds
+`conversations.list` paging — raising it to read deeper history widens discovery too,
+which is usually harmless because `-max-conversations` stops discovery first; `-page-limit` (200) is messages per page; `-max-threads` (5) is threads
+sampled per conversation on the replies surface; and `-skip-replies` drops that surface
+entirely. Every one of them is echoed back in the report's `bounds` block, so a reader
+can tell a 25-conversation workspace from a 25-conversation cap — and an all-zero
+`replies` block that means "skipped" from one that means "measured and found nothing".
+A conversation cut off by `-max-pages` is flagged `more_pages` on its own line.
+
+`-min-uploads 0` turns the tripwire off and makes the run report-only. That is a
+legitimate mode for a first look at an unfamiliar workspace, but it disables the primary
+check: read `contract.min_uploads` before trusting a `holds: true`.
+
+`-timeout` (20 minutes) is the total budget and must be at least three times
+`-request-timeout`. The default is sized for the default bounds: about 226 requests
+against Slack's tier-3 limit of roughly 50 a minute, or ~4.5 minutes of pure rate-limit
+budget before any `429` wait. Widen the bounds and you must widen this too, or the run
+truncates — which reports as a budget failure and suppresses the upload check rather than
+producing a wrong verdict. A single `429` is retried once after Slack's `Retry-After`, up
+to 30 seconds; anything longer is reported rather than waited out.
+
+Note the asymmetry in how a rate limit lands. One hit while reading a conversation is
+recorded against that conversation and the scan carries on, but one on
+`conversations.list` ends the run: discovery has to succeed before there is anything to
+measure, and a partial conversation list would produce a report that looks complete while
+describing a sample nobody chose. On a busy workspace, either re-run or name the
+conversations yourself with `-channels`, which skips discovery entirely.
+
+Record the result in the PR or issue using this shape. If the numbers disagree with the
+ones in `SlackMessageHasUpload`'s comment, update that comment in the same change — a
+stale measurement is worse than none, because the next reader will trust it.
+
+```text
+Workspace shape:
+Token owner:
+Slack scopes:
+Bounds (from the report's bounds block):
+Conversations scanned:
+history: messages=<n> files_key_present=<n> classified_uploads=<n> file_share_subtypes=<n>
+replies: messages=<n> files_key_present=<n> classified_uploads=<n> file_share_subtypes=<n>
+Distinct uploads: <n>  (deduplicated across surfaces — a thread root arrives on both)
+Uncountable shapes: <n>; decode failures: <n>
+Contract holds: <yes/no>; failures:
+```
+
+The replies figures are the ones `SlackMessageHasUpload`'s comment still lists as
+assumed: the recorded measurement covered `conversations.history` only. A run that
+reports them is what lets that caveat be dropped.
 
 ## Binding-backed setup visibility
 
@@ -853,7 +1028,7 @@ that accidentally carried a numeric value.
 | `AUTH0_CLIENT_SECRET` | OAuth | Auth0 application client_secret |
 | `AUTH0_AUDIENCE` | OAuth | Auth0 audience identifier for the qurl-service API. Must not contain surrounding whitespace. |
 | `AUTH0_EXPECTED_AUDIENCE` | No | Optional infra-owned expected Auth0 audience for the configured qURL endpoint. When set, startup fails if `AUTH0_AUDIENCE` does not match exactly; leave unset to disable this drift check for local or self-hosted deployments. |
-| `AUTH0_EMAIL_CONNECTION` | No | Optional Auth0 connection name to force during `/qurl setup <email>` (for example `Username-Password-Authentication`). Empty sends no `connection` hint and lets the Auth0 application choose from its enabled connections. |
+| `AUTH0_EMAIL_CONNECTION` | No | Overrides the Auth0 connection pinned during `/qurl setup <email>`. Empty pins `email`, Auth0's passwordless email connection and the same one qurl-desktop uses, so one human keeps one Auth0 subject across surfaces. Set this only when the deployment's passwordless connection is named something else; pointing it at a non-passwordless connection changes the login method for every workspace admin. |
 | `SLACK_BASE_URL` | OAuth/Slack install | Public origin of the Secure Access Agent, e.g. `https://slack-bot.example`. Used to compose Slack install, Slack callback, Auth0 callback, and `/qurl setup <email>` URLs. |
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_BINDING_IDEMPOTENCY_TTL_CONTRACT` | No | Runtime mirror of qurl-service's external-binding replay window for setup persist-failure logs. Empty uses the current 24-hour default from layervai/qurl-service#904. Set only when qurl-service changes the binding idempotency TTL before this Slack app redeploys; value must use the canonical positive whole-hour `Nh` form such as `24h`, otherwise startup fails. |

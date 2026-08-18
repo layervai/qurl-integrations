@@ -1,0 +1,5 @@
+Error: This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start.
+
+  qURL Connector Hub configuration: this build has no pinned production Hub key; set the all-or-none QURL_CONNECTOR_HUB_HOST/QURL_CONNECTOR_HUB_PORT/QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 custom deployment triple
+
+  Hint: production builds ship this configuration built in — install an official qURL release, or for a custom deployment set QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 together.

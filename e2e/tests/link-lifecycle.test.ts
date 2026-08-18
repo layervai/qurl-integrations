@@ -49,7 +49,7 @@ describe('Link Lifecycle: Minting', () => {
   test('mint with custom description', async () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/described'),
-      description: 'Test link with special chars: <>&"\'日本語',
+      label: 'Test link with special chars: <>&"\'日本語',
     });
     tracked.track(result.resource_id);
     expect(result.qurl_link).toBeDefined();
@@ -77,7 +77,6 @@ describe('Link Lifecycle: Access', () => {
   test('first access returns 200 (SPA loads)', async () => {
     const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
       target_url: withRunNonce('https://example.com/access-test'),
-      max_uses: 1,
     });
     tracked.track(result.resource_id);
     const res = await qurl.accessLink(result.qurl_link);

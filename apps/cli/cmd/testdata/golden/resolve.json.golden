@@ -1,0 +1,8 @@
+{
+  "qurl": "https://qurl.link/#qv2.test.link",
+  "crid": "qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q",
+  "type": "qv2",
+  "expires_at": "2026-03-01T00:05:00Z",
+  "expires_in_seconds": 300,
+  "single_use": true
+}

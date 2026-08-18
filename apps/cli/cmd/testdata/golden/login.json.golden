@@ -1,0 +1,15 @@
+{
+  "owner_id": "own_cli_fixture",
+  "auth_type": "api_key",
+  "api_key": {
+    "key_id": "key_fixturecli01",
+    "kind": "api_key",
+    "scopes": [
+      "qurl:read",
+      "qurl:resolve",
+      "qurl:write"
+    ],
+    "key_prefix": "lv_test_abcd"
+  },
+  "stored": "keyring"
+}

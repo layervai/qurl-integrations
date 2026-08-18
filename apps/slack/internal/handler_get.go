@@ -36,6 +36,14 @@ func getMintLimitMessage(apiErr *client.APIError) string {
 // sentinel.
 const getUsageMessage = "Usage: `/qurl get <$id|$alias>` to create a qURL for a resource. Run `/qurl list` to see what's available."
 
+// getReasonAuditMaxRunes bounds the operator prose recorded for a
+// `reason:"…"` mint. The parser accepts any non-empty value (parser.applyFlag
+// keeps the user's exact wording deliberately), so the bound lives here at the
+// point of record. Matches agentConnectorAuditReasonMaxRunes, the same class of
+// cap on the connector-install audit reason — they are independent surfaces, so
+// they are separate constants rather than one shared knob.
+const getReasonAuditMaxRunes = 240
+
 // Access limits applied to every `/qurl get` mint. Raw URLs are unsupported
 // (see urlNotSupportedGetMessage), but existing URL resources can be minted by
 // their listed `$alias`. These limits bound a shared Slack-created link to a
@@ -513,7 +521,6 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	}
 
 	input := client.CreateInput{
-		Reason: args.cmd.Reason(),
 		// One-time use is the only mode for `/qurl get` — there is no
 		// `once` flag; every minted link burns on first redemption.
 		OneTimeUse: true,
@@ -534,6 +541,20 @@ func (h *Handler) getWork(ctx context.Context, log *slog.Logger, args *getWorkAr
 	out, err := c.Create(ctx, input)
 	if err != nil {
 		return getResult{}, mapMintError(log, err)
+	}
+	// Record the operator's reason against the mint that just happened.
+	//
+	// This is deliberately AFTER the mint and BEFORE the delivery guards
+	// below: the mint has already burned the user's quota at this point, so
+	// the reason for it is worth recording even when the link then fails to
+	// render or deliver. It is emitted rather than sent — see
+	// [slackaudit.QURLMintReason] for why the mint body was never the record
+	// it was documented to be.
+	if reason := strings.TrimSpace(args.cmd.Reason()); reason != "" {
+		slackaudit.LogQURLMintReason(log, slackaudit.QURLMintReasonAttrs(
+			args.teamID, args.channelID, args.userID, input.ResourceID,
+			truncateRunes(reason, getReasonAuditMaxRunes),
+		)...)
 	}
 	// Defensive: an empty OR non-https qurl_link is a server contract surprise (mints
 	// return absolute https qurl.link URLs). The Enter Portal render puts the link in a

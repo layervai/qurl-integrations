@@ -69,9 +69,10 @@ jobs:
           filters: |
             cli:
               # Source of truth for CLI-impacting paths on PR and main push events.
-              # No 'shared/**' here even though apps/cli imports it: shared-test.yml's
-              # `shared / test all` gate runs `go test ./...` — apps/cli included —
-              # on every shared/ change, so those changes are already validated.
+              # No 'shared/**' here: the v2 CLI does not import shared/ at all, and
+              # even if an import returns, shared-test.yml's `shared / test all` gate
+              # runs `go test ./...` — apps/cli included — on every shared/ change,
+              # so those changes are validated there.
               # .goreleaser.yml is here because the goreleaser-check gate below is
               # the only CI that validates it before release-cli consumes it.
               - 'apps/cli/**'
@@ -219,6 +220,13 @@ jobs:
           fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gnome-keyring dbus
+          # gnome-keyring-daemon cannot create/unlock the default collection
+          # unless the keyrings directory already exists with owner-only
+          # permissions. This preparation (and the unlock in the test step)
+          # is zalando/go-keyring's own CI recipe — the upstream-proven shape.
+          mkdir -p "$HOME/.cache/"
+          mkdir -p "$HOME/.local/share/keyrings/"
+          chmod 700 -R "$HOME/.local/"
           # Arms the dbus-run-session wrapper in the test step below: the
           # daemon must be unlocked inside the same session the tests run in,
           # so the wrapper cannot live in this step.
@@ -228,7 +236,16 @@ jobs:
         shell: bash
         run: |
           if [ "${QURL_CLI_KEYRING_DBUS:-}" = "1" ]; then
-            dbus-run-session -- bash -c 'printf "" | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/...'
+            # The unlock password must be non-empty and piped to the daemon
+            # inside the same D-Bus session the tests run in; an empty
+            # password leaves the Secret Service refusing every store with
+            # "failed to unlock correct collection
+            # '/org/freedesktop/secrets/aliases/default'". The incantation is
+            # copied from zalando/go-keyring's own CI (a throwaway password
+            # for an ephemeral runner keyring, not a secret). -eo pipefail
+            # makes a failed unlock redden this step itself instead of
+            # surfacing as a confusing failure inside the tests.
+            dbus-run-session -- bash -c "set -eo pipefail; echo 'somecredstorepass' | gnome-keyring-daemon --unlock; exec go test -count=1 ./apps/cli/..."
           else
             go test -count=1 ./apps/cli/...
           fi
@@ -263,16 +280,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Placeholder until the v2 sandbox suite lands: nothing carries the
-      # clisandbox build tag yet, so this runs the regular suite under the tag
-      # and passes. The notice below self-silences the moment the first tagged
-      # test file appears, at which point this becomes the real gate.
+      # The clisandbox-tagged suites exist now, so this is the real gate. The
+      # CRID journey (apps/cli/cmd/sandbox_journey_test.go) arms itself from
+      # the env below and runs against the live sandbox; until the operator
+      # mints the QURL_SANDBOX_API_KEY secret it skips loudly by name while
+      # this step still proves the whole tree under the tag. Arming is
+      # layered on purpose: the job itself runs only when
+      # vars.CLI_SANDBOX_E2E == 'enabled' on a same-repo ref (see this job's
+      # if:, whose disarmed skip the required aggregate's verifier reports as
+      # expected), and the suite inside arms on its env contract. -v keeps a
+      # suite-level skip visible in the log instead of silent green.
+      #
+      # The Connector smoke (sandbox_connector_test.go) is deliberately NOT
+      # armed here: beyond an endpoint it needs QURL_CLI_SANDBOX_CONNECTOR,
+      # a slug, the Hub triple, and an enrolled state dir or a one-shot
+      # enrollment token — one-shots burn on first use, so a repo secret
+      # cannot carry one. It stays gated on its own variables and skips
+      # loudly; the journey suite does not require it.
       - name: Run sandbox e2e suite
-        run: |
-          go test -tags=clisandbox -count=1 ./apps/cli/...
-          if ! grep -rq --include='*.go' 'go:build.*clisandbox' apps/cli; then
-            echo "::notice::cli / sandbox e2e: no sandbox suite yet — no file carries the clisandbox build tag; this gate arms when the first tagged test lands"
-          fi
+        env:
+          QURL_API_KEY: ${{ secrets.QURL_SANDBOX_API_KEY }}
+          # The sandbox hostname is deliberately a secret, not a literal.
+          QURL_ENDPOINT: ${{ secrets.QURL_SANDBOX_ENDPOINT }}
+        run: go test -tags=clisandbox -count=1 -v ./apps/cli/...
 
   goreleaser-check:
     name: cli / goreleaser check
@@ -294,32 +324,13 @@ jobs:
           install-only: true
 
       # `goreleaser check` exits 1 on an invalid config and 2 on a valid one
-      # that uses deprecated properties. .goreleaser.yml is in the second
-      # state today (archives.builds, nfpms.builds, format_overrides.format,
-      # brews — the brews→casks migration is a Homebrew-install behaviour
-      # change that needs its own PR), and release-cli releases fine through
-      # it because `goreleaser release` only warns on deprecations. Failing
-      # this gate on exit 2 would therefore block every CLI PR on a release
-      # migration it must not smuggle in — so warn loudly on 2, fail on
-      # anything else. Once .goreleaser.yml is migrated, exit 2 stops
-      # occurring and this tolerance becomes dead code to remove.
+      # that uses deprecated properties. Both fail this gate on purpose: a
+      # new upstream deprecation should redden CLI PRs here, where fixing it
+      # is cheap, instead of surfacing first in release-cli. (An exit-2
+      # tolerance lived here until .goreleaser.yml was migrated off its
+      # deprecated keys; keep the gate strict.)
       - name: goreleaser check
-        shell: bash
-        run: |
-          set +e
-          goreleaser check
-          rc=$?
-          set -e
-          case "$rc" in
-            0)
-              ;;
-            2)
-              echo "::warning::goreleaser check: .goreleaser.yml is valid but uses deprecated properties (exit 2). Migrate them before GoReleaser hard-removes support and reddens release-cli."
-              ;;
-            *)
-              exit "$rc"
-              ;;
-          esac
+        run: goreleaser check
 
   required:
     name: cli / required

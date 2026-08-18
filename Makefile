@@ -65,10 +65,12 @@ vendor:
 	go mod vendor
 	go mod tidy
 
-## Release (requires goreleaser)
+## Release (requires goreleaser + syft; .goreleaser.yml's sboms block shells
+## out to syft). Signing is skipped: keyless cosign needs GitHub's OIDC
+## broker, which only exists on Actions runs — see `signs:` in .goreleaser.yml.
 
 release-snapshot: # Build release artifacts without publishing
-	goreleaser release --snapshot --clean
+	goreleaser release --snapshot --clean --skip=sign
 
 ## Security
 
@@ -165,12 +167,7 @@ check-cli:
 	go tool govulncheck ./apps/cli/...
 	QURL_TEST_HARNESS=1 go test -count=1 ./apps/cli/...
 	go test -tags=clisandbox -count=1 ./apps/cli/...
-	@goreleaser check; rc=$$?; \
-	if [ $$rc -eq 2 ]; then \
-		echo "warning: .goreleaser.yml valid but uses deprecated properties (exit 2) — matches cli.yml's tolerated state"; \
-	elif [ $$rc -ne 0 ]; then \
-		exit $$rc; \
-	fi
+	goreleaser check
 
 # Kept verbose for local debugging — discord.yml adds --silent.
 test-discord:
