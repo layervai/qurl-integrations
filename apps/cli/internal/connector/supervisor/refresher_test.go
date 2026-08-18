@@ -14,12 +14,58 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/knock"
 )
 
-func newTestRefresher(knocker knock.Knocker, gate time.Duration) *redialKnockRefresher {
+// The refresher suite drives the gate arithmetic through injected clocks and
+// never reads the real one: Go's monotonic reading advances on the
+// interrupt-timer tick on Windows (up to ~15.6ms), so a real-clock gate —
+// however small — collapses serialized attempts into one debounce window and
+// the budget assertions become scheduling-dependent.
+
+// manualClock is a hand-advanced clock; reads never move it.
+type manualClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newManualClock() *manualClock {
+	return &manualClock{t: time.Unix(1700000000, 0)}
+}
+
+func (c *manualClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *manualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// steppingClock advances itself by step on every read. The refresher reads
+// the clock exactly once per refresh, so each serialized call observes the
+// previous one as a full step in the past — deterministically past any gate
+// at or below step, regardless of scheduling.
+type steppingClock struct {
+	mu   sync.Mutex
+	t    time.Time
+	step time.Duration
+}
+
+func (c *steppingClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(c.step)
+	return c.t
+}
+
+func newTestRefresher(knocker knock.Knocker, gate time.Duration, now func() time.Time) *redialKnockRefresher {
 	return &redialKnockRefresher{
 		knocker:    knocker,
 		resourceID: testResource,
 		gate:       gate,
 		logger:     discardLogger(),
+		now:        now,
 	}
 }
 
@@ -28,8 +74,9 @@ func newTestRefresher(knocker knock.Knocker, gate time.Duration) *redialKnockRef
 // extra knock, and the gate starts at handoff time.
 func TestRefresherFirstCycleHandoffSkipsKnock(t *testing.T) {
 	t.Parallel()
+	clk := newManualClock()
 	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("h.example:1")}}
-	r := newTestRefresher(knocker, time.Hour)
+	r := newTestRefresher(knocker, time.Hour, clk.now)
 	common := commonForTest()
 	common.Metadatas = map[string]string{frpgen.MetaQURLKnockToken: "supervisor-stamped"}
 	if err := r.refresh(context.Background(), common, "open"); err != nil {
@@ -38,7 +85,8 @@ func TestRefresherFirstCycleHandoffSkipsKnock(t *testing.T) {
 	if got := knocker.calls.Load(); got != 0 {
 		t.Fatalf("knocks during first-cycle handoff = %d, want 0", got)
 	}
-	// A second call inside the gate stays debounced.
+	// A second call inside the gate stays debounced, even most of the way in.
+	clk.advance(time.Hour - time.Nanosecond)
 	if err := r.refresh(context.Background(), common, "open"); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -47,23 +95,26 @@ func TestRefresherFirstCycleHandoffSkipsKnock(t *testing.T) {
 	}
 }
 
-// TestRefresherReKnocksAfterGateAndRestamps: past the gate, a redial refresh
-// knocks again and restamps token plus dial target from the fresh ACK.
+// TestRefresherReKnocksAfterGateAndRestamps: exactly at the gate boundary a
+// redial refresh knocks again and restamps token plus dial target from the
+// fresh ACK (the gate is "at least", not "strictly more").
 func TestRefresherReKnocksAfterGateAndRestamps(t *testing.T) {
 	t.Parallel()
+	clk := newManualClock()
+	const gate = 10 * time.Second
 	knocker := &fakeKnocker{script: []knockResp{
 		{result: &knock.Result{
 			ACTokens:     map[string]string{testResource: "fresh-token"},
 			ResourceHost: map[string]string{testResource: "tunnel-b.example:9002"},
 		}},
 	}}
-	r := newTestRefresher(knocker, time.Millisecond)
+	r := newTestRefresher(knocker, gate, clk.now)
 	common := commonForTest()
 	common.Metadatas = map[string]string{frpgen.MetaQURLKnockToken: "stale-token"}
 	if err := r.refresh(context.Background(), common, "open"); err != nil { // handoff
 		t.Fatal(err)
 	}
-	time.Sleep(5 * time.Millisecond)
+	clk.advance(gate)
 	if err := r.refresh(context.Background(), common, "connect"); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -79,11 +130,13 @@ func TestRefresherReKnocksAfterGateAndRestamps(t *testing.T) {
 }
 
 // TestRefresherWithoutSupervisorTokenKnocksImmediately: with no handoff token
-// (nothing stamped yet), the first refresh must knock.
+// (nothing stamped yet), the first refresh must knock. Runs on the nil clock
+// seam deliberately, covering the production time.Now default (the branch is
+// clock-value-independent: a zero lastKnockAt knocks unconditionally).
 func TestRefresherWithoutSupervisorTokenKnocksImmediately(t *testing.T) {
 	t.Parallel()
 	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("h.example:1")}}
-	r := newTestRefresher(knocker, time.Hour)
+	r := newTestRefresher(knocker, time.Hour, nil)
 	common := commonForTest()
 	if err := r.refresh(context.Background(), common, "open"); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -98,12 +151,14 @@ func TestRefresherWithoutSupervisorTokenKnocksImmediately(t *testing.T) {
 // restart escalation.
 func TestRefresherConsecutiveFailuresResetAfterSuccess(t *testing.T) {
 	t.Parallel()
+	clk := newManualClock()
+	const gate = 10 * time.Second
 	boom := errors.New("knock transport failure")
 	knocker := &fakeKnocker{script: []knockResp{
 		{err: boom}, {err: boom}, healthyKnockResp("h.example:1"), {err: boom},
 	}}
 	var restarts atomic.Int64
-	r := newTestRefresher(knocker, time.Nanosecond)
+	r := newTestRefresher(knocker, gate, clk.now)
 	r.requestRestart = func(error) { restarts.Add(1) }
 	common := commonForTest()
 	for i := range 4 {
@@ -112,7 +167,7 @@ func TestRefresherConsecutiveFailuresResetAfterSuccess(t *testing.T) {
 		if (err != nil) != wantErr {
 			t.Fatalf("refresh[%d] error = %v, want error=%v", i, err, wantErr)
 		}
-		time.Sleep(time.Millisecond)
+		clk.advance(gate)
 	}
 	r.mu.Lock()
 	failures := r.consecutiveFailure
@@ -130,15 +185,20 @@ func TestRefresherConsecutiveFailuresResetAfterSuccess(t *testing.T) {
 // knock sentinel, so the outer loop treats it as a knock-budget exit.
 func TestRefresherBudgetRequestsRestartWithSentinel(t *testing.T) {
 	t.Parallel()
+	clk := newManualClock()
+	const gate = 10 * time.Second
 	boom := errors.New("knock transport failure")
 	knocker := &fakeKnocker{script: []knockResp{{err: boom}}}
 	var restartErr atomic.Pointer[error]
-	r := newTestRefresher(knocker, time.Nanosecond)
+	r := newTestRefresher(knocker, gate, clk.now)
 	r.requestRestart = func(err error) { restartErr.Store(&err) }
 	common := commonForTest()
 	for range redialKnockMaxFailures {
 		_ = r.refresh(context.Background(), common, "connect")
-		time.Sleep(time.Millisecond)
+		clk.advance(gate)
+	}
+	if got := knocker.calls.Load(); got != redialKnockMaxFailures {
+		t.Fatalf("knocks = %d, want every past-gate attempt (%d) to have fired", got, redialKnockMaxFailures)
 	}
 	got := restartErr.Load()
 	if got == nil {
@@ -151,11 +211,13 @@ func TestRefresherBudgetRequestsRestartWithSentinel(t *testing.T) {
 
 // TestRefresherConcurrentRefreshersCollapseToOneGatedKnock: concurrent dial
 // paths must serialize through the refresher and collapse into a single
-// gated knock — the lock spans knock plus restamp by design.
+// gated knock — the lock spans knock plus restamp by design. The static
+// clock makes "inside the gate" exact for every follower.
 func TestRefresherConcurrentRefreshersCollapseToOneGatedKnock(t *testing.T) {
 	t.Parallel()
+	clk := newManualClock()
 	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("h.example:1")}}
-	r := newTestRefresher(knocker, time.Hour)
+	r := newTestRefresher(knocker, time.Hour, clk.now)
 	common := commonForTest()
 	var wg sync.WaitGroup
 	for range 8 {
@@ -176,13 +238,17 @@ func TestRefresherConcurrentRefreshersCollapseToOneGatedKnock(t *testing.T) {
 
 // TestRefresherConcurrentFailuresKeepBudgetExact: under concurrency the
 // failure counter and the single restart escalation stay exact — no lost or
-// doubled counts.
+// doubled counts. The stepping clock hands every serialized call a
+// past-the-gate instant, so all five attempts really knock regardless of how
+// the scheduler interleaves them.
 func TestRefresherConcurrentFailuresKeepBudgetExact(t *testing.T) {
 	t.Parallel()
+	const gate = 10 * time.Second
+	clk := &steppingClock{t: time.Unix(1700000000, 0), step: gate}
 	boom := errors.New("knock transport failure")
 	knocker := &fakeKnocker{script: []knockResp{{err: boom}}}
 	var restarts atomic.Int64
-	r := newTestRefresher(knocker, time.Nanosecond)
+	r := newTestRefresher(knocker, gate, clk.now)
 	r.requestRestart = func(error) { restarts.Add(1) }
 	common := commonForTest()
 	var wg sync.WaitGroup
@@ -191,11 +257,12 @@ func TestRefresherConcurrentFailuresKeepBudgetExact(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_ = r.refresh(context.Background(), common, "connect")
-			time.Sleep(time.Millisecond)
 		}()
 	}
 	wg.Wait()
-	// Serialized by r.mu; the gate is 1ns so every call really knocks.
+	if got := knocker.calls.Load(); got != redialKnockMaxFailures {
+		t.Fatalf("knocks = %d, want all %d attempts past the stepped gate", got, redialKnockMaxFailures)
+	}
 	r.mu.Lock()
 	failures := r.consecutiveFailure
 	r.mu.Unlock()
@@ -349,14 +416,17 @@ func TestPhysicalDialInOpen(t *testing.T) {
 // the forced LoginFailExit path owns recovery if it is not).
 func TestRefresherFailureRestampsNothing(t *testing.T) {
 	t.Parallel()
+	clk := newManualClock()
+	const gate = 10 * time.Second
 	knocker := &fakeKnocker{script: []knockResp{{err: errors.New("boom")}}}
-	r := newTestRefresher(knocker, time.Nanosecond)
+	r := newTestRefresher(knocker, gate, clk.now)
 	common := commonForTest()
 	common.Metadatas = map[string]string{frpgen.MetaQURLKnockToken: "prior-token"}
 	common.ServerAddr, common.ServerPort = "prior.example", 7000
 	r.mu.Lock()
-	r.lastKnockAt = time.Now().Add(-time.Hour) // past the gate, not a handoff
+	r.lastKnockAt = clk.now() // a prior refresh, not a handoff
 	r.mu.Unlock()
+	clk.advance(gate)
 	if err := r.refresh(context.Background(), common, "connect"); err == nil {
 		t.Fatal("refresh succeeded, want the knock failure")
 	}

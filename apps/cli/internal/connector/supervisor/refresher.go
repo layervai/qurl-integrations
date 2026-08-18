@@ -48,6 +48,14 @@ type redialKnockRefresher struct {
 	gate       time.Duration
 	logger     *slog.Logger
 
+	// now is the clock seam; nil means time.Now. Injected by the unit tests
+	// so the gate arithmetic is deterministic instead of reading the real
+	// clock: Go's monotonic reading advances on the interrupt-timer tick on
+	// Windows (up to ~15.6ms), so consecutive serialized refreshes can
+	// observe zero elapsed time and a real-clock test gate would collapse
+	// distinct attempts into one debounce window.
+	now func() time.Time
+
 	mu                 sync.Mutex
 	lastKnockAt        time.Time
 	consecutiveFailure int
@@ -65,15 +73,22 @@ func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCom
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// One clock read per refresh: the gate check and the start-to-start
+	// stamp must see the same instant, and a single read is what lets the
+	// injected test clock drive the arithmetic deterministically.
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
 	if r.lastKnockAt.IsZero() && commonKnockToken(common) != "" {
 		// First-cycle handoff: the supervisor already knocked and stamped
 		// this cycle's token. Start the redial gate at handoff time so quick
 		// connector retries stay inside the same admission window.
-		r.lastKnockAt = time.Now()
+		r.lastKnockAt = now
 		return nil
 	}
 	if !r.lastKnockAt.IsZero() {
-		if wait := r.gate - time.Since(r.lastKnockAt); wait > 0 {
+		if wait := r.gate - now.Sub(r.lastKnockAt); wait > 0 {
 			r.log().DebugContext(ctx, "connector: redial NHP knock skipped inside gate",
 				"event", "redial_knock_gate_wait",
 				"resource_id", r.resourceID,
@@ -88,7 +103,7 @@ func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCom
 	// retries; if a stale token then rejects the Login, the forced
 	// LoginFailExit hands control back to the supervisor cycle, which
 	// performs the canonical re-knock.
-	r.lastKnockAt = time.Now()
+	r.lastKnockAt = now
 	result, err := r.knocker.Knock(ctx)
 	if err != nil {
 		wrapped := fmt.Errorf("redial %s knock failed: %w", reason, err)
