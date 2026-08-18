@@ -146,6 +146,11 @@ linters:
       # it buys no cancellation. Pinned to the one check by text so noctx's
       # genuine findings (uncontextualized http.Get and friends) still apply in
       # tests.
+      #
+      # TODO(upstream-contract): the text below mirrors noctx's own message
+      # string, which we do not control. If upstream rewords it the exclusion
+      # stops matching and every httptest.NewRequest in the repo fails the
+      # check again -- loudly, on the next lint run, not silently.
       - linters:
           - noctx
         path: _test\.go
