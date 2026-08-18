@@ -106,6 +106,12 @@ type runOpts struct {
 
 	configDir string
 	sleeps    *[]time.Duration
+	// realSleep leaves the production sleep path in place instead of
+	// injecting a test double, so the API transport waits out its bounded
+	// 429 retries (Retry-After included) on its own context-aware timer.
+	// Only the clisandbox-tagged live sandbox suite sets it; hermetic tests
+	// never wall-clock sleep.
+	realSleep bool
 	// keyring is the injected OS-keyring stand-in; nil means an empty,
 	// available fake. The file side of the chain is always the real file
 	// store rooted at configDir.
@@ -190,9 +196,15 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 			return auth.NewChain(kr, auth.NewFileStore(dir), onFileRead)
 		}
 		g.openBrowser = browser.open
-		if o.sleeps != nil {
+		switch {
+		case o.sleeps != nil:
 			g.sleep = func(d time.Duration) { *o.sleeps = append(*o.sleeps, d) }
-		} else {
+		case o.realSleep:
+			// nil is the production default: the API transport then uses its
+			// own context-aware timer, so live-sandbox runs honor real
+			// Retry-After waits.
+			g.sleep = nil
+		default:
 			g.sleep = func(time.Duration) {} // tests never wall-clock sleep
 		}
 		if o.connectorOpen != nil {
