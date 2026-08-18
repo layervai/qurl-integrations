@@ -195,14 +195,17 @@ func validateRails(f *flags) error {
 
 // looksProd reports whether this run targets production: the operator label, a
 // "prod" substring in a resolved environment-bearing table name or the qurl-service
-// endpoint, or a layerv.ai endpoint — the endpoint is the clearest prod signal,
-// and the real one (api.layerv.ai) carries no "prod" substring, so it gets its
-// own check. That last check matches the whole layerv.ai domain, not the exact
-// api.layerv.ai host, so any *.layerv.ai endpoint trips: deliberately broad, so
-// don't narrow it to the canonical host — a prod endpoint on another subdomain
-// would stop tripping. Defense-in-depth: a forgotten -env=prod still trips the
-// rail when the wiring says prod. False positives just require the explicit
-// opt-in flag.
+// endpoint, or a "layerv.ai" substring in the endpoint — the endpoint is the
+// clearest prod signal, and the real one (api.layerv.ai) carries no "prod"
+// substring, so it gets its own check.
+//
+// That last check is a plain substring match over the whole endpoint string,
+// not a host parse: it trips on "layerv.ai" appearing anywhere, a path
+// included, and on any subdomain. Deliberately broad — don't narrow it to the
+// canonical api.layerv.ai host, or a prod endpoint on another subdomain stops
+// tripping. Over-tripping only costs the explicit opt-in flag, which is the
+// safe direction for a rail. Defense-in-depth: a forgotten -env=prod still
+// trips when the wiring says prod.
 //
 // f.workspaceStateTable is deliberately NOT scanned, for one mechanical reason:
 // no deployment can make it trip. (The name is an operator-supplied flag, so a

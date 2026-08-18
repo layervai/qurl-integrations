@@ -50,12 +50,14 @@ finding and every mutation is an auditable record.
   - the `-env` label says `prod`/`production`;
   - an **environment-bearing** table name contains `prod` — `channel_policies`
     or `workspace_mappings`, the two whose infra names carry the environment;
-  - the qURL endpoint contains `prod`, **or** is any `layerv.ai` host.
+  - the qURL endpoint string contains `prod`, **or** contains `layerv.ai`.
 
-  That last check matches the whole domain, not just the canonical prod origin
-  `api.layerv.ai` — any `*.layerv.ai` endpoint trips the rail. The breadth is
-  deliberate: narrowing it to the exact host would stop a prod endpoint on some
-  other subdomain from tripping.
+  That last check is a plain substring match over the whole endpoint string —
+  not a host parse, and not just the canonical prod origin `api.layerv.ai`. Any
+  endpoint containing `layerv.ai` anywhere, a path included, trips the rail. The
+  breadth is deliberate: narrowing it to the exact host would stop a prod
+  endpoint on some other subdomain from tripping, and over-tripping only costs
+  you the opt-in flag.
 
   `workspace_state` is **not** scanned. Infra names that table
   `qurl-bot-slack-workspace-state` in every environment, so it carries no prod
