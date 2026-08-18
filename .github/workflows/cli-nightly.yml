@@ -196,7 +196,7 @@ jobs:
             echo "::error::release smoke: CASK link broken — install succeeded but 'qurl' is not on PATH (cask binary stanza broken)"
             exit 1
           fi
-          real="$(readlink -f "$bin")"
+          real="$(realpath "$bin")"
           if xattr -p com.apple.quarantine "$real" >/dev/null 2>&1; then
             echo "::error::release smoke: QUARANTINE-POSTFLIGHT link broken — ${real} still carries com.apple.quarantine; the cask's xattr hook did not strip it, so a customer's first run is Gatekeeper-blocked"
             exit 1
