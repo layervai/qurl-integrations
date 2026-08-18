@@ -137,7 +137,59 @@ export async function mintConnectorView(
   return { qurl_link: link.qurl_link };
 }
 
-/** Mint a one-time qURL link for a resource.
+/** Every field `CreateQurlRequest` declares, per qurl-service's openapi.yaml.
+ * Exported so the unit suite can assert the built body against it rather than
+ * against a second hand-copied list. */
+export const CREATE_QURL_ALLOWED_KEYS = [
+  'type',
+  'target_url',
+  'expires_in',
+  'one_time_use',
+  'max_sessions',
+  'session_duration',
+  'access_policy',
+  'label',
+  'custom_domain',
+] as const;
+
+/** Build the `POST /v1/qurls` body. Unset options are omitted rather than sent
+ * as `undefined`, so the wire body is exactly the fields the caller asked for
+ * plus the helper's defaults. */
+function mintBody(opts: { target_url?: string; expires_in?: string; label?: string }): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    expires_in: opts.expires_in ?? '1h',
+    // Tags mints from these suites so a leaked sandbox resource is
+    // identifiable. Carried over from the old `description` default, now on
+    // the field the create schema actually declares.
+    label: opts.label ?? 'E2E test link',
+  };
+  if (opts.target_url !== undefined) body.target_url = opts.target_url;
+  return body;
+}
+
+/** Mint a qURL link, via qurl-service's `POST /v1/qurls` (`mintUrl` is that
+ * endpoint — see `MINT_API_URL`).
+ *
+ * The options are a subset of `CreateQurlRequest`, and MUST stay one: since
+ * qurl-service#1402 the endpoint sets `additionalProperties: false`, so a body
+ * key outside that schema is a 400 rather than the silent drop it used to be.
+ * `mintBody` below is the single place the wire body is built, and
+ * `CREATE_QURL_ALLOWED_KEYS` is the guard on it.
+ *
+ * Removed with #1402 in mind, and why nothing replaced them:
+ *   - `description` → `label`. `description` is not a create-request property
+ *     at all (it lives on the Update / Resource bodies and the GET response);
+ *     `label` is the create schema's human-readable field.
+ *   - `max_uses` → dropped, NOT translated. It was never a property of any
+ *     mint schema, so the server has never seen it and every link minted here
+ *     has been multi-use. `one_time_use: true` is the declared field that
+ *     would have meant what `max_uses: 1` intended, but adding it now would
+ *     change live behavior these suites have been written against (the
+ *     concurrency race in particular), so that is a deliberate follow-up.
+ *   - `resource_id` → dropped. `POST /v1/qurls` does not accept it; a
+ *     resource-scoped mint is `POST /v1/resources/{id}/qurls`, a different
+ *     endpoint with a different body. No caller passed it.
+ *
  * This non-idempotent POST deliberately uses one bare fetch: after an
  * ambiguous transport failure the helper cannot know whether a link was
  * created, so replaying the request could mint an unintended extra qURL. */
@@ -146,10 +198,8 @@ export async function mintLink(
   apiKey: string,
   opts: {
     target_url?: string;
-    resource_id?: string;
     expires_in?: string;
-    description?: string;
-    max_uses?: number;
+    label?: string;
   },
 ): Promise<MintResult> {
   const res = await fetch(stripTrailingSlashes(mintUrl), {
@@ -158,13 +208,7 @@ export async function mintLink(
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      target_url: opts.target_url,
-      resource_id: opts.resource_id,
-      expires_in: opts.expires_in ?? '1h',
-      description: opts.description ?? 'E2E test link',
-      max_uses: opts.max_uses ?? 1,
-    }),
+    body: JSON.stringify(mintBody(opts)),
   });
 
   if (!res.ok) throw new Error(`Mint failed: ${res.status} ${await res.text()}`);

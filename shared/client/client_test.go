@@ -2252,3 +2252,132 @@ func TestListResourcesCursorEscaping(t *testing.T) {
 		t.Fatalf("ListResources: %v", err)
 	}
 }
+
+// mintAllowedKeys is the wire contract for the two mint endpoints, transcribed
+// from qurl-service's api/openapi.yaml — deliberately NOT derived from the body
+// structs in this package, so a field added there cannot also grant itself
+// permission to ship. qurl-service#1402 sets `additionalProperties: false` on
+// both schemas, so anything outside these sets is a 400, not the silent drop it
+// used to be.
+var mintAllowedKeys = map[string][]string{
+	// CreateQurlRequest
+	"POST /v1/qurls": {
+		"type", "target_url", "expires_in", "one_time_use",
+		"max_sessions", "session_duration", "access_policy", "label",
+		"custom_domain",
+	},
+	// CreateQurlForResourceRequest — no target_url or resource_id (the id rides
+	// in the path), and no target_path (that is MintLinkRequest's field).
+	"POST /v1/resources/{id}/qurls": {
+		"expires_in", "one_time_use", "max_sessions", "session_duration",
+		"access_policy", "label",
+	},
+}
+
+// fullyPopulatedCreateInput returns a CreateInput with every marshalable field
+// set to a non-zero value. That is what gives
+// TestMintBodiesCarryOnlyDeclaredFields its teeth: a field that is left at its
+// zero value would be dropped by omitempty and sail past the key check, so the
+// completeness assertion below refuses to let this fixture rot.
+func fullyPopulatedCreateInput() CreateInput {
+	return CreateInput{
+		TargetURL:       testTargetURL,
+		ResourceID:      testResourceID,
+		Label:           "for Alice",
+		ExpiresIn:       "7d",
+		OneTimeUse:      true,
+		MaxSessions:     3,
+		SessionDuration: "1h",
+		AccessPolicy:    &AccessPolicy{IPAllowlist: []string{"10.0.0.1"}},
+		IdempotencyKey:  "idem-key-1",
+	}
+}
+
+// TestCreateInputFixtureIsComplete fails when CreateInput grows a field that
+// fullyPopulatedCreateInput doesn't set. Without this, adding a field and
+// forgetting the fixture would silently weaken the key guard below to a
+// no-op for that field rather than failing.
+func TestCreateInputFixtureIsComplete(t *testing.T) {
+	t.Parallel()
+	v := reflect.ValueOf(fullyPopulatedCreateInput())
+	typ := v.Type()
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if v.Field(i).IsZero() {
+			t.Errorf("CreateInput.%s is zero in fullyPopulatedCreateInput — set it, "+
+				"or the mint-body key guard silently stops covering it", field.Name)
+		}
+	}
+}
+
+// TestMintBodiesCarryOnlyDeclaredFields is the regression gate for
+// qurl-service#1402: every key a mint body carries must be a property of that
+// endpoint's request schema. It drives the real Create path with a
+// fully-populated input and reads the body off the wire, so it covers whatever
+// Create actually serializes rather than whatever a body struct claims.
+//
+// This is the guard that `reason` (Slack) and `target_path` (Discord) needed
+// and didn't have: both were declared client-side, marshaled, dropped
+// server-side, and invisible until the schema tightened.
+func TestMintBodiesCarryOnlyDeclaredFields(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		// mutate adapts the shared fixture to the form under test.
+		// TargetURL and ResourceID are mutually exclusive on the wire, and
+		// which one is set is what routes Create to each endpoint.
+		mutate func(*CreateInput)
+	}{
+		{
+			name:     "target-URL form",
+			endpoint: "POST /v1/qurls",
+			mutate:   func(in *CreateInput) { in.ResourceID = "" },
+		},
+		{
+			name:     "resource form",
+			endpoint: "POST /v1/resources/{id}/qurls",
+			mutate:   func(in *CreateInput) { in.TargetURL = "" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var captured []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"resource_id":"r_1","qurl_link":"https://qurl.link/#at_x"}}`))
+			}))
+			defer srv.Close()
+
+			input := fullyPopulatedCreateInput()
+			tc.mutate(&input)
+			if _, err := testClient(srv.URL, "k").Create(context.Background(), input); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(captured, &body); err != nil {
+				t.Fatalf("unmarshal captured body: %v body=%s", err, captured)
+			}
+			allowed := make(map[string]bool, len(mintAllowedKeys[tc.endpoint]))
+			for _, k := range mintAllowedKeys[tc.endpoint] {
+				allowed[k] = true
+			}
+			for key := range body {
+				if !allowed[key] {
+					t.Errorf("%s body carries %q, which is not a property of its request schema "+
+						"(qurl-service rejects unknown fields since #1402); allowed: %v",
+						tc.endpoint, key, mintAllowedKeys[tc.endpoint])
+				}
+			}
+			if len(body) == 0 {
+				t.Errorf("%s body was empty — the fixture stopped reaching the wire, so this "+
+					"guard would pass vacuously; body=%s", tc.endpoint, captured)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	slackoauth "github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackaudit"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -1203,11 +1204,25 @@ func TestCreateInputJSON_ResourceID(t *testing.T) {
 	}
 }
 
-// TestCreateInputJSON_Reason fences the wire shape: reason flag
-// flows through to the JSON body when set, and is absent when
-// unset. Alias-form mint, so the path is the resource-scoped
-// endpoint.
-func TestCreateInputJSON_Reason(t *testing.T) {
+// TestGetReason_AuditedNotSentOnTheWire fences WHERE the operator's
+// `reason:"…"` goes, on both sides at once.
+//
+// It must NOT ride in the mint body. `reason` has never been a property of
+// CreateQurlRequest or CreateQurlForResourceRequest, so qurl-service dropped it
+// on arrival — the "recorded in the audit log" the flag's help text promises
+// never happened — and qurl-service#1402 (`additionalProperties: false`) turns
+// that silent drop into a 400 on 100% of reasoned gets.
+//
+// It must instead land in Slack's own audit record, which is what makes that
+// promise true. Asserting both halves in one test is deliberate: a fix that
+// merely deleted the field would pass a wire-only assertion while quietly
+// dropping an operator-visible feature.
+//
+// Alias-form mint, so the path is the resource-scoped endpoint.
+func TestGetReason_AuditedNotSentOnTheWire(t *testing.T) {
+	// Before the handler is built: async get work logs through slog.With off
+	// the default logger, so this is the seam that sees the audit record.
+	logs := captureDefaultSlog(t)
 	ts := newAdminTestServers(t)
 	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
 	var capturedBody []byte
@@ -1225,8 +1240,45 @@ func TestCreateInputJSON_Reason(t *testing.T) {
 	if err := json.Unmarshal(capturedBody, &parsed); err != nil {
 		t.Fatalf("unmarshal captured body: %v body=%s", err, capturedBody)
 	}
-	if got, _ := parsed["reason"].(string); got != "incident #123" {
-		t.Errorf("reason = %v, want %q", parsed["reason"], "incident #123")
+	if _, ok := parsed["reason"]; ok {
+		t.Errorf("reason present on the mint body — qurl-service rejects unknown fields (#1402): %v", parsed)
+	}
+
+	audit := findAuditRecord(logs, slackaudit.QURLMintReason)
+	if audit == nil {
+		t.Fatalf("no %s audit record emitted — the reason was dropped, not re-homed; logs=%s",
+			slackaudit.QURLMintReason, logs.String())
+	}
+	for k, want := range map[string]any{
+		"agent":       "slack",
+		"reason":      "incident #123",
+		"team_id":     testAdminTeamID,
+		"user_id":     testAdminUserID,
+		"resource_id": testResourceIDFix,
+	} {
+		if audit[k] != want {
+			t.Errorf("audit[%s] = %#v, want %#v; audit=%#v", k, audit[k], want, audit)
+		}
+	}
+}
+
+// TestGetWithoutReason_EmitsNoAuditRecord pins the other half of the contract:
+// the audit record marks an operator DECISION to annotate a mint, so a plain
+// `/qurl get` must not emit an empty-reason row that dilutes the filter.
+func TestGetWithoutReason_EmitsNoAuditRecord(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	ts := newAdminTestServers(t)
+	ts.seedPolicySet(t, testAdminTeamID, "C_test", "prod-db", []string{testResourceIDFix})
+	ts.addCustomer("POST", mintByTestResourcePath, func(w http.ResponseWriter, _ *http.Request) {
+		writeCreateFixture(t, w, "https://qurl.link/abc", testResourceIDFix)
+	})
+	h := newAdminTestHandler(t, ts)
+	inv := newAdminSlashInvoker(t, h)
+
+	inv.invokeAdminAsync("get $prod-db", testAdminTeamID, testAdminUserID)
+
+	if audit := findAuditRecord(logs, slackaudit.QURLMintReason); audit != nil {
+		t.Errorf("unreasoned get emitted a %s record: %#v", slackaudit.QURLMintReason, audit)
 	}
 }
 

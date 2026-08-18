@@ -298,6 +298,13 @@ type AccessPolicy struct {
 // rather than serializing the zero value `""`, which would otherwise trip the
 // server's exclusivity check.
 type CreateInput struct {
+	// The json tags below document each field's wire NAME; CreateInput
+	// itself is never marshaled. Both endpoints serialize a declared body
+	// ([createQurlBody] / [createForResourceBody]) instead, because the
+	// service rejects unknown fields (qurl-service#1402) — so a field added
+	// here for client-side use cannot reach the wire just by existing.
+	// Adding a wire field means adding it to the matching body struct and
+	// to TestMintBodiesCarryOnlyDeclaredFields's allowed set.
 	TargetURL string `json:"target_url,omitempty"`
 	// ResourceID, when set, mints a qURL bound to an existing resource
 	// (e.g. an existing tunnel resource). Mutually exclusive with
@@ -319,12 +326,6 @@ type CreateInput struct {
 	// stays off the wire and inherits the server/plan default.
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	// Reason is forwarded to the audit log when set (e.g. an
-	// operator-supplied "for incident #123" annotation from the
-	// `/qurl get $alias reason:"…"` slash-command flag). The server
-	// writes this to the audit row only; it is not persisted on the
-	// resulting qURL.
-	Reason string `json:"reason,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so the API dedupes retried writes. See
@@ -394,7 +395,7 @@ func validateIdempotencyKey(key string) error {
 // [Client.UpdateResource]) take *Input pointers, which is the going-forward
 // idiom. Pointer migration tracked at #146.
 //
-//nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
+//nolint:gocritic // hugeParam: CreateInput is 120 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if input.TargetURL == "" && input.ResourceID == "" {
 		return nil, ErrCreateRequiresTarget
@@ -415,9 +416,6 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	if input.ResourceID != "" {
 		// /v1/resources/{id}/qurls — id rides in the path; the body
 		// drops target_url + resource_id and ships the policy subset.
-		// Reason ships in the body too (silently dropped by the server
-		// if not in its schema; harmless either way and matches the
-		// URL-form posture).
 		endpoint = c.baseURL + "/v1/resources/" + url.PathEscape(input.ResourceID) + "/qurls"
 		logLabel = http.MethodPost + " " + CreateForResourcePathLabel
 		body, err = json.Marshal(createForResourceBody{
@@ -427,12 +425,19 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 			MaxSessions:     input.MaxSessions,
 			SessionDuration: input.SessionDuration,
 			AccessPolicy:    input.AccessPolicy,
-			Reason:          input.Reason,
 		})
 	} else {
 		endpoint = c.baseURL + "/v1/qurls"
 		logLabel = "POST /v1/qurls"
-		body, err = json.Marshal(input)
+		body, err = json.Marshal(createQurlBody{
+			TargetURL:       input.TargetURL,
+			Label:           input.Label,
+			ExpiresIn:       input.ExpiresIn,
+			OneTimeUse:      input.OneTimeUse,
+			MaxSessions:     input.MaxSessions,
+			SessionDuration: input.SessionDuration,
+			AccessPolicy:    input.AccessPolicy,
+		})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
@@ -457,6 +462,26 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	return &out, nil
 }
 
+// createQurlBody is the wire shape for `POST /v1/qurls`. Mirrors the qURL
+// service's `CreateQurlRequest` schema.
+//
+// This is a DECLARED body rather than a marshal of [CreateInput] itself:
+// the service rejects unknown fields (qurl-service#1402 adds
+// `additionalProperties: false` to both create schemas), so a field added
+// to CreateInput for client-side use must not reach the wire just by
+// existing. Anything sent here has to be a property of CreateQurlRequest —
+// TestMintBodiesCarryOnlyDeclaredFields is the guard.
+type createQurlBody struct {
+	TargetURL string `json:"target_url,omitempty"`
+	// `label` per CreateQurlRequest (not `description`).
+	Label           string        `json:"label,omitempty"`
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+}
+
 // createForResourceBody is the wire shape for `POST
 // /v1/resources/{id}/qurls`. Mirrors the qURL service's
 // `CreateQurlForResourceRequest` schema (resource id rides in the URL
@@ -470,7 +495,6 @@ type createForResourceBody struct {
 	MaxSessions     int           `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
-	Reason          string        `json:"reason,omitempty"`
 }
 
 // --- Resources ---

@@ -58,6 +58,44 @@ test.each([
   ).rejects.toThrow(/invalid response shape/);
 });
 
+// qurl-service#1402 adds `additionalProperties: false` to the mint schemas, so
+// a body key outside CreateQurlRequest is a 400 rather than the silent drop it
+// used to be. This is the table guard: it reads the body mintLink actually put
+// on the wire and fails on any key the schema does not declare. The allowed
+// list is imported, not re-typed, so it cannot drift from the helper.
+test.each([
+  ['defaults only', {}],
+  ['every supported option', { target_url: 'https://example.com', expires_in: '7d', label: 'a label' }],
+  ['empty target_url (the negative-path shape)', { target_url: '' }],
+])('mintLink sends no field outside CreateQurlRequest: %s', async (_description, opts) => {
+  fetchMock.mockResolvedValueOnce(
+    jsonResponse({ data: { resource_id: publicResourceId, qurl_link: 'https://qurl.link/a', qurl_id: qurlId } }),
+  );
+
+  await qurl.mintLink(mintUrl, apiKey, opts);
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+  const undeclared = Object.keys(body).filter(
+    (k) => !(qurl.CREATE_QURL_ALLOWED_KEYS as readonly string[]).includes(k),
+  );
+  expect(undeclared).toEqual([]);
+});
+
+test('mintLink omits target_url entirely when unset rather than sending undefined', () => {
+  // JSON.stringify already drops an undefined value, so this is a guard on the
+  // shape staying that way: `POST /v1/qurls` requires target_url, and the
+  // negative-path suite asserts the 400 that a body without it produces.
+  fetchMock.mockResolvedValueOnce(
+    jsonResponse({ data: { resource_id: publicResourceId, qurl_link: 'https://qurl.link/a', qurl_id: qurlId } }),
+  );
+
+  return qurl.mintLink(mintUrl, apiKey, {}).then(() => {
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).not.toHaveProperty('target_url');
+  });
+});
+
 test('mintLink does not replay a rejected POST', async () => {
   fetchMock.mockRejectedValueOnce(new Error('simulated transport failure'));
 
