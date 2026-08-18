@@ -1115,16 +1115,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// /slack/commands); logging each would be noise. Slack and
 		// health paths are the only legitimate surface and they get
 		// their own log lines.
-		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		respondJSON(w, http.StatusNotFound, map[string]string{respFieldError: "not found"})
 		return
 	}
 
-	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
+	slog.Info("received request", "path", r.URL.Path, "method", r.Method)
 
 	// Honest oversize declarations get rejected before allocation.
 	// MaxBytesReader still catches dishonest senders during the read.
 	if r.ContentLength > maxRequestBodyBytes {
-		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength)
 		respondPayloadTooLarge(w)
 		return
 	}
@@ -1135,17 +1135,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// above; bucket them together so dashboards see one 413 stream.
 		var mbErr *http.MaxBytesError
 		if errors.As(err, &mbErr) {
-			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read") //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read")
 			respondPayloadTooLarge(w)
 			return
 		}
-		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path)
+		respondJSON(w, http.StatusBadRequest, map[string]string{respFieldError: "invalid body"})
 		return
 	}
 
 	if err := h.verifySlackRequest(r, body); err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+		respondJSON(w, http.StatusUnauthorized, map[string]string{respFieldError: "signature verification failed"})
 		return
 	}
 
@@ -1186,9 +1186,9 @@ func (h *Handler) verifySlackRequest(r *http.Request, body []byte) error {
 		// Empty secret means the deployment is effectively open — page on
 		// it distinctly from ordinary 401 noise.
 		if errors.Is(err, errSlackSigningSecretEmpty) {
-			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
 		} else {
-			slog.Warn("slack signature verification failed", attrs...) //nolint:gosec // G706: attrs carries r.URL.Path which slog escapes.
+			slog.Warn("slack signature verification failed", attrs...)
 		}
 	}
 	return err
@@ -1264,7 +1264,7 @@ var adminVerbs = []string{string(SubcmdAdmin), adminVerbProtect, adminVerbProtec
 // redirect a user who typed a user verb on `/qurl-admin`. `setup` is a
 // user verb (first-come-claims; see handleSetup), so `/qurl-admin setup`
 // redirects here to `/qurl setup`. Immutable like adminVerbs (see above).
-var userVerbs = []string{"get", "list", "aliases", "create", "setup", uninstallVerb, "feedback"}
+var userVerbs = []string{"get", "list", string(SubcmdAliases), "create", setupVerb, uninstallVerb, "feedback"}
 
 // isAdminVerb reports whether text's leading verb is an admin verb.
 func isAdminVerb(text string) bool {
@@ -1373,7 +1373,7 @@ func stripUnsetDisplayNamePrefix(text string) string {
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form body"})
+		respondJSON(w, http.StatusBadRequest, map[string]string{respFieldError: "invalid form body"})
 		return
 	}
 
@@ -1485,7 +1485,7 @@ func (h *Handler) dispatchUserCommand(w http.ResponseWriter, command, text strin
 		// routing here. The parser then produces ErrEmptyResource
 		// for a bare `get`.
 		h.handleGet(w, values)
-	case text == "aliases":
+	case text == string(SubcmdAliases):
 		h.handleAliases(w, values)
 	case slashSubcommand(text, "feedback"):
 		// feedback is a user verb available to any workspace member — no
@@ -2744,14 +2744,14 @@ func (h *Handler) adminHelpMessage(command string) string {
 // from "missing path" (404) and "auth-gated" (401).
 func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
-	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{respFieldError: "method not allowed"})
 }
 
 // respondPayloadTooLarge writes 413 for both the Content-Length pre-check
 // and the MaxBytesReader-during-read paths. Centralizing keeps the wire
 // envelope identical so operator dashboards bucket them together.
 func respondPayloadTooLarge(w http.ResponseWriter) {
-	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
+	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{respFieldError: "body too large"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, body any) {
@@ -2776,6 +2776,7 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 // can't drift, and so the goconst/keyword consistency stays linter-clean.
 const (
 	respFieldResponseType    = "response_type"
+	respFieldError           = "error"
 	respFieldText            = "text"
 	respFieldReplaceOriginal = "replace_original"
 	respTypeEphemeral        = "ephemeral"

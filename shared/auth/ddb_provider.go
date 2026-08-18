@@ -135,6 +135,12 @@ const (
 	apiKeyValidationProjectionKey        = "#api_key"
 	apiKeyValidationProjectionDataKey    = "#data_key"
 	apiKeyValidationProjectionExpression = apiKeyValidationProjectionKey + ", " + apiKeyValidationProjectionDataKey
+
+	// DDB ExpressionAttributeValues placeholders for the current time,
+	// shared by the workspace_state UpdateExpression callers below.
+	// Lifted to constants to satisfy goconst.
+	exprNow     = ":now"
+	exprNowNano = ":now_nano"
 )
 
 // ErrWorkspaceNotConfigured is the sentinel returned by APIKey when the
@@ -930,8 +936,8 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		":key_id":     &ddbtypes.AttributeValueMemberS{Value: keyID},
 		":key_prefix": &ddbtypes.AttributeValueMemberS{Value: keyPrefix},
 		":by":         &ddbtypes.AttributeValueMemberS{Value: configuredBy},
-		":now":        &ddbtypes.AttributeValueMemberS{Value: nowString},
-		":now_nano":   unixNanoAttr(now),
+		exprNow:       &ddbtypes.AttributeValueMemberS{Value: nowString},
+		exprNowNano:   unixNanoAttr(now),
 	}
 	// Only write qurl_account_id when we have a verified qURL account. An empty
 	// value (admin-storage-disabled path) is omitted so it never erases the
@@ -1021,8 +1027,8 @@ func (p *DDBProvider) SetSlackBotToken(ctx context.Context, workspaceID string, 
 	values := map[string]ddbtypes.AttributeValue{
 		":token":    &ddbtypes.AttributeValueMemberB{Value: ct},
 		":dk":       &ddbtypes.AttributeValueMemberB{Value: wrapped},
-		":now":      &ddbtypes.AttributeValueMemberS{Value: nowISO},
-		":now_nano": unixNanoAttr(now),
+		exprNow:     &ddbtypes.AttributeValueMemberS{Value: nowISO},
+		exprNowNano: unixNanoAttr(now),
 	}
 	var removeParts []string
 	setStringAttr := func(attr, token, value string) {
@@ -1150,8 +1156,8 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 			"#updated_at_nano":     attrUpdatedAtNano,
 		},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":now":      &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
-			":now_nano": unixNanoAttr(now),
+			exprNow:     &ddbtypes.AttributeValueMemberS{Value: now.UTC().Format(time.RFC3339)},
+			exprNowNano: unixNanoAttr(now),
 		},
 	})
 	if err != nil {

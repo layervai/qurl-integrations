@@ -411,6 +411,15 @@ const exprNow = ":now"
 
 const exprNowNano = ":now_nano"
 
+// The remaining DDB expression placeholders shared across UpdateExpression
+// callers in this package. Lifted to constants to satisfy goconst, same as
+// exprNow above.
+const (
+	exprOne             = ":one"
+	exprUpdatedAtNano   = "#updated_at_nano"
+	exprPurgeCutoffNano = ":purge_cutoff_nano"
+)
+
 func unixNanoAttr(t time.Time) ddbtypes.AttributeValue {
 	return &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(t.UTC().UnixNano(), 10)}
 }

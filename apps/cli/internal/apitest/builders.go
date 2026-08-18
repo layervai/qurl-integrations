@@ -47,12 +47,12 @@ func WriteProblemExtra(t *testing.T, w http.ResponseWriter, status int, code, ti
 	errObj := map[string]any{
 		// type is mechanically derived from code server-side; consumers must
 		// match on code only.
-		"type":     "https://api.layerv.ai/errors/" + code,
-		"title":    title,
-		"status":   status,
-		"detail":   detail,
-		"instance": "/test/instance",
-		"code":     code,
+		"type":      "https://api.layerv.ai/errors/" + code,
+		"title":     title,
+		fieldStatus: status,
+		"detail":    detail,
+		"instance":  "/test/instance",
+		"code":      code,
 	}
 	if invalidFields != nil {
 		errObj["invalid_fields"] = invalidFields
@@ -110,7 +110,7 @@ func HandlerTombstoned410(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		WriteProblemExtra(t, w, http.StatusGone, "resource_tombstoned", "Gone",
 			"this resource lifecycle is closed", nil,
-			map[string]any{"tombstone": map[string]any{"closed_at": "2026-03-01T00:00:00Z"}})
+			map[string]any{"tombstone": map[string]any{"closed_at": fixtureCreatedAt}})
 	}
 }
 

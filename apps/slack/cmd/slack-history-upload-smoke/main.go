@@ -241,16 +241,16 @@ func prepareScanConfig(cfg *scanConfig) error {
 // difference between an actionable error and a guessing game once -token-env has been
 // pointed somewhere custom.
 //
-// The two nolints below are gosec's taint analysis reaching a flag value that reaches
-// an io.Writer. There is no XSS sink here — stderr on a CLI is not a browser — and
-// slacksmoke.IsEnvVarName has already constrained the value to a POSIX environment
-// variable name before it gets this far, so it cannot carry a control character either.
+// Echoing tokenEnv back verbatim is safe only because slacksmoke.IsEnvVarName has
+// already constrained it to a POSIX environment variable name before it gets this far,
+// so it cannot carry the control characters a forged operator-facing diagnostic would
+// need. TestRunDoesNotEchoTokenEnvName pins that.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, slacksmoke.ErrMissingBotToken):
-		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+		_, _ = fmt.Fprintf(stderr, "%s is not set or is empty\n", tokenEnv)
 	case errors.Is(err, slacksmoke.ErrBotTokenControlCharacters):
-		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv) //nolint:gosec // G705: stderr on a CLI is not an XSS sink; slacksmoke.IsEnvVarName constrains tokenEnv.
+		_, _ = fmt.Fprintf(stderr, "%s contains control characters\n", tokenEnv)
 	default:
 		_, _ = fmt.Fprintln(stderr, err)
 	}

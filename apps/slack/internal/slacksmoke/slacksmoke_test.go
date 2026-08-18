@@ -367,9 +367,9 @@ func TestIsEnvVarName(t *testing.T) {
 		// carrying a newline is exactly what this rejects.
 		{name: "INJECT\nLINE", want: false},
 		// Newline is not the only control character these diagnostics must not carry.
-		// slack-history-upload-smoke's writeConfigValidationError suppresses two gosec
-		// G705 findings on the strength of this rejecting all of them — the suppression
-		// reasons from "cannot carry a control character either" — and slack-dm-smoke
+		// slack-history-upload-smoke's writeConfigValidationError echoes the flag value
+		// on the strength of this rejecting all of them — its doc comment reasons from
+		// "cannot carry a control character" — and slack-dm-smoke
 		// echoes the same flag value behind the same guard. ESC opens a terminal escape
 		// sequence, NUL ends the line early for whatever reads the log, and BEL is
 		// heard rather than seen. Each payload is a valid POSIX name apart from its

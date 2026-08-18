@@ -909,10 +909,10 @@ func (s *Store) deleteWorkspaceMapping(ctx context.Context, teamID string, cutof
 	if !cutoff.IsZero() {
 		input.ConditionExpression = aws.String(purgeCutoffCondition)
 		input.ExpressionAttributeNames = map[string]string{
-			"#updated_at_nano": attrUpdatedAtNano,
+			exprUpdatedAtNano: attrUpdatedAtNano,
 		}
 		input.ExpressionAttributeValues = map[string]ddbtypes.AttributeValue{
-			":purge_cutoff_nano": unixNanoAttr(cutoff),
+			exprPurgeCutoffNano: unixNanoAttr(cutoff),
 		}
 	}
 	_, err := s.Client.DeleteItem(ctx, input)

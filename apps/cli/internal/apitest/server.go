@@ -47,6 +47,19 @@ const DownloadPath = "/file"
 // SetDownloadPayload overrides it. Fixed so goldens can pin byte counts.
 const DefaultDownloadPayload = "qURL mock file payload\n"
 
+// Field names and fixture values repeated across the mock's JSON payloads.
+// Lifted to constants so the builders and the route handlers cannot drift.
+const (
+	fieldStatus = "status"
+	fieldCRID   = "crid"
+	// fixtureCreatedAt is the mock's fixed created_at/closed_at stamp; goldens
+	// pin it, so it must not vary between payloads.
+	fixtureCreatedAt = "2026-03-01T00:00:00Z"
+	// authTypeAPIKey is the auth_type/kind *value* — distinct from the
+	// "api_key" JSON field name that carries the key object.
+	authTypeAPIKey = "api_key"
+)
+
 // NewServer starts a mock with consistent happy-path handlers for publish,
 // resolve, list, and delete. Close it via t.Cleanup automatically.
 func NewServer(t *testing.T) *Server {
@@ -163,10 +176,10 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/resources":
 		WriteEnvelope(s.t, w, http.StatusOK, []map[string]any{{
 			"resource_id": s.Key.ResourceID,
-			"crid":        s.Key.CRID,
+			fieldCRID:     s.Key.CRID,
 			"target_url":  "https://example.com/data",
-			"status":      "active",
-			"created_at":  "2026-03-01T00:00:00Z",
+			fieldStatus:   "active",
+			"created_at":  fixtureCreatedAt,
 		}}, map[string]any{"has_more": false})
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
@@ -211,10 +224,10 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	WriteEnvelope(s.t, w, http.StatusCreated, map[string]any{
 		"resource_id": s.Key.ResourceID,
-		"crid":        s.Key.CRID,
+		fieldCRID:     s.Key.CRID,
 		"target_url":  body.TargetURL,
-		"status":      "active",
-		"created_at":  "2026-03-01T00:00:00Z",
+		fieldStatus:   "active",
+		"created_at":  fixtureCreatedAt,
 	}, meta)
 }
 
@@ -238,7 +251,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey := map[string]any{
 		"key_id": MeKeyID,
-		"kind":   "api_key",
+		"kind":   authTypeAPIKey,
 		"scopes": []string{"qurl:read", "qurl:resolve", "qurl:write"},
 	}
 	if len(bearer) >= 12 {
@@ -246,7 +259,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"owner_id":  MeOwnerID,
-		"auth_type": "api_key",
+		"auth_type": authTypeAPIKey,
 		"api_key":   apiKey,
 	}, nil)
 }
@@ -270,7 +283,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
 		"qurl":               qurlLink,
-		"crid":               s.cridFor(id),
+		fieldCRID:            s.cridFor(id),
 		"type":               "qv2",
 		"expires_at":         "2026-03-01T00:05:00Z",
 		"expires_in_seconds": 300,

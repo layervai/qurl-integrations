@@ -14,10 +14,14 @@ const assistantThreadTitle = "qURL Secure Access Agent"
 // context channel (opened from a DM or the App Home) or its name can't be resolved (no
 // channels:read scope). When the context channel does resolve, channelAwareStarterPrompts
 // names it instead (see assistantStarterPromptsFor).
+// protectConnectorPrompt is shared by both starter sets: it is channel-neutral,
+// so the channel-aware variant reuses it verbatim.
+const protectConnectorPrompt = "How do I protect a connector?"
+
 var assistantStarterPrompts = []SuggestedPrompt{
 	{Title: "What can you do?", Message: "What can you help me with?"},
 	{Title: "How do I get access?", Message: "How do I request access to a connector?"},
-	{Title: "How do I protect a connector?", Message: "How do I protect a connector?"},
+	{Title: protectConnectorPrompt, Message: protectConnectorPrompt},
 }
 
 // channelAwareStarterPrompts names the channel the user opened the pane from, so the
@@ -36,7 +40,7 @@ func channelAwareStarterPrompts(channelName string) []SuggestedPrompt {
 	return []SuggestedPrompt{
 		{Title: "What can I reach?", Message: "What can I reach in " + ch + "?"},
 		{Title: "How do I get access?", Message: "How do I request access to a connector in " + ch + "?"},
-		{Title: "How do I protect a connector?", Message: "How do I protect a connector?"},
+		{Title: protectConnectorPrompt, Message: protectConnectorPrompt},
 		{Title: "What can you do?", Message: "What can you help me with?"},
 	}
 }
