@@ -37,6 +37,7 @@ type fakeDDBClient struct {
 	putInput     *dynamodb.PutItemInput
 	putErr       error
 	updateInput  *dynamodb.UpdateItemInput
+	updateCalls  int
 	updateFunc   func(context.Context, *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
 	updateOutput *dynamodb.UpdateItemOutput
 	updateErr    error
@@ -59,6 +60,9 @@ func (f *fakeDDBClient) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ 
 	return &dynamodb.PutItemOutput{}, f.putErr
 }
 func (f *fakeDDBClient) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	// updateInput is last-write-wins; updateCalls lets a caller that cares assert
+	// how many writes produced it (see requireStampsUpdatedAtNano).
+	f.updateCalls++
 	f.updateInput = in
 	if f.updateFunc != nil {
 		return f.updateFunc(ctx, in)
@@ -141,8 +145,17 @@ func requireCacheValidationProjection(t *testing.T, in *dynamodb.GetItemInput) {
 	}
 }
 
-// requireDurableWorkspaceStateWrite pins the rules every durable workspace_state
-// write shares, so a refactor of one writer's expression cannot quietly drop them.
+// requireDurableWorkspaceStateWrite pins the rules shared by the writers that
+// call it, so a refactor of one writer's expression cannot quietly drop them.
+//
+// Scope, precisely: the callers are SetAPIKeyWithMetadata and SetSlackBotToken.
+// It does NOT cover every durable workspace_state write, and cannot — DeleteAPIKey
+// refreshes the stamp too, but spells it through an ExpressionAttributeNames
+// placeholder (`#updated_at_nano = :now_nano`), which the literal match below is
+// structurally unable to see. TestWorkspaceStateWritersStampUpdatedAtNano
+// resolves placeholders and so covers all three writers; treat that as the
+// completeness guard and this as the per-writer format pin.
+//
 // The attrUpdatedAtNano half is the one no other assertion would notice: the
 // lifecycle purge guard reads it (see the constant's comment), so a write that
 // stops refreshing it lets a delayed uninstall delete freshly reinstalled
