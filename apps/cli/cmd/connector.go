@@ -31,6 +31,26 @@ type connectorKnocker interface {
 	Close()
 }
 
+// The customer term for a Connector's identity is its ID — the route name
+// the app serves under — matching the standalone qurl-connector's contract
+// (QURL_CONNECTOR_ID, YAML `id:`). "Slug" is internal/platform-wire
+// vocabulary only (qurl-go's GetConnectorResourceBySlug, the `slug` wire
+// param, frpgen.Route.Slug); it must not appear on customer surfaces (the
+// jargon gate enforces this).
+const (
+	// envConnectorID supplies the Connector ID when --id is not passed. It
+	// is deliberately the SAME variable the standalone qurl-connector reads,
+	// so one setting covers a machine moving between the two tools.
+	envConnectorID = "QURL_CONNECTOR_ID"
+
+	// envConnectorSlugDeprecated is v1.1.0's spelling, still honored at
+	// lower precedence than envConnectorID.
+	//
+	// Deprecated: remove at the next major, together with the hidden --slug
+	// alias and the connector_slug profile key.
+	envConnectorSlugDeprecated = "QURL_CONNECTOR_SLUG"
+)
+
 // connectorCmd is the `qurl connector` group. Today it carries run; the group
 // exists so future Connector subcommands (status, list, ...) land beside it
 // instead of as new top-level verbs.
@@ -40,10 +60,11 @@ func connectorCmd(opts *globalOpts) *cobra.Command {
 		Short: "Serve local apps through the qURL platform",
 		Long: `Connectors publish apps running on your machine through the qURL platform.
 
-A Connector serves one local app under a route name (its slug). Callers
-never reach your machine directly: the platform verifies each caller and
-grants access before any request is forwarded to your app.`,
-		Example:       "  qurl connector run --slug billing --target :8080",
+A Connector serves one local app under its ID — the route name your app
+serves under. Callers never reach your machine directly: the platform
+verifies each caller and grants access before any request is forwarded
+to your app.`,
+		Example:       "  qurl connector run --id billing --target :8080",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
@@ -60,7 +81,12 @@ grants access before any request is forwarded to your app.`,
 
 // connectorRunFlags carries run's flag values into the wiring.
 type connectorRunFlags struct {
-	slug        string
+	id string
+	// slugAlias holds the hidden deprecated --slug alias of --id, kept so
+	// v1.1.0 command lines keep working.
+	//
+	// Deprecated: remove at the next major.
+	slugAlias   string
 	target      string
 	stateDir    string
 	refreshMode string
@@ -75,9 +101,9 @@ func connectorRunCmd(opts *globalOpts) *cobra.Command {
 		Long: `Serve a local app through the qURL platform.
 
 Your app keeps listening on localhost; this command connects outward and
-serves it under your Connector's route name (the slug). The platform
-verifies each caller and grants access per caller — your machine never
-opens a listening port to the internet.
+serves it under your Connector's ID — the route name your app serves
+under. The platform verifies each caller and grants access per caller —
+your machine never opens a listening port to the internet.
 
 The first start enrolls this machine and needs a one-time enrollment
 token: set QURL_CONNECTOR_TOKEN, or point QURL_CONNECTOR_TOKEN_FILE at a
@@ -92,8 +118,8 @@ that self-healing (manual asks you to approve the refresh, auto approves
 it once, disabled never refreshes).
 
 Stop with Ctrl-C or SIGTERM; teardown gets a short grace period.`,
-		Example: "  qurl connector run --slug billing --target :8080\n" +
-			"  QURL_CONNECTOR_TOKEN_FILE=/run/secrets/qurl-token qurl connector run --slug billing --target 127.0.0.1:3000",
+		Example: "  qurl connector run --id billing --target :8080\n" +
+			"  QURL_CONNECTOR_TOKEN_FILE=/run/secrets/qurl-token qurl connector run --id billing --target 127.0.0.1:3000",
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runConnector(cmd.Context(), opts, &flags)
@@ -101,7 +127,18 @@ Stop with Ctrl-C or SIGTERM; teardown gets a short grace period.`,
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&flags.slug, "slug", "", "which Connector to run: its route name in qURL (or set connector_slug in your profile)")
+	f.StringVar(&flags.id, "id", "", "which Connector to run: its ID in qURL — the route name your app serves under (or set connector_id in your profile)")
+	// Hidden deprecated alias of --id: v1.1.0 shipped --slug, so it keeps
+	// working, invisibly. connectorIDFromFlags refuses the two disagreeing.
+	// Deprecated: remove at the next major. The usage string is neutral
+	// (no banned vocabulary) so the jargon gate stays clean even if it ever
+	// starts walking hidden flags.
+	f.StringVar(&flags.slugAlias, "slug", "", "deprecated alias of --id")
+	if err := f.MarkHidden("slug"); err != nil {
+		// Unreachable: the flag is registered two lines up. panic keeps the
+		// deprecation wiring honest instead of silently unhiding it.
+		panic(err)
+	}
 	f.StringVar(&flags.target, "target", "", "local app to serve, as host:port (\":8080\" means 127.0.0.1:8080)")
 	f.StringVar(&flags.stateDir, "state-dir", "", "directory holding this Connector's identity (default: your user state directory)")
 	f.StringVar(&flags.refreshMode, "refresh-mode", "", "whether the Connector may refresh its platform assignment after sustained failures: manual, auto, or disabled (default manual)")
@@ -109,19 +146,68 @@ Stop with Ctrl-C or SIGTERM; teardown gets a short grace period.`,
 	return cmd
 }
 
-// runConnector wires the Connector serve loop: agent open/enroll ladder →
-// slug resource ensure → FRP config generation → supervised knock-then-login
-// serving, with INT/TERM handing the supervisor a bounded graceful stop.
-func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlags) error {
-	// Local validation first: nothing below runs (and no state directory is
-	// created) until the command line itself is coherent.
-	slug := strings.TrimSpace(config.Resolve(flags.slug, "QURL_CONNECTOR_SLUG", opts.lookupEnv, opts.profileConnectorSlug, ""))
-	if slug == "" {
-		return exitcode.UsageError(errors.New(msgConnectorSlugRequired))
+// connectorIDFromFlags merges --id with its deprecated --slug alias. Both
+// given with different values is a contradiction the command refuses rather
+// than guesses; both given with the same value is harmlessly redundant.
+func connectorIDFromFlags(flags *connectorRunFlags) (string, error) {
+	id := strings.TrimSpace(flags.id)
+	alias := strings.TrimSpace(flags.slugAlias)
+	if id != "" && alias != "" && id != alias {
+		return "", exitcode.UsageError(fmt.Errorf(msgConnectorIDConflict, id, alias))
+	}
+	if id != "" {
+		return id, nil
+	}
+	return alias, nil
+}
+
+// resolveConnectorID applies the flag > env > profile ladder for the
+// Connector ID. Within the env and profile tiers the deprecated v1.1.0
+// names are honored below their ID twins (QURL_CONNECTOR_SLUG under
+// QURL_CONNECTOR_ID, connector_slug under connector_id), so an existing
+// setup keeps working while any ID-termed setting wins its tier.
+// Deprecated fallbacks go away at the next major.
+func resolveConnectorID(opts *globalOpts, flags *connectorRunFlags) (string, error) {
+	flagID, err := connectorIDFromFlags(flags)
+	if err != nil {
+		return "", err
+	}
+	profileID := opts.profileConnectorID
+	if profileID == "" {
+		profileID = opts.profileConnectorSlug
+	}
+	// Compose the tiers through the one canonical precedence helper: the
+	// inner Resolve is the deprecated-env-then-profile tail, the outer one
+	// puts flag and QURL_CONNECTOR_ID above it.
+	tail := config.Resolve("", envConnectorSlugDeprecated, opts.lookupEnv, profileID, "")
+	return strings.TrimSpace(config.Resolve(flagID, envConnectorID, opts.lookupEnv, tail, "")), nil
+}
+
+// connectorRunInputs is one run invocation's validated command line.
+type connectorRunInputs struct {
+	id          string
+	localIP     string
+	localPort   int
+	refreshMode string
+}
+
+// validateConnectorRunInputs resolves and validates everything runConnector
+// needs from the command line before any side effect (no state directory is
+// created, no network is touched): the Connector ID ladder, the --target
+// grammar, and the --refresh-mode vocabulary. The customer's Connector ID
+// is the platform's "slug" on the wire — qurl-go and the internal packages
+// keep that vocabulary; the customer surface says ID.
+func validateConnectorRunInputs(opts *globalOpts, flags *connectorRunFlags) (*connectorRunInputs, error) {
+	id, err := resolveConnectorID(opts, flags)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, exitcode.UsageError(errors.New(msgConnectorIDRequired))
 	}
 	localIP, localPort, err := parseConnectorTarget(flags.target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	refreshMode := strings.ToLower(strings.TrimSpace(flags.refreshMode))
 	switch refreshMode {
@@ -130,7 +216,20 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 		// a flag typo is a usage error here, while a bad ENV spelling maps to
 		// the configuration exit through agent.ErrRefreshModeInvalid.
 	default:
-		return exitcode.UsageError(fmt.Errorf(msgConnectorRefreshModeInvalid, flags.refreshMode))
+		return nil, exitcode.UsageError(fmt.Errorf(msgConnectorRefreshModeInvalid, flags.refreshMode))
+	}
+	return &connectorRunInputs{id: id, localIP: localIP, localPort: localPort, refreshMode: refreshMode}, nil
+}
+
+// runConnector wires the Connector serve loop: agent open/enroll ladder →
+// resource ensure by ID → FRP config generation → supervised knock-then-login
+// serving, with INT/TERM handing the supervisor a bounded graceful stop.
+func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlags) error {
+	// Local validation first: nothing below runs until the command line
+	// itself is coherent.
+	in, err := validateConnectorRunInputs(opts, flags)
+	if err != nil {
+		return err
 	}
 
 	logger := connectorLogger(opts)
@@ -140,7 +239,7 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	rt, err := opts.openConnectorRuntime(ctx, &agent.Config{
 		APIBaseURL:  opts.resolvedEndpoint,
 		StateDir:    flags.stateDir,
-		RefreshMode: refreshMode,
+		RefreshMode: in.refreshMode,
 		Version:     opts.version,
 		Logger:      logger,
 	})
@@ -149,7 +248,7 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	}
 	defer func() { _ = rt.Close() }()
 
-	resource, err := agent.ResolveResource(ctx, rt.Client, slug)
+	resource, err := agent.ResolveResource(ctx, rt.Client, in.id)
 	if err != nil {
 		return err
 	}
@@ -182,8 +281,8 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 		Slug:               resource.Slug,
 		ResourceID:         resource.ResourceID,
 		ConnectorRoutingID: resource.ConnectorRoutingID,
-		LocalIP:            localIP,
-		LocalPort:          localPort,
+		LocalIP:            in.localIP,
+		LocalPort:          in.localPort,
 	}, &frpgen.Options{
 		ReplicaDiscriminator: salt,
 		ClientVersion:        opts.version,
@@ -227,7 +326,7 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 		return err
 	}
 
-	printer.Notef(msgConnectorServing, resource.Slug, net.JoinHostPort(localIP, strconv.Itoa(localPort)))
+	printer.Notef(msgConnectorServing, resource.Slug, net.JoinHostPort(in.localIP, strconv.Itoa(in.localPort)))
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}

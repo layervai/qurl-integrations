@@ -80,7 +80,8 @@ func connectorTestEnv(t *testing.T) {
 	for _, name := range []string{
 		state.EnvStateDir, state.EnvStateDirPrimary, state.EnvAgentID,
 		agent.EnvRefreshMode, agent.EnvEnrollmentToken, agent.EnvEnrollmentTokenFile,
-		agent.EnvKnockResourceID, replica.EnvReplicaID, "QURL_CONNECTOR_SLUG",
+		agent.EnvKnockResourceID, replica.EnvReplicaID,
+		"QURL_CONNECTOR_ID", "QURL_CONNECTOR_SLUG",
 	} {
 		t.Setenv(name, "restore-after-test")
 		if err := os.Unsetenv(name); err != nil {
@@ -476,7 +477,7 @@ func TestConnectorRunHermeticServeAndGracefulStop(t *testing.T) {
 			ctx: ctx,
 			args: []string{
 				"--endpoint", producer.URL, "connector", "run",
-				"--slug", "cmd-slug", "--target", ":" + echoURL.Port(),
+				"--id", "cmd-slug", "--target", ":" + echoURL.Port(),
 				"--state-dir", stateDir,
 			},
 			env:           map[string]string{},
@@ -567,7 +568,7 @@ func TestConnectorRunTokenAbsentRefusesWithZeroNetwork(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", producer.URL, "connector", "run",
-			"--slug", "cmd-slug", "--target", ":8080", "--state-dir", t.TempDir()},
+			"--id", "cmd-slug", "--target", ":8080", "--state-dir", t.TempDir()},
 		env: map[string]string{},
 	})
 	if res.code != 4 {
@@ -610,7 +611,7 @@ func TestConnectorRunRefreshGates(t *testing.T) {
 		producer := newConnectorProducer(t)
 		res := runCLI(t, &runOpts{
 			args: []string{"--endpoint", producer.URL, "connector", "run",
-				"--slug", "cmd-slug", "--target", ":8080", "--state-dir", armStateDir(t)},
+				"--id", "cmd-slug", "--target", ":8080", "--state-dir", armStateDir(t)},
 			env: map[string]string{},
 		})
 		if res.code != 2 {
@@ -629,7 +630,7 @@ func TestConnectorRunRefreshGates(t *testing.T) {
 	t.Run("disabled flag is exit 3", func(t *testing.T) {
 		connectorTestEnv(t)
 		res := runCLI(t, &runOpts{
-			args: []string{"connector", "run", "--slug", "cmd-slug", "--target", ":8080",
+			args: []string{"connector", "run", "--id", "cmd-slug", "--target", ":8080",
 				"--state-dir", armStateDir(t), "--refresh-mode", "disabled"},
 			env: map[string]string{},
 		})
@@ -644,7 +645,7 @@ func TestConnectorRunRefreshGates(t *testing.T) {
 	t.Run("flag typo is usage exit 2", func(t *testing.T) {
 		connectorTestEnv(t)
 		res := runCLI(t, &runOpts{
-			args: []string{"connector", "run", "--slug", "cmd-slug", "--target", ":8080",
+			args: []string{"connector", "run", "--id", "cmd-slug", "--target", ":8080",
 				"--state-dir", t.TempDir(), "--refresh-mode", "sometimes"},
 			env: map[string]string{},
 		})
@@ -660,7 +661,7 @@ func TestConnectorRunRefreshGates(t *testing.T) {
 		connectorTestEnv(t)
 		t.Setenv(agent.EnvRefreshMode, "sometimes")
 		res := runCLI(t, &runOpts{
-			args: []string{"connector", "run", "--slug", "cmd-slug", "--target", ":8080",
+			args: []string{"connector", "run", "--id", "cmd-slug", "--target", ":8080",
 				"--state-dir", t.TempDir()},
 			env: map[string]string{},
 		})
@@ -693,7 +694,7 @@ func TestConnectorRunBudgetExhaustionIsUnavailable(t *testing.T) {
 
 	res := runCLI(t, &runOpts{
 		args: []string{"--endpoint", producer.URL, "connector", "run",
-			"--slug", "cmd-slug", "--target", ":8080", "--state-dir", stateDir},
+			"--id", "cmd-slug", "--target", ":8080", "--state-dir", stateDir},
 		env:           map[string]string{},
 		connectorOpen: fakeConnectorOpen(t, producer.URL),
 		newKnocker: func(_ *agent.Runtime, knockResourceID string) (connectorKnocker, error) {
@@ -732,11 +733,24 @@ func TestConnectorRunBudgetExhaustionIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestConnectorRunSlugResolution pins the flag > env > profile chain for the
-// slug by driving each source past slug validation into the (zero-network)
-// token-required refusal.
-func TestConnectorRunSlugResolution(t *testing.T) {
+// TestConnectorRunIDResolution pins the flag > env > profile chain for the
+// Connector ID by driving each source past ID validation into the
+// (zero-network) token-required refusal, including every deprecated v1.1.0
+// alias surface (--slug, QURL_CONNECTOR_SLUG, connector_slug) and the
+// flag-conflict refusal. Tier-internal precedence (ID names over their
+// deprecated twins) is pinned value-exactly by TestResolveConnectorIDLadder.
+func TestConnectorRunIDResolution(t *testing.T) {
 	skipWithoutPinnedState(t)
+
+	// pastIDValidation asserts an invocation resolved SOME id and moved on
+	// to the token-required refusal (exit 4) without touching the network.
+	pastIDValidation := func(t *testing.T, o *runOpts) {
+		t.Helper()
+		res := runCLI(t, o)
+		if res.code != 4 {
+			t.Fatalf("exit = %d, want 4 (past ID validation into token-required); stderr: %s", res.code, res.stderr.String())
+		}
+	}
 
 	t.Run("missing everywhere is usage", func(t *testing.T) {
 		connectorTestEnv(t)
@@ -744,37 +758,155 @@ func TestConnectorRunSlugResolution(t *testing.T) {
 			args: []string{"connector", "run", "--target", ":8080", "--state-dir", t.TempDir()},
 			env:  map[string]string{},
 		})
-		if res.code != 2 || !strings.Contains(res.stderr.String(), "--slug is required") {
-			t.Fatalf("exit = %d stderr = %q, want the slug usage refusal", res.code, res.stderr.String())
+		if res.code != 2 || !strings.Contains(res.stderr.String(), "--id is required") {
+			t.Fatalf("exit = %d stderr = %q, want the ID usage refusal", res.code, res.stderr.String())
+		}
+	})
+
+	t.Run("deprecated flag alias still works", func(t *testing.T) {
+		connectorTestEnv(t)
+		pastIDValidation(t, &runOpts{
+			args: []string{"connector", "run", "--slug", "v110-id", "--target", ":8080", "--state-dir", t.TempDir()},
+			env:  map[string]string{},
+		})
+	})
+
+	t.Run("redundant flag and alias agree", func(t *testing.T) {
+		connectorTestEnv(t)
+		pastIDValidation(t, &runOpts{
+			args: []string{"connector", "run", "--id", "same-id", "--slug", "same-id", "--target", ":8080", "--state-dir", t.TempDir()},
+			env:  map[string]string{},
+		})
+	})
+
+	t.Run("flag and alias disagreeing is usage", func(t *testing.T) {
+		connectorTestEnv(t)
+		res := runCLI(t, &runOpts{
+			args: []string{"connector", "run", "--id", "one", "--slug", "two", "--target", ":8080", "--state-dir", t.TempDir()},
+			env:  map[string]string{},
+		})
+		if res.code != 2 {
+			t.Fatalf("exit = %d, want 2 (usage) for the flag/alias conflict; stderr: %s", res.code, res.stderr.String())
+		}
+		for _, want := range []string{`"one"`, `"two"`, "deprecated alias", "pass only --id"} {
+			if !strings.Contains(res.stderr.String(), want) {
+				t.Errorf("conflict refusal missing %q:\n%s", want, res.stderr.String())
+			}
 		}
 	})
 
 	t.Run("environment supplies it", func(t *testing.T) {
 		connectorTestEnv(t)
-		res := runCLI(t, &runOpts{
+		pastIDValidation(t, &runOpts{
 			args: []string{"connector", "run", "--target", ":8080", "--state-dir", t.TempDir()},
-			env:  map[string]string{"QURL_CONNECTOR_SLUG": "env-slug"},
+			env:  map[string]string{"QURL_CONNECTOR_ID": "env-id"},
 		})
-		if res.code != 4 {
-			t.Fatalf("exit = %d, want 4 (past slug validation into token-required); stderr: %s", res.code, res.stderr.String())
-		}
+	})
+
+	t.Run("deprecated environment name still works", func(t *testing.T) {
+		connectorTestEnv(t)
+		pastIDValidation(t, &runOpts{
+			args: []string{"connector", "run", "--target", ":8080", "--state-dir", t.TempDir()},
+			env:  map[string]string{"QURL_CONNECTOR_SLUG": "env-v110-id"},
+		})
 	})
 
 	t.Run("profile supplies it", func(t *testing.T) {
 		connectorTestEnv(t)
 		configDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("connector_slug: profile-slug\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("connector_id: profile-id\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		res := runCLI(t, &runOpts{
+		pastIDValidation(t, &runOpts{
 			args:      []string{"connector", "run", "--target", ":8080", "--state-dir", t.TempDir()},
 			env:       map[string]string{},
 			configDir: configDir,
 		})
-		if res.code != 4 {
-			t.Fatalf("exit = %d, want 4 (past slug validation into token-required); stderr: %s", res.code, res.stderr.String())
-		}
 	})
+
+	t.Run("deprecated profile key still works", func(t *testing.T) {
+		connectorTestEnv(t)
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("connector_slug: profile-v110-id\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pastIDValidation(t, &runOpts{
+			args:      []string{"connector", "run", "--target", ":8080", "--state-dir", t.TempDir()},
+			env:       map[string]string{},
+			configDir: configDir,
+		})
+	})
+}
+
+// TestResolveConnectorIDLadder pins the resolution ladder value-exactly at
+// the unit seam: flag (--id merged with its deprecated --slug alias) > env
+// (QURL_CONNECTOR_ID > QURL_CONNECTOR_SLUG) > profile (connector_id >
+// connector_slug). The deprecated names sit below their ID twins WITHIN a
+// tier but keep their tier's rank — the v1.1.0 env still beats any profile
+// value, which is exactly the "precedence unchanged" contract.
+func TestResolveConnectorIDLadder(t *testing.T) {
+	env := func(m map[string]string) func(string) (string, bool) {
+		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	}
+
+	cases := []struct {
+		name        string
+		flags       connectorRunFlags
+		env         map[string]string
+		profileID   string
+		profileSlug string
+		want        string
+		wantErr     string
+	}{
+		{name: "flag wins over everything",
+			flags:     connectorRunFlags{id: "flag-id"},
+			env:       map[string]string{"QURL_CONNECTOR_ID": "env-id", "QURL_CONNECTOR_SLUG": "env-old"},
+			profileID: "prof-id", profileSlug: "prof-old", want: "flag-id"},
+		{name: "alias flag counts as the flag tier",
+			flags: connectorRunFlags{slugAlias: "alias-id"},
+			env:   map[string]string{"QURL_CONNECTOR_ID": "env-id"},
+			want:  "alias-id"},
+		{name: "flag and alias agreeing is redundant not fatal",
+			flags: connectorRunFlags{id: "same", slugAlias: "same"}, want: "same"},
+		{name: "flag and alias disagreeing is refused",
+			flags:   connectorRunFlags{id: "one", slugAlias: "two"},
+			wantErr: "pass only --id"},
+		{name: "env ID beats deprecated env",
+			env:  map[string]string{"QURL_CONNECTOR_ID": "env-id", "QURL_CONNECTOR_SLUG": "env-old"},
+			want: "env-id"},
+		{name: "deprecated env beats any profile value",
+			env:       map[string]string{"QURL_CONNECTOR_SLUG": "env-old"},
+			profileID: "prof-id", want: "env-old"},
+		{name: "profile ID beats deprecated profile key",
+			profileID: "prof-id", profileSlug: "prof-old", want: "prof-id"},
+		{name: "deprecated profile key is the last resort",
+			profileSlug: "prof-old", want: "prof-old"},
+		{name: "nothing anywhere resolves empty",
+			want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &globalOpts{
+				lookupEnv:            env(tc.env),
+				profileConnectorID:   tc.profileID,
+				profileConnectorSlug: tc.profileSlug,
+			}
+			flags := tc.flags
+			got, err := resolveConnectorID(opts, &flags)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("resolved ID = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestConnectorRunTargetValidation pins the --target grammar as usage errors
@@ -782,12 +914,12 @@ func TestConnectorRunSlugResolution(t *testing.T) {
 func TestConnectorRunTargetValidation(t *testing.T) {
 	connectorTestEnv(t)
 	cases := map[string][]string{
-		"missing":         {"connector", "run", "--slug", "s"},
-		"bare host":       {"connector", "run", "--slug", "s", "--target", "localhost"},
-		"port zero":       {"connector", "run", "--slug", "s", "--target", ":0"},
-		"port too big":    {"connector", "run", "--slug", "s", "--target", ":70000"},
-		"not a port":      {"connector", "run", "--slug", "s", "--target", "localhost:http"},
-		"whitespace only": {"connector", "run", "--slug", "s", "--target", "   "},
+		"missing":         {"connector", "run", "--id", "s"},
+		"bare host":       {"connector", "run", "--id", "s", "--target", "localhost"},
+		"port zero":       {"connector", "run", "--id", "s", "--target", ":0"},
+		"port too big":    {"connector", "run", "--id", "s", "--target", ":70000"},
+		"not a port":      {"connector", "run", "--id", "s", "--target", "localhost:http"},
+		"whitespace only": {"connector", "run", "--id", "s", "--target", "   "},
 		"group unknown":   {"connector", "frobnicate"},
 	}
 	for name, args := range cases {
@@ -823,7 +955,7 @@ func TestConnectorRunClosedStdinNeverHangs(t *testing.T) {
 	t.Cleanup(func() { _ = r.Close() })
 
 	res := runCLI(t, &runOpts{
-		args:  []string{"connector", "run", "--slug", "s", "--target", ":8080", "--state-dir", t.TempDir()},
+		args:  []string{"connector", "run", "--id", "s", "--target", ":8080", "--state-dir", t.TempDir()},
 		env:   map[string]string{},
 		stdin: r,
 	})
@@ -880,7 +1012,7 @@ func TestConnectorGoldens(t *testing.T) {
 		{
 			name: "error_connector_token",
 			args: func(t *testing.T) []string {
-				return []string{"connector", "run", "--slug", "billing", "--target", ":8080", "--state-dir", t.TempDir()}
+				return []string{"connector", "run", "--id", "billing", "--target", ":8080", "--state-dir", t.TempDir()}
 			},
 			variants:   []string{"tty", "plain", "json"},
 			wantCode:   4,
@@ -889,7 +1021,7 @@ func TestConnectorGoldens(t *testing.T) {
 		{
 			name: "error_connector_refresh_manual",
 			args: func(t *testing.T) []string {
-				return []string{"connector", "run", "--slug", "billing", "--target", ":8080", "--state-dir", armStateDir(t)}
+				return []string{"connector", "run", "--id", "billing", "--target", ":8080", "--state-dir", armStateDir(t)}
 			},
 			variants:   []string{"plain"},
 			wantCode:   2,
@@ -898,7 +1030,7 @@ func TestConnectorGoldens(t *testing.T) {
 		{
 			name: "error_connector_hub",
 			args: func(t *testing.T) []string {
-				return []string{"connector", "run", "--slug", "billing", "--target", ":8080", "--state-dir", t.TempDir()}
+				return []string{"connector", "run", "--id", "billing", "--target", ":8080", "--state-dir", t.TempDir()}
 			},
 			variants:   []string{"plain"},
 			wantCode:   3,

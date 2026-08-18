@@ -25,7 +25,8 @@ import (
 //
 //	QURL_CLI_SANDBOX_CONNECTOR       = "enabled"  — the arming switch
 //	QURL_CLI_SANDBOX_ENDPOINT        — sandbox qURL API base URL
-//	QURL_CLI_SANDBOX_CONNECTOR_SLUG  — a slug this tenant may serve
+//	QURL_CLI_SANDBOX_CONNECTOR_SLUG  — a Connector ID this tenant may serve
+//	    (harness name predates the --id surface; it feeds --id)
 //	QURL_CONNECTOR_HUB_HOST/PORT/SERVER_PUBLIC_KEY_B64 — the sandbox Hub triple
 //	QURL_CLI_SANDBOX_CONNECTOR_STATE_DIR — persistent state dir holding an
 //	    already-enrolled identity, OR QURL_CONNECTOR_TOKEN(_FILE) carrying a
@@ -84,7 +85,7 @@ func TestSandboxConnectorServeSmoke(t *testing.T) {
 		ctx: ctx,
 		args: []string{
 			"--endpoint", os.Getenv("QURL_CLI_SANDBOX_ENDPOINT"), "connector", "run",
-			"--slug", os.Getenv("QURL_CLI_SANDBOX_CONNECTOR_SLUG"),
+			"--id", os.Getenv("QURL_CLI_SANDBOX_CONNECTOR_SLUG"),
 			"--target", ":" + echoURL.Port(),
 			"--state-dir", stateDir,
 		},
