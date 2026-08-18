@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -107,6 +108,13 @@ func TestIsValidKey(t *testing.T) {
 }
 
 func TestFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The 0600/0700 contract is explicitly POSIX ("on POSIX systems" in
+		// the credential-storage spec); Windows does not enforce POSIX mode
+		// bits and Go reports synthetic values there. Windows secret
+		// protection is the credential-manager path, asserted elsewhere.
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &Config{APIKey: "secret"}
 	if err := saveFile(p, cfg); err != nil {
