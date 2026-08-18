@@ -142,13 +142,15 @@ branch protection requires all eight: `slack / required`, `discord / required`,
 `chrome-extension / required`, `edge-extension / required`, `teams / required`,
 `s3-static-connector / required`, `e2e / required`, and `shared / required`.
 The connector aggregate arrived in #1042 (refs #1022), which moved
-`s3-static-connector.yml` off `on.push.paths` onto the `changes`-job pattern;
-it and `e2e / required` were the last two still awaiting the settings change,
-which landed 2026-08-17 with the repair described below. Each workflow's
-`changes` filter is the source of truth for which paths need validation. When
-that filter matches, the aggregate validates every quality gate listed in its
-workflow `needs:` set. Branch protection requires only these aggregate checks,
-never the internally skipped expensive jobs.
+`s3-static-connector.yml` off `on.push.paths` onto the `changes`-job pattern.
+This section used to track it and `e2e / required` as the only two still
+awaiting a branch-protection change; the required list had in fact drifted
+further than that, carrying just one aggregate (`slack / required`) as of
+2026-08-14. All eight were added 2026-08-17 with the repair described below.
+Each workflow's `changes` filter is the source of truth for which paths need
+validation. When that filter matches, the aggregate validates every quality
+gate listed in its workflow `needs:` set. Branch protection requires only these
+aggregate checks, never the internally skipped expensive jobs.
 
 Every PR is gated by the always-present `Validate GitHub Actions pins` check.
 The job re-scans all workflow and composite-action files, checks external
@@ -167,7 +169,10 @@ The full required set is those eight aggregates plus `Workflow Contract`,
 fourteen in all. **Required contexts match case-sensitively.** From 2026-08-14
 to 2026-08-17 the required list was a single context spelled `Workflow
 contract` (lowercase `c`), which no job ever reports, so nothing gated and
-every merge went through an admin override. The API call that adds a context
+every merge went through an admin override. The context was added shortly
+before the workflow that reports it, which is what kept the typo invisible:
+until that workflow merges, a misspelled context and a correctly spelled one
+look identical — both simply never report. The API call that adds a context
 *replaces* the list rather than appending to it, so the same edit also dropped
 the six contexts required until then. When changing required contexts, send the
 complete desired set in one `PATCH`, spell each one exactly as the job's
