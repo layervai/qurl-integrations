@@ -177,11 +177,13 @@ setting rather than rename the job: `Workflow Contract` is the spelling
 README.md and `internal/ciworkflows` already pin, so renaming would have
 broken both.
 
-Two things made the mistake easy. The API call that adds a context *replaces*
-the list rather than appending to it, so adding one check silently dropped the
-rest. And the context was required about an hour before #1092 merged the
-workflow that reports it, during which a misspelled context and a correct one
-are indistinguishable — both simply never report.
+Two things made the mistake easy. `PATCH .../required_status_checks`
+*replaces* the `contexts` list rather than appending to it — only
+`POST .../required_status_checks/contexts` appends — so adding one check that
+way silently dropped the rest. And the context was required an hour and a
+quarter before #1092 merged the workflow that reports it, during which a
+misspelled context and a correct one are indistinguishable — both simply never
+report.
 
 When changing required contexts, send the complete desired set in one `PATCH`
 and spell each exactly as the check renders: a job's `name:` where it sets
