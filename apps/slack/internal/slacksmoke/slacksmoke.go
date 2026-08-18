@@ -156,18 +156,26 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // the bytes or an error carrying the text both smoke commands print. method names the
 // Slack Web API method the read belongs to, which is what that text leads with.
 //
-// The read is limit+1 bytes — deliberately one past the ceiling — and an oversized body
+// The read is limit+1 bytes — deliberately one past the ceiling — so an oversized body
 // is detected by having read that extra byte, rather than by trusting a Content-Length
 // the caller has no way to verify. The over-read and the comparison against it are why
-// this is one function rather than an idiom copied per command: reading limit bytes, or
-// comparing with >=, silently truncates a body that exactly fills the ceiling into a
-// JSON parse error, and an operator-triggered command has no CI run that would notice.
-// Nor could dupl, for the reason the package comment gives.
+// this is one function rather than an idiom copied per command: the two ways to get it
+// wrong fail in opposite directions. Reading only limit bytes loses the detection
+// entirely, handing back an over-limit body truncated to the ceiling with a nil error,
+// to die later as a JSON parse error. Comparing with >= instead refuses a body that
+// exactly fills the ceiling as though it had overflowed. Nothing caught either while
+// this was copied per command: the commands are operator-triggered, so no CI run
+// exercised them, and dupl was no backstop — it runs per package, these are two
+// package main directories, and at 78 tokens the block sat under its 150-token
+// threshold anyway.
 //
 // An oversized body is drained before the error returns, for the connection-reuse reason
 // DrainResponseBody exists, and the error unwraps to ErrResponseTooLarge so a caller can
-// record its own code for that case. limit is a parameter, and a negative one is clamped,
-// both for the reasons given on DrainResponseBody.
+// record its own code for that case. limit is a parameter for the reason given on
+// DrainResponseBody; a negative one is clamped to zero, but NOT for that function's
+// reason. Unclamped here, io.LimitReader reads nothing and the comparison below then
+// refuses every body — an empty one included — with the negative digits rendered into
+// the operator's message. Clamped, a negative ceiling behaves exactly as a zero one does.
 func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error) {
 	if limit < 0 {
 		limit = 0
@@ -185,7 +193,8 @@ func ReadResponseBody(method string, body io.Reader, limit int64) ([]byte, error
 
 // DrainResponseBody discards up to limit+1 bytes of body — one past the caller's
 // ceiling, matching ReadResponseBody's over-read. It is a best-effort attempt at
-// connection reuse; Close tears the response down if bytes still remain.
+// connection reuse; Close tears the response down if bytes still remain. It takes no
+// method name because, unlike ReadResponseBody, it renders no message.
 //
 // limit is a parameter rather than a package constant because the callers' ceilings
 // differ by two orders of magnitude — slack-dm-smoke reads small chat.postMessage
@@ -202,10 +211,13 @@ func DrainResponseBody(body io.Reader, limit int64) {
 }
 
 // oversizeResponseError renders the over-limit message operators read while unwrapping
-// to ErrResponseTooLarge. The wrapping is done with a type rather than a
-// fmt.Errorf("...: %w", ErrResponseTooLarge), because that would append the sentinel's
-// own text to a message that has to stay byte-identical to the one both commands
-// printed before this was hoisted.
+// to ErrResponseTooLarge. The obvious fmt.Errorf("...: %w", ErrResponseTooLarge) is out
+// because it appends the sentinel's own text to a message that has to stay
+// byte-identical to the one both commands printed before this was hoisted. An infix
+// fmt.Errorf("%s %w %d bytes", method, ErrResponseTooLarge, limit) does render those
+// exact bytes, but only by cutting the sentinel down to the fragment "response
+// exceeded", which reads as a typo at its declaration and cannot be understood away
+// from this call site. The type is what keeps the sentinel a standalone sentence.
 type oversizeResponseError struct {
 	method string
 	limit  int64
@@ -249,7 +261,7 @@ type TimeoutBudget struct {
 }
 
 // Validate returns the first failing check, or nil when the budget is usable. Callers
-// print it and exit; the package renders no operator text and knows no exit codes,
+// print it and exit; the package itself does no printing and knows no exit codes,
 // which is the same division the token and base-URL sentinels above keep.
 //
 // minFactor is how many whole request timeouts the overall budget must cover — the
