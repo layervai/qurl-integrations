@@ -2223,3 +2223,32 @@ func TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst(t *testin
 		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive (exclusivity beats empty-pointer), got %v", err)
 	}
 }
+
+// TestListResourcesCursorEscaping fences query-string escaping for opaque
+// cursors: a cursor carrying URL metacharacters must arrive as one intact
+// parameter value, not be split into extra params (regression cover moved
+// here from the removed token-era List test).
+func TestListResourcesCursorEscaping(t *testing.T) {
+	const cursor = "a=b&c=d?e f+g"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("cursor"); got != cursor {
+			t.Errorf("cursor query param: got %q, want %q", got, cursor)
+		}
+		if len(r.URL.Query()) != 1 {
+			t.Errorf("cursor must arrive as one param, got %v", r.URL.Query())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{},
+			"meta": map[string]string{"request_id": "req_test"},
+		}); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.ListResources(context.Background(), ListResourcesInput{Cursor: cursor}); err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+}
