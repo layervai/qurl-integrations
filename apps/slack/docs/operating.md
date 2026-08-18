@@ -73,9 +73,20 @@ at the OAuth-callback bind layer.
     same-account by intent) and records the account for next time, which is how an
     owner self-heals a legacy row so future `--repoint` works.
   Rotation failure modes to expect:
-  - If the stored row predates key metadata, or if the signed-in account cannot
-    revoke the current key, rotation fails closed before any replacement is
-    minted.
+  - If the signed-in account cannot revoke the current key, rotation fails
+    closed before any replacement is minted.
+  - A stored row that predates key metadata (no `key_id`) rotates without
+    revoking: Slack cannot identify the predecessor, so it mints and stores the
+    replacement and logs the abandoned key under
+    `setup_rotate_legacy_row_orphaned_key` with the owning `team_id`. Operators
+    should revoke that key in qURL API-key management; until they do it stays
+    live and counts against the account's API-key plan limit. This path runs at
+    most once per workspace, because the rotation records the new `key_id` and
+    the next rotation takes the normal revoke-then-replace route. Refusing
+    these rows (the previous behavior) protected nothing — the only remaining
+    route was `/qurl uninstall`, which abandons the same key and also discards
+    the Slack bot token and workspace binding, so a customer following that
+    path leaked one key per cycle.
   - Missing or revoked legacy stored keys without key identity ask qURL to
     provision the Slack workspace key; if qURL reports that the workspace is
     already connected but the stored key cannot be recovered, setup stops with

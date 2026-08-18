@@ -413,10 +413,15 @@ func (m *HTTPAPIKeyMinter) MintWorkspaceReplacementAPIKey(ctx context.Context, a
 	if teamID == "" {
 		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceReplacementAPIKey: empty teamID")
 	}
+	// An empty oldKeyID is the legacy-row rotation: the workspace has a stored
+	// key whose qURL identity Slack never recorded, so there is nothing to
+	// revoke and the caller has already skipped the revoke step. Minting is
+	// still correct — the alternative for these rows is /qurl uninstall, which
+	// abandons the same un-revokable key AND discards the Slack bot token and
+	// workspace binding. replacementIdempotencyKey stays stable for the team,
+	// and this branch runs at most once per workspace because a successful
+	// rotation records the new key_id.
 	oldKeyID = strings.TrimSpace(oldKeyID)
-	if oldKeyID == "" {
-		return WorkspaceAPIKeyMint{}, errors.New("MintWorkspaceReplacementAPIKey: empty oldKeyID")
-	}
 	return m.mintLegacyAPIKey(ctx, accessToken, "Slack workspace "+teamID, apiKeyScopes(), replacementIdempotencyKey(teamID, oldKeyID))
 }
 

@@ -92,6 +92,16 @@ const (
 	// proven. Structured so operators can measure how often legacy rows block
 	// repoint (the owner self-heals with --rotate, which records the account).
 	repointLegacyRowRefusedEvent = "setup_repoint_legacy_row_refused"
+	// rotateLegacyRowOrphanEvent marks a rotation that could not revoke its
+	// predecessor because the row predates stored key identity. The workspace is
+	// healthy afterwards, but one live qURL key is left behind that only an
+	// operator (or the owner, in qURL API-key management) can revoke. Structured
+	// so operators can find and clean up those keys rather than discovering them
+	// when an account hits its API-key plan limit.
+	rotateLegacyRowOrphanEvent = "setup_rotate_legacy_row_orphaned_key"
+	// rotateLegacyRowOperatorAction names the cleanup so the log line is
+	// actionable without cross-referencing this file.
+	rotateLegacyRowOperatorAction = "revoke the workspace's pre-rotation qURL key in qURL API-key management"
 	// Mirrors qurl-service's key_prefix display contract: "lv_live_"
 	// plus four non-secret characters. The reuse path derives this
 	// from stored plaintext because workspace_state stores api_key
@@ -674,8 +684,15 @@ func ensureWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamI
 //     can self-heal with --rotate, which records the account for next time.
 //   - Same qURL account, or --rotate against a legacy row: revoke the stored key
 //     before minting the replacement, so a failed mint never leaves the account
-//     holding both old and new workspace keys. Rows with no key_id at all fail
-//     closed because Slack cannot prove which qURL key to revoke safely.
+//     holding both old and new workspace keys.
+//   - Rows with no key_id at all (pre-dating stored key identity) mint without
+//     revoking: Slack cannot prove which qURL key to revoke, and refusing does
+//     not protect that key — it only routes the owner to /qurl uninstall, which
+//     abandons the same key and additionally discards the bot token and
+//     workspace binding. The un-revokable predecessor is logged under
+//     setup_rotate_legacy_row_orphaned_key for operator cleanup, and the
+//     rotation records the new key_id so this happens at most once per
+//     workspace.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, teamID, userID, qurlAccountID string, mode SetupMode) (string, bool) {
@@ -735,12 +752,23 @@ func replaceWorkspaceAPIKey(w http.ResponseWriter, cfg Config, accessToken, team
 		return "", false
 	}
 	// Same qURL account, or --rotate against a legacy row: revoke-then-replace.
+	//
+	// A row with no key_id predates Slack storing qURL key identity, so there is
+	// no key to revoke safely. Mint the replacement anyway rather than refusing:
+	// refusing does not protect the old key, it only pushes the owner to
+	// /qurl uninstall, which abandons that same key (local-only disconnect) AND
+	// discards the Slack bot token and workspace binding. Both paths leave one
+	// un-revokable key behind; only this one keeps the workspace working, and
+	// each uninstall/setup cycle otherwise adds another live key against the
+	// account's plan limit. The orphan is logged for operator cleanup.
 	if keyID == "" {
-		slog.Warn("oauth/callback rotation refused because stored key has no key_id", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
-			"team_id", teamID)
-		renderOAuthErrorPage(w, http.StatusConflict, "Can't rotate qURL key from Slack",
-			"This workspace was connected before Slack stored qURL™ key identity. To avoid revoking the wrong key, rotate it from your qURL account or contact LayerV support.")
-		return "", false
+		slog.Warn("oauth/callback rotating a legacy row with no stored key_id — previous key cannot be revoked from Slack and needs operator cleanup", //nolint:gosec // G706: team_id is recovered from signed OAuth state; slog escapes structured attributes.
+			"event", rotateLegacyRowOrphanEvent,
+			"team_id", teamID,
+			"mode", string(mode),
+			"qurl_account_id", qurlAccountID,
+			"operator_action", rotateLegacyRowOperatorAction)
+		return mintReplacementAndPersist(w, cfg, accessToken, teamID, "", userID, qurlAccountID)
 	}
 	if err := validateIdempotencyKey(replacementIdempotencyKey(teamID, keyID)); err != nil {
 		slog.Error("oauth/callback rotation replacement idempotency key invalid before revoke", //nolint:gosec // G706: team_id/key_id are non-secret qURL identifiers needed for operator triage.

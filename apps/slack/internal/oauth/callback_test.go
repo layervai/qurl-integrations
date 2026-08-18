@@ -1727,7 +1727,16 @@ func TestCallbackExplicitRotationRevokesOldKeyBeforeReplacementMint(t *testing.T
 	minter.validateMu.Unlock()
 }
 
-func TestCallbackExplicitRotationRequiresStoredKeyID(t *testing.T) {
+// TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke covers the row that
+// predates stored key identity. Slack cannot revoke a key it never recorded, so
+// rotation mints without revoking rather than refusing.
+//
+// Refusing was the previous behavior and it protected nothing: the owner's only
+// remaining route was /qurl uninstall, which abandons the same un-revokable key
+// (local-only disconnect) and additionally discards the Slack bot token and
+// workspace binding — and each uninstall/setup cycle mints another live key
+// against the account's plan limit (3 on free tier).
+func TestCallbackExplicitRotationOnLegacyRowMintsWithoutRevoke(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.existingKey = testOldAPIKey
 	state := mintTestStateWithMode(t, &cfg, SetupModeRotate)
@@ -1735,24 +1744,32 @@ func TestCallbackExplicitRotationRequiresStoredKeyID(t *testing.T) {
 	h := Callback(cfg)
 	rec := httptest.NewRecorder()
 	h(rec, callbackRequest(state))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status: got %d want 409 (missing key_id, body=%s)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (legacy-row rotation should succeed, body=%s)", rec.Code, rec.Body.String())
+	}
+	minter.revokeMu.Lock()
+	revoked := append([]string(nil), minter.revokedKeys...)
+	minter.revokeMu.Unlock()
+	if len(revoked) != 0 {
+		t.Errorf("revoke must not run without a known key_id, got %#v", revoked)
+	}
+	minter.mintMu.Lock()
+	replacementCalls := minter.replacementMintCalls
+	minter.mintMu.Unlock()
+	if replacementCalls != 1 {
+		t.Errorf("replacement mint calls = %d, want 1", replacementCalls)
 	}
 	store.mu.Lock()
-	if store.setArgs != nil {
-		t.Fatal("SetAPIKeyWithMetadata must not run without a stored key_id")
-	}
+	setArgs := store.setArgs
 	store.mu.Unlock()
-	minter.revokeMu.Lock()
-	if len(minter.revokedKeys) != 0 {
-		t.Errorf("revoke must not run without key_id, got %#v", minter.revokedKeys)
+	if setArgs == nil {
+		t.Fatal("replacement key must be persisted so the workspace keeps working")
 	}
-	minter.revokeMu.Unlock()
-	minter.mintMu.Lock()
-	if minter.mintCalls != 0 || minter.replacementMintCalls != 0 {
-		t.Errorf("mint calls: regular=%d replacement=%d, want 0/0", minter.mintCalls, minter.replacementMintCalls)
+	// The rotation must record key identity, so this workspace takes the normal
+	// revoke-then-replace path next time instead of orphaning a second key.
+	if setArgs.KeyID == "" {
+		t.Error("rotation must store the new key_id so the next rotation can revoke it")
 	}
-	minter.mintMu.Unlock()
 }
 
 func TestCallbackExplicitRotationValidatesReplacementIdempotencyBeforeRevoke(t *testing.T) {
