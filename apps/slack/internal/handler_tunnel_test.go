@@ -5151,6 +5151,13 @@ func TestValidateConnectorAPIURLLoopbackHostCasing(t *testing.T) {
 		{name: "loopback ip over http", raw: "http://127.0.0.1:8080/v1"},
 		{name: "uppercase public host over http", raw: "http://EXAMPLE.COM/v1", wantErr: errConnectorAPIURLInvalid},
 		{name: "public host over http", raw: "http://example.com/v1", wantErr: errConnectorAPIURLInvalid},
+		// The one deliberate behavior delta from moving this predicate into nethost:
+		// url.URL.Hostname can return surrounding Unicode whitespace from a URL that
+		// parsed cleanly, and nethost.IsLoopback trims where the old call site did not.
+		// Pinned so re-tightening or further loosening trips a test rather than shipping.
+		{name: "loopback with trailing nbsp over http", raw: "http://localhost\u00a0:8080/v1"},
+		// Interior whitespace survives the trim, so this stays rejected.
+		{name: "nbsp separated impostor host over http", raw: "http://localhost\u00a0.evil.com/v1", wantErr: errConnectorAPIURLInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

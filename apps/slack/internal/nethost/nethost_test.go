@@ -16,9 +16,14 @@ func TestIsLoopback(t *testing.T) {
 		{host: "  LocalHost  ", want: true},
 		{host: "LOCALHOST", want: true},
 		{host: "  127.0.0.1 ", want: true},
+		// url.URL.Hostname can hand back a host carrying Unicode whitespace from a URL
+		// that parsed cleanly; TrimSpace strips it, which the doc comment claims.
+		{host: "localhost\u00a0", want: true},
+		{host: "\u00a0localhost", want: true},
 		{host: "", want: false},
 		{host: "slack.test", want: false},
 		{host: "localhost.evil.test", want: false},
+		{host: "localhost\u00a0.evil.test", want: false},
 		{host: "8.8.8.8", want: false},
 		{host: "0.0.0.0", want: false},
 	}
