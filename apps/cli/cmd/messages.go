@@ -9,10 +9,6 @@ const exampleCRID = "aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledf
 // referenced by both the commands and the jargon-gate test, so the strings a
 // customer sees and the strings the gate vets can never drift apart.
 const (
-	// msgNotImplemented is the uniform "present but not in this build yet"
-	// error for stubbed capabilities (exit code 1).
-	msgNotImplemented = "this isn't available in this build of the qURL CLI yet — it arrives in an upcoming release"
-
 	// msgKeyringUnavailable is the file-fallback warning: emitted by login
 	// when the key had to be stored in the fallback file, and once per
 	// invocation by any command that reads the key from that file.
@@ -54,13 +50,31 @@ const (
 	// msgAlreadyPublished notes that the service returned the existing
 	// resource for an already-published target.
 	msgAlreadyPublished = "This target was already published; showing the existing resource."
+
+	// msgOpeningBrowser is get's browser-mode note, printed after the
+	// verified link and before the launcher runs.
+	msgOpeningBrowser = "Opening it in your browser..."
+
+	// msgBrowserFailed reports a launcher that would not start; the link is
+	// already on stdout by then, so the user is not stranded.
+	msgBrowserFailed = "couldn't open your browser: %w. The access link is printed above — open it yourself, or re-run with --file to download the file"
+
+	// msgFileNeedsPath refuses an explicitly empty --file value.
+	msgFileNeedsPath = "--file needs a path, or \"-\" to stream to stdout"
+
+	// msgFileDashJSON refuses combining raw-byte output with the JSON
+	// document format.
+	msgFileDashJSON = "--file - streams the raw file bytes to stdout and can't be combined with --output json"
+
+	// msgBrowserJSON refuses browser-open under the JSON output mode: a
+	// machine asked for data, and a spawned browser is not data.
+	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl resolve --output json` for the link"
 )
 
 // customerMessages returns every fixed customer-facing string the cmd
 // package can emit, for the jargon gate.
 func customerMessages() []string {
 	return []string{
-		msgNotImplemented,
 		msgKeyringUnavailable,
 		msgVerifyMismatch,
 		msgVerifyMissing,
@@ -71,5 +85,10 @@ func customerMessages() []string {
 		msgNoKeyProvided,
 		msgAlreadyGone,
 		msgAlreadyPublished,
+		msgOpeningBrowser,
+		msgBrowserFailed,
+		msgFileNeedsPath,
+		msgFileDashJSON,
+		msgBrowserJSON,
 	}
 }

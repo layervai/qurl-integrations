@@ -19,6 +19,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
 
@@ -37,6 +38,11 @@ var cliSentinels = map[string]struct {
 	"config.ErrSecretInConfig":     {config.ErrSecretInConfig, Config},
 	"cridux.ErrUnusableID":         {cridux.ErrUnusableID, InvalidInput},
 	"cridux.ErrTestIDOnProduction": {cridux.ErrTestIDOnProduction, Usage},
+	"consume.ErrPipedNeedsFile":    {consume.ErrPipedNeedsFile, Usage},
+	"consume.ErrFileExists":        {consume.ErrFileExists, Conflict},
+	"consume.ErrLinkExpired":       {consume.ErrLinkExpired, NotFound},
+	"consume.ErrLinkFetch":         {consume.ErrLinkFetch, ServerError},
+	"consume.ErrUnopenableLink":    {consume.ErrUnopenableLink, ServerError},
 }
 
 // sdkSentinels pins the mapping for every qurl-go sentinel the CLI can

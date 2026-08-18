@@ -27,6 +27,12 @@ type goldenCase struct {
 	// one each run, so a mutating command cannot bleed into the next
 	// variant); nil means the harness default (empty, available).
 	keyring func() *fakeKeyring
+	// chdirTemp runs the variant in a fresh temp working directory, so
+	// cases whose output embeds a relative --file path stay deterministic
+	// and leave nothing behind in the repo tree.
+	chdirTemp bool
+	// setup seeds the (possibly temp) working directory before the run.
+	setup func(t *testing.T)
 	// stdoutGolden/stderrGolden select which streams are golden-compared;
 	// a stream not selected must be byte-empty.
 	stdoutGolden bool
@@ -240,11 +246,102 @@ func TestGoldens(t *testing.T) {
 			wantCode:     9,
 			stderrGolden: true,
 		},
+		{
+			// Browser mode: the verified link plus expiry on stdout, the
+			// launch note on stderr. TTY-only by contract — the piped
+			// variant of a bare get is error_get_piped below.
+			name:         "get_browser",
+			args:         func(srv *apitest.Server) []string { return []string{"get", srv.Key.CRID} },
+			variants:     []string{"tty"},
+			stdoutGolden: true,
+			stderrGolden: true,
+		},
+		{
+			// Download mode: the confirmation goes to stderr; stdout stays
+			// data-free. The relative --file path keeps the message
+			// deterministic under chdirTemp.
+			name: "get_file",
+			args: func(srv *apitest.Server) []string {
+				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+			},
+			chdirTemp:    true,
+			variants:     []string{"tty", "plain"},
+			stderrGolden: true,
+		},
+		{
+			name: "get_file",
+			args: func(srv *apitest.Server) []string {
+				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+			},
+			chdirTemp:    true,
+			variants:     []string{"json"},
+			stdoutGolden: true,
+		},
+		{
+			// The §16.2 refusal: piped stdout with no --file.
+			name:         "error_get_piped",
+			args:         func(srv *apitest.Server) []string { return []string{"get", srv.Key.CRID} },
+			variants:     []string{"plain"},
+			wantCode:     2,
+			stderrGolden: true,
+		},
+		{
+			// Overwrite refusal (exit 7, the Conflict row) fires before any
+			// request; the golden pins the --force remedy wording.
+			name: "error_get_exists",
+			args: func(srv *apitest.Server) []string {
+				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
+			},
+			chdirTemp: true,
+			setup: func(t *testing.T) {
+				if err := os.WriteFile("out.bin", []byte("already here"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			variants:     []string{"plain"},
+			wantCode:     7,
+			stderrGolden: true,
+		},
+		{
+			// Expiry that outlives the single automatic refresh: two 410s
+			// from the link host, exit 5.
+			name: "error_get_expired",
+			args: func(srv *apitest.Server) []string {
+				return []string{"get", srv.Key.CRID, "--file", "out.bin"}
+			},
+			prepare: func(srv *apitest.Server) {
+				srv.SetResolveQURL(srv.URL + apitest.DownloadPath)
+				srv.ScriptRepeat(http.MethodGet, apitest.DownloadPath, 2,
+					func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusGone) })
+			},
+			chdirTemp:    true,
+			variants:     []string{"plain"},
+			wantCode:     5,
+			stderrGolden: true,
+		},
+	}
+
+	// Anchor the golden tree before any case changes the working directory.
+	goldenDir, err := filepath.Abs(filepath.Join("testdata", "golden"))
+	if err != nil {
+		t.Fatalf("resolve golden dir: %v", err)
 	}
 
 	for _, tc := range cases {
 		for _, variant := range tc.variants {
 			t.Run(tc.name+"_"+variant, func(t *testing.T) {
+				if tc.chdirTemp {
+					t.Chdir(t.TempDir())
+				}
+				if tc.setup != nil {
+					tc.setup(t)
+				}
 				srv := apitest.NewServerWithKey(t, apitest.FixedResourceKey(t))
 				if tc.prepare != nil {
 					tc.prepare(srv)
@@ -276,12 +373,12 @@ func TestGoldens(t *testing.T) {
 						res.code, tc.wantCode, res.stdout.String(), res.stderr.String())
 				}
 				if tc.stdoutGolden {
-					clitest.Golden(t, tc.name+"."+variant+".golden", res.stdout.Bytes())
+					clitest.GoldenAt(t, filepath.Join(goldenDir, tc.name+"."+variant+".golden"), res.stdout.Bytes())
 				} else {
 					mustEmptyStdout(t, res)
 				}
 				if tc.stderrGolden {
-					clitest.Golden(t, tc.name+"."+variant+".stderr.golden", res.stderr.Bytes())
+					clitest.GoldenAt(t, filepath.Join(goldenDir, tc.name+"."+variant+".stderr.golden"), res.stderr.Bytes())
 				} else if res.stderr.Len() != 0 {
 					t.Fatalf("stderr must be empty for %s_%s, got %q", tc.name, variant, res.stderr.String())
 				}

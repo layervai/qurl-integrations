@@ -58,6 +58,9 @@ const (
 
 	// msgNothingStored is logout's idempotent no-op note (still exit 0).
 	msgNothingStored = "No qURL API key is stored on this machine; nothing to remove."
+
+	// msgSavedTo confirms a completed download: destination, then size.
+	msgSavedTo = "Saved to %s (%d bytes)."
 )
 
 // CustomerMessages returns every fixed customer-facing string this package
@@ -83,5 +86,6 @@ func CustomerMessages() []string {
 		msgLoggedInAs,
 		msgLoggedOut,
 		msgNothingStored,
+		msgSavedTo,
 	}
 }

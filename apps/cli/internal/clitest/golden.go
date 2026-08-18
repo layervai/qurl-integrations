@@ -25,12 +25,20 @@ const UpdateEnv = "UPDATE_GOLDEN"
 // normalization — because the rendered bytes are the contract.
 func Golden(t *testing.T, name string, got []byte) {
 	t.Helper()
+	GoldenAt(t, filepath.Join("testdata", "golden", name), got)
+}
 
+// GoldenAt is Golden with an explicit file path, for tests that change the
+// working directory (t.Chdir) and must anchor the golden tree before doing
+// so.
+func GoldenAt(t *testing.T, path string, got []byte) {
+	t.Helper()
+
+	name := filepath.Base(path)
 	if i := bytes.IndexByte(got, '\r'); i >= 0 {
 		t.Fatalf("golden %s: output contains a carriage return at byte %d; CLI output must be LF-only", name, i)
 	}
 
-	path := filepath.Join("testdata", "golden", name)
 	if os.Getenv(UpdateEnv) == "1" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatalf("golden %s: create dir: %v", name, err)

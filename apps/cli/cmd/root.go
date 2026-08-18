@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/exitcode"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
@@ -42,6 +44,9 @@ type globalOpts struct {
 	// newCredentialStore builds the storage chain; tests inject a fake
 	// keyring so unit tests never touch a developer's real one.
 	newCredentialStore func(dir string, onFileRead func()) *auth.Chain
+	// openBrowser launches the user's browser at an already-verified link;
+	// tests inject a recorder so no real browser ever starts under test.
+	openBrowser func(ctx context.Context, link string) error
 
 	// Resolved in PersistentPreRunE.
 	resolved         bool
@@ -90,6 +95,12 @@ func newRoot(version string, streams *output.Streams, options ...rootOption) (*c
 	}
 	if opts.newCredentialStore == nil {
 		opts.newCredentialStore = auth.NewStore
+	}
+	if opts.openBrowser == nil {
+		// The launcher reads the override variables through the same
+		// injected environment the rest of the CLI uses.
+		launcher := &consume.Launcher{LookupEnv: opts.lookupEnv, GOOS: runtime.GOOS}
+		opts.openBrowser = launcher.Open
 	}
 
 	cmd := &cobra.Command{

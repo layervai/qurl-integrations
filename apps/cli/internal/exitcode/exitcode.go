@@ -24,6 +24,7 @@ import (
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/consume"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/cridux"
 )
 
@@ -137,20 +138,14 @@ func FromError(err error) int {
 		return Interrupted
 	case errors.Is(err, context.DeadlineExceeded):
 		return Unavailable
-	case errors.Is(err, cridux.ErrTestIDOnProduction):
-		return Usage
-	case errors.Is(err, cridux.ErrUnusableID):
-		return InvalidInput
-	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
-		return Auth
-	case errors.Is(err, config.ErrInvalidProfileName),
-		errors.Is(err, config.ErrConfigFile),
-		errors.Is(err, config.ErrSecretInConfig):
-		return Config
 	case errors.Is(err, qurl.ErrTemporaryAccessLinksDisabled):
 		return Unavailable
 	case errors.Is(err, qurl.ErrNoCRID), errors.Is(err, qurl.ErrCRIDMismatch):
 		return VerificationFailed
+	}
+
+	if code, ok := cliSentinelCode(err); ok {
+		return code
 	}
 
 	if code, ok := apiErrorCode(err); ok {
@@ -174,6 +169,49 @@ func FromError(err error) int {
 		return Unavailable
 	default:
 		return General
+	}
+}
+
+// cliSentinelCode maps the CLI's own sentinel families — operand
+// assessment, credentials, configuration, and the consume layer — onto
+// their exit codes.
+func cliSentinelCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, cridux.ErrTestIDOnProduction):
+		return Usage, true
+	case errors.Is(err, cridux.ErrUnusableID):
+		return InvalidInput, true
+	case errors.Is(err, consume.ErrPipedNeedsFile):
+		// The invocation is wrong for its context (piped stdout, no --file):
+		// a usage failure, remedied on the command line.
+		return Usage, true
+	case errors.Is(err, consume.ErrFileExists):
+		// Overwrite refusal is the Conflict row of the §16.5 table: the
+		// command and operand are both valid — the request conflicts with
+		// state that already exists at the destination, exactly the shape
+		// the HTTP 409 row describes, and --force is the caller's explicit
+		// resolution. (Not InvalidInput: the path is a perfectly good path.)
+		return Conflict, true
+	case errors.Is(err, consume.ErrLinkExpired):
+		// Expiry that survived the one automatic refresh joins the
+		// platform's gone family: the link does not resolve to content now.
+		return NotFound, true
+	case errors.Is(err, consume.ErrLinkFetch):
+		// A freshly minted, verified link that then refuses to serve is the
+		// service answering outside its contract.
+		return ServerError, true
+	case errors.Is(err, consume.ErrUnopenableLink):
+		// A verified answer whose link is not a web URL is likewise the
+		// service outside its contract — never handed to a launcher.
+		return ServerError, true
+	case errors.Is(err, auth.ErrNoCredential), errors.Is(err, auth.ErrInvalidKey):
+		return Auth, true
+	case errors.Is(err, config.ErrInvalidProfileName),
+		errors.Is(err, config.ErrConfigFile),
+		errors.Is(err, config.ErrSecretInConfig):
+		return Config, true
+	default:
+		return 0, false
 	}
 }
 

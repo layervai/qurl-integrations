@@ -33,8 +33,19 @@ type Server struct {
 	requests             []RecordedRequest
 	scripts              map[string][]http.HandlerFunc
 	resolveCRID          string
+	resolveQURL          string
+	downloadPayload      []byte
 	publishFoundExisting bool
 }
+
+// DownloadPath is the mock's link-host route: SetResolveQURL(srv.URL +
+// DownloadPath) makes resolve answers point at the mock itself, so download
+// tests never leave the process.
+const DownloadPath = "/file"
+
+// DefaultDownloadPayload is what the download route serves unless
+// SetDownloadPayload overrides it. Fixed so goldens can pin byte counts.
+const DefaultDownloadPayload = "qURL mock file payload\n"
 
 // NewServer starts a mock with consistent happy-path handlers for publish,
 // resolve, list, and delete. Close it via t.Cleanup automatically.
@@ -88,6 +99,22 @@ func (s *Server) SetPublishFoundExisting(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.publishFoundExisting = v
+}
+
+// SetResolveQURL overrides the qurl field of resolve responses; download
+// tests point it at the mock's own DownloadPath.
+func (s *Server) SetResolveQURL(u string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resolveQURL = u
+}
+
+// SetDownloadPayload overrides the bytes the DownloadPath route serves —
+// binary-cleanliness tests pass payloads full of NUL and CR bytes.
+func (s *Server) SetDownloadPayload(b []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.downloadPayload = b
 }
 
 // Requests returns everything the server has seen, in order.
@@ -144,6 +171,9 @@ func (s *Server) defaultHandler(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/resources/"):
 		w.WriteHeader(http.StatusNoContent)
+
+	case r.Method == http.MethodGet && r.URL.Path == DownloadPath:
+		s.handleDownload(w)
 
 	default:
 		WriteProblem(s.t, w, http.StatusNotFound, "not_found", "Not Found", "no such route in the mock qURL API")
@@ -232,14 +262,36 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/resources/"), "/resolve")
+	s.mu.Lock()
+	qurlLink := s.resolveQURL
+	s.mu.Unlock()
+	if qurlLink == "" {
+		qurlLink = "https://qurl.link/#qv2.test.link"
+	}
 	WriteEnvelope(s.t, w, http.StatusOK, map[string]any{
-		"qurl":               "https://qurl.link/#qv2.test.link",
+		"qurl":               qurlLink,
 		"crid":               s.cridFor(id),
 		"type":               "qv2",
 		"expires_at":         "2026-03-01T00:05:00Z",
 		"expires_in_seconds": 300,
 		"single_use":         true,
 	}, nil)
+}
+
+// handleDownload serves the link-host bytes for DownloadPath.
+func (s *Server) handleDownload(w http.ResponseWriter) {
+	s.mu.Lock()
+	payload := s.downloadPayload
+	s.mu.Unlock()
+	if payload == nil {
+		payload = []byte(DefaultDownloadPayload)
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	// #nosec G705 -- the mock link host echoes the test's own payload bytes
+	// as an octet-stream download; no browser or HTML context exists here.
+	if _, err := w.Write(payload); err != nil {
+		s.t.Errorf("write download payload: %v", err)
+	}
 }
 
 // cridFor answers the crid field for a resolve: the override when scripted,
