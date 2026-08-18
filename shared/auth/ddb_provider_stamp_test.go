@@ -198,6 +198,11 @@ func nonMutatingMethods() map[string]string {
 // until someone decides which it is. The cost is a one-line edit when an
 // unrelated reader is added, which is the intended forcing function, not a
 // side effect.
+//
+// Note that reflect counts PROMOTED methods too. If DDBProvider ever embeds a
+// type, that type's exported methods surface here as unclassified — correct
+// behavior for a forcing function, but the failure lands far from its cause, so
+// look for a new embed before assuming someone added a method.
 func TestDDBProviderExportedMethodsAreClassified(t *testing.T) {
 	classified := make(map[string]string)
 	for _, w := range stampingWriters() {
@@ -236,8 +241,8 @@ func TestDDBProviderExportedMethodsAreClassified(t *testing.T) {
 	}
 }
 
-// requireStampsUpdatedAtNano asserts that in sets attrUpdatedAtNano to want's
-// Unix-nanosecond value.
+// requireStampsUpdatedAtNano asserts that the captured UpdateItemInput sets
+// attrUpdatedAtNano to want's Unix-nanosecond value.
 func requireStampsUpdatedAtNano(t *testing.T, method string, in *dynamodb.UpdateItemInput, want time.Time) {
 	t.Helper()
 	if in == nil {
@@ -270,6 +275,12 @@ func requireStampsUpdatedAtNano(t *testing.T, method string, in *dynamodb.Update
 // can masquerade as a match. Assignments to a function rather than a value
 // placeholder — `configured_at = if_not_exists(configured_at, :now)` — simply do
 // not match, which is correct: only the stamp's binding is of interest here.
+//
+// Consequence worth knowing: a writer that ever stamps via if_not_exists would
+// be reported as "does not set updated_at_unix_nano" rather than as an
+// unsupported stamp form, pointing a maintainer at the wrong problem. No writer
+// does that today; if one arrives, teach requireStampsUpdatedAtNano to tell the
+// two apart rather than trusting that message.
 var assignmentPattern = regexp.MustCompile(`(?:\A|[\s,])(#?[A-Za-z0-9_]+)\s*=\s*(:[A-Za-z0-9_]+)`)
 
 // stampValueRef finds the `:value` placeholder that expr assigns to
