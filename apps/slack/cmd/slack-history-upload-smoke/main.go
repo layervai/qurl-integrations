@@ -250,6 +250,9 @@ func prepareScanConfig(cfg *scanConfig) error {
 // already constrained the value to a POSIX environment variable name before it gets this
 // far, so it cannot carry a control character either.
 //
+// That is gosec v2.23.0, the version golangci-lint v2.10.1 pins. Newer gosec stops
+// reporting this, at which point nolintlint fails these two lines as unused instead.
+//
 // The slack-dm-smoke mirror of this function deliberately carries no directives, for the
 // reason documented there.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
