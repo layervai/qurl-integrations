@@ -175,29 +175,32 @@ func TestOpenWarmOpenSuccess(t *testing.T) {
 	}
 }
 
+// TestOpenFirstRegistrationRequiresToken pins the zero-network token-required
+// path: no stored identity plus no configured token refuses with the exported
+// sentinel BEFORE the registration seam (the network transaction) is invoked.
 func TestOpenFirstRegistrationRequiresToken(t *testing.T) {
 	lifecycleEnv(t)
 	calls := &seamCalls{}
-	sdkErr := errors.New("registration requires an enrollment credential")
 	installSeams(t, calls,
-		func(_ context.Context, credential string, _ qurl.AgentStateStore, _ ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
-			if credential != "" {
-				t.Errorf("credential = %q, want empty", credential)
-			}
-			return nil, nil, sdkErr
+		func(context.Context, string, qurl.AgentStateStore, ...qurl.AgentRuntimeRegistrationOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
+			t.Error("registerAgentRuntime must not be called without an enrollment credential")
+			return nil, nil, errors.New("unreachable")
 		},
 		func(context.Context, qurl.AgentStateStore, ...qurl.AgentRuntimeOpenOption) (*qurl.Client, *qurl.AgentRuntimeBinding, error) {
 			return nil, nil, fmt.Errorf("no persisted state: %w", qurl.ErrAgentStateNotFound)
 		}, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if err == nil || !errors.Is(err, sdkErr) {
-		t.Fatalf("Open = %v, want the SDK cause preserved", err)
+	if !errors.Is(err, ErrEnrollmentTokenRequired) {
+		t.Fatalf("Open = %v, want ErrEnrollmentTokenRequired", err)
 	}
-	for _, want := range []string{"--token", EnvEnrollmentToken, EnvEnrollmentTokenFile} {
+	for _, want := range []string{EnvEnrollmentToken, EnvEnrollmentTokenFile} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("token-required hint %q missing from %v", want, err)
+			t.Fatalf("token-required guidance %q missing from %v", want, err)
 		}
+	}
+	if calls.register != 0 {
+		t.Fatalf("register seam calls = %d, want 0 (the refusal must be zero-network)", calls.register)
 	}
 }
 
@@ -307,8 +310,8 @@ func TestOpenLeaseExpiredArmsMarkerAndManualGateHolds(t *testing.T) {
 		}, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if err == nil || !strings.Contains(err.Error(), "operator approval") || !strings.Contains(err.Error(), EnvRefreshMode) {
-		t.Fatalf("Open under manual mode = %v, want the operator-approval gate naming %s", err, EnvRefreshMode)
+	if !errors.Is(err, ErrRefreshApprovalRequired) || !strings.Contains(err.Error(), EnvRefreshMode) {
+		t.Fatalf("Open under manual mode = %v, want ErrRefreshApprovalRequired naming %s", err, EnvRefreshMode)
 	}
 	marker, present := readMarker(t, dir)
 	if !present || marker.Attempted || marker.Reason != "assigned NHP cell lease expired" {
@@ -327,8 +330,29 @@ func TestOpenRefreshDisabledFailsClosed(t *testing.T) {
 	installSeams(t, calls, nil, nil, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if err == nil || !strings.Contains(err.Error(), "disabled") || !strings.Contains(err.Error(), dir) {
-		t.Fatalf("Open under disabled mode = %v, want a fail-closed error naming the state dir", err)
+	if !errors.Is(err, ErrRefreshDisabled) || !strings.Contains(err.Error(), dir) {
+		t.Fatalf("Open under disabled mode = %v, want ErrRefreshDisabled naming the state dir", err)
+	}
+}
+
+// TestOpenRefreshModeFlagOverridesEnv pins the Config.RefreshMode plumbing:
+// an explicit manual override holds the gate even when the environment says
+// auto, so the command's flag is authoritative over ambient configuration.
+func TestOpenRefreshModeFlagOverridesEnv(t *testing.T) {
+	dir := lifecycleEnv(t)
+	armMarker(t, dir, "sustained failures", false)
+	t.Setenv(EnvRefreshMode, "auto")
+	calls := &seamCalls{}
+	installSeams(t, calls, nil, nil, nil)
+
+	cfg := testConfig()
+	cfg.RefreshMode = RefreshModeManual
+	_, err := Open(context.Background(), cfg)
+	if !errors.Is(err, ErrRefreshApprovalRequired) {
+		t.Fatalf("Open with explicit manual over env auto = %v, want ErrRefreshApprovalRequired", err)
+	}
+	if calls.refresh != 0 {
+		t.Fatalf("refresh calls = %d, want 0 under the explicit manual gate", calls.refresh)
 	}
 }
 
@@ -383,7 +407,7 @@ func TestOpenAttemptedMarkerBlocksSecondRefresh(t *testing.T) {
 		}, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if !errors.Is(err, errRefreshAlreadyAttempted) || !errors.Is(err, warmErr) {
+	if !errors.Is(err, ErrRefreshAlreadyAttempted) || !errors.Is(err, warmErr) {
 		t.Fatalf("Open = %v, want the already-attempted episode error joined with the warm-open cause", err)
 	}
 	if calls.refresh != 0 {
@@ -422,8 +446,8 @@ func TestOpenConfiguredAgentIdentityConflictFailsClosed(t *testing.T) {
 	}, nil)
 
 	_, err := Open(context.Background(), testConfig())
-	if err == nil || !strings.Contains(err.Error(), "agent-configured") || !strings.Contains(err.Error(), "agent-persisted") {
-		t.Fatalf("Open = %v, want the identity conflict naming both values", err)
+	if !errors.Is(err, ErrIdentityConflict) || !strings.Contains(err.Error(), "agent-configured") || !strings.Contains(err.Error(), "agent-persisted") {
+		t.Fatalf("Open = %v, want ErrIdentityConflict naming both values", err)
 	}
 }
 

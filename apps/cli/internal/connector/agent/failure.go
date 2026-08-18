@@ -34,7 +34,7 @@ func (e *registrationStalledError) Error() string {
 	var b strings.Builder
 	b.WriteString("native NHP registration did not complete: the NHP Hub or assigned cell stopped answering. ")
 	fmt.Fprintf(&b, "This is usually transport — blocked UDP/443 egress, a wrong %s pin, or a transiently unreachable endpoint; ", hub.EnvHost)
-	fmt.Fprintf(&b, "if it persists, also confirm the enrollment --token / %s was minted for this Connector and is not expired or already consumed (it is one-shot). ", EnvEnrollmentToken)
+	fmt.Fprintf(&b, "if it persists, also confirm the enrollment token (%s / %s) was minted for this Connector and is not expired or already consumed (it is one-shot). ", EnvEnrollmentToken, EnvEnrollmentTokenFile)
 	b.WriteString("Increase log verbosity to see which leg stalled")
 	if e.cause != nil {
 		fmt.Fprintf(&b, ": %v", e.cause)

@@ -37,7 +37,9 @@ var errSecretFileTooLarge = fmt.Errorf("file exceeds %d byte cap (Connector enro
 // resolveEnrollmentToken returns the one-shot enrollment credential.
 // Resolution order:
 //
-//  1. the explicit value (the command's --token flag), highest precedence
+//  1. the explicit Config value (embedders and tests only — the CLI command
+//     deliberately has no token flag, because argv leaks into shell history
+//     and process lists), highest precedence
 //  2. QURL_CONNECTOR_TOKEN_FILE — the trimmed contents of that file
 //  3. QURL_CONNECTOR_TOKEN
 //

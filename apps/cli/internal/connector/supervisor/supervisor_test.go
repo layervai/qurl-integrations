@@ -307,7 +307,7 @@ func TestKnockForcesLoginFailExit(t *testing.T) {
 }
 
 // TestKnockFailureBudgetExitsAndArmsMarker drives the transport-failure
-// budget to exhaustion: the supervisor exits with errTooManyKnockFailures
+// budget to exhaustion: the supervisor exits with ErrTooManyKnockFailures
 // wrapping the cause, never builds a runner, and arms exactly one refresh
 // episode with the shared reason string.
 func TestKnockFailureBudgetExitsAndArmsMarker(t *testing.T) {
@@ -326,8 +326,8 @@ func TestKnockFailureBudgetExitsAndArmsMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	runErr := sup.Run(context.Background())
-	if !errors.Is(runErr, errTooManyKnockFailures) || !errors.Is(runErr, cause) {
-		t.Fatalf("Run = %v, want errTooManyKnockFailures wrapping the knock cause", runErr)
+	if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, cause) {
+		t.Fatalf("Run = %v, want ErrTooManyKnockFailures wrapping the knock cause", runErr)
 	}
 	if got := knocker.calls.Load(); got != 3 {
 		t.Fatalf("knock attempts = %d, want exactly the budget of 3", got)
@@ -364,7 +364,7 @@ func TestAlternatingKnockAndACKFailuresShareOneBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	runErr := sup.Run(context.Background())
-	if !errors.Is(runErr, errTooManyKnockFailures) || !errors.Is(runErr, errKnockACTokenMissing) {
+	if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, errKnockACTokenMissing) {
 		t.Fatalf("Run = %v, want the unified budget exit wrapping the final ACK cause", runErr)
 	}
 	if got := knocker.calls.Load(); got != 4 {
@@ -395,7 +395,7 @@ func TestTokenRejectedLoginCountsAgainstBudget(t *testing.T) {
 	waitForRunners(t, log, 2)
 	close(log.snapshot()[1].done)
 	runErr := <-done
-	if !errors.Is(runErr, errTooManyKnockFailures) || !errors.Is(runErr, tokenReject) {
+	if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, tokenReject) {
 		t.Fatalf("Run = %v, want budget exit wrapping the token-rejected login", runErr)
 	}
 	armed, cleared := marker.snapshot()
@@ -458,7 +458,7 @@ func TestMissingResourceHostFailsClosedWithoutTokenStamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	runErr := sup.Run(context.Background())
-	if !errors.Is(runErr, errTooManyKnockFailures) || !errors.Is(runErr, errKnockResourceHostMissing) {
+	if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, errKnockResourceHostMissing) {
 		t.Fatalf("Run = %v, want fail-closed missing-dial-target budget exit", runErr)
 	}
 }
@@ -498,7 +498,7 @@ func TestResourceHostValidationTable(t *testing.T) {
 			}
 			if tc.wantDial == "" {
 				runErr := sup.Run(context.Background())
-				if !errors.Is(runErr, errTooManyKnockFailures) || !errors.Is(runErr, errKnockResourceHostUnusable) {
+				if !errors.Is(runErr, ErrTooManyKnockFailures) || !errors.Is(runErr, errKnockResourceHostUnusable) {
 					t.Fatalf("Run = %v, want fail-closed unusable dial target", runErr)
 				}
 				if len(log.snapshot()) != 0 {
@@ -717,7 +717,7 @@ func TestCyclesCountsCompletedCyclesOnly(t *testing.T) {
 // terminates the supervisor with it and arms the episode.
 func TestRunnerErrTooManyKnockFailuresPropagates(t *testing.T) {
 	t.Parallel()
-	escalation := fmt.Errorf("%w: 5 consecutive redial knock refresh failures", errTooManyKnockFailures)
+	escalation := fmt.Errorf("%w: 5 consecutive redial knock refresh failures", ErrTooManyKnockFailures)
 	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("h.example:1")}}
 	log := &runnerLog{}
 	marker := &fakeMarker{}
@@ -731,7 +731,7 @@ func TestRunnerErrTooManyKnockFailuresPropagates(t *testing.T) {
 	go func() { done <- sup.Run(context.Background()) }()
 	waitForRunners(t, log, 1)
 	close(log.snapshot()[0].done)
-	if runErr := <-done; !errors.Is(runErr, errTooManyKnockFailures) {
+	if runErr := <-done; !errors.Is(runErr, ErrTooManyKnockFailures) {
 		t.Fatalf("Run = %v, want the propagated sentinel", runErr)
 	}
 	armed, _ := marker.snapshot()
@@ -786,10 +786,10 @@ func TestBackoffResetsAfterHealthyRun(t *testing.T) {
 // false for everything else.
 func TestIsTooManyKnockFailures(t *testing.T) {
 	t.Parallel()
-	if !IsTooManyKnockFailures(errTooManyKnockFailures) {
+	if !IsTooManyKnockFailures(ErrTooManyKnockFailures) {
 		t.Fatal("bare sentinel not detected")
 	}
-	if !IsTooManyKnockFailures(fmt.Errorf("wrapped: %w", errTooManyKnockFailures)) {
+	if !IsTooManyKnockFailures(fmt.Errorf("wrapped: %w", ErrTooManyKnockFailures)) {
 		t.Fatal("wrapped sentinel not detected")
 	}
 	if IsTooManyKnockFailures(errors.New("unrelated")) || IsTooManyKnockFailures(nil) {

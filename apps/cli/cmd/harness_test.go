@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/supervisor"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
@@ -110,6 +113,21 @@ type runOpts struct {
 	// browser is the injected launcher recorder; nil means a fresh recorder
 	// (pass one to assert on what was — or was not — opened).
 	browser *fakeBrowser
+
+	// ctx, when non-nil, replaces context.Background() so a test can cancel
+	// a long-running command (connector run's simulated INT/TERM).
+	ctx context.Context
+	// Connector seams; nil keeps the production wiring (agent.Open /
+	// knock.NewNative / package-default supervisor timings).
+	connectorOpen func(ctx context.Context, cfg *agent.Config) (*agent.Runtime, error)
+	newKnocker    func(rt *agent.Runtime, knockResourceID string) (connectorKnocker, error)
+	connectorTune func(cfg *supervisor.Config)
+	// syncStreams serializes writes to the captured stdout/stderr buffers.
+	// The connector serve test needs it: the linked FRP client and the
+	// in-process test server log from their own goroutines through the
+	// redirected process-global logger while the command goroutine writes
+	// too.
+	syncStreams bool
 }
 
 // runResult captures one invocation's streams and exit code.
@@ -146,6 +164,10 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		OutIsTTY: o.tty,
 		ErrIsTTY: o.tty,
 	}
+	if o.syncStreams {
+		streams.Out = &syncWriter{w: &res.stdout}
+		streams.Err = &syncWriter{w: &res.stderr}
+	}
 
 	kr := o.keyring
 	if kr == nil {
@@ -173,10 +195,39 @@ func runCLI(t *testing.T, o *runOpts) *runResult {
 		} else {
 			g.sleep = func(time.Duration) {} // tests never wall-clock sleep
 		}
+		if o.connectorOpen != nil {
+			g.openConnectorRuntime = o.connectorOpen
+		}
+		if o.newKnocker != nil {
+			g.newConnectorKnocker = o.newKnocker
+		}
+		if o.connectorTune != nil {
+			g.tuneConnectorSupervisor = o.connectorTune
+		}
+		// The FRP global logger is pinned once for the whole test binary in
+		// TestMain; a per-invocation swap would race the in-process tunnel
+		// server's own log goroutines.
+		g.redirectFRPLogs = func() {}
 	})
 	root.SetArgs(o.args)
-	res.code = run(context.Background(), root, opts)
+	ctx := o.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res.code = run(ctx, root, opts)
 	return res
+}
+
+// syncWriter serializes writes from concurrent goroutines into one buffer.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // mustEmptyStdout asserts the data stream carried nothing — the fail-closed

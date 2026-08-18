@@ -1,0 +1,28 @@
+Connectors publish apps running on your machine through the qURL platform.
+
+A Connector serves one local app under a route name (its slug). Callers
+never reach your machine directly: the platform verifies each caller and
+grants access before any request is forwarded to your app.
+
+Usage:
+  qurl connector [flags]
+  qurl connector [command]
+
+Examples:
+  qurl connector run --slug billing --target :8080
+
+Available Commands:
+  run         Serve a local app through the qURL platform
+
+Flags:
+  -h, --help   help for connector
+
+Global Flags:
+      --color string      colorize output: auto, always, or never (default auto)
+      --endpoint string   qURL API endpoint (default https://api.layerv.ai)
+  -o, --output string     output format: text or json (default text)
+      --profile string    configuration profile name
+  -q, --quiet             print only the primary value, one per line
+  -v, --verbose           print request diagnostics on stderr
+
+Use "qurl connector [command] --help" for more information about a command.

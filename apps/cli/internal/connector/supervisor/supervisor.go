@@ -19,7 +19,7 @@
 //
 // Failure budget: consecutive unhealthy knock cycles (transport error, ACK
 // without a usable token or dial target, or a token-rejected Login) share ONE
-// counter; exhausting it exits with errTooManyKnockFailures and arms the
+// counter; exhausting it exits with ErrTooManyKnockFailures and arms the
 // state package's refresh marker, which hands recovery to the agent package's
 // operator-gated assignment-refresh ladder on the next start. A confirmed
 // healthy knock+login cycle clears the marker and ends the episode.
@@ -69,7 +69,7 @@ const (
 	// gated re-knocks still land inside the prior admission window.
 	minKnockInterval = 10 * time.Second
 	// maxConsecutiveKnockFailures is the exit threshold: this many
-	// consecutive unhealthy knock cycles return errTooManyKnockFailures and
+	// consecutive unhealthy knock cycles return ErrTooManyKnockFailures and
 	// arm the refresh marker. The orchestrator's restart is the recovery
 	// mechanism — persisted native state survives, and the next start walks
 	// the agent package's refresh ladder.
@@ -82,6 +82,12 @@ const (
 	// a state directory keeps its meaning across the two tools.
 	refreshMarkerReason = "sustained native NHP knock failures"
 )
+
+// StopWait is the deadline a command should give Stop for the serve loop's
+// teardown: the graceful FRP close budget plus the best-effort native session
+// exit, with scheduling margin. Exported so the command layer's INT/TERM
+// handler and this package cannot drift on what "graceful" costs.
+const StopWait = gracefulCloseTimeout + endCycleTimeout + 2*time.Second
 
 // Structured-log event names for knock-cycle outcomes. Grep-stable
 // identifiers shared with the knock package's decision-stream vocabulary.
@@ -190,6 +196,16 @@ type Supervisor struct {
 	// accumulates after its healthy knock.
 	consecutiveUnhealthyKnocks int
 
+	// refreshEpisodeCleared is the in-process already-cleared latch in front
+	// of the marker clear: once a confirmed-healthy cycle has cleared the
+	// refresh marker, steady-state healthy cycles skip the per-cycle
+	// stat/remove entirely. Any unhealthy accrual resets the latch, so the
+	// next confirmed-healthy cycle goes back to the store — the latch only
+	// elides clears that provably follow an earlier clear with nothing
+	// in between that could have re-armed an episode. Serve-goroutine-only
+	// state, like the counter above.
+	refreshEpisodeCleared bool
+
 	// Start/Stop lifecycle. lifecycleMu guards the trio; done is closed when
 	// the background serve goroutine exits with finalErr recorded.
 	lifecycleMu sync.Mutex
@@ -198,11 +214,14 @@ type Supervisor struct {
 	finalErr    error
 }
 
-// The package's failure conditions are deliberately unexported sentinels with
-// an exported predicate where a caller needs the distinction: exported Err*
-// vars would enter the CLI's exported-sentinel exit-code contract, and these
-// conditions are the command layer's to interpret (the budget exit via
-// IsTooManyKnockFailures), never customer-rendered identities of their own.
+// The package's per-cycle failure conditions stay unexported sentinels: they
+// are retried under the budget, never surfaced as a process exit of their
+// own, so they must not enter the CLI's exported-sentinel exit-code contract.
+// The ONE condition that does terminate the process — the budget exit — is
+// exported (ErrTooManyKnockFailures) precisely so that contract's AST
+// tripwire forces an exit-code row for it; the command layer still interprets
+// it through IsTooManyKnockFailures and renders it in customer language, so
+// it never becomes a customer-rendered identity of its own.
 
 // errAlreadyStarted is returned by Run/Start when the supervisor has already
 // been started; it is single-shot by design.
@@ -211,18 +230,18 @@ var errAlreadyStarted = errors.New("qURL Connector supervisor: already started; 
 // errNotStarted is returned by Stop when Start was never called.
 var errNotStarted = errors.New("qURL Connector supervisor: Stop called before Start")
 
-// errTooManyKnockFailures terminates the supervisor when the consecutive
+// ErrTooManyKnockFailures terminates the supervisor when the consecutive
 // unhealthy-knock budget is exhausted. The exit arms the refresh marker; the
 // orchestrator restart plus the agent package's refresh ladder is the
 // recovery mechanism.
-var errTooManyKnockFailures = errors.New("qURL Connector supervisor: knock failed too many times consecutively")
+var ErrTooManyKnockFailures = errors.New("qURL Connector supervisor: knock failed too many times consecutively")
 
 // IsTooManyKnockFailures reports whether err is the supervisor's
 // knock-budget exit — the sustained-failure signal whose recovery path is a
 // process restart through the agent package's refresh ladder. The command
 // layer keys its messaging and exit decision on this predicate.
 func IsTooManyKnockFailures(err error) bool {
-	return errors.Is(err, errTooManyKnockFailures)
+	return errors.Is(err, ErrTooManyKnockFailures)
 }
 
 // errKnockACTokenMissing is returned when a successful knock ACK carries no
@@ -270,7 +289,7 @@ func (s *Supervisor) Cycles() int64 {
 
 // Run executes the serve loop until ctx is canceled or a non-recoverable
 // error occurs. Returns ctx.Err() on clean shutdown, errAlreadyStarted on a
-// second start, errTooManyKnockFailures (marker armed) on budget exhaustion,
+// second start, ErrTooManyKnockFailures (marker armed) on budget exhaustion,
 // or a wrapped fatal error.
 func (s *Supervisor) Run(ctx context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
@@ -345,7 +364,7 @@ func (s *Supervisor) Err() error {
 // operator-gated refresh.
 func (s *Supervisor) serveAndSettle(ctx context.Context) error {
 	err := s.serve(ctx)
-	if errors.Is(err, errTooManyKnockFailures) {
+	if errors.Is(err, ErrTooManyKnockFailures) {
 		s.armRefreshEpisode(ctx)
 	}
 	return err
@@ -389,7 +408,7 @@ func (s *Supervisor) serve(ctx context.Context) error {
 			}
 			s.cycles.Add(1)
 			s.logCycleEnd(ctx, outcome)
-			if errors.Is(outcome.runErr, errTooManyKnockFailures) {
+			if errors.Is(outcome.runErr, ErrTooManyKnockFailures) {
 				// The in-run knock refresher exhausted its own budget and
 				// asked for a restart; the supervisor exits with the same
 				// sentinel so recovery is uniform.
@@ -489,6 +508,7 @@ func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutc
 	}
 	if IsTokenLoginError(outcome.runErr) {
 		s.consecutiveUnhealthyKnocks++
+		s.refreshEpisodeCleared = false
 		s.log().WarnContext(ctx, "connector: tunnel login rejected the knock token; will re-knock on next cycle",
 			append(s.knockLogAttrs(),
 				"event", "login_token_rejected",
@@ -499,7 +519,7 @@ func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutc
 		)
 		if s.consecutiveUnhealthyKnocks >= s.maxConsecutiveKnockFailures() {
 			return errors.Join(
-				errTooManyKnockFailures,
+				ErrTooManyKnockFailures,
 				fmt.Errorf("%d consecutive unhealthy knocks, last was a token-rejected login: %w", s.consecutiveUnhealthyKnocks, outcome.runErr),
 			)
 		}
@@ -509,8 +529,11 @@ func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutc
 	// Confirmed-healthy knock+login cycle: the single authoritative point
 	// where the supervisor declares the knock path recovered and ends any
 	// refresh episode. Not on a mere transport-success knock, which may
-	// still fail the Login.
-	s.clearRefreshEpisode(ctx)
+	// still fail the Login. The already-cleared latch keeps steady-state
+	// healthy cycles off the marker store once one clear has landed.
+	if !s.refreshEpisodeCleared {
+		s.clearRefreshEpisode(ctx)
+	}
 	return nil
 }
 
@@ -580,6 +603,7 @@ func (s *Supervisor) waitKnockGate(ctx context.Context) error {
 // budget-exhausted exit (wrapping both the sentinel and the cause).
 func (s *Supervisor) recordUnhealthyKnock(ctx context.Context, event, message string, cause error, knockDuration time.Duration, exhausted func(count int, cause error) error) (retryNextCycle bool, err error) {
 	s.consecutiveUnhealthyKnocks++
+	s.refreshEpisodeCleared = false
 	s.logRefreshHintIfNeeded(ctx)
 	s.log().WarnContext(ctx, message,
 		append(s.knockLogAttrs(),
@@ -591,7 +615,7 @@ func (s *Supervisor) recordUnhealthyKnock(ctx context.Context, event, message st
 		)...,
 	)
 	if s.consecutiveUnhealthyKnocks >= s.maxConsecutiveKnockFailures() {
-		return false, errors.Join(errTooManyKnockFailures, exhausted(s.consecutiveUnhealthyKnocks, cause))
+		return false, errors.Join(ErrTooManyKnockFailures, exhausted(s.consecutiveUnhealthyKnocks, cause))
 	}
 	return true, nil
 }
@@ -721,9 +745,12 @@ func (s *Supervisor) armRefreshEpisode(ctx context.Context) {
 
 // clearRefreshEpisode ends the current refresh episode after a
 // confirmed-healthy cycle, so steady-state restarts stay on the efficient
-// persisted-assignment path.
+// persisted-assignment path. A successful clear sets the already-cleared
+// latch; a failed clear leaves it unset so the next healthy cycle retries
+// instead of latching over a marker that still exists.
 func (s *Supervisor) clearRefreshEpisode(ctx context.Context) {
 	if s.cfg.Marker == nil {
+		s.refreshEpisodeCleared = true
 		return
 	}
 	if err := s.cfg.Marker.ClearRefreshMarker(); err != nil {
@@ -733,7 +760,9 @@ func (s *Supervisor) clearRefreshEpisode(ctx context.Context) {
 				"err", err.Error(),
 			)...,
 		)
+		return
 	}
+	s.refreshEpisodeCleared = true
 }
 
 // logRefreshHintIfNeeded explains the persisted-identity refresh policy once

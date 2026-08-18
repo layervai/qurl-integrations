@@ -34,7 +34,7 @@ const (
 
 	// redialKnockMaxFailures mirrors the supervisor's budget shape, but
 	// counts physical-redial knocks inside ONE tunnel run; exhausting it
-	// requests a cycle restart carrying errTooManyKnockFailures.
+	// requests a cycle restart carrying ErrTooManyKnockFailures.
 	redialKnockMaxFailures = 5
 )
 
@@ -75,20 +75,23 @@ func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCom
 
 	// One clock read per refresh: the gate check and the start-to-start
 	// stamp must see the same instant, and a single read is what lets the
-	// injected test clock drive the arithmetic deterministically.
-	now := time.Now()
+	// injected test clock drive the arithmetic deterministically. Select the
+	// clock first, then read it once — the seam replaces the clock, not the
+	// reading.
+	now := time.Now
 	if r.now != nil {
-		now = r.now()
+		now = r.now
 	}
+	t := now()
 	if r.lastKnockAt.IsZero() && commonKnockToken(common) != "" {
 		// First-cycle handoff: the supervisor already knocked and stamped
 		// this cycle's token. Start the redial gate at handoff time so quick
 		// connector retries stay inside the same admission window.
-		r.lastKnockAt = now
+		r.lastKnockAt = t
 		return nil
 	}
 	if !r.lastKnockAt.IsZero() {
-		if wait := r.gate - now.Sub(r.lastKnockAt); wait > 0 {
+		if wait := r.gate - t.Sub(r.lastKnockAt); wait > 0 {
 			r.log().DebugContext(ctx, "connector: redial NHP knock skipped inside gate",
 				"event", "redial_knock_gate_wait",
 				"resource_id", r.resourceID,
@@ -103,7 +106,7 @@ func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCom
 	// retries; if a stale token then rejects the Login, the forced
 	// LoginFailExit hands control back to the supervisor cycle, which
 	// performs the canonical re-knock.
-	r.lastKnockAt = now
+	r.lastKnockAt = t
 	result, err := r.knocker.Knock(ctx)
 	if err != nil {
 		wrapped := fmt.Errorf("redial %s knock failed: %w", reason, err)
@@ -145,7 +148,7 @@ func (r *redialKnockRefresher) recordFailureLocked(err error) error {
 	if r.consecutiveFailure >= redialKnockMaxFailures && r.requestRestart != nil {
 		// requestRestart only takes the runner's cancel lock and never calls
 		// back into the refresher, so the lock order stays isolated.
-		r.requestRestart(fmt.Errorf("%w: %d consecutive redial knock refresh failures, last error: %w", errTooManyKnockFailures, r.consecutiveFailure, err))
+		r.requestRestart(fmt.Errorf("%w: %d consecutive redial knock refresh failures, last error: %w", ErrTooManyKnockFailures, r.consecutiveFailure, err))
 	}
 	return err
 }

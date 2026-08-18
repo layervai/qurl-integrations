@@ -79,6 +79,7 @@ command-line flag > environment variable > profile/config file > built-in defaul
 | API endpoint | `--endpoint` | `QURL_ENDPOINT` | `endpoint` | `https://api.layerv.ai` |
 | Output format | `-o, --output` | `QURL_OUTPUT` | `output` | `text` |
 | Color | `--color` | `QURL_COLOR` | `color` | `auto` |
+| Connector route | `--slug` | `QURL_CONNECTOR_SLUG` | `connector_slug` | — (required by `connector run`) |
 
 Config files are YAML. The default file is `~/.config/qurl/config.yaml`; a
 named profile lives at `~/.config/qurl/profiles/<name>.yaml` and is
@@ -100,6 +101,7 @@ would travel unencrypted; loopback endpoints are exempt.
 | `qurl get <CRID>` | Fetch what a CRID points to: browser on a terminal, or download with `--file` |
 | `qurl list` | List your published resources |
 | `qurl delete <CRID>` | Delete a published resource |
+| `qurl connector run` | Serve a local app through the qURL platform, outbound-only |
 | `qurl login` / `qurl logout` | Store your API key (validated first, OS keyring preferred) / remove it everywhere |
 | `qurl whoami` | Show which account and key identity your credential maps to |
 | `qurl completion <shell>` | Generate shell completions (`bash`, `zsh`, `fish`, `powershell`) |
@@ -206,6 +208,35 @@ without a terminal the command refuses rather than hanging. Deleting an
 already-deleted resource succeeds idempotently and says so (JSON sets
 `already_gone`).
 
+### qurl connector run
+
+`qurl connector run --slug <name> --target <host:port>` serves an app
+running on your machine through the qURL platform. Your app keeps
+listening on localhost and the Connector connects outward — your machine
+never opens a listening port to the internet — while the platform
+verifies each caller and grants access before any request is forwarded.
+
+| Flag | Description |
+|------|-------------|
+| `--slug` | Which Connector to run: its route name in qURL (or `connector_slug` in your profile) |
+| `--target` | The local app, as `host:port`; `:8080` means `127.0.0.1:8080` |
+| `--state-dir` | Where this machine's Connector identity lives (default: your user state directory) |
+| `--refresh-mode` | Self-healing gate after sustained failures: `manual` (default), `auto`, or `disabled` |
+
+The first start enrolls this machine and needs a one-time enrollment
+token from the qURL console, supplied **only** via `QURL_CONNECTOR_TOKEN`
+or `QURL_CONNECTOR_TOKEN_FILE` — there is deliberately no token flag,
+because arguments leak into shell history and process lists. The token is
+used once and never stored; later starts reuse the saved identity.
+
+If the platform stays unreachable long enough, the command exits with
+code 11 instead of retrying forever. The next start may then need its
+platform assignment refreshed: with the default `--refresh-mode manual`
+it stops and asks for approval (exit 2) — approve by running once with
+`--refresh-mode auto`. Automatic restarts are deliberately not treated
+as approval. Stop serving with Ctrl-C or SIGTERM; teardown gets a short
+grace period and the command exits 130.
+
 ### qurl login / logout / whoami
 
 `qurl login` reads the key from piped stdin or a hidden interactive
@@ -296,7 +327,7 @@ exit-code authority in code (`apps/cli/internal/exitcode`):
 | 10 | server error | The service failed or answered outside its contract. |
 | 11 | unavailable | The service cannot be reached or is not serving this surface: HTTP 503, network failures, timeouts. |
 | 12 | verification failed | The response failed CRID-anchored verification. Nothing was printed — treat it as tampering, not transience. |
-| 130 | interrupted | The run was canceled (Ctrl-C). |
+| 130 | interrupted | The run was canceled (Ctrl-C or SIGTERM), including a graceful `connector run` stop. |
 
 ### JSON output (`-o json`)
 

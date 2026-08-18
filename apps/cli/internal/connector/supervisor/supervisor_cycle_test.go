@@ -106,8 +106,8 @@ func TestCycleKnockerExitsSessionWhenKnockFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sup.Run(context.Background()); !errors.Is(err, wantErr) || !errors.Is(err, errTooManyKnockFailures) {
-		t.Fatalf("Run = %v, want wrapped knock error and errTooManyKnockFailures", err)
+	if err := sup.Run(context.Background()); !errors.Is(err, wantErr) || !errors.Is(err, ErrTooManyKnockFailures) {
+		t.Fatalf("Run = %v, want wrapped knock error and ErrTooManyKnockFailures", err)
 	}
 	if got := knocker.endedIDs(); got != wantFirstCycleEnded {
 		t.Fatalf("ended cycle IDs = %s, want %s", got, wantFirstCycleEnded)
@@ -146,8 +146,8 @@ func TestCycleKnockerExitsSessionWhenKnockACKIsUnusable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sup.Run(context.Background()); !errors.Is(err, errTooManyKnockFailures) {
-		t.Fatalf("Run = %v, want errTooManyKnockFailures", err)
+	if err := sup.Run(context.Background()); !errors.Is(err, ErrTooManyKnockFailures) {
+		t.Fatalf("Run = %v, want ErrTooManyKnockFailures", err)
 	}
 	if got := knocker.endedIDs(); got != wantFirstCycleEnded {
 		t.Fatalf("ended cycle IDs = %s, want %s", got, wantFirstCycleEnded)

@@ -81,6 +81,8 @@ homebrew_casks:
       verified: github.com/layervai/qurl-integrations/releases/download
     manpages:
       - manpages/qurl-completion.1
+      - manpages/qurl-connector-run.1
+      - manpages/qurl-connector.1
       - manpages/qurl-delete.1
       - manpages/qurl-get.1
       - manpages/qurl-list.1

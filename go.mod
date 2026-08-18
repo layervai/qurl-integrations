@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.55.4
 	github.com/distribution/reference v0.6.0
 	github.com/fatedier/frp v0.70.1
+	github.com/fatedier/golib v0.7.0
 	github.com/layervai/qurl-go v0.5.3
 	github.com/lestrrat-go/jwx/v2 v2.1.7
 	github.com/spf13/cobra v1.10.2
@@ -44,7 +45,6 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
-	github.com/fatedier/golib v0.7.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect

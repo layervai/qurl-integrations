@@ -69,6 +69,27 @@ const (
 	// msgBrowserJSON refuses browser-open under the JSON output mode: a
 	// machine asked for data, and a spawned browser is not data.
 	msgBrowserJSON = "browser opening isn't available with --output json — use --file to download, or `qurl resolve --output json` for the link"
+
+	// msgConnectorSlugRequired refuses connector run without a route name.
+	msgConnectorSlugRequired = "--slug is required: pass your Connector's route name, or set connector_slug in your profile"
+
+	// msgConnectorTargetRequired refuses connector run without a local app.
+	msgConnectorTargetRequired = "--target is required: the local app to serve, as host:port (\":8080\" means 127.0.0.1:8080)"
+
+	// msgConnectorTargetInvalid refuses a --target that is not host:port.
+	msgConnectorTargetInvalid = "--target %q is not host:port (\":8080\" means 127.0.0.1:8080)"
+
+	// msgConnectorRefreshModeInvalid refuses a --refresh-mode outside the
+	// three modes. The same misspelling in the environment variable is a
+	// configuration error instead; only the flag is a usage error.
+	msgConnectorRefreshModeInvalid = "--refresh-mode must be manual, auto, or disabled; got %q"
+
+	// msgConnectorServing announces the serve loop on stderr; the slug, then
+	// the local target being served.
+	msgConnectorServing = "Starting Connector %q for your local app at %s. Press Ctrl-C to stop."
+
+	// msgConnectorStopped acknowledges a graceful signal-initiated stop.
+	msgConnectorStopped = "Stopped."
 )
 
 // customerMessages returns every fixed customer-facing string the cmd
@@ -90,5 +111,11 @@ func customerMessages() []string {
 		msgFileNeedsPath,
 		msgFileDashJSON,
 		msgBrowserJSON,
+		msgConnectorSlugRequired,
+		msgConnectorTargetRequired,
+		msgConnectorTargetInvalid,
+		msgConnectorRefreshModeInvalid,
+		msgConnectorServing,
+		msgConnectorStopped,
 	}
 }

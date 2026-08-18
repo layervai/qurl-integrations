@@ -1,0 +1,5 @@
+Error: This Connector needs its qURL platform assignment refreshed, and that refresh waits for your explicit approval.
+
+  native assignment refresh requires explicit operator approval (sustained connection failures): inspect the failure, then run exactly one start with LAYERV_AGENT_REGISTRATION_REFRESH_MODE=auto and restore manual after a healthy connection; an orchestrator restart is not approval
+
+  Hint: review why it stopped (see your previous run's output), then run `qurl connector run` once with --refresh-mode auto to approve the refresh, and return to manual afterwards. Automatic restarts are deliberately not treated as approval.
