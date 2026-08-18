@@ -198,21 +198,25 @@ func TestContributingCountsMatchTheDocumentedSet(t *testing.T) {
 		want    int
 	}{
 		{name: "aggregate count", pattern: regexp.MustCompile(`branch protection requires all (\w+):`), want: len(aggregateContexts(documented))},
-		{name: "full set count", pattern: regexp.MustCompile(`(\w+) in all`), want: len(documented)},
+		{name: "full set count", pattern: regexp.MustCompile(`contexts, (\w+) in all`), want: len(documented)},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			match := test.pattern.FindStringSubmatch(body)
-			if match == nil {
-				t.Fatalf("%s no longer contains a phrase matching %s; reword the check with the prose", contributingPath, test.pattern)
+			// Exactly one match, not the first of several: silently reading the
+			// wrong occurrence is the same class of quiet miss this file exists
+			// to remove.
+			matches := test.pattern.FindAllStringSubmatch(body, -1)
+			if len(matches) != 1 {
+				t.Fatalf("%s contains %d phrases matching %s, want exactly 1 — reword the check alongside the prose",
+					contributingPath, len(matches), test.pattern)
 			}
-			got, ok := numberWords[match[1]]
+			got, ok := numberWords[matches[0][1]]
 			if !ok {
-				t.Fatalf("%s says %q, which is not a number word this test knows", contributingPath, match[1])
+				t.Fatalf("%s says %q, which is not a number word this test knows", contributingPath, matches[0][1])
 			}
 			if got != test.want {
-				t.Errorf("%s says %q (%d), but the required-contexts block holds %d entries", contributingPath, match[1], got, test.want)
+				t.Errorf("%s says %q (%d), but the required-contexts block holds %d entries", contributingPath, matches[0][1], got, test.want)
 			}
 		})
 	}
