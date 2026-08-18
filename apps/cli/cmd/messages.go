@@ -47,10 +47,6 @@ const (
 	// msgAlreadyGone notes an idempotent delete that had nothing left to do.
 	msgAlreadyGone = "It was already deleted; nothing left to do."
 
-	// msgAlreadyPublished notes that the service returned the existing
-	// resource for an already-published target.
-	msgAlreadyPublished = "This target was already published; showing the existing resource."
-
 	// msgOpeningBrowser is get's browser-mode note, printed after the
 	// verified link and before the launcher runs.
 	msgOpeningBrowser = "Opening it in your browser..."
@@ -112,7 +108,6 @@ func customerMessages() []string {
 		msgTTLClamped,
 		msgNoKeyProvided,
 		msgAlreadyGone,
-		msgAlreadyPublished,
 		msgOpeningBrowser,
 		msgBrowserFailed,
 		msgFileNeedsPath,

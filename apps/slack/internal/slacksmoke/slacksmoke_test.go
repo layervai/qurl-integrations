@@ -369,18 +369,22 @@ func TestIsEnvVarName(t *testing.T) {
 		// Newline is not the only control character these diagnostics must not carry.
 		// slack-history-upload-smoke's writeConfigValidationError echoes the flag value
 		// on the strength of this rejecting all of them — its doc comment reasons from
-		// "cannot carry a control character" — and slack-dm-smoke
-		// echoes the same flag value behind the same guard. ESC opens a terminal escape
-		// sequence, NUL ends the line early for whatever reads the log, and BEL is
-		// heard rather than seen. Each payload is a valid POSIX name apart from its
-		// single control character, so the row turns red only if the charset rule
-		// itself stops rejecting that rune; one carrying extra punctuation would be
-		// rejected for the punctuation and would survive the loosening it is meant to
-		// catch. slack-history-upload-smoke pins ESC at command depth too, but this is
-		// the shared rule both commands rest on, and NUL and BEL are pinned only here.
+		// "cannot carry a control character" — and slack-dm-smoke echoes the same flag
+		// value behind the same guard. ESC opens a terminal escape sequence, NUL ends
+		// the line early for whatever reads the log, and BEL is heard rather than seen.
+		// Each payload is a valid POSIX name apart from its single control character,
+		// so the row turns red only if the charset rule itself stops rejecting that
+		// rune; one carrying extra punctuation would be rejected for the punctuation
+		// and would survive the loosening it is meant to catch. slack-history-upload-smoke
+		// pins ESC at command depth too, but this is the shared rule both commands rest
+		// on, and NUL and BEL are pinned only here.
 		{name: "SMOKE\x1bFORGED", want: false},
 		{name: "SMOKE\x00FORGED", want: false},
 		{name: "SMOKE\aFORGED", want: false},
+		// DEL is the control character a "reject C0" rewrite misses: ESC, NUL and BEL all
+		// sit below 0x20, so a guard written as r < 0x20 still rejects them while letting
+		// 0x7f through. It was pinned in the command-package duplicate #1138 deleted.
+		{name: "SMOKE\x7fFORGED", want: false},
 		{name: "UNICODE_É", want: false},
 	}
 	for _, tc := range tests {

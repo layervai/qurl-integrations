@@ -128,10 +128,12 @@ select and copy; `--quiet` prints only the CRID.
 | `--tag <tag>` | Tag stored with the resource (repeatable) |
 | `--alias <name>` | Memorable handle stored with the resource |
 
-Publishing is not idempotent: the same URL published twice normally
-creates two independent resources with two CRIDs. When the service
-instead answers with an already-existing resource, the CLI says so on
-stderr (and sets `found_existing` in JSON output).
+Publishing the same URL again does not create a duplicate: while the URL
+has an active resource, the service returns that existing resource and
+its CRID. Text mode says so in its output, `--quiet` notes it on stderr,
+and JSON output always carries `found_existing` (`true` exactly in this
+case). Delete the resource first to publish the same URL as a new
+resource with a fresh CRID.
 
 ### qurl resolve
 

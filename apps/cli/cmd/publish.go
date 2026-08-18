@@ -23,9 +23,12 @@ permanent, verifiable ID. Share the CRID anywhere; it contains no secrets.
 Anyone authorized can later turn it into a short-lived access link with
 "qurl resolve".
 
-Publishing the same URL twice creates two independent resources with two
-CRIDs; it is not idempotent. The CRID is printed last so it is the easiest
-thing to select and copy, and --quiet prints only the CRID for scripts.`,
+Publishing the same URL again does not create a duplicate: while the URL
+already has an active resource, publish returns that existing resource
+and its CRID, and the output says so when it happens. Delete the resource
+first to publish the same URL as a new resource with a fresh CRID. The
+CRID is printed last so it is the easiest thing to select and copy, and
+--quiet prints only the CRID for scripts.`,
 		Example: `  qurl publish https://api.example.com/reports
   qurl publish https://grafana.internal.example.com --description "Team dashboard" --quiet`,
 		Args: exactArgs(1),
@@ -45,9 +48,6 @@ thing to select and copy, and --quiet prints only the CRID for scripts.`,
 			}
 
 			printer := opts.printer()
-			if result.FoundExisting {
-				printer.Notef(msgAlreadyPublished)
-			}
 			if result.CRID == "" {
 				printer.Warnf("%s", msgNoCRIDReturned)
 			}

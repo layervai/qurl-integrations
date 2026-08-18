@@ -1,7 +1,9 @@
-[32mPublished[0m
+[32mAlready published[0m
 
   [1mTarget:[0m   https://example.com/data
   [1mStatus:[0m   active
   [1mCreated:[0m  1d ago
+
+[2mThis URL already has an active resource, so its existing CRID is shown. Delete it first to publish the URL as a new resource.[0m
 
 [1mCRID:[0m qhtpthw4qt7wkw7khghr6x3z4hsfyn4zbuyhnee4i6bi67yu6yytgvwdbb4q
