@@ -1603,6 +1603,35 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     for (const call of calls) expect(call.arguments).toHaveLength(3);
   });
 
+  // The primitives that can put bytes on disk. Named once because the two
+  // tests below split the ban into "where it is allowed" and "where it is
+  // not", and a list that drifted between them would leave a gap in whichever
+  // copy was not updated.
+  //
+  // Every one of them, not just the writeFileSync a straight revert of #1177
+  // would use: appendFileSync and an openSync/writeSync pair reintroduce the
+  // same scratch file while leaving a narrower ban green, and copyFileSync
+  // does it without ever naming the bytes. The list is not exhaustive of the
+  // fs surface — cpSync, truncateSync and the promise-API equivalents are all
+  // absent — so it stops the plausible regressions, not a determined author.
+  const WRITE_PRIMITIVES = [
+    'writeFileSync', 'writeFile', 'createWriteStream',
+    'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
+  ];
+
+  // The three writes the reclaim ledger is SUPPOSED to make, each pinned to
+  // the one primitive that writer uses. Surviving a hard kill is the ledger's
+  // whole purpose — an in-memory list cannot — so these are deliberate.
+  const LEDGER_WRITES = [
+    { writer: 'preflightLedger', primitive: 'openSync' },
+    { writer: 'recordResource', primitive: 'appendFileSync' },
+    { writer: 'pruneLedger', primitive: 'writeFileSync' },
+  ];
+
+  // The ledger path, as spelled at those three call sites: the module-level
+  // const, and pruneLedger's parameter of the same name.
+  const LEDGER_TARGET = /^(?:LEDGER_PATH|ledgerPath)$/;
+
   it('writes nothing to disk outside the reclaim ledger', () => {
     // The rule is the primitive, not the helper. Counting calls to
     // generateTestPayload cannot express "and nothing else writes a scratch
@@ -1615,77 +1644,105 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // durable record the operator names and re-reads, which is the opposite
     // of the litter this test exists to keep out. The two landed 19 seconds
     // apart and neither PR's CI ever saw the other, so this test's original
-    // whole-file ban reached main already contradicted by main.
+    // whole-file ban reached main already contradicted by main. The premise
+    // "this script has no business writing anywhere" is what was wrong — not
+    // either change — so the ban is scoped rather than relaxed. Relaxing the
+    // list instead would have re-opened the exact hole: writeFileSync and
+    // appendFileSync are the two most obvious ways to reinstate the temp
+    // file, and both are ledger primitives.
     //
-    // Exempted by CALL SITE rather than by dropping the primitives from the
-    // list, which is what keeps the ban total everywhere else: a writeFileSync
-    // added to runRound, to main(), at module level, or as a second call
-    // inside a ledger writer itself still fails here.
-    // Relaxing the list instead would have re-opened the exact hole —
-    // writeFileSync and appendFileSync are the two most obvious ways to
-    // reinstate the temp file, and both are ledger primitives.
+    // Scoped by CALL NODE and TARGET, which is what keeps the ban total
+    // everywhere else. Each writer makes exactly one of these calls, so the
+    // exemption resolves to three specific nodes, each of which must also
+    // name the ledger path. A writeFileSync added to runRound, to main(), at
+    // module level, as a second call inside a ledger writer, or written by
+    // repointing one of the three at a scratch path is a stray in every case.
     //
-    // Every fs primitive that can put bytes on disk, not just the
-    // writeFileSync a straight revert of #1177 would use: appendFileSync and
-    // an openSync/writeSync pair reintroduce the same file while leaving a
-    // narrower ban green, and copyFileSync does it without ever naming the
-    // bytes. openSync is banned outside the ledger rather than by mode: the
-    // only descriptor this script opens is preflightLedger's 0600 probe, so
-    // anywhere else there is still no legitimate call to distinguish it from.
-    // That probe's MODE is not pinned anywhere — this is a static call-site
-    // check, and preflightLedger is unexported and reads a module-level
-    // LEDGER_PATH, so nothing runtime reaches it. Read this as "the ledger is
-    // the only opener", not as "the ledger opens 0600". The sibling
-    // gateway-resume-spike.js does pin its own 0600 (tests/gateway-resume-
-    // spike.test.js), and the ledger inherited that file's threat model
-    // without inheriting the test.
+    // openSync is banned outside the ledger rather than by mode: the only
+    // EXPLICIT openSync in the script is preflightLedger's, so anywhere else
+    // there is no legitimate call to distinguish it from. (Only explicit —
+    // readFileSync and the two ledger writes open descriptors of their own.)
+    // That call takes 'a', so it creates the ledger as a side effect of
+    // proving it writable; it is a create-and-close, not a pure probe. Its
+    // MODE is pinned nowhere: this is a static check, and preflightLedger is
+    // unexported and reads a module-level LEDGER_PATH, so nothing runtime
+    // reaches it. Read this as "the ledger is the only opener", not as "the
+    // ledger opens 0600" — the sibling gateway-resume-spike.js does pin its
+    // own 0600, and the ledger inherited that file's threat model without
+    // inheriting its test.
     //
-    // The exemption is the three known call NODES, not a function range and
-    // not a primitive name. Each writer legitimately makes exactly one of
-    // these calls, so resolving them to specific nodes keeps the ban fully
-    // live inside the ledger: a copyFileSync added to pruneLedger, an
-    // appendFileSync added to preflightLedger, and a SECOND writeFileSync
-    // added alongside the prune are all still strays. Exempting by range
-    // would pass the first two only if their primitive happened to differ,
-    // and would pass the third outright.
-    const ledgerWrites = [
-      { writer: 'preflightLedger', primitive: 'openSync' },
-      { writer: 'recordResource', primitive: 'appendFileSync' },
-      { writer: 'pruneLedger', primitive: 'writeFileSync' },
-    ].map(({ writer, primitive }) => {
+    // The cost, stated because this file's convention is to state it: moving
+    // the three writes behind one shared ledger-write helper, or swapping
+    // preflightLedger's openSync for an appendFileSync probe, both fail here
+    // despite preserving every property described above. That is deliberate
+    // work, and failing loudly on it is the cheaper side of the trade.
+    const exempt = new Set(LEDGER_WRITES.map(({ writer, primitive }) => {
       const fn = findFunction(writer);
-      // Boolean, not `fn !== null`: this must fail on a renamed or removed
-      // writer on its own terms rather than inherit findFunction's choice of
-      // miss value. Were that ever undefined, `!== null` would pass here and
-      // the range check below would throw a TypeError instead of asserting.
+      // Not a soft skip: a renamed or deleted writer must fail here rather
+      // than silently shrink the exemption to nothing, which would read as a
+      // stricter ban while actually meaning it no longer matches anything.
+      //
+      // Boolean rather than `fn !== null`, so this fails on its own terms
+      // instead of inheriting findFunction's choice of miss value — were that
+      // ever undefined, `!== null` would pass and the range filter below
+      // would throw a TypeError instead of asserting.
       expect({ writer, found: Boolean(fn) }).toEqual({ writer, found: true });
       const owned = callsNamed(primitive)
         .filter((node) => node.start >= fn.start && node.end <= fn.end);
       // Exactly one, which is two assertions in one. It pins the "each writer
-      // writes once" invariant the pairing above is built on, and it keeps
-      // the exemption from going vacuous — delete the ledger's writes and a
+      // writes once" invariant the pairing is built on, and it keeps the
+      // exemption from going vacuous — delete the ledger's writes and a
       // merely-positive check would leave every stray count at 0, green while
       // the test had stopped describing anything.
       expect({ writer, primitive, calls: owned.length })
         .toEqual({ writer, primitive, calls: 1 });
+      // And it must write to the LEDGER. Without this the exemption is
+      // positional only: repoint the append at '/tmp/scratch.bin' and it is
+      // the same node, still exempt, still green — a per-round scratch write
+      // reinstated inside the one function allowed to write, which is the
+      // original regression moved one frame down the stack. Both spellings
+      // are bare identifiers, so a string literal or a computed path fails.
+      const [target] = owned[0].arguments;
+      expect({ writer, target: target?.type === 'Identifier' ? target.name : `${target?.type}` })
+        .toEqual({ writer, target: expect.stringMatching(LEDGER_TARGET) });
       return owned[0];
-    });
+    }));
     // Identity, not range: callsNamed re-walks the same parsed ast, so the
-    // node objects it returns are the same references collected above.
-    const exempt = new Set(ledgerWrites);
-    for (const primitive of [
-      'writeFileSync', 'writeFile', 'createWriteStream',
-      'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
-    ]) {
+    // nodes it returns are the same references collected above.
+    for (const primitive of WRITE_PRIMITIVES) {
       const stray = callsNamed(primitive).filter((node) => !exempt.has(node));
-      expect({ primitive, calls: stray.length }).toEqual({ primitive, calls: 0 });
+      expect({ primitive, callsOutsideLedger: stray.length })
+        .toEqual({ primitive, callsOutsideLedger: 0 });
     }
     // And nothing to unlink, which is the other half of why no cleanup path
-    // was added here — an unlink would mean the litter is back and merely
-    // swept, leaving a run that is killed mid-window still littering. Not
-    // exempted for the ledger either: reclaim prunes it in place through
-    // pruneLedger's writeFileSync and leaves the emptied file behind.
+    // was added for the payload — an unlink would mean the litter is back and
+    // merely swept, leaving a run that is killed mid-window still littering.
+    // Unscoped, including inside the ledger: reclaim deliberately truncates
+    // rather than deletes, so an unlink anywhere here is the litter-and-sweep
+    // shape.
     expect(callsNamed('unlinkSync')).toHaveLength(0);
+  });
+
+  it('writes nothing from the round itself', () => {
+    // Defence in depth, and the one assertion here that does not depend on
+    // the exemption above being right. That exemption is keyed on three
+    // function names; an edit that added runRound to the list, or that moved
+    // a ledger writer's body into the round, would leave the ban above green.
+    // This states the property directly, where a per-round leak lands.
+    //
+    // Not a replacement for the whole-file ban, because #1177's actual leak
+    // was NOT in runRound: it removed a top-level generateTestFile helper
+    // that wrote the payload and handed back a path. A round-scoped ban would
+    // never have caught the regression this whole guard exists for, which is
+    // why the ban above is whole-file and this is only its narrow companion.
+    const runRound = findFunction('runRound');
+    expect({ found: Boolean(runRound) }).toEqual({ found: true });
+    for (const primitive of WRITE_PRIMITIVES) {
+      const inRound = callsNamed(primitive)
+        .filter((node) => node.start >= runRound.start && node.end <= runRound.end);
+      expect({ primitive, callsInRunRound: inRound.length })
+        .toEqual({ primitive, callsInRunRound: 0 });
+    }
   });
 
   it('keeps the per-round read for --file and drops it for the generated payload', () => {
