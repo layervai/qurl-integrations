@@ -525,13 +525,13 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 // TestForkDialsQUICFromOpen drives a UDP probe, a QUIC dial's observable event
 // being a datagram rather than an accept, and is what fails if the QUIC dial
 // moves into Connect or if the fork stops handling QUIC ahead of the TCPMux
-// guard. It disables TCPMux deliberately: on a completed config the TCPMux
-// branch answers Open on its own, so the QUIC branch could be deleted with
-// that test still green. QUIC remains unreachable config today
-// (cmd/connector.go never sets frpgen.Options.Protocol), so it guards a branch
-// nothing currently takes — which is the point. It costs one UDP socket, and
-// it turns the ordering above from a claim about another repository into one
-// this package can check.
+// guard. Why that test disables TCPMux, and why it spells the protocol in
+// caps, are argued at its own doc comment rather than restated here: two
+// separately editable copies of one argument drift apart. QUIC remains
+// unreachable config today (cmd/connector.go never sets
+// frpgen.Options.Protocol), so it guards a branch nothing currently takes —
+// which is the point. It is cheap, and it turns the ordering above from a
+// claim about another repository into one this package can check.
 func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return true
