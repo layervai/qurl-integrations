@@ -269,6 +269,16 @@ func TestForkServiceCompletesTheCommonConfigInPlace(t *testing.T) {
 	// happened whether or not the rest of construction succeeds. Asserting on
 	// the mutation rather than on a successful build keeps this test pinned to
 	// the one behavior it is about.
+	//
+	// The service is then dropped, NOT closed, and that is deliberate in both
+	// directions. Construction is inert: measured on the pinned fork it
+	// returns a service having started no goroutines, and with no WebServer
+	// port set it binds nothing, so there is nothing to release. Closing it
+	// anyway is worse than useless — Service.Close calls GracefulClose, which
+	// calls svr.cancel, and svr.cancel is only assigned in Run, so Close on a
+	// never-run service nil-panics (client/service.go:493-496). If a fork bump
+	// ever makes construction acquire something, the fix is a Run/Close pair
+	// or a narrower seam, not a bare Close here.
 	_, _ = frpclient.NewService(frpclient.ServiceOptions{
 		Common:                 common,
 		ConfigSourceAggregator: source.NewAggregator(cfgSource),
