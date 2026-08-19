@@ -53,6 +53,28 @@ const (
 	// A single failing attempt can burn the first two in sequence — a TCP
 	// connect that succeeds slowly, then a server that never answers the
 	// Login — before the loop waits out the third.
+	//
+	// TODO(upstream-contract): the second and third mirror
+	// github.com/layervai/frp v0.70.0-layerv.4, and neither has a config
+	// seam — both are literals inside the fork:
+	//
+	//   - client/control_session.go's
+	//     `conn.SetReadDeadline(time.Now().Add(10 * time.Second))`, which
+	//     exchangeLogin arms right after writing the Login msg and disarms on
+	//     return, so it bounds the login response reads (the v2 ServerHello
+	//     frame, then the LoginResp) rather than the whole dial.
+	//   - client/service.go's `svr.loopLoginUntilSuccess(20*time.Second,
+	//     false)` in keepControllerWorking, whose maxInterval becomes
+	//     wait.FastBackoffOptions.MaxDuration. 20s is a true ceiling rather
+	//     than a pre-jitter base: pkg/util/wait/backoff.go clamps to
+	//     MaxDuration AFTER applying Jitter. Only the FIRST login is paced
+	//     differently — Run passes 10s — and that one is not this storm.
+	//
+	// Nothing local fails if either drifts: the only guard over them,
+	// TestWatchdogWindowOutlivesATunnelServerReplacement, checks their SUM
+	// against reconnectSettledGap and never any one of them against the fork,
+	// so a value that silently doubled upstream would still pass. On a fork
+	// bump re-read both call sites and update the values here in lockstep.
 	failingDialConnectBudget   = 10 * time.Second
 	failingDialLoginReadBudget = 10 * time.Second
 	failingDialBackoffCeiling  = 20 * time.Second
@@ -96,6 +118,19 @@ const (
 	// blocked, so the supervisor's knock budget, its failure classification
 	// and every operator-facing message are unreachable for the rest of the
 	// run. Without this watchdog a Connector in that state loops in silence.
+	//
+	// TODO(upstream-contract): that unboundedness mirrors
+	// github.com/layervai/frp v0.70.0-layerv.4 client/service.go —
+	// `svr.loopLoginUntilSuccess(20*time.Second, false)` in
+	// keepControllerWorking, where the literal false is firstLoginExit.
+	// LoginFailExit is consulted once, on the first login, where Run passes
+	// `lo.FromPtr(svr.common.LoginFailExit)` instead — so the true this
+	// package forces in forceLoginFailExit never reaches the post-admission
+	// loop. With firstLoginExit false a failed dial no longer cancels
+	// svr.ctx, so wait.BackoffUntil redials until the caller cancels while
+	// Run is parked on `<-svr.ctx.Done()`. If a fork bump gives that loop an
+	// exit of its own, this watchdog becomes redundant rather than wrong —
+	// but re-read it here before treating it as either.
 	//
 	// Sized to outlast the measured cause with margin. The tunnel-server
 	// fleet is an ASG that rolls instances with an instance refresh; a
