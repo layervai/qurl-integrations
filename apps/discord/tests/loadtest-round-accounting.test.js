@@ -42,6 +42,15 @@ jest.mock('../src/connector', () => ({
   mintLinks: mockMintLinks,
 }));
 
+// The location leg, needed only by the deadline-truncation describe at the
+// bottom. Safe for every test above: they load with --file and no --location,
+// so the location leg never runs and this mock is never consulted.
+const mockCreateOneTimeLink = jest.fn();
+jest.mock('../src/qurl', () => ({
+  createOneTimeLink: mockCreateOneTimeLink,
+  deleteLink: jest.fn().mockResolvedValue({}),
+}));
+
 const TOKENS = 10; // TOKENS_PER_RESOURCE, asserted against the export below.
 
 let tmpFile;
@@ -84,9 +93,37 @@ function loadWithCount(count) {
 
 const upload = (id) => ({ resource_id: id });
 
+/**
+ * Load the script with both legs enabled. Same require-time constraint as
+ * loadWithCount: --location is read from argv at module load, so it has to be
+ * in place before the require.
+ */
+function loadWithBothLegs(count) {
+  const savedArgv = process.argv;
+  let mod;
+  try {
+    process.argv = [
+      'node', 'loadtest-standalone.js',
+      '--count', String(count), '--file', tmpFile, '--location',
+    ];
+    jest.isolateModules(() => {
+      mod = require('../scripts/loadtest-standalone');
+    });
+  } finally {
+    process.argv = savedArgv;
+  }
+  return mod;
+}
+
+// recordResource rejects anything that is not qurl-service's resource-ID
+// shape, so the location mock has to hand back a plausible one or every
+// created link is reported as unrecordable.
+const locationLink = () => ({ resource_id: 'r_abcdefghijk' });
+
 beforeEach(() => {
   mockReUploadBuffer.mockReset();
   mockMintLinks.mockReset();
+  mockCreateOneTimeLink.mockReset();
   jest.spyOn(console, 'error').mockImplementation(() => {});
   jest.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -298,5 +335,97 @@ describe('runRound accounting — latency figures', () => {
     expect(r.uploadMs).toBeGreaterThanOrEqual(35);
     expect(r.reuploads).toBe(0);
     expect(r.reuploadMs).toBe(0);
+  });
+});
+
+describe('runRound truncation — what --duration actually stops', () => {
+  // These drive runRound directly against the stubs above, which is what makes
+  // them different from the pure-function tests in
+  // tests/loadtest-duration-bound.test.js: those pin the stop RULE and the
+  // reporting POLICY, this pins that a round bounded mid-flight reports itself
+  // correctly. The deadline is moved with setRunDeadlineForTests rather than
+  // by mocking Date.now, because expiryToISO and the reclaim ledger read the
+  // clock too and a global stub would move all three.
+  const EXPIRED = 1;
+
+  it('skips the file leg entirely when the deadline has already passed', async () => {
+    const { runRound, setRunDeadlineForTests } = loadWithCount(30);
+    setRunDeadlineForTests(EXPIRED);
+
+    const r = await runRound(1);
+
+    // Nothing issued at all — the point of checking before the upload rather
+    // than only inside the batch loop.
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(r.fileLinks).toBe(0);
+    expect(r.partial).toBe(true);
+    expect(r.mintPartial).toBe(true);
+  });
+
+  it('stops minting mid-plan and charges only the batches it ran', async () => {
+    // 30 links is three batches of 10. Expire the clock from inside the first
+    // mint, so the second batch is the one that finds the deadline gone.
+    const { runRound, setRunDeadlineForTests } = loadWithCount(30);
+    setRunDeadlineForTests(Infinity);
+    mockReUploadBuffer.mockResolvedValue(upload('res-1'));
+    mockMintLinks.mockImplementationOnce(async () => {
+      setRunDeadlineForTests(EXPIRED);
+      return {};
+    });
+
+    const r = await runRound(1);
+
+    // The regression this whole PR exists for: before it, all three batches
+    // ran regardless of the clock.
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(r.fileLinks).toBe(10);
+    expect(r.partial).toBe(true);
+    expect(r.mintPartial).toBe(true);
+  });
+
+  it('keeps mintPartial false when the mint plan finished before the clock did', async () => {
+    // The case a single whole-round flag got wrong, proved end to end rather
+    // than through a hand-built round object: --count 10 is exactly one batch,
+    // so expiring the clock from inside that mint leaves the FILE leg complete
+    // and stops the LOCATION leg at its entry.
+    const { runRound, setRunDeadlineForTests } = loadWithBothLegs(10);
+    setRunDeadlineForTests(Infinity);
+    mockReUploadBuffer.mockResolvedValue(upload('res-1'));
+    mockMintLinks.mockImplementationOnce(async () => {
+      setRunDeadlineForTests(EXPIRED);
+      return {};
+    });
+    mockCreateOneTimeLink.mockResolvedValue(locationLink());
+
+    const r = await runRound(1);
+
+    expect(r.fileLinks).toBe(10);        // mint plan ran in full
+    expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
+    expect(r.locLinks).toBe(0);
+    expect(r.partial).toBe(true);        // the ROUND was cut short
+    expect(r.mintPartial).toBe(false);   // ...but its mint sample is complete
+  });
+
+  it('stops the location leg mid-way and marks only the round', async () => {
+    const { runRound, setRunDeadlineForTests } = loadWithBothLegs(10);
+    setRunDeadlineForTests(Infinity);
+    mockReUploadBuffer.mockResolvedValue(upload('res-1'));
+    mockMintLinks.mockResolvedValue({});
+    // Expire the clock after the third location create rather than at the leg
+    // boundary, so this exercises the in-loop guard and not the entry check.
+    let created = 0;
+    mockCreateOneTimeLink.mockImplementation(async () => {
+      if (++created === 3) setRunDeadlineForTests(EXPIRED);
+      return locationLink();
+    });
+
+    const r = await runRound(1);
+
+    expect(r.locLinks).toBe(3);
+    expect(r.fileLinks).toBe(10);
+    expect(r.partial).toBe(true);
+    // Truncating the location leg must not disqualify the mint sample.
+    expect(r.mintPartial).toBe(false);
   });
 });
