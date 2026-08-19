@@ -568,6 +568,22 @@ function resolveReclaimArg(argv) {
     // tests/loadtest-silent-failure.test.js as though it were an ad-hoc flag
     // read. The name still appears, which is what the wiring check needs.
     errors.push('a ledger path is required — pass it as --reclaim <tmpdir>/loadtest-ledger-<ts>.jsonl');
+  } else if (requested && reclaimPath.trim() === '') {
+    // Whitespace-only is a mistyped flag, not a path — the same reasoning as
+    // --file and --ledger, and refused here rather than in parseReclaimArg for
+    // the reason that function's own header records: it reads a MODE switch,
+    // so a value it cannot use collapses to `path: null`, which is already how a
+    // bare --reclaim arrives. Collapsing this one too would cost the only
+    // thing that makes the message legible — the value, quoted. Unquoted, the
+    // fault renders as an invisible gap, and it is downstream in reclaim()'s
+    // `no ledger file at ${ledgerPath}` that an operator would meet it: a
+    // sentence with a hole in it, read by someone who has already lost a run.
+    //
+    // So this is a message fix, not a leak fix. The resources are safe either
+    // way — reclaim() finds no such file and main() exits 1 — which is why
+    // the refusal is worth having at preflight, where every other unusable
+    // argv value is already named back to the operator.
+    errors.push(`--reclaim must name the ledger file to reclaim from, got ${JSON.stringify(reclaimPath)}`);
   }
   return { requested, path: reclaimPath, errors };
 }
@@ -828,11 +844,25 @@ const { ledgerPath: LEDGER_PATH } = resolveLedgerArg(args, DEFAULT_LEDGER_PATH);
 // Prove the ledger is writable BEFORE anything creates a resource. Discovering
 // an unwritable ledger after the first mint orphans that resource: its id was
 // never recorded and, once the process stops, nothing knows it exists.
-function preflightLedger() {
+//
+// Takes the path rather than reading LEDGER_PATH, the way pruneLedger already
+// does. It proves the path writable by CREATING the ledger, so the mode below
+// is a property of a real file — and a runtime one, invisible to the static
+// write-ban in tests/loadtest-silent-failure.test.js. A parameterless function
+// reading a module-level const resolved from process.argv could only be aimed
+// at a temp file by argv surgery before require, so the mode went unpinned
+// while the sibling gateway-resume-spike.js pinned its own twice.
+function preflightLedger(ledgerPath) {
   try {
-    fs.closeSync(fs.openSync(LEDGER_PATH, 'a', 0o600));
+    // The mode applies on CREATION only: re-running against a ledger that
+    // already exists leaves whatever permissions it has. Deliberate — by then
+    // the file is one the operator named with --ledger, and re-permissioning
+    // it is not this probe's business. gateway-resume-spike.js does chmod
+    // after its write, but the file it may find waiting is its own crashed
+    // run's .tmp, not something the operator chose.
+    fs.closeSync(fs.openSync(ledgerPath, 'a', 0o600));
   } catch (e) {
-    console.error(`FATAL: reclaim ledger ${LEDGER_PATH} is not writable — ${e.message}`);
+    console.error(`FATAL: reclaim ledger ${ledgerPath} is not writable — ${e.message}`);
     console.error('Refusing to create resources that could not be recorded. Pass --ledger PATH.');
     process.exit(1);
   }
@@ -2213,7 +2243,7 @@ async function main() {
   for (const line of report.warnings) console.warn(line);
 
   // After the guard: no point creating the ledger for a run that is refused.
-  preflightLedger();
+  preflightLedger(LEDGER_PATH);
 
   // Quick smoke test
   console.log('Running smoke test...');
@@ -2321,6 +2351,11 @@ if (require.main === module) {
 module.exports = {
   // Reclaim ledger
   LEDGER_PATH,
+  // Exported for the suite, not for callers: main() is the only caller, and
+  // the 0600 it creates the ledger with is unreachable from a test otherwise.
+  // Hand it a WRITABLE path — the refusal below is process.exit(1), which
+  // from a test takes the jest worker with it instead of failing a case.
+  preflightLedger,
   readLedger,
   pruneLedger,
   ledgerEndpoints,
