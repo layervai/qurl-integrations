@@ -91,7 +91,7 @@ const (
 	ErrCodeOwnerTransferNotOwner = "owner_transfer_not_owner"
 )
 
-const purgeCutoffCondition = "attribute_not_exists(#updated_at_nano) OR #updated_at_nano <= :purge_cutoff_nano"
+const purgeCutoffCondition = "attribute_not_exists(" + exprUpdatedAtNano + ") OR " + exprUpdatedAtNano + " <= " + exprPurgeCutoffNano
 
 // bindDisambiguationBudget caps the post-CCFE GetItem that decides
 // between the caller-already-bound (idempotent-continue) and

@@ -303,6 +303,13 @@ const maxRequestBodyBytes = 1 << 20
 // of a richer payload fails (unreachable for current callers).
 const internalErrorEnvelope = `{"error":"internal"}`
 
+// errEnvelopeKey is the single JSON key of this handler's OWN HTTP error
+// envelope — the 400/401/404/405/413 replies on the non-Slack surfaces. It is
+// deliberately not one of the respField* Slack slash-command response keys
+// further down. internalErrorEnvelope above spells the same key literally
+// because it is pre-marshalled for the path where marshalling itself failed.
+const errEnvelopeKey = "error"
+
 // Config carries the runtime wiring for [NewHandler]. Every field is
 // captured by value into [Handler.cfg] once and then read on the
 // request hot path without synchronization — callers MUST NOT mutate
@@ -1115,7 +1122,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// /slack/commands); logging each would be noise. Slack and
 		// health paths are the only legitimate surface and they get
 		// their own log lines.
-		respondJSON(w, http.StatusNotFound, map[string]string{respFieldError: "not found"})
+		respondJSON(w, http.StatusNotFound, map[string]string{errEnvelopeKey: "not found"})
 		return
 	}
 
@@ -1140,12 +1147,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path)
-		respondJSON(w, http.StatusBadRequest, map[string]string{respFieldError: "invalid body"})
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid body"})
 		return
 	}
 
 	if err := h.verifySlackRequest(r, body); err != nil {
-		respondJSON(w, http.StatusUnauthorized, map[string]string{respFieldError: "signature verification failed"})
+		respondJSON(w, http.StatusUnauthorized, map[string]string{errEnvelopeKey: "signature verification failed"})
 		return
 	}
 
@@ -1373,7 +1380,7 @@ func stripUnsetDisplayNamePrefix(text string) string {
 func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]string{respFieldError: "invalid form body"})
+		respondJSON(w, http.StatusBadRequest, map[string]string{errEnvelopeKey: "invalid form body"})
 		return
 	}
 
@@ -2744,14 +2751,14 @@ func (h *Handler) adminHelpMessage(command string) string {
 // from "missing path" (404) and "auth-gated" (401).
 func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
-	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{respFieldError: "method not allowed"})
+	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{errEnvelopeKey: "method not allowed"})
 }
 
 // respondPayloadTooLarge writes 413 for both the Content-Length pre-check
 // and the MaxBytesReader-during-read paths. Centralizing keeps the wire
 // envelope identical so operator dashboards bucket them together.
 func respondPayloadTooLarge(w http.ResponseWriter) {
-	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{respFieldError: "body too large"})
+	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{errEnvelopeKey: "body too large"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, body any) {
@@ -2776,7 +2783,6 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 // can't drift, and so the goconst/keyword consistency stays linter-clean.
 const (
 	respFieldResponseType    = "response_type"
-	respFieldError           = "error"
 	respFieldText            = "text"
 	respFieldReplaceOriginal = "replace_original"
 	respTypeEphemeral        = "ephemeral"

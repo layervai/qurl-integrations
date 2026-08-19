@@ -381,7 +381,7 @@ func (s *Store) PurgeResourceFromChannel(ctx context.Context, teamID, channelID,
 	// keys are name-aliased.
 	now := s.nowOrDefault()
 	nowISO := now.UTC().Format(time.RFC3339)
-	expr := "SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano
+	expr := "SET #updated_at = " + exprNow + ", " + exprUpdatedAtNano + " = " + exprNowNano
 	names := map[string]string{
 		"#updated_at":     attrUpdatedAt,
 		exprUpdatedAtNano: attrUpdatedAtNano,

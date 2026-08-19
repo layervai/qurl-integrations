@@ -12,7 +12,8 @@ import (
 )
 
 // docsFormatMan and docsFormatMarkdown are the two accepted `qurl docs` output
-// formats; named so the validity check, the switch and ValidArgs cannot drift.
+// formats; named so the validity check, the switch, ValidArgs and the usage
+// error stay in step. `qurl docs man` is a distribution contract (see docsCmd).
 const (
 	docsFormatMan      = "man"
 	docsFormatMarkdown = "markdown"
@@ -33,7 +34,7 @@ func docsCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := args[0]
 			if mode != docsFormatMan && mode != docsFormatMarkdown {
-				return exitcode.UsageError(fmt.Errorf("docs mode must be \"man\" or \"markdown\", got %q", mode))
+				return exitcode.UsageError(fmt.Errorf("docs mode must be %q or %q, got %q", docsFormatMan, docsFormatMarkdown, mode))
 			}
 
 			dir := filepath.Clean(outDir)

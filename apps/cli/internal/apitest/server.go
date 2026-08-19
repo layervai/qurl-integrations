@@ -51,10 +51,14 @@ const DefaultDownloadPayload = "qURL mock file payload\n"
 // Field names and fixture values repeated across the mock's JSON payloads.
 // Lifted to constants so the builders and the route handlers cannot drift.
 const (
+	// fieldStatus and fieldCRID are keys of the *resource* payloads this file
+	// serves. builders.go's RFC7807 problem document has its own "status" (an
+	// int echo of the HTTP status) and deliberately does not share this one.
 	fieldStatus = "status"
 	fieldCRID   = "crid"
-	// fixtureCreatedAt is the mock's fixed created_at/closed_at stamp; goldens
-	// pin it, so it must not vary between payloads.
+	// fixtureCreatedAt is the mock's fixed resource created_at. The apps/cli
+	// goldens pin it (mutating it reddens them), so it must not drift. It is
+	// not shared with builders.go's tombstone closed_at, which no golden pins.
 	fixtureCreatedAt = "2026-03-01T00:00:00Z"
 	// authTypeAPIKey is the auth_type/kind *value* — distinct from the
 	// "api_key" JSON field name that carries the key object.

@@ -148,7 +148,7 @@ func (s *Store) incrementCurrentRateLimitWindow(ctx context.Context, counterKey 
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET #updated_at_nano = :now_nano ADD #count :one"),
+		UpdateExpression:    aws.String("SET " + exprUpdatedAtNano + " = " + exprNowNano + " ADD #count " + exprOne),
 		ConditionExpression: aws.String("#window = :window AND #count < :limit"),
 		ExpressionAttributeNames: map[string]string{
 			"#count":          attrRateLimitCount,
@@ -198,7 +198,7 @@ func (s *Store) setRateLimitWindow(ctx context.Context, counterKey string, now t
 		Key: map[string]ddbtypes.AttributeValue{
 			attrSlackTeamID: stringAttr(counterKey),
 		},
-		UpdateExpression:    aws.String("SET #window = :window, #count = :one, #expires_at = :expires_at, #updated_at_nano = :now_nano"),
+		UpdateExpression:    aws.String("SET #window = :window, #count = " + exprOne + ", #expires_at = :expires_at, " + exprUpdatedAtNano + " = " + exprNowNano),
 		ConditionExpression: aws.String(condition),
 		ExpressionAttributeNames: map[string]string{
 			"#count":          attrRateLimitCount,

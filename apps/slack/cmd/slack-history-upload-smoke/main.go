@@ -243,8 +243,10 @@ func prepareScanConfig(cfg *scanConfig) error {
 //
 // Echoing tokenEnv back verbatim is safe only because slacksmoke.IsEnvVarName has
 // already constrained it to a POSIX environment variable name before it gets this far,
-// so it cannot carry the control characters a forged operator-facing diagnostic would
-// need. TestRunDoesNotEchoTokenEnvName pins that.
+// so it cannot carry a control character — any of them, not just the newline a forged
+// operator-facing diagnostic would need. TestRunDoesNotEchoTokenEnvName pins that here,
+// and TestIsEnvVarName pins the charset rule itself (ESC, NUL, BEL and DEL rows) on the
+// strength of this absolute claim.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, slacksmoke.ErrMissingBotToken):

@@ -926,9 +926,9 @@ func (p *DDBProvider) setAPIKey(ctx context.Context, operation, workspaceID, api
 		attrQURLAPIKeyID + " = :key_id",
 		attrQURLAPIKeyPrefix + " = :key_prefix",
 		attrConfiguredBy + " = :by",
-		attrUpdatedAt + " = :now",
-		attrUpdatedAtNano + " = :now_nano",
-		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", :now)",
+		attrUpdatedAt + " = " + exprNow,
+		attrUpdatedAtNano + " = " + exprNowNano,
+		attrConfiguredAt + " = if_not_exists(" + attrConfiguredAt + ", " + exprNow + ")",
 	}
 	values := map[string]ddbtypes.AttributeValue{
 		":key":        &ddbtypes.AttributeValueMemberB{Value: ct},
@@ -1140,7 +1140,7 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		// ConditionExpression: it is only ever written alongside the key, so a row
 		// can't exist with only that attribute, and REMOVE of an absent attribute
 		// is a no-op. (TestDDBProviderDeleteAPIKey pins both expressions.)
-		UpdateExpression: aws.String("SET #updated_at = :now, #updated_at_nano = :now_nano REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
+		UpdateExpression: aws.String("SET #updated_at = " + exprNow + ", #updated_at_nano = " + exprNowNano + " REMOVE #qurl_api_key, #qurl_api_key_dk, #qurl_api_key_id, #qurl_api_key_prefix, #qurl_account_id, #configured_by, #configured_at"),
 		ConditionExpression: aws.String(
 			"attribute_exists(#qurl_api_key) OR attribute_exists(#qurl_api_key_dk) OR attribute_exists(#qurl_api_key_id) OR attribute_exists(#qurl_api_key_prefix) OR attribute_exists(#configured_by) OR attribute_exists(#configured_at)",
 		),

@@ -122,11 +122,14 @@ const (
 var version = "dev"
 
 func newAppLogger(w io.Writer) *slog.Logger {
-	// JSON handler is load-bearing for log-injection safety and operational log
-	// metrics: apps/slack/internal/handler.go logs request-controlled values such
-	// as r.URL.Path as slog attributes, which is safe only because the JSON output
-	// escapes control characters in attribute values, and alert filters match the
-	// JSON "msg" field. Don't swap to TextHandler without revisiting those sites.
+	// JSON handler is load-bearing for operational log metrics: alert filters
+	// match the JSON "msg" field. It is not, on its own, what makes the attribute
+	// values safe — apps/slack/internal/handler.go logs request-controlled values
+	// such as r.URL.Path as slog attributes, and both stdlib handlers escape
+	// control characters in attribute values (gosec v2.26.1 scopes its G706 check
+	// to args[0] for exactly that reason). The message is the part TextHandler
+	// would write verbatim. Don't swap to TextHandler without revisiting those
+	// sites.
 	// Redaction mirrors Discord: matched keys blank string/byte values, while
 	// containers under matched keys are walked by their inner field names.
 	return slog.New(observability.NewRedactingJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))

@@ -102,7 +102,7 @@ func (s *DDBStateStore) PutState(ctx context.Context, handle string, state Store
 			oauthStateAttrExpiresAt: &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
 			oauthStateAttrTTL:       &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(state.ExpiresAt.Unix(), 10)},
 		},
-		ConditionExpression: aws.String("attribute_not_exists(#pk)"),
+		ConditionExpression: aws.String("attribute_not_exists(" + workspaceStatePKName + ")"),
 		ExpressionAttributeNames: map[string]string{
 			workspaceStatePKName: workspaceStatePKAttr,
 		},

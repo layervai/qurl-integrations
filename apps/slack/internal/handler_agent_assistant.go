@@ -9,15 +9,15 @@ import (
 // thread (assistant.threads.setTitle) — the product's user-facing agent name.
 const assistantThreadTitle = "qURL Secure Access Agent"
 
+// protectConnectorPrompt is shared by both starter sets: it is channel-neutral,
+// so the channel-aware variant reuses it verbatim.
+const protectConnectorPrompt = "How do I protect a connector?"
+
 // assistantStarterPrompts are the DM-SAFE fallback first-run prompts: capability/how-to
 // starters the agent answers without a channel read. They're used when the pane has no
 // context channel (opened from a DM or the App Home) or its name can't be resolved (no
 // channels:read scope). When the context channel does resolve, channelAwareStarterPrompts
 // names it instead (see assistantStarterPromptsFor).
-// protectConnectorPrompt is shared by both starter sets: it is channel-neutral,
-// so the channel-aware variant reuses it verbatim.
-const protectConnectorPrompt = "How do I protect a connector?"
-
 var assistantStarterPrompts = []SuggestedPrompt{
 	{Title: "What can you do?", Message: "What can you help me with?"},
 	{Title: "How do I get access?", Message: "How do I request access to a connector?"},
