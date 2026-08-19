@@ -103,10 +103,22 @@ describe('preflightLedger', () => {
     // lasting property of a real file. That file sits at a predictable path
     // under a world-writable /tmp and holds live resource ids: the threat
     // model the script's own comment inherits from gateway-resume-spike.js,
-    // whose 0600 is pinned twice while this one was pinned nowhere. Dropping
-    // the mode argument leaves 0666 & ~umask and failed no test in the repo.
+    // whose 0600 is pinned twice while this one was pinned nowhere.
+    //
+    // Under umask 0, so this pins the MODE ARGUMENT rather than the runner.
+    // Dropping that argument leaves 0666 & ~umask, which on a host at umask
+    // 077 masks back down to exactly 0600 — the mutant would survive there
+    // while this stayed green, which is the failure a mode assertion is most
+    // likely to have. At umask 0 it lands 0666 and dies everywhere. Jest runs
+    // one test file at a time per worker and the cases within a file
+    // serially, so the window this widens is the try block.
     const ledger = unusedLedgerPath('preflight-mode');
-    preflightLedger(ledger);
+    const priorUmask = process.umask(0o000);
+    try {
+      preflightLedger(ledger);
+    } finally {
+      process.umask(priorUmask);
+    }
     expect(fs.statSync(ledger).mode & 0o777).toBe(0o600);
   });
 

@@ -2337,6 +2337,8 @@ module.exports = {
   LEDGER_PATH,
   // Exported for the suite, not for callers: main() is the only caller, and
   // the 0600 it creates the ledger with is unreachable from a test otherwise.
+  // Hand it a WRITABLE path — the refusal below is process.exit(1), which
+  // from a test takes the jest worker with it instead of failing a case.
   preflightLedger,
   readLedger,
   pruneLedger,
