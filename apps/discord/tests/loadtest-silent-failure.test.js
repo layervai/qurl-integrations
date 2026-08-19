@@ -1301,6 +1301,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return found;
   };
 
+  // Returns nodes from the once-parsed module-scope `ast`, so repeated calls
+  // hand back the SAME references. The disk-write ban depends on that: it
+  // collects the ledger's three legitimate calls, then re-walks each primitive
+  // and removes them by identity. Re-parsing per invocation here would break
+  // that dedup — loudly, since the fresh nodes would count as strays rather
+  // than pass silently, but it would still be this function's doing.
   const callsNamed = (name) => {
     const found = [];
     traverse(ast, {
