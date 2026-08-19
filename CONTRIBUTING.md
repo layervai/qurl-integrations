@@ -261,9 +261,11 @@ rather than pending, and the PR reads green having run none of them.
 `internal/ciworkflows` records each pull-request workflow's intended filter and
 reads this block to tell which of them gate merges, so one recorded as
 deliberately narrow fails `Workflow Contract` the moment it starts gating. The
-nine aggregate workflows are pinned against their own recorded filter instead —
-narrowing one is an edit to `requiredWorkflowSpecs`, which a reviewer has to
-catch (#1183).
+nine aggregate workflows are additionally pinned against their own recorded
+filter, but that record is not what authorizes a narrowing: every one of them
+reports a context listed above, so this block is what a narrow filter is
+weighed against. Narrowing one and editing `requiredWorkflowSpecs` to match
+fails `Workflow Contract` rather than passing as self-consistent (#1183, #1213).
 
 The four `age-check / *` contexts are the one partial exception. Only their
 caller half — the `age-check` job in each `dependency-age-check-*.yml` — is
