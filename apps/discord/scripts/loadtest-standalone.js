@@ -674,12 +674,15 @@ async function main() {
       // round whose re-uploads all failed has fileLinks === 0, and the old
       // `fileLinks > 0` gate would have printed nothing for it.
       if (results.fileLinks > 0 || results.fileFail > 0) {
+        // reup= counts attempts over time-spent-on-attempts: reuploadMs
+        // accumulates outside the try/catch, so counting only successes would
+        // put a numerator and denominator from different populations on one
+        // field. reupFail= names the failed subset. Both segments drop out
+        // when there is nothing to say — at --count <= TOKENS_PER_RESOURCE the
+        // plan is a single batch, so a bare `reup=0/0ms` would be pure noise.
+        const reupAttempts = results.reuploads + results.reuploadFail;
         line += `file(upload=${results.uploadMs.toFixed(0)}ms `
-          // Attempts over time-spent-on-attempts: reuploadMs accumulates
-          // outside the try/catch, so counting only successes here would put a
-          // numerator and denominator from different populations on one field.
-          // The failed subset is named separately by reupFail= below.
-          + `reup=${results.reuploads + results.reuploadFail}/${results.reuploadMs.toFixed(0)}ms `
+          + (reupAttempts > 0 ? `reup=${reupAttempts}/${results.reuploadMs.toFixed(0)}ms ` : '')
           + (results.reuploadFail > 0 ? `reupFail=${results.reuploadFail} ` : '')
           + `mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
       }

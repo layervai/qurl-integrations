@@ -1685,6 +1685,12 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
 
+  // Mirrored by planMintBatches in scripts/loadtest-standalone.js, so the load
+  // test issues the upload/mint pattern a real send does. Nothing ties the two
+  // at compile time — tests/loadtest-mint-batches.test.js re-implements this
+  // loop as an oracle and diffs the shapes. If the guard, the increment or the
+  // batchSize formula below changes, update that oracle in the same PR or the
+  // load test keeps measuring the old shape while staying green.
   for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
     if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
       const re = await reuploadFn();
