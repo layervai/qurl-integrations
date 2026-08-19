@@ -366,6 +366,12 @@ function resolveArgErrors(argv, check = checkUploadFile) {
   return errors;
 }
 
+// The values only. Both resolvers run again inside resolveArgErrors, which is
+// where the errors are read — they are discarded here on purpose, because
+// nothing may act on them until main() has printed them and exited. A bad
+// flag therefore cannot reach the loops through a NaN left in one of these
+// constants: main() re-resolves and exits before runRound is ever called.
+// Both resolvers are pure, so resolving twice costs an argv scan.
 const {
   count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
