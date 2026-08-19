@@ -818,6 +818,17 @@ describe('loadtest flag table — the one list everything reads', () => {
     },
   );
 
+  it('hands out a table nothing can edit', () => {
+    // The table is exported, so every importer holds a live reference to the
+    // one source of truth. Frozen rows and all: a suite that edited one would
+    // leak the edit into every later test in its file, jest sharing a single
+    // module instance across them, and the "single source" claim would hold
+    // only for as long as nobody wrote to it.
+    expect(Object.isFrozen(FLAGS)).toBe(true);
+    expect(FLAGS.every((spec) => Object.isFrozen(spec))).toBe(true);
+    expect(() => FLAGS.push({ name: 'warmup', takesValue: true })).toThrow();
+  });
+
   it('refuses to hand out a spec for a flag it does not declare', () => {
     // A wiring bug, not an operator mistake, so it throws where the readers
     // collect — and it throws at module load, since the resolvers run there.

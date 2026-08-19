@@ -131,6 +131,13 @@ const args = process.argv.slice(2);
 // behave identically. `defaultLabel` is what a missing-value message calls the
 // default — see readFlag. Only --file needs one, because its default is not a
 // path at all and would otherwise print as the literal "null".
+//
+// Frozen, rows included, because it is exported. "Single source of truth" is
+// the claim this whole section rests on, and an export hands every importer a
+// live reference to mutate it through — a suite that edited a row would leak
+// that edit into every later test in its file, since jest shares one module
+// instance across them. Freezing makes the invariant hold at runtime instead
+// of by convention.
 const FLAGS = [
   { name: 'count', takesValue: true, defaultValue: '100' },
   { name: 'duration', takesValue: true, defaultValue: '7200' },
@@ -138,7 +145,8 @@ const FLAGS = [
   { name: 'file', takesValue: true, defaultValue: null, defaultLabel: 'an auto-generated 1MB test file' },
   { name: 'location', takesValue: false },
   { name: 'allow-production', takesValue: false },
-];
+].map((spec) => Object.freeze(spec));
+Object.freeze(FLAGS);
 
 const FLAG_BY_NAME = new Map(FLAGS.map((spec) => [spec.name, spec]));
 
