@@ -189,7 +189,20 @@ describe('runReport — the summary and the exit code', () => {
 
   it('reports mint latency once qURLs are actually minted', () => {
     expect(report([round({ fileLinks: 100, uploadMs: 250, mintMs: 400, totalMs: 700 })]).lines)
-      .toContain('Avg upload: 250ms, avg mint: 400ms');
+      .toContain('Avg upload: 250ms, avg mint/round: 400ms');
+  });
+
+  // The same blend one granularity down. A round whose every mint failed
+  // times only failures, which are far faster than a real mint, so averaging
+  // it in reports a latency neither the healthy nor the dead rounds ever saw
+  // — here 201ms, from a 400ms round and a 2ms one.
+  it('averages mint latency over the rounds that actually minted', () => {
+    const lines = report([
+      round({ fileLinks: 100, uploadMs: 250, mintMs: 400, totalMs: 700 }),
+      round({ fileFail: 100, uploadMs: 250, mintMs: 2, totalMs: 300 }),
+    ]).lines;
+    expect(lines).toContain('Avg upload: 250ms, avg mint/round: 400ms');
+    expect(lines.join('\n')).not.toContain('201ms');
   });
 
   it('passes a clean run', () => {
@@ -203,7 +216,7 @@ describe('runReport — the summary and the exit code', () => {
       'Total links minted: 200',
       'Total failures: 0',
       'Avg round time: 0.6s',
-      'Avg upload: 200ms, avg mint: 300ms',
+      'Avg upload: 200ms, avg mint/round: 300ms',
     ]);
   });
 

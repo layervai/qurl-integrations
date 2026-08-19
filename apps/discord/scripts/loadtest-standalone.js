@@ -520,15 +520,30 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
     // round throwing inside the leg never reaches allResults.
     const fileRounds = allResults.filter((r) => r.uploadMs > 0);
     if (fileRounds.length > 0) {
-      const avg = (pick) => fileRounds.reduce((total, r) => total + pick(r), 0) / fileRounds.length;
-      // Mint latency is reported only when qURLs were actually minted. The
-      // old gate was `allResults[0].uploadMs > 0`, which is set before the
-      // first mint is even attempted and so held while every mint failed:
-      // the summary reported how long the failures took as though it were how
-      // long the successes took, and a fast failure reads as a fast success.
-      lines.push(fileLinks > 0
-        ? `Avg upload: ${avg((r) => r.uploadMs).toFixed(0)}ms, avg mint: ${avg((r) => r.mintMs).toFixed(0)}ms`
-        : `Avg upload: ${avg((r) => r.uploadMs).toFixed(0)}ms, avg mint: n/a — all ${fileFail} mint attempt(s) failed`);
+      const mean = (rounds, pick) => rounds.reduce((total, r) => total + pick(r), 0) / rounds.length;
+      // Every one of these rounds uploaded successfully, so the upload average
+      // is over all of them however their mints then went.
+      const avgUpload = mean(fileRounds, (r) => r.uploadMs).toFixed(0);
+      // Mint latency is averaged over the rounds that actually minted, and
+      // reported only when there are some. The old gate was
+      // `allResults[0].uploadMs > 0`, which is set before the first mint is
+      // even attempted and so held while every mint failed: the summary
+      // reported how long the failures took as though it were how long the
+      // successes took, and a fast failure reads as a fast success.
+      //
+      // Excluding rounds that minted nothing matters for the same reason one
+      // granularity down. Their mintMs measures only failures, which are
+      // typically much faster than a real mint, so folding them in drags the
+      // average toward the failures — a run of healthy rounds plus dead ones
+      // would report a mint latency neither kind ever saw.
+      //
+      // Residual limit, inherent to timing the batch loop as a whole rather
+      // than each attempt: this is time per ROUND, not per qURL, and a
+      // partially-failing round still blends its own failures into its mintMs.
+      const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0);
+      lines.push(mintedRounds.length > 0
+        ? `Avg upload: ${avgUpload}ms, avg mint/round: ${mean(mintedRounds, (r) => r.mintMs).toFixed(0)}ms`
+        : `Avg upload: ${avgUpload}ms, avg mint: n/a — all ${fileFail} mint attempt(s) failed`);
     }
   }
 
