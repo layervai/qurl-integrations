@@ -33,21 +33,21 @@ if [ -n "$S3_ORIGIN_CONTROL_CHAR_WAIVER_IMAGE" ]; then
 fi
 
 # Second waiver, same shape and same lifecycle as the control-char one above:
-# the pinned immutable origin also predates the credential preflight, so that
+# the pinned immutable origin also predates the request preflight, so that
 # producer change cannot publish while the Slack pin gate asserts it. Kept as a
 # separate variable because each waives a different assertion set; the single
 # pin-rotation PR that bumps the digest removes both together.
-waive_credential_preflight_contract=false
-if [ -n "${S3_ORIGIN_CREDENTIAL_PREFLIGHT_WAIVER_IMAGE:-}" ]; then
-  if [[ ! "$S3_ORIGIN_CREDENTIAL_PREFLIGHT_WAIVER_IMAGE" =~ ^ghcr\.io/layervai/qurl-integrations/s3-static-connector@sha256:[0-9a-f]{64}$ ]]; then
-    printf 'FAIL S3_ORIGIN_CREDENTIAL_PREFLIGHT_WAIVER_IMAGE must be the canonical released S3 origin digest\n' >&2
+waive_request_preflight_contract=false
+if [ -n "${S3_ORIGIN_REQUEST_PREFLIGHT_WAIVER_IMAGE:-}" ]; then
+  if [[ ! "$S3_ORIGIN_REQUEST_PREFLIGHT_WAIVER_IMAGE" =~ ^ghcr\.io/layervai/qurl-integrations/s3-static-connector@sha256:[0-9a-f]{64}$ ]]; then
+    printf 'FAIL S3_ORIGIN_REQUEST_PREFLIGHT_WAIVER_IMAGE must be the canonical released S3 origin digest\n' >&2
     exit 1
   fi
-  if [ "$REQUESTED_IMG" != "$S3_ORIGIN_CREDENTIAL_PREFLIGHT_WAIVER_IMAGE" ]; then
-    printf 'FAIL credential-preflight waiver digest does not match the image under test\n' >&2
+  if [ "$REQUESTED_IMG" != "$S3_ORIGIN_REQUEST_PREFLIGHT_WAIVER_IMAGE" ]; then
+    printf 'FAIL request-preflight waiver digest does not match the image under test\n' >&2
     exit 1
   fi
-  waive_credential_preflight_contract=true
+  waive_request_preflight_contract=true
 fi
 
 TMPROOT="${TMPDIR:-/tmp}"
@@ -494,19 +494,18 @@ for child in envoy nginx; do
   fi
 done
 
-if [ "$waive_credential_preflight_contract" = "true" ]; then
-  message="Known pre-preflight S3 origin digest remains pinned by Slack; credential-preflight assertions are waived only for this exact immutable image. Rotate the pin after this producer change publishes, then remove S3_ORIGIN_CREDENTIAL_PREFLIGHT_WAIVER_IMAGE. Viewer-facing 403 masking stays covered by the unwaived checks above."
+if [ "$waive_request_preflight_contract" = "true" ]; then
+  message="Known pre-preflight S3 origin digest remains pinned by Slack; request-preflight assertions are waived only for this exact immutable image. Rotate the pin after this producer change publishes, then remove S3_ORIGIN_REQUEST_PREFLIGHT_WAIVER_IMAGE. Viewer-facing 403 masking stays covered by the unwaived checks above."
   if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
-    printf '::warning title=S3 origin credential preflight pending pin rotation::%s\n' "$message"
+    printf '::warning title=S3 origin request preflight pending pin rotation::%s\n' "$message"
   else
     printf 'WARNING: %s\n' "$message" >&2
   fi
 else
-  # 16. Startup credential preflight. A rejected signature never self-heals and
-  # nginx masks it to a viewer 404, so the origin must refuse to serve rather than
-  # look healthy while 404ing every request. Everything else stays a warning that
-  # still serves. The stub keys off the request path, so S3_PREFIX selects which
-  # upstream status the preflight HEAD of <prefix>/index.html receives.
+  # 16. Startup request preflight. A 400/403 means S3 rejected the signed
+  # request, but status alone does not distinguish credentials from IAM, region,
+  # endpoint, or other request configuration. nginx masks the rejection to a
+  # viewer 404, so the origin refuses to serve until the operator fixes it.
   origin_running() {
     docker inspect -f '{{.State.Running}}' "$ORIGIN" 2>/dev/null || echo false
   }
@@ -526,7 +525,7 @@ else
     # A fatal verdict tears the container down right after logging it; settle
     # before the caller inspects container state.
     for _ in $(seq 1 20); do
-      docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_auth_failed"' || break
+      docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_request_rejected"' || break
       [ "$(origin_running)" = "false" ] && break
       sleep 0.5
     done
@@ -537,37 +536,46 @@ else
     expect_eq "preflight refuses to serve on upstream $prefix" "$(origin_running)" "false"
     expect_eq "preflight exits non-zero on upstream $prefix" \
       "$(docker inspect -f '{{.State.ExitCode}}' "$ORIGIN")" "1"
-    expect_origin_log "preflight names the credential failure for upstream $prefix" \
-      '"msg":"preflight_auth_failed"'
+    expect_origin_log "preflight names the rejected request for upstream $prefix" \
+      '"msg":"preflight_request_rejected"'
+    expect_origin_log "preflight rejection covers credentials and IAM for upstream $prefix" \
+      'credentials/provider chain, IAM permissions'
+    expect_origin_log "preflight rejection covers region and request config for upstream $prefix" \
+      'AWS_REGION, bucket/endpoint, and signed-request configuration'
   done
 
-  # An object that has not been synced yet is not a credential failure: keep
-  # serving so a deploy that starts the origin before the sync still recovers.
+  # A 404 is nonfatal so a deploy that starts before object sync can recover,
+  # but the status does not prove the active credentials are valid.
   preflight_case not-synced-yet
   expect_eq "preflight serves when only the index object is missing" "$(origin_running)" "true"
-  expect_origin_log "preflight distinguishes a missing object from a rejected credential" \
+  expect_origin_log "preflight distinguishes a 404 from a rejected request" \
     '"msg":"preflight_object_missing"'
+  if docker logs "$ORIGIN" 2>&1 | grep -q 'Credentials work'; then
+    no "preflight avoids claiming that a 404 proves credentials work"
+  else
+    ok "preflight avoids claiming that a 404 proves credentials work"
+  fi
 
-  # 17. Runtime credential failures stay masked to a viewer 404 but must be
-  # greppable as themselves, so an expired credential is not misread as a bad key.
+  # 17. Runtime request rejections stay masked to a viewer 404 but must be
+  # greppable without assigning a cause that status alone cannot establish.
   # The origin above still serves under S3_PREFIX=not-synced-yet, so the stub sees
   # /not-synced-yet/forbidden.json (403) and /not-synced-yet/definitely-missing/
-  # index.html (404) — an auth failure and a real miss, both masked to a 404.
+  # index.html (404) — a rejected request and a miss, both masked to a 404.
   base="$(origin_base_url)"
   for _ in $(seq 1 40); do
     [ "$(curl -s -o /dev/null -w '%{http_code}' "$base/")" != "000" ] && break
     sleep 0.5
   done
-  expect_eq "runtime auth failure still returns viewer 404" \
+  expect_eq "runtime request rejection still returns viewer 404" \
     "$(curl -s -o /dev/null -w '%{http_code}' "$base/forbidden.json")" 404
   curl -s -o /dev/null "$base/definitely-missing"
   auth_lines=0
   for _ in $(seq 1 10); do
-    auth_lines="$(docker logs "$ORIGIN" 2>&1 | grep -c '"msg":"s3_auth_failed"')"
+    auth_lines="$(docker logs "$ORIGIN" 2>&1 | grep -c '"msg":"s3_request_rejected"')"
     [ "$auth_lines" = "1" ] && break
     sleep 0.5
   done
-  expect_eq "runtime auth failure logged once, missing key logs none" "$auth_lines" 1
+  expect_eq "runtime request rejection logged once, missing key logs none" "$auth_lines" 1
 fi
 
 echo "-------------------------------------------"

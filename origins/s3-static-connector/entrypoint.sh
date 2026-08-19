@@ -61,20 +61,20 @@ trap shutdown TERM INT
   --log-format '{"layer":"envoy","level":"%l","name":"%n","message":"%j"}' &
 envoy_pid=$!
 
-# Credential preflight. Envoy signs the S3 hop with the AWS default credential
-# provider chain; when that chain comes up empty (a non-EC2 Docker host has no
-# instance role) or the credential has expired, S3 rejects every signed request
-# and nginx deliberately masks that to a plain 404 so viewers cannot tell a
-# denied key from a missing one. The origin then looks healthy while serving
-# nothing and the operator debugs the bucket key instead of the credential.
+# Request preflight. Envoy signs the S3 hop with the AWS default credential
+# provider chain. S3 can reject that request because of credentials, IAM,
+# region/endpoint selection, or other signed-request configuration, while nginx
+# deliberately masks the rejection to a plain 404 so viewers cannot distinguish
+# it from a missing key. The origin would then look healthy while serving
+# nothing and the operator would debug the object path instead of the request.
 # Probe the index object through the signer once, before nginx starts, and
-# refuse to serve when S3 rejects the signature: that class never self-heals.
+# refuse to serve when S3 rejects the request: that class needs operator action.
 # A missing object, a throttle, an upstream 5xx and an unreachable bucket stay
 # warnings — they either resolve on their own or already reach viewers as a 502,
 # and failing the boot on those would burn the restart budget on a transient S3
 # blip. README "AWS credentials" documents both outcomes.
 preflight_key="${S3_PREFIX_NORMALIZED}/${INDEX_DOCUMENT}"
-preflight_remediation="Give the origin AWS credentials for s3://${S3_BUCKET}${preflight_key} (EC2 instance role with IMDSv2 hop-limit 2, ECS task role, EKS pod identity, or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_SESSION_TOKEN in the container environment) and grant that identity s3:GetObject on the served keys plus s3:ListBucket on the bucket."
+preflight_remediation="Verify the credentials/provider chain, IAM permissions (s3:GetObject on the served keys and s3:ListBucket on the bucket), AWS_REGION, bucket/endpoint, and signed-request configuration for s3://${S3_BUCKET}${preflight_key}."
 
 # Status line of a HEAD sent through the signer; exit 2 while it is not
 # listening yet, exit 1 once it is but the S3 hop produced no response.
@@ -130,18 +130,16 @@ case "$preflight_status" in
     preflight_log preflight_ok "Signed S3 request succeeded."
     ;;
   400|401|403)
-    # 403 is AccessDenied/InvalidAccessKeyId/SignatureDoesNotMatch; 400 is the
-    # ExpiredToken/InvalidToken class. Both mean the signature was rejected: with
-    # the required s3:ListBucket grant a genuinely missing object comes back 404
-    # instead, so neither status can be an absent key. Without that grant a
-    # missing object is a 403 too, which this correctly reports as a policy fix.
-    preflight_log preflight_auth_failed "S3 rejected the signed request. $preflight_remediation" >&2
+    # Status alone cannot distinguish credentials from IAM, wrong region,
+    # endpoint, or other request configuration. It does establish that S3
+    # rejected the signed probe, which nginx would otherwise mask to a viewer 404.
+    preflight_log preflight_request_rejected "S3 rejected the signed request. $preflight_remediation" >&2
     term
     wait_children
     exit 1
     ;;
   404)
-    preflight_log preflight_object_missing "Credentials work; this object is not in the bucket yet. Serving anyway." >&2
+    preflight_log preflight_object_missing "S3 returned 404 for the requested index object. It may not be synced yet; this status does not prove which identity or permissions handled the request. Serving anyway." >&2
     ;;
   "")
     preflight_log preflight_no_response "Could not reach the signer or S3 before the deadline. Serving anyway; requests will fail 502 while it stays unreachable." >&2

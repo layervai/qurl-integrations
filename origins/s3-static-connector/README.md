@@ -91,10 +91,11 @@ dualstack, and VPC endpoint hostnames need a future signed-host/SNI override;
 
 Envoy signs the S3 hop with the **AWS default credential provider chain**:
 environment variables, then the shared credentials file, then web identity
-(`AWS_WEB_IDENTITY_TOKEN_FILE`, which is what EKS pod identity uses), then the
-ECS container credential endpoint, then the EC2 instance role over IMDSv2. The
-first source that yields a key wins, so an EC2, ECS, or EKS deployment with a
-role attached needs no credential configuration at all.
+(`AWS_WEB_IDENTITY_TOKEN_FILE`, used by IRSA), then the container credential
+endpoint (used by ECS task roles and EKS Pod Identity), then the EC2 instance
+role over IMDSv2. The first source that yields a key wins. In particular,
+environment credentials override a credentials-file mount and every workload
+role, so do not forward ambient shell credentials by default.
 
 **Off those platforms there is no role to inherit.** On a laptop, an on-prem
 box, or a PaaS runtime the chain finds nothing, Envoy forwards the request with
@@ -104,9 +105,10 @@ would look like a missing object. Supply credentials one of these ways:
 
 | Source | How |
 | --- | --- |
-| Environment | Set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` (temporary credentials only) in the container environment. The Slack Docker and Compose installers forward exactly these three from the operator's own shell or `.env` **by name**, so no credential value is ever placed in a generated snippet or sent through Slack. |
+| Environment | Set an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_SESSION_TOKEN` for temporary credentials. The Slack Docker and Compose installers do **not** forward ambient AWS variables by default. As a last-resort opt-in, export the complete pair or trio in the current shell, set `QURL_S3_FORWARD_AWS_CREDENTIALS=true`, and run the generated block. The block rejects incomplete sets and forwards names rather than values, so no value enters Slack or the generated script/Compose file. Docker still stores the resolved values in container configuration, where daemon/API access and `docker inspect` can reveal them; recreating the origin without the opt-in removes that copy. |
 | Credentials file | Mount one read-only and point the chain at it: `-v /host/aws-credentials:/aws/credentials:ro -e AWS_SHARED_CREDENTIALS_FILE=/aws/credentials` (plus `AWS_PROFILE` if not `default`). The file must be readable by uid `65532`. |
-| Web identity | The chain entry EKS pod identity populates for you. Setting `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` by hand works the same way, but additionally needs egress to STS. |
+| IRSA (EKS) | IRSA injects `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`; the web-identity provider exchanges that projected service-account token with STS. Configure the Kubernetes service account and allow STS egress. |
+| EKS Pod Identity | EKS Pod Identity injects `AWS_CONTAINER_CREDENTIALS_FULL_URI` and `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. Envoy's container provider queries the node-local Pod Identity Agent; it does not use `AWS_WEB_IDENTITY_TOKEN_FILE` or call STS directly from the pod. |
 
 Never bake a key into the image or into a committed manifest.
 
@@ -145,7 +147,10 @@ equivalent narrowing here: that key is supplied per List request and is absent
 from the authorization check `GetObject` performs, so conditioning the grant
 sends missing keys back to `403`. Confine enumeration with a bucket policy
 instead. A prefix-scoped variant is tracked in GitHub issue #894, along with the
-CloudWatch queries for these statuses.
+CloudWatch queries for these statuses. This broad `s3:ListBucket` grant is an
+intentional #894 tradeoff: it preserves the 403-vs-404 operator signal at the
+cost of enumeration permission for this identity. Do not silently replace it
+with an `s3:prefix` condition until #894 changes that signal and policy shape.
 
 ### Startup preflight
 
@@ -156,20 +161,21 @@ Envoy signer before nginx starts, and reports the verdict as
 | Upstream | `msg` | Outcome |
 | --- | --- | --- |
 | `2xx` / `304` | `preflight_ok` | serves |
-| `400`, `401`, `403` | `preflight_auth_failed` | **exits 1 without serving**; the line names the credential and IAM fix |
-| `404` | `preflight_object_missing` | serves — credentials work, the object is not synced yet |
+| `400`, `401`, `403` | `preflight_request_rejected` | **exits 1 without serving**; remediation covers credentials/provider chain, IAM, region, endpoint, and signed-request configuration |
+| `404` | `preflight_object_missing` | serves — the object may not be synced yet; this status does not prove which identity or permissions handled the request |
 | other statuses | `preflight_upstream_error` | serves; `503` means the signer could not reach the bucket endpoint |
 | no response | `preflight_no_response` | serves |
 
-Only a rejected signature is fatal. That class never self-heals and is exactly
-what the viewer-facing `404` masking hides, so starting up and returning `404`
-for every request would send the operator to debug the bucket key. The other
-outcomes either resolve on their own or already reach viewers as a `502`, and
-failing the boot on those would spend the orchestrator's restart budget on a
-transient S3 blip.
+Only a `400`/`401`/`403` request rejection is fatal. The HTTP status alone does
+not identify the cause: credentials, IAM, `AWS_REGION`, endpoint selection, or
+other request configuration can all be responsible. It does identify a
+startup condition that nginx would mask as a viewer `404`, so serving would
+send the operator toward the object key instead. Other outcomes either can
+resolve on their own or already reach viewers as a `502`; failing on those
+would spend the orchestrator's restart budget on a transient S3 blip.
 
-The preflight covers startup only. A credential that expires or loses access
-later is caught at runtime by the `s3_auth_failed` log line — see
+The preflight covers startup only. A request that S3 rejects with `400` or `403`
+later is caught at runtime by the `s3_request_rejected` log line — see
 [Logging](#logging).
 
 ## Behavior contract
@@ -214,23 +220,21 @@ replaces; viewer TLS is terminated before traffic reaches nginx.
 
 | Condition | Client status | Body | Observability |
 | --- | ---: | --- | --- |
-| Missing key (S3 `404`) | 404 | `Not Found` | access log `upstream_status:404`, and no `s3_auth_failed` line |
-| Signing / auth failure (S3 `403`) | 404 | `Not Found` | access log `upstream_status:403` (drives the SigV4-denied alarm) **plus** an `s3_auth_failed` line |
-| Other expected non-throttle S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`) | 404 | `Not Found` | access log preserves the exact `upstream_status`; `400` also emits `s3_auth_failed` |
+| S3 `404` | 404 | `Not Found` | access log `upstream_status:404`, and no `s3_request_rejected` line; does not by itself validate credentials |
+| S3 request rejected with `403` | 404 | `Not Found` | access log `upstream_status:403` **plus** an `s3_request_rejected` line; inspect credentials, IAM, region, endpoint, and request configuration |
+| Other expected non-throttle S3 `4xx` responses (`400`, `401`, `409`, `411`, `412`) | 404 | `Not Found` | access log preserves the exact `upstream_status`; `400` also emits `s3_request_rejected` without assigning a cause |
 | S3 throttle (`429`) | 502 | `Bad Gateway` | access log `upstream_status:429` |
 | Upstream 5xx / Envoy down / credential-chain failure | 502 | `Bad Gateway` | access log `status:502` (drives the origin-5xx alarm) |
 | Method other than GET/HEAD | 405 | (nginx default) | access log only |
 
 S3 error bodies and the 403-vs-404 distinction are never leaked to clients; the
-distinction is preserved operator-side for alarming. Because a signing or IAM
-failure intentionally looks like a normal 404 to viewers, the origin surfaces it
-on the operator side in three places, none of which change what a viewer sees:
-the `upstream_status` field on the nginx access line, the dedicated
-`s3_auth_failed` line described under [Logging](#logging), and — at startup only
-— the `preflight_auth_failed` refusal described under
-[Startup preflight](#startup-preflight). Production deployments must wire the
-SigV4-denied alarm before relying on this image; `s3_auth_failed` is the
-narrowest signal to alarm on.
+distinction is preserved operator-side for alarming. A rejected S3 request can
+therefore look like a normal 404 to viewers. The origin surfaces the rejection
+through `upstream_status`, the `s3_request_rejected` line described under
+[Logging](#logging), and — at startup only — the
+`preflight_request_rejected` refusal. These signals intentionally say only what
+the statuses establish; diagnose the credential/provider chain, IAM policy,
+region, endpoint, and signed-request configuration before assigning a cause.
 
 Range serving is intended for uncompressed objects. nginx gzip takes precedence
 for compressible content types such as CSS, JS, JSON, SVG, and XML, so text
@@ -250,14 +254,14 @@ stream stays filterable:
 - `entrypoint.sh` emits `{"layer":"origin","msg":"origin_started"}` once per start
   (the OriginRestart metric filter keys on it), then one
   `{"layer":"origin","msg":"preflight_...","status":<num>,"key":"<key>","detail":"<text>"}`
-  line with the credential verdict — see
+  line with the request-preflight verdict — see
   [Startup preflight](#startup-preflight).
-- Envoy emits `{"layer":"origin","msg":"s3_auth_failed","status":<num>,"key":"<key>"}`
+- Envoy emits `{"layer":"origin","msg":"s3_request_rejected","status":<num>,"key":"<key>"}`
   for each request S3 rejects with `400` or `403`, and nothing for any other
   status. It is tagged `origin` rather than `envoy` so it groups with the other
-  operator-facing `msg` events instead of with Envoy's own `level`/`name` lines. That is the runtime counterpart to the startup preflight: it is how an
-  expired or newly-unauthorized credential is told apart from a genuinely
-  missing object once nginx has masked both to a viewer `404`.
+  operator-facing `msg` events instead of with Envoy's own `level`/`name` lines.
+  It is the runtime counterpart to the startup preflight and deliberately does
+  not infer a credential or IAM cause from status alone.
 - `qurl-origin-cachectl purge` emits
   `{"layer":"origin","msg":"cache_purged",...}` when deploy automation clears
   the local proxy cache.
@@ -328,31 +332,17 @@ as **either** process exits — so a crash of either one takes the container dow
 and produces a clean restart/alarm signal. `tini` is PID 1; the supervisor
 intentionally uses bash >= 5.1 for PID-scoped `wait -n`.
 
-The qURL Connector sidecar joins **this container's** network namespace, and
-both Docker and Docker Compose pin that namespace by container ID at the
-sidecar's first start. Restarting or recreating this origin container therefore
-moves it into a fresh namespace and strands the sidecar in the dead one: neither
-container exits, so no restart policy fires, and both keep reporting a running
-state while viewers get a connection reset. Container state is not a valid
-health check for that topology — compare
-`readlink /proc/<pid>/ns/net` for the two containers, and recover by recreating
-**both** (`docker compose up -d --force-recreate`, or re-running the generated
-Docker block). ECS and Kubernetes are not exposed: ECS marks both containers
-essential so the task is replaced as a unit, and a Kubernetes pod's sandbox
-namespace outlives a container restart. Giving Docker and Compose the same
-pod-style namespace ownership is a deployment-contract change, not a flag, and
-is not attempted here.
-
 ## Deploy requirements
 
 - The signing identity needs **`s3:GetObject`** on the served keys **and**
   **`s3:ListBucket`** on the bucket — without ListBucket, a missing key returns
   `AccessDenied` (403) instead of `NoSuchKey` (404), muddying the
-  signing-failure signal. Policy and non-EC2 credential sources are in
+  request-rejection signal. The deliberately broad grant and #894 follow-up,
+  plus non-EC2 credential sources, are in
   [AWS credentials](#aws-credentials).
 - IMDSv2 from inside a container requires **hop-limit 2** on the host. Hosts
   with no instance role must supply credentials explicitly; the origin refuses
-  to start rather than serving 404s when it cannot authenticate.
+  to start when S3 rejects the signed startup request.
 - Passing `AWS_REGION` explicitly is the deployment path. The image does not
   probe IMDS for region discovery; `AWS_DEFAULT_REGION` is copied into
   `AWS_REGION` only when `AWS_REGION` is unset.

@@ -24,9 +24,9 @@ static_resources:
           # reject every signed request, and nginx masks that to a viewer 404 by
           # design — so the only operator-side trace is an `upstream_status`
           # field on an otherwise ordinary-looking 404 access line. Emit one
-          # explicit line for the auth-failure class instead, so an expired or
-          # unauthorized credential is greppable and alarmable as itself rather
-          # than being read as a missing object. Filtered to that class only:
+          # explicit request-rejected line instead. Status alone cannot assign
+          # the cause to credentials rather than IAM, region, endpoint, or other
+          # request configuration. Filtered to the rejection statuses only:
           # normal traffic (including real 404s) logs nothing here, and the
           # viewer-facing response is unchanged.
           access_log:
@@ -34,22 +34,22 @@ static_resources:
             filter:
               or_filter:
                 filters:
-                # 403 is AccessDenied/InvalidAccessKeyId/SignatureDoesNotMatch,
-                # 400 the ExpiredToken/InvalidToken class.
+                # 400 and 403 cover multiple S3 error codes, so do not label
+                # either status as an authentication verdict.
                 - status_code_filter:
                     comparison:
                       op: EQ
-                      value: { default_value: 400, runtime_key: s3_auth_failed_400 }
+                      value: { default_value: 400, runtime_key: s3_request_rejected_400 }
                 - status_code_filter:
                     comparison:
                       op: EQ
-                      value: { default_value: 403, runtime_key: s3_auth_failed_403 }
+                      value: { default_value: 403, runtime_key: s3_request_rejected_403 }
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
               log_format:
                 json_format:
                   layer: origin
-                  msg: s3_auth_failed
+                  msg: s3_request_rejected
                   status: "%RESPONSE_CODE%"
                   key: "%REQ(:PATH)%"
           route_config:
