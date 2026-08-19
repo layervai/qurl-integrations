@@ -32,6 +32,16 @@ const (
 	workflowContractTestName  = "Test workflow contract"
 	workflowContractTestRun   = "go test -count=1 ./internal/ciworkflows/..."
 
+	// The two job ids the app-workflow aggregate pattern is built on: a
+	// `changes` detector, and a `required` aggregate that needs it and reports
+	// the gating context. Spelled as constants only where an id is read
+	// structurally — a key into a workflow's Jobs map, or an entry in a
+	// `needs` list. The hand-written needs maps further down stay literal:
+	// they are fixtures standing in for what a workflow author typed, so
+	// renaming the real job must not silently rewrite them too.
+	changesJobID  = "changes"
+	requiredJobID = "required"
+
 	releasePleaseWorkflow      = "release-please.yml"
 	releasePleaseJobID         = "release-please"
 	releasePleaseActionStepID  = "release"
@@ -189,10 +199,23 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 	},
 }
 
+// githubWorkflow, githubJob and step model the workflow keys this package
+// asserts on.
+//
+// githubJob and step have both reached gocritic's rangeValCopy threshold — 128
+// and 136 bytes against a >= 128 default — so range over them by index and take
+// a pointer, `for i := range job.Steps { current := &job.Steps[i] }`, and reach
+// a job through the *githubJob that Jobs holds: a map value cannot be
+// addressed, so a value map would force exactly the copy that finding names.
+// gocritic's skipTestFuncs default spares the loops inside Test functions,
+// which silences the finding and not the copy, so those are written the same
+// way rather than left as the exception. There is no headroom left in either
+// struct to spend, and none to reclaim by reordering: every field is
+// pointer-aligned and pointer-sized, so neither carries any padding.
 type githubWorkflow struct {
-	On          any                  `yaml:"on"`
-	Permissions any                  `yaml:"permissions"`
-	Jobs        map[string]githubJob `yaml:"jobs"`
+	On          any                   `yaml:"on"`
+	Permissions any                   `yaml:"permissions"`
+	Jobs        map[string]*githubJob `yaml:"jobs"`
 }
 
 type githubJob struct {
@@ -200,7 +223,14 @@ type githubJob struct {
 	Name        string `yaml:"name"`
 	Needs       any    `yaml:"needs"`
 	Permissions any    `yaml:"permissions"`
-	Steps       []step `yaml:"steps"`
+	// Env carries the job-level environment. Values are strings and numbers,
+	// so it is read as `any` per key and asserted only where one is
+	// load-bearing — the Claude review's minute budget.
+	Env map[string]any `yaml:"env"`
+	// TimeoutMinutes is the job's own cap. See step.TimeoutMinutes for why
+	// both are `any` rather than int.
+	TimeoutMinutes any    `yaml:"timeout-minutes"`
+	Steps          []step `yaml:"steps"`
 	// Uses is set only on a job that calls a reusable workflow. Such a job
 	// reports its checks as "<this job> / <inner job>" rather than under its
 	// own name, which is why required_checks_test.go resolves it separately.
@@ -223,6 +253,13 @@ type step struct {
 	// and asserted absent rather than compared: either spelling would turn a
 	// failing guard into a green one.
 	ContinueOnError any `yaml:"continue-on-error"`
+	// TimeoutMinutes accepts an integer literal or a `${{ }}` expression, so it
+	// is read as `any` and type-asserted at the call site. Typing it int would
+	// make an expression-valued cap anywhere in .github/workflows fail to parse
+	// in readWorkflow — taking down every test in this package rather than the
+	// one assertion that cares — and a caller that wants a literal wants a bare
+	// number to report as the *wrong* value, not as a missing one.
+	TimeoutMinutes any `yaml:"timeout-minutes"`
 }
 
 // TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
@@ -269,11 +306,12 @@ func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 		t.Fatalf("contract job must not depend on another job, got needs = %#v", contract.Needs)
 	}
 
-	for _, step := range contract.Steps {
-		if step.Name != workflowContractTestName {
+	for i := range contract.Steps {
+		current := &contract.Steps[i]
+		if current.Name != workflowContractTestName {
 			continue
 		}
-		if run := strings.TrimSpace(step.Run); run != workflowContractTestRun {
+		if run := strings.TrimSpace(current.Run); run != workflowContractTestRun {
 			t.Fatalf("%s command = %q, want %q", workflowContractTestName, run, workflowContractTestRun)
 		}
 		return
@@ -1183,7 +1221,7 @@ func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 
 	seen := 0
 	for _, name := range workflowFiles(t) {
-		if _, ok := readWorkflow(t, name).Jobs["required"]; !ok {
+		if _, ok := readWorkflow(t, name).Jobs[requiredJobID]; !ok {
 			continue
 		}
 		seen++
@@ -1208,10 +1246,7 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 		t.Run(spec.name, func(t *testing.T) {
 			workflow := readWorkflow(t, spec.path)
 
-			required, ok := workflow.Jobs["required"]
-			if !ok {
-				t.Fatalf("%s workflow is missing required aggregate job", spec.name)
-			}
+			required := requiredAggregateJob(t, spec, workflow)
 			if required.Name != spec.requiredName {
 				t.Fatalf("required job name = %q, want %q", required.Name, spec.requiredName)
 			}
@@ -1224,8 +1259,8 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 				t.Fatalf("%s required.if = %q, want always()", spec.name, required.If)
 			}
 
-			requiredNeeds := stringSet(parseWorkflowNeeds(t, "required", required.Needs))
-			if !requiredNeeds["changes"] {
+			requiredNeeds := stringSet(parseWorkflowNeeds(t, requiredJobID, required.Needs))
+			if !requiredNeeds[changesJobID] {
 				t.Fatal("required.needs is missing changes detector")
 			}
 
@@ -1240,7 +1275,7 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 			}
 
 			for need := range requiredNeeds {
-				if need == "changes" {
+				if need == changesJobID {
 					continue
 				}
 				if !qualityGates[need] {
@@ -1500,6 +1535,24 @@ func readWorkflow(t *testing.T, name string) githubWorkflow {
 	if err := yaml.Unmarshal(readWorkflowBytes(t, name), &workflow); err != nil {
 		t.Fatalf("parse %s workflow: %v", name, err)
 	}
+	// A job key with no body decodes to a nil entry rather than to a zero job.
+	// (`job: {}` does not — that is a non-nil zero struct; only a true null
+	// trips this.) Named here so it reports as the malformed workflow it is, at
+	// the file that carries it, rather than as a nil dereference in whichever
+	// assertion reached it first. Every githubWorkflow in this package comes
+	// from here, so this is also what lets a Jobs lookup anywhere below take
+	// its *githubJob as non-nil without re-checking.
+	//
+	// Unasserted, like the other fatals here: a fixture carrying a null job
+	// would have to sit in .github/workflows, where every other scan in this
+	// package would read it too. Verified by mutation instead — a bare
+	// `orphan:` added under a workflow's `jobs:` names that file and id rather
+	// than panicking. Re-run that if you touch this.
+	for id, job := range workflow.Jobs {
+		if job == nil {
+			t.Fatalf("%s job %q has an empty body", name, id)
+		}
+	}
 	return workflow
 }
 
@@ -1557,16 +1610,30 @@ func workflowFiles(t *testing.T) []string {
 	return names
 }
 
+// requiredAggregateJob returns the aggregate job of the workflow a spec names.
+// Both callers reach for it before reading anything else about that workflow,
+// and for both a spec whose workflow has no such job is the same registration
+// bug, so the lookup and its diagnosis are written once here.
+func requiredAggregateJob(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) *githubJob {
+	t.Helper()
+
+	job, ok := workflow.Jobs[requiredJobID]
+	if !ok {
+		t.Fatalf("%s workflow is missing its %q aggregate job", spec.name, requiredJobID)
+	}
+	return job
+}
+
 func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) map[string]bool {
 	t.Helper()
 
 	qualityGates := map[string]bool{}
 	for id, job := range workflow.Jobs {
 		needs := parseWorkflowNeeds(t, id, job.Needs)
-		if !looksLikeRequiredWorkflowQualityGate(spec, &job, needs) {
+		if !looksLikeRequiredWorkflowQualityGate(spec, job, needs) {
 			continue
 		}
-		if !slices.Contains(needs, "changes") {
+		if !slices.Contains(needs, changesJobID) {
 			t.Errorf("%s quality gate %q must include changes in needs", spec.name, id)
 			continue
 		}
@@ -1586,7 +1653,7 @@ func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job *githu
 	if job.Name == spec.detectChangesName || job.Name == spec.requiredName {
 		return false
 	}
-	return !slices.Contains(needs, "required")
+	return !slices.Contains(needs, requiredJobID)
 }
 
 func sortedQualityGateIDs(qualityGates map[string]bool) []string {
@@ -1635,21 +1702,19 @@ func stringSet(values []string) map[string]bool {
 func requiredVerifierScript(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) string {
 	t.Helper()
 
-	required, ok := workflow.Jobs["required"]
-	if !ok {
-		t.Fatalf("%s workflow is missing required aggregate job", spec.name)
-	}
-	for _, step := range required.Steps {
-		if step.Name != spec.verifierStepName {
+	required := requiredAggregateJob(t, spec, workflow)
+	for i := range required.Steps {
+		current := &required.Steps[i]
+		if current.Name != spec.verifierStepName {
 			continue
 		}
-		if step.Shell != "bash" {
-			t.Fatalf("%s shell = %q, want bash", spec.verifierStepName, step.Shell)
+		if current.Shell != "bash" {
+			t.Fatalf("%s shell = %q, want bash", spec.verifierStepName, current.Shell)
 		}
-		if strings.TrimSpace(step.Run) == "" {
+		if strings.TrimSpace(current.Run) == "" {
 			t.Fatalf("%s step has empty run script", spec.verifierStepName)
 		}
-		return step.Run
+		return current.Run
 	}
 	t.Fatalf("%s required job is missing %s step", spec.name, spec.verifierStepName)
 	return ""

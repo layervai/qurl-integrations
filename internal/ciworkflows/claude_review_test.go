@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,6 +45,20 @@ const (
 	claudeReviewPublishStepID     = "publish_review"
 
 	claudeReviewEligibleGuard = "steps.eligibility.outputs.eligible == 'true'"
+
+	// The slug the eligibility step is handed as its own repository. A row
+	// setting head or base to it is a same-repo pull request; any other value
+	// is a fork. Deliberately not protectionRepo, which happens to spell the
+	// same string for an unrelated reason: that one is pinned to upstream so a
+	// fork still diffs against upstream's protection, while this is fixture
+	// input the step only ever compares against itself.
+	claudeReviewFixtureRepo = "layervai/qurl-integrations"
+
+	// claudeReviewBudgetEnv names the job-level minute budget. It is the one
+	// number the review step's cap, the report step's classification and the
+	// report step's message all derive from, which is what makes a single
+	// wrong value impossible to spell.
+	claudeReviewBudgetEnv = "CLAUDE_REVIEW_BUDGET_MINUTES"
 )
 
 // TestClaudeReviewConcludesOnEveryPullRequest is the assertion this whole
@@ -91,7 +106,7 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 		t.Errorf("last step = %q, want %q — a step after the gate is a conclusion the gate never saw", last.Name, claudeReviewGateStepName)
 	}
 
-	eligibility := claudeReviewStep(t, &job, claudeReviewEligibilityStepName)
+	eligibility := claudeReviewStep(t, job, claudeReviewEligibilityStepName)
 	if eligibility.ID != claudeReviewEligibilityStepID {
 		t.Errorf("%s id = %q, want %q", claudeReviewEligibilityStepName, eligibility.ID, claudeReviewEligibilityStepID)
 	}
@@ -102,21 +117,21 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 	// The checkout guard is the root of the chain: every later step already
 	// keys off `steps.checkout.outcome`, so this is the single place the
 	// withheld paths are cut off from the secrets-bearing work.
-	checkout := claudeReviewStep(t, &job, claudeReviewCheckoutStepName)
+	checkout := claudeReviewStep(t, job, claudeReviewCheckoutStepName)
 	if strings.TrimSpace(checkout.If) != claudeReviewEligibleGuard {
 		t.Errorf("%s if = %q, want %q", claudeReviewCheckoutStepName, checkout.If, claudeReviewEligibleGuard)
 	}
 
-	gate := claudeReviewStep(t, &job, claudeReviewGateStepName)
+	gate := claudeReviewStep(t, job, claudeReviewGateStepName)
 	if strings.TrimSpace(gate.If) != "success()" {
 		t.Errorf("%s if = %q, want success() — the gate speaks only on the otherwise-green path; a failed review is already red and annotated, and a `concurrency` cancellation is not its to report", claudeReviewGateStepName, gate.If)
 	}
 
 	// The reporting paths exist so a missing review can never read as a passing
 	// one. A restructure that drops either is the failure they guard against.
-	report := claudeReviewStep(t, &job, claudeReviewReportStepName)
-	publish := claudeReviewStep(t, &job, claudeReviewPublishStepName)
-	for _, reporter := range []step{report, publish} {
+	report := claudeReviewStep(t, job, claudeReviewReportStepName)
+	publish := claudeReviewStep(t, job, claudeReviewPublishStepName)
+	for _, reporter := range []*step{report, publish} {
 		if reporter.ContinueOnError != nil {
 			t.Errorf("%s sets continue-on-error = %v; a swallowed failure here is the silent pass this workflow reports on", reporter.Name, reporter.ContinueOnError)
 		}
@@ -129,13 +144,13 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 // TestClaudeReviewEligibilityClassifiesEveryPullRequest executes the step
 // rather than reading it. Its withheld branches run only on bot, fork and draft
 // pull requests, so a defect in them ships green and surfaces exactly when the
-// classification is load-bearing — the argument
-// scripts/test-claude-review-budget-report.sh makes for its own existence.
+// classification is load-bearing — the same argument
+// TestClaudeReviewReportClassifiesEveryUnfinishedReview makes for its own
+// existence.
 func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 	t.Parallel()
 	requireCommand(t, "bash")
 
-	const repo = "layervai/qurl-integrations"
 	script := claudeReviewStepScript(t, claudeReviewEligibilityStepName)
 
 	tests := []struct {
@@ -149,16 +164,16 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 		baseRepo      string
 		wantExemption string
 	}{
-		{name: "human ready same-repo pull request is reviewed", author: "User", draft: "false", headRepo: repo, baseRepo: repo},
-		{name: "organization author is reviewed", author: "Organization", draft: "false", headRepo: repo, baseRepo: repo},
-		{name: "bot author is exempt", author: "Bot", draft: "false", headRepo: repo, baseRepo: repo, wantExemption: "bot"},
-		{name: "draft is exempt", author: "User", draft: "true", headRepo: repo, baseRepo: repo, wantExemption: "draft"},
-		{name: "fork head is exempt", author: "User", draft: "false", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "fork"},
-		{name: "foreign base is exempt", author: "User", draft: "false", headRepo: repo, baseRepo: "outsider/qurl-integrations", wantExemption: "fork"},
+		{name: "human ready same-repo pull request is reviewed", author: "User", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo},
+		{name: "organization author is reviewed", author: "Organization", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo},
+		{name: "bot author is exempt", author: "Bot", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo, wantExemption: "bot"},
+		{name: "draft is exempt", author: "User", draft: "true", headRepo: claudeReviewFixtureRepo, baseRepo: claudeReviewFixtureRepo, wantExemption: "draft"},
+		{name: "fork head is exempt", author: "User", draft: "false", headRepo: "outsider/qurl-integrations", baseRepo: claudeReviewFixtureRepo, wantExemption: "fork"},
+		{name: "foreign base is exempt", author: "User", draft: "false", headRepo: claudeReviewFixtureRepo, baseRepo: "outsider/qurl-integrations", wantExemption: "fork"},
 		// Precedence: a bot can never receive this review, while a draft only
 		// waits for one, so the most durable reason is the one reported.
-		{name: "bot outranks fork and draft", author: "Bot", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "bot"},
-		{name: "fork outranks draft", author: "User", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "fork"},
+		{name: "bot outranks fork and draft", author: "Bot", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: claudeReviewFixtureRepo, wantExemption: "bot"},
+		{name: "fork outranks draft", author: "User", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: claudeReviewFixtureRepo, wantExemption: "fork"},
 	}
 
 	for _, tc := range tests {
@@ -170,7 +185,7 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 				"IS_DRAFT":    tc.draft,
 				"HEAD_REPO":   tc.headRepo,
 				"BASE_REPO":   tc.baseRepo,
-				"REPO":        repo,
+				"REPO":        claudeReviewFixtureRepo,
 			})
 			if run.err != nil {
 				t.Fatalf("eligibility step failed: %v\noutput:\n%s", run.err, run.combined)
@@ -205,15 +220,14 @@ func TestClaudeReviewEligibilityFailsClosedOnAnUnreadablePullRequest(t *testing.
 	t.Parallel()
 	requireCommand(t, "bash")
 
-	const repo = "layervai/qurl-integrations"
 	script := claudeReviewStepScript(t, claudeReviewEligibilityStepName)
 
 	base := map[string]string{
 		"AUTHOR_TYPE": "User",
 		"IS_DRAFT":    "false",
-		"HEAD_REPO":   repo,
-		"BASE_REPO":   repo,
-		"REPO":        repo,
+		"HEAD_REPO":   claudeReviewFixtureRepo,
+		"BASE_REPO":   claudeReviewFixtureRepo,
+		"REPO":        claudeReviewFixtureRepo,
 	}
 
 	tests := []struct {
@@ -250,6 +264,225 @@ func TestClaudeReviewEligibilityFailsClosedOnAnUnreadablePullRequest(t *testing.
 				t.Errorf("eligible = %q on an undecidable payload, want no verdict at all", run.outputs["eligible"])
 			}
 		})
+	}
+}
+
+// TestClaudeReviewReportClassifiesEveryUnfinishedReview executes the report
+// step rather than reading it.
+//
+// That step runs only after the review has already failed, so a defect in it
+// ships green and is discovered exactly when it is needed. It is also the only
+// thing that tells a maintainer a review is missing, so the assertion with
+// teeth is that *every* branch annotates: nothing here may regress to a bare
+// echo, which would restore the silent pass this job exists to remove.
+//
+// The real run: block is extracted and executed rather than pattern-matched,
+// so rewording the messages does not require editing this test. Elapsed time
+// decides the explanation, never whether the missing review is reported — a
+// misclassification costs a wrong cause, not a silent pass — which is why the
+// exit code and the annotation count are asserted on every row and the title
+// only names which cause was chosen.
+func TestClaudeReviewReportClassifiesEveryUnfinishedReview(t *testing.T) {
+	t.Parallel()
+	requireCommand(t, "bash")
+
+	script := claudeReviewStepScript(t, claudeReviewReportStepName)
+	// Read from the workflow rather than restated, so raising the budget moves
+	// these rows with it instead of leaving them asserting against a value the
+	// workflow no longer uses.
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
+	budgetMinutes := claudeReviewMinutes(t, claudeReviewBudgetEnv, job.Env[claudeReviewBudgetEnv])
+	budgetSeconds := budgetMinutes * 60
+
+	// The step reads `date +%s`, so the wall clock decides which branch it
+	// takes. Sampling the real clock made the boundary rows racy: a single tick
+	// between reading `now` and running a row moves elapsed past the budget and
+	// flips the expected classification. `date` is stubbed instead, so `now` is
+	// fixed and every boundary below is exact.
+	const now = 1000000000
+	stubbedPath := stubbedDatePATH(t)
+
+	const (
+		timedOut     = "Claude review ran out of time"
+		failed       = "Claude review failed"
+		unmeasurable = "Claude review did not finish"
+	)
+
+	tests := []struct {
+		name      string
+		startedAt string
+		// budget defaults to the workflow's own value; only the row that
+		// corrupts it sets this.
+		budget    string
+		wantTitle string
+	}{
+		// Overrun: the runner kills the step at the budget, so elapsed is
+		// always at or just past it by the time this step measures.
+		{name: "over budget is reported as a timeout", startedAt: strconv.Itoa(now - budgetSeconds - 20), wantTitle: timedOut},
+		{name: "exactly at budget is reported as a timeout", startedAt: strconv.Itoa(now - budgetSeconds), wantTitle: timedOut},
+
+		// Inside the budget the step cannot have been killed, so this was a
+		// real failure and must not be blamed on the clock.
+		{name: "one second under budget is reported as a failure", startedAt: strconv.Itoa(now - budgetSeconds + 1), wantTitle: failed},
+		{name: "an early failure is reported as a failure", startedAt: strconv.Itoa(now - 5), wantTitle: failed},
+
+		// Unmeasurable: a timeout cannot be ruled out, so these must still
+		// annotate rather than pass quietly. Both inputs reach an arithmetic
+		// context in the step, so the last two also pin that an expression is
+		// rejected as input rather than evaluated as one.
+		{name: "an empty clock is reported as unfinished", startedAt: "", wantTitle: unmeasurable},
+		{name: "a non-numeric clock is reported as unfinished", startedAt: "not-a-number", wantTitle: unmeasurable},
+		{name: "an injected clock expression is reported as unfinished", startedAt: "1+1", wantTitle: unmeasurable},
+		{name: "a non-numeric budget is reported as unfinished", startedAt: strconv.Itoa(now), budget: "thirteen", wantTitle: unmeasurable},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			budget := tc.budget
+			if budget == "" {
+				budget = strconv.Itoa(budgetMinutes)
+			}
+
+			run := runClaudeReviewStep(t, script, map[string]string{
+				"STARTED_AT":     tc.startedAt,
+				"BUDGET_MINUTES": budget,
+				// PATH is handed over through the env map rather than set on
+				// this process: runVerifierScriptWithEnv appends the map after
+				// os.Environ(), and os/exec keeps the last duplicate of a key,
+				// so the stub wins for the step alone and no other test sees a
+				// mutated environment.
+				"PATH":          stubbedPath,
+				"DATE_NOW_STUB": strconv.Itoa(now),
+			})
+
+			// Exit 0 on purpose: the review step's own failure already fails
+			// the job, and a second red step would bury the annotation.
+			if run.err != nil {
+				t.Fatalf("report step exited non-zero (%v), want 0 — a second red step buries the annotation that is the whole point of this step\noutput:\n%s", run.err, run.combined)
+			}
+			if got := countErrorAnnotations(run.combined); got != 1 {
+				t.Fatalf("emitted %d ::error annotations, want exactly 1 — a branch that stops annotating is the silent pass this step exists to remove\noutput:\n%s", got, run.combined)
+			}
+			if want := "::error title=" + tc.wantTitle + "::"; !strings.Contains(run.combined, want) {
+				t.Errorf("output does not contain %q\noutput:\n%s", want, run.combined)
+			}
+		})
+	}
+}
+
+// stubbedDatePATH writes a `date` shim into a fresh directory and returns a
+// PATH with that directory ahead of the inherited one, the way
+// scripts/test-resolve-validated-base.sh stubs `gh`.
+//
+// It answers `date +%s`, the one spelling the report step uses, and refuses
+// everything else rather than delegating to the real binary. Two reasons, and
+// the second is a trap:
+//
+//   - A step that started reading the clock some other way would otherwise get
+//     a real `now`, roughly 7.8e8 seconds past the fixed one below. Every row
+//     would then classify as a timeout, and the under-budget rows would fail
+//     for a reason that looks nothing like the cause. Refusing puts the cause
+//     on stderr, which lands in the run's combined output.
+//   - Delegating cannot be written the obvious way. This directory is first on
+//     PATH, so `exec date "$@"` re-finds this shim and spins until the test
+//     binary is killed — measured, not assumed. Any reintroduced fallback has
+//     to name an absolute path, which is what the shell script this replaced
+//     did with a hard-coded /bin/date.
+//
+// The shim needs /bin/sh, which the caller's requireCommand(t, "bash") does not
+// cover. Not worth a second guard: POSIX fixes that path, and a host without it
+// fails loudly on the first row rather than misreporting one — a second
+// requireCommand would only turn that into a skip, which is the wrong outcome
+// for a test whose point is that no branch goes quiet.
+//
+// The shell script this replaced assumed the same path, but note the reach is
+// not the same: it ran only under the Scripts workflow, while this runs on
+// every `go test ./...`, so the precondition widened along with the coverage.
+func stubbedDatePATH(t *testing.T) string {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create stub bin directory: %v", err)
+	}
+
+	const shim = `#!/bin/sh
+if [ "$1" = "+%s" ]; then
+  printf '%s\n' "$DATE_NOW_STUB"
+  exit 0
+fi
+echo "date stub: refusing 'date $*'; this stub models only the report step's 'date +%s'" >&2
+exit 127
+`
+	// #nosec G306 -- a shim is reachable through PATH only if it is
+	// executable, and this one is written into a t.TempDir() the test owns.
+	if err := os.WriteFile(filepath.Join(dir, "date"), []byte(shim), 0o700); err != nil {
+		t.Fatalf("write date stub: %v", err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// countErrorAnnotations counts the workflow-command lines GitHub renders as
+// check annotations. Counted rather than merely searched for, because two
+// branches annotating at once reports two causes for one failure.
+func countErrorAnnotations(output string) int {
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		// GitHub accepts both spellings, and this workflow uses each: the gate
+		// emits a bare `::error::message` and the report step emits
+		// `::error title=…::message`. Matching the `::error` prefix alone would
+		// also count a line beginning `::errored`, which is not a workflow
+		// command — so require the delimiter that ends the command name.
+		if strings.HasPrefix(line, "::error::") || strings.HasPrefix(line, "::error ") {
+			count++
+		}
+	}
+	return count
+}
+
+// TestClaudeReviewBudgetFitsInsideTheJobCap pins the two numbers the report
+// step's message rests on. Neither is inside a run: block, so executing a step
+// cannot reach either.
+func TestClaudeReviewBudgetFitsInsideTheJobCap(t *testing.T) {
+	t.Parallel()
+
+	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
+	budgetMinutes := claudeReviewMinutes(t, claudeReviewBudgetEnv, job.Env[claudeReviewBudgetEnv])
+	jobCapMinutes := claudeReviewMinutes(t, claudeReviewJobID+" job timeout-minutes", job.TimeoutMinutes)
+	reviewStepCap := claudeReviewStep(t, job, claudeReviewRunStepName).TimeoutMinutes
+
+	// The single-source-of-truth property: the cap that stops the review and
+	// the budget its annotation names must be the same number, or the message
+	// can claim a budget that never fired. Anchored to the review step rather
+	// than matched anywhere in the file, so the expression appearing on some
+	// other step cannot satisfy it.
+	wantCap := "${{ fromJSON(env." + claudeReviewBudgetEnv + ") }}"
+	if got, _ := reviewStepCap.(string); got != wantCap {
+		t.Errorf("%s timeout-minutes = %#v, want %q — a cap that does not derive from %s lets the report step name a budget that stopped nothing",
+			claudeReviewRunStepName, reviewStepCap, wantCap, claudeReviewBudgetEnv)
+	}
+
+	// The job cap must clear the review budget by more than the steps around
+	// the review can cost, or the job is canceled before the review step can
+	// fail — and a canceled job runs nothing, so nothing reports. Worst case
+	// measured from the workflow, in seconds:
+	//
+	//   30   job setup + fetch-depth:0 checkout + origin preparation
+	//   60   checkout's internal retry, when it fires
+	//   92   Publish and verify terminal Claude review: three `timeout 30s` gh
+	//        calls — pull request refresh, comment POST, read-back
+	//   ---
+	//   182  = 3m02s, rounded up to a 4-minute floor
+	//
+	// Raise this alongside the cap if the surrounding steps grow; it is a
+	// floor on the gap, not a prediction of it.
+	const minHeadroomMinutes = 4
+
+	if headroom := jobCapMinutes - budgetMinutes; headroom < minHeadroomMinutes {
+		t.Errorf("job cap %dm leaves %dm over the %dm review budget, under the %dm floor; too thin for setup, checkout retry and verify",
+			jobCapMinutes, headroom, budgetMinutes, minHeadroomMinutes)
 	}
 }
 
@@ -460,18 +693,12 @@ func anchorOccurrences(condition, expression string) []string {
 func claudeReviewRawSteps(t *testing.T) []string {
 	t.Helper()
 
-	// #nosec G304 -- a checked-in workflow file name, fixed by a constant.
-	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", claudeCodeReviewWorkflow))
-	if err != nil {
-		t.Fatalf("read %s: %v", claudeCodeReviewWorkflow, err)
-	}
-
 	var raw struct {
 		Jobs map[string]struct {
 			Steps []map[string]any `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := yaml.Unmarshal(readWorkflowBytes(t, claudeCodeReviewWorkflow), &raw); err != nil {
 		t.Fatalf("parse %s: %v", claudeCodeReviewWorkflow, err)
 	}
 
@@ -521,7 +748,7 @@ func TestClaudeReviewKeepsItsSecurityProperties(t *testing.T) {
 
 	// PR-authored files never enter this workspace: the checkout takes the
 	// default branch, and the review reads the pull request through GitHub MCP.
-	checkout := claudeReviewStep(t, &job, claudeReviewCheckoutStepName)
+	checkout := claudeReviewStep(t, job, claudeReviewCheckoutStepName)
 	if !strings.HasPrefix(checkout.Uses, checkoutActionPrefix) {
 		t.Errorf("%s uses = %q, want an %s action", claudeReviewCheckoutStepName, checkout.Uses, checkoutActionPrefix)
 	}
@@ -532,8 +759,8 @@ func TestClaudeReviewKeepsItsSecurityProperties(t *testing.T) {
 		t.Errorf("checkout persist-credentials = %v, want false — the review origin is credential-free and the steps assert it stayed that way", got)
 	}
 
-	review := claudeReviewStep(t, &job, claudeReviewRunStepName)
-	assertClaudeReviewToolAccess(t, &review)
+	review := claudeReviewStep(t, job, claudeReviewRunStepName)
+	assertClaudeReviewToolAccess(t, review)
 }
 
 // assertClaudeReviewToolAccess holds the review to read-only GitHub MCP. The
@@ -605,7 +832,7 @@ func claudeArgsToolList(t *testing.T, args, flag string) []string {
 	return tools
 }
 
-func claudeReviewJob(t *testing.T, workflow githubWorkflow) githubJob {
+func claudeReviewJob(t *testing.T, workflow githubWorkflow) *githubJob {
 	t.Helper()
 
 	job, ok := workflow.Jobs[claudeReviewJobID]
@@ -629,19 +856,38 @@ func claudeReviewStepScript(t *testing.T, name string) string {
 	t.Helper()
 
 	job := claudeReviewJob(t, readWorkflow(t, claudeCodeReviewWorkflow))
-	return claudeReviewStep(t, &job, name).Run
+	return claudeReviewStep(t, job, name).Run
 }
 
-func claudeReviewStep(t *testing.T, job *githubJob, name string) step {
+func claudeReviewStep(t *testing.T, job *githubJob, name string) *step {
 	t.Helper()
 
-	for _, candidate := range job.Steps {
-		if candidate.Name == name {
-			return candidate
+	for i := range job.Steps {
+		if job.Steps[i].Name == name {
+			return &job.Steps[i]
 		}
 	}
 	t.Fatalf("%s job is missing the %q step", claudeReviewJobID, name)
-	return step{}
+	return nil
+}
+
+// claudeReviewMinutes reads a minute count that has to be a literal. The report
+// step compares the budget arithmetically and the job cap is GitHub's own kill
+// timer; neither can take a value computed at run time, and an expression here
+// would leave the headroom floor comparing against something it cannot see.
+//
+// yaml.v3 decodes a bare integer scalar to int, so `13` and `17` pass. A quoted
+// `"17"` decodes to string and is rejected, which is intended rather than
+// incidental: the assertion is that a human can read the number off the
+// workflow, and a quoted cap is a step away from an expression.
+func claudeReviewMinutes(t *testing.T, label string, value any) int {
+	t.Helper()
+
+	minutes, ok := value.(int)
+	if !ok || minutes <= 0 {
+		t.Fatalf("%s = %#v, want a positive integer literal", label, value)
+	}
+	return minutes
 }
 
 // claudeReviewStepRun is one execution of a workflow step's run: block, with

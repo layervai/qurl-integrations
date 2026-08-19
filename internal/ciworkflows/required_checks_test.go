@@ -42,7 +42,16 @@ const (
 
 	// Reusable-workflow calls report as "<caller job> / <inner job>".
 	contextSeparator = " / "
-	aggregateSuffix  = contextSeparator + "required"
+	// The trailing word is requiredJobID (workflow_test.go): every workflow in
+	// requiredWorkflowSpecs names its aggregate "<app> / required", repeating
+	// that job id verbatim after the separator, which is what lets an
+	// aggregate context be recognized by suffix at all. Spelled out rather
+	// than derived from that constant, because what this matches is documented
+	// context names and job `name:` fields — renaming the job id alone would
+	// not move a line in CONTRIBUTING.md. The convention is the aggregate's
+	// alone: the detector beside it is keyed `changes` but displays as
+	// "<app> / detect changes".
+	aggregateSuffix = contextSeparator + "required"
 
 	mergeGroupTrigger = "merge_group"
 	// The posture marker in CONTRIBUTING.md, and its two legal values. It is
@@ -191,32 +200,30 @@ func TestRequiredContextJobsCannotConcludeSkipped(t *testing.T) {
 type requiredContextJob struct {
 	workflow string
 	id       string
-	job      githubJob
+	job      *githubJob
 }
 
-// workflowJobsByDisplayName indexes every job in .github/workflows under the
-// name its check renders as: the job's `name:` when it sets one, its job id
-// otherwise. It keeps the job itself, which workflowReportedContexts discards.
+// jobDisplayName reports the name a job's check renders under: the job's
+// `name:` when it sets one, its job id otherwise. That rule is this file's
+// premise — every documented required context is resolved through it — so it
+// lives here once rather than at each scan that applies it.
+func jobDisplayName(id string, job *githubJob) string {
+	if job.Name != "" {
+		return job.Name
+	}
+	return id
+}
+
+// workflowJobsByDisplayName indexes every job in .github/workflows under its
+// jobDisplayName. It keeps the job itself, which workflowReportedContexts
+// discards.
 func workflowJobsByDisplayName(t *testing.T) map[string][]requiredContextJob {
 	t.Helper()
 
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	byDisplayName := map[string][]requiredContextJob{}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
-			display := job.Name
-			if display == "" {
-				display = id
-			}
+			display := jobDisplayName(id, job)
 			byDisplayName[display] = append(byDisplayName[display], requiredContextJob{workflow: name, id: id, job: job})
 		}
 	}
@@ -367,17 +374,14 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 // either.
 //
 // Flipping to `required` is still not a matter of adding the trigger back
-// everywhere. `claude-review` comes from claudeCodeReviewWorkflow, which is
-// `pull_request_target`-only by design — it holds ANTHROPIC_API_KEY and so must
-// load from the trusted default branch. That trigger, not the job gate, is
-// the property: a merge group never starts the workflow at all, so the context cannot report
-// for a queue entry. It is what the tail of this test pins.
+// everywhere: `claude-review` cannot report for a queue entry until
+// claudeCodeReviewWorkflow is restructured, and no offline check can verify
+// that restructuring for you.
 //
-// Restructuring is more than adding the trigger. The job's steps read
-// `github.event.pull_request` throughout — the head and base SHAs the review
-// is pinned to, the number it publishes against, the draft and fork guards —
-// and a merge group carries none of it. No offline check can verify that half
-// for you.
+// The mechanism and migration constraints are documented beside the assertion
+// at the tail of this test and in CONTRIBUTING.md's "Merge-result checks"
+// section; keep those accounts colocated with the code and contributor guidance
+// rather than restating them here.
 func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 	t.Parallel()
 
@@ -635,12 +639,7 @@ func workflowReportedContexts(t *testing.T) workflowContexts {
 	found := workflowContexts{direct: map[string][]string{}, reusable: map[string][]string{}}
 	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
-			// A check renders under the job's `name:` when it sets one and
-			// under its job id otherwise.
-			display := job.Name
-			if display == "" {
-				display = id
-			}
+			display := jobDisplayName(id, job)
 			if strings.TrimSpace(job.Uses) != "" {
 				found.reusable[display] = append(found.reusable[display], name)
 				continue
