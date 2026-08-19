@@ -71,44 +71,71 @@ const hasFlag = (name) => args.includes(`--${name}`);
 // the target for its whole DURATION_S window issuing zero requests and then
 // prints "Total links minted: 0" as though that were a measurement.
 //
-// getArg hands back the next argv token verbatim, so a flag typed without its
+// The value is the next argv token verbatim, so a flag typed without its
 // value ('--count --location') arrives here as '--location' — while also
 // turning the location leg on. Matching the whole string against digits
 // refuses that, rather than parsing its leading characters.
 //
-// Kept pure, and separate from the constants below, so the suite can cover
-// it: the loops it protects live in runRound, which no test can reach — it is
-// not exported and its only caller is behind `require.main === module`.
+// Kept pure so the suite can cover it: the loops it protects live in
+// runRound, which no test can reach — it is not exported and its only caller
+// is behind `require.main === module`.
 function parsePositiveInt(flag, raw) {
-  const text = String(raw).trim();
-  if (!/^\d+$/.test(text)) {
-    return { error: `--${flag} must be a positive whole number, got ${JSON.stringify(String(raw))}` };
+  const text = String(raw);
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    // Quotes the value as given, not the trimmed one, so '' and '  ' are
+    // visible as themselves rather than as a message that looks truncated.
+    return { error: `--${flag} must be a positive whole number, got ${JSON.stringify(text)}` };
   }
-  const value = Number(text);
+  const value = Number(trimmed);
   if (value === 0) return { error: `--${flag} must be greater than zero` };
   // Past 2^53 the parse stops being exact, so the number the loops would run
-  // on is not the number echoed back to the operator.
-  if (!Number.isSafeInteger(value)) return { error: `--${flag} is too large to be exact: ${text}` };
+  // on is not the number echoed back to the operator. This bounds the parse,
+  // not the workload — a count that is exactly representable can still be far
+  // more than DURATION_S has room for.
+  if (!Number.isSafeInteger(value)) return { error: `--${flag} is too large to be exact: ${trimmed}` };
   return { value };
 }
 
-// Collected rather than thrown: this runs at module load, which the suite
-// reaches through require(), so the exit belongs in main() alongside every
-// other fatal. Collecting also names every bad flag in one pass instead of
-// one per re-run.
-const numericArgErrors = [];
-function positiveIntArg(flag, defaultValue) {
-  const { value, error } = parsePositiveInt(flag, getArg(flag, defaultValue));
-  if (error) {
-    numericArgErrors.push(error);
-    return NaN;
-  }
-  return value;
+// Resolve all three numeric flags from an argv array. Pure and taking argv as
+// a parameter, following resolveGuardInputs above, so the suite covers the
+// wiring and not merely the parser: the constants below are the actual
+// regression surface, and a call site quietly reverted to `parseInt` would
+// leave a green parsePositiveInt behind it.
+//
+// Reads argv directly rather than through getArg, which cannot express the
+// case that matters here. getArg collapses "flag absent" and "flag present
+// with nothing usable after it" onto the same default — so `--count` as the
+// final token, and `--count ""`, both run 100 recipients while the operator
+// believes they asked for something else. Separating those is the whole point
+// of the flag being present.
+function resolveNumericArgs(argv) {
+  const errors = [];
+  const read = (flag, defaultValue) => {
+    const idx = argv.indexOf(`--${flag}`);
+    if (idx === -1) return defaultValue;
+    const raw = argv[idx + 1];
+    if (raw === undefined) {
+      errors.push(`--${flag} was given no value (omit it to use the default of ${defaultValue})`);
+      return NaN;
+    }
+    const { value, error } = parsePositiveInt(flag, raw);
+    if (error) {
+      errors.push(error);
+      return NaN;
+    }
+    return value;
+  };
+  // Collected rather than thrown: this runs at module load, which the suite
+  // reaches through require(), so the exit belongs in main() alongside every
+  // other fatal. Collecting also names every bad flag in one pass instead of
+  // one per re-run.
+  return { count: read('count', 100), durationS: read('duration', 7200), intervalS: read('interval', 60), errors };
 }
 
-const COUNT = positiveIntArg('count', '100');
-const DURATION_S = positiveIntArg('duration', '7200');
-const INTERVAL_S = positiveIntArg('interval', '60');
+const {
+  count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S, errors: numericArgErrors,
+} = resolveNumericArgs(args);
 const FILE_PATH = getArg('file', null);
 const INCLUDE_LOCATION = hasFlag('location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
@@ -587,6 +614,7 @@ if (require.main === module) {
 module.exports = {
   // CLI argument validation
   parsePositiveInt,
+  resolveNumericArgs,
   // Target safety guard
   resolveGuardInputs,
   targetGuardReport,

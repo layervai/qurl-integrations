@@ -33,7 +33,7 @@ const traverseModule = require('@babel/traverse');
 
 const traverse = traverseModule.default || traverseModule;
 
-const { parsePositiveInt } = require('../scripts/loadtest-standalone');
+const { parsePositiveInt, resolveNumericArgs } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
   it.each([
@@ -107,7 +107,65 @@ describe('loadtest numeric flags — values that would run the loops zero times'
   });
 });
 
-describe('loadtest upload — goes through the connector client, not a raw fetch', () => {
+describe('loadtest numeric flags — resolving them from argv', () => {
+  it('falls back to the documented defaults when no flag is given', () => {
+    expect(resolveNumericArgs([])).toEqual({
+      count: 100, durationS: 7200, intervalS: 60, errors: [],
+    });
+  });
+
+  it('reads each flag independently', () => {
+    expect(resolveNumericArgs(['--count', '5', '--duration', '30', '--interval', '2']))
+      .toEqual({ count: 5, durationS: 30, intervalS: 2, errors: [] });
+  });
+
+  it('ignores flags it does not own', () => {
+    expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
+  });
+
+  // The case getArg cannot express: `--count` as the final token has no value
+  // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
+  // the same 100 as not passing the flag at all. Silently running the default
+  // is exactly the "did nothing you asked for, reported success" shape.
+  it('refuses a flag left without a value', () => {
+    const { count, errors } = resolveNumericArgs(['--count']);
+    expect(count).toBeNaN();
+    expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
+  });
+
+  it('refuses an explicitly empty value rather than defaulting', () => {
+    const { count, errors } = resolveNumericArgs(['--count', '']);
+    expect(count).toBeNaN();
+    expect(errors[0]).toContain('got ""');
+  });
+
+  it('refuses the following flag when the value was forgotten', () => {
+    // Consumes '--location' as the value AND leaves the location leg on, so
+    // the run would differ from the one typed in two ways at once.
+    const { count, errors } = resolveNumericArgs(['--count', '--location']);
+    expect(count).toBeNaN();
+    expect(errors[0]).toContain('got "--location"');
+  });
+
+  it('names every bad flag in one pass', () => {
+    // All three print before the exit, so a run with three typos is fixed in
+    // one edit rather than three.
+    const { errors } = resolveNumericArgs(['--count', 'abc', '--duration', '-1', '--interval', '0']);
+    expect(errors).toHaveLength(3);
+    expect(errors.map(e => e.split(' ')[0])).toEqual(['--count', '--duration', '--interval']);
+  });
+
+  it('leaves the valid flags usable when another is wrong', () => {
+    // The errors are fatal in main(), but the resolver must not let one bad
+    // flag corrupt the others' values.
+    const { count, durationS, errors } = resolveNumericArgs(['--count', '50', '--duration', 'nope']);
+    expect(count).toBe(50);
+    expect(durationS).toBeNaN();
+    expect(errors).toHaveLength(1);
+  });
+});
+
+describe('loadtest script — static checks on call sites no test can reach', () => {
   const ast = parser.parse(
     fs.readFileSync(path.join(__dirname, '..', 'scripts', 'loadtest-standalone.js'), 'utf8'),
     { sourceType: 'unambiguous' },
@@ -139,6 +197,21 @@ describe('loadtest upload — goes through the connector client, not a raw fetch
     // here" but "do not open a second door": any fetch in this file is a copy
     // of a request the connector client already owns.
     expect(callsNamed('fetch')).toHaveLength(0);
+  });
+
+  it('parses none of its own numeric arguments', () => {
+    // The regression this file exists for is a call site quietly reverted to
+    // `const COUNT = parseInt(getArg('count', '100'))`. That leaves
+    // parsePositiveInt exported and every unit test above green while the
+    // constants the loops actually read go back to being unvalidated, so the
+    // ban has to be on parseInt itself, not on the parser's internals.
+    expect(callsNamed('parseInt')).toHaveLength(0);
+  });
+
+  it('resolves its numeric flags in one place', () => {
+    // Fails closed if a fourth numeric flag is added with its own ad-hoc
+    // parse instead of going through the resolver.
+    expect(callsNamed('resolveNumericArgs')).toHaveLength(1);
   });
 
   it('uploads through reUploadBuffer', () => {
