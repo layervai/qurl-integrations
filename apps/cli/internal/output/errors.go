@@ -53,11 +53,18 @@ func renderErrorLines(p *Printer, err error) []string {
 }
 
 // connectorErrorLines is the customer-language translation of the Connector
-// lifecycle sentinels: a plain-language headline, the operator-facing detail
-// (the wrapped error text, which stays technical and is where env names and
-// reasons live), and the one §17.1 hint. The token-required posture omits the
-// detail block — its headline and hint already carry everything the wrapped
-// message says.
+// lifecycle sentinels and of qurl-go's enrollment/assignment taxonomy: a
+// plain-language headline, the operator-facing detail (the wrapped error text,
+// which stays technical and is where env names and reasons live), and the one
+// §17.1 hint. Two postures omit the detail block — token-required, whose
+// headline and hint already carry everything the wrapped message says, and
+// request-rejected, whose SDK text prescribes the wrong remedy in SDK
+// vocabulary (see its case).
+//
+// Every case matches with errors.Is, so a sentinel keeps rendering after the
+// enroll/refresh path wraps it (`refresh native assignment binding: %w`) or
+// after the SDK returns it inside an *AssignmentError. A mapping that only
+// fired on a bare sentinel would be dead code on the real path.
 func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 	headline, hint, includeDetail := "", "", true
 	switch {
@@ -77,6 +84,49 @@ func connectorErrorLines(p *Printer, head string, err error) ([]string, bool) {
 		headline, hint = msgConnectorHubConfig, hintConnectorHubConfig
 	case supervisor.IsTooManyKnockFailures(err):
 		headline, hint = msgConnectorRetryBudget, hintConnectorRetryBudget
+
+	// qurl-go's assignment taxonomy comes last so the CLI's own lifecycle
+	// reading always wins: agent.ErrRefreshAlreadyAttempted, for one, is
+	// joined with the warm-open cause and therefore also matches
+	// ErrAssignmentLeaseExpired below.
+	case errors.Is(err, qurl.ErrAssignmentBootstrapConsumed):
+		headline, hint = msgConnectorTokenConsumed, hintConnectorTokenConsumed
+	case errors.Is(err, qurl.ErrAssignmentKeyRejected):
+		headline, hint = msgConnectorTokenRejected, hintConnectorTokenRejected
+	case errors.Is(err, qurl.ErrAssignmentRequestRejected):
+		// The one case that drops the detail block. For 52109 that block is
+		// the SDK's own sentence telling the reader to "correct
+		// WithAgentRuntimeIdentity" — a Go option name, and the wrong remedy
+		// for the enrollment-token mismatch that actually produces this. A
+		// detail that misdirects is worse than no detail; the stable reason
+		// (assignment_request_rejected) is still on the structured log line
+		// that agent.logRegistrationFailure emits, so support keeps it.
+		headline, hint, includeDetail = msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected, false
+	case errors.Is(err, qurl.ErrAssignmentRegistrationDisabled):
+		headline, hint = msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled
+	case errors.Is(err, qurl.ErrAssignmentIdentityRejected):
+		headline, hint = msgConnectorIdentityRejected, hintConnectorIdentityRejected
+	case errors.Is(err, qurl.ErrAssignmentQuotaExceeded):
+		headline, hint = msgConnectorQuotaExceeded, hintConnectorQuotaExceeded
+	case errors.Is(err, qurl.ErrAssignmentRateLimited),
+		errors.Is(err, qurl.ErrAssignmentUnavailable),
+		errors.Is(err, qurl.ErrAssignmentReassignmentRequired),
+		errors.Is(err, qurl.ErrAssignmentRecoveryRequired):
+		// One story, four sentinels: the platform could not place this
+		// Connector and the next step is the same for all of them. The
+		// rate-limited member carries a RetryAfter, which is deliberately not
+		// printed: the SDK already honors it inside the bounded operation, so
+		// by the time this renders the wait has been spent and quoting it
+		// would ask the customer to wait it a second time.
+		headline, hint = msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable
+	case errors.Is(err, qurl.ErrAssignmentLeaseExpired):
+		// Ordering trap: AgentAssignment.Validate wraps an expired lease with
+		// BOTH ErrAssignmentInvalidResponse and ErrAssignmentLeaseExpired, so
+		// the narrower lease case must be tested first or every expiry would
+		// render as a platform-contract violation.
+		headline, hint = msgConnectorAssignmentExpired, hintConnectorAssignmentExpired
+	case errors.Is(err, qurl.ErrAssignmentInvalidResponse):
+		headline, hint = msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid
 	default:
 		return nil, false
 	}

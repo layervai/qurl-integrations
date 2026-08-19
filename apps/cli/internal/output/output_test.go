@@ -13,6 +13,7 @@ import (
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 )
 
 func lookupFrom(env map[string]string) func(string) (string, bool) {
@@ -265,6 +266,143 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	// Fields render sorted.
 	if strings.Index(rendered, "alias:") > strings.Index(rendered, "target_url:") {
 		t.Errorf("invalid fields not sorted:\n%s", rendered)
+	}
+}
+
+// TestConnectorAssignmentRenderings is the customer-language contract for
+// qurl-go's enrollment/assignment taxonomy. Every row is asserted twice —
+// bare, and wrapped the way the enroll/refresh path really wraps it — because
+// a mapping that only fires on a bare sentinel is dead code on the real path:
+// agent.registerRuntime returns the SDK's *AssignmentError as-is and
+// refreshRuntime wraps it with "refresh native assignment binding: %w".
+func TestConnectorAssignmentRenderings(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		headline string
+		hint     string
+	}{
+		{"bootstrap consumed", qurl.ErrAssignmentBootstrapConsumed, msgConnectorTokenConsumed, hintConnectorTokenConsumed},
+		{"key rejected", qurl.ErrAssignmentKeyRejected, msgConnectorTokenRejected, hintConnectorTokenRejected},
+		{"request rejected", qurl.ErrAssignmentRequestRejected, msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected},
+		{"registration disabled", qurl.ErrAssignmentRegistrationDisabled, msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled},
+		{"identity rejected", qurl.ErrAssignmentIdentityRejected, msgConnectorIdentityRejected, hintConnectorIdentityRejected},
+		{"quota exceeded", qurl.ErrAssignmentQuotaExceeded, msgConnectorQuotaExceeded, hintConnectorQuotaExceeded},
+		{"rate limited", qurl.ErrAssignmentRateLimited, msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable},
+		{"unavailable", qurl.ErrAssignmentUnavailable, msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable},
+		{"reassignment required", qurl.ErrAssignmentReassignmentRequired, msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable},
+		{"recovery required", qurl.ErrAssignmentRecoveryRequired, msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable},
+		{"lease expired", qurl.ErrAssignmentLeaseExpired, msgConnectorAssignmentExpired, hintConnectorAssignmentExpired},
+		{"invalid response", qurl.ErrAssignmentInvalidResponse, msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, shape := range []struct {
+				label string
+				err   error
+			}{
+				{"bare", tc.err},
+				{"wrapped", fmt.Errorf("refresh native assignment binding: %w", tc.err)},
+				{"double wrapped", fmt.Errorf("open Connector runtime: %w", fmt.Errorf("native registration: %w", tc.err))},
+			} {
+				var buf bytes.Buffer
+				RenderError(&buf, shape.err, false)
+				got := buf.String()
+				if !strings.Contains(got, tc.headline) {
+					t.Errorf("%s: headline missing\nwant: %s\ngot:\n%s", shape.label, tc.headline, got)
+				}
+				if !strings.Contains(got, tc.hint) {
+					t.Errorf("%s: hint missing\nwant: %s\ngot:\n%s", shape.label, tc.hint, got)
+				}
+			}
+		})
+	}
+}
+
+// TestConnectorAssignmentOrdering pins the two overlaps that a naive switch
+// order would render wrongly, because in both the SDK (or the CLI) matches two
+// sentinels at once.
+func TestConnectorAssignmentOrdering(t *testing.T) {
+	// AgentAssignment.Validate wraps an expired lease with BOTH
+	// ErrAssignmentInvalidResponse and ErrAssignmentLeaseExpired. The lease
+	// reading has to win, or every expiry reads as a platform-contract fault.
+	t.Run("expired lease beats invalid response", func(t *testing.T) {
+		both := fmt.Errorf("%w: assignment lease must be in the future: %w",
+			qurl.ErrAssignmentInvalidResponse, qurl.ErrAssignmentLeaseExpired)
+		var buf bytes.Buffer
+		RenderError(&buf, both, false)
+		if !strings.Contains(buf.String(), msgConnectorAssignmentExpired) {
+			t.Errorf("want the expiry headline, got:\n%s", buf.String())
+		}
+		if strings.Contains(buf.String(), msgConnectorAssignmentInvalid) {
+			t.Errorf("the contract-violation headline must not win:\n%s", buf.String())
+		}
+	})
+
+	// agent.ErrRefreshAlreadyAttempted is joined with its warm-open cause, so
+	// it can carry an assignment sentinel too. The CLI's lifecycle reading is
+	// the more specific one and must win.
+	t.Run("CLI lifecycle beats the SDK sentinel it carries", func(t *testing.T) {
+		joined := errors.Join(
+			fmt.Errorf("%w in this failure episode", agent.ErrRefreshAlreadyAttempted),
+			fmt.Errorf("warm-open after attempted refresh: %w", qurl.ErrAssignmentLeaseExpired),
+		)
+		var buf bytes.Buffer
+		RenderError(&buf, joined, false)
+		if !strings.Contains(buf.String(), msgConnectorRefreshExhausted) {
+			t.Errorf("want the refresh-exhausted headline, got:\n%s", buf.String())
+		}
+	})
+}
+
+// TestConnectorRequestRejectedDropsSDKRemedy is the regression guard for the
+// reported defect: the 52109 rendering must not put the SDK's own sentence —
+// which names a Go option and prescribes the wrong fix — in front of a
+// customer. The detail block is suppressed for exactly this case.
+func TestConnectorRequestRejectedDropsSDKRemedy(t *testing.T) {
+	// The shape the live sandbox Hub produced: the SDK's error text, wrapped.
+	sdkText := "qurl: native Hub assignment request rejected (52109); " +
+		"correct WithAgentRuntimeIdentity or the Hub request contract before retrying"
+	live := fmt.Errorf("%s: %w", sdkText, qurl.ErrAssignmentRequestRejected)
+
+	var buf bytes.Buffer
+	RenderError(&buf, live, false)
+	got := buf.String()
+
+	if !strings.Contains(got, msgConnectorEnrollmentRejected) {
+		t.Errorf("want the customer headline, got:\n%s", got)
+	}
+	for _, banned := range []string{"WithAgentRuntimeIdentity", "request contract", "52109"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("SDK vocabulary %q reached the customer surface:\n%s", banned, got)
+		}
+	}
+}
+
+// TestEveryConnectorMessageIsRegistered guards the jargon gate's reach: a
+// headline or hint that renders but is missing from CustomerMessages is never
+// checked for jargon by cmd's gate.
+func TestEveryConnectorMessageIsRegistered(t *testing.T) {
+	registered := map[string]bool{}
+	for _, msg := range CustomerMessages() {
+		registered[msg] = true
+	}
+	rendered := []string{
+		msgConnectorTokenConsumed, hintConnectorTokenConsumed,
+		msgConnectorTokenRejected, hintConnectorTokenRejected,
+		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,
+		msgConnectorEnrollmentDisabled, hintConnectorEnrollmentDisabled,
+		msgConnectorIdentityRejected, hintConnectorIdentityRejected,
+		msgConnectorQuotaExceeded, hintConnectorQuotaExceeded,
+		msgConnectorAssignmentUnavailable, hintConnectorAssignmentUnavailable,
+		msgConnectorAssignmentInvalid, hintConnectorAssignmentInvalid,
+		msgConnectorAssignmentExpired, hintConnectorAssignmentExpired,
+	}
+	for _, msg := range rendered {
+		if !registered[msg] {
+			t.Errorf("message not registered in CustomerMessages, so the jargon gate never sees it: %q", msg)
+		}
 	}
 }
 

@@ -275,6 +275,54 @@ func connectorSentinelCode(err error) (int, bool) {
 		// before this, so an exhaustion whose final cause was the user's own
 		// interrupt still exits 130.
 		return Unavailable, true
+
+	// qurl-go's enrollment/assignment taxonomy. It is tested after the CLI's
+	// own lifecycle sentinels above so the CLI's reading wins wherever both
+	// match — agent.ErrRefreshAlreadyAttempted is joined with its warm-open
+	// cause and can therefore also carry ErrAssignmentLeaseExpired.
+	case errors.Is(err, qurl.ErrAssignmentKeyRejected),
+		errors.Is(err, qurl.ErrAssignmentBootstrapConsumed),
+		errors.Is(err, qurl.ErrAssignmentIdentityRejected):
+		// The enrollment token is this surface's credential, and all three of
+		// these are the platform refusing the credential or the identity it
+		// vouches for — the Auth row's "the service rejected the credential",
+		// the same row agent.ErrEnrollmentTokenRequired takes for its absence.
+		return Auth, true
+	case errors.Is(err, qurl.ErrAssignmentRequestRejected):
+		// 52205/52109 reject the request itself rather than the credential:
+		// "an operand or request the service rejected as invalid" is the
+		// InvalidInput row verbatim. Not Auth — the token can be perfectly
+		// valid and simply belong to another Connector.
+		return InvalidInput, true
+	case errors.Is(err, qurl.ErrAssignmentRegistrationDisabled),
+		errors.Is(err, qurl.ErrAssignmentQuotaExceeded):
+		// Both are standing entitlement refusals: the platform will not do
+		// this for this account, and no amount of waiting or retyping changes
+		// it. Forbidden is the honest row. Quota deliberately does NOT take
+		// RateLimited — that code tells a script the work will succeed if it
+		// waits, which for a plan limit is false.
+		return Forbidden, true
+	case errors.Is(err, qurl.ErrAssignmentRateLimited):
+		// Checked before the Unavailable family below because a recovery
+		// error wraps its final cause: an exhausted budget whose last answer
+		// was 52204 is exactly the RateLimited row's "still rate limited
+		// after the transport's bounded retries".
+		return RateLimited, true
+	case errors.Is(err, qurl.ErrAssignmentUnavailable),
+		errors.Is(err, qurl.ErrAssignmentReassignmentRequired),
+		errors.Is(err, qurl.ErrAssignmentRecoveryRequired),
+		errors.Is(err, qurl.ErrAssignmentLeaseExpired):
+		// The platform could not place this Connector, or its assignment
+		// lapsed and could not be renewed: "cannot be reached or is not
+		// serving this surface". Kin to ErrRefreshAlreadyAttempted's row.
+		// ErrAssignmentLeaseExpired is matched here, before the invalid
+		// response below, because Validate wraps an expired lease with both.
+		return Unavailable, true
+	case errors.Is(err, qurl.ErrAssignmentInvalidResponse):
+		// An authenticated producer-contract violation is the service
+		// "answered outside its contract" — the ServerError row, and terminal
+		// by the SDK's own design.
+		return ServerError, true
 	default:
 		return 0, false
 	}

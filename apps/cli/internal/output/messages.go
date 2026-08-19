@@ -120,6 +120,87 @@ const (
 	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
 
 	hintConnectorHubConfig = "Hint: production builds ship this configuration built in — install an official qURL release, or for a custom deployment set QURL_CONNECTOR_HUB_HOST, QURL_CONNECTOR_HUB_PORT, and QURL_CONNECTOR_HUB_SERVER_PUBLIC_KEY_B64 together."
+
+	// Enrollment and platform-assignment renderings for the qurl-go
+	// assignment taxonomy. Without these the SDK's own text reaches the
+	// terminal, and that text is written for SDK callers: it names Go
+	// identifiers and prescribes remedies ("correct WithAgentRuntimeIdentity")
+	// that no CLI customer can act on. Each headline says what the platform
+	// decided, in the same "platform assignment" vocabulary the refresh
+	// messages above already use, and each hint is the one next step.
+
+	// msgConnectorTokenConsumed renders qurl.ErrAssignmentBootstrapConsumed
+	// (52108).
+	msgConnectorTokenConsumed = "The enrollment token this machine presented has already been used. Enrollment tokens work exactly once."
+
+	// hintConnectorTokenConsumed leads with the fresh-token step, then guards
+	// the common second cause: a machine that already enrolled does not need a
+	// token at all, and clearing its state directory to "start clean" throws
+	// away the identity it earned.
+	hintConnectorTokenConsumed = "Hint: create a new enrollment token in the qURL console, set QURL_CONNECTOR_TOKEN to it, and run the command again. If this machine already enrolled once, it doesn't need a token — its Connector identity lives in the state directory, so check --state-dir points there instead of clearing it."
+
+	// msgConnectorTokenRejected renders qurl.ErrAssignmentKeyRejected (52106).
+	msgConnectorTokenRejected = "The qURL platform didn't accept this machine's enrollment token."
+
+	// hintConnectorTokenRejected names the causes the customer can actually
+	// check — the token is opaque, so none of them are visible locally.
+	hintConnectorTokenRejected = "Hint: the token may be mistyped, expired, revoked, or created for a different qURL environment than the endpoint this command is using. Create a new enrollment token in the qURL console, set QURL_CONNECTOR_TOKEN to it, and run the command again."
+
+	// msgConnectorEnrollmentRejected renders
+	// qurl.ErrAssignmentRequestRejected (52205 or 52109).
+	msgConnectorEnrollmentRejected = "The qURL platform refused this Connector's enrollment request."
+
+	// hintConnectorEnrollmentRejected names the dominant real cause: a token
+	// minted for a different Connector than the one --id names.
+	hintConnectorEnrollmentRejected = "Hint: this usually means the enrollment token was created for a different Connector than the one --id names. Create a new enrollment token for this Connector in the qURL console, set QURL_CONNECTOR_TOKEN to it, and run the command again."
+
+	// msgConnectorEnrollmentDisabled renders
+	// qurl.ErrAssignmentRegistrationDisabled (52107).
+	msgConnectorEnrollmentDisabled = "The qURL platform isn't accepting new Connector enrollments here right now."
+
+	// hintConnectorEnrollmentDisabled says the quiet part: this is a
+	// platform-side switch, so retrying or re-minting a token changes nothing.
+	hintConnectorEnrollmentDisabled = "Hint: enrollment is turned off on the platform side, so no change on this machine — including a new token — will change the answer. Ask your qURL administrator to enable Connector enrollment for this account, then run the command again."
+
+	// msgConnectorIdentityRejected renders
+	// qurl.ErrAssignmentIdentityRejected (52201). Distinct from
+	// msgConnectorIdentityConflict, which is a purely local disagreement: this
+	// one is the platform refusing the identity that was presented.
+	msgConnectorIdentityRejected = "The qURL platform refused the Connector identity this machine presented."
+
+	hintConnectorIdentityRejected = "Hint: the stored identity may have been removed from your account, or LAYERV_AGENT_ID may name an identity this account doesn't own. Remove that override if you set it; otherwise enroll this machine again with a new enrollment token and a fresh --state-dir."
+
+	// msgConnectorQuotaExceeded renders qurl.ErrAssignmentQuotaExceeded
+	// (52203).
+	msgConnectorQuotaExceeded = "Your qURL account has reached its limit on enrolled Connectors, so this machine can't be added."
+
+	hintConnectorQuotaExceeded = "Hint: retire a Connector you no longer use in the qURL console, or ask your qURL administrator to raise the limit, then run the command again."
+
+	// msgConnectorAssignmentUnavailable renders the four sentinels whose
+	// customer story and next step are identical — the platform could not
+	// place this Connector right now: qurl.ErrAssignmentUnavailable (52200),
+	// ErrAssignmentRateLimited (52204), ErrAssignmentReassignmentRequired
+	// (52202), and ErrAssignmentRecoveryRequired (the bounded budget ran out).
+	// They keep separate exit codes, which is where a script reads the
+	// difference.
+	msgConnectorAssignmentUnavailable = "The qURL platform couldn't give this Connector its platform assignment right now — it's busy, moving capacity, or briefly unreachable from this machine."
+
+	hintConnectorAssignmentUnavailable = "Hint: this is usually temporary and nothing on this machine needs to change. Run `qurl connector run` again in a few minutes; if it keeps happening, check this machine's outbound network access and contact LayerV support."
+
+	// msgConnectorAssignmentInvalid renders
+	// qurl.ErrAssignmentInvalidResponse: the platform answered outside its
+	// own contract. Terminal by design — retrying an answer that failed
+	// validation could conceal a platform deployment fault.
+	msgConnectorAssignmentInvalid = "The qURL platform answered this Connector's enrollment request in a way this version can't accept, so it stopped instead of guessing."
+
+	hintConnectorAssignmentInvalid = "Hint: this is a problem on the qURL platform side, not on this machine, and running the command again won't clear it. Contact LayerV support with the detail above."
+
+	// msgConnectorAssignmentExpired renders qurl.ErrAssignmentLeaseExpired.
+	// The Connector normally renews this itself, so reaching the terminal
+	// means the renewal did not happen.
+	msgConnectorAssignmentExpired = "This Connector's qURL platform assignment has expired and wasn't renewed."
+
+	hintConnectorAssignmentExpired = "Hint: run `qurl connector run` again — a Connector renews its own assignment at startup. If it keeps expiring, check this machine's clock and its outbound network access."
 )
 
 // CustomerMessages returns every fixed customer-facing string this package
@@ -164,5 +245,23 @@ func CustomerMessages() []string {
 		hintConnectorRetryBudget,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
+		msgConnectorTokenConsumed,
+		hintConnectorTokenConsumed,
+		msgConnectorTokenRejected,
+		hintConnectorTokenRejected,
+		msgConnectorEnrollmentRejected,
+		hintConnectorEnrollmentRejected,
+		msgConnectorEnrollmentDisabled,
+		hintConnectorEnrollmentDisabled,
+		msgConnectorIdentityRejected,
+		hintConnectorIdentityRejected,
+		msgConnectorQuotaExceeded,
+		hintConnectorQuotaExceeded,
+		msgConnectorAssignmentUnavailable,
+		hintConnectorAssignmentUnavailable,
+		msgConnectorAssignmentInvalid,
+		hintConnectorAssignmentInvalid,
+		msgConnectorAssignmentExpired,
+		hintConnectorAssignmentExpired,
 	}
 }
