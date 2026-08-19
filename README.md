@@ -120,9 +120,13 @@ is modified.
 That pattern is itself under test. `internal/ciworkflows` reads every file in
 `.github/workflows` and fails when a workflow grows a `required` aggregate with no registered
 spec, leaves a quality gate out of `required.needs`, ships a verifier that treats a skipped gate
-as a pass, or makes the contract check conditional. Its check — `Workflow Contract` — is
-unfiltered and reports on every PR and merge group, because a check behind a paths filter cannot
-police the paths filters (#1081).
+as a pass, or makes the contract check conditional. It records base-branch filters the same way:
+every workflow triggered by a pull request pins its intended `branches:`, so one that gates merges
+cannot narrow to `main`, and one already narrow cannot quietly start gating. Same mechanism as the
+paths filter above — a workflow filtered off PRs stacked on a feature branch never registers its
+checks, so a required context there waits forever instead of failing (#1183). Its check —
+`Workflow Contract` — is unfiltered and reports on every PR and merge group, because a check
+behind a paths filter cannot police the paths filters (#1081).
 
 ## License
 
