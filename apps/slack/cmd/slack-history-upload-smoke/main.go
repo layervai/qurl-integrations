@@ -241,10 +241,24 @@ func prepareScanConfig(cfg *scanConfig) error {
 // difference between an actionable error and a guessing game once -token-env has been
 // pointed somewhere custom.
 //
-// The two nolints below are gosec's taint analysis reaching a flag value that reaches
-// an io.Writer. There is no XSS sink here — stderr on a CLI is not a browser — and
-// slacksmoke.IsEnvVarName has already constrained the value to a POSIX environment
-// variable name before it gets this far, so it cannot carry a control character either.
+// The two nolints below suppress a G705 false positive that never actually looks at the
+// flag value. gosec taints the result of any call that received a tainted argument, and
+// parseFlags takes stderr and args, which main sources from os.Stderr (an *os.File) and
+// os.Args[1:] — rooted in two of G705's configured sources, and taint follows the
+// slice. So every value in its return tuple arrives tainted; a returned compile-time
+// constant would too. The write is safe on its own terms anyway: stderr on a CLI is not
+// a browser, and slacksmoke.IsEnvVarName has already constrained the value to a POSIX
+// environment variable name before it gets this far, so it cannot carry a control
+// character either.
+//
+// That is gosec v2.23.0, the version golangci-lint v2.10.1 pins. By gosec v2.26.1 (in
+// golangci-lint v2.12.x) the finding is gone, at which point nolintlint fails these two
+// lines as unused instead. Delete both directives and this paragraph then, along with
+// the slack-dm-smoke mirror's account of why it carries none — that copy's refactor
+// caveat is guarded on the pinned linter still reporting G705, so it lapses on its own.
+//
+// The slack-dm-smoke mirror of this function deliberately carries no directives, for the
+// reason documented there.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, slacksmoke.ErrMissingBotToken):
