@@ -99,7 +99,7 @@ jobs:
         run: |
           select_fallback_mirrors() {
             local status
-            echo "::warning::Switching Linux package downloads away from the slow Azure mirror"
+            echo "::warning::Switching Linux package downloads away from the default package mirror"
             # TODO(upstream-contract): actions/runner-images routes apt through
             # /etc/apt/apt-mirrors.txt and configure-apt-sources.sh writes one
             # URI plus a tab-delimited priority on each mirror-list line.
@@ -139,6 +139,9 @@ jobs:
                 # A slow-but-responsive Azure endpoint does not trigger apt's
                 # own failover, so make the official Ubuntu mirrors explicit
                 # before the one remaining bounded attempt.
+                # If timeout had to kill apt mid-transaction, the retry may
+                # still fail on package-manager state; its bounds keep that
+                # failure local and legible on this ephemeral runner.
                 if ! select_fallback_mirrors; then
                   return 1
                 fi
@@ -159,11 +162,11 @@ jobs:
           # release packages, and an `apt-get update` would add a second
           # unbounded fetch through the same stalling mirror.
           if ! command -v envsubst >/dev/null 2>&1 || ! command -v shellcheck >/dev/null 2>&1; then
-            install_shell_tool_packages
+            install_shell_tool_packages || exit "$?"
           fi
-          for command in envsubst shellcheck; do
-            if ! command -v "$command" >/dev/null 2>&1; then
-              echo "::error::Shell tool setup completed without required command: ${command}"
+          for tool in envsubst shellcheck; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::Shell tool setup completed without required command: ${tool}"
               exit 1
             fi
           done
