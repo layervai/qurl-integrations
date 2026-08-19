@@ -194,29 +194,27 @@ type requiredContextJob struct {
 	job      githubJob
 }
 
-// workflowJobsByDisplayName indexes every job in .github/workflows under the
-// name its check renders as: the job's `name:` when it sets one, its job id
-// otherwise. It keeps the job itself, which workflowReportedContexts discards.
+// jobDisplayName reports the name a job's check renders under: the job's
+// `name:` when it sets one, its job id otherwise. That rule is this file's
+// premise — every documented required context is resolved through it — so it
+// lives here once rather than at each scan that applies it.
+func jobDisplayName(id string, job *githubJob) string {
+	if job.Name != "" {
+		return job.Name
+	}
+	return id
+}
+
+// workflowJobsByDisplayName indexes every job in .github/workflows under its
+// jobDisplayName. It keeps the job itself, which workflowReportedContexts
+// discards.
 func workflowJobsByDisplayName(t *testing.T) map[string][]requiredContextJob {
 	t.Helper()
 
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	byDisplayName := map[string][]requiredContextJob{}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
-			display := job.Name
-			if display == "" {
-				display = id
-			}
+			display := jobDisplayName(id, &job)
 			byDisplayName[display] = append(byDisplayName[display], requiredContextJob{workflow: name, id: id, job: job})
 		}
 	}
@@ -635,12 +633,7 @@ func workflowReportedContexts(t *testing.T) workflowContexts {
 	found := workflowContexts{direct: map[string][]string{}, reusable: map[string][]string{}}
 	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
-			// A check renders under the job's `name:` when it sets one and
-			// under its job id otherwise.
-			display := job.Name
-			if display == "" {
-				display = id
-			}
+			display := jobDisplayName(id, &job)
 			if strings.TrimSpace(job.Uses) != "" {
 				found.reusable[display] = append(found.reusable[display], name)
 				continue

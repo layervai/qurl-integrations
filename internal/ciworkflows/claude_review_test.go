@@ -460,11 +460,7 @@ func anchorOccurrences(condition, expression string) []string {
 func claudeReviewRawSteps(t *testing.T) []string {
 	t.Helper()
 
-	// #nosec G304 -- a checked-in workflow file name, fixed by a constant.
-	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", claudeCodeReviewWorkflow))
-	if err != nil {
-		t.Fatalf("read %s: %v", claudeCodeReviewWorkflow, err)
-	}
+	data := readWorkflowBytes(t, claudeCodeReviewWorkflow)
 
 	var raw struct {
 		Jobs map[string]struct {
