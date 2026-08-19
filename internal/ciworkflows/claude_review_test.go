@@ -1,11 +1,13 @@
 package ciworkflows
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // claude-code-review.yml carries a required context and cannot validate its own
@@ -110,13 +112,14 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 
 	// The reporting paths exist so a missing review can never read as a passing
 	// one. A restructure that drops either is the failure they guard against.
-	for _, name := range []string{claudeReviewReportStepName, claudeReviewPublishStepName} {
-		step := claudeReviewStep(t, &job, name)
-		if step.ContinueOnError != nil {
-			t.Errorf("%s sets continue-on-error = %v; a swallowed failure here is the silent pass this workflow reports on", name, step.ContinueOnError)
+	report := claudeReviewStep(t, &job, claudeReviewReportStepName)
+	publish := claudeReviewStep(t, &job, claudeReviewPublishStepName)
+	for _, reporter := range []step{report, publish} {
+		if reporter.ContinueOnError != nil {
+			t.Errorf("%s sets continue-on-error = %v; a swallowed failure here is the silent pass this workflow reports on", reporter.Name, reporter.ContinueOnError)
 		}
 	}
-	if publish := claudeReviewStep(t, &job, claudeReviewPublishStepName); publish.ID != claudeReviewPublishStepID {
+	if publish.ID != claudeReviewPublishStepID {
 		t.Errorf("%s id = %q, want %q — the gate reads this step's outcome to decide whether a review was published", claudeReviewPublishStepName, publish.ID, claudeReviewPublishStepID)
 	}
 }
@@ -134,24 +137,26 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 	script := claudeReviewStepScript(t, claudeReviewEligibilityStepName)
 
 	tests := []struct {
-		name          string
-		author        string
-		draft         string
+		name   string
+		author string
+		draft  string
+		// wantExemption "" means the pull request is reviewable; eligible is
+		// derived from it below rather than restated per row, since only one
+		// value is ever legal for a given exemption.
 		headRepo      string
 		baseRepo      string
-		wantEligible  string
 		wantExemption string
 	}{
-		{name: "human ready same-repo pull request is reviewed", author: "User", draft: "false", headRepo: repo, baseRepo: repo, wantEligible: "true"},
-		{name: "organization author is reviewed", author: "Organization", draft: "false", headRepo: repo, baseRepo: repo, wantEligible: "true"},
-		{name: "bot author is exempt", author: "Bot", draft: "false", headRepo: repo, baseRepo: repo, wantEligible: "false", wantExemption: "bot"},
-		{name: "draft is exempt", author: "User", draft: "true", headRepo: repo, baseRepo: repo, wantEligible: "false", wantExemption: "draft"},
-		{name: "fork head is exempt", author: "User", draft: "false", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantEligible: "false", wantExemption: "fork"},
-		{name: "foreign base is exempt", author: "User", draft: "false", headRepo: repo, baseRepo: "outsider/qurl-integrations", wantEligible: "false", wantExemption: "fork"},
+		{name: "human ready same-repo pull request is reviewed", author: "User", draft: "false", headRepo: repo, baseRepo: repo},
+		{name: "organization author is reviewed", author: "Organization", draft: "false", headRepo: repo, baseRepo: repo},
+		{name: "bot author is exempt", author: "Bot", draft: "false", headRepo: repo, baseRepo: repo, wantExemption: "bot"},
+		{name: "draft is exempt", author: "User", draft: "true", headRepo: repo, baseRepo: repo, wantExemption: "draft"},
+		{name: "fork head is exempt", author: "User", draft: "false", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "fork"},
+		{name: "foreign base is exempt", author: "User", draft: "false", headRepo: repo, baseRepo: "outsider/qurl-integrations", wantExemption: "fork"},
 		// Precedence: a bot can never receive this review, while a draft only
 		// waits for one, so the most durable reason is the one reported.
-		{name: "bot outranks fork and draft", author: "Bot", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantEligible: "false", wantExemption: "bot"},
-		{name: "fork outranks draft", author: "User", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantEligible: "false", wantExemption: "fork"},
+		{name: "bot outranks fork and draft", author: "Bot", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "bot"},
+		{name: "fork outranks draft", author: "User", draft: "true", headRepo: "outsider/qurl-integrations", baseRepo: repo, wantExemption: "fork"},
 	}
 
 	for _, tc := range tests {
@@ -168,8 +173,12 @@ func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 			if run.err != nil {
 				t.Fatalf("eligibility step failed: %v\noutput:\n%s", run.err, run.combined)
 			}
-			if got := run.outputs["eligible"]; got != tc.wantEligible {
-				t.Errorf("eligible = %q, want %q\noutput:\n%s", got, tc.wantEligible, run.combined)
+			wantEligible := "true"
+			if tc.wantExemption != "" {
+				wantEligible = "false"
+			}
+			if got := run.outputs["eligible"]; got != wantEligible {
+				t.Errorf("eligible = %q, want %q\noutput:\n%s", got, wantEligible, run.combined)
 			}
 			if got := run.outputs["exemption"]; got != tc.wantExemption {
 				t.Errorf("exemption = %q, want %q\noutput:\n%s", got, tc.wantExemption, run.combined)
@@ -225,10 +234,7 @@ func TestClaudeReviewEligibilityFailsClosedOnAnUnreadablePullRequest(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			env := make(map[string]string, len(base))
-			for key, value := range base {
-				env[key] = value
-			}
+			env := maps.Clone(base)
 			env[tc.key] = tc.value
 
 			run := runClaudeReviewStep(t, script, env)
@@ -329,6 +335,115 @@ func TestClaudeReviewGateRefusesAnEmptyPass(t *testing.T) {
 	}
 }
 
+// TestClaudeReviewHoldsEverySecretBearingStepBehindTheChain guards the one
+// property this restructuring actually traded away.
+//
+// Before it, a bot or fork pull request was held off by the job never starting
+// — the job-level `if:` was itself the defense. The job now always starts, so
+// that defense is entirely the step-level guards chaining back to the
+// eligibility verdict. The workflow comment claims "every later step already
+// chains off its outcome"; this is what makes the claim true rather than
+// aspirational.
+//
+// Written as a rule over anchors rather than a list of step names, so a step
+// nobody has written yet is covered too. That matters here more than usual:
+// this workflow runs on `pull_request_target`, so a pull request adding an
+// unguarded secret-bearing step gets a green `claude-review` from the default
+// branch's copy of the file, which says nothing about the step it added.
+func TestClaudeReviewHoldsEverySecretBearingStepBehindTheChain(t *testing.T) {
+	t.Parallel()
+
+	job := claudeReviewJob(t, readWorkflow(t, claudeReviewWorkflow))
+	raw := claudeReviewRawSteps(t)
+	if len(raw) != len(job.Steps) {
+		t.Fatalf("parsed %d steps but %d raw steps; the two views disagree", len(job.Steps), len(raw))
+	}
+
+	// Reaching any of these means the step cannot run until the eligibility
+	// step declared the pull request reviewable: the checkout is the only
+	// consumer of the verdict, and everything else keys off the checkout or off
+	// a step that does.
+	anchors := []string{
+		"steps.eligibility.outputs.eligible",
+		"steps.checkout.outcome",
+		"steps.review_origin.outputs.ready",
+		"steps.claude-review.outcome",
+	}
+	chained := func(condition string) bool {
+		for _, anchor := range anchors {
+			if strings.Contains(condition, anchor) {
+				return true
+			}
+		}
+		return false
+	}
+
+	sawSecret := false
+	for i := range job.Steps {
+		current := &job.Steps[i]
+		// The eligibility step is the root of the chain and the conclusion gate
+		// is deliberately outside it; both are pinned by
+		// TestClaudeReviewConcludesOnEveryPullRequest.
+		isRoot, isGate := i == 0, i == len(job.Steps)-1
+		if !isRoot && !isGate && !chained(current.If) {
+			t.Errorf("step %q has if: %q, which reaches none of %v — a step that does not chain back to the eligibility verdict runs on bot and fork pull requests, which this job no longer withholds by skipping",
+				current.Name, current.If, anchors)
+		}
+		if !strings.Contains(raw[i], "secrets.") {
+			continue
+		}
+		sawSecret = true
+		if isRoot || isGate || !chained(current.If) {
+			t.Errorf("step %q reads a secret but its if: %q does not chain back to the eligibility verdict; on a fork or bot pull request that spends the secret on untrusted input",
+				current.Name, current.If)
+		}
+	}
+
+	// Without a secret-bearing step to find, the loop above proves nothing
+	// about secrets — and this job exists to run one.
+	if !sawSecret {
+		t.Error("no step in the claude-review job references secrets.; this assertion matched nothing and would pass however the guards were edited")
+	}
+}
+
+// claudeReviewRawSteps re-reads the workflow as untyped YAML and renders each
+// step of the claude-review job back to text. The typed `step` struct models
+// only the fields these tests assert on, so a secret reaching the job through a
+// key it does not model would be invisible; this sees every key.
+func claudeReviewRawSteps(t *testing.T) []string {
+	t.Helper()
+
+	// #nosec G304 -- a checked-in workflow file name, fixed by a constant.
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", claudeReviewWorkflow))
+	if err != nil {
+		t.Fatalf("read %s: %v", claudeReviewWorkflow, err)
+	}
+
+	var raw struct {
+		Jobs map[string]struct {
+			Steps []map[string]any `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse %s: %v", claudeReviewWorkflow, err)
+	}
+
+	steps := raw.Jobs[claudeReviewJobID].Steps
+	if len(steps) == 0 {
+		t.Fatalf("%s job has no raw steps", claudeReviewJobID)
+	}
+
+	rendered := make([]string, 0, len(steps))
+	for _, current := range steps {
+		text, err := yaml.Marshal(current)
+		if err != nil {
+			t.Fatalf("render step: %v", err)
+		}
+		rendered = append(rendered, string(text))
+	}
+	return rendered
+}
+
 // TestClaudeReviewKeepsItsSecurityProperties pins what the restructuring was
 // not allowed to cost. This job holds ANTHROPIC_API_KEY and runs on
 // `pull_request_target`, where the trigger's own defense is that the workflow
@@ -393,13 +508,11 @@ func assertClaudeReviewToolAccess(t *testing.T, review *step) {
 		"mcp__github__create_or_update_file", "mcp__github__push_files",
 		"mcp__github__delete_file", "mcp__github__add_issue_comment",
 	}
-	denied := claudeArgsToolList(t, args, "--disallowed-tools")
-	sort.Strings(wantDenied)
-	got := append([]string(nil), denied...)
-	sort.Strings(got)
-	if strings.Join(got, ",") != strings.Join(wantDenied, ",") {
-		t.Errorf("--disallowed-tools = %v, want %v", got, wantDenied)
-	}
+	// assertSameContexts reports which tool moved and on which side, rather
+	// than leaving a reader to eyeball-diff two 18-element dumps.
+	assertSameContexts(t,
+		"the deny-list this review is pinned to", wantDenied,
+		`claude_args --disallowed-tools`, claudeArgsToolList(t, args, "--disallowed-tools"))
 
 	// Read-only by construction rather than by enumeration: a new reader can be
 	// added without touching this test, but a writer cannot.
@@ -452,8 +565,11 @@ func claudeReviewJob(t *testing.T, workflow githubWorkflow) githubJob {
 	if !ok {
 		t.Fatalf("%s is missing the %s job; that job id is the required context's name", claudeReviewWorkflow, claudeReviewJobID)
 	}
-	// The check renders under the job id only while the job sets no name, and
-	// branch protection matches the context case-sensitively.
+	// The check renders under the job id only while the job sets no name.
+	// TestDocumentedRequiredContextsResolveToWorkflowJobs would also catch a
+	// respelling, since `claude-review` is in CONTRIBUTING.md's required-context
+	// block; this fatal exists so the lookups below fail with the cause rather
+	// than with a missing step.
 	if job.Name != "" {
 		t.Fatalf("%s job sets name = %q, which respells the required context away from %q", claudeReviewJobID, job.Name, claudeReviewJobID)
 	}
@@ -506,16 +622,13 @@ func runClaudeReviewStep(t *testing.T, script string, env map[string]string) cla
 		}
 	}
 
-	stepEnv := make(map[string]string, len(env)+2)
-	for key, value := range env {
-		stepEnv[key] = value
-	}
-	// Set last because os/exec's dedupEnv keeps the *last* duplicate, so these
-	// override a real runner's own values when this test runs inside Actions.
-	// The mechanism is Go's, not the shell's — a libc getenv would take the
-	// first. Nothing rests on getting that right, though: a step that wrote to
-	// the ambient file instead would read back empty here, which fails loudly
-	// rather than passing.
+	stepEnv := maps.Clone(env)
+	// These beat a real runner's own GITHUB_OUTPUT when the suite runs inside
+	// Actions: runVerifierScriptWithEnv appends the whole map after
+	// os.Environ(), and os/exec keeps the last duplicate. Assigning them here
+	// rather than in the loop only shuts out a caller-supplied override, which
+	// no caller passes. Nothing subtle rests on either: a step that wrote to
+	// the ambient file would read back empty here and fail loudly.
 	stepEnv["GITHUB_OUTPUT"] = outputPath
 	stepEnv["GITHUB_STEP_SUMMARY"] = summaryPath
 
