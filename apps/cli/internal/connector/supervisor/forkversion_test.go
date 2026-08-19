@@ -46,6 +46,11 @@ var commentWrap = regexp.MustCompile(`\n\s*//\s*`)
 // they cite is the version in the build. A bump then fails here, and the
 // failure is the prompt to re-verify each claim against the new fork before
 // updating the string.
+//
+// Expect four sites, not the three a plain grep reports: one marker wraps
+// between the module path and the version, so only the commentWrap pass below
+// sees it. Do not "correct" that count from grep output — mutate the wrapped
+// marker's version instead and watch this test name the file.
 func TestForkContractMarkersNameThePinnedForkVersion(t *testing.T) {
 	t.Parallel()
 

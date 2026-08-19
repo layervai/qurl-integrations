@@ -119,7 +119,9 @@ func (s *hermeticLogSink) Write(p []byte) (int, error) {
 	return s.buf.Write(p)
 }
 
-// countEvent returns how many records carried the given event field.
+// countEvent returns how many records carried the given event field. It reads
+// the raw JSON, so it is coupled to the handler wired at the call site being
+// slog's JSON one; a switch to a text handler makes every count silently zero.
 func (s *hermeticLogSink) countEvent(event string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
