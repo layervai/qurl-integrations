@@ -438,7 +438,9 @@ async function runRound(roundNum) {
     // two trailing parameters are deliberately omitted — apiKey falls back to
     // config.QURL_API_KEY, which is what the hand-rolled header read, and
     // appendViewerTtl drops viewerTtlSeconds unless it is positive-finite, so
-    // leaving it off puts a byte-identical form on the wire.
+    // leaving it off sends the same single `file` part, under the same
+    // filename and content type, that the hand-rolled form did. What is new
+    // is the timeout and the two response checks.
     const uploadStart = performance.now();
     const uploadResult = await reUploadBuffer(
       fileBuffer,
