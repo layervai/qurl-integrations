@@ -7,7 +7,8 @@
  *   --count N      Recipients per round (default: 100)
  *   --duration S   Total duration in seconds (default: 7200 = 2 hours)
  *   --interval S   Seconds between rounds (default: 60)
- *   --file PATH    Local file to upload (default: generates a 1MB test file)
+ *   --file PATH    Local file to upload (default: generates a 1MB test payload
+ *                  in memory — nothing is written to disk)
  *   --location     Include a location link in each round
  *   --allow-production
  *                  Run anyway when a target is refused by the guard below.
@@ -41,6 +42,13 @@
  *   but throws on the first bad flag — forfeiting "name every bad flag in one
  *   pass" — and rejects `--count -5` as an ambiguous option rather than as
  *   the bad count it is.
+ *
+ * Load shape:
+ *   The file leg mirrors a real send's mintLinksInBatches: a resource's token
+ *   pool is TOKENS_PER_RESOURCE deep, so it re-uploads each time the pool
+ *   drains. --count N therefore issues ceil(N / TOKENS_PER_RESOURCE) uploads
+ *   and the same number of mint calls per round — 10 of each at the default
+ *   --count 100. See planMintBatches below.
  *
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
@@ -84,6 +92,11 @@ if (require.main === module && fs.existsSync(envFile)) {
 const config = require('../src/config');
 const { mintLinks, reUploadBuffer } = require('../src/connector');
 const { createOneTimeLink } = require('../src/qurl');
+
+// The same pool depth the send pipeline batches against — imported, not
+// copied, so a change to the cap reaches this script instead of silently
+// leaving it issuing a different number of uploads than a real send.
+const { TOKENS_PER_RESOURCE } = require('../src/constants');
 
 const args = process.argv.slice(2);
 
@@ -336,7 +349,7 @@ function resolveBooleanArgs(argv) {
 // in three directions here: a non-numeric value gives NaN, a negative one is
 // returned intact, and with no radix '0x64' reads as 100 while '1e9'
 // truncates to 1. NaN and negatives converge on the worst outcome — every
-// loop a round runs is bounded by COUNT, the file leg's `i += 10` batches and
+// loop a round runs is bounded by COUNT, the file leg's batch plan and
 // the location leg's `i++` alike, so none of them enter. The run then holds
 // the target for its whole DURATION_S window issuing zero requests and prints
 // "Total links minted: 0" as though that were a measurement.
@@ -663,6 +676,12 @@ function resolveArgErrors(argv, check = checkUploadFile) {
   return errors;
 }
 
+// The values only. Both resolvers run again inside resolveArgErrors, which is
+// where the errors are read — they are discarded here on purpose, because
+// nothing may act on them until main() has printed them and exited. A bad
+// flag therefore cannot reach the loops through a NaN left in one of these
+// constants: main() re-resolves and exits before runRound is ever called.
+// Both resolvers are pure, so resolving twice costs an argv scan.
 const {
   count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
@@ -670,11 +689,36 @@ const { filePath: FILE_PATH } = resolveFileArg(args);
 const { includeLocation: INCLUDE_LOCATION } = resolveBooleanArgs(args);
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
-async function generateTestFile() {
-  const tmpPath = path.join('/tmp', `loadtest-${Date.now()}.bin`);
-  const buf = Buffer.alloc(1024 * 1024, 'A'); // 1MB
-  fs.writeFileSync(tmpPath, buf);
-  return tmpPath;
+// The auto-generated payload is byte-identical on every round — `Buffer.alloc`
+// fills a fixed length with a fixed byte — and the upload filename comes from
+// `loadtest-round<n>.bin` at the call site, never from the path. So the
+// round-trip through the filesystem this replaced bought nothing: it wrote a
+// fresh 1MB file into /tmp every round, read it straight back into a buffer,
+// and never removed it. Over a default 2h run at a 60s interval that is ~120
+// files and ~120MB left behind, on the one code path here designed to be
+// started and walked away from — a plausible way to fill the filesystem
+// during exactly the long soak this script exists to run.
+//
+// Allocated once and reused, so the footprint is 1MB per process rather than
+// 1MB per round, and there is no cleanup to get wrong: no unlink to skip on a
+// throw, nothing left behind on SIGINT, and no /tmp write at all. A
+// caller-supplied --file is still read from disk each round in runRound —
+// that is the only case with a path to read.
+//
+// Every round gets the same Buffer *reference*, which is safe only because
+// rounds are strictly sequential (main awaits each runRound before the next)
+// and the one consumer, reUploadBuffer, reads the buffer without mutating it.
+// Both hold today; a future change that overlaps rounds or hands this to a
+// mutating consumer needs a per-round copy instead.
+//
+// Allocated lazily rather than at module load so that neither a --file run
+// nor the test suite's require() of this module pays for 1MB it never uses.
+let generatedPayload = null;
+function generateTestPayload() {
+  if (generatedPayload === null) {
+    generatedPayload = Buffer.alloc(1024 * 1024, 'A'); // 1MB
+  }
+  return generatedPayload;
 }
 
 // Reuse the shared parser — it has the overflow protection that this
@@ -911,19 +955,27 @@ function isTargetAuthorized(target, { allowProdFlag, allowProdEnv }) {
  */
 function resolveGuardInputs(env, argv) {
   return {
-    // Exact token, deliberately. `--allow-production=1` is refused as a
-    // malformed flag by resolveBooleanArgs above, before main() reaches the
-    // guard at all; should that check ever be bypassed, reading the flag as
-    // absent here is the fail-closed answer — the guard refuses the target
-    // rather than clearing it.
+    // Through the shared boolean reader like --location, rather than an
+    // inline includes: the two boolean flags reading argv two different ways
+    // was the residual of a split #1174 removed, and this is the one that
+    // gates a production-target override.
     //
-    // Note the two reads scan different arrays: this one gets the whole
-    // process.argv, resolveBooleanArgs gets args (process.argv.slice(2)).
-    // They cannot disagree about this token, because the two extra entries
-    // are the node binary and the RESOLVED ABSOLUTE script path, and neither
-    // an equality against `--allow-production` nor a `--allow-production=`
-    // prefix can match an absolute path.
-    allowProdFlag: argv.includes('--allow-production'),
+    // `.value === true` is what carries that forward now that the reader can
+    // refuse. On the refused path it returns `{ error }` with no `value`, so
+    // `--allow-production=1` reads as ABSENT here — fail-closed, the guard
+    // refusing the target rather than clearing it. The operator still gets a
+    // message, because resolveBooleanArgs checks the same flag's SHAPE and
+    // main() exits on that before ever reaching the guard. The error this
+    // call would have produced is dropped on purpose: reporting it twice is
+    // worse than reporting it once, and this is the value read, not the
+    // report.
+    //
+    // Note this scans the whole process.argv while resolveBooleanArgs scans
+    // args (process.argv.slice(2)). They cannot disagree about this token:
+    // the two extra entries are the node binary and the RESOLVED ABSOLUTE
+    // script path, and neither an equality against `--allow-production` nor a
+    // `--allow-production=` prefix can match an absolute path.
+    allowProdFlag: readBooleanFlag(argv, 'allow-production').value === true,
     allowProdEnv: env.LOADTEST_ALLOW_PRODUCTION === '1',
     ...parseTargetAllowlist(env.LOADTEST_TARGET_HOSTS),
   };
@@ -977,14 +1029,48 @@ function targetGuardReport({ targets, allowlistErrors = [], allowProdFlag, allow
   return { refused, blocked, lines, warnings, fatal: lines.length > 0 };
 }
 
+/**
+ * Batch plan for minting `count` links against a token pool `tokensPerResource`
+ * deep — the load-test mirror of mintLinksInBatches in ../src/commands.js.
+ *
+ * Extracted as a pure function because scripts/ sits outside this app's jest
+ * `collectCoverageFrom`, so loop logic left inline here is unenforced. The plan
+ * is data, so tests/loadtest-mint-batches.test.js can pin it without a
+ * connector; runRound below only executes it.
+ *
+ * `reupload: true` marks every batch after the first, because the initial
+ * resource arrives with a full pool and each batch drains it. That reproduces
+ * mintLinksInBatches' `tokensUsed >= TOKENS_PER_RESOURCE && i > 0` guard: only
+ * the final batch can be short, so at every i > 0 the previous batch was full
+ * and tokensUsed has already reached the cap — the two conditions collapse into
+ * `i > 0`. Kept as an explicit per-batch flag so the mirror stays legible if
+ * the batcher's guard ever stops being equivalent.
+ *
+ * @param {number} count — links to mint across the whole plan.
+ * @param {number} [tokensPerResource] — pool depth; defaults to TOKENS_PER_RESOURCE.
+ * @returns {Array<{size: number, reupload: boolean}>} — empty when count <= 0.
+ *   Fractional counts are not gated here (0.5 plans one batch of 0.5); the
+ *   CLI can't produce one, since parsePositiveInt admits only whole numbers.
+ */
+function planMintBatches(count, tokensPerResource = TOKENS_PER_RESOURCE) {
+  const batches = [];
+  for (let i = 0; i < count; i += tokensPerResource) {
+    batches.push({ size: Math.min(tokensPerResource, count - i), reupload: i > 0 });
+  }
+  return batches;
+}
+
 async function runRound(roundNum) {
   const roundStart = performance.now();
-  const results = { fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0, uploadMs: 0, mintMs: 0, locMs: 0 };
+  const results = {
+    fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0,
+    uploadMs: 0, mintMs: 0, locMs: 0,
+    reuploads: 0, reuploadFail: 0, reuploadMs: 0,
+  };
 
   // File pipeline
   if (FILE_PATH || !INCLUDE_LOCATION) {
-    const filePath = FILE_PATH || await generateTestFile();
-    const fileBuffer = fs.readFileSync(filePath);
+    const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
     // Upload through the bot's own connector client rather than a hand-rolled
     // fetch. The copy this replaced put the same multipart body on the wire
@@ -1010,28 +1096,78 @@ async function runRound(roundNum) {
     // leaving it off sends the same single `file` part, under the same
     // filename and content type, that the hand-rolled form did. What is new
     // is the timeout and the two response checks.
+    //
+    // Deliberately NOT wrapped, unlike the re-upload leg below: a failure here
+    // leaves nothing to mint against at all, so there is no partial round to
+    // salvage — it throws out of runRound, main reports the round FAILED and
+    // it never reaches allResults. The leg below states its own opposite
+    // policy and why. Don't "harmonize" the two.
+    //
+    // Hoisted: the re-upload leg below registers each fresh resource under
+    // the same filename, so a round's resources are one named series.
+    const uploadName = `loadtest-round${roundNum}.bin`;
     const uploadStart = performance.now();
     const uploadResult = await reUploadBuffer(
       fileBuffer,
-      `loadtest-round${roundNum}.bin`,
+      uploadName,
       'application/octet-stream',
     );
     results.uploadMs = performance.now() - uploadStart;
 
-    // Mint links in batches of 10
-    const mintStart = performance.now();
+    // Mint a pool at a time, re-uploading once each pool drains — the shape a
+    // real send takes through mintLinksInBatches (../src/commands.js).
+    //
+    // The re-upload leg is what makes this leg generate real load: reusing one
+    // resource_id for every batch spends the initial pool on batch 1 and takes
+    // `quota_exceeded` for the rest. tests/loadtest-mint-batches.test.js has
+    // the full regression narrative and the numbers.
     const expiresAt = expiryToISO('24h');
-    for (let i = 0; i < COUNT; i += 10) {
-      const batchSize = Math.min(10, COUNT - i);
-      try {
-        await mintLinks(uploadResult.resource_id, { expiresAt, n: batchSize });
-        results.fileLinks += batchSize;
-      } catch (e) {
-        if (results.fileFail === 0) console.error(`  File mint error: ${e.message}`);
-        results.fileFail += batchSize;
+    let currentResourceId = uploadResult.resource_id;
+    // Own flag rather than reusing fileFail as the "have we logged yet?"
+    // signal: a failed re-upload charges fileFail too, so keying the mint log
+    // off it would swallow the first mint error on any round where a
+    // re-upload failed first — losing exactly the diagnostic that explains
+    // what went wrong on the round most in need of one.
+    let mintErrorLogged = false;
+    for (const batch of planMintBatches(COUNT)) {
+      if (batch.reupload) {
+        const reStart = performance.now();
+        let re = null;
+        try {
+          re = await reUploadBuffer(fileBuffer, uploadName, 'application/octet-stream');
+        } catch (e) {
+          if (results.reuploadFail === 0) console.error(`  File re-upload error: ${e.message}`);
+          results.reuploadFail++;
+        }
+        results.reuploadMs += performance.now() - reStart;
+        // The previous resource's pool is spent, so there is nothing left to
+        // mint against — charge this batch as failed and keep going. That
+        // costs one batch per failed upload instead of abandoning the round,
+        // so a transient connector blip doesn't truncate the run.
+        if (!re) {
+          results.fileFail += batch.size;
+          continue;
+        }
+        currentResourceId = re.resource_id;
+        results.reuploads++;
       }
+
+      const mintStart = performance.now();
+      try {
+        await mintLinks(currentResourceId, { expiresAt, n: batch.size });
+        results.fileLinks += batch.size;
+      } catch (e) {
+        if (!mintErrorLogged) {
+          console.error(`  File mint error: ${e.message}`);
+          mintErrorLogged = true;
+        }
+        results.fileFail += batch.size;
+      }
+      // Accumulated per batch rather than wrapped around the loop, so
+      // re-upload time stays out of the mint figure — otherwise the new leg
+      // would silently inflate reported mint latency.
+      results.mintMs += performance.now() - mintStart;
     }
-    results.mintMs = performance.now() - mintStart;
   }
 
   // Location pipeline
@@ -1116,7 +1252,22 @@ async function main() {
       allResults.push(results);
 
       let line = `[${elapsed}s] Round ${round}: `;
-      if (results.fileLinks > 0) line += `file(upload=${results.uploadMs.toFixed(0)}ms mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
+      // Reported whenever the file leg ran at all, not just on success: a
+      // round whose re-uploads all failed has fileLinks === 0, and the old
+      // `fileLinks > 0` gate would have printed nothing for it.
+      if (results.fileLinks > 0 || results.fileFail > 0) {
+        // reup= counts attempts over time-spent-on-attempts: reuploadMs
+        // accumulates outside the try/catch, so counting only successes would
+        // put a numerator and denominator from different populations on one
+        // field. reupFail= names the failed subset. Both segments drop out
+        // when there is nothing to say — at --count <= TOKENS_PER_RESOURCE the
+        // plan is a single batch, so a bare `reup=0/0ms` would be pure noise.
+        const reupAttempts = results.reuploads + results.reuploadFail;
+        line += `file(upload=${results.uploadMs.toFixed(0)}ms `
+          + (reupAttempts > 0 ? `reup=${reupAttempts}/${results.reuploadMs.toFixed(0)}ms ` : '')
+          + (results.reuploadFail > 0 ? `reupFail=${results.reuploadFail} ` : '')
+          + `mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
+      }
       if (results.locLinks > 0) line += `location(${results.locMs.toFixed(0)}ms ok=${results.locLinks} fail=${results.locFail}) `;
       line += `total=${(results.totalMs / 1000).toFixed(1)}s`;
       console.log(line);
@@ -1145,6 +1296,26 @@ async function main() {
       const avgUpload = allResults.reduce((s, r) => s + r.uploadMs, 0) / allResults.length;
       const avgMint = allResults.reduce((s, r) => s + r.mintMs, 0) / allResults.length;
       console.log(`Avg upload: ${avgUpload.toFixed(0)}ms, avg mint: ${avgMint.toFixed(0)}ms`);
+      // Uploads per round is the headline number for whether this test
+      // reproduces a real send's load: one initial upload plus one re-upload
+      // per drained pool, i.e. ceil(COUNT / TOKENS_PER_RESOURCE) in total.
+      //
+      // Counts only rounds that got that far. A failed INITIAL upload throws
+      // the round out before it reaches allResults, so unlike reupFail= those
+      // failures are invisible here — they are already reported as `Round N
+      // FAILED` above, and a round with no resource has nothing to tally.
+      const reuploads = allResults.reduce((s, r) => s + r.reuploads, 0);
+      const reuploadFail = allResults.reduce((s, r) => s + r.reuploadFail, 0);
+      const reuploadMs = allResults.reduce((s, r) => s + r.reuploadMs, 0);
+      console.log(`Uploads: ${allResults.length + reuploads} ok (${allResults.length} initial + ${reuploads} re-upload)`
+        + (reuploadFail > 0 ? `, ${reuploadFail} re-upload failed` : ''));
+      // Gated on attempts, not successes: a run whose every re-upload failed
+      // still spent time on them, and a failure that sat on the connector's
+      // timeout is exactly the latency worth seeing. Averaged over attempts
+      // for the same reason the round line counts them.
+      if (reuploads + reuploadFail > 0) {
+        console.log(`Avg re-upload: ${(reuploadMs / (reuploads + reuploadFail)).toFixed(0)}ms`);
+      }
     }
   }
 }
@@ -1168,6 +1339,19 @@ module.exports = {
   resolveUnknownArgs,
   checkUploadFile,
   resolveArgErrors,
+  // Mint batching / token pool
+  planMintBatches,
+  TOKENS_PER_RESOURCE,
+  // The round itself. Exported for tests/loadtest-round-accounting.test.js:
+  // planMintBatches covers the batch *plan*, but the per-round accounting
+  // wrapped around it — which counter a failed re-upload charges, and which
+  // latency lands in which figure — is stateful, lives here, and is reachable
+  // no other way. main() is behind `require.main === module` and scripts/ is
+  // outside jest's collectCoverageFrom, so without this line nothing enforces
+  // any of it. The test stubs ../src/connector; the call sites below stay
+  // exactly as written, which is what keeps the AST assertions in
+  // tests/loadtest-silent-failure.test.js meaningful.
+  runRound,
   // Target safety guard
   resolveGuardInputs,
   targetGuardReport,

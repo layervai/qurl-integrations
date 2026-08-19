@@ -19,7 +19,7 @@
  *     off. One rule refuses all of them, and the flag table it reads is the
  *     thing this half mostly guards.
  *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
- *     round runs — the file leg's `i += 10` batches and the location leg's
+ *     round runs — the file leg's batch plan and the location leg's
  *     `i++` alike — so the script holds the target for its full duration
  *     issuing no requests and reports "Total links minted: 0".
  *   - The --file flag. Defaulting sends a generated 1MB payload instead of
@@ -52,7 +52,7 @@ const traverse = traverseModule.default || traverseModule;
 const {
   FLAGS, flagSpec, readFlag, readBooleanFlag, resolveBooleanArgs,
   parsePositiveInt, resolveNumericArgs, resolveFileArg, resolveUnknownArgs,
-  checkUploadFile, resolveArgErrors,
+  checkUploadFile, resolveArgErrors, resolveGuardInputs,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -575,6 +575,27 @@ describe('loadtest boolean flags — resolving them from argv', () => {
     expect(resolveFileArg(['--file', '--location=true']).errors).toHaveLength(1);
   });
 
+  it('reads --allow-production through the same reader as --location', () => {
+    // Carried over from the change that consolidated the guard onto the
+    // shared boolean reader. resolveGuardInputs takes the UNSLICED
+    // process.argv, so this is pinned in that shape too.
+    expect(resolveGuardInputs({}, ['node', 'script.js', '--allow-production']).allowProdFlag).toBe(true);
+    expect(resolveGuardInputs({}, ['node', 'script.js']).allowProdFlag).toBe(false);
+  });
+
+  it('leaves the production override OFF when its shape is refused', () => {
+    // The half that reader could not express before it could refuse. The
+    // previous change pinned `--allow-production=true` reading as absent and
+    // noted it fails SAFE; that is now a refusal, and this asserts the safe
+    // half still holds at the guard — `.value === true` is false on the
+    // refused path, so the target stays refused rather than cleared. The
+    // operator is told why by resolveBooleanArgs, which checks the same
+    // flag's shape and whose error main() exits on before the guard runs.
+    expect(resolveGuardInputs({}, ['node', 'script.js', '--allow-production=true']).allowProdFlag).toBe(false);
+    expect(resolveGuardInputs({}, ['node', 'script.js', '--allow-production=1']).allowProdFlag).toBe(false);
+    expect(resolveBooleanArgs(['--allow-production=true']).errors).toHaveLength(1);
+  });
+
   it('still reads the bare flag when a value-taking flag swallowed at it', () => {
     // `--count --location` is the shape readFlag's own comment calls out: it
     // used to consume `--location` as the value AND leave the leg off, so the
@@ -1064,9 +1085,44 @@ describe('loadtest preflight — the composition main() used to hold inline', ()
     expect(seen).toBe('untouched');
   });
 
-  it('reports every fault in one pass, in command-line order', () => {
-    const errors = resolveArgErrors(['--count', 'abc', '--file', '/x'], () => 'file is bad');
-    expect(errors).toEqual([expect.stringContaining('--count'), 'file is bad']);
+  it('reports every fault in one pass, numeric flags before the file flag', () => {
+    // The order is numeric-then-file, NOT argv order — the concatenation is
+    // fixed and the readability error is appended last. Pinned with --file
+    // typed FIRST, because the obvious argv-order reading of this list is
+    // wrong and only that case can tell the two apart. Cosmetic either way:
+    // every message is fatal and they print together, so the operator fixes
+    // them in one edit.
+    expect(resolveArgErrors(['--file', '', '--count', 'abc'], () => null)).toEqual([
+      expect.stringContaining('--count'),
+      expect.stringContaining('--file'),
+    ]);
+    expect(resolveArgErrors(['--count', 'abc', '--file', '/x'], () => 'file is bad')).toEqual([
+      expect.stringContaining('--count'),
+      'file is bad',
+    ]);
+  });
+
+  it('carries the boolean-flag errors too', () => {
+    // Mutation: dropping `...booleanErrors` from the composition. Every
+    // readBooleanFlag and resolveBooleanArgs case above stays green while
+    // `--location=true` goes back to running the whole window with the leg
+    // off, printing `Location: false` — the exact defect this change removes,
+    // reinstated by one spread. This is the seam that makes it reachable at
+    // all; before resolveArgErrors was extracted it lived in main().
+    expect(resolveArgErrors(['--location=true'], () => null)).toEqual([
+      expect.stringContaining('--location takes no value'),
+    ]);
+    expect(resolveArgErrors(['--allow-production=1'], () => null)).toHaveLength(1);
+  });
+
+  it('names a bad boolean flag alongside a bad numeric one', () => {
+    // The one-pass claim across resolvers rather than within one. Boolean
+    // errors are appended after the numeric and file ones, matching the fixed
+    // concatenation order the test above pins.
+    expect(resolveArgErrors(['--count', 'abc', '--location=1'], () => null)).toEqual([
+      expect.stringContaining('--count'),
+      expect.stringContaining('--location'),
+    ]);
   });
 
   it('defaults to the real readability check', () => {
@@ -1100,17 +1156,25 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return null;
   };
 
-  // Flag tokens hard-coded anywhere in the file, whatever call they sit in.
-  // The shared readers build their token from the flag NAME, so a
-  // `--`-prefixed literal is written only by an ad-hoc read — and the ad-hoc
-  // read is the defect itself. A token built as `` `--${'dry-run'}` `` is a
-  // TemplateLiteral and still escapes; not a plausible accident.
+  // Every `--`-prefixed string literal in the file, in sorted order and
+  // deliberately NOT de-duplicated. The shared readers build their token from
+  // the flag NAME, so a `--`-prefixed literal is written only by an ad-hoc
+  // read or by prose — and the ad-hoc read is the defect itself.
+  //
+  // Keeping duplicates is what lets this catch an ad-hoc read of a flag whose
+  // name already appears for some other reason. De-duplicating collapsed the
+  // two `--allow-production` literals that used to exist — the guard's own
+  // `includes` and the warning text below — into one entry, so a check
+  // asserting that single entry could not have told them apart.
+  //
+  // A token built as `` `--${'dry-run'}` `` is a TemplateLiteral and still
+  // escapes; not a plausible accident.
   const flagLiterals = () => {
     const found = [];
     traverse(ast, {
       StringLiteral(p) { if (/^--\w/.test(p.node.value)) found.push(p.node.value); },
     });
-    return [...new Set(found)].sort();
+    return found.sort();
   };
 
   // Flag names written as a DECLARATION rather than a read. A name in an
@@ -1240,11 +1304,17 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // Matching the LITERAL rather than the call is what makes this
     // independent of which one someone reaches for.
     //
-    // One entry survives, and it is the target guard's own read: deliberately
-    // exact-token and fail-closed, with the SHAPE refused upstream in
-    // resolveBooleanArgs. A third boolean flag added the intended way —
-    // `read('dry-run')` inside resolveBooleanArgs — writes 'dry-run' without
-    // the dashes and leaves this list untouched.
+    // ONE entry, and it is not a read at all: it is the warning text in
+    // targetGuardReport naming which override let a refused target through
+    // (`--allow-production` vs `LOADTEST_ALLOW_PRODUCTION=1`). The guard's own
+    // read used to add a second copy of the same token and no longer does,
+    // now that it goes through the shared reader.
+    //
+    // Because duplicates are kept, that residual prose entry does not become
+    // a hiding place: an ad-hoc `args.includes('--allow-production')` would
+    // make this two entries and fail. A third boolean flag added the intended
+    // way — `read('dry-run')` inside resolveBooleanArgs — writes 'dry-run'
+    // without the dashes and leaves this list alone.
     //
     // The FLAGS table did not change this expectation, which is worth saying
     // because it plainly could have. A table keyed by TOKEN would put five new
@@ -1260,8 +1330,10 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // `/^--\w/` so readFlag's own `'--'` prefix test, the `'--'` refused by
     // resolveUnknownArgs and the `'---'` console divider are not swept up.
     expect(flagLiterals()).toEqual(['--allow-production']);
-    expect(callsNamed('readBooleanFlag')).toHaveLength(1);
-    // Two call sites, like resolveNumericArgs and resolveFileArg above: the
+    // Two call sites: resolveBooleanArgs, and resolveGuardInputs reading the
+    // production override through the same reader rather than its own scan.
+    expect(callsNamed('readBooleanFlag')).toHaveLength(2);
+    // Two as well, like resolveNumericArgs and resolveFileArg above: the
     // module-level constant, and resolveArgErrors re-resolving from the argv
     // it is handed so the whole preflight decision stays reachable.
     expect(callsNamed('resolveBooleanArgs')).toHaveLength(2);
@@ -1307,11 +1379,35 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(preflight).not.toBeNull();
     expect(smokeTest).not.toBeNull();
     expect(preflight).toBeLessThan(smokeTest);
+
+    // And before the target guard, which two comments now lean on: the one at
+    // resolveGuardInputs saying a malformed `--allow-production=1` is refused
+    // "before main() reaches the guard at all", and the one at
+    // resolveBooleanArgs explaining why the shape check lives there rather
+    // than in the guard's own error list. Both are claims about main()'s
+    // ORDER, and nothing pinned that order — reversing these two would leave
+    // every unit test green and both comments quietly false, which in this
+    // file is the costliest kind of defect.
+    //
+    // Behaviour survives the reversal (the guard's read is fail-closed on a
+    // refused flag either way), so this pins the comments, not a bug.
+    const guard = firstInMain('resolveGuardInputs');
+    expect(guard).not.toBeNull();
+    expect(preflight).toBeLessThan(guard);
   });
 
-  it('uploads through reUploadBuffer', () => {
-    // Fails closed if the call disappears or a second one appears unreviewed.
-    expect(callsNamed('reUploadBuffer')).toHaveLength(1);
+  it('uploads through reUploadBuffer, twice and only twice', () => {
+    // Fails closed if a call disappears or a third one appears unreviewed.
+    //
+    // Two, reviewed: the round's initial upload, and the re-upload leg that
+    // runs each time a resource's TOKENS_PER_RESOURCE pool drains. Dropping
+    // the second is the regression tests/loadtest-mint-batches.test.js
+    // documents — every later batch mints against a spent pool.
+    //
+    // Counted rather than located because both calls are the same call: same
+    // callee, same three arguments, same buffer and filename. A check that
+    // told them apart would be asserting on which line they sit.
+    expect(callsNamed('reUploadBuffer')).toHaveLength(2);
   });
 
   it('passes the first three parameters positionally and omits the last two', () => {
@@ -1349,7 +1445,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(params).toEqual([
       'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds',
     ]);
-    expect(callsNamed('reUploadBuffer')[0].arguments).toHaveLength(3);
+    // Every call site, not just the first: the reasoning above is about which
+    // two parameters are being omitted, so it has to hold for the re-upload
+    // leg exactly as it does for the initial upload.
+    const calls = callsNamed('reUploadBuffer');
+    expect(calls).not.toHaveLength(0);
+    for (const call of calls) expect(call.arguments).toHaveLength(3);
   });
 
   it('imports reUploadBuffer from the connector client', () => {
