@@ -109,34 +109,71 @@ func TestRunEmitsTheReportWhenTheContractBreaks(t *testing.T) {
 func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 	t.Parallel()
 
+	// Spelled out rather than deferred to slacksmoke.ErrTokenEnvName: a sentinel sits on
+	// both sides of the comparison and moves with a reword, which would leave this
+	// operator-facing wording pinned nowhere in the repo. The -base-url rows below spell
+	// theirs out for the same reason — slacksmoke states that rule outright on its
+	// timeout sentinels, and these reach stderr the same way, printed as-is.
+	const wantTokenEnvName = "-token-env must be a POSIX environment variable name"
+
 	tests := []struct {
 		name string
 		args []string
 		env  string
+		// wantStderr is compared exactly, against the FIRST LINE of stderr.
+		//
+		// First line rather than the whole stream: the three rows that fail inside
+		// flag.Parse — the unknown flag and both -expect-upload rows — get that
+		// package's ~1.8KB usage block appended after the message. It begins on the
+		// next line, so taking one line keeps it out of the comparison without
+		// inlining the usage text into this table, where every new flag would rewrite
+		// it.
+		//
+		// Exactly rather than a substring match, because an unanchored match lets one
+		// branch's message satisfy a different branch's row. "-timeout must be greater
+		// than 0" is a substring of "-request-timeout must be greater than 0", so under
+		// strings.Contains the zero-timeout row stayed green even when
+		// TimeoutBudget.Validate answered a non-positive -timeout with the wrong
+		// sentinel: the operator is told to fix the flag they did not set, and nothing
+		// fails. Exactness also rejects a message that merely starts the same way, and
+		// it makes an empty wantStderr fail on its own, since no diagnostic here is a
+		// blank line.
+		//
+		// It follows that the two -expect-upload rows spell out that package's "invalid
+		// value ... for flag ..." attribution, which pins the blame on the right flag.
+		wantStderr string
 	}{
-		{"no token in the environment", nil, ""},
-		{"blank token env name", []string{flagTokenEnv, "  "}, testToken},
-		{"token env name with a newline", []string{flagTokenEnv, "SLACK\nTOKEN"}, testToken},
-		{"token env name with a hyphen", []string{flagTokenEnv, "SLACK-TOKEN"}, testToken},
-		{"token env name starting with a digit", []string{flagTokenEnv, "1TOKEN"}, testToken},
-		{"token with control characters", nil, "xoxb-\ntest"},
-		{"user agent with control characters", []string{"-user-agent", "smoke\r\nX: y"}, testToken},
-		{"non-https base url", []string{flagBaseURL, "http://slack.example.com"}, testToken},
-		{"base url with query", []string{flagBaseURL, "https://slack.example.com?a=b"}, testToken},
-		{"base url with userinfo", []string{flagBaseURL, "https://user:pw@slack.example.com"}, testToken},
-		{"unparsable channel id", []string{"-channels", "not-a-channel"}, testToken},
-		{"expect-upload without a timestamp", []string{"-expect-upload", testChannel}, testToken},
-		{"expect-upload with a non-numeric timestamp", []string{"-expect-upload", testChannel + ":yesterday"}, testToken},
-		{"zero timeout", []string{flagTimeout, "0"}, testToken},
-		{"zero request timeout", []string{flagReqTimeout, "0"}, testToken},
-		{"request timeout at the overall budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, testTimeoutSpan}, testToken},
-		{"request timeout too close to the budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, "5s"}, testToken},
-		{"zero conversations", []string{"-max-conversations", "0"}, testToken},
-		{"zero pages", []string{flagMaxPages, "0"}, testToken},
-		{"page limit past Slack's ceiling", []string{"-page-limit", "1001"}, testToken},
-		{"negative threads", []string{"-max-threads", "-1"}, testToken},
-		{"negative min uploads", []string{"-min-uploads", "-1"}, testToken},
-		{"unknown flag", []string{"-nope"}, testToken},
+		{"no token in the environment", nil, "", testTokenEnv + " is not set or is empty"},
+		{"blank token env name", []string{flagTokenEnv, "  "}, testToken, "-token-env is required"},
+		{"token env name with a newline", []string{flagTokenEnv, "SLACK\nTOKEN"}, testToken, wantTokenEnvName},
+		{"token env name with a hyphen", []string{flagTokenEnv, "SLACK-TOKEN"}, testToken, wantTokenEnvName},
+		{"token env name starting with a digit", []string{flagTokenEnv, "1TOKEN"}, testToken, wantTokenEnvName},
+		// This row and "no token in the environment" above are the two //nolint:gosec
+		// branches in writeConfigValidationError, so the echoed env name is part of what
+		// they pin — "missing Slack bot token" without it is a guessing game once
+		// -token-env has been pointed somewhere custom. This branch's text was pinned
+		// nowhere.
+		{"token with control characters", nil, "xoxb-\ntest", testTokenEnv + " contains control characters"},
+		{"user agent with control characters", []string{"-user-agent", "smoke\r\nX: y"}, testToken, "-user-agent contains control characters"},
+		{"non-https base url", []string{flagBaseURL, "http://slack.example.com"}, testToken, "-base-url must use https unless host is localhost or loopback"},
+		{"base url with query", []string{flagBaseURL, "https://slack.example.com?a=b"}, testToken, "-base-url must not include query or fragment"},
+		{"base url with userinfo", []string{flagBaseURL, "https://user:pw@slack.example.com"}, testToken, "-base-url must not include userinfo"},
+		// The one -base-url rejection with no command-level row. slacksmoke's own test
+		// matches this sentinel with errors.Is, so its text was pinned nowhere.
+		{"base url without a scheme", []string{flagBaseURL, "slack.example.com"}, testToken, "invalid -base-url"},
+		{"unparsable channel id", []string{"-channels", "not-a-channel"}, testToken, `invalid conversation ID: "not-a-channel"`},
+		{"expect-upload without a timestamp", []string{"-expect-upload", testChannel}, testToken, `invalid value "` + testChannel + `" for flag -expect-upload: -expect-upload must be CHANNEL:TIMESTAMP`},
+		{"expect-upload with a non-numeric timestamp", []string{"-expect-upload", testChannel + ":yesterday"}, testToken, `invalid value "` + testChannel + `:yesterday" for flag -expect-upload: -expect-upload must be CHANNEL:TIMESTAMP: timestamp "yesterday" is not a Slack ts`},
+		{"zero timeout", []string{flagTimeout, "0"}, testToken, "-timeout must be greater than 0"},
+		{"zero request timeout", []string{flagReqTimeout, "0"}, testToken, "-request-timeout must be greater than 0"},
+		{"request timeout at the overall budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, testTimeoutSpan}, testToken, "-request-timeout must be less than -timeout"},
+		{"request timeout too close to the budget", []string{flagTimeout, testTimeoutSpan, flagReqTimeout, "5s"}, testToken, "-timeout must be at least 3x -request-timeout"},
+		{"zero conversations", []string{"-max-conversations", "0"}, testToken, "-max-conversations must be between 1 and 10000"},
+		{"zero pages", []string{flagMaxPages, "0"}, testToken, "-max-pages must be between 1 and 1000"},
+		{"page limit past Slack's ceiling", []string{"-page-limit", "1001"}, testToken, "-page-limit must be between 1 and 1000"},
+		{"negative threads", []string{"-max-threads", "-1"}, testToken, "-max-threads must not be negative"},
+		{"negative min uploads", []string{"-min-uploads", "-1"}, testToken, "-min-uploads must not be negative"},
+		{"unknown flag", []string{"-nope"}, testToken, "flag provided but not defined: -nope"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -149,8 +186,19 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 			if stdout != "" {
 				t.Errorf("stdout = %q, want nothing written for an invocation error", stdout)
 			}
-			if strings.TrimSpace(stderr) == "" {
-				t.Error("an invocation error must say what was wrong")
+			line, rest, _ := strings.Cut(stderr, "\n")
+			if line != tt.wantStderr {
+				t.Errorf("stderr first line = %q, want exactly %q", line, tt.wantStderr)
+			}
+			// Nothing may follow the diagnostic except the flag package's usage block.
+			// Checking only the first line would otherwise let a regression append a
+			// forged second line — the failure the //nolint:gosec suppressions in
+			// writeConfigValidationError make possible — with the package staying green.
+			// The usage text itself is still not pinned, for the reason given above — but
+			// its header is a fourth piece of stdlib wording this table leans on, and a
+			// Go release rewording it fails the same three rows as the others.
+			if rest != "" && !strings.HasPrefix(rest, "Usage of slack-history-upload-smoke:") {
+				t.Errorf("stderr after the first line = %q, want nothing or the usage block", rest)
 			}
 		})
 	}
@@ -160,8 +208,9 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 // writeConfigValidationError rest on: -token-env is echoed back verbatim in the errors
 // an operator hits first, so parseFlags has to reject a name that is not a POSIX
 // environment variable before any of that echo can run.
-// TestRunRejectsBadInvocationBeforeCallingSlack covers names of this shape, but asserts
-// only exit 2 and a non-empty stderr — which a forged diagnostic satisfies.
+// TestRunRejectsBadInvocationBeforeCallingSlack covers names of this shape and now pins
+// that error's wording, but it compares only the first line of stderr — a forged line
+// appended after a legitimate diagnostic still satisfies it.
 func TestRunDoesNotEchoTokenEnvName(t *testing.T) {
 	t.Parallel()
 
@@ -215,18 +264,6 @@ func TestRunHelpExitsZero(t *testing.T) {
 	}
 	if stdout != "" {
 		t.Errorf("stdout = %q, want the usage on stderr only", stdout)
-	}
-}
-
-// TestRunNamesTheTokenEnvVarItLookedAt pins the one error message an operator hits
-// first. "missing Slack bot token" without the variable name is a guessing game when
-// -token-env has been pointed somewhere custom.
-func TestRunNamesTheTokenEnvVarItLookedAt(t *testing.T) {
-	t.Parallel()
-
-	_, _, stderr := runCLI(t, []string{flagTokenEnv, testTokenEnv}, testEnv(""))
-	if !strings.Contains(stderr, testTokenEnv) {
-		t.Errorf("stderr = %q, want the environment variable named", stderr)
 	}
 }
 
