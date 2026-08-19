@@ -255,6 +255,32 @@ or `QURL_CONNECTOR_TOKEN_FILE` — there is deliberately no token flag,
 because arguments leak into shell history and process lists. The token is
 used once and never stored; later starts reuse the saved identity.
 
+Every start prints the Connector's CRID, so the identity a consumer needs
+is on screen rather than something to go look up:
+
+```
+Starting Connector "reports" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.
+
+  Anyone authorized can reach it with `qurl get <CRID>`.
+
+CRID: aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledfa
+```
+
+That note is prose for a person. An unattended runner should read the
+structured event instead, emitted on stderr beside the command's other
+operator events:
+
+```
+level=INFO msg="connector: starting to serve local app" event=connector_starting connector_id=reports target=127.0.0.1:8080 crid=aea6x7mea52z…
+```
+
+`event=connector_starting` is the stable name; it fires as the serve loop
+starts, not once traffic flows (`event=proxy_allow` marks a served
+session). `crid` is omitted entirely rather than logged empty when the
+platform returned none, so its presence is meaningful. A CRID is base32
+over `[a-z2-7]`, so the value never needs quoting and always renders as a
+bare `crid=<value>`.
+
 If the platform stays unreachable long enough, the command exits with
 code 11 instead of retrying forever. The next start may then need its
 platform assignment refreshed: with the default `--refresh-mode manual`
