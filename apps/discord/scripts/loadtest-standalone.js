@@ -567,7 +567,7 @@ function resolveReclaimArg(argv) {
     // swept up by the boolean-flag literal guard in
     // tests/loadtest-silent-failure.test.js as though it were an ad-hoc flag
     // read. The name still appears, which is what the wiring check needs.
-    errors.push('a ledger path is required — pass it as --reclaim /tmp/loadtest-ledger-<ts>.jsonl');
+    errors.push('a ledger path is required — pass it as --reclaim <tmpdir>/loadtest-ledger-<ts>.jsonl');
   }
   return { requested, path: reclaimPath, errors };
 }

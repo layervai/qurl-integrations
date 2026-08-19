@@ -36,7 +36,7 @@ const config = require('../src/config');
 const {
   LEDGER_PATH,
   readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg, trackCreate, recordResource,
-  reclaimOnce, resetReclaimStateForTests, resolveLedgerArg,
+  reclaimOnce, resetReclaimStateForTests, resolveLedgerArg, resolveReclaimArg,
 } = require('../scripts/loadtest-standalone');
 
 let created = [];
@@ -309,6 +309,39 @@ describe('parseReclaimArg', () => {
 
   it('rejects an empty --reclaim= value', () => {
     expect(parseReclaimArg(['--reclaim='])).toEqual({ requested: true, path: null });
+  });
+});
+
+describe('resolveReclaimArg', () => {
+  it('refuses a bare --reclaim, carrying the shape parseReclaimArg read', () => {
+    // The refusal is the whole job: a declared flag whose reader reports
+    // nothing is accepted by resolveUnknownArgs and then ignored, which here
+    // means a full load test runs where the operator asked to delete.
+    expect(resolveReclaimArg(['--reclaim'])).toEqual({
+      requested: true, path: null, errors: [expect.stringContaining('--reclaim')],
+    });
+  });
+
+  it('points at the temp directory rather than a hard-coded /tmp', () => {
+    // The path this message tells the operator to type has to be the one the
+    // run actually wrote to, and DEFAULT_LEDGER_PATH is built from
+    // os.tmpdir() — so a literal /tmp sends a Windows operator to a directory
+    // that does not exist, and this message is read by someone who has
+    // already lost the run and is trying to find thousands of live resources.
+    // The header docs spell the same default `<tmpdir>` twice; this is the
+    // third mention and the only one that was ever out of step with them.
+    const [message] = resolveReclaimArg(['--reclaim']).errors;
+    expect(message).toContain('--reclaim <tmpdir>/loadtest-ledger-');
+    expect(message).not.toContain('/tmp/');
+  });
+
+  it('stays silent on the paths that are not a refusal', () => {
+    // Both directions, because an always-erroring resolver still satisfies
+    // the wiring check in tests/loadtest-silent-failure.test.js: a run given
+    // a good ledger path, and a run that never asked to reclaim at all,
+    // would each abort on an error naming a flag the operator got right.
+    expect(resolveReclaimArg(['--reclaim', '/tmp/x.jsonl']).errors).toEqual([]);
+    expect(resolveReclaimArg(['--count', '10']).errors).toEqual([]);
   });
 });
 
