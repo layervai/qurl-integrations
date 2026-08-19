@@ -55,8 +55,7 @@ const (
 	mergeQueuePostureNone   = "none"
 	mergeQueuePostureQueued = "required"
 	// The job id, which is also the required context: that job sets no `name:`.
-	claudeReviewContext          = "claude-review"
-	pullRequestContextExpression = "github.event.pull_request"
+	claudeReviewContext = "claude-review"
 	// How GitHub renders a required context that no job ever reports, in the
 	// merge box. It is not a failure state, which is why every assertion in
 	// this file exists. Quoted into failure messages only — nothing compares it
@@ -437,8 +436,8 @@ func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
 			waitingForStatus, "Merge-result checks", contributingPath)
 
 	case posture == mergeQueuePostureNone && len(handling) > 0:
-		t.Errorf("%s declares merge-queue posture %q, but every required-context workflow declares %s (%s).\nEnable a queue by flipping the marker in the same change — after confirming %s can report on the event at all, since it is pull_request_target-only and its job gate reads %s, which a merge group does not carry.",
-			contributingPath, posture, mergeGroupTrigger, strings.Join(handling, ", "), claudeCodeReviewWorkflow, pullRequestContextExpression)
+		t.Errorf("%s declares merge-queue posture %q, but every required-context workflow declares %s (%s).\nEnable a queue by flipping the marker in the same change — after confirming %s can report on the event at all, since it is pull_request_target-only and a merge group never starts it.",
+			contributingPath, posture, mergeGroupTrigger, strings.Join(handling, ", "), claudeCodeReviewWorkflow)
 
 	case posture == mergeQueuePostureQueued && len(ignoring) > 0:
 		// The mirror image, and the one that actually strands a queue: the
