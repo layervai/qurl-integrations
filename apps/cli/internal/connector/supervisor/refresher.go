@@ -129,10 +129,41 @@ const reasonReconnectStalled = "reconnect_stalled"
 // produces is ErrTooManyKnockFailures, which already has a code.
 var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could not re-establish after it was admitted")
 
-// redialKnockRefresher re-knocks before physical tunnel redials. All state is
-// mutex-guarded: the lock deliberately spans the knock call and the common
-// config mutation, so pipelined connector dials in a future FRP version would
-// serialize rather than race the ServerAddr/Metadatas writes.
+// redialKnockRefresher re-knocks before physical tunnel redials. All refresher
+// state is mutex-guarded, and the lock spans the knock call and the common
+// config stamp so concurrent refreshes serialize against each other: the token
+// and the dial target one stamp leaves behind always come from a single ACK,
+// never interleaved from two.
+//
+// The lock does NOT make that stamp safe to READ concurrently, and nothing on
+// this side can. refresh unlocks on return — before the dial it precedes — and
+// the pinned fork then reads ServerAddr, ServerPort and Transport.* in
+// realConnect (client/connector.go) and Metadatas in buildLoginMsg
+// (client/control_session.go), none of it synchronized. Writes serialize
+// against writes; the fork's reads of them are unguarded.
+//
+// That is latent rather than live, because production never refreshes
+// concurrently. Everything reaching the connector has been completed, and
+// completion defaults TCPMux on (see the WATCHDOG COUPLING note on Connect),
+// so physicalDialInOpen puts the refresh on the Open seam — and the fork calls
+// Open from exactly one place: controlSessionDialer.Dial, driven serially by
+// loopLoginUntilSuccess. Every read of a stamped field therefore happens later
+// on the same goroutine that wrote it. The concurrent dials the fork does have
+// are the work connections — registerMsgHandlers wraps handleReqWorkConn in
+// msg.AsyncHandler, one goroutine per ReqWorkConn — and on this seam each one
+// reaches only knockingConnector.Connect, which refreshes nothing and touches
+// nothing in the shared config but Transport.Protocol and Transport.TCPMux,
+// fields no refresh writes
+// (TestApplyKnockResultStampsOnlyTheDialTargetAndToken).
+//
+// On the unmuxed seam those AsyncHandler goroutines refresh concurrently, and
+// -race reports real write/read races on ServerAddr and ServerPort against
+// realConnect. The fix there is not a per-refresh copy of the config, however
+// the in-place stamp reads: buildLoginMsg takes Metadatas off the
+// control-session dialer's own pointer to this same struct, which the
+// ConnectorCreator seam cannot substitute, so the token has to be stamped in
+// place or the Login never carries it. Making that seam safe needs fork-side
+// changes — and noteRedialLocked revisited first, per the same note.
 type redialKnockRefresher struct {
 	knocker    knock.Knocker
 	resourceID string
@@ -254,10 +285,12 @@ func (r *redialKnockRefresher) settled() time.Duration {
 	return reconnectSettledGap
 }
 
-// refresh performs one gated knock and restamps common in place. The pinned
-// FRP fork reads the common config synchronously from the connector dial path
-// after this returns; a future FRP that reads it from background goroutines
-// would require a per-refresh copy instead of in-place mutation.
+// refresh performs one gated knock and restamps common in place. In place is
+// required rather than incidental: the fork's buildLoginMsg reads Metadatas
+// off the control-session dialer's own pointer to this struct, so a token
+// stamped on a copy would never reach the Login. The stamp is unsynchronized
+// once this returns — see the type's doc comment for what that costs and why
+// the completed production config does not pay it.
 func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCommonConfig, reason string) error {
 	if r == nil || r.knocker == nil {
 		return nil

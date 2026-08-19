@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -378,6 +380,73 @@ func TestApplyKnockResultContract(t *testing.T) {
 	}
 	if _, err := applyKnockResult(nil, testResource, &knock.Result{}); !errors.Is(err, errNilCommonConfig) {
 		t.Fatalf("nil common = %v, want errNilCommonConfig", err)
+	}
+}
+
+// TestApplyKnockResultStampsOnlyTheDialTargetAndToken pins the refresher's
+// write set — ServerAddr, ServerPort and the one knock-token metadata entry —
+// against the config production actually runs.
+//
+// It is load-bearing for the concurrency argument in the redialKnockRefresher
+// doc comment, not tidiness. The fork reads the stamped config without
+// synchronization, and what keeps that harmless on the Open seam is that the
+// one path FRP does drive concurrently — knockingConnector.Connect, reached
+// once per ReqWorkConn through msg.AsyncHandler — touches nothing in that
+// config but Transport.Protocol and Transport.TCPMux, via physicalDialInOpen.
+// Let a refresh start restamping any Transport field and those reads become a
+// live data race in production rather than the latent one the unmuxed seam
+// already has. Comparing marshaled JSON rather than the struct is deliberate:
+// it dereferences the *bool transport knobs, so a write THROUGH one of those
+// pointers fails here instead of comparing equal to itself.
+func TestApplyKnockResultStampsOnlyTheDialTargetAndToken(t *testing.T) {
+	t.Parallel()
+	cfg, err := frpgen.Generate(&frpgen.Route{
+		Slug:               "reports",
+		ResourceID:         testResource,
+		ConnectorRoutingID: routingID("write-set"),
+		LocalIP:            "127.0.0.1",
+		LocalPort:          8080,
+	}, &frpgen.Options{ReplicaDiscriminator: "abc123", ClientVersion: "test"})
+	if err != nil {
+		t.Fatalf("generate the production client config: %v", err)
+	}
+	common, _ := cfg.FRPClientConfig()
+	if err := common.Complete(); err != nil {
+		t.Fatalf("complete the production common config: %v", err)
+	}
+	if len(common.Metadatas) == 0 {
+		// The restore below deletes one key; if the generated config carried
+		// no Metadatas at all, applyKnockResult would leave an empty map
+		// where a nil one was and the comparison would fail on {} vs null
+		// rather than on a real extra write.
+		t.Fatal("test premise broken: the production config carries no Metadatas to stamp into")
+	}
+	beforeAddr, beforePort := common.ServerAddr, common.ServerPort
+	before, err := json.Marshal(common)
+	if err != nil {
+		t.Fatalf("marshal the pre-stamp config: %v", err)
+	}
+
+	if _, err := applyKnockResult(common, testResource, healthyKnockResp("stamped.example:7443").result); err != nil {
+		t.Fatalf("applyKnockResult: %v", err)
+	}
+	if common.ServerAddr != "stamped.example" || common.ServerPort != 7443 {
+		t.Fatalf("dial target = %s:%d, want the ACK's stamped.example:7443", common.ServerAddr, common.ServerPort)
+	}
+	if common.Metadatas[frpgen.MetaQURLKnockToken] == "" {
+		t.Fatal("knock token not stamped")
+	}
+
+	// Undo exactly the three sanctioned writes. Anything else the stamp
+	// touched survives into the comparison below.
+	common.ServerAddr, common.ServerPort = beforeAddr, beforePort
+	delete(common.Metadatas, frpgen.MetaQURLKnockToken)
+	after, err := json.Marshal(common)
+	if err != nil {
+		t.Fatalf("marshal the post-stamp config: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("applyKnockResult wrote outside its dial-target-and-token set; the fork reads this config unsynchronized from the work-connection goroutines\nbefore: %s\nafter:  %s", before, after)
 	}
 }
 
