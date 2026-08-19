@@ -322,6 +322,27 @@ it stops and asks for approval (exit 2) — approve by running once with
 as approval. Stop serving with Ctrl-C or SIGTERM; teardown gets a short
 grace period and the command exits 130.
 
+How you stop a Connector decides how fast the same `--id` can start
+again. The platform keeps one session per Connector and holds it until
+it is released; a Ctrl-C or SIGTERM stop releases it during teardown, so
+an immediate restart connects straight away. A Connector that was
+force-killed, or that lost its network connection before it stopped,
+releases nothing — the platform has to time the old session out instead,
+which takes roughly half a minute, and a start inside that window
+reports that the previous session is still registered rather than
+failing silently:
+
+```
+level=WARN msg="connector: this Connector's previous session is still registered with the qURL platform, so this one could not take over yet; retrying" event=login_session_conflict connector_id=reports
+```
+
+The same bound applies once a tunnel is up: if the connection drops and
+cannot be re-established, the Connector says so on stderr
+(`event=reconnect_retrying`), keeps trying for a bounded window, and
+then starts a fresh connection cycle rather than retrying invisibly.
+Either way the retry budget is finite and a Connector that never
+recovers exits 11.
+
 ### qurl login / logout / whoami
 
 `qurl login` reads the key from piped stdin or a hidden interactive

@@ -496,34 +496,43 @@ func (s *Supervisor) forceLoginFailExit(ctx context.Context, cycleCommon *v1.Cli
 // (failed-knock paths already counted inside applyKnockOverlay and never ran
 // the tunnel).
 //
-// Reset rule: a healthy-knock cycle whose Login was NOT token-rejected clears
-// the slate and the refresh episode. The deferred reset is what lets the
-// increment below accumulate — an at-knock-time reset would erase the
-// token-rejection bump. Increment rule: a token-rejected Login counts against
-// the SAME budget, so a server that persistently refuses valid-looking tokens
-// still reaches the orchestrator-restart recovery instead of looping forever.
+// Reset rule: a healthy-knock cycle whose Login ended in none of the unhealthy
+// outcomes below clears the slate and the refresh episode. The deferred reset
+// is what lets the increments accumulate — an at-knock-time reset would erase
+// them. Increment rule: a cycle that knocked cleanly and still could not hold
+// a tunnel counts against the SAME budget, so every "the knock works but the
+// tunnel does not" shape reaches the orchestrator-restart recovery instead of
+// looping forever. Three shapes qualify, most-specific first:
+//
+//   - a token-rejected Login — the server refused the knock token;
+//   - a duplicate-session refusal — this Connector's previous session is
+//     still registered, so the new Login cannot take over yet;
+//   - a stalled post-admission reconnect — the tunnel was admitted, lost its
+//     connection, and the watchdog took the cycle back.
+//
+// Before this reconciliation covered the last two, either one reset the budget
+// on every cycle, so a Connector that could knock but never serve retried
+// forever without ever reaching the budget exit or its customer message.
 func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutcome) error {
 	if !outcome.tokenStamped {
 		return nil
 	}
-	if IsTokenLoginError(outcome.runErr) {
-		s.consecutiveUnhealthyKnocks++
-		s.refreshEpisodeCleared = false
-		s.log().WarnContext(ctx, "connector: tunnel login rejected the knock token; will re-knock on next cycle",
-			append(s.knockLogAttrs(),
-				"event", "login_token_rejected",
-				"err", errString(outcome.runErr),
-				"consecutive_unhealthy_knocks", s.consecutiveUnhealthyKnocks,
-				"max_failures", s.maxConsecutiveKnockFailures(),
-			)...,
-		)
-		if s.consecutiveUnhealthyKnocks >= s.maxConsecutiveKnockFailures() {
-			return errors.Join(
-				ErrTooManyKnockFailures,
-				fmt.Errorf("%d consecutive unhealthy knocks, last was a token-rejected login: %w", s.consecutiveUnhealthyKnocks, outcome.runErr),
-			)
-		}
-		return nil
+	switch {
+	case IsTokenLoginError(outcome.runErr):
+		return s.recordUnhealthyLogin(ctx, outcome.runErr,
+			"login_token_rejected",
+			"connector: tunnel login rejected the knock token; will re-knock on next cycle",
+			"a token-rejected login")
+	case IsSessionConflictError(outcome.runErr):
+		return s.recordUnhealthyLogin(ctx, outcome.runErr,
+			"login_session_conflict",
+			"connector: this Connector's previous session is still registered with the qURL platform, so this one could not take over yet; retrying",
+			"a duplicate-session refusal")
+	case errors.Is(outcome.runErr, errReconnectStalled):
+		return s.recordUnhealthyLogin(ctx, outcome.runErr,
+			"reconnect_stalled",
+			"connector: the tunnel was admitted and then could not re-establish; re-knocking on the next cycle",
+			"a stalled reconnect")
 	}
 	s.consecutiveUnhealthyKnocks = 0
 	// Confirmed-healthy knock+login cycle: the single authoritative point
@@ -533,6 +542,31 @@ func (s *Supervisor) reconcileKnockBudget(ctx context.Context, outcome cycleOutc
 	// healthy cycles off the marker store once one clear has landed.
 	if !s.refreshEpisodeCleared {
 		s.clearRefreshEpisode(ctx)
+	}
+	return nil
+}
+
+// recordUnhealthyLogin books one healthy-knock-but-no-tunnel cycle against the
+// unified budget: bump the counter, un-latch the refresh-episode clear, say
+// what happened in the operator's terms, and exit with the knock sentinel once
+// the budget is spent. summary names the cause in that exit's detail so triage
+// reads the last cause without parsing the wrapped error.
+func (s *Supervisor) recordUnhealthyLogin(ctx context.Context, runErr error, event, message, summary string) error {
+	s.consecutiveUnhealthyKnocks++
+	s.refreshEpisodeCleared = false
+	s.log().WarnContext(ctx, message,
+		append(s.knockLogAttrs(),
+			"event", event,
+			"err", errString(runErr),
+			"consecutive_unhealthy_knocks", s.consecutiveUnhealthyKnocks,
+			"max_failures", s.maxConsecutiveKnockFailures(),
+		)...,
+	)
+	if s.consecutiveUnhealthyKnocks >= s.maxConsecutiveKnockFailures() {
+		return errors.Join(
+			ErrTooManyKnockFailures,
+			fmt.Errorf("%d consecutive unhealthy knocks, last was %s: %w", s.consecutiveUnhealthyKnocks, summary, runErr),
+		)
 	}
 	return nil
 }

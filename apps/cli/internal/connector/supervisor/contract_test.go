@@ -137,6 +137,21 @@ func TestQRTSKnockTokenLoginContract(t *testing.T) {
 	}
 }
 
+// decodeStrictJSON decodes one contract snapshot into out with unknown fields
+// rejected, so a field added on the producer side surfaces as a test failure
+// here rather than being silently dropped.
+func decodeStrictJSON(t *testing.T, label string, raw []byte, out any) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		t.Fatalf("decode %s: %v", label, err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		t.Fatalf("decode %s: trailing content after the snapshot object (err=%v)", label, err)
+	}
+}
+
 // decodeKnockTokenLoginContract decodes one snapshot strictly: unknown
 // fields, schema bumps, malformed needles, and untagged wire texts all fail
 // so a drifted artifact cannot pass as nominally compatible metadata.

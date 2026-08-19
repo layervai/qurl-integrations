@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "conflict_scope": "client_id",
+  "client_needle_pairs": [
+    [
+      "client_id",
+      "is already online"
+    ]
+  ],
+  "login_reject_wire_texts": [
+    "client_id [qurl-connector-1] for user [acct_123] is already online"
+  ],
+  "non_conflict_wire_texts": [
+    "knock_invalid: knock token rejected",
+    "register control error",
+    "session shutdown",
+    "connection write timeout",
+    "dial tcp 10.0.0.1:7002: i/o timeout"
+  ]
+}

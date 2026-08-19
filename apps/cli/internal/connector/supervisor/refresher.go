@@ -36,7 +36,51 @@ const (
 	// counts physical-redial knocks inside ONE tunnel run; exhausting it
 	// requests a cycle restart carrying ErrTooManyKnockFailures.
 	redialKnockMaxFailures = 5
+
+	// reconnectStallWindow bounds how long the FRP client may sit in its own
+	// post-admission reconnect loop before this package takes the cycle back.
+	//
+	// It exists because that loop is unbounded and unobservable: after a
+	// cycle's first Login succeeds the pinned fork retries internally forever
+	// (keepControllerWorking passes firstLoginExit=false, hard-coded, so the
+	// LoginFailExit this package forces does not reach it) and Run stays
+	// blocked, so the supervisor's knock budget, its failure classification
+	// and every operator-facing message are unreachable for the rest of the
+	// run. Without this watchdog a Connector in that state loops in silence.
+	//
+	// Sized above the two delays it must not race. The server releases a
+	// registration whose flow died without a close only when its multiplexer
+	// keepalive expires (30s interval plus a 10s write timeout), and the FRP
+	// reconnect loop backs off up to 20s between attempts — so 90s leaves
+	// room for several attempts after the release lands, and a stale session
+	// recovers inside the cycle rather than by restarting it.
+	reconnectStallWindow = 90 * time.Second
+
+	// reconnectSettledGap is the quiet period that ends a redial storm. The
+	// FRP client does not dial while a control session is up, so a gap this
+	// long means one of the redials succeeded and the tunnel served again.
+	// It must stay above the reconnect loop's 20s backoff ceiling, or a
+	// still-failing storm would look settled between two attempts.
+	reconnectSettledGap = 45 * time.Second
+
+	// reconnectStallNoticeAfter is how many dials into a storm the operator
+	// notice fires. Two means the tunnel dropped and at least one redial has
+	// already failed — past a single ordinary reconnect, which is routine and
+	// self-healing, and not worth a warning.
+	reconnectStallNoticeAfter = 2
 )
+
+// reasonReconnectStalled is the classification bucket for a cycle the
+// reconnect watchdog took back.
+const reasonReconnectStalled = "reconnect_stalled"
+
+// errReconnectStalled ends a cycle whose tunnel was admitted and then could
+// not re-establish inside reconnectStallWindow. Unexported on purpose: like
+// the other per-cycle conditions it is retried under the supervisor's budget
+// and never becomes a process exit of its own, so it stays out of the CLI's
+// exported-sentinel exit-code contract. The budget exit it eventually
+// produces is ErrTooManyKnockFailures, which already has a code.
+var errReconnectStalled = errors.New("qURL Connector supervisor: tunnel could not re-establish after it was admitted")
 
 // redialKnockRefresher re-knocks before physical tunnel redials. All state is
 // mutex-guarded: the lock deliberately spans the knock call and the common
@@ -56,10 +100,89 @@ type redialKnockRefresher struct {
 	// distinct attempts into one debounce window.
 	now func() time.Time
 
+	// stallWindow and settledGap override the package defaults; zero means
+	// the default. Test-only injection, like the supervisor's own knobs.
+	stallWindow time.Duration
+	settledGap  time.Duration
+
 	mu                 sync.Mutex
 	lastKnockAt        time.Time
 	consecutiveFailure int
 	requestRestart     func(error)
+
+	// Reconnect-watchdog state, guarded by mu with everything above.
+	// lastDialAt stamps the previous physical dial, stormStartedAt opens the
+	// current unbroken redial storm (zero outside one), stormDials counts the
+	// dials inside it, and stormNoticed latches the one operator notice.
+	lastDialAt     time.Time
+	stormStartedAt time.Time
+	stormDials     int
+	stormNoticed   bool
+}
+
+// noteRedialLocked advances the reconnect watchdog for one physical dial and
+// reports the error the dial should fail with, if any. The caller holds r.mu.
+//
+// Every call reaching it is a redial: the supervisor's own first dial of a
+// cycle is consumed by the first-cycle handoff in refresh, and FRP does not
+// dial again while a control session is up. So a run of calls separated by
+// less than settledGap is precisely "the tunnel is down and not coming back",
+// which is the condition the FRP client cannot report and this watchdog can.
+func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time) error {
+	if !r.lastDialAt.IsZero() && t.Sub(r.lastDialAt) >= r.settled() {
+		// Quiet long enough that a redial must have served: start over, so a
+		// tunnel that reconnects normally never accumulates toward the window.
+		r.stormStartedAt = time.Time{}
+		r.stormDials = 0
+		r.stormNoticed = false
+	}
+	r.lastDialAt = t
+	if r.stormStartedAt.IsZero() {
+		r.stormStartedAt = t
+	}
+	r.stormDials++
+
+	elapsed := t.Sub(r.stormStartedAt)
+	if elapsed >= r.stall() {
+		r.log().WarnContext(ctx, "connector: the tunnel was admitted and then could not re-establish; restarting the connection cycle",
+			"event", "reconnect_stalled",
+			"resource_id", r.resourceID,
+			"stalled_seconds", elapsed.Seconds(),
+			"dial_attempts", r.stormDials)
+		stalled := fmt.Errorf("%w: no tunnel session for %s across %d dial attempts", errReconnectStalled, elapsed.Round(time.Second), r.stormDials)
+		if r.requestRestart != nil {
+			r.requestRestart(stalled)
+		}
+		return stalled
+	}
+	if r.stormDials >= reconnectStallNoticeAfter && !r.stormNoticed {
+		r.stormNoticed = true
+		// Said once per storm, in customer language, because this is the
+		// window in which the Connector otherwise looks healthy while
+		// consumers time out: the knocks below keep succeeding and the FRP
+		// client logs only its own transport errors.
+		r.log().WarnContext(ctx, "connector: lost the tunnel connection and is reconnecting; if this Connector was just restarted, its previous session is still registered and this one takes over once the qURL platform releases it",
+			"event", "reconnect_retrying",
+			"resource_id", r.resourceID,
+			"stalled_seconds", elapsed.Seconds(),
+			"dial_attempts", r.stormDials,
+			"gives_up_after_seconds", r.stall().Seconds())
+	}
+	return nil
+}
+
+func (r *redialKnockRefresher) stall() time.Duration {
+	if r.stallWindow > 0 {
+		return r.stallWindow
+	}
+	return reconnectStallWindow
+}
+
+func (r *redialKnockRefresher) settled() time.Duration {
+	if r.settledGap > 0 {
+		return r.settledGap
+	}
+	return reconnectSettledGap
 }
 
 // refresh performs one gated knock and restamps common in place. The pinned
@@ -86,9 +209,18 @@ func (r *redialKnockRefresher) refresh(ctx context.Context, common *v1.ClientCom
 	if r.lastKnockAt.IsZero() && commonKnockToken(common) != "" {
 		// First-cycle handoff: the supervisor already knocked and stamped
 		// this cycle's token. Start the redial gate at handoff time so quick
-		// connector retries stay inside the same admission window.
+		// connector retries stay inside the same admission window, and return
+		// before the watchdog — this is the supervisor's own dial, not a
+		// redial, so it must not open a storm or count toward one.
 		r.lastKnockAt = t
 		return nil
+	}
+	// Ahead of the gate on purpose: the watchdog must see EVERY physical
+	// dial. During a storm the FRP client redials faster than the gate, so
+	// most calls return debounced below — counting only the ungated ones
+	// would undercount the storm by roughly the ratio of the two intervals.
+	if err := r.noteRedialLocked(ctx, t); err != nil {
+		return err
 	}
 	if !r.lastKnockAt.IsZero() {
 		if wait := r.gate - t.Sub(r.lastKnockAt); wait > 0 {

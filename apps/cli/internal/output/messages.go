@@ -132,6 +132,21 @@ const (
 
 	hintConnectorRetryBudget = "Hint: check this machine's outbound network access, then run `qurl connector run` again. If the problem persists, the next start will ask to refresh this Connector's platform assignment (--refresh-mode auto approves it once)."
 
+	// msgConnectorPreviousSessionActive renders the supervisor's retry-budget
+	// exit when the last cause was the tunnel server's duplicate-session
+	// refusal — the one stale-session condition the platform states in words
+	// rather than leaving as an unexplained transport failure. It is checked
+	// before msgConnectorRetryBudget precisely because that generic rendering
+	// ("kept refusing or not answering") would send the reader to look at
+	// their network, which is the wrong place for this cause.
+	msgConnectorPreviousSessionActive = "This Connector's previous session is still registered with the qURL platform, so this one couldn't take over and it stopped after retrying."
+
+	// hintConnectorPreviousSessionActive gives the wait-then-retry step first,
+	// then the one thing the operator can change next time: how the previous
+	// Connector was stopped decides whether the platform is told to release
+	// the session or has to time it out.
+	hintConnectorPreviousSessionActive = "Hint: wait about a minute for the qURL platform to release the previous session, then run `qurl connector run` again. Stopping a Connector with Ctrl-C releases its session right away — one that was force-killed, or that lost its network connection before it stopped, stays registered until the platform times it out."
+
 	// msgConnectorHubConfig renders hub.ErrConfig. The detail block names the
 	// exact variable; this headline places the problem.
 	msgConnectorHubConfig = "This Connector's qURL platform endpoint configuration is incomplete or invalid, so it can't start."
@@ -263,6 +278,8 @@ func CustomerMessages() []string {
 		hintConnectorRefreshExhausted,
 		msgConnectorRetryBudget,
 		hintConnectorRetryBudget,
+		msgConnectorPreviousSessionActive,
+		hintConnectorPreviousSessionActive,
 		msgConnectorHubConfig,
 		hintConnectorHubConfig,
 		msgConnectorTokenConsumed,
