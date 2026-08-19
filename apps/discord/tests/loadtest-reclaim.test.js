@@ -153,10 +153,16 @@ describe('recordResource', () => {
     // would fail every sweep with a message matching neither 404 nor 410.
     ['unprefixed', 'abc123'],
   ])('warns and records nothing for a %s resource_id', (_label, value) => {
+    const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('carried no usable resource_id'),
     );
+    // The omission matters as much as the warning: recording a shape-rejected
+    // id would make it fail every sweep forever, which is what the check
+    // exists to prevent.
+    const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
+    expect(after).toBe(before);
   });
 });
 

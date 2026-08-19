@@ -159,10 +159,21 @@ function recordResource(resourceId, kind) {
   // exact outcome this check exists to prevent. The upload path hand-rolls
   // its fetch and does not validate the response shape the way connector.js
   // does, so this is where that shows up.
+  //
+  // TODO(upstream-contract): the `r_` prefix is qurl-service's resource-ID
+  // shape (`^r_[a-z0-9_-]{11}$`, mirrored in src/connector.js). The reclaim
+  // path now depends on it as hard as it depends on the 404/410 statuses
+  // above: if that shape changes, every id is rejected here and the run
+  // leaks silently rather than failing.
   if (!resourceId || typeof resourceId !== 'string' || !/^r_[\w-]+$/.test(resourceId)) {
-    // Loud, not silent: a created-but-unrecorded resource makes the closing
-    // "N revoked" a lie by omission, and this is the only place that notices.
+    // Loud, and fatal to the run rather than a warning that scrolls past
+    // during a two-hour soak. An id we cannot record is a resource we cannot
+    // reclaim, and whatever produced one unusable id will produce another
+    // every round — so this is the same posture as an unwritable ledger:
+    // stop minting, and reclaim what was recorded before it started.
     console.error(`WARNING: ${kind} response carried no usable resource_id — that resource cannot be reclaimed.`);
+    console.error('Stopping the run; a resource that cannot be recorded leaks every round.');
+    stopping = true;
     return;
   }
   try {
