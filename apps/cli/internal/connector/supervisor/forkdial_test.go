@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,15 +22,25 @@ const forkDialAcceptWait = 2 * time.Second
 // does see, on the same loopback listener, to slip through.
 const forkDialQuietWait = 250 * time.Millisecond
 
-// dialProbe is a loopback listener that reports accepted connections.
+// dialProbe is a loopback listener that signals each accepted connection.
 type dialProbe struct {
 	addr     string
 	port     int
-	accepted chan net.Conn
+	accepted chan struct{}
+
+	mu     sync.Mutex
+	conns  []net.Conn
+	closed bool
 }
 
-// newDialProbe starts the listener and drains accepts into a buffered
-// channel. Everything is torn down through t.Cleanup.
+// newDialProbe starts the listener and signals every accepted connection.
+//
+// Teardown is registered ONCE, before the accept goroutine starts, and owns
+// both the listener and every connection accepted through it. Keep it that
+// way: t.Cleanup panics if called after the test has completed, so the accept
+// goroutine must never register one. Per-connection cleanup from inside the
+// loop would survive only on the LIFO ordering that happens to close the
+// listener last, which is not an invariant this file should depend on.
 func newDialProbe(t *testing.T) *dialProbe {
 	t.Helper()
 	var lc net.ListenConfig
@@ -37,21 +48,46 @@ func newDialProbe(t *testing.T) *dialProbe {
 	if err != nil {
 		t.Fatalf("listen on loopback: %v", err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-
 	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
+		_ = ln.Close()
 		t.Fatalf("loopback listener address is %T, want *net.TCPAddr", ln.Addr())
 	}
-	p := &dialProbe{addr: "127.0.0.1", port: tcpAddr.Port, accepted: make(chan net.Conn, 8)}
+	p := &dialProbe{addr: "127.0.0.1", port: tcpAddr.Port, accepted: make(chan struct{}, 8)}
+	t.Cleanup(func() {
+		// Close the listener first: that is what unblocks Accept and ends
+		// the goroutine. closed then makes any connection it accepted in the
+		// same instant close itself rather than outlive the test.
+		_ = ln.Close()
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.closed = true
+		for _, c := range p.conns {
+			_ = c.Close()
+		}
+		p.conns = nil
+	})
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return // listener closed by cleanup
 			}
-			t.Cleanup(func() { _ = conn.Close() })
-			p.accepted <- conn
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				_ = conn.Close()
+				return
+			}
+			p.conns = append(p.conns, conn)
+			p.mu.Unlock()
+			// Non-blocking: a full buffer must not wedge this goroutine and
+			// leak it past the test, and a dial beyond the buffer is already
+			// far more than any case here makes.
+			select {
+			case p.accepted <- struct{}{}:
+			default:
+			}
 		}
 	}()
 	return p
