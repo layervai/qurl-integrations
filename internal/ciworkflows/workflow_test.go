@@ -13,6 +13,7 @@ package ciworkflows
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,13 +60,12 @@ type requiredWorkflowSpec struct {
 	// assumed, so one that later earns a narrower filter records that decision
 	// here; see TestAppWorkflowsRunOnStackedPRs.
 	//
-	// Recording a narrower filter here does not by itself authorize one. Every
-	// spec's requiredName is a documented required context, so
-	// TestNarrowPullRequestWorkflowsProduceNoRequiredContext rejects any
-	// recorded filter that names bases without "**" until that context stops
-	// gating merges. Leaving the field unset is not the way around that: an
-	// unset filter is nil, which isNarrowBranchFilter reads as reaching every
-	// base, and TestAppWorkflowsRunOnStackedPRs fails it by name instead.
+	// Recording a narrower filter here does not by itself authorize one. The
+	// aggregate each spec names reports a context CONTRIBUTING.md documents as
+	// required, and TestNarrowPullRequestWorkflowsProduceNoRequiredContext
+	// weighs a narrow filter against that block rather than against this
+	// field. Unsetting the field is no way around it either:
+	// TestAppWorkflowsRunOnStackedPRs fails an unrecorded intent by name.
 	pullRequestBranches []string
 }
 
@@ -778,19 +778,7 @@ func reportsRequiredContext(path string, reported workflowContexts, required []s
 // that second edit is what trips this test: the narrowing is now judged
 // against the documented gate rather than against its own paperwork.
 func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
-	narrow := map[string]bool{}
-	for i := range otherPullRequestWorkflows {
-		spec := &otherPullRequestWorkflows[i]
-		if isNarrowBranchFilter(spec.branches) {
-			narrow[spec.path] = true
-		}
-	}
-	for i := range requiredWorkflowSpecs {
-		spec := &requiredWorkflowSpecs[i]
-		if isNarrowBranchFilter(spec.pullRequestBranches) {
-			narrow[spec.path] = true
-		}
-	}
+	narrow := narrowPullRequestWorkflows(requiredWorkflowSpecs, otherPullRequestWorkflows)
 	if len(narrow) == 0 {
 		t.Skip("no deliberately-narrow entries recorded, so there is no premise to enforce")
 	}
@@ -817,32 +805,76 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	}
 }
 
+// narrowPullRequestWorkflows collects the workflow files whose recorded filter
+// keeps them off a PR stacked on a feature branch, reading both tables through
+// one predicate.
+//
+// It takes its tables as parameters rather than closing over the package ones
+// so that TestNarrowPullRequestWorkflowsKeyOnPath can feed it synthetic
+// entries. Every real spec records "**" today, so the requiredWorkflowSpecs
+// half contributes nothing to the live map, and a keying slip there —
+// narrow[spec.name] where narrow[spec.path] was meant, which for the shared
+// spec is "shared" against "shared-test.yml" — would ship green and simply
+// fail to fire on the day it mattered.
+func narrowPullRequestWorkflows(required []requiredWorkflowSpec, other []pullRequestBranchSpec) map[string]bool {
+	narrow := map[string]bool{}
+	for i := range other {
+		if isNarrowBranchFilter(other[i].branches) {
+			narrow[other[i].path] = true
+		}
+	}
+	for i := range required {
+		if isNarrowBranchFilter(required[i].pullRequestBranches) {
+			narrow[required[i].path] = true
+		}
+	}
+	return narrow
+}
+
 // isNarrowBranchFilter reports whether a recorded `branches:` filter keeps a
 // workflow off a PR stacked on a feature branch. A nil filter is absent from
 // the workflow and so reaches every base branch already, and one naming "**"
-// reaches them explicitly; anything else names the bases it runs on and skips
-// the rest.
+// with nothing excluded reaches them explicitly; anything else names the bases
+// it runs on and skips the rest.
+//
+// A negated pattern makes "**" stop meaning full reach: GitHub evaluates the
+// list in order, so `["**", "!justin/**"]` matches every base and then takes
+// back the stacked ones. That is the same failure pullRequestBranchFilter
+// refuses branches-ignore for, in a spelling `branches:` can hold, so it is
+// read as narrow rather than waved through by the "**" already present.
 //
 // nil and []string{} part company here, which is why the guard is against nil
 // rather than against len. A nil is how pullRequestBranchSpec spells "declares
 // no filter", the reading assertPullRequestBranches already gives it. A
-// present-but-empty one names no base branch at all and so runs nowhere —
-// narrow in the strictest sense, and the one reading that is not merely a
-// stricter version of [main]. No entry in either table spells it today, and an
-// app spec whose intent went unrecorded is nil and fails
-// TestAppWorkflowsRunOnStackedPRs by name before reaching here; the split is
-// pinned by TestIsNarrowBranchFilter so it stays a decision.
+// present-but-empty one names no base at all, so nothing establishes that it
+// reaches a stacked PR and the conservative reading is the safe one. Neither
+// table spells it today; the split is pinned by TestIsNarrowBranchFilter so it
+// stays a decision, and an app spec whose intent went unrecorded is nil and
+// fails TestAppWorkflowsRunOnStackedPRs by name instead of here.
 func isNarrowBranchFilter(branches []string) bool {
-	return branches != nil && !slices.Contains(branches, "**")
+	if branches == nil {
+		return false
+	}
+	for _, branch := range branches {
+		if strings.HasPrefix(branch, "!") {
+			return true
+		}
+	}
+	return !slices.Contains(branches, "**")
 }
 
-// TestIsNarrowBranchFilter pins the readings both tables now share. The helper
-// is a one-liner, but it is the single point where "does this filter keep the
+// TestIsNarrowBranchFilter pins each reading the helper gives. It is a short
+// function, but it is the single point where "does this filter keep the
 // workflow off a stacked PR" is decided for a required aggregate and for an
 // unrequired workflow alike, so each reading is spelled out rather than left to
-// be inferred from the two callers.
+// be inferred from the callers.
+//
+// Not every reading is reachable from both tables: only pullRequestBranchSpec
+// can carry a present-but-empty filter, since TestAppWorkflowsRunOnStackedPRs
+// rejects that spelling on a requiredWorkflowSpec as an unrecorded intent
+// rather than honoring it.
 func TestIsNarrowBranchFilter(t *testing.T) {
-	for _, testCase := range []struct {
+	tests := []struct {
 		name     string
 		branches []string
 		want     bool
@@ -853,12 +885,40 @@ func TestIsNarrowBranchFilter(t *testing.T) {
 		{name: "main alone skips a stacked PR", branches: []string{"main"}, want: true},
 		{name: "named bases without ** skip the rest", branches: []string{"main", "release"}, want: true},
 		{name: "present but empty names no base at all", branches: []string{}, want: true},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			if got := isNarrowBranchFilter(testCase.branches); got != testCase.want {
-				t.Errorf("isNarrowBranchFilter(%#v) = %t, want %t", testCase.branches, got, testCase.want)
+		{name: "** with a negated pattern takes the stacked bases back", branches: []string{"**", "!justin/**"}, want: true},
+		{name: "a negated pattern before ** is narrow too", branches: []string{"!justin/**", "**"}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isNarrowBranchFilter(test.branches); got != test.want {
+				t.Errorf("isNarrowBranchFilter(%#v) = %t, want %t", test.branches, got, test.want)
 			}
 		})
+	}
+}
+
+// TestNarrowPullRequestWorkflowsKeyOnPath pins the set construction itself,
+// which the live tables cannot exercise: all nine required specs record "**",
+// so that half of narrowPullRequestWorkflows contributes nothing and every
+// assertion above holds identically with it deleted. Synthetic entries are the
+// only way to prove it runs at all, and that it keys on path — the shared spec
+// is named "shared" but lives in shared-test.yml, so a slip to spec.name would
+// record a file that does not exist and silently match no reported context.
+func TestNarrowPullRequestWorkflowsKeyOnPath(t *testing.T) {
+	got := narrowPullRequestWorkflows(
+		[]requiredWorkflowSpec{
+			{name: "shared", path: "shared-test.yml", pullRequestBranches: []string{"main"}},
+			{name: "slack", path: "slack.yml", pullRequestBranches: []string{"**"}},
+		},
+		[]pullRequestBranchSpec{
+			{path: "codeql.yml", branches: []string{"main"}},
+			{path: "secrets-scan.yml"},
+		},
+	)
+
+	want := map[string]bool{"shared-test.yml": true, "codeql.yml": true}
+	if !maps.Equal(got, want) {
+		t.Errorf("narrowPullRequestWorkflows() = %v, want %v", got, want)
 	}
 }
 

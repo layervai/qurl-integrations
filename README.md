@@ -122,8 +122,9 @@ That pattern is itself under test. `internal/ciworkflows` reads every file in
 spec, leaves a quality gate out of `required.needs`, ships a verifier that treats a skipped gate
 as a pass, or makes the contract check conditional. It also records every pull-request workflow's
 intended `branches:` filter, so one recorded as deliberately narrow fails the moment it reports a
-required context, and narrowing one that already gates merges takes a matching edit to
-`requiredWorkflowSpecs`, which only review catches. This is the paths filter's trap inverted: a
+required context — including the nine aggregates, whose recorded filter is weighed against the
+documented contexts rather than only against itself, so narrowing one cannot be laundered by
+editing `requiredWorkflowSpecs` to match. This is the paths filter's trap inverted: a
 workflow filtered off PRs stacked on a feature branch never registers its checks at all, and
 protection guards only `main`, so the stacked PR reads green having run none of them
 (#1183, #1185). The package's own check — `Workflow Contract` — is unfiltered and reports on every
