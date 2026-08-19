@@ -459,7 +459,7 @@ expect_eq "unsatisfiable Range -> 416" \
 # 13b. Control bytes are rejected in the default (no S3_PREFIX) config too —
 # the common deployment shape — and the rejection path keeps the security
 # headers and stays out of error_log.
-if [ "$waive_control_char_contract" != "true" ]; then
+if [ "$waive_security_contract" != "true" ]; then
   warn_mark="$(origin_log_mark)"
   expect_control_char_rejected "default-config CRLF viewer path" \
     "/crlf%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css" '/crlf HTTP'
