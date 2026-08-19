@@ -42,7 +42,16 @@ const (
 
 	// Reusable-workflow calls report as "<caller job> / <inner job>".
 	contextSeparator = " / "
-	aggregateSuffix  = contextSeparator + "required"
+	// The trailing word is requiredJobID (workflow_test.go): every workflow in
+	// requiredWorkflowSpecs names its aggregate "<app> / required", repeating
+	// that job id verbatim after the separator, which is what lets an
+	// aggregate context be recognized by suffix at all. Spelled out rather
+	// than derived from that constant, because what this matches is documented
+	// context names and job `name:` fields — renaming the job id alone would
+	// not move a line in CONTRIBUTING.md. The convention is the aggregate's
+	// alone: the detector beside it is keyed `changes` but displays as
+	// "<app> / detect changes".
+	aggregateSuffix = contextSeparator + "required"
 
 	mergeGroupTrigger = "merge_group"
 	// The posture marker in CONTRIBUTING.md, and its two legal values. It is
