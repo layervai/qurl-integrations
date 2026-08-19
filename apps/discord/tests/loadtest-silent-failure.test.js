@@ -1603,32 +1603,85 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     for (const call of calls) expect(call.arguments).toHaveLength(3);
   });
 
-  it('writes nothing to disk', () => {
+  // The primitives that can put bytes on disk. Named once, because the two
+  // tests below split the ban into "where it is allowed" and "where it is
+  // not" and must not drift apart.
+  //
+  // Every one of them, not just the writeFileSync a straight revert of #1177
+  // would use: appendFileSync and an openSync/writeSync pair reintroduce the
+  // same scratch file while leaving a narrower ban green, and copyFileSync
+  // does it without ever naming the bytes.
+  const WRITE_PRIMITIVES = [
+    'writeFileSync', 'writeFile', 'createWriteStream',
+    'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
+  ];
+
+  // The reclaim ledger (#1161) is the one part of this script that is SUPPOSED
+  // to write. Its whole purpose is surviving a hard kill, which an in-memory
+  // list cannot do, so its three writes are deliberate:
+  //
+  //   preflightLedger  openSync       — proves the path is writable before
+  //                                     anything is minted against it
+  //   recordResource   appendFileSync — one line per resource, before it is used
+  //   pruneLedger      writeFileSync  — rewrites what is still outstanding
+  //
+  // Allowing them by FUNCTION rather than by primitive is what keeps this a
+  // real ban: a scratch file written anywhere else still fails, including one
+  // written with a primitive the ledger happens to use.
+  const LEDGER_WRITERS = ['preflightLedger', 'recordResource', 'pruneLedger'];
+
+  it('writes to disk only from the reclaim ledger', () => {
     // The rule is the primitive, not the helper. Counting calls to
     // generateTestPayload cannot express "and nothing else writes a scratch
     // file either", which is the regression that actually recurs — the
     // round-scoped temp file was itself the second-most-obvious way to hand
-    // runRound some bytes. This script reads a payload and posts it; it has
-    // no business writing anywhere.
+    // runRound some bytes.
     //
-    // Every fs primitive that can put bytes on disk, not just the
-    // writeFileSync a straight revert of #1177 would use: appendFileSync and
-    // an openSync/writeSync pair reintroduce the same file while leaving a
-    // narrower ban green, and copyFileSync does it without ever naming the
-    // bytes. openSync is banned outright rather than by mode — this script
-    // opens no descriptors at all, for reading or writing, so there is no
-    // legitimate call to distinguish it from.
-    for (const primitive of [
-      'writeFileSync', 'writeFile', 'createWriteStream',
-      'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
-    ]) {
-      expect({ primitive, calls: callsNamed(primitive).length })
-        .toEqual({ primitive, calls: 0 });
+    // This test began life as a blanket ban, written when the script genuinely
+    // wrote nothing. #1180 landed that ban and #1161 then landed the ledger;
+    // each was green against a main without the other, and main went red on
+    // the pair. The premise "this script has no business writing anywhere" is
+    // what was wrong, not either change — so the ban is scoped rather than
+    // relaxed. Reverting it instead would have given the temp file its way
+    // back, which is the regression the ban exists for.
+    const allowed = LEDGER_WRITERS.map((name) => {
+      const fn = findFunction(name);
+      // A renamed or deleted ledger writer must fail here rather than silently
+      // shrink the allowlist to nothing — which would read as a stricter ban
+      // while actually meaning the exemption no longer matches anything.
+      expect({ name, found: fn !== null }).toEqual({ name, found: true });
+      return fn;
+    });
+    const insideLedger = (node) =>
+      allowed.some((fn) => node.start >= fn.start && node.end <= fn.end);
+
+    for (const primitive of WRITE_PRIMITIVES) {
+      const stray = callsNamed(primitive).filter((node) => !insideLedger(node));
+      expect({ primitive, callsOutsideLedger: stray.length })
+        .toEqual({ primitive, callsOutsideLedger: 0 });
     }
     // And nothing to unlink, which is the other half of why no cleanup path
-    // was added here — an unlink would mean the litter is back and merely
-    // swept, leaving a run that is killed mid-window still littering.
+    // was added for the payload — an unlink would mean the litter is back and
+    // merely swept, leaving a run that is killed mid-window still littering.
+    // Unscoped: the ledger deliberately truncates rather than deletes, so an
+    // unlink anywhere in this file is the litter-and-sweep shape.
     expect(callsNamed('unlinkSync')).toHaveLength(0);
+  });
+
+  it('writes nothing from the round itself', () => {
+    // The direct regression, stated where it happened. The ledger exemption
+    // above is scoped by function, so a scratch file written in runRound is
+    // already caught — but that catch depends on runRound not being one of the
+    // allowlisted names, which is exactly the kind of thing a future edit
+    // could quietly change. This asserts the round's own body directly.
+    const runRound = findFunction('runRound');
+    expect(runRound).not.toBeNull();
+    for (const primitive of WRITE_PRIMITIVES) {
+      const inRound = callsNamed(primitive)
+        .filter((node) => node.start >= runRound.start && node.end <= runRound.end);
+      expect({ primitive, callsInRunRound: inRound.length })
+        .toEqual({ primitive, callsInRunRound: 0 });
+    }
   });
 
   it('keeps the per-round read for --file and drops it for the generated payload', () => {
