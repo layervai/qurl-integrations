@@ -588,6 +588,9 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 // TestAppWorkflowsRunOnStackedPRs pins the `on.pull_request.branches` filter of
 // each workflow that owns a required aggregate.
 //
+// Filtering one to [main] fails in two phases: while the PR is stacked it reads
+// green, and once it retargets onto main it stalls. Both are below, in order.
+//
 // A workflow filtered to `branches: [main]` does not merely skip a PR stacked on
 // a feature branch — GitHub never registers it, so its checks are absent from
 // the PR rather than reported as skipped. The two states are distinguishable on
@@ -601,10 +604,10 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 // `pull_request` activity type `edited`, which is not one of the three default
 // types, and every workflow carrying a `branches:` filter here takes those
 // defaults. So the retarget re-runs none of them, and the check that never
-// registered finally has a merge box to hold: the PR sits at waitingForStatus
-// until the next push re-triggers it. That stall is the same defect surfacing
-// late rather than a second one — the coverage was already lost, silently, one
-// merge earlier.
+// registered finally has a merge box to hold: the PR sits at "Expected —
+// Waiting for status to be reported" until the next push re-triggers it. That
+// stall is the same defect surfacing late rather than a second one — the
+// coverage was already lost, silently, one merge earlier.
 //
 // The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
 // discord.yml (#1179) — and each time a one-line revert would have undone it
