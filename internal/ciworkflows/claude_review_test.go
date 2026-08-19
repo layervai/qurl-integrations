@@ -359,23 +359,38 @@ func TestClaudeReviewHoldsEverySecretBearingStepBehindTheChain(t *testing.T) {
 		t.Fatalf("parsed %d steps but %d raw steps; the two views disagree", len(job.Steps), len(raw))
 	}
 
-	// Reaching any of these means the step cannot run until the eligibility
-	// step declared the pull request reviewable: the checkout is the only
-	// consumer of the verdict, and everything else keys off the checkout or off
-	// a step that does.
-	anchors := []string{
-		"steps.eligibility.outputs.eligible",
-		"steps.checkout.outcome",
-		"steps.review_origin.outputs.ready",
-		"steps.claude-review.outcome",
+	// Mentioning an anchor is not enough. On a withheld pull request the
+	// eligibility verdict is `false` and every step below it is `skipped`, so
+	// `eligible == 'false'` and `outcome == 'skipped'` are *true* there — a
+	// step guarded that way names an anchor and still runs on exactly the paths
+	// this job must not touch. Each anchor therefore carries the comparisons
+	// that are true only when the chain actually ran, and every occurrence has
+	// to be one of them. `claude-review` admits 'failure' as well as 'success'
+	// because a step can only fail if it ran, which is what the report step
+	// keys on.
+	//
+	// This is a rule about spelling, not an evaluation of the expression: it
+	// cannot see through `||`, a negation, or an anchor read inside a `run:`
+	// body. It is the shape of the guard that is pinned here.
+	anchors := []chainAnchor{
+		{"steps.eligibility.outputs.eligible", []string{" == 'true'"}},
+		{"steps.checkout.outcome", []string{" == 'success'"}},
+		{"steps.review_origin.outputs.ready", []string{" == 'true'"}},
+		{"steps.claude-review.outcome", []string{" == 'success'", " == 'failure'"}},
 	}
+	// GitHub allows a condition to wrap across lines; compare it as one line.
 	chained := func(condition string) bool {
+		flattened := strings.Join(strings.Fields(condition), " ")
+		reached := false
 		for _, anchor := range anchors {
-			if strings.Contains(condition, anchor) {
-				return true
+			for _, occurrence := range anchorOccurrences(flattened, anchor.expression) {
+				if !anchor.allows(occurrence) {
+					return false
+				}
+				reached = true
 			}
 		}
-		return false
+		return reached
 	}
 
 	sawSecret := false
@@ -403,6 +418,36 @@ func TestClaudeReviewHoldsEverySecretBearingStepBehindTheChain(t *testing.T) {
 	// about secrets — and this job exists to run one.
 	if !sawSecret {
 		t.Error("no step in the claude-review job references secrets.; this assertion matched nothing and would pass however the guards were edited")
+	}
+}
+
+// chainAnchor is one step output the guards key on, with the comparisons that
+// hold only when that step actually ran.
+type chainAnchor struct {
+	expression string
+	reviewable []string
+}
+
+func (a *chainAnchor) allows(occurrence string) bool {
+	for _, comparison := range a.reviewable {
+		if strings.HasPrefix(occurrence, comparison) {
+			return true
+		}
+	}
+	return false
+}
+
+// anchorOccurrences returns the text following each mention of expression, so
+// the caller can check what the guard compares it against.
+func anchorOccurrences(condition, expression string) []string {
+	following := []string{}
+	for rest := condition; ; {
+		_, after, found := strings.Cut(rest, expression)
+		if !found {
+			return following
+		}
+		following = append(following, after)
+		rest = after
 	}
 }
 

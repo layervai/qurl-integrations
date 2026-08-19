@@ -36,7 +36,12 @@ jobs:
     # Running unconditionally does not widen what this job trusts. On the
     # withheld paths nothing is checked out and no secret-bearing step runs:
     # the eligibility step reads fixed `github.event` scalars through `env:` and
-    # compares them in bash, and every later step already chains off its outcome.
+    # compares them in bash, and every later step is guarded by a chain rooted
+    # in its verdict — the checkout consumes the verdict directly, and the rest
+    # key off the checkout or off a step that does. That chain is now the whole
+    # of the defense that the job's own `if:` used to provide, so
+    # TestClaudeReviewHoldsEverySecretBearingStepBehindTheChain asserts it
+    # rather than leaving it to review.
     if: always()
     runs-on: ubuntu-latest
     # A kill at this cap surfaces as a `cancelled` check rather than an explicit
