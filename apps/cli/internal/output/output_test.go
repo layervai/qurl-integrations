@@ -380,6 +380,41 @@ func TestConnectorRequestRejectedDropsSDKRemedy(t *testing.T) {
 	}
 }
 
+// TestConnectorServingNote pins the startup note byte-exactly at the
+// rendering seam: the CRID lands last and alone on its line (the copy
+// contract), a platform that returned no CRID gets the original one-line note
+// with no empty label, and color styles only the label — never the CRID
+// itself, which would bury escape bytes inside a value people paste.
+func TestConnectorServingNote(t *testing.T) {
+	const headline = "Starting Connector \"billing\" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.\n"
+
+	var out, errBuf bytes.Buffer
+	p := newTestPrinter(&out, &errBuf, FormatText, false, false, false)
+	p.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
+	want := headline + "\n  Anyone authorized can reach it with `qurl get <CRID>`.\n\nCRID: acrid\n"
+	if got := errBuf.String(); got != want {
+		t.Errorf("serving note =\n%q\nwant\n%q", got, want)
+	}
+	// The note is status, not data: a serve loop that runs until interrupted
+	// has no stdout document to put it in.
+	if out.Len() != 0 {
+		t.Errorf("serving note wrote to stdout: %q", out.String())
+	}
+
+	errBuf.Reset()
+	p.ConnectorServing("billing", "127.0.0.1:8080", "")
+	if got := errBuf.String(); got != headline {
+		t.Errorf("note without a CRID =\n%q\nwant the unchanged one-liner\n%q", got, headline)
+	}
+
+	errBuf.Reset()
+	colored := newTestPrinter(&out, &errBuf, FormatText, false, true, false)
+	colored.ConnectorServing("billing", "127.0.0.1:8080", "acrid")
+	if got := errBuf.String(); !strings.HasSuffix(got, " acrid\n") {
+		t.Errorf("colored note must end with the bare CRID, got %q", got)
+	}
+}
+
 // TestEveryConnectorMessageIsRegistered guards the jargon gate's reach: a
 // headline or hint that renders but is missing from CustomerMessages is never
 // checked for jargon by cmd's gate.
@@ -389,6 +424,7 @@ func TestEveryConnectorMessageIsRegistered(t *testing.T) {
 		registered[msg] = true
 	}
 	rendered := []string{
+		msgConnectorServing, msgConnectorReachIt, labelCRID,
 		msgConnectorTokenConsumed, hintConnectorTokenConsumed,
 		msgConnectorTokenRejected, hintConnectorTokenRejected,
 		msgConnectorEnrollmentRejected, hintConnectorEnrollmentRejected,

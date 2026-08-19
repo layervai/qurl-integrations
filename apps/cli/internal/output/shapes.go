@@ -150,9 +150,30 @@ func (p *Printer) publishText(res *qurlapi.Published) error {
 		ew.printf("\n%s\n", p.dim(msgPublishFoundExisting))
 	}
 	if res.CRID != "" {
-		ew.printf("\n%s %s\n", p.bold("CRID:"), res.CRID)
+		ew.printf("\n%s %s\n", p.bold(labelCRID), res.CRID)
 	}
 	return ew.flush(nil)
+}
+
+// ConnectorServing announces a Connector serve loop. The Connector resolved
+// its own resource at startup, so the note carries that resource's CRID
+// instead of leaving the customer to go find it: the anatomy mirrors the
+// publish document — headline, an indented detail line, then the CRID last
+// and alone on its line, the easiest thing to select and copy.
+//
+// The CRID is optional by presence on the wire, so a platform that returned
+// none gets the headline alone — never an empty label. Every mode renders
+// the same note: --quiet and --output json shape the stdout document, and a
+// serve loop that runs until interrupted has none (capturing its stdout
+// would only hang), so this stays a stderr status note throughout. Writes
+// are best-effort for the same reason Notef's are — a broken stderr must not
+// take down an otherwise healthy serve loop.
+func (p *Printer) ConnectorServing(id, target, crid string) {
+	p.Notef(msgConnectorServing, id, target)
+	if crid == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(p.err, "\n%s\n\n%s %s\n", p.dim("  "+msgConnectorReachIt), p.bold(labelCRID), crid)
 }
 
 // Resolve renders a minted temporary access link. Piped stdout gets the bare

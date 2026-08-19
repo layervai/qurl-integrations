@@ -87,9 +87,10 @@ const (
 	// configuration error instead; only the flag is a usage error.
 	msgConnectorRefreshModeInvalid = "--refresh-mode must be manual, auto, or disabled; got %q"
 
-	// msgConnectorServing announces the serve loop on stderr; the Connector
-	// ID (as the platform records it), then the local target being served.
-	msgConnectorServing = "Starting Connector %q for your local app at %s. Press Ctrl-C to stop."
+	// The serve-loop announcement moved to the output package when it grew an
+	// anatomy (headline, detail line, CRID): output.Printer.ConnectorServing
+	// renders it, so output owns msgConnectorServing and registers it with the
+	// jargon gate. msgConnectorStopped stays here — it is still a bare note.
 
 	// msgConnectorStopped acknowledges a graceful signal-initiated stop.
 	msgConnectorStopped = "Stopped."
@@ -118,7 +119,6 @@ func customerMessages() []string {
 		msgConnectorTargetRequired,
 		msgConnectorTargetInvalid,
 		msgConnectorRefreshModeInvalid,
-		msgConnectorServing,
 		msgConnectorStopped,
 	}
 }
