@@ -153,25 +153,51 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
 //     `--location=yes`, or the mistyped `--location=flase`, would read as OFF
 //     again — the original fault, now with a value sitting in the operator's
 //     shell history to suggest it was honoured.
-//   - Refusing has no edge: every `=` spelling is refused identically, and the
-//     message names the form that works. It also cannot turn a leg ON that was
-//     meant to be off, nor off that was meant to be on, because the run does
-//     not start at all.
+//   - Refusing has no edge: every `=` spelling of THIS flag name is refused
+//     identically, and the message names the form that works. It also cannot
+//     turn a leg ON that was meant to be off, nor off that was meant to be on,
+//     because the run does not start at all.
 //   - There is nothing for `--location=false` to express that omitting the
 //     flag does not already express. These are leg switches, not settings.
 //
-// Only the `=` spelling is refused. `--location true` still reads the flag as
-// on and leaves `true` as a positional this script has never read, so the
-// operator gets what they asked for and there is nothing to report.
+// What this does NOT close, stated plainly because the `=` fix invites the
+// assumption that it does. There is no unknown-argument pass in this script,
+// so a token that is neither a recognized flag nor a recognized flag's value
+// is ignored whatever it says:
+//
+//   --location true    leg ON, `true` ignored — the operator got what they
+//                      asked for, so nothing to report.
+//   --location false   leg ON, `false` ignored. The operator asked for OFF and
+//                      got ON, silently. Same fault class as the one closed
+//                      here, and a likelier spelling than `--location=false`
+//                      for anyone carrying a `--flag value` habit over.
+//   --locatoin         reads as absent, leg OFF, nothing said — as does
+//                      `--cont 5` for the numeric flags.
+//   --LOCATION=true    reads as absent. The match is case-sensitive on both
+//                      halves, deliberately, so a shift-key slip lands here.
+//
+// Closing those means an unknown-argument pass over the whole command line —
+// one rule covering all four — which is a larger change than this one and does
+// not belong inside it. Named here so the next person finds a decision rather
+// than an oversight.
 function readBooleanFlag(argv, flag) {
   const token = `--${flag}`;
   const inlinePrefix = `${token}=`;
   // ANY occurrence refuses, not merely the last one. A value-taking flag can
   // fall back on "last wins" when it is repeated; there is no such rule to
   // reach for here, so `--location --location=false` has no reading that is
-  // not a guess.
-  if (argv.some((arg) => arg.startsWith(inlinePrefix))) {
-    return { error: `${token} takes no value — pass ${token} on its own to turn it on, or omit it to leave it off` };
+  // not a guess. The FIRST such occurrence is the one reported — which of them
+  // is echoed does not change the verdict, and picking one keeps the message
+  // deterministic.
+  const offending = argv.find((arg) => arg.startsWith(inlinePrefix));
+  if (offending !== undefined) {
+    // Echo the value, as parsePositiveInt and parseTargetAllowlist do. Without
+    // it, a wrapper emitting `--location=$WITH_LOCATION` with the variable
+    // unset produces `--location=`, whose message would otherwise be
+    // byte-identical to `--location=false` — hiding the actual fault, which is
+    // the unset variable and not the value the operator chose.
+    const value = offending.slice(inlinePrefix.length);
+    return { error: `${token} takes no value, got ${JSON.stringify(value)} — pass ${token} on its own to turn it on, or omit it to leave it off` };
   }
   return { value: argv.includes(token) };
 }
@@ -196,10 +222,23 @@ function resolveBooleanArgs(argv) {
   };
   const includeLocation = read('location');
   // --allow-production's VALUE belongs to resolveGuardInputs, which owns every
-  // input the guard reads. Only its SHAPE is checked here, so that both
-  // boolean flags answer `=` the same way and a malformed one is reported in
-  // the same single pass as a malformed --file — rather than surfacing a run
-  // later, out of the guard, after the operator has fixed the first message.
+  // input the guard reads. Only its SHAPE is checked here, for two reasons.
+  //
+  // The weaker one: it puts a malformed boolean in the same single pass as a
+  // malformed --file. main() gates on argErrors, THEN on QURL_API_KEY, and
+  // only then reaches the guard — so a bad --file plus a bad
+  // --allow-production would otherwise cost an operator without an API key
+  // exported three runs to see three messages.
+  //
+  // The decisive one: resolveGuardInputs's `errors` is not a general bucket.
+  // It arrives entirely by spread from parseTargetAllowlist, is destructured
+  // as `allowlistErrors`, and main() documents it as meaning specifically
+  // "the operator believes they granted a host they did not". A flag-shape
+  // error riding in that array would make that comment false and give the
+  // array two meanings.
+  //
+  // Called for its error side effect only; the boolean it returns is the
+  // guard's to read, not ours.
   read('allow-production');
   return { includeLocation, errors };
 }
@@ -595,6 +634,13 @@ function resolveGuardInputs(env, argv) {
     // guard at all; should that check ever be bypassed, reading the flag as
     // absent here is the fail-closed answer — the guard refuses the target
     // rather than clearing it.
+    //
+    // Note the two reads scan different arrays: this one gets the whole
+    // process.argv, resolveBooleanArgs gets args (process.argv.slice(2)).
+    // They cannot disagree about this token, because the two extra entries
+    // are the node binary and the RESOLVED ABSOLUTE script path, and neither
+    // an equality against `--allow-production` nor a `--allow-production=`
+    // prefix can match an absolute path.
     allowProdFlag: argv.includes('--allow-production'),
     allowProdEnv: env.LOADTEST_ALLOW_PRODUCTION === '1',
     ...parseTargetAllowlist(env.LOADTEST_TARGET_HOSTS),

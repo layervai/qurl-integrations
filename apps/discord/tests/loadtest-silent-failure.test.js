@@ -287,16 +287,22 @@ describe('loadtest boolean flags — the `=` spelling that read as absent', () =
   // the decision: interpreting true/false/1/0 would leave `--location=yes` —
   // and the mistyped `--location=flase` — back in the silent-off hole, now
   // with a value in the operator's shell history suggesting it was honoured.
+  //
+  // The echoed value is pinned per row, not just the refusal. `--location=`
+  // is the row that needs it: a wrapper emitting `--location=$WITH_LOCATION`
+  // with the variable unset produces exactly that, and without the echo its
+  // message is byte-identical to `--location=false` — so the operator is told
+  // the wrong thing is wrong.
   it.each([
-    ['--location=true'],
-    ['--location=false'],
-    ['--location=1'],
-    ['--location=0'],
-    ['--location=yes'],
-    ['--location='],
-  ])('refuses %s rather than reading a value out of it', (token) => {
+    ['--location=true', 'true'],
+    ['--location=false', 'false'],
+    ['--location=1', '1'],
+    ['--location=0', '0'],
+    ['--location=yes', 'yes'],
+    ['--location=', ''],
+  ])('refuses %s rather than reading a value out of it', (token, echoed) => {
     expect(readBooleanFlag([token], 'location').error).toBe(
-      '--location takes no value — pass --location on its own to turn it on, or omit it to leave it off',
+      `--location takes no value, got ${JSON.stringify(echoed)} — pass --location on its own to turn it on, or omit it to leave it off`,
     );
   });
 
@@ -330,11 +336,27 @@ describe('loadtest boolean flags — the `=` spelling that read as absent', () =
     expect(readBooleanFlag(['--location', '--location'], 'location')).toEqual({ value: true });
   });
 
-  it('leaves a following positional alone', () => {
+  it('leaves a following positional alone, for better and for worse', () => {
     // `--location true` is deliberately NOT refused: the flag reads as on,
     // which is what was asked for, and `true` stays a positional this script
-    // has never read. Only the `=` spelling has no honest reading.
+    // has never read.
     expect(readBooleanFlag(['--location', 'true'], 'location')).toEqual({ value: true });
+    // `--location false` gets the SAME treatment, and there the operator asked
+    // for the leg off and gets it on with nothing said. Pinned deliberately:
+    // it is the honest boundary of this change, not a case it covers. Closing
+    // it needs an unknown-argument pass over the whole command line — see the
+    // note above readBooleanFlag — which is a larger change than this one.
+    expect(readBooleanFlag(['--location', 'false'], 'location')).toEqual({ value: true });
+  });
+
+  it('matches the flag name case-sensitively', () => {
+    // Documented, not accidental. `--LOCATION=true` is not this flag, so it is
+    // neither refused nor read — the same silent-off the `=` spelling had,
+    // reachable by a shift-key slip. Flags are case-sensitive everywhere else
+    // in this script, and widening the match here would mean deciding what
+    // `--FILE` does too.
+    expect(readBooleanFlag(['--LOCATION=true'], 'location')).toEqual({ value: false });
+    expect(readBooleanFlag(['--Location'], 'location')).toEqual({ value: false });
   });
 
   it('does not match a longer flag that starts with the same letters', () => {
@@ -371,12 +393,16 @@ describe('loadtest boolean flags — resolving them from argv', () => {
     // --file, instead of a run later out of the guard — after the operator
     // has already fixed the first message and started again.
     expect(resolveBooleanArgs(['--allow-production=1']).errors).toEqual([
-      '--allow-production takes no value — pass --allow-production on its own to turn it on, or omit it to leave it off',
+      '--allow-production takes no value, got "1" — pass --allow-production on its own to turn it on, or omit it to leave it off',
     ]);
   });
 
   it('names every bad boolean flag in one pass', () => {
-    expect(resolveBooleanArgs(['--location=1', '--allow-production=1']).errors).toHaveLength(2);
+    const { errors } = resolveBooleanArgs(['--location=1', '--allow-production=1']);
+    expect(errors).toHaveLength(2);
+    // Order pinned too: the report follows the order the resolver reads them,
+    // not the order they were typed.
+    expect(errors.map((e) => e.split(' ')[0])).toEqual(['--location', '--allow-production']);
   });
 
   it('reports a malformed --allow-production without disturbing --location', () => {
@@ -391,6 +417,38 @@ describe('loadtest boolean flags — resolving them from argv', () => {
   it('ignores flags it does not own', () => {
     expect(resolveBooleanArgs(['--file=/tmp/x', '--count=5']))
       .toEqual({ includeLocation: false, errors: [] });
+  });
+
+  it("does not read another flag's value as its own", () => {
+    // The scan runs over the whole argv with no idea which tokens are values
+    // belonging to a value-taking flag. `--file=--location=true` names a
+    // bizarre but legal path; the only thing keeping it out of the refusal is
+    // that the match is anchored on `--location=` and this entry starts with
+    // `--file=`. Loosen that anchor and a CORRECT command line starts being
+    // refused — the one failure this change could introduce.
+    expect(resolveBooleanArgs(['--file=--location=true']))
+      .toEqual({ includeLocation: false, errors: [] });
+    expect(resolveFileArg(['--file=--location=true']).filePath).toBe('--location=true');
+  });
+
+  it('reports the boolean and the value-taking flag separately', () => {
+    // `--file --location=true` is wrong twice over and both readers say so:
+    // readFlag refuses a flag-shaped value, and this refuses the `=`. main()
+    // prints both, which is the point of collecting rather than throwing —
+    // the operator fixes one command line instead of two in succession.
+    const { includeLocation, errors } = resolveBooleanArgs(['--file', '--location=true']);
+    expect(includeLocation).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(resolveFileArg(['--file', '--location=true']).errors).toHaveLength(1);
+  });
+
+  it('still reads the bare flag when a value-taking flag swallowed at it', () => {
+    // `--count --location` is the shape readFlag's own comment calls out: it
+    // used to consume `--location` as the value AND leave the leg off, so the
+    // command line differed from the run in two ways at once. The count is
+    // refused, and the flag that was typed still reads as on.
+    expect(resolveBooleanArgs(['--count', '--location']).includeLocation).toBe(true);
+    expect(resolveNumericArgs(['--count', '--location']).errors).toHaveLength(1);
   });
 });
 
@@ -530,16 +588,63 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return found;
   };
 
-  // Flag tokens hard-coded into an `includes` call. The shared readers build
-  // their token from the flag NAME, so only an ad-hoc inline check puts a
-  // `--`-prefixed literal here — which is what this counts.
-  const flagLiteralIncludes = () => {
+  // Flag tokens hard-coded anywhere in the file, whatever call they sit in.
+  // The shared readers build their token from the flag NAME, so a
+  // `--`-prefixed literal is written only by an ad-hoc read — and the ad-hoc
+  // read is the defect itself.
+  //
+  // Deliberately NOT scoped to `.includes`, which was the first shape of this
+  // check and caught one spelling out of four. `--location=true` reads as
+  // absent just as silently through `.some((a) => a === '--x')`, through
+  // `.indexOf('--x') !== -1` — the very shape the readFlag check below names
+  // as the historical regression — and through `new Set(args).has('--x')`.
+  // Matching the literal rather than the call is what makes this independent
+  // of which one someone reaches for. It also stops the check firing on an
+  // unrelated `someString.includes('--x')`, which is not an argv read at all.
+  //
+  // `/^--\w/` so readFlag's own `'--'` prefix test and the `'---'` console
+  // divider are not swept up. A token built as `` `--${'dry-run'}` `` is a
+  // TemplateLiteral and still escapes; not a plausible accident.
+  const flagLiterals = () => {
     const found = [];
     traverse(ast, {
-      CallExpression(p) {
-        if (calleeName(p.node) !== 'includes') return;
-        const [arg] = p.node.arguments;
-        if (arg && arg.type === 'StringLiteral' && arg.value.startsWith('--')) found.push(arg.value);
+      StringLiteral(p) { if (/^--\w/.test(p.node.value)) found.push(p.node.value); },
+    });
+    return [...new Set(found)].sort();
+  };
+
+  // The module-level `errors:` bindings, and the ones main() actually
+  // forwards. Two independent walks on purpose, so the check below is a
+  // COMPARISON rather than a restatement of one hard-coded list.
+  const collectedErrorBindings = () => {
+    const found = [];
+    traverse(ast, {
+      VariableDeclarator(p) {
+        // getFunctionParent() === null keeps this to the module-level resolver
+        // destructures — the guard's own `errors:` binding lives inside main()
+        // and is not one of these.
+        if (p.node.id.type !== 'ObjectPattern' || p.getFunctionParent() !== null) return;
+        for (const prop of p.node.id.properties) {
+          if (prop.type !== 'ObjectProperty') continue;
+          if (prop.key.name === 'errors' && prop.value.type === 'Identifier') {
+            found.push(prop.value.name);
+          }
+        }
+      },
+    });
+    return found.sort();
+  };
+
+  const argErrorsSpread = () => {
+    let found = null;
+    traverse(ast, {
+      VariableDeclarator(p) {
+        if (p.node.id.type !== 'Identifier' || p.node.id.name !== 'argErrors') return;
+        if (p.node.init?.type !== 'ArrayExpression') return;
+        found = p.node.init.elements
+          .filter((e) => e?.type === 'SpreadElement' && e.argument.type === 'Identifier')
+          .map((e) => e.argument.name)
+          .sort();
       },
     });
     return found;
@@ -607,11 +712,30 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // to read `--location=true` as absent.
     //
     // One entry survives, and it is the target guard's own read: deliberately
-    // exact-token and fail-closed, with the shape refused upstream in
-    // resolveBooleanArgs. Anything else appearing here is a boolean flag that
-    // answers `=` by ignoring it.
-    expect(flagLiteralIncludes()).toEqual(['--allow-production']);
+    // exact-token and fail-closed, with the SHAPE refused upstream in
+    // resolveBooleanArgs.
+    //
+    // A third boolean flag added the intended way — `read('dry-run')` inside
+    // resolveBooleanArgs — writes 'dry-run' without the dashes and leaves this
+    // list untouched. Only the ad-hoc spellings add to it.
+    expect(flagLiterals()).toEqual(['--allow-production']);
     expect(callsNamed('readBooleanFlag')).toHaveLength(1);
+  });
+
+  it('forwards every resolver error list to main()', () => {
+    // Everything the unit tests above prove stops at the resolver. What turns
+    // a collected error into a refused run is one spread inside main(), which
+    // no test can reach — so `...booleanArgErrors` can be deleted with every
+    // test in this file still green AND lint clean, and that deletion is the
+    // original bug verbatim: the reader still refuses `--location=true`, the
+    // error is still collected, and the run still takes its whole window with
+    // the leg off, printing `Location: false`.
+    //
+    // Asserted as a comparison of two independent walks rather than one
+    // hard-coded list, so a fourth resolver has to be WIRED IN and not merely
+    // added alongside — the same ratchet as the resolveNumericArgs check.
+    expect(argErrorsSpread()).toEqual(collectedErrorBindings());
+    expect(argErrorsSpread()).toEqual(['booleanArgErrors', 'fileArgErrors', 'numericArgErrors']);
   });
 
   it('resolves its boolean flags in one place', () => {
