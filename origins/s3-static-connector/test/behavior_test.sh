@@ -194,9 +194,14 @@ expect_security_headers() {
 # nginx writes its access line after the response reaches the client, and the
 # container log pipeline adds its own lag, so a bare grep right after curl races
 # the writer — it flaked on emulated arm64. Poll like expect_stub_gets_since.
+docker_logs_contain() {
+  # grep -q closes the pipe on its first match; under pipefail that can turn a
+  # successful probe into SIGPIPE from docker logs. Consume the full stream.
+  docker logs "$1" 2>&1 | grep -F "$2" >/dev/null
+}
 expect_origin_log() {
   for _ in $(seq 1 20); do
-    if docker logs "$ORIGIN" 2>&1 | grep -q "$2"; then ok "$1"; return; fi
+    if docker_logs_contain "$ORIGIN" "$2"; then ok "$1"; return; fi
     sleep 0.25
   done
   no "$1"
@@ -526,13 +531,13 @@ else
       -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
       "$IMG" >/dev/null
     for _ in $(seq 1 40); do
-      docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_' && break
+      docker_logs_contain "$ORIGIN" '"msg":"preflight_' && break
       sleep 0.5
     done
     # A fatal verdict tears the container down right after logging it; settle
     # before the caller inspects container state.
     for _ in $(seq 1 20); do
-      docker logs "$ORIGIN" 2>&1 | grep -q '"msg":"preflight_request_rejected"' || break
+      docker_logs_contain "$ORIGIN" '"msg":"preflight_request_rejected"' || break
       [ "$(origin_running)" = "false" ] && break
       sleep 0.5
     done
@@ -564,7 +569,7 @@ else
   expect_eq "preflight serves when only the index object is missing" "$(origin_running)" "true"
   expect_origin_log "preflight distinguishes a 404 from a rejected request" \
     '"msg":"preflight_object_missing"'
-  if docker logs "$ORIGIN" 2>&1 | grep -q 'Credentials work'; then
+  if docker_logs_contain "$ORIGIN" 'Credentials work'; then
     no "preflight avoids claiming that a 404 proves credentials work"
   else
     ok "preflight avoids claiming that a 404 proves credentials work"
