@@ -102,9 +102,10 @@ type Options struct {
 	// Login. It does not govern post-admission reconnects: the pinned fork
 	// retries those internally, and the supervisor's watchdog bounds that loop.
 	//
-	// TODO(upstream-contract): mirrors github.com/layervai/frp
-	// v0.70.0-layerv.4 client/service.go: Run passes this field to the initial
-	// Login loop, while keepControllerWorking passes false to its reconnect loop.
+	// TODO(upstream-contract): mirrors the client/service.go call sites also
+	// documented by the supervisor's version-guarded reconnect contract: Run
+	// passes this field to the initial Login loop, while keepControllerWorking
+	// passes false to its reconnect loop.
 	//
 	// Its zero value is false. The supervisor forces it true for every
 	// knock-then-login cycle so a failed initial Login returns for a fresh knock
