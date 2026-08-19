@@ -27,6 +27,11 @@ import (
 
 // Client is what commands program against.
 type Client interface {
+	// MintConnectorEnrollmentToken creates a short-lived, one-shot credential
+	// bound to exactly one Connector. The caller supplies the idempotency key
+	// so a higher-level enrollment attempt can recover an ambiguous response
+	// without minting a second credential.
+	MintConnectorEnrollmentToken(ctx context.Context, opts MintConnectorEnrollmentTokenOptions) (*ConnectorEnrollmentToken, error)
 	// Publish registers targetURL as a protected resource and returns its
 	// identity, CRID included when the service mints one.
 	Publish(ctx context.Context, targetURL string, opts PublishOptions) (*Published, error)
@@ -198,14 +203,14 @@ func New(cfg *Config) (Client, error) {
 func (c *client) Resolve(ctx context.Context, id string, opts ResolveOptions) (*Resolved, error) {
 	var sdkOpts *qurl.ResolveResourceOptions
 	if opts.TTLSeconds > 0 {
-		sdkOpts = &qurl.ResolveResourceOptions{TTLSeconds: opts.TTLSeconds}
+		sdkOpts = &qurl.ResolveResourceOptions{TTL: time.Duration(opts.TTLSeconds) * time.Second}
 	}
 	access, err := c.sdk.ResolveResource(ctx, id, sdkOpts)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	return &Resolved{
-		QURL:             access.QURL,
+		QURL:             access.Link,
 		CRID:             access.CRID,
 		Type:             access.Type,
 		ExpiresAt:        access.ExpiresAt,

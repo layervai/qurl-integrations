@@ -223,6 +223,14 @@ type restReply struct {
 // authorization the SDK calls use. The response body is fully consumed and
 // closed before returning.
 func (c *client) doREST(ctx context.Context, method, path string, body any) (*restReply, error) {
+	return c.doRESTWithHeaders(ctx, method, path, body, nil)
+}
+
+// doRESTWithHeaders is doREST plus request-specific headers. Shared headers
+// (including authorization) still come from the same transport seam; this
+// narrow variant exists for contracts such as Idempotency-Key that cannot be
+// represented in a JSON body.
+func (c *client) doRESTWithHeaders(ctx context.Context, method, path string, body any, headers http.Header) (*restReply, error) {
 	reqBody := io.Reader(http.NoBody)
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -238,6 +246,11 @@ func (c *client) doREST(ctx context.Context, method, path string, body any) (*re
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 	if err := c.authorize(ctx, req); err != nil {
 		return nil, err

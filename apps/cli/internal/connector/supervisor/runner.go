@@ -49,7 +49,8 @@ type cycleRunner struct {
 	// the runner's only evidence-based "the server admitted us" signal.
 	admitted atomic.Bool
 
-	logger *slog.Logger
+	logger               *slog.Logger
+	onAuthenticatedReady func()
 
 	cancelMu sync.Mutex
 	cancel   context.CancelFunc
@@ -104,6 +105,15 @@ func (r *cycleRunner) onFirstLoginSuccess(runID string) error {
 		"resource_id", r.resourceID,
 		"run_id", runID,
 	)
+	// The FRP hook is synchronous, so this callback must be a nonblocking
+	// notification only. Keeping it synchronous preserves ordering: once a
+	// caller observes readiness, exact RunID validation and the admitted latch
+	// are already complete. A factory may build multiple runners as the
+	// supervisor reconnects; callers that only need the first notification can
+	// guard the shared callback with sync.Once.
+	if r.onAuthenticatedReady != nil {
+		r.onAuthenticatedReady()
+	}
 	return nil
 }
 

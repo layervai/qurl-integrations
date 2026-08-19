@@ -2,8 +2,11 @@ package output
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +16,7 @@ import (
 	"github.com/layervai/qurl-go/qurl"
 
 	qurlapi "github.com/layervai/qurl-integrations/apps/cli/internal/api"
+	"github.com/layervai/qurl-integrations/apps/cli/internal/apitest"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/auth"
 	"github.com/layervai/qurl-integrations/apps/cli/internal/connector/agent"
 )
@@ -267,6 +271,38 @@ func TestRenderErrorAnatomies(t *testing.T) {
 	// Fields render sorted.
 	if strings.Index(rendered, "alias:") > strings.Index(rendered, "target_url:") {
 		t.Errorf("invalid fields not sorted:\n%s", rendered)
+	}
+}
+
+func TestRenderConnectorEnrollmentScopeRemedy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apitest.WriteProblem(t, w, http.StatusForbidden, "insufficient_scope", "Forbidden", "minting enrollment tokens requires qurl:agent")
+	}))
+	t.Cleanup(srv.Close)
+	client, err := qurlapi.New(&qurlapi.Config{
+		BaseURL: srv.URL,
+		APIKey:  "lv_test_logincredential123456789",
+		Version: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.MintConnectorEnrollmentToken(context.Background(), qurlapi.MintConnectorEnrollmentTokenOptions{
+		ConnectorID:    "local-scope-test",
+		IdempotencyKey: "0123456789abcdef0123456789abcdef",
+	})
+	if err == nil {
+		t.Fatal("mint unexpectedly succeeded")
+	}
+
+	var buf bytes.Buffer
+	RenderError(&buf, fmt.Errorf("bootstrap local Connector: %w", err), false)
+	got := buf.String()
+	if !strings.Contains(got, "qurl:agent") || !strings.Contains(got, "one-shot Connector enrollment credential") {
+		t.Errorf("operation-specific remedy missing:\n%s", got)
+	}
+	if strings.Contains(got, hintScope) {
+		t.Errorf("generic resource-scope remedy won over enrollment remedy:\n%s", got)
 	}
 }
 

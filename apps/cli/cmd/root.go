@@ -25,6 +25,11 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
+const (
+	httpURLScheme  = "http"
+	httpsURLScheme = "https"
+)
+
 // globalOpts carries flag values, injected process context, and the settings
 // resolved from the flag > env > profile > default precedence chain.
 type globalOpts struct {
@@ -272,7 +277,7 @@ func (o *globalOpts) printer() *output.Printer {
 // Location elsewhere; this closes the sibling misconfiguration.
 func insecureEndpointWarning(endpoint string) string {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" {
+	if err != nil || u.Scheme != httpURLScheme {
 		return ""
 	}
 	host := u.Hostname()

@@ -27,6 +27,12 @@ type FRPFactoryConfig struct {
 	Proxies []v1.ProxyConfigurer
 	// Logger receives runner and refresher events; nil uses slog.Default().
 	Logger *slog.Logger
+	// OnAuthenticatedReady is called after a tunnel Login is authenticated
+	// and its accepted RunID exactly matches the current native cycle RunID.
+	// It is optional and must return immediately; use a nonblocking channel
+	// send to hand work off, and guard it with sync.Once when the caller only
+	// needs the first ready signal across supervised reconnect cycles.
+	OnAuthenticatedReady func()
 	// RedialKnockGate overrides the redial refresher's debounce; zero means
 	// the package default. Test-only injection.
 	RedialKnockGate time.Duration
@@ -41,25 +47,30 @@ type FRPFactoryConfig struct {
 // FRP service re-registers the same proxies on every reconnect), so the
 // factory validates the proxies eagerly and cycle construction cannot fail on
 // them later.
-func NewFRPRunnerFactory(cfg FRPFactoryConfig) (RunnerFactory, error) {
-	if cfg.Knocker == nil {
+func NewFRPRunnerFactory(cfg *FRPFactoryConfig) (RunnerFactory, error) {
+	if cfg == nil {
+		return nil, errors.New("qURL Connector supervisor: FRP runner factory configuration is nil")
+	}
+	// Keep the factory immutable even if a caller reuses its config struct.
+	config := *cfg
+	if config.Knocker == nil {
 		return nil, errors.New("qURL Connector supervisor: FRP runner factory requires a cycle knocker")
 	}
-	if cfg.ResourceID == "" {
+	if config.ResourceID == "" {
 		return nil, errors.New("qURL Connector supervisor: FRP runner factory requires the knock resource")
 	}
-	if len(cfg.Proxies) == 0 {
+	if len(config.Proxies) == 0 {
 		return nil, errors.New("qURL Connector supervisor: FRP runner factory requires at least one proxy")
 	}
-	gate := cfg.RedialKnockGate
+	gate := config.RedialKnockGate
 	if gate <= 0 {
 		gate = redialKnockGate
 	}
-	for _, proxy := range cfg.Proxies {
+	for _, proxy := range config.Proxies {
 		proxy.Complete()
 	}
 	cfgSource := source.NewConfigSource()
-	if err := cfgSource.ReplaceAll(cfg.Proxies, nil); err != nil {
+	if err := cfgSource.ReplaceAll(config.Proxies, nil); err != nil {
 		return nil, fmt.Errorf("qURL Connector supervisor: load proxy configs: %w", err)
 	}
 	aggregator := source.NewAggregator(cfgSource)
@@ -69,16 +80,21 @@ func NewFRPRunnerFactory(cfg FRPFactoryConfig) (RunnerFactory, error) {
 		// presents it on the first Login, and the admission hook refuses a
 		// session under any other value. A missing or noncanonical RunID
 		// here is a sequencing bug, not a transient — fail the factory.
-		runID := cfg.Knocker.CycleRunID()
+		runID := config.Knocker.CycleRunID()
 		if err := qurl.ValidateCycleRunID(runID); err != nil {
 			return nil, fmt.Errorf("native cycle RunID unavailable for tunnel login: %w", err)
 		}
-		runner := &cycleRunner{resourceID: cfg.ResourceID, cycleRunID: runID, logger: cfg.Logger}
+		runner := &cycleRunner{
+			resourceID:           config.ResourceID,
+			cycleRunID:           runID,
+			logger:               config.Logger,
+			onAuthenticatedReady: config.OnAuthenticatedReady,
+		}
 		refresher := &redialKnockRefresher{
-			knocker:        cfg.Knocker,
-			resourceID:     cfg.ResourceID,
+			knocker:        config.Knocker,
+			resourceID:     config.ResourceID,
 			gate:           gate,
-			logger:         cfg.Logger,
+			logger:         config.Logger,
 			requestRestart: runner.requestRestart,
 		}
 		svc, err := frpclient.NewService(frpclient.ServiceOptions{

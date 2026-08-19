@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,6 +158,72 @@ func TestOnFirstLoginSuccessBindsRunID(t *testing.T) {
 				t.Fatal("admission latched for a refused session")
 			}
 		})
+	}
+}
+
+// TestOnFirstLoginSuccessNotifiesOnlyAfterAdmission pins the readiness seam:
+// rejected Login identities never notify, while an exact match observes the
+// admission latch before the callback runs.
+func TestOnFirstLoginSuccessNotifiesOnlyAfterAdmission(t *testing.T) {
+	t.Parallel()
+	runID := testCycleRunID(t)
+	var notifications atomic.Int32
+	r := &cycleRunner{
+		resourceID: testResource,
+		cycleRunID: runID,
+		logger:     discardLogger(),
+	}
+	r.onAuthenticatedReady = func() {
+		if !r.admitted.Load() {
+			t.Error("readiness callback ran before admission was latched")
+		}
+		notifications.Add(1)
+	}
+
+	if err := r.onFirstLoginSuccess(testCycleRunID(t)); err == nil {
+		t.Fatal("mismatched RunID admitted")
+	}
+	if err := r.onFirstLoginSuccess("not-a-run-id"); err == nil {
+		t.Fatal("noncanonical RunID admitted")
+	}
+	if got := notifications.Load(); got != 0 {
+		t.Fatalf("readiness notifications after refused Logins = %d, want 0", got)
+	}
+
+	if err := r.onFirstLoginSuccess(runID); err != nil {
+		t.Fatalf("exact RunID admission: %v", err)
+	}
+	if got := notifications.Load(); got != 1 {
+		t.Fatalf("readiness notifications after admitted Login = %d, want 1", got)
+	}
+}
+
+// TestAuthenticatedReadyCallbackCanBeOnceGuardedAcrossRunners models the
+// factory's reconnect shape: every cycle receives the same callback, and a
+// caller can safely reduce repeated admissions to one readiness signal.
+func TestAuthenticatedReadyCallbackCanBeOnceGuardedAcrossRunners(t *testing.T) {
+	t.Parallel()
+	var once sync.Once
+	var notifications atomic.Int32
+	callback := func() {
+		once.Do(func() { notifications.Add(1) })
+	}
+
+	for range 2 {
+		runID := testCycleRunID(t)
+		r := &cycleRunner{
+			resourceID:           testResource,
+			cycleRunID:           runID,
+			logger:               discardLogger(),
+			onAuthenticatedReady: callback,
+		}
+		if err := r.onFirstLoginSuccess(runID); err != nil {
+			t.Fatalf("admit reconnect cycle: %v", err)
+		}
+	}
+
+	if got := notifications.Load(); got != 1 {
+		t.Fatalf("once-guarded readiness notifications = %d, want 1", got)
 	}
 }
 

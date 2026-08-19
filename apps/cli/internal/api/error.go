@@ -31,6 +31,8 @@ type Error struct {
 	RequestID string
 
 	err error
+
+	connectorEnrollmentScopeRequired bool
 }
 
 // Error renders a single line: the fixed frame, the server's title (or
@@ -53,6 +55,14 @@ func (e *Error) Error() string {
 // Unwrap keeps the original wire error chain — SDK sentinels included —
 // reachable for errors.Is and errors.As.
 func (e *Error) Unwrap() error { return e.err }
+
+// ConnectorEnrollmentScopeRequired reports that this error came from the
+// automatic Connector enrollment mint and the login key lacks qurl:agent.
+// Keeping the operation marker on the typed error lets output give the right
+// remedy without parsing server prose or weakening every other 403 hint.
+func (e *Error) ConnectorEnrollmentScopeRequired() bool {
+	return e != nil && e.connectorEnrollmentScopeRequired
+}
 
 // CustomerMessages returns the fixed customer-facing strings this package
 // can emit, for the CLI-wide jargon gate. Server-provided problem text is

@@ -160,12 +160,16 @@ func TestResolveResourceFindsExistingBySlug(t *testing.T) {
 	m := newMockHub(t, row)
 	client := newMockClient(t, m)
 
-	got, err := ResolveResource(context.Background(), client, "my-service")
+	result, err := ResolveResourceWithResult(context.Background(), client, "my-service")
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := result.Resource
 	if got.ResourceID != row.ResourceID || got.Slug != "my-service" || got.KnockResourceID != row.KnockResourceID {
 		t.Fatalf("ResolveResource = %+v, want the existing row", got)
+	}
+	if result.FoundExisting == nil || !*result.FoundExisting {
+		t.Fatalf("FoundExisting = %v, want true", result.FoundExisting)
 	}
 	for _, req := range m.requestLog() {
 		if strings.HasPrefix(req, http.MethodPost) {
@@ -179,12 +183,16 @@ func TestResolveResourceEnsuresWhenAbsent(t *testing.T) {
 	m := newMockHub(t)
 	client := newMockClient(t, m)
 
-	got, err := ResolveResource(context.Background(), client, "fresh-connector")
+	result, err := ResolveResourceWithResult(context.Background(), client, "fresh-connector")
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := result.Resource
 	if got.Slug != "fresh-connector" || got.ResourceID == "" || got.ConnectorRoutingID == "" {
 		t.Fatalf("ensured resource = %+v", got)
+	}
+	if result.FoundExisting == nil || *result.FoundExisting {
+		t.Fatalf("FoundExisting = %v, want false", result.FoundExisting)
 	}
 	log := m.requestLog()
 	if len(log) != 2 || log[0] != "GET /v1/resources" || log[1] != "POST /v1/resources" {
@@ -232,12 +240,16 @@ func TestResolveResourceReconcilesUncertainEnsure(t *testing.T) {
 		writeJSON(t, w, http.StatusOK, map[string]any{"data": []connectorWire{row}})
 	})
 
-	got, err := ResolveResource(context.Background(), client, "flaky-net")
+	result, err := ResolveResourceWithResult(context.Background(), client, "flaky-net")
 	if err != nil {
 		t.Fatalf("uncertain ensure with committed row = %v, want adoption", err)
 	}
+	got := result.Resource
 	if got.ResourceID != row.ResourceID {
 		t.Fatalf("adopted resource = %+v, want the committed row", got)
+	}
+	if result.FoundExisting != nil {
+		t.Fatalf("FoundExisting = %v, want unknown after reconciliation", *result.FoundExisting)
 	}
 }
 
