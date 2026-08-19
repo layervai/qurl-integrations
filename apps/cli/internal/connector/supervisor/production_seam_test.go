@@ -25,7 +25,8 @@ func routingID(seed string) string {
 // the tests that reason about production's shape, so the two cannot drift into
 // asserting against different configs. seed only feeds the routing identity,
 // which frpgen puts on the proxy rather than the common config, so callers
-// passing different seeds still get identical configs back.
+// passing different seeds still get identical configs back — it is a
+// call-site label, not a knob.
 func productionCommon(t *testing.T, seed string) *v1.ClientCommonConfig {
 	t.Helper()
 	cfg, err := frpgen.Generate(&frpgen.Route{
