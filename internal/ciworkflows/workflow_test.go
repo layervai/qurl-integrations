@@ -484,7 +484,7 @@ type pullRequestBranchSpec struct {
 }
 
 // otherPullRequestWorkflows covers every remaining workflow with a
-// pull_request trigger. Splitting the record in two is deliberate:
+// pull-request trigger. Splitting the record in two is deliberate:
 // requiredWorkflowSpecs already carries a completeness guard
 // (TestRequiredWorkflowSpecsCoverEveryAggregate), and the workflows here are
 // exactly the ones that guard cannot see.
@@ -667,8 +667,8 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 
 	// Couple the counts, so a scan that matches nothing (renamed directory,
 	// changed extension) fails instead of passing every assertion vacuously,
-	// and so an entry for a workflow that no longer runs on pull_request is
-	// caught rather than left to rot.
+	// and so an entry for a workflow that no longer runs on a pull-request
+	// trigger is caught rather than left to rot.
 	if want := len(recorded); seen != want {
 		t.Errorf("found %d workflows running on a pull-request trigger, want %d (one per recorded entry)", seen, want)
 	}
