@@ -406,8 +406,11 @@ func TestApplyKnockResultContract(t *testing.T) {
 // compare each to itself. The pointer-identity checks catch a knob repointed at
 // an equal value, which a value snapshot cannot see. Neither catches a
 // value-preserving write through an existing pointer (`*Enable = true` where it
-// is already true); that is still an unsynchronized write, and it is the
-// acknowledged floor of this technique rather than a claim of total coverage.
+// is already true), nor one of the three non-bool pointers on this config
+// (Auth.TokenSource, Auth.OIDC.TokenSource, WebServer.TLS) repointed at an
+// equal value — those are nil in the generated config, so a pointer check on
+// them would assert nothing. That is the acknowledged floor of this technique
+// rather than a claim of total coverage.
 func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
 	t.Parallel()
 	common := productionCommon(t, "write-set")
