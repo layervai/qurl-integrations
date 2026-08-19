@@ -535,25 +535,16 @@ func workflowReportedContexts(t *testing.T) workflowContexts {
 // name the files it scanned and found clean rather than only the ones it
 // flagged.
 //
-// This is the only place that parses every workflow's `on:`, so it is also
-// where an unusable one has to be named. parseWorkflowTriggers reports an
-// unexpected shape as a bare type — "workflow on has unexpected type <nil>" —
-// which across a scan of every workflow in the repo identifies no file at all.
-// A bare `on:` with no value is exactly that case: it unmarshals to nil, misses
-// every shape the parser knows, and would abort the whole scan anonymously.
+// An unusable `on:` is parseWorkflowTriggers' problem, not this scan's: it
+// takes the file name precisely so a malformed one is named rather than
+// reported as a bare type, which across a scan of every workflow in the repo
+// would identify no file at all.
 func workflowMergeGroupTriggers(t *testing.T) map[string]bool {
 	t.Helper()
 
 	declared := map[string]bool{}
 	for _, name := range workflowFiles(t) {
-		on := readWorkflow(t, name).On
-		if on == nil {
-			t.Errorf("%s has an empty `on:`, so nothing can ever run it", name)
-			declared[name] = false
-			continue
-		}
-
-		triggers := parseWorkflowTriggers(t, on)
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
 		if len(triggers) == 0 {
 			t.Errorf("%s declares no triggers, so nothing can ever run it", name)
 		}
@@ -563,12 +554,16 @@ func workflowMergeGroupTriggers(t *testing.T) map[string]bool {
 	return declared
 }
 
-// mergeQueuePosturePattern matches the marker whatever spacing it is written
-// with. Matching a literal instead would make `<!--merge-queue-posture:none-->`
-// fail as "no marker found", sending the reader after a missing line that is
-// sitting right in front of them — a misleading diagnostic on a file whose
-// whole job is to be believed.
-var mergeQueuePosturePattern = regexp.MustCompile(`<!--\s*` + mergeQueuePostureMarker + `\s*:\s*(\S*)\s*-->`)
+// mergeQueuePosturePattern matches the marker whatever spacing it carries, and
+// captures everything up to the close rather than a single word. Both halves
+// exist to keep the diagnostic honest: a literal match would report
+// `<!--merge-queue-posture:none-->` as "no marker found", and a `\S*` capture
+// would report `<!-- merge-queue-posture: none oops -->` the same way — each
+// sending the reader after a missing line that is sitting in front of them.
+// Anything the marker does hold is validated below and named if it is wrong,
+// which is the diagnostic a file whose whole job is to be believed owes its
+// reader.
+var mergeQueuePosturePattern = regexp.MustCompile(`<!--\s*` + mergeQueuePostureMarker + `\s*:([^>]*)-->`)
 
 // documentedMergeQueuePosture reads the marker CONTRIBUTING.md uses to declare
 // whether this repo intends a merge queue. It requires exactly one, for the
@@ -584,7 +579,7 @@ func documentedMergeQueuePosture(t *testing.T) string {
 			contributingPath, len(matches), mergeQueuePostureMarker)
 	}
 
-	switch posture := matches[0][1]; posture {
+	switch posture := strings.TrimSpace(matches[0][1]); posture {
 	case mergeQueuePostureNone, mergeQueuePostureQueued:
 		return posture
 	default:

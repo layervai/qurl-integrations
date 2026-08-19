@@ -38,6 +38,8 @@ const (
 	cliReleaseVerifierStepName = "Verify the CLI release was created"
 	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
 	checkoutActionPrefix       = "actions/checkout@"
+
+	workflowContractWorkflow = "workflow-contract.yml"
 )
 
 type requiredWorkflowSpec struct {
@@ -220,8 +222,8 @@ type step struct {
 // answer has to be the same for every required context rather than for this
 // one workflow.
 func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
-	workflow := readWorkflow(t, "workflow-contract.yml")
-	triggers := parseWorkflowTriggers(t, workflow.On)
+	workflow := readWorkflow(t, workflowContractWorkflow)
+	triggers := parseWorkflowTriggers(t, workflowContractWorkflow, workflow.On)
 
 	pullRequest, ok := triggers["pull_request"]
 	if !ok {
@@ -418,7 +420,7 @@ func TestParseWorkflowTriggers(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := parseWorkflowTriggers(t, test.value)
+			got := parseWorkflowTriggers(t, "example.yml", test.value)
 			if len(got) != len(test.want) {
 				t.Fatalf("trigger count = %d, want %d", len(got), len(test.want))
 			}
@@ -431,7 +433,7 @@ func TestParseWorkflowTriggers(t *testing.T) {
 	}
 }
 
-func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
+func parseWorkflowTriggers(t *testing.T, workflow string, value any) map[string]any {
 	t.Helper()
 
 	switch typed := value.(type) {
@@ -442,7 +444,7 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 		for _, raw := range typed {
 			trigger, ok := raw.(string)
 			if !ok {
-				t.Fatalf("workflow on sequence contains non-string value %T", raw)
+				t.Fatalf("%s on sequence contains non-string value %T", workflow, raw)
 			}
 			triggers[trigger] = nil
 		}
@@ -455,8 +457,14 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 		return triggers
 	case map[string]any:
 		return typed
+	case nil:
+		// A bare `on:` with no value unmarshals to nil. Named separately from
+		// the default below because it is the one malformed shape a human
+		// actually writes, and "unexpected type <nil>" describes it poorly.
+		t.Fatalf("%s has an empty `on:`, so nothing can ever run it", workflow)
+		return nil
 	default:
-		t.Fatalf("workflow on has unexpected type %T", value)
+		t.Fatalf("%s on has unexpected type %T", workflow, value)
 		return nil
 	}
 }
@@ -640,7 +648,7 @@ func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 
 	seen := 0
 	for _, name := range workflowFiles(t) {
-		triggers := parseWorkflowTriggers(t, readWorkflow(t, name).On)
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
 		runsOnPullRequests := false
 		for _, trigger := range pullRequestTriggers {
 			if _, ok := triggers[trigger]; ok {
@@ -775,7 +783,7 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 func assertPullRequestBranches(t *testing.T, path string, want []string) {
 	t.Helper()
 
-	triggers := parseWorkflowTriggers(t, readWorkflow(t, path).On)
+	triggers := parseWorkflowTriggers(t, path, readWorkflow(t, path).On)
 	checked := 0
 	for _, trigger := range pullRequestTriggers {
 		config, ok := triggers[trigger]
