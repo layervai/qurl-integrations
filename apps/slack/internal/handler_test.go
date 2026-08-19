@@ -226,9 +226,20 @@ func slashUninstallConfirmedForGrid(t *testing.T, h *Handler, teamID, userID str
 	}
 	// Return the whole response_url payload (it carries response_type too), so
 	// assertions that predate the button still read the fields they expect.
-	var reply map[string]string
-	if err := json.Unmarshal(captured.waitForBody(t, 2*time.Second), &reply); err != nil {
+	// Decoded as map[string]any because the confirmed reply also carries
+	// replace_original (a bool), which consumes the confirmation card.
+	var raw map[string]any
+	if err := json.Unmarshal(captured.waitForBody(t, 2*time.Second), &raw); err != nil {
 		t.Fatalf("unmarshal uninstall confirm reply: %v", err)
+	}
+	reply := map[string]string{}
+	for k, v := range raw {
+		if str, ok := v.(string); ok {
+			reply[k] = str
+		}
+	}
+	if replace, ok := raw[respFieldReplaceOriginal].(bool); !ok || !replace {
+		t.Fatalf("confirmed uninstall reply must set replace_original so the card is consumed; got %v", raw[respFieldReplaceOriginal])
 	}
 	return reply
 }

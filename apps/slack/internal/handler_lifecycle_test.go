@@ -948,12 +948,28 @@ func TestUninstallConfirmClickRequiresAdmin(t *testing.T) {
 // the echoed button value: a card can only ever purge partitions the clicking
 // interaction is itself authenticated for.
 func TestUninstallPurgeIDsForClickRejectsForeignPartitions(t *testing.T) {
-	got := uninstallPurgeIDsForClick("T_team,E_GRID,T_SOMEONE_ELSE", "T_team", "E_GRID")
+	got, dropped := uninstallPurgeIDsForClick("T_team,E_GRID,T_SOMEONE_ELSE", "T_team", "E_GRID")
 	if strings.Join(got, ",") != "T_team,E_GRID" {
 		t.Fatalf("purge ids = %v, want the foreign partition dropped", got)
 	}
+	if strings.Join(dropped, ",") != "T_SOMEONE_ELSE" {
+		t.Fatalf("dropped = %v, want the foreign partition reported so it can be logged", dropped)
+	}
+
 	// An empty or fully-foreign value still purges the caller's own team.
-	if got := uninstallPurgeIDsForClick("T_SOMEONE_ELSE", "T_team", ""); strings.Join(got, ",") != "T_team" {
+	if got, _ := uninstallPurgeIDsForClick("T_SOMEONE_ELSE", "T_team", ""); strings.Join(got, ",") != "T_team" {
 		t.Fatalf("purge ids = %v, want a fallback to the payload team", got)
+	}
+
+	// The Grid case the review flagged: an org install whose CLICK payload omits
+	// the enterprise object. The enterprise partition is dropped (fail-safe:
+	// under-purge, never cross-workspace), and it is reported so the handler can
+	// warn instead of silently reporting a complete teardown.
+	got, dropped = uninstallPurgeIDsForClick("T_team,E_GRID", "T_team", "")
+	if strings.Join(got, ",") != "T_team" {
+		t.Fatalf("purge ids = %v, want only the authenticated team", got)
+	}
+	if strings.Join(dropped, ",") != "E_GRID" {
+		t.Fatalf("dropped = %v, want the enterprise partition reported", dropped)
 	}
 }

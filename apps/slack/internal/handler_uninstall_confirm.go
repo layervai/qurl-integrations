@@ -58,20 +58,32 @@ func uninstallConfirmBlocks(command string, purgeWorkspaceIDs []string) []any {
 // this very interaction is authenticated for, so a replayed card can never point
 // the purge at a partition outside the clicking workspace. Falls back to the
 // payload's own team id when nothing survives validation.
-func uninstallPurgeIDsForClick(value, teamID, enterpriseID string) []string {
+//
+// It also returns what it dropped. Dropping is the fail-safe direction
+// (under-purge, never cross-workspace over-purge), but an Enterprise Grid org
+// install whose click payload omits the `enterprise` object would silently leave
+// that partition behind on tables with no restore path — so the caller logs it
+// rather than letting it pass unnoticed.
+//
+// TODO(upstream-contract): this relies on Slack populating `enterprise` on a
+// block_actions payload for the same install whose slash payload carried
+// is_enterprise_install=true. If that stops holding, the dropped-partition
+// warning below is the signal.
+func uninstallPurgeIDsForClick(value, teamID, enterpriseID string) (purge, dropped []string) {
 	allowed := map[string]struct{}{}
 	for _, id := range []string{teamID, enterpriseID} {
 		if id = strings.TrimSpace(id); id != "" {
 			allowed[id] = struct{}{}
 		}
 	}
-	var ids orderedIDSet
+	var ids, rejected orderedIDSet
 	for _, raw := range strings.Split(value, uninstallPurgeIDSeparator) {
 		id := strings.TrimSpace(raw)
 		if id == "" {
 			continue
 		}
 		if _, ok := allowed[id]; !ok {
+			rejected.add(id)
 			continue
 		}
 		ids.add(id)
@@ -79,7 +91,7 @@ func uninstallPurgeIDsForClick(value, teamID, enterpriseID string) []string {
 	if ids.empty() {
 		ids.add(teamID)
 	}
-	return ids.ids
+	return ids.ids, rejected.ids
 }
 
 // handleUninstallConfirmClick performs the teardown after the admin confirms.
@@ -96,13 +108,26 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 	)
 	responseURL := payload.ResponseURL
 	teamID, userID := payload.Team.ID, payload.User.ID
-	purgeIDs := uninstallPurgeIDsForClick(action.Value, teamID, payload.Enterprise.ID)
+	purgeIDs, droppedIDs := uninstallPurgeIDsForClick(action.Value, teamID, payload.Enterprise.ID)
+	if len(droppedIDs) > 0 {
+		// Loud on purpose: the teardown is about to report success while leaving
+		// these partitions intact. Ids are Slack team/enterprise identifiers, not
+		// secrets, and they are what an operator needs to finish the cleanup.
+		log.Warn("uninstall confirm: dropped purge partitions not authenticated by this click",
+			"dropped_workspace_ids", droppedIDs,
+			"cleanup_action_required", true,
+		)
+	}
 
 	if !h.startAsyncWorker(log, func(ctx context.Context, log *slog.Logger) {
 		if !h.requireUninstallAdminOrOwnerForClick(ctx, log, responseURL, teamID, userID) {
 			return
 		}
-		_ = h.postResponse(log, responseURL, h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs))
+		// replace_original consumes the confirmation card. Leaving it in place
+		// would let a second click re-run the gate against the roster this
+		// teardown just purged, telling the admin who ran it that they are not
+		// an admin.
+		_ = h.replaceOriginalResponse(log, responseURL, h.uninstallWorkspaceReply(ctx, teamID, userID, purgeIDs))
 	}) {
 		log.Warn("async pool saturated — dropping uninstall confirmation click")
 		h.Go(func() { _ = h.postResponse(log, responseURL, ackBusy) })
@@ -114,8 +139,8 @@ func (h *Handler) handleUninstallConfirmClick(w http.ResponseWriter, payload *in
 // click-surface twin: same owner-or-admin rule, but it reports refusals over
 // response_url instead of the slash writer, and fails closed on a store error.
 func (h *Handler) requireUninstallAdminOrOwnerForClick(ctx context.Context, log *slog.Logger, responseURL, teamID, userID string) bool {
-	if userID == "" {
-		_ = h.postResponse(log, responseURL, ":warning: missing user_id in the Slack interaction payload")
+	if userID == "" || teamID == "" {
+		_ = h.postResponse(log, responseURL, ":warning: missing team_id or user_id in the Slack interaction payload")
 		return false
 	}
 	if h.cfg.AdminStore == nil {
