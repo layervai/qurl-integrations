@@ -275,7 +275,7 @@ a trigger-level `paths:` the diff misses — leaves the merge box at "Expected �
 Waiting for status to be reported" with nothing red to point at. The nine narrow
 by diff with `dorny/paths-filter` inside their `changes` job precisely so the
 workflow still starts and the aggregate still reports; lifting that up to the
-trigger is what this catches.
+trigger is what this catches (#1225).
 
 The four `age-check / *` contexts are the one partial exception. Only their
 caller half — the `age-check` job in each `dependency-age-check-*.yml` — is
