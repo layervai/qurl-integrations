@@ -400,11 +400,17 @@ else
   # root; under S3_PREFIX=site a legit request signs /site/styles/app.css, so any
   # upstream GET for the bare /styles/app.css means the prefix boundary escaped.
   mark="$(stub_log_mark)"
-  curl -s --path-as-is -o /dev/null \
-    "$base/q%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css"
+  code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' \
+    "$base/q%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css")
+  expect_eq "CRLF control-char viewer path is rejected" "$code" 404
   expect_stub_gets_since "CRLF request-splitting cannot escape S3_PREFIX" "$mark" 'GET /styles/app.css ' 0
-  expect_eq "control-char viewer path is rejected, not proxied" \
-    "$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$base/a%0d%0ab.html")" 404
+
+  # Pin a non-CR/LF member of the complete C0/DEL class and assert the request
+  # never reaches the signer, even if the stub would independently return 404.
+  mark="$(stub_log_mark)"
+  code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$base/a%09b.html")
+  expect_eq "tab control-char viewer path is rejected" "$code" 404
+  expect_stub_gets_since "tab control-char viewer path is not proxied" "$mark" 'GET ' 0
 fi
 
 # 15. The entrypoint supervisor exits the container if either child dies.
