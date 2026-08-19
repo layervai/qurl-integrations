@@ -542,3 +542,99 @@ describe('loadtest target guard — the names read from the outside world', () =
     expect(resolveGuardInputs({}, []).allowProdFlag).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Static check: the script calls mintLinks with its options object.
+//
+// Filed after PR #1168 fixed a real 100%-failure bug — the file leg called
+// `mintLinks(resourceId, expiresAt, batchSize)` positionally against a
+// `(resourceId, { expiresAt, n, ... })` signature. Destructuring an ISO string
+// yields `undefined` for every key, so the `n` bound check threw before fetch
+// and the leg issued ZERO mint requests while reporting them as failures.
+//
+// This is a STATIC check because runRound is unreachable from a test: it is
+// not in module.exports, its only caller main() is behind
+// `require.main === module`, and scripts/ sits outside collectCoverageFrom, so
+// neither jest nor the coverage gate can see the call site. eslint extends
+// only eslint:recommended — no arity or type checking — so it cannot see it
+// either. Parsing the source is what is left. Same approach as
+// tests/ddb-reserved-words-static.test.js.
+//
+// The expected key set is derived from connector.js's actual parameter list
+// rather than hard-coded, so a rename there surfaces here instead of silently
+// making this test assert a stale contract.
+
+const fs = require('fs');
+const path = require('path');
+const parser = require('@babel/parser');
+const traverseModule = require('@babel/traverse');
+const traverse = traverseModule.default || traverseModule;
+
+describe('loadtest script — mintLinks call shape', () => {
+  const parseFile = (...segments) =>
+    parser.parse(fs.readFileSync(path.join(__dirname, '..', ...segments), 'utf8'), {
+      sourceType: 'unambiguous',
+    });
+
+  /** Option names mintLinks actually destructures, read from its signature. */
+  const declaredOptionKeys = () => {
+    let keys = null;
+    traverse(parseFile('src', 'connector.js'), {
+      FunctionDeclaration(p) {
+        if (p.node.id?.name !== 'mintLinks') return;
+        const second = p.node.params[1];
+        // `{ ... } = {}` parses as AssignmentPattern wrapping the ObjectPattern.
+        const pattern = second.type === 'AssignmentPattern' ? second.left : second;
+        expect(pattern.type).toBe('ObjectPattern');
+        keys = new Set(
+          pattern.properties.filter(pr => pr.type === 'ObjectProperty').map(pr => pr.key.name),
+        );
+      },
+    });
+    expect(keys).not.toBeNull();
+    return keys;
+  };
+
+  /** Every mintLinks(...) call node in the load-test script. */
+  const mintLinksCalls = () => {
+    const calls = [];
+    traverse(parseFile('scripts', 'loadtest-standalone.js'), {
+      CallExpression(p) {
+        const callee = p.node.callee;
+        const name =
+          callee.type === 'Identifier' ? callee.name
+            : callee.type === 'MemberExpression' && callee.property.type === 'Identifier'
+              ? callee.property.name
+              : null;
+        if (name === 'mintLinks') calls.push(p.node);
+      },
+    });
+    return calls;
+  };
+
+  it('passes an options object, never positional arguments', () => {
+    const calls = mintLinksCalls();
+    // Fails closed if the call site moves or a second one appears unreviewed.
+    expect(calls).toHaveLength(1);
+    const args = calls[0].arguments;
+    // mintLinks takes exactly (resourceId, opts) — a third argument is the
+    // positional form that silently dropped batchSize.
+    expect(args).toHaveLength(2);
+    expect(args[1].type).toBe('ObjectExpression');
+  });
+
+  it('names only options mintLinks destructures, and always passes n', () => {
+    const declared = declaredOptionKeys();
+    const opts = mintLinksCalls()[0].arguments[1];
+    // A spread would make the passed keys unresolvable statically; keep the
+    // call site literal so this check stays meaningful.
+    expect(opts.properties.every(pr => pr.type === 'ObjectProperty')).toBe(true);
+    const passed = opts.properties.map(pr => pr.key.name ?? pr.key.value);
+    // Catches a misspelled key (`count:`/`batchSize:`) that would leave n
+    // undefined and reproduce the original throw.
+    expect(passed.filter(k => !declared.has(k))).toEqual([]);
+    // n is the one whose absence caused the 100%-failure bug.
+    expect(passed).toContain('n');
+    expect(passed).toContain('expiresAt');
+  });
+});

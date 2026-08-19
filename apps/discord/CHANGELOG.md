@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.1...discord-v0.2.2) (2026-08-19)
+
+
+### Bug Fixes
+
+* **discord:** fail closed on unrecognized load-test targets ([#1164](https://github.com/layervai/qurl-integrations/issues/1164)) ([40e7464](https://github.com/layervai/qurl-integrations/commit/40e746477e6ad8a38f1cccc281c00b998f96db5a))
+* **discord:** pass mintLinks its options object in the load test ([#1168](https://github.com/layervai/qurl-integrations/issues/1168)) ([3410bfb](https://github.com/layervai/qurl-integrations/commit/3410bfb9c81c9b3f54188c4cdb866097093364c6))
+
 ## [0.2.1](https://github.com/layervai/qurl-integrations/compare/discord-v0.2.0...discord-v0.2.1) (2026-08-19)
 
 
