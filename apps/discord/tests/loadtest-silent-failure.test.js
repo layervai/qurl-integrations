@@ -724,6 +724,13 @@ describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
     // A bare positional swallows nothing — it is not a flag, so there is no
     // value for it to have taken.
     expect(errorsFor(['payload.bin', 'other.bin'])).toHaveLength(2);
+    // Nor does an INLINE misspelling: `--cont=5` has already been given its
+    // value, so its arity is not the unknowable thing the swallow exists for,
+    // and `stray` is a real second token. Same rule as the recognized branch,
+    // where `--file=/tmp/x stray` reports the stray — a misspelling must not
+    // hide more than the flag it was meant to be would have.
+    expect(errorsFor(['--cont=5', 'stray'])).toHaveLength(2);
+    expect(errorsFor(['--file=/tmp/x', 'stray'])).toHaveLength(1);
   });
 
   it('skips a declared value-taking flag\'s value on exactly readFlag\'s terms', () => {

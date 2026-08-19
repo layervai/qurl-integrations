@@ -554,11 +554,15 @@ function resolveUnknownArgs(argv) {
     // resolveArgErrors below declining to stat a --file whose shape already
     // failed. Nothing is hidden by it: the run stops on the flag either way.
     //
-    // `--` is excluded because it is the one refused token whose arity IS
-    // known: it is a separator and never carries a value, so swallowing the
-    // token after it would drop a real stray on a guess this case does not
-    // have to make.
-    if (arg.startsWith('-') && arg !== '--' && isValueToken(argv[i + 1])) i += 1;
+    // Two tokens are excluded, both because their arity is NOT in fact
+    // unknowable, so there is no guess to justify dropping a real stray:
+    //
+    //   - `--`, which is a separator and never carries a value;
+    //   - an inline spelling, `--cont=5`, which has already been given its
+    //     value and so cannot take a separated one as well. Same reasoning as
+    //     the recognized branch above, and the same rule, so a misspelling
+    //     hides no more than the flag it was meant to be would have.
+    if (arg.startsWith('-') && arg !== '--' && !arg.includes('=') && isValueToken(argv[i + 1])) i += 1;
   }
   return { errors };
 }
