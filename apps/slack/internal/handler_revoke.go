@@ -22,6 +22,25 @@ const revokeUsageMessage = "Usage: `/qurl-admin revoke $<id>` — revoke a prote
 // *userError — but a future refactor mustn't leak an internal error to Slack.
 const commonRevokeFailedMessage = "Failed to revoke the resource. Please try again."
 
+// revokeTeardownNote is appended to the revoke SUCCESS reply. Revoking is a
+// control-plane action only: it deletes the resource and its qURLs upstream, so
+// no new viewer is admitted, but nothing contacts the customer's qURL Connector
+// — an already-registered tunnel session stays up until the operator removes
+// the container, and an S3 static-site install leaves a SECOND container (the
+// S3 origin, holding IAM read access to the private bucket) running too.
+// Without this line nothing in Slack tells the admin any of that.
+//
+// Deliberately environment-GENERIC: the install environment (Docker, Compose,
+// ECS, Kubernetes) is picked at `protect-connector` time and never persisted —
+// neither slackdata nor the upstream resource carries it — so revoke has
+// nothing to render an exact uninstall command from. And phrased conditionally
+// ("you installed for it") because the same reply serves URL resources from
+// `/qurl-admin expose`, which have no container at all.
+//
+// layervai/qurl-service#1411 tracks the real fix (revoke terminating the tunnel
+// session), which would retire this note's urgency.
+const revokeTeardownNote = "Revoking doesn't stop containers — remove the qURL Connector you installed for it, and its S3 origin container if this was a static site."
+
 // revokeConfirmText is the confirm-dialog body shared by the `/qurl list`
 // Revoke button and the `/qurl-admin revoke` prompt. It spells out the blast
 // radius: revoke destroys the resource (and every qURL on it) in EVERY channel
@@ -203,7 +222,10 @@ func (h *Handler) revokeResourceResult(ctx context.Context, log *slog.Logger, te
 	// is already gone, so a sweep failure only leaves a recoverable orphan and
 	// must not change the revoke reply.
 	h.purgeResourceBindings(ctx, log, teamID, resourceID)
-	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.", escapeMrkdwnCode(displayToken)), "Resource and all of its qURLs were revoked.")
+	// The teardown note rides on the SUCCESS branch only: on a 404/already-revoked
+	// reply the admin has no confirmation that this workspace ever owned the
+	// resource, so telling them to go delete containers would be a guess.
+	return newActionCoreResult(true, fmt.Sprintf("Revoked `$%s` and all its qURLs.\n\n%s", escapeMrkdwnCode(displayToken), revokeTeardownNote), "Resource and all of its qURLs were revoked.")
 }
 
 // purgeResourceBindings removes the just-revoked resourceID from every channel
