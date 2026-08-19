@@ -719,8 +719,14 @@ func assertPullRequestBranches(t *testing.T, path string, want []string) {
 
 // pullRequestBranchFilter reads the `branches` filter off a parsed pull_request
 // trigger, reporting whether one is declared at all. It accepts both YAML
-// spellings of a filter — a bare scalar and a sequence — so the assertion above
-// pins reach rather than punctuation.
+// spellings of a single filter — a bare scalar and a sequence — so `main` and
+// `[main]` are not treated as different decisions.
+//
+// The comparison this feeds is still order-sensitive, which matters only once a
+// workflow earns a multi-element filter: ["main", "release/**"] and
+// ["release/**", "main"] have identical reach but are not interchangeable here.
+// That is deliberate — the table records the spelling a reader will find in the
+// YAML — but it is stricter than reach alone, so record the order as written.
 func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branches []string, declared bool) {
 	t.Helper()
 
