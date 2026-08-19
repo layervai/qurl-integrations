@@ -711,7 +711,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // defect itself. Weak alone — the identical body under any other name
     // passes it — which is precisely what the indexOf ban above covers.
     expect(callsNamed('getArg')).toHaveLength(0);
-    expect(callsNamed('readFlag')).toHaveLength(2);
+    // Three call sites: the numeric resolver, --file, and --max-fail-rate.
+    // The third arrived with this branch's exit-code work and had to be routed
+    // through the shared reader deliberately — which is the whole point of
+    // counting rather than name-checking. A new flag cannot be added with its
+    // own ad-hoc lookup without failing here first.
+    expect(callsNamed('readFlag')).toHaveLength(3);
   });
 
   it('resolves the upload flag and the whole preflight in one place each', () => {
