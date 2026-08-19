@@ -210,6 +210,39 @@ When more results exist, text mode says so on stderr with the `--cursor`
 value to pass next. See [JSON output](#json-output--o-json) for the
 pagination contract scripts should follow.
 
+`-o json` additionally carries each row's `type` and its publish-time
+`description` and `tags` — the metadata `qurl publish --description` and
+`--tag` set. The text table deliberately does not: its five columns
+already run past an 80-column terminal, and it shortens the CRID and
+truncates the target to get even that far. Scripts that recognize resources
+by the label their publisher gave them read the JSON document:
+
+```bash
+cursor=""
+while :; do
+  if [ -n "$cursor" ]; then
+    page=$(qurl list --status active -o json --cursor "$cursor")
+  else
+    page=$(qurl list --status active -o json)
+  fi
+  jq -r '.resources[] | select((.description // "") | test("safe to delete")) | .crid' <<<"$page"
+  jq -e '.has_more' <<<"$page" >/dev/null || break
+  cursor=$(jq -r '.next_cursor // empty' <<<"$page")
+  [ -n "$cursor" ] || break
+done
+```
+
+The loop is the point: a single `qurl list` call returns one page, so a
+sweeper that reads only `.resources[]` from one invocation silently misses
+everything behind `has_more`. `(.description // "")` matters too — the key is
+absent on rows that carry no description, and `null | test(...)` is a jq
+error, not a non-match.
+
+`--status active` matters for a different reason: deleting a resource flips
+its status rather than removing the row, so an unfiltered listing keeps
+returning resources you have already deleted. Pass it on anything that walks
+the whole listing.
+
 ### qurl delete
 
 `qurl delete <CRID>` deletes a published resource. Deletion cannot be
@@ -254,6 +287,32 @@ token from the qURL console, supplied **only** via `QURL_CONNECTOR_TOKEN`
 or `QURL_CONNECTOR_TOKEN_FILE` — there is deliberately no token flag,
 because arguments leak into shell history and process lists. The token is
 used once and never stored; later starts reuse the saved identity.
+
+Every start prints the Connector's CRID, so the identity a consumer needs
+is on screen rather than something to go look up:
+
+```
+Starting Connector "reports" for your local app at 127.0.0.1:8080. Press Ctrl-C to stop.
+
+  Anyone authorized can reach it with `qurl get <CRID>`.
+
+CRID: aea6x7mea52zcalolw7nis3g4iy3rcfr7nzyfukkuujsqufnxhmvhhtledfa
+```
+
+That note is prose for a person. An unattended runner should read the
+structured event instead, emitted on stderr beside the command's other
+operator events:
+
+```
+level=INFO msg="connector: starting to serve local app" event=connector_starting connector_id=reports target=127.0.0.1:8080 crid=aea6x7mea52z…
+```
+
+`event=connector_starting` is the stable name; it fires as the serve loop
+starts, not once traffic flows (`event=proxy_allow` marks a served
+session). `crid` is omitted entirely rather than logged empty when the
+platform returned none, so its presence is meaningful. A CRID is base32
+over `[a-z2-7]`, so the value never needs quoting and always renders as a
+bare `crid=<value>`.
 
 If the platform stays unreachable long enough, the command exits with
 code 11 instead of retrying forever. The next start may then need its

@@ -23,12 +23,15 @@ const maxResponseBody = 1 << 20
 // Decoding is deliberately lax about extra fields: the server owns its own
 // payloads, and the projection into ResourceSummary is the contract.
 type resourceRow struct {
-	ResourceID string     `json:"resource_id"`
-	CRID       string     `json:"crid"`
-	TargetURL  string     `json:"target_url"`
-	Status     string     `json:"status"`
-	CreatedAt  *time.Time `json:"created_at"`
-	ExpiresAt  *time.Time `json:"expires_at"`
+	ResourceID  string     `json:"resource_id"`
+	CRID        string     `json:"crid"`
+	TargetURL   string     `json:"target_url"`
+	Type        string     `json:"type"`
+	Status      string     `json:"status"`
+	Description string     `json:"description"`
+	Tags        []string   `json:"tags"`
+	CreatedAt   *time.Time `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
 }
 
 // envelopeMeta carries the platform's response metadata this CLI consumes.
@@ -156,14 +159,18 @@ func (c *client) List(ctx context.Context, opts ListOptions) (*ResourcePage, err
 		return nil, fmt.Errorf("%w: decode resource list: %w", qurl.ErrInvalidAPIResponse, err)
 	}
 	page := &ResourcePage{NextCursor: env.Meta.NextCursor, HasMore: env.Meta.HasMore}
-	for _, row := range env.Data {
+	for i := range env.Data {
+		row := &env.Data[i]
 		page.Items = append(page.Items, ResourceSummary{
-			CRID:       row.CRID,
-			ResourceID: row.ResourceID,
-			TargetURL:  row.TargetURL,
-			Status:     row.Status,
-			CreatedAt:  row.CreatedAt,
-			ExpiresAt:  row.ExpiresAt,
+			CRID:        row.CRID,
+			ResourceID:  row.ResourceID,
+			TargetURL:   row.TargetURL,
+			Type:        row.Type,
+			Status:      row.Status,
+			Description: row.Description,
+			Tags:        row.Tags,
+			CreatedAt:   row.CreatedAt,
+			ExpiresAt:   row.ExpiresAt,
 		})
 	}
 	return page, nil

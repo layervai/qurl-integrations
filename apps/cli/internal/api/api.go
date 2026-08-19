@@ -120,14 +120,24 @@ type ResourcePage struct {
 	HasMore    bool
 }
 
-// ResourceSummary is one row of a List result.
+// ResourceSummary is one row of a List result. Description and Tags are the
+// publish-time metadata (PublishOptions) read back, so a tool built on List
+// can recognize a row by the label its publisher gave it.
+//
+// TODO(upstream-contract): the service redacts description and tags on
+// connector-owned rows, so empty here means "not visible on this row", not
+// necessarily "never set". Type is not redacted and is always populated —
+// legacy rows with no stored type read back as "url".
 type ResourceSummary struct {
-	CRID       string
-	ResourceID string
-	TargetURL  string
-	Status     string
-	CreatedAt  *time.Time
-	ExpiresAt  *time.Time
+	CRID        string
+	ResourceID  string
+	TargetURL   string
+	Type        string
+	Status      string
+	Description string
+	Tags        []string
+	CreatedAt   *time.Time
+	ExpiresAt   *time.Time
 }
 
 // Config configures New. Zero hooks get production defaults.
