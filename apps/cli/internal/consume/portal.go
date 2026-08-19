@@ -110,13 +110,18 @@ func (o *AccessOpener) Open(ctx context.Context, link string) (string, error) {
 	if err != nil {
 		return "", classifyAccessError(err)
 	}
-	// The granted URL is about to be fetched; anything but a web URL is the
-	// service answering outside its contract.
-	u, err := url.Parse(handle.ResourceURL)
+	return grantedContentURL(handle.ResourceURL)
+}
+
+// grantedContentURL admits only web URLs as download targets: the granted
+// URL is about to be fetched, and anything else is the service answering
+// outside its contract.
+func grantedContentURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return "", fmt.Errorf("%w — it can't be downloaded", ErrUnopenableLink)
 	}
-	return handle.ResourceURL, nil
+	return raw, nil
 }
 
 // enter runs the SDK opener with the deployment settings precedence:
@@ -165,11 +170,18 @@ func openerConfig(d *qurl.Deployment) (qurl.Config, error) {
 		return qurl.Config{}, fmt.Errorf("%w (deployment settings list an unusable key)", ErrAccessNotConfigured)
 	}
 	cfg := qurl.Config{TrustStore: ts}
+	// Blank entries are dropped rather than handed to the SDK: only real,
+	// trimmed hosts belong in the allowlist, and a list that was ONLY
+	// blanks must read as no transport at all (fail closed below), not as
+	// an allowlist that rejects everything with a worse diagnostic.
+	hosts := make([]string, 0, len(d.RelayAllowlist))
 	for _, entry := range d.RelayAllowlist {
-		if strings.TrimSpace(entry) != "" {
-			cfg.RelayAllowlist = qurl.NewRelayAllowlist(d.RelayAllowlist)
-			break
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			hosts = append(hosts, trimmed)
 		}
+	}
+	if len(hosts) > 0 {
+		cfg.RelayAllowlist = qurl.NewRelayAllowlist(hosts)
 	}
 	if len(d.Cells) > 0 {
 		entries := make([]qurl.CellEntry, 0, len(d.Cells))
