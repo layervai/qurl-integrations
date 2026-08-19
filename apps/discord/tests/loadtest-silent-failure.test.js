@@ -52,7 +52,7 @@ const traverse = traverseModule.default || traverseModule;
 const {
   FLAGS, flagSpec, readFlag, readBooleanFlag, resolveBooleanArgs,
   parsePositiveInt, resolveNumericArgs, resolveFileArg, resolveUnknownArgs,
-  checkUploadFile, resolveArgErrors, resolveGuardInputs,
+  checkUploadFile, resolveArgErrors, resolveGuardInputs, DEFAULT_MAX_FAIL_RATE_PCT,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -698,7 +698,7 @@ describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
     // carry what DOES exist or the operator is told only that they are wrong.
     expect(errorsFor(['--locatoin'])).toEqual([
       '--locatoin is not a flag this script accepts — accepted flags are '
-        + '--count, --duration, --interval, --file, --location, --allow-production',
+        + '--count, --duration, --interval, --file, --max-fail-rate, --location, --allow-production',
     ]);
     expect(errorsFor(['payload.bin'])[0])
       .toContain('this script takes no positional arguments; accepted flags are --count');
@@ -804,7 +804,14 @@ describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
 describe('loadtest flag table — the one list everything reads', () => {
   const never = () => null;
 
-  it.each(FLAGS.map((spec) => [spec.name, spec]))(
+  // Every flag EXCEPT --max-fail-rate, whose reader sits in main() rather than
+  // in resolveArgErrors — #1170 put it there so a mistyped threshold is caught
+  // beside the other preflight checks instead of at the summary two hours
+  // later. main() is unreachable from a test, so its wiring is pinned
+  // statically instead, by 'reads --max-fail-rate in main() through the shared
+  // reader' below. The exception is named here rather than silently skipped,
+  // because an unreachable row is exactly what this case exists to catch.
+  it.each(FLAGS.filter((spec) => spec.name !== 'max-fail-rate').map((spec) => [spec.name, spec]))(
     'wires --%s to a reader instead of accepting it and ignoring it',
     (name, spec) => {
       // The drift direction no throw can catch. A row added to FLAGS but read
@@ -852,7 +859,16 @@ describe('loadtest flag table — the one list everything reads', () => {
     // up here rather than in a comment that has quietly gone stale.
     expect(resolveNumericArgs([])).toEqual({ count: 100, durationS: 7200, intervalS: 60, errors: [] });
     expect(FLAGS.filter((spec) => spec.takesValue).map((spec) => [spec.name, spec.defaultValue]))
-      .toEqual([['count', '100'], ['duration', '7200'], ['interval', '60'], ['file', null]]);
+      .toEqual([
+        ['count', '100'], ['duration', '7200'], ['interval', '60'],
+        ['file', null], ['max-fail-rate', '10'],
+      ]);
+    // --max-fail-rate's default reaches the run as a NUMBER through an export
+    // of its own, so the table has to be what feeds it or the two drift: the
+    // echoed threshold would stop matching the one the exit code is judged on.
+    expect(DEFAULT_MAX_FAIL_RATE_PCT).toBe(10);
+    expect(String(DEFAULT_MAX_FAIL_RATE_PCT))
+      .toBe(FLAGS.find((spec) => spec.name === 'max-fail-rate').defaultValue);
     // --file's default is prose rather than a value, and the table owns that
     // wording too — without it readFlag falls back to String(null) and the
     // operator is told to omit the flag to get "the default of null".
@@ -1228,6 +1244,17 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return declared;
   };
 
+  // main()'s own node, for the checks that have to be scoped to its body
+  // rather than to the whole file. Declared here rather than inside one case
+  // because two of them need it now.
+  const mainNode = () => {
+    let found = null;
+    traverse(ast, {
+      FunctionDeclaration(p) { if (p.node.id?.name === 'main') found = p.node; },
+    });
+    return found;
+  };
+
   const callsNamed = (name) => {
     const found = [];
     traverse(ast, {
@@ -1271,15 +1298,35 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(new Set(declared.map((d) => d.list)).size).toBe(1);
   });
 
-  it('reads the flag table in every resolver that has a flag to look up', () => {
-    // Three call sites, one per resolver: `read` inside resolveNumericArgs,
-    // resolveFileArg, and `read` inside resolveBooleanArgs. A resolver that
-    // stops consulting the table goes back to carrying its own copy of a
-    // default or an arity — the second list the table replaced — and the copy
-    // agrees with the table right up until somebody edits one of them. That
-    // regression changes no behaviour on the day it lands, so no runtime test
-    // can see it; the count is what does.
-    expect(callsNamed('flagSpec')).toHaveLength(3);
+  it('reads the flag table everywhere a flag is looked up', () => {
+    // Five call sites: `read` inside resolveNumericArgs, resolveFileArg,
+    // `read` inside resolveBooleanArgs, and --max-fail-rate twice — once for
+    // the DEFAULT_MAX_FAIL_RATE_PCT export and once for main()'s read.
+    //
+    // A reader that stops consulting the table goes back to carrying its own
+    // copy of a default or an arity — the second list the table replaced — and
+    // the copy agrees with the table right up until somebody edits one of
+    // them. That regression changes no behaviour on the day it lands, so no
+    // runtime test can see it; the count is what does.
+    expect(callsNamed('flagSpec')).toHaveLength(5);
+  });
+
+  it('reads --max-fail-rate in main() through the shared reader', () => {
+    // The one declared flag resolveArgErrors does not resolve, so the runtime
+    // 'wires every flag to a reader' case cannot reach it. Its reader is in
+    // main(), which no test can run — the same blind spot the static checks in
+    // this describe exist for. Without this, --max-fail-rate could be dropped
+    // from main() entirely and the only surviving evidence of the flag would
+    // be the FLAGS row that makes resolveUnknownArgs accept it: a flag the
+    // script welcomes and then ignores, which is the defect this PR removes.
+    const main = mainNode();
+    expect(main).not.toBeNull();
+    const namesReadInMain = callsNamed('readFlag')
+      .filter((node) => node.start >= main.start && node.end <= main.end)
+      .map((node) => node.arguments[1])
+      .filter((arg) => arg && arg.type === 'StringLiteral')
+      .map((arg) => arg.value);
+    expect(namesReadInMain).toContain('max-fail-rate');
   });
 
   it('resolves its numeric flags in one place', () => {
@@ -1307,7 +1354,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // defect itself. Weak alone — the identical body under any other name
     // passes it — which is precisely what the indexOf ban above covers.
     expect(callsNamed('getArg')).toHaveLength(0);
-    expect(callsNamed('readFlag')).toHaveLength(2);
+    // Three call sites: the numeric resolver, --file, and --max-fail-rate.
+    // The third arrived with #1170's exit-code work and had to be routed
+    // through the shared reader deliberately — which is the whole point of
+    // counting rather than name-checking. A new flag cannot be added with its
+    // own ad-hoc lookup without failing here first.
+    expect(callsNamed('readFlag')).toHaveLength(3);
     // One call site, unlike the resolvers' two: this one produces no constant
     // for the run to read, only errors, so resolveArgErrors is its only
     // caller. A second would mean argv being scanned for strays somewhere the
