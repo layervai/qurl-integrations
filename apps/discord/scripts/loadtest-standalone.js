@@ -275,10 +275,38 @@ function checkUploadFile(filePath) {
   return null;
 }
 
+// Every argument fault in one list, as data — main() only prints and exits.
+// Follows targetGuardReport below, for the reason spelled out there: main() is
+// unreachable from the suite, so a decision left inline in it is a decision
+// nothing can test.
+//
+// That is not hypothetical here. With this composition inline, three separate
+// regressions passed the entire suite green: dropping the --file errors from
+// the concatenation (which silently reinstates the exact default-payload bug
+// this change exists to remove), discarding the readability result, and moving
+// the whole check after the smoke test that mints the first real resource.
+//
+// `check` is injected so the suite can drive the composition without a disk.
+// Called from main() rather than at module load, so `require()`ing this file
+// from a test does not stat the operator's disk.
+function resolveArgErrors(argv, check = checkUploadFile) {
+  const { errors: numericErrors } = resolveNumericArgs(argv);
+  const { filePath, errors: fileErrors } = resolveFileArg(argv);
+  const errors = [...numericErrors, ...fileErrors];
+  // Guarded on filePath rather than run unconditionally: null means either no
+  // --file was given or its shape already failed above, and statting that
+  // would add a second message naming a path the operator never typed.
+  if (filePath) {
+    const fileError = check(filePath);
+    if (fileError) errors.push(fileError);
+  }
+  return errors;
+}
+
 const {
-  count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S, errors: numericArgErrors,
+  count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
-const { filePath: FILE_PATH, errors: fileArgErrors } = resolveFileArg(args);
+const { filePath: FILE_PATH } = resolveFileArg(args);
 const INCLUDE_LOCATION = hasFlag('location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
@@ -660,14 +688,7 @@ async function main() {
   // and a bad flag is the only fault here that otherwise survives to the end
   // of a full run — exiting 0 having done nothing at all for a numeric flag,
   // or spending the whole window uploading a payload nobody chose for --file.
-  const argErrors = [...numericArgErrors, ...fileArgErrors];
-  // Guarded on FILE_PATH rather than run unconditionally: null means either
-  // no --file was given or its shape already failed above, and statting that
-  // would add a second message naming a path the operator never typed.
-  if (FILE_PATH) {
-    const fileError = checkUploadFile(FILE_PATH);
-    if (fileError) argErrors.push(fileError);
-  }
+  const argErrors = resolveArgErrors(args);
   if (argErrors.length > 0) {
     for (const message of argErrors) console.error(`FATAL: ${message}`);
     process.exit(1);
@@ -769,6 +790,7 @@ module.exports = {
   resolveNumericArgs,
   resolveFileArg,
   checkUploadFile,
+  resolveArgErrors,
   // Target safety guard
   resolveGuardInputs,
   targetGuardReport,

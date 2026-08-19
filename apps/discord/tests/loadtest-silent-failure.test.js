@@ -45,6 +45,7 @@ const traverse = traverseModule.default || traverseModule;
 
 const {
   readFlag, parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
+  resolveArgErrors,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -370,6 +371,66 @@ describe('loadtest --file — proving it is readable before anything is minted',
   });
 });
 
+describe('loadtest preflight — the composition main() used to hold inline', () => {
+  // Every case here corresponds to a mutation that passed the ENTIRE suite
+  // before resolveArgErrors was extracted. The unit tests above all stayed
+  // green while the run silently went back to doing the wrong thing, because
+  // the only thing wiring them together lived in main(), which no test can
+  // reach. Counting call sites could not see any of them.
+
+  const never = () => null;
+
+  it('carries the --file errors, not only the numeric ones', () => {
+    // Mutation: `[...numericErrors]`, dropping the file half. Every
+    // resolveFileArg test stays green while `--file ""`, `--file=`, `--file`
+    // as a final token and `--file --location` all fall back to the generated
+    // 1MB payload — exactly the bug this change exists to remove.
+    expect(resolveArgErrors(['--file'], never)).toEqual([
+      expect.stringContaining('--file'),
+    ]);
+    expect(resolveArgErrors(['--file', '--location'], never)).toHaveLength(1);
+  });
+
+  it('surfaces what the readability check reported', () => {
+    // Mutation: call the checker and discard its return. Green suite, ENOENT
+    // back inside the first round.
+    expect(resolveArgErrors(['--file', '/some/path'], () => 'boom')).toEqual(['boom']);
+  });
+
+  it('does not touch the filesystem when no --file was given', () => {
+    // Mutation: drop the filePath guard. fs.statSync(null) throws
+    // ERR_INVALID_ARG_TYPE, which the catch turns into
+    // `--file null cannot be read` on EVERY default run.
+    let called = 0;
+    const errors = resolveArgErrors([], () => { called += 1; return 'should not run'; });
+    expect(called).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it('does not stat a path the operator never typed', () => {
+    // A --file whose SHAPE already failed resolves to null; statting it would
+    // append a second message naming that null.
+    let seen = 'untouched';
+    resolveArgErrors(['--file', ''], (candidate) => { seen = candidate; return null; });
+    expect(seen).toBe('untouched');
+  });
+
+  it('reports every fault in one pass, in command-line order', () => {
+    const errors = resolveArgErrors(['--count', 'abc', '--file', '/x'], () => 'file is bad');
+    expect(errors).toEqual([expect.stringContaining('--count'), 'file is bad']);
+  });
+
+  it('defaults to the real readability check', () => {
+    // The injected checker is a test seam, not the production path. If the
+    // default parameter were dropped, main() would pass no checker and the
+    // preflight would silently become a no-op — so this is what pins the
+    // wiring that the AST call-count deliberately cannot.
+    expect(resolveArgErrors(['--file', '/nonexistent/loadtest/payload.bin'])).toEqual([
+      expect.stringContaining('cannot be read'),
+    ]);
+  });
+});
+
 describe('loadtest script — static checks on call sites no test can reach', () => {
   const parseFile = (...segments) =>
     parser.parse(fs.readFileSync(path.join(__dirname, '..', ...segments), 'utf8'), {
@@ -420,37 +481,68 @@ describe('loadtest script — static checks on call sites no test can reach', ()
 
   it('resolves its numeric flags in one place', () => {
     // Fails closed if a fourth numeric flag is added with its own ad-hoc
-    // parse instead of going through the resolver.
-    expect(callsNamed('resolveNumericArgs')).toHaveLength(1);
+    // parse instead of going through the resolver. Two call sites: the
+    // module-level constants, and resolveArgErrors, which re-resolves from
+    // the argv it is handed so the whole preflight decision stays reachable
+    // from a test.
+    expect(callsNamed('resolveNumericArgs')).toHaveLength(2);
   });
 
-  it('reads every value-taking flag through the one shared reader', () => {
-    // The regression this guards is a fourth flag added with its own inline
-    // `argv.indexOf(...)`, which is exactly how the file got three parsers
-    // with three different answers for `--flag` as the final token.
+  it('scans argv through the shared reader and nothing else', () => {
+    // Bans the PRIMITIVE, not a name. Counting readFlag call sites cannot
+    // catch the regression that actually matters: a new flag reading argv
+    // with its own inline `const i = args.indexOf('--warmup')` leaves the
+    // readFlag count untouched and stays green while that flag silently
+    // defaults — which is how this file came to hold three parsers in the
+    // first place. Same reasoning as the parseInt ban above, and the same
+    // regression a name-based check misses.
     //
-    // Two call sites today: resolveNumericArgs (which serves all three
-    // numeric flags) and resolveFileArg. A new value-taking flag should raise
-    // this to three DELIBERATELY, as part of routing it through readFlag —
-    // not discover afterwards that it defaulted silently.
+    // There is no indexOf call site today; the only occurrence of the word
+    // is inside a comment, which does not parse as a call.
+    expect(callsNamed('indexOf')).toHaveLength(0);
+    // A name pin as well, since getArg's `args[idx + 1] || defaultVal` is the
+    // defect itself. Weak alone — the identical body under any other name
+    // passes it — which is precisely what the indexOf ban above covers.
+    expect(callsNamed('getArg')).toHaveLength(0);
     expect(callsNamed('readFlag')).toHaveLength(2);
   });
 
-  it('keeps no permissive reader alongside it', () => {
-    // getArg's `args[idx + 1] || defaultVal` is the defect itself, not merely
-    // a style: it cannot express "flag present, value missing". Re-adding it
-    // for one new flag would reinstate the silent default for that flag while
-    // every test above stays green.
-    expect(callsNamed('getArg')).toHaveLength(0);
+  it('resolves the upload flag and the whole preflight in one place each', () => {
+    expect(callsNamed('resolveFileArg')).toHaveLength(2);
+    expect(callsNamed('resolveArgErrors')).toHaveLength(1);
+    // checkUploadFile is deliberately NOT call-counted: it is now referenced
+    // as resolveArgErrors' default parameter rather than called by name, so a
+    // call count would read 0 whether or not it is wired. The runtime test
+    // 'defaults to the real readability check' is what pins that, and it is
+    // the stronger check — it proves the default resolves to a real stat.
   });
 
-  it('resolves and checks the upload file exactly once each', () => {
-    // checkUploadFile is unreachable from main() in a test, so nothing else
-    // would notice the preflight call being dropped — and dropping it puts
-    // the failure back inside runRound, after the smoke test has minted a
-    // resource, which is the whole point of adding it.
-    expect(callsNamed('resolveFileArg')).toHaveLength(1);
-    expect(callsNamed('checkUploadFile')).toHaveLength(1);
+  it('decides every argument error before the smoke test mints a resource', () => {
+    // The one regression the call counts cannot see: move the preflight below
+    // the smoke test. Every unit test stays green while "prove the upload
+    // file is readable BEFORE the run starts" — the entire stated value of
+    // the check — is gone, because createOneTimeLink has by then minted a
+    // live resource.
+    //
+    // Scoped to main()'s body on purpose: createOneTimeLink is called twice,
+    // and the FIRST one lexically is the location leg inside runRound. A
+    // whole-file comparison would silently measure the wrong call.
+    let main = null;
+    traverse(ast, {
+      FunctionDeclaration(p) { if (p.node.id?.name === 'main') main = p.node; },
+    });
+    expect(main).not.toBeNull();
+    const firstInMain = (name) => {
+      const starts = callsNamed(name)
+        .filter((node) => node.start >= main.start && node.end <= main.end)
+        .map((node) => node.start);
+      return starts.length ? Math.min(...starts) : null;
+    };
+    const preflight = firstInMain('resolveArgErrors');
+    const smokeTest = firstInMain('createOneTimeLink');
+    expect(preflight).not.toBeNull();
+    expect(smokeTest).not.toBeNull();
+    expect(preflight).toBeLessThan(smokeTest);
   });
 
   it('uploads through reUploadBuffer', () => {
