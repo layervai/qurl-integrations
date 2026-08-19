@@ -26,10 +26,11 @@ import (
 // So shrink the first only with evidence, and lengthen the second freely —
 // the only cost of a longer quiet window is wall-clock.
 
-// forkDialAcceptWait bounds how long a dial-detecting assertion waits. The
-// listener is on loopback and the dial is a bare TCP connect, so a real dial
-// lands in microseconds; this is only the ceiling before a missing dial is
-// called missing.
+// forkDialAcceptWait bounds how long a dial-detecting assertion waits, on
+// both probes below. Everything is on loopback and every dial under test is
+// observed at its first packet out — a bare TCP connect, or QUIC's opening
+// Initial datagram, measured at 1280 bytes ~3ms after Open on this fork — so
+// this is only the ceiling before a missing dial is called missing.
 const forkDialAcceptWait = 2 * time.Second
 
 // forkDialQuietWait is how long "no dial happened" is observed for. A dial
@@ -130,27 +131,101 @@ func (p *dialProbe) quiet(t *testing.T, what string) {
 	}
 }
 
+// packetProbe is dialProbe's QUIC counterpart: a loopback UDP socket that
+// signals each datagram it reads. A QUIC dial has nothing to accept at this
+// layer, so the observable event is the opening Initial datagram landing on
+// the socket rather than a connection arriving.
+//
+// It owns no accepted connections, which is what makes its teardown simpler
+// than dialProbe's rather than sloppier: closing the socket is the whole of
+// it, and the read goroutine is joined so it cannot outlive the test.
+type packetProbe struct {
+	addr     string
+	port     int
+	received chan struct{}
+}
+
+func newPacketProbe(t *testing.T) *packetProbe {
+	t.Helper()
+	var lc net.ListenConfig
+	pc, err := lc.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for datagrams on loopback: %v", err)
+	}
+	udpAddr, ok := pc.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = pc.Close()
+		t.Fatalf("loopback packet socket address is %T, want *net.UDPAddr", pc.LocalAddr())
+	}
+	p := &packetProbe{addr: "127.0.0.1", port: udpAddr.Port, received: make(chan struct{}, 8)}
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		// Closing the socket is what unblocks ReadFrom; the join then makes
+		// the goroutine's exit part of the test rather than a leak.
+		_ = pc.Close()
+		<-done
+	})
+	go func() {
+		defer close(done)
+		// Sized past a QUIC Initial so a full datagram fits. Nothing here
+		// reads the bytes, but an undersized buffer would TRUNCATE rather
+		// than fail, so anyone who later asserts on the contents would be
+		// asserting on a short read with nothing to tell them.
+		buf := make([]byte, 2048)
+		for {
+			if _, _, err := pc.ReadFrom(buf); err != nil {
+				return // socket closed by cleanup
+			}
+			// Non-blocking for dialProbe's reason: a full buffer must not
+			// wedge this goroutine and leak it past the test. QUIC also
+			// retransmits its Initial, so repeats here are expected.
+			select {
+			case p.received <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return p
+}
+
+// awaitDatagram fails unless a datagram arrives. There is no quiet twin: the
+// QUIC case below makes only a positive assertion.
+func (p *packetProbe) awaitDatagram(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-p.received:
+	case <-time.After(forkDialAcceptWait):
+		t.Fatalf("%s: no datagram reached the socket within %s", what, forkDialAcceptWait)
+	}
+}
+
 // forkDialCommon returns a production-shaped common config aimed at the
 // probe, Complete()d so every field except the one under test carries its
 // real default, then pinned to the two defaults that would otherwise send the
 // dial somewhere other than the probe:
 //
-//   - TLS off. The fork's realConnect would start a handshake the bare
-//     listener never answers. This test asserts on the TCP accept that
-//     precedes it either way; off just avoids leaving a connection
-//     mid-handshake.
+//   - TLS off. On the TCP path the fork's realConnect would start a
+//     handshake the bare listener never answers; these tests assert on the
+//     accept that precedes it either way, so off just avoids leaving a
+//     connection mid-handshake. It decides less on the QUIC path, where the
+//     fork builds a client TLS config from Transport.TLS whether or not it
+//     is enabled and the handshake is inseparable from the dial — off only
+//     selects the empty-credentials branch. Either way the assertion is on
+//     the packet, not on a session.
 //   - ProxyURL cleared. Complete seeds it from the http_proxy ENVIRONMENT
 //     VARIABLE, and realConnect hands that to libnet.WithProxy — so on any
-//     machine or runner with http_proxy exported, every dial below goes to
-//     the proxy instead of the probe and both subtests fail. Nothing in frp
-//     or golib consults no_proxy, so even a correctly scoped proxy breaks it.
-func forkDialCommon(t *testing.T, p *dialProbe) *v1.ClientCommonConfig {
+//     machine or runner with http_proxy exported, every dial that reaches
+//     realConnect lands on the proxy instead of the probe. Nothing in frp or
+//     golib consults no_proxy, so even a correctly scoped proxy breaks it.
+//     The QUIC caller below is the one exception, and does not rely on this:
+//     Open calls quic.DialAddr itself and never reads ProxyURL.
+func forkDialCommon(t *testing.T, addr string, port int) *v1.ClientCommonConfig {
 	t.Helper()
 	common := commonForTest()
 	if err := common.Complete(); err != nil {
 		t.Fatalf("complete the common config: %v", err)
 	}
-	common.ServerAddr, common.ServerPort = p.addr, p.port
+	common.ServerAddr, common.ServerPort = addr, port
 	off := false
 	common.Transport.TLS.Enable = &off
 	common.Transport.ProxyURL = ""
@@ -184,7 +259,7 @@ func TestForkDialsFromConnectWithoutTCPMux(t *testing.T) {
 	t.Run("tcpmux enabled dials from open", func(t *testing.T) {
 		t.Parallel()
 		probe := newDialProbe(t)
-		common := forkDialCommon(t, probe)
+		common := forkDialCommon(t, probe.addr, probe.port)
 		on := true
 		common.Transport.TCPMux = &on
 
@@ -204,7 +279,7 @@ func TestForkDialsFromConnectWithoutTCPMux(t *testing.T) {
 	t.Run("unset tcpmux dials from connect", func(t *testing.T) {
 		t.Parallel()
 		probe := newDialProbe(t)
-		common := forkDialCommon(t, probe)
+		common := forkDialCommon(t, probe.addr, probe.port)
 		common.Transport.TCPMux = nil
 
 		connector := frpclient.NewConnector(t.Context(), common)
@@ -226,6 +301,59 @@ func TestForkDialsFromConnectWithoutTCPMux(t *testing.T) {
 				"the redial re-knock and the reconnect watchdog would both attach to the wrong method")
 		}
 	})
+}
+
+// TestForkDialsQUICFromOpen is the empirical half of physicalDialInOpen's
+// QUIC branch, which until now was asserted only against the predicate — the
+// same structural gap that let the TCPMux bug survive, since a test over the
+// predicate alone agrees with it by construction. A fork bump moving the QUIC
+// dial into Connect would have left every test in this package green while
+// the redial re-knock and the reconnect watchdog both attached to a method
+// that no longer dials.
+//
+// TCPMux is explicitly DISABLED here, and that is what makes this a guard
+// rather than a coincidence. The fork handles QUIC before
+// `if !lo.FromPtr(c.cfg.Transport.TCPMux) { return nil }`, and the predicate
+// mirrors that ordering by answering on the protocol first. A Complete()d
+// config carries TCPMux true, so the predicate would answer Open from its
+// TCPMux branch and this test would keep passing with the QUIC branch deleted
+// outright. Disabling TCPMux leaves the QUIC branch as the only thing that
+// can answer Open, so the seam assertion fails if either the fork or the
+// predicate stops putting QUIC first.
+//
+// What is asserted is that a packet was SENT, not that a session came up. The
+// probe speaks no QUIC, so the handshake cannot complete and Open blocks until
+// the context is canceled — which is why Open runs in a goroutine here while
+// the TCP subtests above call it inline, and why its error is dropped rather
+// than checked.
+func TestForkDialsQUICFromOpen(t *testing.T) {
+	t.Parallel()
+	probe := newPacketProbe(t)
+	common := forkDialCommon(t, probe.addr, probe.port)
+	common.Transport.Protocol = "quic"
+	off := false
+	common.Transport.TCPMux = &off
+
+	connector := frpclient.NewConnector(t.Context(), common)
+	opened := make(chan error, 1)
+	go func() { opened <- connector.Open() }()
+	// One cleanup doing both, in this order, deliberately: Open writes
+	// quicConn and Close reads it, so joining the dial is what keeps that pair
+	// off the race detector. Two separate t.Cleanup calls would order
+	// correctly only by LIFO accident. The join returns promptly because
+	// t.Context() is canceled before cleanups run, rather than waiting out
+	// quic-go's handshake timeout.
+	t.Cleanup(func() {
+		<-opened
+		_ = connector.Close()
+	})
+
+	probe.awaitDatagram(t, "Open with protocol quic")
+
+	if !physicalDialInOpen(common) {
+		t.Fatal("physicalDialInOpen says Connect, but Open is what dialed: " +
+			"the redial re-knock and the reconnect watchdog would both attach to the wrong method")
+	}
 }
 
 // TestForkTCPMuxCompletionDefault pins the other half of the same trap: the

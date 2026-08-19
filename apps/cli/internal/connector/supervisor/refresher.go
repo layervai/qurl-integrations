@@ -517,13 +517,21 @@ func newKnockingConnectorCreator(refresher *redialKnockRefresher) func(context.C
 // imports it, so the semantics are copied rather than the call. This is a
 // hand-maintained model of another repository's control flow and cannot be
 // checked by reading this package — if a fork bump moves the dial, update it
-// here in lockstep. TestForkDialsFromConnectWithoutTCPMux drives the real
-// connector and is what fails if the TCPMux branches drift. The QUIC branch
-// is asserted only against this predicate, so it is NOT pinned empirically —
-// a fork bump moving the QUIC dial into Connect would leave every test here
-// green. QUIC is unreachable config today (cmd/connector.go never sets
-// frpgen.Options.Protocol), which is why that gap is tolerated rather than
-// closed with a UDP probe.
+// here in lockstep. Both transport branches below are also pinned empirically
+// against the real connector — the nil-common branch has no dial to observe —
+// so a fork bump that moves a dial reddens a test instead of only
+// contradicting this comment. TestForkDialsFromConnectWithoutTCPMux drives a
+// loopback listener and is what fails if the TCPMux branches drift;
+// TestForkDialsQUICFromOpen drives a UDP probe, a QUIC dial's observable event
+// being a datagram rather than an accept, and is what fails if the QUIC dial
+// moves into Connect or if the fork stops handling QUIC ahead of the TCPMux
+// guard. It disables TCPMux deliberately: on a completed config the TCPMux
+// branch answers Open on its own, so the QUIC branch could be deleted with
+// that test still green. QUIC remains unreachable config today
+// (cmd/connector.go never sets frpgen.Options.Protocol), so it guards a branch
+// nothing currently takes — which is the point. It costs one UDP socket, and
+// it turns the ordering above from a claim about another repository into one
+// this package can check.
 func physicalDialInOpen(common *v1.ClientCommonConfig) bool {
 	if common == nil {
 		return true
