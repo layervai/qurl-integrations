@@ -96,11 +96,3 @@ jobs:
       - name: Test validated-base resolver
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: scripts/test-resolve-validated-base.sh
-
-      # The report step only runs once the Claude review has already failed, so
-      # a defect in it ships green and surfaces exactly when it is needed. This
-      # pins that every branch still annotates — a bare echo there would restore
-      # the silent pass the step exists to remove.
-      - name: Test Claude review budget report
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: scripts/test-claude-review-budget-report.sh

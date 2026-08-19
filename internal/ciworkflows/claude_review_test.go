@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -42,6 +43,12 @@ const (
 	claudeReviewPublishStepID     = "publish_review"
 
 	claudeReviewEligibleGuard = "steps.eligibility.outputs.eligible == 'true'"
+
+	// claudeReviewBudgetEnv names the job-level minute budget. It is the one
+	// number the review step's cap, the report step's classification and the
+	// report step's message all derive from, which is what makes a single
+	// wrong value impossible to spell.
+	claudeReviewBudgetEnv = "CLAUDE_REVIEW_BUDGET_MINUTES"
 )
 
 // TestClaudeReviewConcludesOnEveryPullRequest is the assertion this whole
@@ -127,8 +134,9 @@ func TestClaudeReviewConcludesOnEveryPullRequest(t *testing.T) {
 // TestClaudeReviewEligibilityClassifiesEveryPullRequest executes the step
 // rather than reading it. Its withheld branches run only on bot, fork and draft
 // pull requests, so a defect in them ships green and surfaces exactly when the
-// classification is load-bearing — the argument
-// scripts/test-claude-review-budget-report.sh makes for its own existence.
+// classification is load-bearing — the same argument
+// TestClaudeReviewReportClassifiesEveryUnfinishedReview makes for its own
+// existence.
 func TestClaudeReviewEligibilityClassifiesEveryPullRequest(t *testing.T) {
 	t.Parallel()
 	requireCommand(t, "bash")
@@ -248,6 +256,193 @@ func TestClaudeReviewEligibilityFailsClosedOnAnUnreadablePullRequest(t *testing.
 				t.Errorf("eligible = %q on an undecidable payload, want no verdict at all", run.outputs["eligible"])
 			}
 		})
+	}
+}
+
+// TestClaudeReviewReportClassifiesEveryUnfinishedReview executes the report
+// step rather than reading it.
+//
+// That step runs only after the review has already failed, so a defect in it
+// ships green and is discovered exactly when it is needed. It is also the only
+// thing that tells a maintainer a review is missing, so the assertion with
+// teeth is that *every* branch annotates: nothing here may regress to a bare
+// echo, which would restore the silent pass this job exists to remove.
+//
+// The real run: block is extracted and executed rather than pattern-matched,
+// so rewording the messages does not require editing this test. Elapsed time
+// decides the explanation, never whether the missing review is reported — a
+// misclassification costs a wrong cause, not a silent pass — which is why the
+// exit code and the annotation count are asserted on every row and the title
+// only names which cause was chosen.
+func TestClaudeReviewReportClassifiesEveryUnfinishedReview(t *testing.T) {
+	t.Parallel()
+	requireCommand(t, "bash")
+
+	script := claudeReviewStepScript(t, claudeReviewReportStepName)
+	// Read from the workflow rather than restated, so raising the budget moves
+	// these rows with it instead of leaving them asserting against a value the
+	// workflow no longer uses.
+	budgetMinutes := readClaudeReviewBudgetWiring(t).budgetMinutes
+	budgetSeconds := budgetMinutes * 60
+
+	// The step reads `date +%s`, so the wall clock decides which branch it
+	// takes. Sampling the real clock made the boundary rows racy: a single tick
+	// between reading `now` and running a row moves elapsed past the budget and
+	// flips the expected classification. `date` is stubbed instead, so `now` is
+	// fixed and every boundary below is exact.
+	const now = 1000000000
+	stubbedPath := stubbedDatePATH(t)
+
+	const (
+		timedOut     = "Claude review ran out of time"
+		failed       = "Claude review failed"
+		unmeasurable = "Claude review did not finish"
+	)
+
+	tests := []struct {
+		name      string
+		startedAt string
+		// budget defaults to the workflow's own value; only the row that
+		// corrupts it sets this.
+		budget    string
+		wantTitle string
+	}{
+		// Overrun: the runner kills the step at the budget, so elapsed is
+		// always at or just past it by the time this step measures.
+		{name: "over budget is reported as a timeout", startedAt: strconv.Itoa(now - budgetSeconds - 20), wantTitle: timedOut},
+		{name: "exactly at budget is reported as a timeout", startedAt: strconv.Itoa(now - budgetSeconds), wantTitle: timedOut},
+
+		// Inside the budget the step cannot have been killed, so this was a
+		// real failure and must not be blamed on the clock.
+		{name: "one second under budget is reported as a failure", startedAt: strconv.Itoa(now - budgetSeconds + 1), wantTitle: failed},
+		{name: "an early failure is reported as a failure", startedAt: strconv.Itoa(now - 5), wantTitle: failed},
+
+		// Unmeasurable: a timeout cannot be ruled out, so these must still
+		// annotate rather than pass quietly. Both inputs reach an arithmetic
+		// context in the step, so the last two also pin that an expression is
+		// rejected as input rather than evaluated as one.
+		{name: "an empty clock is reported as unfinished", startedAt: "", wantTitle: unmeasurable},
+		{name: "a non-numeric clock is reported as unfinished", startedAt: "not-a-number", wantTitle: unmeasurable},
+		{name: "an injected clock expression is reported as unfinished", startedAt: "1+1", wantTitle: unmeasurable},
+		{name: "a non-numeric budget is reported as unfinished", startedAt: strconv.Itoa(now), budget: "thirteen", wantTitle: unmeasurable},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			budget := tc.budget
+			if budget == "" {
+				budget = strconv.Itoa(budgetMinutes)
+			}
+
+			run := runClaudeReviewStep(t, script, map[string]string{
+				"STARTED_AT":     tc.startedAt,
+				"BUDGET_MINUTES": budget,
+				// PATH is handed over through the env map rather than set on
+				// this process: runVerifierScriptWithEnv appends the map after
+				// os.Environ(), and os/exec keeps the last duplicate of a key,
+				// so the stub wins for the step alone and no other test sees a
+				// mutated environment.
+				"PATH":          stubbedPath,
+				"DATE_NOW_STUB": strconv.Itoa(now),
+			})
+
+			// Exit 0 on purpose: the review step's own failure already fails
+			// the job, and a second red step would bury the annotation.
+			if run.err != nil {
+				t.Fatalf("report step exited non-zero (%v), want 0 — a second red step buries the annotation that is the whole point of this step\noutput:\n%s", run.err, run.combined)
+			}
+			if got := countErrorAnnotations(run.combined); got != 1 {
+				t.Fatalf("emitted %d ::error annotations, want exactly 1 — a branch that stops annotating is the silent pass this step exists to remove\noutput:\n%s", got, run.combined)
+			}
+			if want := "::error title=" + tc.wantTitle + "::"; !strings.Contains(run.combined, want) {
+				t.Errorf("output does not contain %q\noutput:\n%s", want, run.combined)
+			}
+		})
+	}
+}
+
+// stubbedDatePATH writes a `date` shim into a fresh directory and returns a
+// PATH with that directory ahead of the inherited one, the way
+// scripts/test-resolve-validated-base.sh stubs `gh`. The shim answers the one
+// spelling the report step uses and defers anything else to the real binary,
+// so a step that started reading the clock some other way falls through to a
+// real `now` and fails its rows loudly rather than reading them as passes.
+func stubbedDatePATH(t *testing.T) string {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create stub bin directory: %v", err)
+	}
+
+	const shim = `#!/bin/sh
+if [ "$1" = "+%s" ]; then
+  printf '%s\n' "$DATE_NOW_STUB"
+  exit 0
+fi
+exec /bin/date "$@"
+`
+	// #nosec G306 -- a shim is reachable through PATH only if it is
+	// executable, and this one is written into a t.TempDir() the test owns.
+	if err := os.WriteFile(filepath.Join(dir, "date"), []byte(shim), 0o700); err != nil {
+		t.Fatalf("write date stub: %v", err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// countErrorAnnotations counts the workflow-command lines GitHub renders as
+// check annotations. Counted rather than merely searched for, because two
+// branches annotating at once reports two causes for one failure.
+func countErrorAnnotations(output string) int {
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "::error") {
+			count++
+		}
+	}
+	return count
+}
+
+// TestClaudeReviewBudgetFitsInsideTheJobCap pins the two numbers the report
+// step's message rests on. Neither is inside a run: block, so executing a step
+// cannot reach either.
+func TestClaudeReviewBudgetFitsInsideTheJobCap(t *testing.T) {
+	t.Parallel()
+
+	wiring := readClaudeReviewBudgetWiring(t)
+
+	// The single-source-of-truth property: the cap that stops the review and
+	// the budget its annotation names must be the same number, or the message
+	// can claim a budget that never fired. Anchored to the review step rather
+	// than matched anywhere in the file, so the expression appearing on some
+	// other step cannot satisfy it.
+	wantCap := "${{ fromJSON(env." + claudeReviewBudgetEnv + ") }}"
+	if got, _ := wiring.reviewStepCap.(string); got != wantCap {
+		t.Errorf("%s timeout-minutes = %#v, want %q — a cap that does not derive from %s lets the report step name a budget that stopped nothing",
+			claudeReviewRunStepName, wiring.reviewStepCap, wantCap, claudeReviewBudgetEnv)
+	}
+
+	// The job cap must clear the review budget by more than the steps around
+	// the review can cost, or the job is canceled before the review step can
+	// fail — and a canceled job runs nothing, so nothing reports. Worst case
+	// measured from the workflow, in seconds:
+	//
+	//   30   job setup + fetch-depth:0 checkout + origin preparation
+	//   60   checkout's internal retry, when it fires
+	//   92   Publish and verify terminal Claude review: three `timeout 30s` gh
+	//        calls — pull request refresh, comment POST, read-back
+	//   ---
+	//   182  = 3m02s, rounded up to a 4-minute floor
+	//
+	// Raise this alongside the cap if the surrounding steps grow; it is a
+	// floor on the gap, not a prediction of it.
+	const minHeadroomMinutes = 4
+
+	if headroom := wiring.jobCapMinutes - wiring.budgetMinutes; headroom < minHeadroomMinutes {
+		t.Errorf("job cap %dm leaves %dm over the %dm review budget, under the %dm floor; too thin for setup, checkout retry and verify",
+			wiring.jobCapMinutes, headroom, wiring.budgetMinutes, minHeadroomMinutes)
 	}
 }
 
@@ -640,6 +835,83 @@ func claudeReviewStep(t *testing.T, job *githubJob, name string) step {
 	}
 	t.Fatalf("%s job is missing the %q step", claudeReviewJobID, name)
 	return step{}
+}
+
+// claudeReviewBudgetWiring is the job's declared review budget together with
+// the two caps that have to bracket it.
+type claudeReviewBudgetWiring struct {
+	budgetMinutes int
+	jobCapMinutes int
+	// reviewStepCap stays `any` so a cap written as a bare number reports as
+	// the wrong value rather than as a missing one: timeout-minutes accepts a
+	// literal or a `${{ }}` expression, and only one of those is correct here.
+	reviewStepCap any
+}
+
+// readClaudeReviewBudgetWiring re-reads the workflow as untyped YAML for the
+// three values around the budget. None is on the job's or the step's `if:`, so
+// none is reachable by executing a step.
+//
+// Read raw rather than by widening githubJob and step, for the reason
+// claudeReviewRawSteps gives one field over: both structs are copied by value
+// in the range loops of this package's workflow-wide assertions, and each sits
+// just under the size at which that copy becomes a lint finding. Growing them
+// for three fields only this file reads charges every one of those loops for it.
+func readClaudeReviewBudgetWiring(t *testing.T) claudeReviewBudgetWiring {
+	t.Helper()
+
+	// #nosec G304 -- a checked-in workflow file name, fixed by a constant.
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", claudeReviewWorkflow))
+	if err != nil {
+		t.Fatalf("read %s: %v", claudeReviewWorkflow, err)
+	}
+
+	var raw struct {
+		Jobs map[string]struct {
+			TimeoutMinutes any            `yaml:"timeout-minutes"`
+			Env            map[string]any `yaml:"env"`
+			Steps          []struct {
+				Name           string `yaml:"name"`
+				TimeoutMinutes any    `yaml:"timeout-minutes"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse %s: %v", claudeReviewWorkflow, err)
+	}
+
+	job, ok := raw.Jobs[claudeReviewJobID]
+	if !ok {
+		t.Fatalf("%s is missing the %s job", claudeReviewWorkflow, claudeReviewJobID)
+	}
+
+	wiring := claudeReviewBudgetWiring{
+		budgetMinutes: claudeReviewMinutes(t, claudeReviewBudgetEnv, job.Env[claudeReviewBudgetEnv]),
+		jobCapMinutes: claudeReviewMinutes(t, claudeReviewJobID+" job timeout-minutes", job.TimeoutMinutes),
+	}
+
+	for _, current := range job.Steps {
+		if current.Name == claudeReviewRunStepName {
+			wiring.reviewStepCap = current.TimeoutMinutes
+			return wiring
+		}
+	}
+	t.Fatalf("%s job is missing the %q step, which is where the budget is spent", claudeReviewJobID, claudeReviewRunStepName)
+	return claudeReviewBudgetWiring{}
+}
+
+// claudeReviewMinutes reads a minute count that has to be a literal. The report
+// step compares the budget arithmetically and the job cap is GitHub's own kill
+// timer; neither can take a value computed at run time, and an expression here
+// would leave the headroom floor comparing against something it cannot see.
+func claudeReviewMinutes(t *testing.T, label string, value any) int {
+	t.Helper()
+
+	minutes, ok := value.(int)
+	if !ok || minutes <= 0 {
+		t.Fatalf("%s = %#v, want a positive integer literal", label, value)
+	}
+	return minutes
 }
 
 // claudeReviewStepRun is one execution of a workflow step's run: block, with
