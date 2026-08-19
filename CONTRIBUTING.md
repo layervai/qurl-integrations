@@ -256,27 +256,26 @@ rename that orphans a documented context fails `Workflow Contract` at PR time.
 
 This block also bounds which workflows may narrow the three `on.pull_request`
 keys that decide whether a workflow starts at all: `branches:`, `types:`, and a
-trigger-level `paths:`. A workflow reporting a context listed here must start
-for every ordinary pull request, one stacked on a feature branch included —
-`main`'s protection does not reach such a PR, so a workflow that never starts
-leaves its checks absent rather than pending, and the PR reads green having run
-none of them. A required context is worse still on any PR: absent is what the
-merge box shows as "Expected — Waiting for status to be reported", with nothing
-red to point at. `internal/ciworkflows` records each pull-request workflow's
+trigger-level `paths:`. A workflow reporting a context listed here must run on
+PRs stacked on a feature branch too: `main`'s protection does not reach such a
+PR, so its checks are absent rather than pending, and the PR reads green having
+run none of them. `internal/ciworkflows` records each pull-request workflow's
 intended filters and reads this block to tell which of them gate merges, so one
 recorded as deliberately narrow fails `Workflow Contract` the moment it starts
-gating.
+gating. The nine aggregate workflows are additionally pinned against their own
+recorded filters, but that record is not what authorizes a narrowing: every one
+of them reports a context listed above, so this block is what a narrow filter is
+weighed against. Narrowing one and editing `requiredWorkflowSpecs` to match
+fails `Workflow Contract` rather than passing as self-consistent (#1183, #1213).
 
-The three are guarded to different depths. For `branches:`, the nine aggregate
-workflows are pinned against their own recorded filter only, so narrowing one is
-an edit to `requiredWorkflowSpecs` that a reviewer has to catch (#1183). For
-`types:` and trigger-level `paths:`, the premise is re-derived from the workflow
-tree rather than read off the table, so narrowing any workflow that reports a
-context listed here — the nine included — fails `Workflow Contract` even with
-its recorded intent updated to match. The nine narrow by diff with
-`dorny/paths-filter` inside their `changes` job precisely so the workflow still
-starts and the aggregate still reports; lifting that up to the trigger is what
-this catches.
+The two keys beside `branches:` reach that failure from a different direction,
+and on any PR rather than only a stacked one. A workflow that never starts
+registers nothing, so a required context behind a narrowed `types:` — or behind
+a trigger-level `paths:` the diff misses — leaves the merge box at "Expected —
+Waiting for status to be reported" with nothing red to point at. The nine narrow
+by diff with `dorny/paths-filter` inside their `changes` job precisely so the
+workflow still starts and the aggregate still reports; lifting that up to the
+trigger is what this catches.
 
 The four `age-check / *` contexts are the one partial exception. Only their
 caller half — the `age-check` job in each `dependency-age-check-*.yml` — is
