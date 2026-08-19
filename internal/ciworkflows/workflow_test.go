@@ -50,6 +50,10 @@ type requiredWorkflowSpec struct {
 	requiredName         string
 	verifierStepName     string
 	unchangedOutput      string
+	// pullRequestBranches is the intended `on.pull_request.branches` filter.
+	// Every app workflow runs on "**" so a PR stacked on a feature branch runs
+	// the same gates as one targeting main; see TestAppWorkflowsRunOnStackedPRs.
+	pullRequestBranches []string
 }
 
 var requiredWorkflowSpecs = []requiredWorkflowSpec{
@@ -64,6 +68,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "slack / required",
 		verifierStepName:     "Verify Slack CI result",
 		unchangedOutput:      "No Slack-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "discord",
@@ -76,6 +81,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "discord / required",
 		verifierStepName:     "Verify Discord CI result",
 		unchangedOutput:      "No Discord-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "chrome-extension",
@@ -88,6 +94,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "chrome-extension / required",
 		verifierStepName:     "Verify Chrome extension CI result",
 		unchangedOutput:      "No Chrome extension-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "edge-extension",
@@ -100,6 +107,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "edge-extension / required",
 		verifierStepName:     "Verify Edge extension CI result",
 		unchangedOutput:      "No Edge extension-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "teams",
@@ -112,6 +120,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "teams / required",
 		verifierStepName:     "Verify Teams CI result",
 		unchangedOutput:      "No Teams-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "cli",
@@ -124,6 +133,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "cli / required",
 		verifierStepName:     "Verify CLI CI result",
 		unchangedOutput:      "No CLI-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "s3-static-connector",
@@ -136,6 +146,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "s3-static-connector / required",
 		verifierStepName:     "Verify connector CI result",
 		unchangedOutput:      "No connector-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "e2e",
@@ -148,6 +159,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "e2e / required",
 		verifierStepName:     "Verify e2e CI result",
 		unchangedOutput:      "No e2e-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "shared",
@@ -160,6 +172,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "shared / required",
 		verifierStepName:     "Verify shared CI result",
 		unchangedOutput:      "No shared-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 }
 
@@ -440,6 +453,238 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 	default:
 		t.Fatalf("workflow on has unexpected type %T", value)
 		return nil
+	}
+}
+
+// pullRequestBranchSpec records the intended `on.pull_request.branches` filter
+// for a workflow that runs on pull requests but owns no required aggregate, and
+// so has no requiredWorkflowSpecs entry.
+type pullRequestBranchSpec struct {
+	path string
+	// branches is the intended filter. A nil value means the workflow must
+	// declare no `branches:` key at all — the same reach as ["**"], arrived at
+	// by omission rather than by a filter. The two are kept distinct so this
+	// table pins the spelling each workflow actually uses.
+	branches []string
+	why      string
+}
+
+// otherPullRequestWorkflows covers every remaining workflow with a
+// pull_request trigger. Splitting the record in two is deliberate:
+// requiredWorkflowSpecs already carries a completeness guard
+// (TestRequiredWorkflowSpecsCoverEveryAggregate), and the workflows here are
+// exactly the ones that guard cannot see.
+var otherPullRequestWorkflows = []pullRequestBranchSpec{
+	{
+		path:     "codeql.yml",
+		branches: []string{"main"},
+		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
+			"that never runs it is not reading green over a gate it skipped — the honest-signal " +
+			"argument that widened the app workflows does not apply. The code is still analyzed " +
+			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
+			"main, and the analysis runs then. Against that second look sits a two-language " +
+			"analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
+			"re-anchors pre-existing alerts onto that PR, where they block merge until a human " +
+			"resolves each conversation.",
+	},
+	{
+		path:     "dependency-review.yml",
+		branches: []string{"main"},
+		why: "Deliberately narrow, on the same reasoning as codeql.yml: no required context, " +
+			"and a stacked PR's dependency delta is reviewed again inside the combined diff once " +
+			"it retargets to main. Cheaper to widen than CodeQL, so this is the entry to revisit " +
+			"first — the cost is not runtime but noise, since `comment-summary-in-pr: always` " +
+			"would post a summary onto every stacked PR.",
+	},
+	{
+		path: "secrets-scan.yml",
+		why:  "Already unfiltered, so it runs on every PR whatever its base. Recorded so that narrowing it to main fails here.",
+	},
+	{
+		path: "scripts.yml",
+		why:  "Already unfiltered. It gates the repo-wide scripts, including the extension lockstep and i18n parity checks, which a stacked PR can break exactly as a main-targeting one can.",
+	},
+	{
+		path: "workflow-contract.yml",
+		why:  "Already unfiltered, and must stay that way — it is what runs this package. A branches filter here would take the whole CI contract off stacked PRs, this test included.",
+	},
+	{
+		path: "dependency-age-check-actions.yml",
+		why:  "Already unfiltered, and produces a required context.",
+	},
+	{
+		path: "dependency-age-check-docker.yml",
+		why:  "Already unfiltered, and produces a required context.",
+	},
+	{
+		path: "dependency-age-check-go.yml",
+		why:  "Already unfiltered, and produces a required context.",
+	},
+	{
+		path: "dependency-age-check-pip.yml",
+		why:  "Already unfiltered, and produces a required context.",
+	},
+	{
+		path: "pr-title.yml",
+		why:  "Already unfiltered — it validates the PR title itself, which is worth checking on a stacked PR too.",
+	},
+	{
+		path: "dependabot-pr-title.yml",
+		why:  "Already unfiltered; same reasoning as pr-title.yml.",
+	},
+	{
+		path: "validate-issue-templates.yml",
+		why:  "Already unfiltered, and narrowed by `paths` rather than by base branch.",
+	},
+}
+
+// TestAppWorkflowsRunOnStackedPRs pins the `on.pull_request.branches` filter of
+// every workflow that runs on pull requests.
+//
+// A workflow filtered to `branches: [main]` does not merely skip a PR stacked on
+// a feature branch — GitHub never registers it, so its checks are absent from
+// the PR rather than reported as skipped. The PR then reads fully green having
+// run none of them, and because branch protection guards only main, nothing
+// stops it merging into its base on that showing.
+//
+// The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
+// discord.yml (#1179) — and each time a one-line revert would have undone it
+// with every check still green. This table is what notices. It records the
+// intended value per workflow rather than asserting "**" across the board,
+// because two workflows deliberately stay on main and a blanket assertion would
+// either fail on them or quietly bless whatever a future edit leaves behind.
+func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		t.Run(spec.name, func(t *testing.T) {
+			assertPullRequestBranches(t, spec.path, spec.pullRequestBranches)
+		})
+	}
+
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		t.Run(strings.TrimSuffix(spec.path, ".yml"), func(t *testing.T) {
+			if strings.TrimSpace(spec.why) == "" {
+				t.Fatalf("%s needs a why explaining its intended filter", spec.path)
+			}
+			assertPullRequestBranches(t, spec.path, spec.branches)
+		})
+	}
+}
+
+// TestEveryPullRequestWorkflowRecordsItsBranchFilter closes the hole the two
+// tables above would otherwise leave: a workflow added later with
+// `branches: [main]` and no entry would be silently unenforced, which is the
+// same shape of gap that let an unregistered aggregate ship in #1081.
+func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	recorded := make(map[string]bool, len(requiredWorkflowSpecs)+len(otherPullRequestWorkflows))
+	for i := range requiredWorkflowSpecs {
+		recorded[requiredWorkflowSpecs[i].path] = true
+	}
+	for i := range otherPullRequestWorkflows {
+		path := otherPullRequestWorkflows[i].path
+		if recorded[path] {
+			t.Errorf("%s is recorded in both requiredWorkflowSpecs and otherPullRequestWorkflows", path)
+		}
+		recorded[path] = true
+	}
+
+	seen := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		if _, ok := parseWorkflowTriggers(t, readWorkflow(t, name).On)["pull_request"]; !ok {
+			continue
+		}
+		seen++
+		if !recorded[name] {
+			t.Errorf("%s runs on pull_request but records no intended branches filter", name)
+		}
+	}
+
+	// Couple the counts, so a scan that matches nothing (renamed directory,
+	// changed extension) fails instead of passing every assertion vacuously,
+	// and so an entry for a workflow that no longer runs on pull_request is
+	// caught rather than left to rot.
+	if want := len(recorded); seen != want {
+		t.Errorf("found %d workflows running on pull_request, want %d (one per recorded entry)", seen, want)
+	}
+}
+
+// assertPullRequestBranches compares a workflow's declared pull_request
+// branches filter against the intended one. A nil want means the workflow must
+// declare no filter at all.
+func assertPullRequestBranches(t *testing.T, path string, want []string) {
+	t.Helper()
+
+	triggers := parseWorkflowTriggers(t, readWorkflow(t, path).On)
+	pullRequest, ok := triggers["pull_request"]
+	if !ok {
+		t.Fatalf("%s must run on pull_request", path)
+	}
+
+	got, declared := pullRequestBranchFilter(t, path, pullRequest)
+	if want == nil {
+		if declared {
+			t.Errorf("%s pull_request declares branches %v, want no filter at all", path, got)
+		}
+		return
+	}
+	if !declared {
+		t.Fatalf("%s pull_request declares no branches filter, want %v", path, want)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%s pull_request.branches = %v, want %v", path, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s pull_request.branches = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// pullRequestBranchFilter reads the `branches` filter off a parsed pull_request
+// trigger, reporting whether one is declared at all. It accepts both YAML
+// spellings of a filter — a bare scalar and a sequence — so the assertion above
+// pins reach rather than punctuation.
+func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branches []string, declared bool) {
+	t.Helper()
+
+	if pullRequest == nil {
+		return nil, false
+	}
+	config, ok := pullRequest.(map[string]any)
+	if !ok {
+		t.Fatalf("%s pull_request trigger has unexpected type %T", path, pullRequest)
+	}
+	raw, ok := config["branches"]
+	if !ok {
+		return nil, false
+	}
+
+	switch typed := raw.(type) {
+	case string:
+		return []string{typed}, true
+	case []any:
+		for _, value := range typed {
+			branch, ok := value.(string)
+			if !ok {
+				t.Fatalf("%s pull_request.branches contains non-string value %T", path, value)
+			}
+			branches = append(branches, branch)
+		}
+		return branches, true
+	default:
+		t.Fatalf("%s pull_request.branches has unexpected type %T", path, raw)
+		return nil, false
 	}
 }
 
