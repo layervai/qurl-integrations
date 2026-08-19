@@ -55,9 +55,12 @@ function tempLedger(contents) {
 // here: that creation is the thing under test, and a file this helper had
 // already written would carry this process's umask rather than the mode the
 // probe asks for. Registered for the same cleanup, since the probe leaves it
-// behind.
+// behind. Its own `-absent-` infix, matching the readLedger case that already
+// spells a nonexistent path that way, keeps it out of tempLedger's namespace:
+// that helper suffixes with `created.length`, so sharing the prefix would let
+// a future numerically-named call here alias a fixture.
 function absentLedgerPath(name) {
-  const p = path.join(os.tmpdir(), `loadtest-ledger-test-${process.pid}-${name}.jsonl`);
+  const p = path.join(os.tmpdir(), `loadtest-ledger-absent-${process.pid}-${name}.jsonl`);
   created.push(p);
   return p;
 }
