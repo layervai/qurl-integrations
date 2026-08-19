@@ -190,6 +190,25 @@ func (p *hermeticProxyRecorder) snapshot() []hermeticNewProxyObservation {
 	return out
 }
 
+// The pinned fork's server constructor writes the package-global
+// vhost.NotFoundPagePath, so every in-package constructor must come through
+// this helper. Only construction is serialized; the server tests remain
+// parallel once their independent Service instances exist.
+var forkServerConstructionMu sync.Mutex
+
+func startForkServer(t *testing.T, cfg *v1.ServerConfig, kind string, bindPort int) *frpserver.Service {
+	t.Helper()
+	forkServerConstructionMu.Lock()
+	svc, err := frpserver.NewService(cfg)
+	forkServerConstructionMu.Unlock()
+	if err != nil {
+		t.Fatalf("construct %s on 127.0.0.1:%d: %v", kind, bindPort, err)
+	}
+	go svc.Run(context.Background())
+	t.Cleanup(func() { _ = svc.Close() })
+	return svc
+}
+
 // startHermeticFRPS runs the FRP fork's real server on the given loopback
 // port, wired to the NewProxy recorder plugin. NewService binds the listener
 // synchronously; Close stops it (idempotent against Run's own shutdown).
@@ -209,13 +228,7 @@ func startHermeticFRPS(t *testing.T, bindPort int, pluginURL string) *frpserver.
 	if err := cfg.Complete(); err != nil {
 		t.Fatalf("complete hermetic server config: %v", err)
 	}
-	svc, err := frpserver.NewService(cfg)
-	if err != nil {
-		t.Fatalf("construct hermetic server on 127.0.0.1:%d: %v", bindPort, err)
-	}
-	go svc.Run(context.Background())
-	t.Cleanup(func() { _ = svc.Close() })
-	return svc
+	return startForkServer(t, cfg, "hermetic server", bindPort)
 }
 
 // pollHermeticHTTPBody polls the tunneled endpoint until the echo body

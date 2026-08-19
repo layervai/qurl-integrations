@@ -8,14 +8,12 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	frpclient "github.com/fatedier/frp/client"
 	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/policy/security"
-	frpserver "github.com/fatedier/frp/server"
 )
 
 // This file is the empirical half of the TODO(upstream-contract) marker on
@@ -37,12 +35,6 @@ import (
 // mounted at. The fork posts every op to this one endpoint and distinguishes
 // them by the "op" field in the body, which is why the handler filters on it.
 const forkLoginRejectPluginPath = "/"
-
-// The pinned fork's server constructor writes the package-global
-// vhost.NotFoundPagePath, so concurrent constructors race even for distinct
-// Service instances. Keep only construction serialized; the tests themselves
-// remain parallel.
-var forkLoginServerConstructionMu sync.Mutex
 
 // refusingLoopbackPort returns a loopback TCP port that is verified CLOSED at
 // the moment it is returned.
@@ -125,14 +117,7 @@ func startLoginRejectingFRPS(t *testing.T, bindPort int, rejectReason string) {
 	if err := cfg.Complete(); err != nil {
 		t.Fatalf("complete the login-rejecting server config: %v", err)
 	}
-	forkLoginServerConstructionMu.Lock()
-	svc, err := frpserver.NewService(cfg)
-	forkLoginServerConstructionMu.Unlock()
-	if err != nil {
-		t.Fatalf("construct the login-rejecting server on 127.0.0.1:%d: %v", bindPort, err)
-	}
-	go svc.Run(context.Background())
-	t.Cleanup(func() { _ = svc.Close() })
+	startForkServer(t, cfg, "login-rejecting server", bindPort)
 }
 
 // runForkClientLoginFailure builds the REAL fork client against the given
