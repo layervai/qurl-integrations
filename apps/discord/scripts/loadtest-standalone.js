@@ -7,7 +7,8 @@
  *   --count N      Recipients per round (default: 100)
  *   --duration S   Total duration in seconds (default: 7200 = 2 hours)
  *   --interval S   Seconds between rounds (default: 60)
- *   --file PATH    Local file to upload (default: generates a 1MB test file)
+ *   --file PATH    Local file to upload (default: generates a 1MB test payload
+ *                  in memory — nothing is written to disk)
  *   --location     Include a location link in each round
  *   --allow-production
  *                  Run anyway when a target is refused by the guard below.
@@ -202,6 +203,15 @@ const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7
 // throw, nothing left behind on SIGINT, and no /tmp write at all. A
 // caller-supplied --file is still read from disk each round in runRound —
 // that is the only case with a path to read.
+//
+// Every round gets the same Buffer *reference*, which is safe only because
+// rounds are strictly sequential (main awaits each runRound before the next)
+// and the one consumer, reUploadBuffer, reads the buffer without mutating it.
+// Both hold today; a future change that overlaps rounds or hands this to a
+// mutating consumer needs a per-round copy instead.
+//
+// Allocated lazily rather than at module load so that neither a --file run
+// nor the test suite's require() of this module pays for 1MB it never uses.
 let generatedPayload = null;
 function generateTestPayload() {
   if (generatedPayload === null) {
