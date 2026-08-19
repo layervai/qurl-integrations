@@ -32,6 +32,16 @@ const (
 	workflowContractTestName  = "Test workflow contract"
 	workflowContractTestRun   = "go test -count=1 ./internal/ciworkflows/..."
 
+	// The two job ids the app-workflow aggregate pattern is built on: a
+	// `changes` detector, and a `required` aggregate that needs it and reports
+	// the gating context. Spelled as constants only where an id is read
+	// structurally — a key into a workflow's Jobs map, or an entry in a
+	// `needs` list. The hand-written needs maps further down stay literal:
+	// they are fixtures standing in for what a workflow author typed, so
+	// renaming the real job must not silently rewrite them too.
+	changesJobID  = "changes"
+	requiredJobID = "required"
+
 	releasePleaseWorkflow      = "release-please.yml"
 	releasePleaseJobID         = "release-please"
 	releasePleaseActionStepID  = "release"
@@ -1201,7 +1211,7 @@ func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
 
 	seen := 0
 	for _, name := range workflowFiles(t) {
-		if _, ok := readWorkflow(t, name).Jobs["required"]; !ok {
+		if _, ok := readWorkflow(t, name).Jobs[requiredJobID]; !ok {
 			continue
 		}
 		seen++
@@ -1226,10 +1236,7 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 		t.Run(spec.name, func(t *testing.T) {
 			workflow := readWorkflow(t, spec.path)
 
-			required, ok := workflow.Jobs["required"]
-			if !ok {
-				t.Fatalf("%s workflow is missing required aggregate job", spec.name)
-			}
+			required := requiredAggregateJob(t, spec, workflow)
 			if required.Name != spec.requiredName {
 				t.Fatalf("required job name = %q, want %q", required.Name, spec.requiredName)
 			}
@@ -1242,8 +1249,8 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 				t.Fatalf("%s required.if = %q, want always()", spec.name, required.If)
 			}
 
-			requiredNeeds := stringSet(parseWorkflowNeeds(t, "required", required.Needs))
-			if !requiredNeeds["changes"] {
+			requiredNeeds := stringSet(parseWorkflowNeeds(t, requiredJobID, required.Needs))
+			if !requiredNeeds[changesJobID] {
 				t.Fatal("required.needs is missing changes detector")
 			}
 
@@ -1258,7 +1265,7 @@ func TestRequiredWorkflowsNeedAllQualityGates(t *testing.T) {
 			}
 
 			for need := range requiredNeeds {
-				if need == "changes" {
+				if need == changesJobID {
 					continue
 				}
 				if !qualityGates[need] {
@@ -1575,6 +1582,20 @@ func workflowFiles(t *testing.T) []string {
 	return names
 }
 
+// requiredAggregateJob returns the aggregate job of the workflow a spec names.
+// Both callers reach for it before reading anything else about that workflow,
+// and for both a spec whose workflow has no such job is the same registration
+// bug, so the lookup and its diagnosis are written once here.
+func requiredAggregateJob(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) githubJob {
+	t.Helper()
+
+	job, ok := workflow.Jobs[requiredJobID]
+	if !ok {
+		t.Fatalf("%s workflow is missing its %q aggregate job", spec.name, requiredJobID)
+	}
+	return job
+}
+
 func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) map[string]bool {
 	t.Helper()
 
@@ -1584,7 +1605,7 @@ func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, work
 		if !looksLikeRequiredWorkflowQualityGate(spec, &job, needs) {
 			continue
 		}
-		if !slices.Contains(needs, "changes") {
+		if !slices.Contains(needs, changesJobID) {
 			t.Errorf("%s quality gate %q must include changes in needs", spec.name, id)
 			continue
 		}
@@ -1604,7 +1625,7 @@ func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job *githu
 	if job.Name == spec.detectChangesName || job.Name == spec.requiredName {
 		return false
 	}
-	return !slices.Contains(needs, "required")
+	return !slices.Contains(needs, requiredJobID)
 }
 
 func sortedQualityGateIDs(qualityGates map[string]bool) []string {
@@ -1653,10 +1674,7 @@ func stringSet(values []string) map[string]bool {
 func requiredVerifierScript(t *testing.T, spec *requiredWorkflowSpec, workflow githubWorkflow) string {
 	t.Helper()
 
-	required, ok := workflow.Jobs["required"]
-	if !ok {
-		t.Fatalf("%s workflow is missing required aggregate job", spec.name)
-	}
+	required := requiredAggregateJob(t, spec, workflow)
 	for _, step := range required.Steps {
 		if step.Name != spec.verifierStepName {
 			continue
