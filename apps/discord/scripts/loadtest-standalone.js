@@ -174,22 +174,36 @@ function parsePositiveInt(flag, raw) {
 // regression surface, and a call site quietly reverted to `parseInt` would
 // leave a green parsePositiveInt behind it.
 //
-// Reads argv directly rather than through getArg, which cannot express the
-// case that matters here. getArg collapses "flag absent" and "flag present
-// with nothing usable after it" onto the same default — so `--count` as the
-// final token, and `--count ""`, both run 100 recipients while the operator
-// believes they asked for something else. Separating those is the whole point
-// of the flag being present.
+// Both spellings, `--count 200` and `--count=200`, through the same readArg
+// every other flag is read by. An indexOf on the bare token does not match
+// `--count=200` at all, so the equals form read as the flag being ABSENT and
+// ran the default with nothing in the log saying so — this resolver's own
+// silent fallback, reached from the other direction. `--duration=60` is the
+// one that hurts: it held the target for the default 7200 seconds after the
+// operator sized the run at a minute.
+//
+// readArg alone cannot express the case that matters here. It collapses "flag
+// absent" and "flag present with nothing usable after it" onto the same
+// default, so `--count` as the final token, `--count ""` and `--count=` would
+// all run 100 recipients while the operator believes they asked for something
+// else. argValueMissing — the predicate --max-fail-rate already rejects on —
+// splits that second case off first, which is what leaves an undefined from
+// readArg meaning the flag was not passed at all. Both helpers read the space
+// form before the equals form, so they always resolve the same occurrence; a
+// precedence change in one alone would put the silent default back.
 function resolveNumericArgs(argv) {
   const errors = [];
   const read = (flag, defaultValue) => {
-    const idx = argv.indexOf(`--${flag}`);
-    if (idx === -1) return defaultValue;
-    const raw = argv[idx + 1];
-    if (raw === undefined) {
+    // One message for all three no-value spellings: they are one mistake, and
+    // the fix for each is the same. It also keeps `--count=` from reaching
+    // parsePositiveInt as an empty string, which would report a dropped value
+    // as a badly typed number.
+    if (argValueMissing(argv, flag)) {
       errors.push(`--${flag} was given no value (omit it to use the default of ${defaultValue})`);
       return NaN;
     }
+    const raw = readArg(argv, flag, undefined);
+    if (raw === undefined) return defaultValue;
     const { value, error } = parsePositiveInt(flag, raw);
     if (error) {
       errors.push(error);

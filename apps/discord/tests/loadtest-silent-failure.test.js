@@ -123,20 +123,81 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
-  // The case getArg cannot express: `--count` as the final token has no value
-  // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
-  // the same 100 as not passing the flag at all. Silently running the default
-  // is exactly the "did nothing you asked for, reported success" shape.
+  // Per flag, not one case standing in for three. An indexOf on the bare token
+  // does not match `--count=200` at all, so all three read as ABSENT and ran
+  // their defaults silently — the same fallback this resolver was added to
+  // remove, reached from the other direction. Asserted one flag at a time
+  // because the cheapest way to break this again is to special-case a single
+  // one: a resolver that reads two flags through readArg and the third through
+  // an inline indexOf still passes any assertion that only spells out --count.
+  it.each([
+    ['--count=200', 'count', 200],
+    ['--duration=60', 'durationS', 60],
+    ['--interval=30', 'intervalS', 30],
+  ])('reads %s in the equals form', (token, key, expected) => {
+    const resolved = resolveNumericArgs([token]);
+    expect(resolved[key]).toBe(expected);
+    expect(resolved.errors).toEqual([]);
+  });
+
+  it('reads all three in the equals form at once', () => {
+    // --duration is the one that hurts: falling back to 7200 held the target
+    // for two hours after the operator sized the run at a minute.
+    expect(resolveNumericArgs(['--count=200', '--duration=60', '--interval=30']))
+      .toEqual({ count: 200, durationS: 60, intervalS: 30, errors: [] });
+  });
+
+  it('validates an equals-form value rather than trusting it', () => {
+    // The new spelling is a second way INTO parsePositiveInt, not a way around
+    // it — otherwise `--count=abc` would empty every loop a round runs while
+    // `--count abc` was refused.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--count=0']).errors[0]).toContain('greater than zero');
+    expect(resolveNumericArgs(['--count=-5']).errors[0]).toContain('got "-5"');
+  });
+
+  it('matches the flag name and not a prefix of it', () => {
+    // `--counter=9` starts with `--count`, so a startsWith on the bare name
+    // would set count from a flag this resolver does not own.
+    expect(resolveNumericArgs(['--counter=9']).count).toBe(100);
+  });
+
+  // The case readArg cannot express on its own: `--count` as the final token
+  // has no value after it, and readArg's `argv[idx + 1] || defaultVal`
+  // collapses that onto the same 100 as not passing the flag at all. Silently
+  // running the default is exactly the "did nothing you asked for, reported
+  // success" shape. argValueMissing is what splits it back out.
   it('refuses a flag left without a value', () => {
     const { count, errors } = resolveNumericArgs(['--count']);
     expect(count).toBeNaN();
     expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
   });
 
-  it('refuses an explicitly empty value rather than defaulting', () => {
-    const { count, errors } = resolveNumericArgs(['--count', '']);
+  it.each([
+    ['an explicitly empty value', ['--count', '']],
+    ['an empty equals form', ['--count=']],
+  ])('refuses %s rather than defaulting', (_label, argv) => {
+    // One message for all three spellings, `--count` trailing included: they
+    // are one mistake — the value was dropped, usually by a wrapper expanding
+    // an unset variable — and the fix for each is the same. Reporting `--count=`
+    // as a badly typed number would describe a value the operator never typed.
+    const { count, errors } = resolveNumericArgs(argv);
     expect(count).toBeNaN();
-    expect(errors[0]).toContain('got ""');
+    expect(errors).toEqual(['--count was given no value (omit it to use the default of 100)']);
+  });
+
+  it.each([
+    ['the space form is written first', ['--count', '5', '--count=9']],
+    ['the equals form is written first', ['--count=9', '--count', '5']],
+  ])('resolves the space form when both spellings are given and %s', (_label, argv) => {
+    // Not a stance on which spelling should win — it is that argValueMissing
+    // and readArg must pick the SAME occurrence. Both check the space form
+    // first; change the precedence in one alone and this argv reads as
+    // present-with-a-value to the guard and as empty to the reader, which is
+    // the silent default all over again.
+    expect(resolveNumericArgs(argv)).toEqual({
+      count: 5, durationS: 7200, intervalS: 60, errors: [],
+    });
   });
 
   it('refuses the following flag when the value was forgotten', () => {
