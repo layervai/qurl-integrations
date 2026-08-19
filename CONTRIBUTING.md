@@ -276,11 +276,11 @@ gh api graphql -f query='{repository(owner:"layervai",name:"qurl-integrations"){
 ```
 
 That returns `{"data":{"repository":{"mergeQueue":null}}}` today. The classic
-protection response carries no merge-queue field at all — `has(
-"required_merge_queue")` on it is `false` — so reaching for
+protection response carries no merge-queue field at all, so reaching for
 `--jq '.required_merge_queue'` there prints nothing whether or not a queue
-exists. That is a check that cannot fail, the same shape as a required context
-matching no job, and it does not belong in this section.
+exists — confirm with `--jq 'has("required_merge_queue")'`, which is `false`.
+That is a check that cannot fail, the same shape as a required context matching
+no job, and it does not belong in this section.
 
 A queue evaluates required contexts against its own temporary ref, so a required
 context whose workflow does not handle that event never reports for a queue
