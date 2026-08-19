@@ -1858,11 +1858,22 @@ func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values, setupCmd
 }
 
 func (h *Handler) handleUninstall(w http.ResponseWriter, values url.Values) {
-	teamID, userID, ok := h.requireUninstallAvailableAndAuthorized(w, values)
+	teamID, _, ok := h.requireUninstallAvailableAndAuthorized(w, values)
 	if !ok {
 		return
 	}
-	h.deleteWorkspaceAPIKey(w, teamID, userID, slashUninstallPurgeWorkspaceIDs(values, teamID))
+	// Render the confirmation instead of disconnecting now. The click →
+	// handleUninstallConfirmClick re-gates and performs the teardown, so the
+	// destructive step always sits behind Slack's own confirm dialog. The purge
+	// partitions are resolved HERE, from the signed slash payload, because a
+	// block_actions payload carries no is_enterprise_install flag; the click
+	// re-validates them against its own team/enterprise ids before using them.
+	command := values.Get(fieldCommand)
+	if command == "" {
+		command = commandUser
+	}
+	purgeIDs := slashUninstallPurgeWorkspaceIDs(values, teamID)
+	respondSlackBlocks(w, uninstallConfirmFallbackText, uninstallConfirmBlocks(command, purgeIDs))
 }
 
 func slashUninstallPurgeWorkspaceIDs(values url.Values, teamID string) []string {
@@ -1943,15 +1954,11 @@ var _ workspaceStateIdentityDeleter = (*auth.DDBProvider)(nil)
 // workspace_state rows.
 var _ workspaceStateBeforeIdentityDeleter = (*auth.DDBProvider)(nil)
 
-func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID string, purgeWorkspaceIDs []string) {
-	// Reuse the sync admin-verb budget (1.2s): after the owner/admin gate, the
-	// optional upstream revoke plus the DeleteAPIKey write stay inside Slack's 3s
-	// ack window. The revoke is best-effort within this ctx — the qURL client may
-	// retry a flapping upstream (WithRetry), but the ctx bound makes a retry storm
-	// abort (key_id preserved) rather than miss the ack.
-	ctx, cancel := context.WithTimeout(h.baseCtx, adminSyncVerbBudget)
-	defer cancel()
-
+// uninstallWorkspaceReply performs the disconnect and RETURNS the reply text
+// rather than writing it, so the confirmation button and any future surface
+// converge on one teardown path instead of forking the revoke/delete/purge
+// ordering. The caller owns delivery (response_url) and the context budget.
+func (h *Handler) uninstallWorkspaceReply(ctx context.Context, teamID, userID string, purgeWorkspaceIDs []string) string {
 	// The trailing sentence is the honest boundary of what this command does. It
 	// clears qURL's per-workspace data but deliberately leaves the Slack app —
 	// and the bot token Slack issued to it — in place, because only a fresh Slack
@@ -2013,8 +2020,7 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 		// Covers all abort arms — a failed revoke, but also the key_id read and
 		// client-build (KMS) failures where no revoke was even attempted — so the
 		// copy says "disconnect", not "revoke".
-		respondSlack(w, ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing.")
-		return
+		return ":warning: Couldn't disconnect qURL right now. Nothing was disconnected — try again in a moment, and contact your qURL operator if it keeps failing."
 	}
 
 	if err := h.cfg.AuthProvider.DeleteAPIKey(ctx, teamID); err != nil {
@@ -2026,28 +2032,23 @@ func (h *Handler) deleteWorkspaceAPIKey(w http.ResponseWriter, teamID, userID st
 				// success, not the contradictory "isn't currently connected".
 				slog.Info("/qurl uninstall: upstream key revoked; local row already cleared", "team_id", teamID, "caller_user_id", userID)
 				schedulePurge("qurl_key_already_cleared_after_revoke")
-				respondSlack(w, revokedReply)
-				return
+				return revokedReply
 			}
 			schedulePurge("qurl_key_not_configured")
-			respondSlack(w, "qURL isn't currently connected to this workspace.\n\n"+localSlackDataPurgeScheduledReply+"\n\nContact your qURL operator if the owner is unavailable.")
-			return
+			return "qURL isn't currently connected to this workspace.\n\n" + localSlackDataPurgeScheduledReply + "\n\nContact your qURL operator if the owner is unavailable."
 		case errors.Is(err, auth.ErrWorkspaceAPIKeyDeleteUnsupported):
-			respondUninstallUnsupported(w)
-			return
+			return uninstallUnsupportedMessage
 		default:
 			slog.Error("/qurl uninstall: DeleteAPIKey failed", "error", err, "team_id", teamID, "caller_user_id", userID)
-			respondSlack(w, ":warning: could not disconnect qURL from this workspace. Try again in a moment.")
-			return
+			return ":warning: could not disconnect qURL from this workspace. Try again in a moment."
 		}
 	}
 	schedulePurge("delete_api_key_succeeded")
 	slog.Info("/qurl uninstall: disconnected workspace Slack commands", "team_id", teamID, "caller_user_id", userID, "upstream_revoked", revoked)
 	if revoked {
-		respondSlack(w, revokedReply)
-		return
+		return revokedReply
 	}
-	respondSlack(w, "qURL has been disconnected from this workspace's Slack commands.\n\n"+localSlackDataPurgeScheduledReply+"\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed.")
+	return "qURL has been disconnected from this workspace's Slack commands.\n\n" + localSlackDataPurgeScheduledReply + "\n\nThis does not revoke the qURL API key outside Slack; contact the operator if you're disconnecting because the key may be exposed."
 }
 
 func workspaceStatePurgeCutoff(provider auth.Provider, fallbackNow func() time.Time) time.Time {
@@ -2186,8 +2187,12 @@ func classifyUninstallRevokeError(revokeErr error, teamID, userID, keyID string)
 	return false, revokeErr
 }
 
+// uninstallUnsupportedMessage is shared by the sync gate (which writes it) and
+// the teardown (which returns it), so both surfaces say the same thing.
+var uninstallUnsupportedMessage = "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at " + qurlContactURL + "."
+
 func respondUninstallUnsupported(w http.ResponseWriter) {
-	respondSlack(w, "`/qurl uninstall` isn't supported on this Secure Access Agent deployment. Contact qURL support at "+qurlContactURL+".")
+	respondSlack(w, uninstallUnsupportedMessage)
 }
 
 type uninstallUnavailableReason int

@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -649,13 +650,10 @@ func TestSlashCommandUninstallGridOrgInstallPurgesTeamAndEnterpriseKeys(t *testi
 	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
 	seedLifecycleAgentState(t, h.cfg.AgentStore, testEnterpriseID)
 
-	inv := newAdminSlashInvoker(t, h)
-	inv.enterpriseID = testEnterpriseID
-	inv.isEnterpriseInstall = slackFormBoolTrue
-	status, reply := inv.invokeAdmin(uninstallVerb, testAdminTeamID, testAdminUserID)
-	if status != http.StatusOK {
-		t.Fatalf("uninstall status = %d, want 200; reply=%q", status, reply)
-	}
+	slashUninstallConfirmedForGrid(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{
+		enterpriseID:        testEnterpriseID,
+		isEnterpriseInstall: slackFormBoolTrue,
+	})
 
 	if provider.deleteCalls != 1 {
 		t.Fatalf("DeleteAPIKey calls = %d, want 1", provider.deleteCalls)
@@ -685,13 +683,10 @@ func TestSlashCommandUninstallGridWorkspaceInstallKeepsEnterpriseKey(t *testing.
 	ts.seedWorkspace(t, testEnterpriseID, testAdminOwnerID, testAdminUserID, testWorkspaceConfiguredAt)
 	seedLifecycleAgentState(t, h.cfg.AgentStore, testEnterpriseID)
 
-	inv := newAdminSlashInvoker(t, h)
-	inv.enterpriseID = testEnterpriseID
-	inv.isEnterpriseInstall = "false"
-	status, reply := inv.invokeAdmin(uninstallVerb, testAdminTeamID, testAdminUserID)
-	if status != http.StatusOK {
-		t.Fatalf("uninstall status = %d, want 200; reply=%q", status, reply)
-	}
+	slashUninstallConfirmedForGrid(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{
+		enterpriseID:        testEnterpriseID,
+		isEnterpriseInstall: "false",
+	})
 	h.Wait()
 
 	// The team's row survives (Slack app still installed); the enterprise partition
@@ -852,5 +847,113 @@ func TestPurgeWorkspaceScopeControlsWorkspaceStateDelete(t *testing.T) {
 			// Both scopes still forget the non-install-scoped data.
 			assertLifecycleAgentStatePurged(t, h.cfg.AgentStore, testAdminTeamID)
 		})
+	}
+}
+
+// TestSlashCommandUninstallBareVerbOnlyConfirms is the guard on the two-step
+// gate. The teardown clears the admin roster, the per-channel resource access
+// set, and every channel alias from tables that have no restore path, so the
+// bare verb must be inert: it renders a confirmation card and nothing else.
+func TestSlashCommandUninstallBareVerbOnlyConfirms(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+
+	value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{})
+	if !ok {
+		t.Fatalf("bare verb did not render a confirm button; got %q", value)
+	}
+	h.Wait()
+
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0: the bare verb must not disconnect anything", provider.deleteCalls)
+	}
+	if provider.deleteStateCalls != 0 {
+		t.Fatalf("DeleteWorkspaceState calls = %d, want 0 on the bare verb", provider.deleteStateCalls)
+	}
+	if _, _, err := h.cfg.AdminStore.ListAdmins(context.Background(), testAdminTeamID); err != nil {
+		t.Fatalf("ListAdmins after the bare verb: %v, want the roster intact", err)
+	}
+	entries, err := h.cfg.AdminStore.GetChannelPolicy(context.Background(), testAdminTeamID, "C_one")
+	if err != nil {
+		t.Fatalf("GetChannelPolicy after the bare verb: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("channel policy was purged by the bare verb; it must only confirm")
+	}
+}
+
+// TestUninstallConfirmBlocksStateWhatIsClearedAndKept pins the card's copy. The
+// card is the only place a workspace learns what it is about to lose, and that
+// "uninstall" does NOT delete their protected resources.
+func TestUninstallConfirmBlocksStateWhatIsClearedAndKept(t *testing.T) {
+	rendered, err := json.Marshal(uninstallConfirmBlocks(commandUser, []string{testAdminTeamID}))
+	if err != nil {
+		t.Fatalf("marshal confirm blocks: %v", err)
+	}
+	got := string(rendered)
+	for _, want := range []string{
+		"Admin list",
+		"Channel access",
+		"Channel aliases",
+		"not* affected", // resources survive
+		"--rotate",      // the non-destructive alternative
+		uninstallConfirmActionID,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("confirmation card missing %q: %s", want, got)
+		}
+	}
+	// Slack must render a confirm dialog on the destructive button, or the card
+	// is just a button with extra words.
+	if !strings.Contains(got, `"confirm"`) || !strings.Contains(got, `"danger"`) {
+		t.Fatalf("confirmation card is missing the danger confirm dialog: %s", got)
+	}
+}
+
+// TestUninstallConfirmClickRequiresAdmin keeps the click itself as the mutation
+// boundary: rendering a button must never be what authorizes the teardown.
+func TestUninstallConfirmClickRequiresAdmin(t *testing.T) {
+	h, provider, _ := newLifecycleTestHandler(t)
+
+	value, ok := uninstallConfirmButtonValue(t, h, testAdminTeamID, testAdminUserID, uninstallGridContext{})
+	if !ok {
+		t.Fatalf("bare verb did not render a confirm button; got %q", value)
+	}
+
+	captured := &capturedResponseURL{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		captured.record(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	// A different user replays the card's button.
+	body := exposeBlockActionsBodyWithEnterprise(t, testAdminTeamID, "", "USTRANGER000", testExposeChannel, srv.URL, uninstallConfirmActionID, value)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, pathSlackInteractions, body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("click ack = %d, want 200", w.Code)
+	}
+	got := parseSlackText(t, captured.waitForBody(t, 2*time.Second))
+	if !strings.Contains(got, "can disconnect it") {
+		t.Fatalf("non-admin click reply = %q, want the admin-or-owner refusal", got)
+	}
+	h.Wait()
+	if provider.deleteCalls != 0 {
+		t.Fatalf("DeleteAPIKey calls = %d, want 0 for a non-admin click", provider.deleteCalls)
+	}
+}
+
+// TestUninstallPurgeIDsForClickRejectsForeignPartitions pins the validation on
+// the echoed button value: a card can only ever purge partitions the clicking
+// interaction is itself authenticated for.
+func TestUninstallPurgeIDsForClickRejectsForeignPartitions(t *testing.T) {
+	got := uninstallPurgeIDsForClick("T_team,E_GRID,T_SOMEONE_ELSE", "T_team", "E_GRID")
+	if strings.Join(got, ",") != "T_team,E_GRID" {
+		t.Fatalf("purge ids = %v, want the foreign partition dropped", got)
+	}
+	// An empty or fully-foreign value still purges the caller's own team.
+	if got := uninstallPurgeIDsForClick("T_SOMEONE_ELSE", "T_team", ""); strings.Join(got, ",") != "T_team" {
+		t.Fatalf("purge ids = %v, want a fallback to the payload team", got)
 	}
 }
