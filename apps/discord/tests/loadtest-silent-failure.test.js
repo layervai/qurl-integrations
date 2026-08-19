@@ -13,7 +13,7 @@
  *     empty or flag-shaped value silently became the DEFAULT, so the run did
  *     something real that nobody asked for.
  *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
- *     round runs — the file leg's `i += 10` batches and the location leg's
+ *     round runs — the file leg's batch plan and the location leg's
  *     `i++` alike — so the script holds the target for its full duration
  *     issuing no requests and reports "Total links minted: 0".
  *   - The --file flag. Defaulting sends a generated 1MB payload instead of
@@ -30,15 +30,23 @@
  *     into a `Round N FAILED` line: the window still runs to completion and
  *     still measures nothing.
  *
- * The upload half is a STATIC check because runRound is unreachable from a
- * test: it is not exported, its only caller main() is behind
- * `require.main === module`, and scripts/ sits outside collectCoverageFrom,
- * so neither jest nor the coverage gate can see it. eslint extends only
- * eslint:recommended, so it cannot see it either. Parsing the source is what
- * is left — same approach as tests/ddb-reserved-words-static.test.js, and the
- * sibling of the mintLinks call-shape check #1168 added to
- * tests/loadtest-target-guard.test.js. The two stay in separate files because
- * that one's scaffolding is scoped inside its own describe.
+ * The upload and payload halves are STATIC checks, for a reason that survived
+ * #1173 exporting runRound: what they assert is the SHAPE OF THE SOURCE, and
+ * calling a function cannot see that. Running a round proves the bytes that
+ * reach reUploadBuffer; it cannot distinguish a memoized buffer from one
+ * allocated fresh inside the round, and it can say nothing at all about
+ * whether some other line in the file writes a scratch file. Coverage would
+ * not have caught either anyway — scripts/ sits outside collectCoverageFrom,
+ * and eslint extends only eslint:recommended, so neither can see this file's
+ * internals. Parsing the source is what is left — same approach as
+ * tests/ddb-reserved-words-static.test.js, and the sibling of the mintLinks
+ * call-shape check #1168 added to tests/loadtest-target-guard.test.js. The two
+ * stay in separate files because that one's scaffolding is scoped inside its
+ * own describe.
+ *
+ * runRound itself IS reachable now (#1173 exports it for
+ * tests/loadtest-round-accounting.test.js). Anything expressible as "run a
+ * round and assert on the result" belongs there, not here.
  */
 
 const fs = require('fs');
@@ -790,9 +798,18 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(preflight).toBeLessThan(smokeTest);
   });
 
-  it('uploads through reUploadBuffer', () => {
-    // Fails closed if the call disappears or a second one appears unreviewed.
-    expect(callsNamed('reUploadBuffer')).toHaveLength(1);
+  it('uploads through reUploadBuffer, twice and only twice', () => {
+    // Fails closed if a call disappears or a third one appears unreviewed.
+    //
+    // Two, reviewed: the round's initial upload, and the re-upload leg that
+    // runs each time a resource's TOKENS_PER_RESOURCE pool drains. Dropping
+    // the second is the regression tests/loadtest-mint-batches.test.js
+    // documents — every later batch mints against a spent pool.
+    //
+    // Counted rather than located because both calls are the same call: same
+    // callee, same three arguments, same buffer and filename. A check that
+    // told them apart would be asserting on which line they sit.
+    expect(callsNamed('reUploadBuffer')).toHaveLength(2);
   });
 
   it('passes the first three parameters positionally and omits the last two', () => {
@@ -830,7 +847,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     expect(params).toEqual([
       'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds',
     ]);
-    expect(callsNamed('reUploadBuffer')[0].arguments).toHaveLength(3);
+    // Every call site, not just the first: the reasoning above is about which
+    // two parameters are being omitted, so it has to hold for the re-upload
+    // leg exactly as it does for the initial upload.
+    const calls = callsNamed('reUploadBuffer');
+    expect(calls).not.toHaveLength(0);
+    for (const call of calls) expect(call.arguments).toHaveLength(3);
   });
 
   it('writes nothing to disk', () => {
