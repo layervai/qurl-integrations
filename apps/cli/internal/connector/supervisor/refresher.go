@@ -54,6 +54,11 @@ const (
 	// connect that succeeds slowly, then a server that never answers the
 	// Login — before the loop waits out the third.
 	//
+	// The third is counted once, not twice, even though keepControllerWorking
+	// wraps the dial loop in a second 20s-capped backoff of its own: that
+	// outer one does not tick during a sustained storm, because the inner
+	// loop it calls only returns once a Login succeeds or the context ends.
+	//
 	// TODO(upstream-contract): the second and third mirror
 	// github.com/layervai/frp v0.70.0-layerv.4, and neither has a config
 	// seam — both are literals inside the fork:
@@ -69,9 +74,11 @@ const (
 	//     inside that loop. 20s is a true ceiling and not a pre-jitter base:
 	//     pkg/util/wait/backoff.go applies Jitter first and clamps second.
 	//     Read that clamp as this manager's rather than the file's — the same
-	//     file has a fast-retry return that skips it, which this manager
-	//     escapes only by leaving FastRetryCount zero. Only the FIRST login
-	//     is paced differently — Run passes 10s — and it is not this storm.
+	//     file has a fast-retry return that skips it, and this manager escapes
+	//     that only by leaving FastRetryCount zero, so a fork bump that sets
+	//     FastRetryCount on THIS literal would make the ceiling untrue while
+	//     every value here still read as verified. Only the FIRST login is
+	//     paced differently — Run passes 10s — and it is not this storm.
 	//
 	// reconnectStallWindow's marker below quotes this same call for its OTHER
 	// hard-coded argument. One fork edit can invalidate both; update the pair.
