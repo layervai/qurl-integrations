@@ -894,8 +894,7 @@ var otherPullRequestWorkflows = []pullRequestBranchSpec{
 			"and a stacked PR's dependency delta is reviewed again inside the combined diff once " +
 			"the merged base is deleted and it retargets to main. Cheaper to widen than CodeQL, " +
 			"so this is the entry to revisit first — the cost is not runtime but noise, since " +
-			"`comment-summary-in-pr: always` " +
-			"would post a summary onto every stacked PR.",
+			"`comment-summary-in-pr: always` would post a summary onto every stacked PR.",
 	},
 	{
 		path: "secrets-scan.yml",
