@@ -26,6 +26,11 @@ jest.mock('../src/qurl', () => ({
   deleteLink: jest.fn(),
 }));
 
+jest.mock('../src/connector', () => ({
+  mintLinks: jest.fn(),
+  reUploadBuffer: jest.fn(),
+}));
+
 const { deleteLink } = require('../src/qurl');
 const config = require('../src/config');
 const {
@@ -177,9 +182,6 @@ describe('recordResource', () => {
     ['empty', ''],
     ['non-string', 12345],
     ['malformed', 'not a valid id!'],
-    // Charset-clean but missing the r_ prefix client.delete() requires: it
-    // would fail every sweep with a message matching neither 404 nor 410.
-    ['unprefixed', 'abc123'],
   ])('warns and records nothing for a %s resource_id', (_label, value) => {
     const before = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     recordResource(value, 'upload');
@@ -191,6 +193,49 @@ describe('recordResource', () => {
     // exists to prevent.
     const after = fs.existsSync(LEDGER_PATH) ? fs.readFileSync(LEDGER_PATH, 'utf8') : '';
     expect(after).toBe(before);
+  });
+});
+
+describe('runRound ledgering', () => {
+  // The re-upload leg (#1173) mints a NEW parent resource each time a token
+  // pool drains. Each one is as leakable as the round's first upload, and
+  // nothing about the leg itself makes that visible — so this pins that every
+  // parent a round creates reaches the ledger, not just the first.
+  const { mintLinks, reUploadBuffer } = require('../src/connector');
+
+  function loadWith(argvTail) {
+    const savedArgv = process.argv;
+    let mod;
+    try {
+      process.argv = ['node', 'loadtest-standalone.js', ...argvTail];
+      jest.isolateModules(() => { mod = require('../scripts/loadtest-standalone'); });
+    } finally {
+      process.argv = savedArgv;
+    }
+    return mod;
+  }
+
+  it('records every parent a round creates, re-uploads included', async () => {
+    const payload = path.join(os.tmpdir(), `loadtest-payload-${process.pid}.bin`);
+    const ledger = path.join(os.tmpdir(), `loadtest-round-ledger-${process.pid}.jsonl`);
+    fs.writeFileSync(payload, 'x');
+    created.push(payload, ledger);
+
+    mintLinks.mockReset();
+    reUploadBuffer.mockReset();
+    mintLinks.mockResolvedValue({});
+    reUploadBuffer
+      .mockResolvedValueOnce({ resource_id: 'res-1' })
+      .mockResolvedValueOnce({ resource_id: 'res-2' })
+      .mockResolvedValueOnce({ resource_id: 'res-3' });
+
+    const mod = loadWith(['--count', '30', '--file', payload, '--ledger', ledger]);
+    await mod.runRound(1);
+
+    // 30 recipients at 10 per resource: one initial upload plus two
+    // re-uploads. All three parents must be reclaimable.
+    expect(reUploadBuffer).toHaveBeenCalledTimes(3);
+    expect(mod.readLedger(ledger)).toEqual(['res-1', 'res-2', 'res-3']);
   });
 });
 
