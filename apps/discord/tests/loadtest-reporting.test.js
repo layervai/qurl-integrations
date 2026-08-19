@@ -345,6 +345,9 @@ describe('runReport — the summary and the exit code', () => {
     expect(result.failed).toBe(true);
     expect(result.lines[0]).toBe('Rounds: 0 completed, 5 failed');
     expect(result.lines).toContain('FAILED: no round completed');
+    // One condition, one finding: a zero-completed run always has a 100%
+    // round rate, so naming both would report it twice.
+    expect(result.lines.filter((l) => l.startsWith('FAILED:'))).toHaveLength(1);
   });
 
   it('fails when the run window was too short to attempt a round', () => {

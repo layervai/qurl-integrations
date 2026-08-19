@@ -633,7 +633,10 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
     const [rate, limit] = formatRatePair(linkFailRate, maxFailRate);
     reasons.push(`link failure rate ${rate} (${failedLinks}/${attemptedLinks}) exceeds --max-fail-rate ${limit}`);
   }
-  if (roundFailRate > maxFailRate) {
+  // Skipped when nothing completed: that case is already named above, and a
+  // zero-completed run always has a 100% round rate, so both would fire and
+  // report one condition as two findings.
+  if (roundsCompleted > 0 && roundFailRate > maxFailRate) {
     const [rate, limit] = formatRatePair(roundFailRate, maxFailRate);
     reasons.push(`round failure rate ${rate} (${roundsFailed}/${roundsAttempted}) exceeds --max-fail-rate ${limit}`);
   }
