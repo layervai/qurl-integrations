@@ -1231,14 +1231,87 @@ describe('loadtest script — static checks on call sites no test can reach', ()
 
   const ast = parseFile('scripts', 'loadtest-standalone.js');
 
+  // A name the source states outright, in whichever of the two spellings it
+  // is written: `fs.writeFileSync` and `fs['writeFileSync']` are one call,
+  // and so are `{ writeFileSync: w }` and `{ 'writeFileSync': w }`. A key
+  // computed from anything else is not stated here, and reads as null.
+  const staticName = (node, computed) => {
+    if (node.type === 'StringLiteral') return node.value;
+    if (!computed && node.type === 'Identifier') return node.name;
+    return null;
+  };
+
+  // Names bound exactly ONCE in this file, and what the binding makes them
+  // mean. Three shapes land here, each of which reached a primitive while
+  // naming something else, and so walked past every check below:
+  //
+  //   const w = fs.writeFileSync       →  w      is writeFileSync
+  //   const { writeFileSync: w } = fs  →  w      is writeFileSync
+  //   const W = 'writeFileSync'        →  fs[W]  is writeFileSync
+  //
+  // ONCE is the rule rather than a convenience. A name declared twice means
+  // whichever binding reached the call site, and a static walk cannot see
+  // which; it is dropped here and resolves to itself, which is what every
+  // name did before this map existed. Plenty are — `line` and `error` are
+  // each declared in several functions — and dropping them is why this map
+  // cannot make a count wrong. No name any check here counts is aliased in
+  // the script today, so the map moves nothing as it stands; it is here for
+  // the edit that introduces one.
+  //
+  // One hop, and only from a declaration. `let w; w = fs.writeFileSync`, an
+  // alias of an alias, and a key assembled at runtime all still escape —
+  // this closes the spellings an ordinary edit reaches for, which is the
+  // same standard WRITE_PRIMITIVES below is held to and the same one the
+  // whole file is: these checks stop a regression, not an author who is
+  // trying to get one past them. Scope is not tracked either, so a parameter
+  // shadowing an aliased name would read as the alias — which cannot happen
+  // until an alias exists, and fails loudly rather than passing silently.
+  const ALIASES = (() => {
+    const bound = new Map();
+    // A second sighting does not overwrite the first, it makes the name
+    // ambiguous — which is what null means here, alongside a binding whose
+    // target cannot be read statically.
+    const note = (name, target) => bound.set(name, bound.has(name) ? null : target);
+    traverse(ast, {
+      VariableDeclarator(p) {
+        const { id, init } = p.node;
+        if (id.type === 'Identifier') {
+          if (init?.type === 'MemberExpression') {
+            note(id.name, staticName(init.property, init.computed));
+          } else {
+            note(id.name, init?.type === 'StringLiteral' ? init.value : null);
+          }
+          return;
+        }
+        if (id.type !== 'ObjectPattern') return;
+        for (const prop of id.properties) {
+          if (prop.type !== 'ObjectProperty' || prop.value.type !== 'Identifier') continue;
+          note(prop.value.name, staticName(prop.key, prop.computed));
+        }
+      },
+    });
+    return new Map([...bound].filter(([, target]) => target !== null));
+  })();
+
   // Matches a member expression on its property name too, so `client.fetch()`
   // counts as a fetch. Wider than strictly needed, in the direction these
   // checks want to err.
+  //
+  // Both ends resolve through ALIASES, because a check keyed on the spelling
+  // at the call site is a check on that spelling. `w(...)` after `const w =
+  // fs.writeFileSync` IS a writeFileSync, and so is `fs[W]` with W a const
+  // string; reading them as `w` and as `W` is how a scratch write dropped
+  // into runRound used to leave the ban below green.
   const calleeName = (node) => {
     const callee = node.callee;
-    if (callee.type === 'Identifier') return callee.name;
-    if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-      return callee.property.name;
+    if (callee.type === 'Identifier') return ALIASES.get(callee.name) ?? callee.name;
+    if (callee.type !== 'MemberExpression') return null;
+    const named = staticName(callee.property, callee.computed);
+    if (named !== null) return named;
+    // A computed key that is itself a name: `fs[W]`. Unresolvable means
+    // unknown, not the identifier's own name — `fs[W]` is not a call to W.
+    if (callee.computed && callee.property.type === 'Identifier') {
+      return ALIASES.get(callee.property.name) ?? null;
     }
     return null;
   };
@@ -1614,15 +1687,50 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   // not", and a list that drifted between them would leave a gap in whichever
   // copy was not updated.
   //
-  // Every one of them, not just the writeFileSync a straight revert of #1177
-  // would use: appendFileSync and an openSync/writeSync pair reintroduce the
-  // same scratch file while leaving a narrower ban green, and copyFileSync
-  // does it without ever naming the bytes. The list is not exhaustive of the
-  // fs surface — cpSync, truncateSync and the promise-API equivalents are all
-  // absent — so it stops the plausible regressions, not a determined author.
+  // The rule is every fs entry point that CREATES a filesystem entry or
+  // CHANGES the bytes behind one, in both spellings — the callback name and
+  // its Sync twin. Pairing them is what was missing rather than the names
+  // themselves: the list used to ban copyFileSync, writeSync and openSync
+  // while letting copyFile, write and open through, so the same regression
+  // written async walked past a ban that already named its sync twin. Member
+  // matching is what makes one entry cover three call shapes — `fs.writeFile`,
+  // `fs.promises.writeFile` and `fsp.writeFile` all read as writeFile — which
+  // is why no promise-API row is needed here.
+  //
+  // Grouped by what an author would be reaching for, because the second and
+  // third groups are the ones a ban written around "writing" keeps missing:
+  // a scratch directory and a rename are litter that never calls a write.
+  //
+  // Deliberately NOT here: chmod, chown and utimes change a path's metadata
+  // without placing a byte or creating an entry, and readFileSync, statSync,
+  // accessSync and existsSync are how this script legitimately reads. The
+  // stated cost is `write`, which matches any `.write()` — a progress bar on
+  // process.stdout fails this test, which was checked rather than assumed.
+  // It is kept for two reasons: it is the only entry that catches a write
+  // through a descriptor or stream this file did not open itself, and a list
+  // banning writeSync but not write is the very asymmetry this is fixing.
+  // Every line of output here goes through console.*, so that cost is
+  // currently zero.
   const WRITE_PRIMITIVES = [
-    'writeFileSync', 'writeFile', 'createWriteStream',
-    'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
+    // Bytes at a path.
+    'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync',
+    'write', 'writeSync', 'writev', 'writevSync',
+    'truncate', 'truncateSync', 'ftruncate', 'ftruncateSync',
+    'copyFile', 'copyFileSync', 'cp', 'cpSync',
+    // A descriptor or a stream to write through.
+    'open', 'openSync', 'createWriteStream',
+    // An entry where there was none.
+    'mkdir', 'mkdirSync', 'mkdtemp', 'mkdtempSync',
+    'rename', 'renameSync', 'link', 'linkSync', 'symlink', 'symlinkSync',
+  ];
+
+  // Removal, banned everywhere including inside the ledger — see the
+  // assertion at the end of the whole-file test for why deleting is the
+  // litter shape and not the cure for it. Same both-spellings rule as above,
+  // and rmSync is the reason this is a list at all: unlinkSync alone was the
+  // ban, and `fs.rmSync(path)` is the modern spelling of exactly that call.
+  const DELETE_PRIMITIVES = [
+    'unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync',
   ];
 
   // The three writes the reclaim ledger is SUPPOSED to make, each pinned to
@@ -1720,13 +1828,21 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       expect({ primitive, callsOutsideLedger: stray.length })
         .toEqual({ primitive, callsOutsideLedger: 0 });
     }
-    // And nothing to unlink, which is the other half of why no cleanup path
-    // was added for the payload — an unlink would mean the litter is back and
+    // And nothing to remove, which is the other half of why no cleanup path
+    // was added for the payload — a removal would mean the litter is back and
     // merely swept, leaving a run that is killed mid-window still littering.
     // Unscoped, including inside the ledger: reclaim deliberately truncates
-    // rather than deletes, so an unlink anywhere here is the litter-and-sweep
+    // rather than deletes, so a removal anywhere here is the litter-and-sweep
     // shape.
-    expect(callsNamed('unlinkSync')).toHaveLength(0);
+    //
+    // Every spelling, for a reason this assertion learned the hard way: it
+    // named unlinkSync alone, and `fs.rmSync(path)` is the same call in the
+    // API an author reaches for now. A ban on the older name reads as a rule
+    // about deleting while only being a rule about one function.
+    for (const primitive of DELETE_PRIMITIVES) {
+      expect({ primitive, calls: callsNamed(primitive).length })
+        .toEqual({ primitive, calls: 0 });
+    }
   });
 
   it('writes nothing from the round itself', () => {
@@ -1749,6 +1865,42 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       expect({ primitive, callsInRunRound: inRound.length })
         .toEqual({ primitive, callsInRunRound: 0 });
     }
+  });
+
+  it('spawns no subprocess to write on its behalf', () => {
+    // The hole under every check above. `execSync('dd if=/dev/zero
+    // of=/tmp/p.bin bs=1M count=1')` reinstates the scratch file exactly,
+    // and to the two bans above it is a call named execSync — no fs
+    // primitive anywhere — carrying a string that is only a string. Less a
+    // hypothetical evasion than the shape a "just shell out to it" edit
+    // naturally takes.
+    //
+    // Pinned on the IMPORT rather than on the spawner names. That is the
+    // opposite of how the primitives above are banned, and deliberate:
+    // `exec` is also RegExp.prototype.exec, so a call-name ban would fail
+    // the day someone parses a ledger line with a regex — a false failure
+    // inside a disk-write test, which is the kind that gets fixed by
+    // deleting the rule. The import is unambiguous, and every spawner needs
+    // it: there is no execSync without first reaching child_process.
+    //
+    // The cost is a real narrowing, stated rather than papered over: a
+    // subprocess reached some other way (process.binding, a helper under
+    // src/ that spawns on this script's behalf) is invisible here. The
+    // script imports three Node builtins — fs, os, path — and otherwise only
+    // its own src/; the ban is on the one line that would have to be added
+    // before any spawner became reachable at all.
+    const required = [];
+    traverse(ast, {
+      CallExpression(p) {
+        if (calleeName(p.node) !== 'require') return;
+        const [source] = p.node.arguments;
+        if (source?.type === 'StringLiteral') required.push(source.value);
+      },
+    });
+    // Non-empty, or this is asserting over a list it failed to build — the
+    // same vacuous-green failure the ledger exemption above guards against.
+    expect(required).toContain('fs');
+    expect(required.filter((mod) => /^(?:node:)?child_process$/.test(mod))).toEqual([]);
   });
 
   it('keeps the per-round read for --file and drops it for the generated payload', () => {
