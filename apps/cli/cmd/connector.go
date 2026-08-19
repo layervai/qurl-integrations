@@ -339,14 +339,14 @@ func runConnector(ctx context.Context, opts *globalOpts, flags *connectorRunFlag
 	// when the platform returned none, so a consumer can treat presence as
 	// meaning.
 	servingAttrs := []any{
-		"event", "connector_serving",
+		"event", "connector_starting",
 		"connector_id", resource.Slug,
 		"target", serveTarget,
 	}
 	if resource.CRID != "" {
 		servingAttrs = append(servingAttrs, "crid", resource.CRID)
 	}
-	logger.InfoContext(ctx, "connector: serving local app", servingAttrs...)
+	logger.InfoContext(ctx, "connector: starting to serve local app", servingAttrs...)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}

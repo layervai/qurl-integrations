@@ -822,7 +822,7 @@ func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
 
 		var serving string
 		for _, line := range strings.Split(stderr, "\n") {
-			if strings.Contains(line, "event=connector_serving") {
+			if strings.Contains(line, "event=connector_starting") {
 				serving = line
 				break
 			}
@@ -841,7 +841,7 @@ func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
 		stderr := connectorServeAttempt(t, "").stderr.String()
 
 		for _, line := range strings.Split(stderr, "\n") {
-			if strings.Contains(line, "event=connector_serving") && strings.Contains(line, "crid=") {
+			if strings.Contains(line, "event=connector_starting") && strings.Contains(line, "crid=") {
 				t.Errorf("an absent CRID was logged anyway, so presence stops meaning anything:\n%s", line)
 			}
 		}
