@@ -9,8 +9,18 @@
  *   --interval S   Seconds between rounds (default: 60)
  *   --file PATH    Local file to upload (default: generates a 1MB test file)
  *   --location     Include a location link in each round
+ *   --max-fail-rate PCT
+ *                  Exit non-zero when the failure rate exceeds this percentage
+ *                  (default: 10). Pass 100 to never fail on rate alone.
  *   --allow-production
  *                  Run anyway when a target is refused by the guard below.
+ *
+ * Exit code:
+ *   0 only for a run that measured something and stayed under the threshold.
+ *   Non-zero when no round completed, or when either the qURL failure rate or
+ *   the round failure rate exceeds --max-fail-rate. Load tests get wrapped in
+ *   shell loops and runbook steps, and before this the script exited 0 whether
+ *   it minted everything or nothing — see runReport.
  *
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
@@ -365,9 +375,190 @@ function targetGuardReport({ targets, allowlistErrors = [], allowProdFlag, allow
   return { refused, blocked, lines, warnings, fatal: lines.length > 0 };
 }
 
+// ---------------------------------------------------------------------------
+// Run reporting
+//
+// Pure functions, for the same reason targetGuardReport is one: main() and
+// runRound() are not reachable from the suite — they run the load test — and
+// scripts/ is outside jest's collectCoverageFrom, so nothing flags an untested
+// gap here. That combination is not hypothetical for this section. Every
+// defect fixed below shipped with the file and survived its whole lifetime,
+// and together they let a file leg issuing zero successful mint requests
+// (#1168) read as a clean run: the failure counts were suppressed, a latency
+// block was printed anyway, and the process exited 0.
+//
+// The stdout/stderr split is deliberate and load-bearing. Errors belong on
+// stderr, as everything else in this file already has them, so stdout has to
+// carry enough on its own to tell a good run from a bad one — `node
+// scripts/loadtest-standalone.js > run.log` is the ordinary invocation and it
+// keeps only that stream. The `fail=` counts, the summary's verdict line and
+// the exit code are all on the stdout side for that reason; stderr adds only
+// the messages behind them.
+
+/**
+ * The per-round line, as data.
+ *
+ * Each leg is gated on whether it ATTEMPTED anything, never on whether it
+ * succeeded. Gating on successes inverts the report precisely: a partial
+ * failure (ok=90 fail=10) prints in full, while total failure — the one case
+ * worth shouting about — prints nothing but the round's elapsed time. That is
+ * what rendered #1168's 100%-failing file leg as `[30s] Round 1: total=0.3s`.
+ */
+function roundReportLine({ elapsed, round, results }) {
+  let line = `[${elapsed}s] Round ${round}: `;
+  if (results.fileLinks > 0 || results.fileFail > 0) {
+    line += `file(upload=${results.uploadMs.toFixed(0)}ms mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
+  }
+  if (results.locLinks > 0 || results.locFail > 0) {
+    line += `location(${results.locMs.toFixed(0)}ms ok=${results.locLinks} fail=${results.locFail}) `;
+  }
+  line += `total=${(results.totalMs / 1000).toFixed(1)}s`;
+  return line;
+}
+
+/**
+ * Record one failure against the message that caused it, weighted by the
+ * number of attempts it took down — a file batch fails `batchSize` mints at
+ * once, a location attempt exactly one. Weighting is what lets the tally be
+ * read against the round line: its counts sum to that line's `fail=`.
+ */
+function tallyFailure(tally, message, weight) {
+  tally.set(message, (tally.get(message) || 0) + weight);
+}
+
+// Distinct messages reported per leg per round. An error message can carry a
+// unique id — a request id, a resource id — in which case every failure is its
+// own key and an uncapped flush prints a line per failed attempt. The cap
+// bounds that; the omitted keys are the rarest ones, and their volume is still
+// named on the trailing line rather than silently dropped.
+const ERROR_TALLY_LIMIT = 5;
+
+/**
+ * Flush a round's failures: each distinct message with how many attempts it
+ * took down, most damaging first.
+ *
+ * This replaces `if (results.fileFail === 0) console.error(...)`, which deduped
+ * on the failure COUNT rather than on the message — so a round printed its
+ * first message and dropped every later one no matter what it said. A round
+ * mixing a systemic call-shape bug with transient 429s reported whichever
+ * landed first and hid the other, which is exactly the pair an operator is
+ * trying to tell apart.
+ */
+function errorTallyLines(tally, label, limit = ERROR_TALLY_LIMIT) {
+  // Insertion order is the tiebreak: Array#sort is stable, and a Map iterates
+  // in insertion order, so equal-weight messages stay in first-seen order and
+  // the output is reproducible for a given round.
+  const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+  const lines = ranked.slice(0, limit).map(([message, n]) => `  ${label} error x${n}: ${message}`);
+  const hidden = ranked.slice(limit);
+  if (hidden.length > 0) {
+    const attempts = hidden.reduce((sum, [, n]) => sum + n, 0);
+    lines.push(`  ${label} error: ${hidden.length} further distinct message(s) covering ${attempts} attempt(s)`);
+  }
+  return lines;
+}
+
+// A load test run against a healthy sandbox fails a fraction of a percent of
+// attempts, so 10% is far above transient 429/5xx noise while still well below
+// the systemic breakage this threshold exists to catch — which shows up at or
+// near 100%, not at 15%. Tunable per run with --max-fail-rate; 100 disables
+// the check, since the comparison is strict.
+const DEFAULT_MAX_FAIL_RATE_PCT = 10;
+
+/**
+ * Parse --max-fail-rate, as a percentage.
+ *
+ * Validated rather than left to `Number`'s NaN, which would compare false
+ * against every rate and so disable the threshold silently — a fail-OPEN, and
+ * this file refuses those (see parseTargetAllowlist). A typo here would
+ * otherwise be discovered as a green exit code after a two-hour run.
+ */
+function parseMaxFailRate(raw) {
+  const pct = Number(raw);
+  if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+    return { error: `--max-fail-rate must be a percentage between 0 and 100, got '${raw}'.` };
+  }
+  return { rate: pct / 100 };
+}
+
+const formatPct = (rate) => `${(rate * 100).toFixed(1)}%`;
+
+/**
+ * The end-of-run report, as data: the measurement block plus the pass/fail
+ * verdict main() turns into an exit code.
+ *
+ * `roundsAttempted` is passed separately from `allResults` because a round
+ * that throws never lands in the results at all. Without it a run whose every
+ * round died printed `Rounds: 0` and exited 0 — the same invisibility as the
+ * per-round line's, one level up.
+ *
+ * Two rates are judged against the threshold, not one. They fail
+ * independently: a run can mint every qURL it attempts across the rounds that
+ * survive while most rounds die in the upload before reaching a mint, and a
+ * single blended rate would dilute either failure with the other's successes.
+ */
+function runReport({ allResults, roundsAttempted, maxFailRate }) {
+  const sum = (pick) => allResults.reduce((total, r) => total + pick(r), 0);
+  const fileLinks = sum((r) => r.fileLinks);
+  const fileFail = sum((r) => r.fileFail);
+  const minted = fileLinks + sum((r) => r.locLinks);
+  const failedLinks = fileFail + sum((r) => r.locFail);
+  const attemptedLinks = minted + failedLinks;
+  const roundsCompleted = allResults.length;
+  const roundsFailed = Math.max(0, roundsAttempted - roundsCompleted);
+
+  const lines = [];
+  lines.push(roundsFailed > 0
+    ? `Rounds: ${roundsCompleted} completed, ${roundsFailed} failed`
+    : `Rounds: ${roundsCompleted}`);
+  lines.push(`Total links minted: ${minted}`);
+  lines.push(`Total failures: ${failedLinks}`);
+
+  if (roundsCompleted > 0) {
+    lines.push(`Avg round time: ${(sum((r) => r.totalMs) / roundsCompleted / 1000).toFixed(1)}s`);
+    // Rounds that ran the file leg — every entry has completed it, since a
+    // round throwing inside the leg never reaches allResults.
+    const fileRounds = allResults.filter((r) => r.uploadMs > 0);
+    if (fileRounds.length > 0) {
+      const avg = (pick) => fileRounds.reduce((total, r) => total + pick(r), 0) / fileRounds.length;
+      // Mint latency is reported only when qURLs were actually minted. The
+      // old gate was `allResults[0].uploadMs > 0`, which is set before the
+      // first mint is even attempted and so held while every mint failed:
+      // the summary reported how long the failures took as though it were how
+      // long the successes took, and a fast failure reads as a fast success.
+      lines.push(fileLinks > 0
+        ? `Avg upload: ${avg((r) => r.uploadMs).toFixed(0)}ms, avg mint: ${avg((r) => r.mintMs).toFixed(0)}ms`
+        : `Avg upload: ${avg((r) => r.uploadMs).toFixed(0)}ms, avg mint: n/a — all ${fileFail} mint attempt(s) failed`);
+    }
+  }
+
+  const linkFailRate = attemptedLinks > 0 ? failedLinks / attemptedLinks : 0;
+  const roundFailRate = roundsAttempted > 0 ? roundsFailed / roundsAttempted : 0;
+  const reasons = [];
+  // A run that never completed a round measured nothing; reporting that as a
+  // pass is the failure this exit code exists to prevent, and no rate above
+  // catches it when roundsAttempted is itself 0.
+  if (roundsCompleted === 0) reasons.push('no round completed');
+  if (linkFailRate > maxFailRate) {
+    reasons.push(`link failure rate ${formatPct(linkFailRate)} (${failedLinks}/${attemptedLinks}) exceeds --max-fail-rate ${formatPct(maxFailRate)}`);
+  }
+  if (roundFailRate > maxFailRate) {
+    reasons.push(`round failure rate ${formatPct(roundFailRate)} (${roundsFailed}/${roundsAttempted}) exceeds --max-fail-rate ${formatPct(maxFailRate)}`);
+  }
+  for (const reason of reasons) lines.push(`FAILED: ${reason}`);
+  return { lines, failed: reasons.length > 0, linkFailRate, roundFailRate };
+}
+
 async function runRound(roundNum) {
   const roundStart = performance.now();
   const results = { fileLinks: 0, fileFail: 0, locLinks: 0, locFail: 0, uploadMs: 0, mintMs: 0, locMs: 0 };
+
+  // Keyed by message and flushed once per leg below, so a round that mixes a
+  // systemic failure with transient ones reports both. Scoped per round: the
+  // tally answers "what went wrong in THIS round", and a run-long map would
+  // reprint every earlier round's messages at every flush.
+  const fileErrors = new Map();
+  const locErrors = new Map();
 
   // File pipeline
   if (FILE_PATH || !INCLUDE_LOCATION) {
@@ -399,11 +590,12 @@ async function runRound(roundNum) {
         await mintLinks(uploadResult.resource_id, expiresAt, batchSize);
         results.fileLinks += batchSize;
       } catch (e) {
-        if (results.fileFail === 0) console.error(`  File mint error: ${e.message}`);
+        tallyFailure(fileErrors, e.message, batchSize);
         results.fileFail += batchSize;
       }
     }
     results.mintMs = performance.now() - mintStart;
+    for (const line of errorTallyLines(fileErrors, 'File mint')) console.error(line);
   }
 
   // Location pipeline
@@ -414,11 +606,12 @@ async function runRound(roundNum) {
         await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
         results.locLinks++;
       } catch (e) {
-        if (results.locFail === 0) console.error(`  Location mint error: ${e.message}`);
+        tallyFailure(locErrors, e.message, 1);
         results.locFail++;
       }
     }
     results.locMs = performance.now() - locStart;
+    for (const line of errorTallyLines(locErrors, 'Location mint')) console.error(line);
   }
 
   const totalMs = performance.now() - roundStart;
@@ -428,6 +621,12 @@ async function runRound(roundNum) {
 async function main() {
   // Preflight checks
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
+  // Parsed up here with the other preflight checks: a mistyped threshold that
+  // was only read at the summary would surface as a green exit code two hours
+  // after the run it was meant to judge.
+  const { rate: maxFailRate, error: maxFailRateError } =
+    parseMaxFailRate(getArg('max-fail-rate', String(DEFAULT_MAX_FAIL_RATE_PCT)));
+  if (maxFailRateError) { console.error(`FATAL: ${maxFailRateError}`); process.exit(1); }
   // Refuse any target not positively recognized as non-production. See the
   // "Target safety guard" section above for why this is an allowlist.
   const { allowProdFlag, allowProdEnv, hosts: allowedHosts, errors: allowlistErrors } =
@@ -477,11 +676,7 @@ async function main() {
       const results = await runRound(round);
       allResults.push(results);
 
-      let line = `[${elapsed}s] Round ${round}: `;
-      if (results.fileLinks > 0) line += `file(upload=${results.uploadMs.toFixed(0)}ms mint=${results.mintMs.toFixed(0)}ms ok=${results.fileLinks} fail=${results.fileFail}) `;
-      if (results.locLinks > 0) line += `location(${results.locMs.toFixed(0)}ms ok=${results.locLinks} fail=${results.locFail}) `;
-      line += `total=${(results.totalMs / 1000).toFixed(1)}s`;
-      console.log(line);
+      console.log(roundReportLine({ elapsed, round, results }));
     } catch (error) {
       console.error(`[${elapsed}s] Round ${round} FAILED: ${error.message}`);
     }
@@ -497,18 +692,11 @@ async function main() {
 
   // Summary
   console.log('\n=== SUMMARY ===');
-  console.log(`Rounds: ${allResults.length}`);
-  console.log(`Total links minted: ${allResults.reduce((s, r) => s + r.fileLinks + r.locLinks, 0)}`);
-  console.log(`Total failures: ${allResults.reduce((s, r) => s + r.fileFail + r.locFail, 0)}`);
-  if (allResults.length > 0) {
-    const avgTotal = allResults.reduce((s, r) => s + r.totalMs, 0) / allResults.length;
-    console.log(`Avg round time: ${(avgTotal / 1000).toFixed(1)}s`);
-    if (allResults[0].uploadMs > 0) {
-      const avgUpload = allResults.reduce((s, r) => s + r.uploadMs, 0) / allResults.length;
-      const avgMint = allResults.reduce((s, r) => s + r.mintMs, 0) / allResults.length;
-      console.log(`Avg upload: ${avgUpload.toFixed(0)}ms, avg mint: ${avgMint.toFixed(0)}ms`);
-    }
-  }
+  const summary = runReport({ allResults, roundsAttempted: round, maxFailRate });
+  for (const line of summary.lines) console.log(line);
+  // exitCode rather than exit: writes to a pipe are asynchronous in Node, and
+  // exiting here can truncate the summary that explains the code being set.
+  if (summary.failed) process.exitCode = 1;
 }
 
 // Only run the CLI entry point when invoked directly. Imported-from-test loads
@@ -518,6 +706,15 @@ if (require.main === module) {
 }
 
 module.exports = {
+  // Reporting decisions, exported for tests/loadtest-reporting.test.js — see
+  // the "Run reporting" section for why they are pure rather than inline.
+  roundReportLine,
+  tallyFailure,
+  errorTallyLines,
+  parseMaxFailRate,
+  runReport,
+  ERROR_TALLY_LIMIT,
+  DEFAULT_MAX_FAIL_RATE_PCT,
   resolveGuardInputs,
   targetGuardReport,
   VERDICT_LABEL,
