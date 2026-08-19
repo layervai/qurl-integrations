@@ -576,6 +576,14 @@ func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
 // tables above would otherwise leave: a workflow added later with
 // `branches: [main]` and no entry would be silently unenforced, which is the
 // same shape of gap that let an unregistered aggregate ship in #1081.
+//
+// Scope is the `pull_request` trigger alone. GitHub honors `branches:` on
+// `pull_request_target` identically, so the same footgun exists there in
+// principle — but claude-code-review.yml is the only workflow in this repo
+// using that trigger, it declares no `branches:` filter, and it produces no
+// required context, so there is nothing to pin today. A required gate arriving
+// on `pull_request_target` would evade this contract; widen the scan here in
+// the same change that adds one.
 func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
 	dir := filepath.Join("..", "..", ".github", "workflows")
 	entries, err := os.ReadDir(dir)
@@ -670,6 +678,10 @@ func pullRequestBranchFilter(t *testing.T, path string, pullRequest any) (branch
 		return nil, false
 	}
 
+	// No []string arm, unlike parseWorkflowTriggers and parseWorkflowNeeds: those
+	// two also read hand-built literals from their own table tests, whereas this
+	// value is always decoded by yaml.v3 into the `map[string]any` above, which
+	// yields []any for every sequence. A []string arm here would be unreachable.
 	switch typed := raw.(type) {
 	case string:
 		return []string{typed}, true
