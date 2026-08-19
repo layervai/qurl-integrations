@@ -12,7 +12,11 @@
  *   --location     Include a location link in each round
  *   --max-fail-rate PCT
  *                  Exit non-zero when the failure rate exceeds this percentage
- *                  (default: 10). Pass 100 to never fail on rate alone.
+ *                  (default: DEFAULT_MAX_FAIL_RATE_PCT below, currently 10).
+ *                  Pass 100 to never fail on rate alone. Named rather than
+ *                  only spelled out because a comment 200 lines from the
+ *                  constant is a comment that goes stale silently; the run
+ *                  also echoes the threshold it actually applied.
  *   --allow-production
  *                  Run anyway when a target is refused by the guard below.
  *
@@ -1362,6 +1366,14 @@ async function main() {
 
   // Summary
   console.log('\n=== SUMMARY ===');
+  // `round` is the ATTEMPTED count, not the completed one: it starts at 0 and
+  // is incremented at the top of the loop, before runRound, so a round that
+  // throws still counts. That is the whole reason it is passed separately —
+  // allResults holds only rounds that returned, so roundsFailed is the
+  // difference. The contract is stated here because it is the one piece no
+  // test guards: this loop is unreachable from the suite, so a `for (let round
+  // = 1; ...)` rewrite would leave every runReport test green while reporting
+  // one failed round too many.
   const summary = runReport({ allResults, roundsAttempted: round, maxFailRate });
   for (const line of summary.lines) console.log(line);
   // exitCode rather than exit: writes to a pipe are asynchronous in Node, and
