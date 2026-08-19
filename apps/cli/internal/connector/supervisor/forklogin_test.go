@@ -215,6 +215,20 @@ func TestForkEmitsTheLoginFailurePrefixThisPackageMatches(t *testing.T) {
 				t.Errorf("classifyRunError(%q) = %q, want login_failed", runErr, got)
 			}
 
+			// Establish that the rejection is what failed this Login before
+			// blaming the matcher for not recognizing it. Losing the
+			// reserve/release race would leave nothing listening on the port,
+			// and a refused dial still carries the wrap and still buckets
+			// login_failed — so it clears both assertions above and lands on
+			// the one below, which would report a classifier that never saw
+			// the wire text as a classifier that ignored it. Failing here
+			// instead keeps the diagnosis pointed at the port.
+			if !strings.Contains(runErr.Error(), wireText) {
+				t.Fatalf("the fork reported %q, which does not carry the reject reason %q; "+
+					"the rejecting server never answered on this port, so the matcher assertion below "+
+					"would be reporting a failure it did not cause", runErr, wireText)
+			}
+
 			// And the matcher, over a reject reason that reached it through
 			// the real server and the real client instead of a local concat.
 			if !IsTokenLoginError(runErr) {
