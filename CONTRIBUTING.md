@@ -264,9 +264,9 @@ checks reported` when a context matches nothing — the cheapest way to catch a
 typo.
 
 PRs opened by release-please carry no checks at all, because GitHub does not
-fire `pull_request` workflows for events created by `GITHUB_TOKEN` — the same
-recursion guard `release-please.yml` documents for tag pushes. Those PRs need
-an admin override to merge regardless of the required set.
+fire workflows for events created by `GITHUB_TOKEN` — the same recursion
+guard `release-please.yml` documents for tag pushes. Those PRs need an admin
+override to merge regardless of the required set.
 
 No workflow here runs on `merge_group`, deliberately. Merges are manual squashes
 and no queue is configured. Ask GraphQL, not branch protection:
