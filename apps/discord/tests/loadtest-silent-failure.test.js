@@ -12,11 +12,6 @@
  *     the mistakes it has to catch are the same for all of them: a missing,
  *     empty or flag-shaped value silently became the DEFAULT, so the run did
  *     something real that nobody asked for.
- *   - Boolean flags. Matched by bare token, `--location=true` was not the
- *     flag at all and read as ABSENT, so the location leg stayed off while
- *     the command line asked for it on. The `=` spelling is refused now
- *     rather than interpreted — a second reader, for the flags that have no
- *     value for the first one to read.
  *   - Numeric flags. `--count abc` and `--count -5` both empty every loop a
  *     round runs — the file leg's `i += 10` batches and the location leg's
  *     `i++` alike — so the script holds the target for its full duration
@@ -51,6 +46,7 @@ const traverse = traverseModule.default || traverseModule;
 const {
   readFlag, readBooleanFlag, resolveBooleanArgs,
   parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
+  resolveArgErrors,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -142,10 +138,96 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(resolveNumericArgs(['--location', '--file', '/tmp/x', '--count', '7']).count).toBe(7);
   });
 
-  // The case getArg cannot express: `--count` as the final token has no value
-  // after it, and getArg's `args[idx + 1] || defaultVal` collapses that onto
-  // the same 100 as not passing the flag at all. Silently running the default
-  // is exactly the "did nothing you asked for, reported success" shape.
+  // The spelling indexOf cannot see. `--count=200` is not the token `--count`,
+  // so it read as the flag being ABSENT and quietly ran the default.
+  // `--duration=60` is the one that hurts: a run the operator sized at a
+  // minute held the target for the default two hours and reported nothing.
+  //
+  // Pinned at the RESOLVER, not only at readFlag. The AST guard counts
+  // readFlag call sites, so a per-flag shortcut back to an inline
+  // `argv.indexOf` inside `read` leaves that count untouched and stays green
+  // while `--duration=60` silently resolves to 7200 again.
+  it.each([
+    ['count', 'count', 200],
+    ['duration', 'durationS', 60],
+    ['interval', 'intervalS', 30],
+  ])('resolves --%s=value, not only the space-separated form', (flag, key, value) => {
+    const resolved = resolveNumericArgs([`--${flag}=${value}`]);
+    expect(resolved[key]).toBe(value);
+    expect(resolved.errors).toEqual([]);
+  });
+
+  it('takes the last value when a flag is repeated in either spelling', () => {
+    // Kills a first-wins mutant, which the per-flag rows above do not.
+    //
+    // This REPLACES the space-form-priority rule #1175 landed, under which the
+    // inline form could never override an earlier space form: `--count 7
+    // --count=200` resolved to 7 in both argv orders. Appending an override
+    // and having it silently ignored is the same fault class as the default
+    // this file exists to refuse, so position decides, not spelling.
+    expect(resolveNumericArgs(['--count=5', '--count=9']).count).toBe(9);
+    expect(resolveNumericArgs(['--count', '5', '--count=9']).count).toBe(9);
+    expect(resolveNumericArgs(['--count=5', '--count', '9']).count).toBe(9);
+  });
+
+  it('lets a later inline value override an earlier space-separated one', () => {
+    // The specific pair #1175 pinned the other way round. Kept as its own case
+    // so the reversal is visible rather than folded into the row above.
+    expect(resolveNumericArgs(['--count', '7', '--count=200']).count).toBe(200);
+    expect(resolveNumericArgs(['--count=200', '--count', '7']).count).toBe(7);
+  });
+
+  it('does not let a longer flag match the one it starts with', () => {
+    // '--counter=9' starts with '--count', and would set count if the equals
+    // form were matched on the flag name rather than on the name plus '='.
+    // Pinned here as well as at readFlag because the resolver is where a
+    // per-flag shortcut would drop that guard.
+    expect(resolveNumericArgs(['--counter=9'])).toEqual({
+      count: 100, durationS: 7200, intervalS: 60, errors: [],
+    });
+  });
+
+  it('reports an empty value as empty, whichever spelling delivered it', () => {
+    // A deliberate divergence from #1175, pinned so it stays deliberate:
+    // `--count=` reports the empty value it was given rather than "was given
+    // no value".
+    //
+    // These are different operator mistakes. A trailing `--count` supplies no
+    // value TOKEN; `--count=` and `--count ""` supply an empty one. #1175
+    // mapped `--count=` onto the former, which splits it from `--count ""` —
+    // reinstating by spelling exactly the divergence one reader exists to
+    // remove. Held together here instead.
+    const inline = resolveNumericArgs(['--count=']).errors;
+    const separated = resolveNumericArgs(['--count', '']).errors;
+    expect(inline).toEqual(separated);
+    expect(inline[0]).toContain('got ""');
+    expect(resolveNumericArgs(['--count']).errors[0]).toContain('was given no value');
+  });
+
+  it('splits on the first equals and leaves the rest to the parser', () => {
+    // `--count==200` is a value of '=200', not an empty value and not 200.
+    // Deciding what counts as malformed belongs to parsePositiveInt, so the
+    // reader hands the whole remainder over untouched. Kept from #1175; it is
+    // the resolver-level companion to readFlag's own `--file=a=b` case.
+    expect(resolveNumericArgs(['--count==200']).errors[0]).toContain('got "=200"');
+    expect(resolveNumericArgs(['--count=2=0']).errors[0]).toContain('got "2=0"');
+  });
+
+  it('resolves a bare token followed by an inline value to the inline one', () => {
+    // #1175 pinned this the other way — the bare `--count` won and the run
+    // failed parsing '--count=200' as its value. Under one reader the last
+    // occurrence wins, so the complete spelling the operator typed second is
+    // the one that takes effect.
+    expect(resolveNumericArgs(['--count', '--count=200'])).toEqual({
+      count: 200, durationS: 7200, intervalS: 60, errors: [],
+    });
+  });
+
+  // The case the old getArg could not express: `--count` as the final token
+  // has no value after it, and `args[idx + 1] || defaultVal` collapsed that
+  // onto the same 100 as not passing the flag at all. Silently running the
+  // default is exactly the "did nothing you asked for, reported success"
+  // shape. readFlag separates the two; this holds them apart.
   it('refuses a flag left without a value', () => {
     const { count, errors } = resolveNumericArgs(['--count']);
     expect(count).toBeNaN();
@@ -158,6 +240,14 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     expect(errors[0]).toContain('got ""');
   });
 
+  it('validates an equals-form value through the same parser', () => {
+    // Otherwise the new spelling would be a way around parsePositiveInt rather
+    // than a second way into it.
+    expect(resolveNumericArgs(['--count=abc']).errors[0]).toContain('got "abc"');
+    expect(resolveNumericArgs(['--duration=0']).errors[0]).toContain('greater than zero');
+    expect(resolveNumericArgs(['--interval=-1']).errors[0]).toContain('got "-1"');
+  });
+
   it('refuses the following flag when the value was forgotten', () => {
     // Used to consume '--location' as the value AND leave the location leg
     // on, so the run differed from the one typed in two ways at once.
@@ -168,7 +258,10 @@ describe('loadtest numeric flags — resolving them from argv', () => {
     // count they typed correctly instead of the value they omitted.
     const { count, errors } = resolveNumericArgs(['--count', '--location']);
     expect(count).toBeNaN();
-    expect(errors[0]).toBe('--count was given no value — the next argument is the flag --location');
+    expect(errors[0]).toBe(
+      '--count was given no value — the next argument is the flag --location '
+      + '(omit it to use the default of 100)',
+    );
   });
 
   it('names every bad flag in one pass', () => {
@@ -226,8 +319,9 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
   it('refuses a value that is itself a flag', () => {
     // Positional consumption is what made this silent: the next flag became
     // the value AND stopped being a flag, so two things changed at once.
-    expect(readFlag(['--file', '--count', '5'], 'file', null)).toEqual({
-      error: '--file was given no value — the next argument is the flag --count',
+    expect(readFlag(['--file', '--count', '5'], 'file', null, 'a generated file')).toEqual({
+      error: '--file was given no value — the next argument is the flag --count '
+        + '(omit it to use the default of a generated file)',
     });
   });
 
@@ -247,6 +341,29 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
     expect(readFlag(['--file='], 'file', null)).toEqual({ value: '' });
   });
 
+  it('keeps everything after the first = in an inline value', () => {
+    // Mutation this kills: `raw.slice(inlinePrefix.length)` ->
+    // `raw.split('=')[1]`. That satisfies every other inline assertion here
+    // (`--file=/tmp/x`, `--file=`, `--file=a`, `--file=b`) while silently
+    // truncating `--file=/tmp/run=3.bin` to `/tmp/run`. Paths with `=` are
+    // ordinary, and the failure is the silent-wrong-payload class again.
+    expect(readFlag(['--file=a=b'], 'file', null)).toEqual({ value: 'a=b' });
+    expect(readFlag(['--file=/tmp/run=3.bin'], 'file', null)).toEqual({ value: '/tmp/run=3.bin' });
+  });
+
+  it('reaches a path that genuinely starts with -- through the inline form', () => {
+    // The documented escape hatch for the flag-shaped-value refusal. Without
+    // a test, a mutation that applied the `--` refusal to the inline branch
+    // too would survive and remove the only way to pass such a path.
+    expect(readFlag(['--file=--weird'], 'file', null)).toEqual({ value: '--weird' });
+  });
+
+  it('does not let an inline value be mistaken for another flag', () => {
+    // `--file=--count=9` contains `--count=`, but it is a VALUE, not a token
+    // of its own. If it were scanned as one, --count would silently take 9.
+    expect(readFlag(['--file=--count=9'], 'count', '100')).toEqual({ value: '100' });
+  });
+
   it('takes the last occurrence when a flag is repeated', () => {
     // indexOf took the FIRST, so appending `--count 5` to a recalled command
     // line left the earlier value in force — the run silently ignored the
@@ -259,7 +376,8 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
   it('reports the last occurrence being malformed even when an earlier one was fine', () => {
     // Last-wins has to apply to the refusal too. Falling back to the earlier
     // good value would run the command the operator had already replaced.
-    expect(readFlag(['--file', 'a', '--file'], 'file', null).error).toContain('given no value');
+    expect(readFlag(['--file', 'a', '--file'], 'file', null, 'a generated file').error)
+      .toContain('given no value');
   });
 
   it('does not match a longer flag that starts with the same letters', () => {
@@ -271,15 +389,17 @@ describe('loadtest flag reading — the argv shapes that used to become the defa
 });
 
 describe('loadtest boolean flags — the `=` spelling that read as absent', () => {
-  // The value-taking flags got their reader in the change above; these two
-  // kept the original defect, because a flag that takes no value has nothing
-  // for that reader to read. Matching on the bare token meant `--location=true`
-  // was not the flag at all, so the location leg stayed off while the command
-  // line said to turn it on.
+  // This block replaces the deferral the previous change recorded here. Its
+  // `does not yet recognize the equals form (known gap)` case asserted
+  // `hasFlag(['--location=true'], 'location') === false` and existed so that
+  // closing the gap would be a deliberate edit with a failing test to update.
+  // This is that edit: the same input is now refused rather than read as
+  // absent, and the assertion inverts on purpose.
 
   it('reads the bare token as on and its absence as off', () => {
     expect(readBooleanFlag([], 'location')).toEqual({ value: false });
     expect(readBooleanFlag(['--location'], 'location')).toEqual({ value: true });
+    expect(readBooleanFlag(['--count', '5', '--location'], 'location')).toEqual({ value: true });
     expect(readBooleanFlag(['--count', '5'], 'location')).toEqual({ value: false });
   });
 
@@ -343,9 +463,9 @@ describe('loadtest boolean flags — the `=` spelling that read as absent', () =
     expect(readBooleanFlag(['--location', 'true'], 'location')).toEqual({ value: true });
     // `--location false` gets the SAME treatment, and there the operator asked
     // for the leg off and gets it on with nothing said. Pinned deliberately:
-    // it is the honest boundary of this change, not a case it covers. Closing
-    // it needs an unknown-argument pass over the whole command line — see the
-    // note above readBooleanFlag — which is a larger change than this one.
+    // it is the honest boundary of this change, not a case it covers. It is
+    // the unknown-flag gap still recorded at readFlag in the script, whose
+    // push-based argv pass subsumes this one — the two are one change.
     expect(readBooleanFlag(['--location', 'false'], 'location')).toEqual({ value: true });
   });
 
@@ -382,8 +502,8 @@ describe('loadtest boolean flags — resolving them from argv', () => {
     // with no location leg, and nothing said about why.
     const { includeLocation, errors } = resolveBooleanArgs(['--location=true']);
     expect(errors).toHaveLength(1);
-    // Fail closed on the refused path: main() exits on `errors` first, so
-    // this is the value nothing reads — but it should still be the safe one.
+    // Fail closed on the refused path: main() exits on the collected errors
+    // first, so this is the value nothing reads — but it should still be safe.
     expect(includeLocation).toBe(false);
   });
 
@@ -513,7 +633,9 @@ describe('loadtest --file — proving it is readable before anything is minted',
   });
 
   afterAll(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
+    // Guarded: if mkdtempSync above threw, `dir` is undefined and
+    // rmSync(undefined) throws a TypeError that masks the original failure.
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('accepts a readable regular file', () => {
@@ -538,23 +660,140 @@ describe('loadtest --file — proving it is readable before anything is minted',
     expect(checkUploadFile(dir)).toMatch(/^--file /);
   });
 
-  it('reports a file that exists but cannot be read', () => {
+  // Root bypasses the permission bits entirely, and Windows chmod does not
+  // remove read access — under either, this would assert the opposite of what
+  // it says. it.skip rather than an early `return`, so the run REPORTS that
+  // it did not execute: a test that quietly passes without asserting is the
+  // same "did nothing, looked like it worked" shape this whole file is about.
+  const permissionsApply = process.platform !== 'win32' && process.getuid?.() !== 0;
+  (permissionsApply ? it : it.skip)('reports a file that exists but cannot be read', () => {
     // Existence is not readability — a file owned by another user is the
     // realistic way this bites, and statSync succeeds on it.
-    //
-    // Skipped as root, which bypasses the permission bits entirely and would
-    // make this assert the opposite of what it says. Guarded rather than
-    // deleted: the check it covers is the one that is only reachable as a
-    // non-root operator, which is how this script is actually run.
-    if (typeof process.getuid === 'function' && process.getuid() === 0) return;
     const locked = path.join(dir, 'locked.bin');
     fs.writeFileSync(locked, 'x');
     fs.chmodSync(locked, 0o000);
     try {
-      expect(checkUploadFile(locked)).toContain('is not readable');
+      const message = checkUploadFile(locked);
+      expect(message).toContain('is not readable');
+      // The third branch's flag prefix, which the message test above cannot
+      // reach without a locked file.
+      expect(message).toMatch(/^--file /);
     } finally {
       fs.chmodSync(locked, 0o600);
     }
+  });
+
+  it('rejects a non-regular file that is not a directory', () => {
+    // Mutation this kills: `!stats.isFile()` -> `stats.isDirectory()`. Every
+    // other assertion in this block still passes under it, but a character
+    // device, socket or FIFO then reaches fs.readFileSync inside the round —
+    // and runRound re-reads once per round, so a pipe uploads real bytes on
+    // round one and nothing after. A FIFO with no writer blocks forever,
+    // which is the hang this file's header exists to prevent.
+    expect(checkUploadFile('/dev/null')).toContain('is not a regular file');
+  });
+
+  it('follows a symlink to a real file', () => {
+    // Mutation this kills: statSync -> lstatSync. Passes every other
+    // assertion here while rejecting a symlink that points at a perfectly
+    // good payload, because readFileSync would have followed it.
+    const link = path.join(dir, 'link.bin');
+    fs.symlinkSync(readable, link);
+    expect(checkUploadFile(link)).toBeNull();
+  });
+
+  it('reports a dangling symlink as unreadable', () => {
+    const dangling = path.join(dir, 'dangling.bin');
+    fs.symlinkSync(path.join(dir, 'gone.bin'), dangling);
+    expect(checkUploadFile(dangling)).toContain('cannot be read');
+  });
+
+  it('quotes the path so whitespace in it stays visible', () => {
+    // resolveFileArg deliberately PRESERVES a leading or trailing space in a
+    // real filename, so this is where such a path surfaces. Rendered raw,
+    // `--file /tmp/x/ spaced  is not a regular file` reads as `/tmp/x/spaced`
+    // and sends the operator after the wrong file.
+    expect(checkUploadFile(path.join(dir, ' spaced '))).toContain(`"${path.join(dir, ' spaced ')}"`);
+  });
+});
+
+describe('loadtest preflight — the composition main() used to hold inline', () => {
+  // Every case here corresponds to a mutation that passed the ENTIRE suite
+  // before resolveArgErrors was extracted. The unit tests above all stayed
+  // green while the run silently went back to doing the wrong thing, because
+  // the only thing wiring them together lived in main(), which no test can
+  // reach. Counting call sites could not see any of them.
+
+  const never = () => null;
+
+  it('carries the --file errors, not only the numeric ones', () => {
+    // Mutation: `[...numericErrors]`, dropping the file half. Every
+    // resolveFileArg test stays green while `--file ""`, `--file=`, `--file`
+    // as a final token and `--file --location` all fall back to the generated
+    // 1MB payload — exactly the bug this change exists to remove.
+    expect(resolveArgErrors(['--file'], never)).toEqual([
+      expect.stringContaining('--file'),
+    ]);
+    expect(resolveArgErrors(['--file', '--location'], never)).toHaveLength(1);
+  });
+
+  it('carries the boolean-flag errors too', () => {
+    // Mutation: dropping `...booleanErrors` from the composition. Every
+    // readBooleanFlag and resolveBooleanArgs case above stays green while
+    // `--location=true` goes back to running the whole window with the leg
+    // off, printing `Location: false` — the exact defect this change removes,
+    // reinstated by one spread. This is the seam that makes that reachable;
+    // before resolveArgErrors was extracted it lived in main() and no test
+    // could see it.
+    expect(resolveArgErrors(['--location=true'], never)).toEqual([
+      expect.stringContaining('--location takes no value'),
+    ]);
+    expect(resolveArgErrors(['--allow-production=1'], never)).toHaveLength(1);
+  });
+
+  it('names a bad boolean flag alongside a bad numeric one', () => {
+    // The one-pass claim, across resolvers rather than within one: an
+    // operator who typed two different kinds of mistake sees both at once.
+    expect(resolveArgErrors(['--count', 'abc', '--location=1'], never)).toHaveLength(2);
+  });
+
+  it('surfaces what the readability check reported', () => {
+    // Mutation: call the checker and discard its return. Green suite, ENOENT
+    // back inside the first round.
+    expect(resolveArgErrors(['--file', '/some/path'], () => 'boom')).toEqual(['boom']);
+  });
+
+  it('does not touch the filesystem when no --file was given', () => {
+    // Mutation: drop the filePath guard. fs.statSync(null) throws
+    // ERR_INVALID_ARG_TYPE, which the catch turns into
+    // `--file null cannot be read` on EVERY default run.
+    let called = 0;
+    const errors = resolveArgErrors([], () => { called += 1; return 'should not run'; });
+    expect(called).toBe(0);
+    expect(errors).toEqual([]);
+  });
+
+  it('does not stat a path the operator never typed', () => {
+    // A --file whose SHAPE already failed resolves to null; statting it would
+    // append a second message naming that null.
+    let seen = 'untouched';
+    resolveArgErrors(['--file', ''], (candidate) => { seen = candidate; return null; });
+    expect(seen).toBe('untouched');
+  });
+
+  it('reports every fault in one pass, in command-line order', () => {
+    const errors = resolveArgErrors(['--count', 'abc', '--file', '/x'], () => 'file is bad');
+    expect(errors).toEqual([expect.stringContaining('--count'), 'file is bad']);
+  });
+
+  it('defaults to the real readability check', () => {
+    // The injected checker is a test seam, not the production path. If the
+    // default parameter were dropped, main() would pass no checker and the
+    // preflight would silently become a no-op — so this is what pins the
+    // wiring that the AST call-count deliberately cannot.
+    expect(resolveArgErrors(['--file', '/nonexistent/loadtest/payload.bin'])).toEqual([
+      expect.stringContaining('cannot be read'),
+    ]);
   });
 });
 
@@ -578,32 +817,10 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return null;
   };
 
-  const callsNamed = (name) => {
-    const found = [];
-    traverse(ast, {
-      CallExpression(p) {
-        if (calleeName(p.node) === name) found.push(p.node);
-      },
-    });
-    return found;
-  };
-
   // Flag tokens hard-coded anywhere in the file, whatever call they sit in.
   // The shared readers build their token from the flag NAME, so a
   // `--`-prefixed literal is written only by an ad-hoc read — and the ad-hoc
-  // read is the defect itself.
-  //
-  // Deliberately NOT scoped to `.includes`, which was the first shape of this
-  // check and caught one spelling out of four. `--location=true` reads as
-  // absent just as silently through `.some((a) => a === '--x')`, through
-  // `.indexOf('--x') !== -1` — the very shape the readFlag check below names
-  // as the historical regression — and through `new Set(args).has('--x')`.
-  // Matching the literal rather than the call is what makes this independent
-  // of which one someone reaches for. It also stops the check firing on an
-  // unrelated `someString.includes('--x')`, which is not an argv read at all.
-  //
-  // `/^--\w/` so readFlag's own `'--'` prefix test and the `'---'` console
-  // divider are not swept up. A token built as `` `--${'dry-run'}` `` is a
+  // read is the defect itself. A token built as `` `--${'dry-run'}` `` is a
   // TemplateLiteral and still escapes; not a plausible accident.
   const flagLiterals = () => {
     const found = [];
@@ -613,38 +830,11 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return [...new Set(found)].sort();
   };
 
-  // The module-level `errors:` bindings, and the ones main() actually
-  // forwards. Two independent walks on purpose, so the check below is a
-  // COMPARISON rather than a restatement of one hard-coded list.
-  const collectedErrorBindings = () => {
+  const callsNamed = (name) => {
     const found = [];
     traverse(ast, {
-      VariableDeclarator(p) {
-        // getFunctionParent() === null keeps this to the module-level resolver
-        // destructures — the guard's own `errors:` binding lives inside main()
-        // and is not one of these.
-        if (p.node.id.type !== 'ObjectPattern' || p.getFunctionParent() !== null) return;
-        for (const prop of p.node.id.properties) {
-          if (prop.type !== 'ObjectProperty') continue;
-          if (prop.key.name === 'errors' && prop.value.type === 'Identifier') {
-            found.push(prop.value.name);
-          }
-        }
-      },
-    });
-    return found.sort();
-  };
-
-  const argErrorsSpread = () => {
-    let found = null;
-    traverse(ast, {
-      VariableDeclarator(p) {
-        if (p.node.id.type !== 'Identifier' || p.node.id.name !== 'argErrors') return;
-        if (p.node.init?.type !== 'ArrayExpression') return;
-        found = p.node.init.elements
-          .filter((e) => e?.type === 'SpreadElement' && e.argument.type === 'Identifier')
-          .map((e) => e.argument.name)
-          .sort();
+      CallExpression(p) {
+        if (calleeName(p.node) === name) found.push(p.node);
       },
     });
     return found;
@@ -670,88 +860,102 @@ describe('loadtest script — static checks on call sites no test can reach', ()
 
   it('resolves its numeric flags in one place', () => {
     // Fails closed if a fourth numeric flag is added with its own ad-hoc
-    // parse instead of going through the resolver.
-    expect(callsNamed('resolveNumericArgs')).toHaveLength(1);
+    // parse instead of going through the resolver. Two call sites: the
+    // module-level constants, and resolveArgErrors, which re-resolves from
+    // the argv it is handed so the whole preflight decision stays reachable
+    // from a test.
+    expect(callsNamed('resolveNumericArgs')).toHaveLength(2);
   });
 
-  it('reads every value-taking flag through the one shared reader', () => {
-    // The regression this guards is a fourth flag added with its own inline
-    // `argv.indexOf(...)`, which is exactly how the file got three parsers
-    // with three different answers for `--flag` as the final token.
+  it('scans argv through the shared reader and nothing else', () => {
+    // Bans the PRIMITIVE, not a name. Counting readFlag call sites cannot
+    // catch the regression that actually matters: a new flag reading argv
+    // with its own inline `const i = args.indexOf('--warmup')` leaves the
+    // readFlag count untouched and stays green while that flag silently
+    // defaults — which is how this file came to hold three parsers in the
+    // first place. Same reasoning as the parseInt ban above, and the same
+    // regression a name-based check misses.
     //
-    // Two call sites today: resolveNumericArgs (which serves all three
-    // numeric flags) and resolveFileArg. A new value-taking flag should raise
-    // this to three DELIBERATELY, as part of routing it through readFlag —
-    // not discover afterwards that it defaulted silently.
-    //
-    // Still two now that the boolean flags have a reader of their own, and
-    // that was the deliberate part of adding it: a boolean carries no value
-    // for readFlag to read, so routing one through it would mean inventing
-    // one. readBooleanFlag is the sibling — see the check below.
+    // There is no indexOf call site today; the only occurrence of the word
+    // is inside a comment, which does not parse as a call.
+    expect(callsNamed('indexOf')).toHaveLength(0);
+    // A name pin as well, since getArg's `args[idx + 1] || defaultVal` is the
+    // defect itself. Weak alone — the identical body under any other name
+    // passes it — which is precisely what the indexOf ban above covers.
+    expect(callsNamed('getArg')).toHaveLength(0);
     expect(callsNamed('readFlag')).toHaveLength(2);
   });
 
-  it('keeps no permissive reader alongside it', () => {
-    // getArg's `args[idx + 1] || defaultVal` is the defect itself, not merely
-    // a style: it cannot express "flag present, value missing". Re-adding it
-    // for one new flag would reinstate the silent default for that flag while
-    // every test above stays green.
-    expect(callsNamed('getArg')).toHaveLength(0);
-    // hasFlag was the boolean half of the same defect: an exact-token
+  it('reads every boolean flag through the one shared reader', () => {
+    // The counterpart to the readFlag/indexOf ban above, and asserted as a
+    // literal search rather than a call count for the same reason that one
+    // bans the primitive: a fresh boolean flag added as
+    // `args.includes('--newflag')` leaves readBooleanFlag's call count
+    // untouched, and that inline shape is precisely how --location came to
+    // read `--location=true` as absent.
+    //
+    // Deliberately not scoped to `.includes` either. The silent-off bug
+    // arrives just as easily through `.some((a) => a === '--x')` or
+    // `new Set(args).has('--x')`, neither of which the indexOf ban sees.
+    // Matching the LITERAL rather than the call is what makes this
+    // independent of which one someone reaches for.
+    //
+    // One entry survives, and it is the target guard's own read: deliberately
+    // exact-token and fail-closed, with the SHAPE refused upstream in
+    // resolveBooleanArgs. A third boolean flag added the intended way —
+    // `read('dry-run')` inside resolveBooleanArgs — writes 'dry-run' without
+    // the dashes and leaves this list untouched.
+    //
+    // `/^--\w/` so readFlag's own `'--'` prefix test and the `'---'` console
+    // divider are not swept up.
+    expect(flagLiterals()).toEqual(['--allow-production']);
+    expect(callsNamed('readBooleanFlag')).toHaveLength(1);
+    // Two call sites, like resolveNumericArgs and resolveFileArg above: the
+    // module-level constant, and resolveArgErrors re-resolving from the argv
+    // it is handed so the whole preflight decision stays reachable.
+    expect(callsNamed('resolveBooleanArgs')).toHaveLength(2);
+    // hasFlag was the boolean half of the getArg defect: an exact-token
     // `includes` cannot express "flag present, carrying a value it should not
     // have", so `--location=true` read as absent and the leg stayed off.
     expect(callsNamed('hasFlag')).toHaveLength(0);
   });
 
-  it('reads every boolean flag through the one shared reader', () => {
-    // The counterpart to the readFlag check above — but asserted as a literal
-    // search rather than a call count, because a call count would not catch
-    // the regression. A fresh boolean flag added as
-    // `args.includes('--newflag')` leaves readBooleanFlag called exactly as
-    // often as before, and that inline shape is precisely how --location came
-    // to read `--location=true` as absent.
-    //
-    // One entry survives, and it is the target guard's own read: deliberately
-    // exact-token and fail-closed, with the SHAPE refused upstream in
-    // resolveBooleanArgs.
-    //
-    // A third boolean flag added the intended way — `read('dry-run')` inside
-    // resolveBooleanArgs — writes 'dry-run' without the dashes and leaves this
-    // list untouched. Only the ad-hoc spellings add to it.
-    expect(flagLiterals()).toEqual(['--allow-production']);
-    expect(callsNamed('readBooleanFlag')).toHaveLength(1);
+  it('resolves the upload flag and the whole preflight in one place each', () => {
+    expect(callsNamed('resolveFileArg')).toHaveLength(2);
+    expect(callsNamed('resolveArgErrors')).toHaveLength(1);
+    // checkUploadFile is deliberately NOT call-counted: it is now referenced
+    // as resolveArgErrors' default parameter rather than called by name, so a
+    // call count would read 0 whether or not it is wired. The runtime test
+    // 'defaults to the real readability check' is what pins that, and it is
+    // the stronger check — it proves the default resolves to a real stat.
   });
 
-  it('forwards every resolver error list to main()', () => {
-    // Everything the unit tests above prove stops at the resolver. What turns
-    // a collected error into a refused run is one spread inside main(), which
-    // no test can reach — so `...booleanArgErrors` can be deleted with every
-    // test in this file still green AND lint clean, and that deletion is the
-    // original bug verbatim: the reader still refuses `--location=true`, the
-    // error is still collected, and the run still takes its whole window with
-    // the leg off, printing `Location: false`.
+  it('decides every argument error before the smoke test mints a resource', () => {
+    // The one regression the call counts cannot see: move the preflight below
+    // the smoke test. Every unit test stays green while "prove the upload
+    // file is readable BEFORE the run starts" — the entire stated value of
+    // the check — is gone, because createOneTimeLink has by then minted a
+    // live resource.
     //
-    // Asserted as a comparison of two independent walks rather than one
-    // hard-coded list, so a fourth resolver has to be WIRED IN and not merely
-    // added alongside — the same ratchet as the resolveNumericArgs check.
-    expect(argErrorsSpread()).toEqual(collectedErrorBindings());
-    expect(argErrorsSpread()).toEqual(['booleanArgErrors', 'fileArgErrors', 'numericArgErrors']);
-  });
-
-  it('resolves its boolean flags in one place', () => {
-    // The sibling of the numeric check above: fails closed if a third boolean
-    // flag is added with its own ad-hoc read instead of going through the
-    // resolver that collects errors for main().
-    expect(callsNamed('resolveBooleanArgs')).toHaveLength(1);
-  });
-
-  it('resolves and checks the upload file exactly once each', () => {
-    // checkUploadFile is unreachable from main() in a test, so nothing else
-    // would notice the preflight call being dropped — and dropping it puts
-    // the failure back inside runRound, after the smoke test has minted a
-    // resource, which is the whole point of adding it.
-    expect(callsNamed('resolveFileArg')).toHaveLength(1);
-    expect(callsNamed('checkUploadFile')).toHaveLength(1);
+    // Scoped to main()'s body on purpose: createOneTimeLink is called twice,
+    // and the FIRST one lexically is the location leg inside runRound. A
+    // whole-file comparison would silently measure the wrong call.
+    let main = null;
+    traverse(ast, {
+      FunctionDeclaration(p) { if (p.node.id?.name === 'main') main = p.node; },
+    });
+    expect(main).not.toBeNull();
+    const firstInMain = (name) => {
+      const starts = callsNamed(name)
+        .filter((node) => node.start >= main.start && node.end <= main.end)
+        .map((node) => node.start);
+      return starts.length ? Math.min(...starts) : null;
+    };
+    const preflight = firstInMain('resolveArgErrors');
+    const smokeTest = firstInMain('createOneTimeLink');
+    expect(preflight).not.toBeNull();
+    expect(smokeTest).not.toBeNull();
+    expect(preflight).toBeLessThan(smokeTest);
   });
 
   it('uploads through reUploadBuffer', () => {

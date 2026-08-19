@@ -19,10 +19,24 @@
  *   back to the default — see readFlag below for why that fallback was the
  *   more dangerous answer.
  *
- *   A flag that takes no value (--location, --allow-production) is written on
- *   its own. `--location=true` is REFUSED rather than interpreted: omitting
- *   the flag is already how it is turned off, so there is no `=false` left
- *   for it to mean — see readBooleanFlag below.
+ *   Consequences worth knowing before you type them:
+ *     - a path that genuinely begins with `--` needs the inline form,
+ *       `--file=--weird.bin`; the separated form reads it as a flag.
+ *     - --file must name a REGULAR file. A pipe, process substitution or
+ *       /dev/stdin is refused: the file is re-read once per round, so a pipe
+ *       would upload real bytes on round one and nothing afterwards.
+ *     - a flag that takes NO value (--location, --allow-production) is
+ *       written on its own. `--location=true` is refused rather than
+ *       interpreted — omitting the flag is already how it is turned off, so
+ *       there is no `=false` left for it to mean. See readBooleanFlag below.
+ *     - a MISSPELLED flag is still ignored silently, and so is a value handed
+ *       to a boolean flag positionally (`--location false` leaves the leg
+ *       ON). Both are recorded as one known gap at readFlag below.
+ *
+ *   Hand-rolled rather than node:util parseArgs, which covers these shapes
+ *   but throws on the first bad flag — forfeiting "name every bad flag in one
+ *   pass" — and rejects `--count -5` as an ambiguous option rather than as
+ *   the bad count it is.
  *
  * Target safety:
  *   QURL_ENDPOINT and CONNECTOR_URL must BOTH resolve to a host this script
@@ -107,9 +121,14 @@ const args = process.argv.slice(2);
 // cover it: the constants it feeds are read by loops inside runRound, which
 // no test can reach.
 //
-// `defaultLabel` is what the missing-value message calls the default — the
+// `defaultLabel` is what the missing-value messages call the default — the
 // value itself for the numeric flags, prose for --file, whose default is not
-// a path at all.
+// a path at all. A flag whose defaultValue is not worth printing must pass
+// one: without it the fallback is String(defaultValue), which renders null as
+// the literal "null". Both call sites do; a fourth flag has to as well.
+//
+// argv is assumed to hold strings, which is what process.argv gives. The
+// function is exported for its own tests, not as a general-purpose parser.
 function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue)) {
   const token = `--${flag}`;
   const inlinePrefix = `${token}=`;
@@ -129,10 +148,33 @@ function readFlag(argv, flag, defaultValue, defaultLabel = String(defaultValue))
     return { error: `${token} was given no value (omit it to use the default of ${defaultLabel})` };
   }
   if (next.startsWith('--')) {
-    return { error: `${token} was given no value — the next argument is the flag ${next}` };
+    // Carries the same recovery hint as the branch above: from the operator's
+    // seat these are one mistake — they forgot the value — so telling them
+    // how to get the default in one case and not the other is arbitrary.
+    return {
+      error: `${token} was given no value — the next argument is the flag ${next} `
+        + `(omit it to use the default of ${defaultLabel})`,
+    };
   }
   return { value: next };
 }
+
+// One gap in the same fault class is deliberately left open here, recorded so
+// it is a deferral rather than an oversight.
+//
+// UNKNOWN FLAGS. readFlag is pull-based — it scans argv for one named flag —
+// so nothing can see a token that matched nothing. `--fil /tmp/payload.bin`
+// and `-file /tmp/payload.bin` both read as "no --file given" and run the
+// full window uploading the generated 1MB payload, from a one-character typo:
+// the same outcome the header above calls the worst available one. Closing it
+// needs a push-based pass that tokenizes argv once against a flag spec and
+// reports what went unconsumed. That is a larger change than routing the
+// value-taking flags through one reader, and it is not what this one does.
+//
+// It also subsumes the positional case named at readBooleanFlag below
+// (`--location false` leaving the leg ON), so the two are one change and not
+// two. The BOOLEAN `=` gap this note used to record alongside it — where
+// `--location=true` read as absent — is closed there.
 
 // Boolean flags are not routed through readFlag: they take no value, so it has
 // nothing to read for them. They shared the defect anyway. The `hasFlag` this
@@ -281,20 +323,26 @@ function parsePositiveInt(flag, raw) {
 }
 
 // Resolve all three numeric flags from an argv array. Pure and taking argv as
-// a parameter, following resolveGuardInputs above, so the suite covers the
+// a parameter, following resolveGuardInputs below, so the suite covers the
 // wiring and not merely the parser: the constants below are the actual
 // regression surface, and a call site quietly reverted to `parseInt` would
 // leave a green parsePositiveInt behind it.
 //
 // Argv shape comes from readFlag above, so these three answer a malformed
 // command line the same way --file does; what stays here is the part that is
-// specific to a number.
+// specific to a number. That includes both spellings: `--count=200` is not
+// `--count` to an indexOf, so it read as the flag being ABSENT and ran the
+// default of 100 with nothing said. `--duration=60` is the one that hurts —
+// it held the target for the default 7200 seconds, so an operator who asked
+// for a minute got two hours.
 //
-// The defaults are written as STRINGS so that an absent flag returns through
-// parsePositiveInt exactly as a typed one does. That is not a formality: it
-// is what stops a default from being a value the validator would have
-// refused, and it removes the "was this token typed or defaulted?" branch
-// that would otherwise sit between readFlag and the parse.
+// The defaults are ROUTED THROUGH parsePositiveInt rather than returned
+// beside it, so a default that the validator would reject cannot ship, and
+// there is no "was this token typed or defaulted?" branch between readFlag
+// and the parse. They are spelled as strings only to look like the argv they
+// stand in for — parsePositiveInt opens with String(raw), so a numeric
+// default would behave identically. The routing is what matters here, not
+// the quoting.
 function resolveNumericArgs(argv) {
   const errors = [];
   const read = (flag, defaultValue) => {
@@ -359,33 +407,77 @@ function resolveFileArg(argv) {
 // that stays pure, and out of module load so `require()`ing this file from
 // the suite does not stat the operator's disk.
 function checkUploadFile(filePath) {
+  // Quoted, like resolveFileArg quotes its own rejection. That function goes
+  // out of its way to PRESERVE a leading or trailing space in a real
+  // filename, so this is exactly where such a path lands — and rendered raw,
+  // `--file /tmp/ spaced  is not a regular file` reads as `/tmp/spaced` and
+  // sends the operator looking for the wrong file. A path containing a
+  // newline is worse: it splits the line, and only the first half carries the
+  // FATAL prefix, so the second reads as a separate fabricated error.
+  const shown = JSON.stringify(filePath);
   let stats;
   try {
     // statSync rather than existsSync: existsSync is also true for a
     // directory, and readFileSync would then throw EISDIR out of the round
-    // this check exists to protect.
+    // this check exists to protect. It also FOLLOWS symlinks, matching what
+    // readFileSync will do — lstatSync here would reject a symlink pointing
+    // at a perfectly good payload.
     stats = fs.statSync(filePath);
   } catch (e) {
-    return `--file ${filePath} cannot be read — ${e.message}`;
+    return `--file ${shown} cannot be read — ${e.message}`;
   }
   if (!stats.isFile()) {
-    return `--file ${filePath} is not a regular file`;
+    // Not just directories. A FIFO, socket, or character device reaches
+    // readFileSync too, and runRound re-reads the file once PER ROUND: a pipe
+    // would upload real bytes on round one and nothing on every round after,
+    // which is a silently wrong measurement rather than a failure. A FIFO
+    // with no writer blocks readFileSync forever.
+    return `--file ${shown} is not a regular file`;
   }
   try {
     // Existence is not readability: a file owned by another user is the
     // realistic way this bites, and statSync succeeds on it.
     fs.accessSync(filePath, fs.constants.R_OK);
   } catch (e) {
-    return `--file ${filePath} is not readable — ${e.message}`;
+    return `--file ${shown} is not readable — ${e.message}`;
   }
   return null;
 }
 
+// Every argument fault in one list, as data — main() only prints and exits.
+// Follows targetGuardReport below, for the reason spelled out there: main() is
+// unreachable from the suite, so a decision left inline in it is a decision
+// nothing can test.
+//
+// That is not hypothetical here. With this composition inline, three separate
+// regressions passed the entire suite green: dropping the --file errors from
+// the concatenation (which silently reinstates the exact default-payload bug
+// this change exists to remove), discarding the readability result, and moving
+// the whole check after the smoke test that mints the first real resource.
+//
+// `check` is injected so the suite can drive the composition without a disk.
+// Called from main() rather than at module load, so `require()`ing this file
+// from a test does not stat the operator's disk.
+function resolveArgErrors(argv, check = checkUploadFile) {
+  const { errors: numericErrors } = resolveNumericArgs(argv);
+  const { filePath, errors: fileErrors } = resolveFileArg(argv);
+  const { errors: booleanErrors } = resolveBooleanArgs(argv);
+  const errors = [...numericErrors, ...fileErrors, ...booleanErrors];
+  // Guarded on filePath rather than run unconditionally: null means either no
+  // --file was given or its shape already failed above, and statting that
+  // would add a second message naming a path the operator never typed.
+  if (filePath) {
+    const fileError = check(filePath);
+    if (fileError) errors.push(fileError);
+  }
+  return errors;
+}
+
 const {
-  count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S, errors: numericArgErrors,
+  count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
-const { filePath: FILE_PATH, errors: fileArgErrors } = resolveFileArg(args);
-const { includeLocation: INCLUDE_LOCATION, errors: booleanArgErrors } = resolveBooleanArgs(args);
+const { filePath: FILE_PATH } = resolveFileArg(args);
+const { includeLocation: INCLUDE_LOCATION } = resolveBooleanArgs(args);
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
 async function generateTestFile() {
@@ -778,14 +870,7 @@ async function main() {
   // and a bad flag is the only fault here that otherwise survives to the end
   // of a full run — exiting 0 having done nothing at all for a numeric flag,
   // or spending the whole window uploading a payload nobody chose for --file.
-  const argErrors = [...numericArgErrors, ...fileArgErrors, ...booleanArgErrors];
-  // Guarded on FILE_PATH rather than run unconditionally: null means either
-  // no --file was given or its shape already failed above, and statting that
-  // would add a second message naming a path the operator never typed.
-  if (FILE_PATH) {
-    const fileError = checkUploadFile(FILE_PATH);
-    if (fileError) argErrors.push(fileError);
-  }
+  const argErrors = resolveArgErrors(args);
   if (argErrors.length > 0) {
     for (const message of argErrors) console.error(`FATAL: ${message}`);
     process.exit(1);
@@ -889,6 +974,7 @@ module.exports = {
   resolveNumericArgs,
   resolveFileArg,
   checkUploadFile,
+  resolveArgErrors,
   // Target safety guard
   resolveGuardInputs,
   targetGuardReport,
