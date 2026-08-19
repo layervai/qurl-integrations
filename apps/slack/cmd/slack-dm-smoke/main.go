@@ -338,6 +338,12 @@ func newSmokeResult(cfg *smokeConfig) smokeResult {
 	}
 }
 
+// writeConfigValidationError names the environment variable it looked at, which is the
+// difference between an actionable error and a guessing game once -token-env has been
+// pointed somewhere custom. It mirrors slack-history-upload-smoke's function of the same
+// name. Echoing the value is safe: stderr on a CLI is not a browser, and
+// slacksmoke.IsEnvVarName has already constrained tokenEnv to a POSIX environment
+// variable name back in run, so it cannot carry a control character either.
 func writeConfigValidationError(stderr io.Writer, tokenEnv string, err error) {
 	switch {
 	case errors.Is(err, errMissingSlackUserID):
