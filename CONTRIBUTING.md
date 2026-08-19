@@ -178,7 +178,7 @@ header cites for its own context. It is unfiltered on `pull_request`, so it
 reports on every PR rather than going missing on a stacked one; it is
 secret-free on a read-only token, so requiring it adds no privileged surface;
 and it runs in about eight seconds against a five-minute cap. It also carries no
-job-level `if:`, so unlike `claude-review` above it cannot report `skipped` and
+job-level `if:`, so unlike `claude-review` below it cannot report `skipped` and
 cannot be satisfied empty — the step-level `!cancelled()` guards change which
 steps run, never whether the job reports. Requiring it removes an asymmetry that
 had begun to distort where guards get written: #1191 put a new Chrome/Edge
