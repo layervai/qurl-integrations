@@ -556,6 +556,23 @@ const formatPct = (rate, digits = 1) => `${(rate * 100).toFixed(digits)}%`;
  * until they differ, bounded at four decimals — a gap smaller than that is
  * reachable only through float error, never through a ratio of two counts.
  */
+/**
+ * The threshold exactly as it was set. One decimal like the verdict lines, but
+ * widened whenever that would round the value away — the echo exists to
+ * confirm what was applied, so `--max-fail-rate 0.05` reading back as `0.1%`
+ * would defeat the only thing it is there for. Bounded at six decimals; a
+ * threshold finer than one part in a hundred million is not a load test's
+ * business, and is shown rounded.
+ */
+function formatThresholdPct(rate) {
+  const pct = rate * 100;
+  for (let digits = 1; digits <= 6; digits++) {
+    const text = pct.toFixed(digits);
+    if (Number(text) === pct) return `${text}%`;
+  }
+  return `${pct.toFixed(6)}%`;
+}
+
 function formatRatePair(rate, threshold) {
   for (const digits of [1, 2, 3]) {
     if (formatPct(rate, digits) !== formatPct(threshold, digits)) {
@@ -598,7 +615,7 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   // Echoed on every run, passing or failing. This is the value that decided
   // the exit code, and printing it only on the FAILED lines meant a run that
   // silently took the default had nothing in its log to say so.
-  lines.push(`Failure threshold: ${formatPct(maxFailRate)} (--max-fail-rate)`);
+  lines.push(`Failure threshold: ${formatThresholdPct(maxFailRate)} (--max-fail-rate)`);
 
   if (roundsCompleted > 0) {
     lines.push(`Avg round time: ${(sum((r) => r.totalMs) / roundsCompleted / 1000).toFixed(1)}s`);
@@ -847,6 +864,7 @@ module.exports = {
   errorTallyLines,
   parseMaxFailRate,
   formatRatePair,
+  formatThresholdPct,
   runReport,
   ERROR_TALLY_LIMIT,
   DEFAULT_MAX_FAIL_RATE_PCT,

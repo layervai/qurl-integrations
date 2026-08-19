@@ -34,6 +34,7 @@ const {
   errorTallyLines,
   parseMaxFailRate,
   formatRatePair,
+  formatThresholdPct,
   runReport,
   ERROR_TALLY_LIMIT,
   DEFAULT_MAX_FAIL_RATE_PCT,
@@ -292,6 +293,28 @@ describe('formatRatePair — a breach never prints as "X% exceeds X%"', () => {
   });
 });
 
+describe('formatThresholdPct — the echo shows the threshold that was set', () => {
+  // At a fixed one decimal the confirmation line rounds away exactly the
+  // values an operator would double-check: 0.05% reads as 0.1%, twice what
+  // was asked for, and 0.01% reads as 0.0%, which is not a threshold at all.
+  it.each([
+    ['a whole percentage', 0.1, '10.0%'],
+    ['one decimal', 0.025, '2.5%'],
+    ['the waiver', 1, '100.0%'],
+    ['zero', 0, '0.0%'],
+    ['two decimals', 0.0005, '0.05%'],
+    ['three decimals', 0.0001, '0.01%'],
+    ['four decimals', 0.00001, '0.001%'],
+    ['a repeating value', 0.33333, '33.333%'],
+  ])('renders %s', (_label, rate, expected) => {
+    expect(formatThresholdPct(rate)).toBe(expected);
+  });
+
+  it('never renders a non-zero threshold as 0.0%', () => {
+    expect(formatThresholdPct(0.0001)).not.toBe('0.0%');
+  });
+});
+
 describe('parseMaxFailRate — a malformed threshold fails closed', () => {
   it.each([
     ['the default', String(DEFAULT_MAX_FAIL_RATE_PCT), 0.1],
@@ -375,6 +398,11 @@ describe('runReport — the summary and the exit code', () => {
   it('states the threshold it judged against, even when passing', () => {
     expect(report([round({ fileLinks: 10, uploadMs: 1, mintMs: 1, totalMs: 2 })], 1, 0.25).lines)
       .toContain('Failure threshold: 25.0% (--max-fail-rate)');
+  });
+
+  it('echoes a sub-tenth-of-a-percent threshold without rounding it away', () => {
+    expect(report([round({ fileLinks: 10, uploadMs: 1, mintMs: 1, totalMs: 2 })], 1, 0.0005).lines)
+      .toContain('Failure threshold: 0.05% (--max-fail-rate)');
   });
 
   it('does not print a breach as an equality', () => {
