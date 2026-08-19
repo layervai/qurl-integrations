@@ -352,14 +352,26 @@ describe('loadtest duration bound — static checks on loops no test can reach',
     // back to a loop header is a second, competing condition that a deadline
     // would not reach — exactly the shape this change removed.
     //
-    // Matched on the IDENTIFIER, not on `!stopping`: the negated spelling is
-    // only the form the old code happened to use, and a bare `if (stopping)`
-    // reintroduces the same competing condition while reading as untouched by
-    // a check that looks for the `!`.
-    const runRoundSource = source.slice(
-      source.indexOf('async function runRound'),
-      source.indexOf('async function main'),
-    );
-    expect(runRoundSource).not.toMatch(/\bstopping\b/);
+    // Matched on the IDENTIFIER rather than on the text `!stopping`: the
+    // negated spelling is only the form the old code happened to use, and a
+    // bare `if (stopping)` reintroduces the same competing condition while
+    // reading as untouched by a check that looks for the `!`.
+    //
+    // And matched through the AST rather than over the sliced source, so
+    // COMMENTS and strings are excluded. This file is comment-dense — the
+    // section above deliberately explains what runRound does instead of
+    // reading the flag — and a text scan makes the prose load-bearing: a doc
+    // comment that merely mentions stopping would fail a test whose subject
+    // is code, with no regression behind it.
+    let references = 0;
+    traverse(ast, {
+      FunctionDeclaration(p) {
+        if (p.node.id?.name !== 'runRound') return;
+        p.traverse({
+          Identifier(i) { if (i.node.name === 'stopping') references++; },
+        });
+      },
+    });
+    expect(references).toBe(0);
   });
 });

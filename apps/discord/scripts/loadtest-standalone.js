@@ -2426,6 +2426,17 @@ async function main() {
 
     try {
       const results = await runRound(round);
+      // Pushed even when the round did nothing. The deadline can cross in the
+      // narrow window between this loop's own check and runRound's first
+      // sample, in which case both legs are skipped and an all-zero round
+      // comes back marked partial.
+      //
+      // Dropping it here would be worse than cosmetic, because roundsAttempted
+      // below is THIS counter, not allResults.length: runReport derives
+      // roundsFailed as the difference, so a round that was merely cut short
+      // before it began would be reported as a FAILED round — and can push
+      // roundFailRate past --max-fail-rate and flip the run's exit code. It is
+      // counted as attempted-and-truncated because that is what it was.
       allResults.push(results);
 
       console.log(roundReportLine({ elapsed, round, results }));
