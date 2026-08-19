@@ -467,6 +467,13 @@ func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
 
 	// Undo exactly the three sanctioned writes. Anything else the stamp
 	// touched survives into the comparison below.
+	//
+	// The delete does not lean on the fork's `metadatas,omitempty` tag: the
+	// generated config carries MetaClientVersion, so the map is non-nil going
+	// in — applyKnockResult never takes its allocate-from-nil branch — and
+	// still non-empty coming out. It would lean on that tag only if frpgen
+	// stopped stamping a client version, leaving a nil map to compare against
+	// the empty one applyKnockResult would then allocate.
 	common.ServerAddr, common.ServerPort = beforeAddr, beforePort
 	delete(common.Metadatas, frpgen.MetaQURLKnockToken)
 	after, err := json.MarshalIndent(common, "", "  ")
