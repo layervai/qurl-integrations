@@ -1789,14 +1789,20 @@ describe('loadtest script — static checks on call sites no test can reach', ()
   //
   // Deliberately NOT here: chmod, chown and utimes change a path's metadata
   // without placing a byte or creating an entry, and readFileSync, statSync,
-  // accessSync and existsSync are how this script legitimately reads. The
-  // stated cost is `write`, which matches any `.write()` — a progress bar on
-  // process.stdout fails this test, which was checked rather than assumed.
-  // It is kept for two reasons: it is the only entry that catches a write
-  // through a descriptor or stream this file did not open itself, and a list
-  // banning writeSync but not write is the very asymmetry this is fixing.
-  // Every line of output here goes through console.*, so that cost is
-  // currently zero.
+  // accessSync and existsSync are how this script legitimately reads.
+  //
+  // The cost is that matching is by member NAME, so every short entry —
+  // write, open, link, cp, rm, rename — also matches that method on an
+  // object which is not fs at all. `write` is the one that bites today: it
+  // matches any `.write()`, so a progress bar on process.stdout fails this
+  // test, which was checked rather than assumed. It is kept because it is the
+  // only entry that catches a write through a descriptor or stream this file
+  // did not open itself, and because a list banning writeSync but not write
+  // is the very asymmetry this is fixing. Every line of output here goes
+  // through console.*, so the cost is currently zero — but a later `.open()`
+  // or `.link()` on some unrelated object will fail here too. That is the
+  // over-banning direction these checks take on purpose; the fix when it
+  // happens is to look at the call, not to trim the list.
   const WRITE_PRIMITIVES = [
     // Bytes at a path.
     'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync',
@@ -1967,12 +1973,17 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // deleting the rule. The import is unambiguous, and every spawner needs
     // it: there is no execSync without first reaching child_process.
     //
-    // The cost is a real narrowing, stated rather than papered over: a
-    // subprocess reached some other way (process.binding, a helper under
-    // src/ that spawns on this script's behalf) is invisible here. The
-    // script imports three Node builtins — fs, os, path — and otherwise only
-    // its own src/; the ban is on the one line that would have to be added
-    // before any spawner became reachable at all.
+    // The cost is a real narrowing, stated rather than papered over. This
+    // reads calls to `require` with a literal argument, so three shapes
+    // escape it, each verified to: an aliased require (`const req = require;
+    // req('child_process')`, whose init is a bare Identifier and so is not
+    // an alias this map records), a dynamic `import('child_process')` (a
+    // CallExpression whose callee is `Import`, not `require`), and a
+    // subprocess reached without importing at all — process.binding, or a
+    // helper under src/ that spawns on this script's behalf. The script
+    // imports three Node builtins — fs, os, path — and otherwise only its
+    // own src/; the ban is on the one line an ordinary edit would add before
+    // any spawner became reachable.
     const required = [];
     traverse(ast, {
       CallExpression(p) {
