@@ -7,7 +7,8 @@
  *   --count N      Recipients per round (default: 100)
  *   --duration S   Total duration in seconds (default: 7200 = 2 hours)
  *   --interval S   Seconds between rounds (default: 60)
- *   --file PATH    Local file to upload (default: generates a 1MB test file)
+ *   --file PATH    Local file to upload (default: generates a 1MB test payload
+ *                  in memory — nothing is written to disk)
  *   --location     Include a location link in each round
  *   --allow-production
  *                  Run anyway when a target is refused by the guard below.
@@ -391,11 +392,36 @@ const { filePath: FILE_PATH } = resolveFileArg(args);
 const INCLUDE_LOCATION = hasFlag(args, 'location');
 const TEST_LOCATION_URL = 'https://www.google.com/maps/place/?q=place_id:ChIJLU7jZClu5kcRbUm7GCkGkNQ'; // Eiffel Tower
 
-async function generateTestFile() {
-  const tmpPath = path.join('/tmp', `loadtest-${Date.now()}.bin`);
-  const buf = Buffer.alloc(1024 * 1024, 'A'); // 1MB
-  fs.writeFileSync(tmpPath, buf);
-  return tmpPath;
+// The auto-generated payload is byte-identical on every round — `Buffer.alloc`
+// fills a fixed length with a fixed byte — and the upload filename comes from
+// `loadtest-round<n>.bin` at the call site, never from the path. So the
+// round-trip through the filesystem this replaced bought nothing: it wrote a
+// fresh 1MB file into /tmp every round, read it straight back into a buffer,
+// and never removed it. Over a default 2h run at a 60s interval that is ~120
+// files and ~120MB left behind, on the one code path here designed to be
+// started and walked away from — a plausible way to fill the filesystem
+// during exactly the long soak this script exists to run.
+//
+// Allocated once and reused, so the footprint is 1MB per process rather than
+// 1MB per round, and there is no cleanup to get wrong: no unlink to skip on a
+// throw, nothing left behind on SIGINT, and no /tmp write at all. A
+// caller-supplied --file is still read from disk each round in runRound —
+// that is the only case with a path to read.
+//
+// Every round gets the same Buffer *reference*, which is safe only because
+// rounds are strictly sequential (main awaits each runRound before the next)
+// and the one consumer, reUploadBuffer, reads the buffer without mutating it.
+// Both hold today; a future change that overlaps rounds or hands this to a
+// mutating consumer needs a per-round copy instead.
+//
+// Allocated lazily rather than at module load so that neither a --file run
+// nor the test suite's require() of this module pays for 1MB it never uses.
+let generatedPayload = null;
+function generateTestPayload() {
+  if (generatedPayload === null) {
+    generatedPayload = Buffer.alloc(1024 * 1024, 'A'); // 1MB
+  }
+  return generatedPayload;
 }
 
 // Reuse the shared parser — it has the overflow protection that this
@@ -731,8 +757,7 @@ async function runRound(roundNum) {
 
   // File pipeline
   if (FILE_PATH || !INCLUDE_LOCATION) {
-    const filePath = FILE_PATH || await generateTestFile();
-    const fileBuffer = fs.readFileSync(filePath);
+    const fileBuffer = FILE_PATH ? fs.readFileSync(FILE_PATH) : generateTestPayload();
 
     // Upload through the bot's own connector client rather than a hand-rolled
     // fetch. The copy this replaced put the same multipart body on the wire
