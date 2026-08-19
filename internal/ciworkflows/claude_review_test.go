@@ -421,7 +421,12 @@ exit 127
 func countErrorAnnotations(output string) int {
 	count := 0
 	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "::error") {
+		// GitHub accepts both spellings, and this workflow uses each: the gate
+		// emits a bare `::error::message` and the report step emits
+		// `::error title=…::message`. Matching the `::error` prefix alone would
+		// also count a line beginning `::errored`, which is not a workflow
+		// command — so require the delimiter that ends the command name.
+		if strings.HasPrefix(line, "::error::") || strings.HasPrefix(line, "::error ") {
 			count++
 		}
 	}
