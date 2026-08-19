@@ -8,15 +8,21 @@ import (
 )
 
 // moduleGoModPath is the repo-root go.mod from this package's directory. A
-// constant rather than a walk up the tree: gosec rejects ReadFile on a
-// computed path, and readme_notice_test.go already reaches a sibling file
-// this way. If the package moves, this fails loudly at the read.
+// constant rather than a walk up the tree: gosec flagged the walk's
+// filepath.Join argument (G304), and readme_notice_test.go already reaches a
+// sibling file this way. If the package moves, this fails loudly at the read.
 const moduleGoModPath = "../../../../../go.mod"
 
 // forkReplaceDirective pulls the EFFECTIVE fork out of go.mod. The require
 // line names the upstream version and is not what compiles; the replace
 // target is, so both the path and the version come from here.
-var forkReplaceDirective = regexp.MustCompile(`github\.com/fatedier/frp\s+=>\s+(\S+)\s+(v[0-9][0-9A-Za-z.\-+]*)`)
+//
+// The left-hand version is optional because both spellings are valid go.mod
+// and a hand edit may introduce either. Getting that wrong would be quietly
+// bad: a reformatted directive would match nothing, and the no-directive
+// branch below would then report a dropped fork — misdiagnosing the exact
+// edit this guard exists to survive.
+var forkReplaceDirective = regexp.MustCompile(`github\.com/fatedier/frp(?:\s+v\S+)?\s+=>\s+(\S+)\s+(v[0-9][0-9A-Za-z.\-+]*)`)
 
 // commentWrap collapses a doc-comment line continuation to a single space, so
 // a marker naming the module and version across a wrap still matches. Without
