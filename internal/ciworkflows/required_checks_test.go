@@ -370,8 +370,8 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 // Flipping to `required` is still not a matter of adding the trigger back
 // everywhere. `claude-review` comes from claudeCodeReviewWorkflow, which is
 // `pull_request_target`-only by design — it holds ANTHROPIC_API_KEY and so must
-// load from the trusted default branch. That trigger list is the property: a
-// merge group never starts the workflow at all, so the context cannot report
+// load from the trusted default branch. That trigger, not the job gate, is
+// the property: a merge group never starts the workflow at all, so the context cannot report
 // for a queue entry. It is what the tail of this test pins.
 //
 // Restructuring is more than adding the trigger. The job's steps read
