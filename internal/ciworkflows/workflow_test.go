@@ -802,6 +802,59 @@ func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
 	}
 }
 
+// TestBranchFilteredWorkflowsTakeDefaultActivityTypes pins the claim
+// TestAppWorkflowsRunOnStackedPRs rests on for its second phase: that when the
+// base merges and the stacked PR is retargeted onto main, the retarget re-runs
+// none of the branch-filtered workflows.
+//
+// GitHub delivers a base change as `pull_request` activity type `edited`, which
+// is not one of the three defaults (`opened`, `synchronize`, `reopened`). A
+// workflow taking the defaults therefore does not re-run on the retarget, which
+// is why the check that never registered stays unregistered until the next
+// push. Adding `edited` to a filtered workflow would falsify that paragraph
+// with nothing failing — the same rot the producesRequiredContext cross-check
+// exists to prevent, and the reason that claim is pinned here rather than
+// trusted.
+//
+// Scope is deliberately only the workflows declaring a `branches:` filter.
+// pr-title.yml and dependabot-pr-title.yml do subscribe to `edited` and are
+// meant to: neither is filtered, so neither can go missing from a stacked PR
+// in the first place, and neither is what that paragraph describes.
+func TestBranchFilteredWorkflowsTakeDefaultActivityTypes(t *testing.T) {
+	// The activity type a base-branch change arrives as.
+	const retargetActivityType = "edited"
+
+	checked := 0
+	for _, name := range workflowFiles(t) {
+		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
+		for _, trigger := range pullRequestTriggers {
+			config, ok := triggers[trigger]
+			if !ok {
+				continue
+			}
+			// An unfiltered workflow reaches every base branch already, so it
+			// has no stacked-PR gap for a retarget to have to close.
+			if _, declared := pullRequestBranchFilter(t, name, trigger, config); !declared {
+				continue
+			}
+			checked++
+
+			types, declared := pullRequestActivityTypes(t, name, trigger, config)
+			if declared && slices.Contains(types, retargetActivityType) {
+				t.Errorf("%s %s declares a branches filter and activity type %q, so a retarget "+
+					"would re-run it; TestAppWorkflowsRunOnStackedPRs documents that nothing does, "+
+					"so update that comment or drop the type", name, trigger, retargetActivityType)
+			}
+		}
+	}
+
+	// Nothing filtered means this pinned nothing, which should fail rather than
+	// pass vacuously — the same coupling the scan counts above use.
+	if checked == 0 {
+		t.Fatal("no branch-filtered pull-request trigger found, so this assertion covered nothing")
+	}
+}
+
 // assertPullRequestBranches compares a workflow's declared pull-request
 // branches filter against the intended one. A nil want means the workflow must
 // declare no filter at all.
@@ -890,6 +943,45 @@ func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any
 		return branches, true
 	default:
 		t.Fatalf("%s %s.branches has unexpected type %T", path, trigger, raw)
+		return nil, false
+	}
+}
+
+// pullRequestActivityTypes reads the `types` list off a parsed pull-request
+// trigger, reporting whether one is declared at all. Not declared is the
+// interesting answer rather than a missing one: it means the three defaults,
+// which is what the comments here describe.
+//
+// Callers reach this only for a trigger that already yielded a branches filter,
+// so the map assertion above has run and the shapes below are the two YAML
+// spellings of a list, mirroring pullRequestBranchFilter.
+func pullRequestActivityTypes(t *testing.T, path, trigger string, pullRequest any) (types []string, declared bool) {
+	t.Helper()
+
+	config, ok := pullRequest.(map[string]any)
+	if !ok {
+		t.Fatalf("%s %s trigger has unexpected type %T", path, trigger, pullRequest)
+	}
+
+	raw, ok := config["types"]
+	if !ok {
+		return nil, false
+	}
+
+	switch typed := raw.(type) {
+	case string:
+		return []string{typed}, true
+	case []any:
+		for _, value := range typed {
+			activityType, ok := value.(string)
+			if !ok {
+				t.Fatalf("%s %s.types contains non-string value %T", path, trigger, value)
+			}
+			types = append(types, activityType)
+		}
+		return types, true
+	default:
+		t.Fatalf("%s %s.types has unexpected type %T", path, trigger, raw)
 		return nil, false
 	}
 }
