@@ -48,12 +48,20 @@ const (
 	// and every operator-facing message are unreachable for the rest of the
 	// run. Without this watchdog a Connector in that state loops in silence.
 	//
-	// Sized above the two delays it must not race. The server releases a
-	// registration whose flow died without a close only when its multiplexer
-	// keepalive expires (30s interval plus a 10s write timeout), and the FRP
-	// reconnect loop backs off up to 20s between attempts — so 90s leaves
-	// room for several attempts after the release lands, and a stale session
-	// recovers inside the cycle rather than by restarting it.
+	// Sized from the measured cause. The tunnel-server fleet is an ASG that
+	// rolls instances with an instance refresh; a replacement measured 80,
+	// 83 and 80 seconds from launch to serving across the three replacements
+	// of one 2026-08-18 sandbox roll. A Connector whose server is taken out
+	// of service therefore has to outlast roughly that long, and the FRP
+	// reconnect loop backs off up to 20s between attempts — so 90s covers
+	// one replacement with room for a retry inside the same cycle.
+	//
+	// Overrunning it is cheap and sometimes better: the cycle ends, the
+	// supervisor re-knocks, and the ACK returns a fresh dial target — which
+	// is exactly what a Connector still pointed at a terminated instance
+	// needs. Five such cycles reach the knock budget at roughly eight
+	// minutes, comfortably past a full fleet roll (three replacements about
+	// 3.5 minutes apart in that same observation).
 	reconnectStallWindow = 90 * time.Second
 
 	// reconnectSettledGap is the quiet period that ends a redial storm. The

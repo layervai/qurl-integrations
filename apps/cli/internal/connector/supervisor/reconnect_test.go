@@ -248,19 +248,20 @@ func TestWatchdogNoticeSaysWhatIsHappeningOncePerStorm(t *testing.T) {
 	}
 }
 
-// TestWatchdogWindowOutlivesTheServerRelease is the sizing guard. The server
-// only releases a registration whose flow died without a close when its
-// multiplexer keepalive expires (30s interval + 10s write timeout); the FRP
-// reconnect loop backs off up to 20s. A window at or below that sum would give
-// up while the session was about to be released, turning a recoverable wait
-// into a restart loop.
-func TestWatchdogWindowOutlivesTheServerRelease(t *testing.T) {
+// TestWatchdogWindowOutlivesATunnelServerReplacement is the sizing guard,
+// anchored to the measured cause rather than to a guess. The tunnel-server
+// fleet rolls via ASG instance refresh; the three replacements of one
+// 2026-08-18 sandbox roll took 80s, 83s and 80s from launch to serving. A
+// window at or below that would give up while the replacement was still
+// coming up, turning a wait that resolves itself into a cycle restart.
+func TestWatchdogWindowOutlivesATunnelServerReplacement(t *testing.T) {
 	t.Parallel()
-	const serverReleaseWorstCase = 40 * time.Second
+	// Slowest observed launch-to-serving of a replacement instance.
+	const serverReplacementObserved = 83 * time.Second
 	const reconnectBackoffCeiling = 20 * time.Second
-	if reconnectStallWindow <= serverReleaseWorstCase+2*reconnectBackoffCeiling {
-		t.Errorf("reconnectStallWindow = %s, want more than %s (server release %s plus two dial attempts at the %s backoff ceiling)",
-			reconnectStallWindow, serverReleaseWorstCase+2*reconnectBackoffCeiling, serverReleaseWorstCase, reconnectBackoffCeiling)
+	if reconnectStallWindow <= serverReplacementObserved {
+		t.Errorf("reconnectStallWindow = %s, want more than the %s a tunnel-server replacement took to start serving",
+			reconnectStallWindow, serverReplacementObserved)
 	}
 	if reconnectSettledGap <= reconnectBackoffCeiling {
 		t.Errorf("reconnectSettledGap = %s, want more than the %s reconnect backoff ceiling, or a still-failing storm looks settled between two attempts",
