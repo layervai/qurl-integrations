@@ -473,6 +473,12 @@ function resolveArgErrors(argv, check = checkUploadFile) {
   return errors;
 }
 
+// The values only. Both resolvers run again inside resolveArgErrors, which is
+// where the errors are read — they are discarded here on purpose, because
+// nothing may act on them until main() has printed them and exited. A bad
+// flag therefore cannot reach the loops through a NaN left in one of these
+// constants: main() re-resolves and exits before runRound is ever called.
+// Both resolvers are pure, so resolving twice costs an argv scan.
 const {
   count: COUNT, durationS: DURATION_S, intervalS: INTERVAL_S,
 } = resolveNumericArgs(args);
@@ -721,19 +727,27 @@ function isTargetAuthorized(target, { allowProdFlag, allowProdEnv }) {
  */
 function resolveGuardInputs(env, argv) {
   return {
-    // Exact token, deliberately. `--allow-production=1` is refused as a
-    // malformed flag by resolveBooleanArgs above, before main() reaches the
-    // guard at all; should that check ever be bypassed, reading the flag as
-    // absent here is the fail-closed answer — the guard refuses the target
-    // rather than clearing it.
+    // Through the shared boolean reader like --location, rather than an
+    // inline includes: the two boolean flags reading argv two different ways
+    // was the residual of a split #1174 removed, and this is the one that
+    // gates a production-target override.
     //
-    // Note the two reads scan different arrays: this one gets the whole
-    // process.argv, resolveBooleanArgs gets args (process.argv.slice(2)).
-    // They cannot disagree about this token, because the two extra entries
-    // are the node binary and the RESOLVED ABSOLUTE script path, and neither
-    // an equality against `--allow-production` nor a `--allow-production=`
-    // prefix can match an absolute path.
-    allowProdFlag: argv.includes('--allow-production'),
+    // `.value === true` is what carries that forward now that the reader can
+    // refuse. On the refused path it returns `{ error }` with no `value`, so
+    // `--allow-production=1` reads as ABSENT here — fail-closed, the guard
+    // refusing the target rather than clearing it. The operator still gets a
+    // message, because resolveBooleanArgs checks the same flag's SHAPE and
+    // main() exits on that before ever reaching the guard. The error this
+    // call would have produced is dropped on purpose: reporting it twice is
+    // worse than reporting it once, and this is the value read, not the
+    // report.
+    //
+    // Note this scans the whole process.argv while resolveBooleanArgs scans
+    // args (process.argv.slice(2)). They cannot disagree about this token:
+    // the two extra entries are the node binary and the RESOLVED ABSOLUTE
+    // script path, and neither an equality against `--allow-production` nor a
+    // `--allow-production=` prefix can match an absolute path.
+    allowProdFlag: readBooleanFlag(argv, 'allow-production').value === true,
     allowProdEnv: env.LOADTEST_ALLOW_PRODUCTION === '1',
     ...parseTargetAllowlist(env.LOADTEST_TARGET_HOSTS),
   };
