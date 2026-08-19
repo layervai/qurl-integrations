@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -517,3 +518,144 @@ func (noopConnector) Connect() (net.Conn, error) {
 	return nil, errors.New("noopConnector.Connect called: the physical dial moved off Open, so the watchdog is attached to the wrong method")
 }
 func (noopConnector) Close() error { return nil }
+
+// blockingService is a serviceRunner that runs until its context is canceled
+// and then returns nil — the shape the pinned FRP fork has once its first
+// Login has succeeded (Service.Run blocks on <-svr.ctx.Done()).
+type blockingService struct{ closed atomic.Bool }
+
+func (s *blockingService) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+func (s *blockingService) GracefulClose(time.Duration) { s.closed.Store(true) }
+
+// TestStallDeliveryShapeReachesTheBudgetAsARestart covers the seam between the
+// two halves the other tests cover separately: the watchdog firing, and the
+// budget booking a stall. Here the stall travels the production route — the
+// refresher's requestRestart is the real cycleRunner's, so the runner records
+// restartErr, cancels the blocked service, and Run returns the sentinel in
+// preference to the service's own nil.
+//
+// It matters because the budget test injects the stall as a direct Run error,
+// which is NOT the production shape: there restartErr is nil, the cycle looks
+// short rather than restarted, and classifyRunError sees a sentinel it is
+// documented never to see. This pins the real delivery.
+func TestStallDeliveryShapeReachesTheBudgetAsARestart(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	var buf bytes.Buffer
+	svc := &blockingService{}
+	runner := &cycleRunner{
+		resourceID: testResource,
+		cycleRunID: "0123456789abcdef",
+		logger:     slog.New(slog.NewJSONHandler(&buf, nil)),
+		svc:        svc,
+	}
+	runner.admitted.Store(true) // the stall path only exists after admission
+	r, _ := newWatchdogRefresher(clk.now, discardLogger(), 90*time.Second, 45*time.Second)
+	r.requestRestart = runner.requestRestart
+
+	common := handedOffCommon()
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(context.Background()) }()
+	// Wait until Run has installed its cancel. Production cannot race here —
+	// dials only happen from inside svc.Run, so Run is always past this point
+	// — but the test drives the refresher from the outside and would
+	// otherwise record a restart cause with nothing to cancel.
+	installed := time.Now().Add(5 * time.Second)
+	for time.Now().Before(installed) {
+		runner.cancelMu.Lock()
+		ready := runner.cancel != nil
+		runner.cancelMu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Storm until the watchdog fires, which cancels the runner's context.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		clk.advance(20 * time.Second)
+		if err := r.refresh(context.Background(), common, "open"); errors.Is(err, errReconnectStalled) {
+			break
+		}
+	}
+
+	var runErr error
+	select {
+	case runErr = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cycleRunner.Run did not return after the watchdog requested a restart")
+	}
+	// The service returned nil; the restart cause must win.
+	if !errors.Is(runErr, errReconnectStalled) {
+		t.Fatalf("Run = %v, want the stall sentinel to win over the service's nil return", runErr)
+	}
+	// And this is exactly what reconcileKnockBudget matches on in production.
+	if !errors.Is(runErr, errReconnectStalled) || IsTokenLoginError(runErr) {
+		t.Fatalf("the delivered error does not route to the stall budget branch: %v", runErr)
+	}
+	// The cycle's own teardown is reported as a restart, not as a dial error.
+	if got := buf.String(); !strings.Contains(got, `"reason":"connector_restart"`) {
+		t.Errorf("cycle teardown should be reported as connector_restart\nlog:\n%s", got)
+	}
+}
+
+// TestWatchdogStallIsReportedOncePerStorm pins the stall latch in both
+// directions. Canceling the cycle does not stop FRP instantly, so it can dial
+// again before its Run observes the cancellation: without the latch the same
+// stall reports twice and requestRestart is called twice. And without the
+// reset a second, genuinely separate outage later in the same cycle would be
+// taken back in silence.
+func TestWatchdogStallIsReportedOncePerStorm(t *testing.T) {
+	t.Parallel()
+	clk := newManualClock()
+	var buf bytes.Buffer
+	r, rec := newWatchdogRefresher(clk.now, slog.New(slog.NewJSONHandler(&buf, nil)), 90*time.Second, 45*time.Second)
+	common := handedOffCommon()
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	stormToStall := func(label string) {
+		t.Helper()
+		for i := 0; i < 12; i++ {
+			clk.advance(20 * time.Second)
+			if err := r.refresh(context.Background(), common, "open"); errors.Is(err, errReconnectStalled) {
+				return
+			}
+		}
+		t.Fatalf("%s never stalled", label)
+	}
+	stormToStall("first storm")
+
+	// FRP dials again before it notices the cancellation. Each dial must
+	// still fail, but the report is latched.
+	for i := 0; i < 3; i++ {
+		clk.advance(20 * time.Second)
+		if err := r.refresh(context.Background(), common, "open"); !errors.Is(err, errReconnectStalled) {
+			t.Fatalf("post-stall dial %d returned %v, want the stall error on every dial", i, err)
+		}
+	}
+	if got := strings.Count(buf.String(), `"event":"reconnect_stalled"`); got != 1 {
+		t.Fatalf("reconnect_stalled emitted %d times for one stall, want 1\nlog:\n%s", got, buf.String())
+	}
+	if len(rec.errs) != 1 {
+		t.Fatalf("requestRestart called %d times for one stall, want 1", len(rec.errs))
+	}
+
+	// A quiet gap ends the storm; a genuinely separate outage must report
+	// again rather than stay latched for the rest of the cycle.
+	clk.advance(50 * time.Second)
+	stormToStall("second storm")
+	if got := strings.Count(buf.String(), `"event":"reconnect_stalled"`); got != 2 {
+		t.Fatalf("reconnect_stalled emitted %d times across two separate storms, want 2 — the latch must reset\nlog:\n%s", got, buf.String())
+	}
+	if len(rec.errs) != 2 {
+		t.Fatalf("requestRestart called %d times across two storms, want 2", len(rec.errs))
+	}
+}

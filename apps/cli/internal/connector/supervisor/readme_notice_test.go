@@ -3,6 +3,7 @@ package supervisor
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -43,5 +44,21 @@ func TestREADMEQuotesTheActualReconnectNotice(t *testing.T) {
 	}
 	if !strings.Contains(string(source), `"`+documented+`"`) {
 		t.Errorf("README documents a reconnect_retrying message refresher.go never logs:\n  README: %q\nUpdate the README sample and the log call together.", documented)
+	}
+
+	// The message is not the only thing an operator reads off that sample:
+	// gives_up_after_seconds is the number they act on, and nothing else
+	// would notice it going stale if reconnectStallWindow were retuned.
+	giveUp := regexp.MustCompile(`gives_up_after_seconds=([0-9.]+)`).FindSubmatch(readme)
+	if giveUp == nil {
+		t.Fatal("README sample has no gives_up_after_seconds field")
+	}
+	documentedSeconds, err := strconv.ParseFloat(string(giveUp[1]), 64)
+	if err != nil {
+		t.Fatalf("gives_up_after_seconds is not a number: %v", err)
+	}
+	if documentedSeconds != reconnectStallWindow.Seconds() {
+		t.Errorf("README documents gives_up_after_seconds=%v but reconnectStallWindow is %v (%vs); update the sample and the constant together",
+			documentedSeconds, reconnectStallWindow, reconnectStallWindow.Seconds())
 	}
 }

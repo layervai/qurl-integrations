@@ -160,11 +160,13 @@ type redialKnockRefresher struct {
 	// Reconnect-watchdog state, guarded by mu with everything above.
 	// lastDialAt stamps the previous physical dial, stormStartedAt opens the
 	// current unbroken redial storm (zero outside one), stormDials counts the
-	// dials inside it, and stormNoticed latches the one operator notice.
+	// dials inside it, stormNoticed latches the one operator notice, and
+	// stormStalled latches the one stall report.
 	lastDialAt     time.Time
 	stormStartedAt time.Time
 	stormDials     int
 	stormNoticed   bool
+	stormStalled   bool
 }
 
 // noteRedialLocked advances the reconnect watchdog for one physical dial and
@@ -182,6 +184,7 @@ func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time
 		r.stormStartedAt = time.Time{}
 		r.stormDials = 0
 		r.stormNoticed = false
+		r.stormStalled = false
 	}
 	r.lastDialAt = t
 	if r.stormStartedAt.IsZero() {
@@ -191,15 +194,24 @@ func (r *redialKnockRefresher) noteRedialLocked(ctx context.Context, t time.Time
 
 	elapsed := t.Sub(r.stormStartedAt)
 	if elapsed >= r.stall() {
-		r.log().WarnContext(ctx, "connector: the tunnel connection kept dropping for too long; restarting the connection cycle",
-			"event", reasonReconnectStalled,
-			"resource_id", r.resourceID,
-			"stalled_seconds", elapsed.Seconds(),
-			"dial_attempts", r.stormDials)
 		stalled := fmt.Errorf("%w: no tunnel session for %s across %d dial attempts", errReconnectStalled, elapsed.Round(time.Second), r.stormDials)
-		if r.requestRestart != nil {
-			r.requestRestart(stalled)
+		// Latched like the notice above. Canceling the cycle does not stop
+		// FRP instantly, so it can dial again before its Run observes the
+		// cancellation; without this the same stall would report twice.
+		// requestRestart is already idempotent on the cause — this is about
+		// not emitting a duplicate operator line.
+		if !r.stormStalled {
+			r.stormStalled = true
+			r.log().WarnContext(ctx, "connector: the tunnel connection kept dropping for too long; restarting the connection cycle",
+				"event", reasonReconnectStalled,
+				"resource_id", r.resourceID,
+				"stalled_seconds", elapsed.Seconds(),
+				"dial_attempts", r.stormDials)
+			if r.requestRestart != nil {
+				r.requestRestart(stalled)
+			}
 		}
+		// Returned on every dial, latched or not: each one must still fail.
 		return stalled
 	}
 	if r.stormDials >= reconnectStallNoticeAfter && !r.stormNoticed {
