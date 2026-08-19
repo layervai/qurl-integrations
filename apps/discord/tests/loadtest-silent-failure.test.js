@@ -1619,7 +1619,8 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     //
     // Exempted by CALL SITE rather than by dropping the primitives from the
     // list, which is what keeps the ban total everywhere else: a writeFileSync
-    // added to runRound, to main(), or at module level still fails here.
+    // added to runRound, to main(), at module level, or as a second call
+    // inside a ledger writer itself still fails here.
     // Relaxing the list instead would have re-opened the exact hole —
     // writeFileSync and appendFileSync are the two most obvious ways to
     // reinstate the temp file, and both are ledger primitives.
@@ -1631,12 +1632,22 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // bytes. openSync is banned outside the ledger rather than by mode: the
     // only descriptor this script opens is preflightLedger's 0600 probe, so
     // anywhere else there is still no legitimate call to distinguish it from.
+    // That probe's MODE is not pinned anywhere — this is a static call-site
+    // check, and preflightLedger is unexported and reads a module-level
+    // LEDGER_PATH, so nothing runtime reaches it. Read this as "the ledger is
+    // the only opener", not as "the ledger opens 0600". The sibling
+    // gateway-resume-spike.js does pin its own 0600 (tests/gateway-resume-
+    // spike.test.js), and the ledger inherited that file's threat model
+    // without inheriting the test.
     //
-    // Paired (writer, primitive) rather than a blanket per-function pass. Each
-    // writer legitimately uses exactly ONE of these, so pairing keeps the ban
-    // live inside the ledger too: a copyFileSync added to pruneLedger, or an
-    // appendFileSync to preflightLedger, is still a stray. A per-function
-    // exemption would wave all eight through the moment a function is named.
+    // The exemption is the three known call NODES, not a function range and
+    // not a primitive name. Each writer legitimately makes exactly one of
+    // these calls, so resolving them to specific nodes keeps the ban fully
+    // live inside the ledger: a copyFileSync added to pruneLedger, an
+    // appendFileSync added to preflightLedger, and a SECOND writeFileSync
+    // added alongside the prune are all still strays. Exempting by range
+    // would pass the first two only if their primitive happened to differ,
+    // and would pass the third outright.
     const ledgerWrites = [
       { writer: 'preflightLedger', primitive: 'openSync' },
       { writer: 'recordResource', primitive: 'appendFileSync' },
@@ -1650,23 +1661,23 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       expect({ writer, found: Boolean(fn) }).toEqual({ writer, found: true });
       const owned = callsNamed(primitive)
         .filter((node) => node.start >= fn.start && node.end <= fn.end);
-      // Positive assertion, so the exemption cannot go vacuous. Without it,
-      // deleting the ledger's writes leaves every count at 0 and this test
-      // green while it has stopped exempting — and therefore stopped
-      // describing — anything.
-      expect({ writer, primitive, exercised: owned.length > 0 })
-        .toEqual({ writer, primitive, exercised: true });
-      return { fn, primitive };
+      // Exactly one, which is two assertions in one. It pins the "each writer
+      // writes once" invariant the pairing above is built on, and it keeps
+      // the exemption from going vacuous — delete the ledger's writes and a
+      // merely-positive check would leave every stray count at 0, green while
+      // the test had stopped describing anything.
+      expect({ writer, primitive, calls: owned.length })
+        .toEqual({ writer, primitive, calls: 1 });
+      return owned[0];
     });
-    const isLedgerWrite = (primitive, node) => ledgerWrites.some(
-      (w) => w.primitive === primitive
-        && node.start >= w.fn.start && node.end <= w.fn.end,
-    );
+    // Identity, not range: callsNamed re-walks the same parsed ast, so the
+    // node objects it returns are the same references collected above.
+    const exempt = new Set(ledgerWrites);
     for (const primitive of [
       'writeFileSync', 'writeFile', 'createWriteStream',
       'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
     ]) {
-      const stray = callsNamed(primitive).filter((node) => !isLedgerWrite(primitive, node));
+      const stray = callsNamed(primitive).filter((node) => !exempt.has(node));
       expect({ primitive, calls: stray.length }).toEqual({ primitive, calls: 0 });
     }
     // And nothing to unlink, which is the other half of why no cleanup path
