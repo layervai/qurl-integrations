@@ -49,11 +49,14 @@ function tempLedger(contents) {
   return p;
 }
 
-// The same place, deliberately NOT created: preflightLedger creating it is the
-// thing under test, and a file this helper had already written would carry
-// this process's umask rather than the mode the probe asks for. Registered for
-// the same cleanup, since the probe leaves it behind.
-function unusedLedgerPath(name) {
+// The same place, but absent when handed over — matching the `absent` naming
+// the readLedger cases use, and naming the precondition rather than the end
+// state, since the probe does go on to create it. Deliberately not created
+// here: that creation is the thing under test, and a file this helper had
+// already written would carry this process's umask rather than the mode the
+// probe asks for. Registered for the same cleanup, since the probe leaves it
+// behind.
+function absentLedgerPath(name) {
   const p = path.join(os.tmpdir(), `loadtest-ledger-test-${process.pid}-${name}.jsonl`);
   created.push(p);
   return p;
@@ -92,7 +95,7 @@ describe('preflightLedger', () => {
   const isUnix = process.platform !== 'win32';
 
   it('creates the ledger rather than only probing for it', () => {
-    const ledger = unusedLedgerPath('preflight-create');
+    const ledger = absentLedgerPath('preflight-create');
     preflightLedger(ledger);
     expect(fs.existsSync(ledger)).toBe(true);
   });
@@ -118,7 +121,7 @@ describe('preflightLedger', () => {
     // window at all — it throws ERR_WORKER_UNSUPPORTED_OPERATION, failing
     // this case rather than skipping it, which is the direction a runner
     // switch should fail in.
-    const ledger = unusedLedgerPath('preflight-mode');
+    const ledger = absentLedgerPath('preflight-mode');
     const priorUmask = process.umask(0o000);
     try {
       preflightLedger(ledger);
