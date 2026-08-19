@@ -1,7 +1,9 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -378,6 +380,112 @@ func TestApplyKnockResultContract(t *testing.T) {
 	}
 	if _, err := applyKnockResult(nil, testResource, &knock.Result{}); !errors.Is(err, errNilCommonConfig) {
 		t.Fatalf("nil common = %v, want errNilCommonConfig", err)
+	}
+}
+
+// TestRefreshStampsOnlyTheDialTargetAndToken pins the refresher's write set —
+// ServerAddr, ServerPort and the one knock-token metadata entry — against the
+// config production actually runs: frpgen's output after Complete(). The pin
+// is against that COMPLETED shape specifically, which is the shape the
+// concurrency argument is about; a write to a field left at its zero value
+// until completion would not show up here.
+//
+// It is load-bearing for the concurrency argument on redialKnockRefresher, not
+// tidiness. The fork reads the stamped config without synchronization from
+// several of its own goroutines, and what keeps that harmless is that none of
+// them reads a field a refresh writes. Let a refresh start restamping a
+// Transport field — physicalDialInOpen reads two of those once per
+// ReqWorkConn, realConnect and heartbeatWorker read more — and those reads
+// become a live data race in production rather than the latent one the
+// unmuxed seam has.
+//
+// It drives refresh rather than applyKnockResult alone because refresh is free
+// to write common outside that helper, and nothing else in the package would
+// notice: a `common.Transport.Protocol = "websocket"` stitched into refresh
+// beside its success log passes every other test here.
+//
+// Two techniques, because neither covers the field alone. The marshaled-JSON
+// compare catches any write that CHANGES a value, including one made through
+// the *bool knobs — a shallow struct copy would share those pointers and
+// compare each to itself. The pointer-identity checks catch a knob repointed at
+// an equal value, which a value snapshot cannot see. Neither catches a
+// value-preserving write through an existing pointer (`*Enable = true` where it
+// is already true), nor one of the three non-bool pointers on this config
+// (Auth.TokenSource, Auth.OIDC.TokenSource, WebServer.TLS) repointed at an
+// equal value — those are nil in the generated config, so a pointer check on
+// them would assert nothing. That is the acknowledged floor of this technique
+// rather than a claim of total coverage.
+func TestRefreshStampsOnlyTheDialTargetAndToken(t *testing.T) {
+	t.Parallel()
+	common := productionCommon(t, "write-set")
+	clk := newManualClock()
+	knocker := &fakeKnocker{script: []knockResp{healthyKnockResp("stamped.example:7443")}}
+	r := newTestRefresher(knocker, time.Hour, clk.now)
+
+	// Presence, not value: this both keeps refresh off the first-cycle handoff
+	// path so it really stamps, and proves the key is absent so the restore
+	// below can simply delete it.
+	if _, ok := common.Metadatas[frpgen.MetaQURLKnockToken]; ok {
+		t.Fatal("test premise broken: the generated config already carries a knock token, so refresh would hand off instead of stamping")
+	}
+	beforeAddr, beforePort := common.ServerAddr, common.ServerPort
+	// Every *bool the fork reads off this config. Complete() populates all
+	// four, and realConnect dereferences TLS.DisableCustomTLSFirstByte the same
+	// way it does the rest, so a knob repointed at an equal value is an
+	// unsynchronized write that the value snapshot below cannot see.
+	beforeMux, beforeExit := common.Transport.TCPMux, common.LoginFailExit
+	beforeTLS, beforeFirstByte := common.Transport.TLS.Enable, common.Transport.TLS.DisableCustomTLSFirstByte
+	// Indented on purpose: this renders only on a failure that should never
+	// happen, and one field per line is what makes the offending field obvious
+	// without a diff helper. MarshalIndent is as deterministic as Marshal.
+	before, err := json.MarshalIndent(common, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal the pre-stamp config: %v", err)
+	}
+
+	if err := r.refresh(context.Background(), common, "open"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := knocker.calls.Load(); got != 1 {
+		t.Fatalf("knocks = %d, want exactly 1 (the stamp under test)", got)
+	}
+	if common.ServerAddr != "stamped.example" || common.ServerPort != 7443 {
+		t.Fatalf("dial target = %s:%d, want the ACK's stamped.example:7443", common.ServerAddr, common.ServerPort)
+	}
+	if got := common.Metadatas[frpgen.MetaQURLKnockToken]; got != "ac-token" {
+		t.Fatalf("knock token = %q, want the ACK's ac-token", got)
+	}
+	for _, knob := range []struct {
+		name          string
+		before, after *bool
+	}{
+		{"Transport.TCPMux", beforeMux, common.Transport.TCPMux},
+		{"Transport.TLS.Enable", beforeTLS, common.Transport.TLS.Enable},
+		{"Transport.TLS.DisableCustomTLSFirstByte", beforeFirstByte, common.Transport.TLS.DisableCustomTLSFirstByte},
+		{"LoginFailExit", beforeExit, common.LoginFailExit},
+	} {
+		if knob.before != knob.after {
+			t.Errorf("refresh repointed %s; the fork dereferences it from its own goroutines, so replacing the pointer is an unsynchronized write even when the value is unchanged", knob.name)
+		}
+	}
+
+	// Undo exactly the three sanctioned writes. Anything else the stamp
+	// touched survives into the comparison below.
+	//
+	// The delete does not lean on the fork's `metadatas,omitempty` tag: the
+	// generated config carries MetaClientVersion, so the map is non-nil going
+	// in — applyKnockResult never takes its allocate-from-nil branch — and
+	// still non-empty coming out. It would lean on that tag only if frpgen
+	// stopped stamping a client version, leaving a nil map to compare against
+	// the empty one applyKnockResult would then allocate.
+	common.ServerAddr, common.ServerPort = beforeAddr, beforePort
+	delete(common.Metadatas, frpgen.MetaQURLKnockToken)
+	after, err := json.MarshalIndent(common, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal the post-stamp config: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("refresh wrote outside its dial-target-and-token set; the fork reads this config unsynchronized from its own goroutines\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
