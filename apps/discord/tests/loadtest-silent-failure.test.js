@@ -23,6 +23,12 @@
  *   - The upload call. Hand-rolled, it had no timeout (a stalled connector
  *     hangs the round forever) and no response-shape checks (a 200 with no
  *     resource_id blamed the mint leg for an upload fault).
+ *   - The generated payload. It used to be written to /tmp and read straight
+ *     back once per round, unlinked by nothing — ~120 files and ~120MB for a
+ *     default window. A round that throws is logged and the loop carries on,
+ *     so a /tmp filled by the run's own litter turns every remaining round
+ *     into a `Round N FAILED` line: the window still runs to completion and
+ *     still measures nothing.
  *
  * The upload half is a STATIC check because runRound is unreachable from a
  * test: it is not exported, its only caller main() is behind
@@ -45,7 +51,7 @@ const traverse = traverseModule.default || traverseModule;
 
 const {
   readFlag, hasFlag, parsePositiveInt, resolveNumericArgs, resolveFileArg, checkUploadFile,
-  resolveArgErrors, resolveGuardInputs,
+  resolveArgErrors, resolveGuardInputs, generateTestPayload,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -638,6 +644,30 @@ describe('loadtest preflight — the composition main() used to hold inline', ()
   });
 });
 
+describe('loadtest generated payload — the temp file that used to litter /tmp', () => {
+  // What the operator gets on the wire has to be byte-for-byte what the temp
+  // file held, or this stopped being a cleanup and became a change to what is
+  // being measured.
+  it('is still 1MB of the same filler byte', () => {
+    const payload = generateTestPayload();
+    expect(Buffer.isBuffer(payload)).toBe(true);
+    expect(payload).toHaveLength(1024 * 1024);
+    // Not a spot check of the ends: Buffer.alloc's fill argument is a string
+    // here, and a wrong one ('AB', or a length the fill does not divide)
+    // repeats across the buffer rather than corrupting only an edge.
+    expect(payload.equals(Buffer.alloc(1024 * 1024, 'A'))).toBe(true);
+  });
+
+  it('hands back one buffer rather than allocating per round', () => {
+    // Identity, not equality — equality passes on a fresh 1MB allocation
+    // every round, which is the cost this removed. The old code paid a write
+    // and a read on top of that, but the allocation is the part that survives
+    // a well-meaning "just drop the temp file" fix that keeps Buffer.alloc
+    // inside runRound.
+    expect(generateTestPayload()).toBe(generateTestPayload());
+  });
+});
+
 describe('loadtest script — static checks on call sites no test can reach', () => {
   const parseFile = (...segments) =>
     parser.parse(fs.readFileSync(path.join(__dirname, '..', ...segments), 'utf8'), {
@@ -664,6 +694,17 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       CallExpression(p) {
         if (calleeName(p.node) === name) found.push(p.node);
       },
+    });
+    return found;
+  };
+
+  // Scoping a call count to one function's source range is how these checks
+  // avoid measuring a same-named call somewhere else in the file — see the
+  // preflight-ordering test below for the case that first needed it.
+  const findFunction = (name) => {
+    let found = null;
+    traverse(ast, {
+      FunctionDeclaration(p) { if (p.node.id?.name === name) found = p.node; },
     });
     return found;
   };
@@ -734,10 +775,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // Scoped to main()'s body on purpose: createOneTimeLink is called twice,
     // and the FIRST one lexically is the location leg inside runRound. A
     // whole-file comparison would silently measure the wrong call.
-    let main = null;
-    traverse(ast, {
-      FunctionDeclaration(p) { if (p.node.id?.name === 'main') main = p.node; },
-    });
+    const main = findFunction('main');
     expect(main).not.toBeNull();
     const firstInMain = (name) => {
       const starts = callsNamed(name)
@@ -793,6 +831,42 @@ describe('loadtest script — static checks on call sites no test can reach', ()
       'fileBuffer', 'filename', 'contentType', 'apiKey', 'viewerTtlSeconds',
     ]);
     expect(callsNamed('reUploadBuffer')[0].arguments).toHaveLength(3);
+  });
+
+  it('writes nothing to disk', () => {
+    // The rule is the primitive, not the helper. Counting calls to
+    // generateTestPayload cannot express "and nothing else writes a scratch
+    // file either", which is the regression that actually recurs — the
+    // round-scoped temp file was itself the second-most-obvious way to hand
+    // runRound some bytes. This script reads a payload and posts it; it has
+    // no business writing anywhere.
+    expect(callsNamed('writeFileSync')).toHaveLength(0);
+    expect(callsNamed('writeFile')).toHaveLength(0);
+    expect(callsNamed('createWriteStream')).toHaveLength(0);
+    // And nothing to unlink, which is the other half of why no cleanup path
+    // was added here — an unlink would mean the litter is back and merely
+    // swept, leaving a run that is killed mid-window still littering.
+    expect(callsNamed('unlinkSync')).toHaveLength(0);
+  });
+
+  it('keeps the per-round read for --file and drops it for the generated payload', () => {
+    // Scoped to runRound rather than counted whole-file: fs.readFileSync also
+    // loads .env.loadtest at module level, so a whole-file count of 2 is
+    // equally true before and after this change and would pin nothing.
+    //
+    // The two halves are one assertion because the scope splits them. --file
+    // must STILL be re-read every round (the operator may be rewriting it,
+    // and checkUploadFile's refusal of a pipe is written against exactly that
+    // re-read), while the generated payload must NOT be — allocating it in
+    // the round leaves 'hands back one buffer' green, since that test calls
+    // the memoized helper directly and never sees who else allocates.
+    const runRound = findFunction('runRound');
+    expect(runRound).not.toBeNull();
+    const inRunRound = (name) => callsNamed(name)
+      .filter((node) => node.start >= runRound.start && node.end <= runRound.end);
+    expect(inRunRound('readFileSync')).toHaveLength(1);
+    expect(inRunRound('generateTestPayload')).toHaveLength(1);
+    expect(inRunRound('alloc')).toHaveLength(0);
   });
 
   it('imports reUploadBuffer from the connector client', () => {

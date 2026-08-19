@@ -890,6 +890,8 @@ module.exports = {
   resolveFileArg,
   checkUploadFile,
   resolveArgErrors,
+  // The payload a run without --file uploads
+  generateTestPayload,
   // Target safety guard
   resolveGuardInputs,
   targetGuardReport,
