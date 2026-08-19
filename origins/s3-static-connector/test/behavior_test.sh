@@ -158,6 +158,9 @@ stub_get_count_since() {
   pattern="$2"
   docker logs "$STUB" 2>&1 | tail -n +"$((mark + 1))" | grep -c "$pattern"
 }
+origin_log_mark() {
+  docker logs "$ORIGIN" 2>&1 | wc -l | tr -d ' '
+}
 ok() { pass=$((pass+1)); printf '  ok  %s\n' "$1"; }
 no() { fail=$((fail+1)); printf 'FAIL  %s\n' "$1"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else no "$1 (got '$2', want '$3')"; fi; }
@@ -187,6 +190,49 @@ expect_stub_gets_since() {
     sleep 0.1
   done
   expect_eq "$label" "$got" "$want"
+}
+# Assert one JSON access-log field of the origin request whose logged $uri
+# starts with $3, among the log lines written since mark $2. Clients cannot tell
+# a locally-rejected request from an upstream-rejected one (both are the generic
+# 404), so the access log is the only evidence of where a request stopped: a
+# request rejected before `set $s3_target` logs an empty "key" and
+# "upstream_status", while a proxied one logs the key it built and the status
+# the signer hop returned.
+# This takes an origin-log mark, not a stub-log one, so it must not touch the
+# `mark`/`label` globals the stub helpers share with their call sites — hence
+# the ol_/cc_ prefixes here and below.
+expect_origin_log_field_since() {
+  ol_label="$1"
+  ol_mark="$2"
+  ol_prefix="$3"
+  ol_field="$4"
+  ol_want="$5"
+  ol_line=""
+  for _ in $(seq 1 20); do
+    ol_line="$(docker logs "$ORIGIN" 2>&1 | tail -n +"$((ol_mark + 1))" \
+      | grep -F "\"path\":\"$ol_prefix" | tail -n 1)"
+    [ -n "$ol_line" ] && break
+    sleep 0.1
+  done
+  if [ -z "$ol_line" ]; then
+    no "$ol_label (no access log line for path prefix '$ol_prefix')"
+    return
+  fi
+  expect_eq "$ol_label" "$(printf '%s\n' "$ol_line" | cache_json_str "$ol_field")" "$ol_want"
+}
+# One control-char probe: the client gets the generic 404, and the access log
+# proves nginx stopped the request before it became an S3 key or reached the
+# signer. $2 is the percent-encoded request path; $3 is the decoded $uri prefix
+# to match in the log, kept clear of the control byte itself.
+expect_control_char_rejected() {
+  cc_label="$1"
+  cc_probe="$2"
+  cc_prefix="$3"
+  cc_mark="$(origin_log_mark)"
+  cc_code="$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$base$cc_probe")"
+  expect_eq "$cc_label is rejected" "$cc_code" 404
+  expect_origin_log_field_since "$cc_label builds no S3 key" "$cc_mark" "$cc_prefix" key ""
+  expect_origin_log_field_since "$cc_label never reaches the signer" "$cc_mark" "$cc_prefix" upstream_status ""
 }
 
 # 0. Runtime cachectl JSON escaping matches the host-side unit contract. This
@@ -410,6 +456,33 @@ expect_stub_gets_since "Range upstream GETs after cached range" "$mark" 'GET /ra
 expect_eq "unsatisfiable Range -> 416" \
   "$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=9999-' "$base/range.bin")" 416
 
+# 13b. Control bytes are rejected in the default (no S3_PREFIX) config too —
+# the common deployment shape — and the rejection path keeps the security
+# headers and stays out of error_log.
+if [ "$waive_control_char_contract" != "true" ]; then
+  warn_mark="$(origin_log_mark)"
+  expect_control_char_rejected "default-config CRLF viewer path" \
+    "/crlf%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css" '/crlf HTTP'
+  expect_control_char_rejected "default-config bare-LF viewer path" \
+    "/lf%20HTTP/1.1%0aHost:h%0a%0aGET%20/styles/app.css" '/lf HTTP'
+  expect_control_char_rejected "default-config tab viewer path" "/tab%09probe.html" '/tab'
+
+  # A rejection is an internal 400 -> @notfound redirect; pin that it still
+  # carries the same header set as every other error status.
+  fetch --path-as-is "$base/hdr%09probe.html"
+  expect_eq "control-char rejection status" "$(status_code)" 404
+  expect_security_headers "control-char rejection"
+
+  # $s3_target is initialized above the guard, so a rejected request must not
+  # also emit a per-request "uninitialized variable" warning — that would turn a
+  # control-char flood into an error_log flood.
+  if docker logs "$ORIGIN" 2>&1 | tail -n +"$((warn_mark + 1))" | grep -q 'uninitialized "s3_target"'; then
+    no "control-char rejection emits no uninitialized s3_target warning"
+  else
+    ok "control-char rejection emits no uninitialized s3_target warning"
+  fi
+fi
+
 # 14. S3_PREFIX is joined with the clean-URL path at runtime.
 docker rm -f "$ORIGIN" >/dev/null 2>&1
 docker run -d --name "$ORIGIN" --network "$NET" -p 127.0.0.1::8080 \
@@ -455,17 +528,21 @@ else
   # root; under S3_PREFIX=site a legit request signs /site/styles/app.css, so any
   # upstream GET for the bare /styles/app.css means the prefix boundary escaped.
   mark="$(stub_log_mark)"
-  code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' \
-    "$base/q%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css")
-  expect_eq "CRLF control-char viewer path is rejected" "$code" 404
+  expect_control_char_rejected "CRLF control-char viewer path" \
+    "/q%20HTTP/1.1%0d%0aHost:h%0d%0a%0d%0aGET%20/styles/app.css" '/q HTTP'
   expect_stub_gets_since "CRLF request-splitting cannot escape S3_PREFIX" "$mark" 'GET /styles/app.css ' 0
 
-  # Pin a non-CR/LF member of the complete C0/DEL class and assert the request
-  # never reaches the signer, even if the stub would independently return 404.
+  # A bare LF splits the request just as well; CR is not required, so pin it
+  # separately instead of assuming the CR/LF pair is the whole vector.
   mark="$(stub_log_mark)"
-  code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$base/a%09b.html")
-  expect_eq "tab control-char viewer path is rejected" "$code" 404
-  expect_stub_gets_since "tab control-char viewer path is not proxied" "$mark" 'GET ' 0
+  expect_control_char_rejected "bare-LF control-char viewer path" \
+    "/l%20HTTP/1.1%0aHost:h%0a%0aGET%20/styles/app.css" '/l HTTP'
+  expect_stub_gets_since "bare-LF request-splitting cannot escape S3_PREFIX" "$mark" 'GET /styles/app.css ' 0
+
+  # Pin a non-CR/LF member of the complete C0/DEL class too. The stub would 404
+  # this path on its own, so the access log — not the stub — is what proves the
+  # request stopped in nginx.
+  expect_control_char_rejected "tab control-char viewer path" "/tab%09probe.html" '/tab'
 fi
 
 # 15. The entrypoint supervisor exits the container if either child dies.
