@@ -1108,7 +1108,7 @@ func requiredWorkflowQualityGates(t *testing.T, spec *requiredWorkflowSpec, work
 		if !looksLikeRequiredWorkflowQualityGate(spec, &job, needs) {
 			continue
 		}
-		if !containsString(needs, "changes") {
+		if !slices.Contains(needs, "changes") {
 			t.Errorf("%s quality gate %q must include changes in needs", spec.name, id)
 			continue
 		}
@@ -1128,7 +1128,7 @@ func looksLikeRequiredWorkflowQualityGate(spec *requiredWorkflowSpec, job *githu
 	if job.Name == spec.detectChangesName || job.Name == spec.requiredName {
 		return false
 	}
-	return !containsString(needs, "required")
+	return !slices.Contains(needs, "required")
 }
 
 func sortedQualityGateIDs(qualityGates map[string]bool) []string {
@@ -1164,15 +1164,6 @@ func parseWorkflowNeeds(t *testing.T, jobID string, needs any) []string {
 		t.Fatalf("%s.needs has unexpected type %T", jobID, needs)
 		return nil
 	}
-}
-
-func containsString(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func stringSet(values []string) map[string]bool {

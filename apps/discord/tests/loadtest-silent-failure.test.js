@@ -29,16 +29,30 @@
  *   - The upload call. Hand-rolled, it had no timeout (a stalled connector
  *     hangs the round forever) and no response-shape checks (a 200 with no
  *     resource_id blamed the mint leg for an upload fault).
+ *   - The generated payload. It used to be written to /tmp and read straight
+ *     back once per round, unlinked by nothing — ~120 files and ~120MB for a
+ *     default window. A round that throws is logged and the loop carries on,
+ *     so a /tmp filled by the run's own litter turns every remaining round
+ *     into a `Round N FAILED` line: the window still runs to completion and
+ *     still measures nothing.
  *
- * The upload half is a STATIC check because runRound is unreachable from a
- * test: it is not exported, its only caller main() is behind
- * `require.main === module`, and scripts/ sits outside collectCoverageFrom,
- * so neither jest nor the coverage gate can see it. eslint extends only
- * eslint:recommended, so it cannot see it either. Parsing the source is what
- * is left — same approach as tests/ddb-reserved-words-static.test.js, and the
- * sibling of the mintLinks call-shape check #1168 added to
- * tests/loadtest-target-guard.test.js. The two stay in separate files because
- * that one's scaffolding is scoped inside its own describe.
+ * The upload and payload halves are STATIC checks, for a reason that survived
+ * #1173 exporting runRound: what they assert is the SHAPE OF THE SOURCE, and
+ * calling a function cannot see that. Running a round proves the bytes that
+ * reach reUploadBuffer; it cannot distinguish a memoized buffer from one
+ * allocated fresh inside the round, and it can say nothing at all about
+ * whether some other line in the file writes a scratch file. Coverage would
+ * not have caught either anyway — scripts/ sits outside collectCoverageFrom,
+ * and eslint extends only eslint:recommended, so neither can see this file's
+ * internals. Parsing the source is what is left — same approach as
+ * tests/ddb-reserved-words-static.test.js, and the sibling of the mintLinks
+ * call-shape check #1168 added to tests/loadtest-target-guard.test.js. The two
+ * stay in separate files because that one's scaffolding is scoped inside its
+ * own describe.
+ *
+ * runRound itself IS reachable now (#1173 exports it for
+ * tests/loadtest-round-accounting.test.js). Anything expressible as "run a
+ * round and assert on the result" belongs there, not here.
  */
 
 const fs = require('fs');
@@ -53,6 +67,7 @@ const {
   FLAGS, flagSpec, readFlag, readBooleanFlag, resolveBooleanArgs,
   parsePositiveInt, resolveNumericArgs, resolveFileArg, resolveUnknownArgs,
   checkUploadFile, resolveArgErrors, resolveGuardInputs, DEFAULT_MAX_FAIL_RATE_PCT,
+  generateTestPayload,
 } = require('../scripts/loadtest-standalone');
 
 describe('loadtest numeric flags — values that would run the loops zero times', () => {
@@ -698,7 +713,8 @@ describe('loadtest unknown arguments — the tokens no reader ever saw', () => {
     // carry what DOES exist or the operator is told only that they are wrong.
     expect(errorsFor(['--locatoin'])).toEqual([
       '--locatoin is not a flag this script accepts — accepted flags are '
-        + '--count, --duration, --interval, --file, --max-fail-rate, --location, --allow-production',
+        + '--count, --duration, --interval, --file, --max-fail-rate, --ledger, --reclaim, '
+        + '--location, --allow-production',
     ]);
     expect(errorsFor(['payload.bin'])[0])
       .toContain('this script takes no positional arguments; accepted flags are --count');
@@ -862,6 +878,12 @@ describe('loadtest flag table — the one list everything reads', () => {
       .toEqual([
         ['count', '100'], ['duration', '7200'], ['interval', '60'],
         ['file', null], ['max-fail-rate', '10'],
+        // Both null: --ledger's real default is generated per run (a timestamped
+        // path under the temp directory) so the table cannot hold it, and
+        // --reclaim is a mode switch with no default at all — its absent value
+        // is refused rather than filled in. Their defaultLabels carry the
+        // wording instead, asserted below.
+        ['ledger', null], ['reclaim', null],
       ]);
     // --max-fail-rate's default reaches the run as a NUMBER through an export
     // of its own, so the table has to be what feeds it or the two drift: the
@@ -1177,6 +1199,30 @@ describe('loadtest preflight — the composition main() used to hold inline', ()
   });
 });
 
+describe('loadtest generated payload — the temp file that used to litter /tmp', () => {
+  // What the operator gets on the wire has to be byte-for-byte what the temp
+  // file held, or this stopped being a cleanup and became a change to what is
+  // being measured.
+  it('is still 1MB of the same filler byte', () => {
+    const payload = generateTestPayload();
+    expect(Buffer.isBuffer(payload)).toBe(true);
+    expect(payload).toHaveLength(1024 * 1024);
+    // Not a spot check of the ends: Buffer.alloc's fill argument is a string
+    // here, and a wrong one ('AB', or a length the fill does not divide)
+    // repeats across the buffer rather than corrupting only an edge.
+    expect(payload.equals(Buffer.alloc(1024 * 1024, 'A'))).toBe(true);
+  });
+
+  it('hands back one buffer rather than allocating per round', () => {
+    // Identity, not equality — equality passes on a fresh 1MB allocation
+    // every round, which is the cost this removed. The old code paid a write
+    // and a read on top of that, but the allocation is the part that survives
+    // a well-meaning "just drop the temp file" fix that keeps Buffer.alloc
+    // inside runRound.
+    expect(generateTestPayload()).toBe(generateTestPayload());
+  });
+});
+
 describe('loadtest script — static checks on call sites no test can reach', () => {
   const parseFile = (...segments) =>
     parser.parse(fs.readFileSync(path.join(__dirname, '..', ...segments), 'utf8'), {
@@ -1265,6 +1311,31 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     return found;
   };
 
+  // Scoping a call count to one function's source range is how these checks
+  // avoid measuring a same-named call somewhere else in the file — see the
+  // preflight-ordering test below for the case that first needed it.
+  //
+  // Matched across node shapes for the same reason the reUploadBuffer-params
+  // test below is: these checks exist to fail on a behavior change, not on a
+  // refactor that preserves it. Rewriting `async function runRound()` as
+  // `const runRound = async () => {}` would otherwise return null here and
+  // fail at the not-toBeNull guard — loudly rather than silently, but still
+  // for the wrong reason.
+  const findFunction = (name) => {
+    let found = null;
+    traverse(ast, {
+      FunctionDeclaration(p) { if (p.node.id?.name === name) found = p.node; },
+      VariableDeclarator(p) {
+        if (p.node.id.type !== 'Identifier' || p.node.id.name !== name) return;
+        const init = p.node.init;
+        if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+          found = init;
+        }
+      },
+    });
+    return found;
+  };
+
   it('hand-rolls no HTTP call of its own', () => {
     // The three guards that went missing — AbortSignal.timeout(60000), the
     // `success` check and the `resource_id` check — live in connector.js and
@@ -1308,7 +1379,9 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // the copy agrees with the table right up until somebody edits one of
     // them. That regression changes no behaviour on the day it lands, so no
     // runtime test can see it; the count is what does.
-    expect(callsNamed('flagSpec')).toHaveLength(5);
+    // Seven: the five that shipped with the table, plus --ledger and --reclaim
+    // reading their defaults from it like every other value-taking flag.
+    expect(callsNamed('flagSpec')).toHaveLength(7);
   });
 
   it('reads --max-fail-rate in main() through the shared reader', () => {
@@ -1354,12 +1427,15 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // defect itself. Weak alone — the identical body under any other name
     // passes it — which is precisely what the indexOf ban above covers.
     expect(callsNamed('getArg')).toHaveLength(0);
-    // Three call sites: the numeric resolver, --file, and --max-fail-rate.
-    // The third arrived with #1170's exit-code work and had to be routed
-    // through the shared reader deliberately — which is the whole point of
-    // counting rather than name-checking. A new flag cannot be added with its
-    // own ad-hoc lookup without failing here first.
-    expect(callsNamed('readFlag')).toHaveLength(3);
+    // Five call sites: the numeric resolver, --file, --max-fail-rate, and the
+    // reclaim ledger's --ledger and --reclaim. Each was routed through the
+    // shared reader deliberately rather than given its own lookup, which is
+    // the whole point of counting rather than name-checking — a new flag
+    // cannot be added with an ad-hoc scan without failing here first.
+    //
+    // The count rises as flags adopt the reader; what must stay at zero are
+    // the bans above. Raising it is only correct alongside those staying 0.
+    expect(callsNamed('readFlag')).toHaveLength(5);
     // One call site, unlike the resolvers' two: this one produces no constant
     // for the run to read, only errors, so resolveArgErrors is its only
     // caller. A second would mean argv being scanned for strays somewhere the
@@ -1440,10 +1516,7 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // Scoped to main()'s body on purpose: createOneTimeLink is called twice,
     // and the FIRST one lexically is the location leg inside runRound. A
     // whole-file comparison would silently measure the wrong call.
-    let main = null;
-    traverse(ast, {
-      FunctionDeclaration(p) { if (p.node.id?.name === 'main') main = p.node; },
-    });
+    const main = findFunction('main');
     expect(main).not.toBeNull();
     const firstInMain = (name) => {
       const starts = callsNamed(name)
@@ -1528,6 +1601,65 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     const calls = callsNamed('reUploadBuffer');
     expect(calls).not.toHaveLength(0);
     for (const call of calls) expect(call.arguments).toHaveLength(3);
+  });
+
+  it('writes nothing to disk', () => {
+    // The rule is the primitive, not the helper. Counting calls to
+    // generateTestPayload cannot express "and nothing else writes a scratch
+    // file either", which is the regression that actually recurs — the
+    // round-scoped temp file was itself the second-most-obvious way to hand
+    // runRound some bytes. This script reads a payload and posts it; it has
+    // no business writing anywhere.
+    //
+    // Every fs primitive that can put bytes on disk, not just the
+    // writeFileSync a straight revert of #1177 would use: appendFileSync and
+    // an openSync/writeSync pair reintroduce the same file while leaving a
+    // narrower ban green, and copyFileSync does it without ever naming the
+    // bytes. openSync is banned outright rather than by mode — this script
+    // opens no descriptors at all, for reading or writing, so there is no
+    // legitimate call to distinguish it from.
+    for (const primitive of [
+      'writeFileSync', 'writeFile', 'createWriteStream',
+      'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
+    ]) {
+      expect({ primitive, calls: callsNamed(primitive).length })
+        .toEqual({ primitive, calls: 0 });
+    }
+    // And nothing to unlink, which is the other half of why no cleanup path
+    // was added here — an unlink would mean the litter is back and merely
+    // swept, leaving a run that is killed mid-window still littering.
+    expect(callsNamed('unlinkSync')).toHaveLength(0);
+  });
+
+  it('keeps the per-round read for --file and drops it for the generated payload', () => {
+    // Scoped to runRound rather than counted whole-file: fs.readFileSync also
+    // loads .env.loadtest at module level, so a whole-file count of 2 is
+    // equally true before and after this change and would pin nothing.
+    //
+    // The two halves are one assertion because the scope splits them. --file
+    // must STILL be re-read every round (the operator may be rewriting it,
+    // and checkUploadFile's refusal of a pipe is written against exactly that
+    // re-read), while the generated payload must NOT be — allocating it in
+    // the round leaves 'hands back one buffer' green, since that test calls
+    // the memoized helper directly and never sees who else allocates.
+    //
+    // The generateTestPayload count pins a call LOCATION, which is more
+    // coupling than the other two need, and it is kept deliberately: it is
+    // the only check that fails when the round stops sourcing its payload
+    // from the memoized helper at all (`: Buffer.from(…)` in place of the
+    // call). The alloc and readFileSync counts are both unmoved by that, and
+    // the runtime tests never see it — they exercise the helper directly, not
+    // its caller. The cost is that hoisting the payload into main() and
+    // passing the buffer in would fail here despite preserving every stated
+    // property; that refactor is deliberate work, and failing loudly on it is
+    // the cheaper side of the trade.
+    const runRound = findFunction('runRound');
+    expect(runRound).not.toBeNull();
+    const inRunRound = (name) => callsNamed(name)
+      .filter((node) => node.start >= runRound.start && node.end <= runRound.end);
+    expect(inRunRound('readFileSync')).toHaveLength(1);
+    expect(inRunRound('generateTestPayload')).toHaveLength(1);
+    expect(inRunRound('alloc')).toHaveLength(0);
   });
 
   it('imports reUploadBuffer from the connector client', () => {
