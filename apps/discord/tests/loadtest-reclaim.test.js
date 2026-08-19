@@ -98,6 +98,15 @@ describe('pruneLedger', () => {
     expect(fs.existsSync(ledger)).toBe(true);
     expect(readLedger(ledger)).toEqual([]);
   });
+
+  it('preserves endpoint provenance, so the tenancy guard survives a prune', () => {
+    // A prune that drops `endpoint` disarms the guard on exactly the
+    // recovery re-run it exists to protect: ledgerEndpoints would come back
+    // empty and the sweep would delete against whatever host is configured.
+    const ledger = tempLedger(line('r_1', { endpoint: 'https://sandbox.example' }));
+    pruneLedger(ledger, new Set(['r_1']), 'https://sandbox.example');
+    expect([...ledgerEndpoints(ledger)]).toEqual(['https://sandbox.example']);
+  });
 });
 
 describe('reclaim', () => {
@@ -144,5 +153,24 @@ describe('reclaim', () => {
     const result = await reclaim(ledger);
     expect(result).toMatchObject({ refused: true });
     expect(deleteLink).not.toHaveBeenCalled();
+  });
+
+  it('refuses a ledger mixing two tenancies even when the current one is present', async () => {
+    // Deletes carry no per-id host, so a ledger spanning two endpoints would
+    // otherwise pass the guard and revoke the other tenancy's resources too.
+    const ledger = tempLedger(
+      line('r_1', { endpoint: config.QURL_ENDPOINT })
+      + line('r_2', { endpoint: `${config.QURL_ENDPOINT}-elsewhere` }),
+    );
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ refused: true });
+    expect(deleteLink).not.toHaveBeenCalled();
+  });
+
+  it('sweeps a ledger whose entries all name the current tenancy', async () => {
+    const ledger = tempLedger(line('r_1', { endpoint: config.QURL_ENDPOINT }));
+    const result = await reclaim(ledger);
+    expect(result).toMatchObject({ revoked: 1, failed: 0 });
+    expect(deleteLink).toHaveBeenCalledWith('r_1');
   });
 });

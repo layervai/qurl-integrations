@@ -168,7 +168,14 @@ function readLedger(ledgerPath) {
 // tenancy other than the one the resources were created on.
 function ledgerEndpoints(ledgerPath) {
   const endpoints = new Set();
-  if (!fs.existsSync(ledgerPath)) return endpoints;
+  // Same stat guard as readLedger rather than existsSync: a directory path
+  // would otherwise throw EISDIR here. Today reclaim returns before reaching
+  // this, but that ordering should not be what keeps it safe.
+  try {
+    if (!fs.statSync(ledgerPath).isFile()) return endpoints;
+  } catch {
+    return endpoints;
+  }
   for (const line of fs.readFileSync(ledgerPath, 'utf8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -184,9 +191,13 @@ function ledgerEndpoints(ledgerPath) {
 // the remainder instead of re-revoking everything. Truncated rather than
 // deleted on a clean sweep: an empty ledger reads as "nothing outstanding",
 // while a missing one is indistinguishable from a mistyped path.
-function pruneLedger(ledgerPath, remainingIds) {
+// `endpoint` is rewritten with each surviving id, not dropped: the tenancy
+// guard keys off it, and a pruned ledger is exactly what the documented
+// recovery re-run reads. Losing provenance here would silently disarm that
+// guard on the one path most likely to be run against the wrong tenancy.
+function pruneLedger(ledgerPath, remainingIds, endpoint = config.QURL_ENDPOINT) {
   try {
-    const kept = [...remainingIds].map(id => `${JSON.stringify({ resource_id: id })}\n`).join('');
+    const kept = [...remainingIds].map(id => `${JSON.stringify({ resource_id: id, endpoint })}\n`).join('');
     fs.writeFileSync(ledgerPath, kept);
   } catch (e) {
     console.error(`  Could not prune ledger ${ledgerPath} — ${e.message}`);
@@ -208,9 +219,12 @@ async function reclaim(ledgerPath) {
   // delete whose target list comes from a file and whose target host comes
   // from ambient config, and those two can disagree.
   console.log(`Reclaim: target endpoint ${config.QURL_ENDPOINT}`);
-  const recorded = ledgerEndpoints(ledgerPath);
-  if (recorded.size > 0 && !recorded.has(config.QURL_ENDPOINT)) {
-    console.error(`Reclaim: this ledger records resources on ${[...recorded].join(', ')}, not ${config.QURL_ENDPOINT}.`);
+  // Every recorded endpoint must be the current one, not merely include it:
+  // deletes are issued per id with no per-id host, so a ledger mixing two
+  // tenancies would otherwise pass and then delete the other one's resources.
+  const foreign = [...ledgerEndpoints(ledgerPath)].filter(e => e !== config.QURL_ENDPOINT);
+  if (foreign.length > 0) {
+    console.error(`Reclaim: this ledger records resources on ${foreign.join(', ')}, not ${config.QURL_ENDPOINT}.`);
     console.error('Refusing to delete against a different tenancy. Set QURL_ENDPOINT to match and re-run.');
     return { missing: false, revoked: 0, failed: 0, refused: true };
   }
@@ -225,8 +239,11 @@ async function reclaim(ledgerPath) {
   for (;;) {
     const pending = [...new Set(readLedger(ledgerPath) || [])].filter(id => !swept.has(id));
     if (pending.length === 0) break;
-    const seconds = Math.round(pending.length * 0.25);
-    console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (~${seconds}s)...`);
+    // Floor, not an estimate: the 50ms pacing gap is the only part that is
+    // known here, and per-request latency adds to it. Overstating the number
+    // the heartbeat exists to contextualise would undercut it.
+    const seconds = Math.max(1, Math.round(pending.length * 0.05));
+    console.log(`Reclaim: revoking ${pending.length} resource(s) from ${ledgerPath} (>=${seconds}s)...`);
     let done = 0;
     // Serial with a short gap. The tenancy is shared and rate-limited per
     // account, and a burst of hundreds of deletes is what trips it.
