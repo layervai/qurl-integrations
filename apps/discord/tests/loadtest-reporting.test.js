@@ -278,6 +278,10 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
       path.join(__dirname, '..', 'scripts', 'loadtest-standalone.js'), 'utf8',
     );
     const ast = parser.parse(source, { sourceType: 'script' });
+    // Matches a FunctionDeclaration only. That is fail-closed rather than a
+    // gap: converting resolveBooleanArgs to an arrow-const leaves this null
+    // and trips the assertion below, so the failure is a prompt to widen this
+    // traversal, not a bug in the code under test.
     let resolveBoolean = null;
     traverse(ast, {
       FunctionDeclaration(p) {
@@ -302,7 +306,11 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
           // The one call site that legitimately passes a variable is the one
           // inside resolveBooleanArgs' `read` helper; its names are collected
           // from `read`'s own call sites just below, so skipping it here drops
-          // nothing.
+          // nothing — for as long as that helper is still named `read`. Rename
+          // it and this branch keeps skipping while the `read` branch stops
+          // matching, which drops `location` and leaves both assertions below
+          // green. That is the same silent narrowing #1176 caused, one level
+          // in; the collected-set equality below is what makes it loud.
           if (arg && arg.type === 'Identifier' && inResolveBoolean(node)) return;
         } else if (node.callee.name === 'read' && inResolveBoolean(node)) {
           arg = node.arguments[0];
@@ -319,6 +327,13 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
     // with readBooleanFlag, which left the old traversal matching nothing and
     // the whole check passing over an empty set.
     expect(names.length).toBeGreaterThan(0);
+    // And fails closed on a PARTIAL loss, which the count alone cannot see.
+    // Equality here is on what the traversal COLLECTED — deliberately not the
+    // same assertion as the subset one on BOOLEAN_FLAGS below, which stays a
+    // subset for the reason given there. Adding a boolean flag is meant to
+    // fail this line: the failure is the prompt to confirm the new flag also
+    // reaches BOOLEAN_FLAGS, which is the pairing this whole test exists for.
+    expect(new Set(names)).toEqual(new Set(['location', 'allow-production']));
     // Still a subset rather than an equality, but for a weaker reason than it
     // used to be. Both boolean flags now reach a boolean reader — #1174 moved
     // --allow-production onto one inside resolveGuardInputs — so the two sets
@@ -329,10 +344,9 @@ describe('valuedBooleanFlags — a boolean written with a value is not absence',
   });
 
   // resolveGuardInputs is the reader for --allow-production. It went through
-  // the shared boolean reader in #1174, so the traversal above does now see it
-  // — but the
-  // traversal only proves the flag is SPELLED somewhere, and this proves the
-  // guard actually honours it. Those are different failures.
+  // the shared boolean reader in #1174, so the traversal above does now see
+  // it — but the traversal only proves the flag is SPELLED somewhere, and this
+  // proves the guard actually honours it. Those are different failures.
   it('covers --allow-production, which resolveGuardInputs reads off argv', () => {
     expect(resolveGuardInputs({}, ['--allow-production']).allowProdFlag).toBe(true);
     expect(BOOLEAN_FLAGS).toContain('allow-production');
