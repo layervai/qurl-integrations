@@ -92,6 +92,22 @@ function preflightLedger() {
 // script exits having reclaimed only part of what it made.
 let stopping = false;
 
+// Creates that have been issued but not yet recorded. `stopping` ends the
+// loops, but it cannot un-issue a request already awaiting a response: that
+// response still resolves and still appends. The drain re-reads the ledger,
+// which only catches an append that has already happened — so it also waits
+// on this counter, or a create resolving just after the final pass would
+// leave an id no pass ever saw.
+let inFlightCreates = 0;
+async function trackCreate(fn) {
+  inFlightCreates++;
+  try {
+    return await fn();
+  } finally {
+    inFlightCreates--;
+  }
+}
+
 // Every resource is appended to the ledger the moment it exists, before any
 // further work. Holding the ids only in memory would not survive how these
 // runs actually end — a two-hour soak gets Ctrl-C'd. Recovering an unrecorded
@@ -135,7 +151,7 @@ function recordResource(resourceId, kind) {
 // Null and [] mean opposite things in recovery mode — "your path is wrong,
 // nothing was swept" versus "nothing is outstanding" — and collapsing them
 // is how an operator walks away believing they are clean.
-function readLedger(ledgerPath) {
+function readLedger(ledgerPath, quiet = false) {
   // statSync rather than existsSync: existsSync is true for a directory, and
   // readFileSync would then throw EISDIR out of the sweep.
   let stat;
@@ -158,7 +174,9 @@ function readLedger(ledgerPath) {
       // position and size only, never content — --reclaim takes an arbitrary
       // operator-supplied path, and one aimed at .env.loadtest would echo the
       // API key into the scrollback.
-      console.error(`  Skipping unparseable ledger line ${index + 1} (${Buffer.byteLength(trimmed)} bytes)`);
+      // Quiet on drain passes: the same torn line would otherwise be reported
+      // once per pass and read as several torn lines.
+      if (!quiet) console.error(`  Skipping unparseable ledger line ${index + 1} (${Buffer.byteLength(trimmed)} bytes)`);
     }
   });
   return ids;
@@ -258,9 +276,9 @@ async function reclaim(ledgerPath) {
   // Compared with a trailing slash trimmed: QURL_ENDPOINT is not normalized
   // in config.js, so the same tenancy spelled with and without one would
   // otherwise refuse a legitimate recovery sweep mid-incident.
-  const sameHost = (value) => String(value).replace(/\/+$/, '');
-  const current = sameHost(config.QURL_ENDPOINT);
-  const foreign = [...ledgerEndpoints(ledgerPath)].filter(e => sameHost(e) !== current);
+  const normalizeEndpoint = (value) => String(value).replace(/\/+$/, '');
+  const current = normalizeEndpoint(config.QURL_ENDPOINT);
+  const foreign = [...ledgerEndpoints(ledgerPath)].filter(e => normalizeEndpoint(e) !== current);
   if (foreign.length > 0) {
     console.error(`Reclaim: this ledger records resources on ${foreign.join(', ')}, not ${config.QURL_ENDPOINT}.`);
     console.error('Refusing to delete against a different tenancy. Set QURL_ENDPOINT to match and re-run.');
@@ -275,8 +293,14 @@ async function reclaim(ledgerPath) {
   // Drain rather than sweep once. An in-flight round can append after the
   // snapshot is taken, so keep passing until a pass finds nothing new.
   for (;;) {
-    const pending = [...new Set(readLedger(ledgerPath) || [])].filter(id => !swept.has(id));
-    if (pending.length === 0) break;
+    const pending = [...new Set(readLedger(ledgerPath, true) || [])].filter(id => !swept.has(id));
+    if (pending.length === 0) {
+      // Nothing new on disk, but a create may still be in flight and about to
+      // append. Wait for it rather than finishing and exiting past it.
+      if (inFlightCreates === 0) break;
+      await new Promise(r => setTimeout(r, 100));
+      continue;
+    }
     // Floor, not an estimate: the 50ms pacing gap is the only part that is
     // known here, and per-request latency adds to it. Overstating the number
     // the heartbeat exists to contextualise would undercut it.
@@ -432,14 +456,17 @@ async function runRound(roundNum) {
     const headers = {};
     if (config.QURL_API_KEY) headers['Authorization'] = `Bearer ${config.QURL_API_KEY}`;
 
-    const uploadResp = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
-      method: 'POST', body: form, headers,
+    const uploadResult = await trackCreate(async () => {
+      const uploadResp = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
+        method: 'POST', body: form, headers,
+      });
+      if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
+      const parsed = await uploadResp.json();
+      // Recorded before anything is minted against it. Reclaiming this parent
+      // is what reclaims the recipient links, so it has to be on disk first.
+      recordResource(parsed.resource_id, 'upload');
+      return parsed;
     });
-    if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.status}`);
-    const uploadResult = await uploadResp.json();
-    // Recorded before anything is minted against it. Reclaiming this parent
-    // is what reclaims the recipient links, so it has to be on disk first.
-    recordResource(uploadResult.resource_id, 'upload');
     results.uploadMs = performance.now() - uploadStart;
 
     // Mint links in batches of 10
@@ -463,8 +490,10 @@ async function runRound(roundNum) {
     const locStart = performance.now();
     for (let i = 0; i < COUNT && !stopping; i++) {
       try {
-        const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
-        recordResource(loc.resource_id, 'location');
+        await trackCreate(async () => {
+          const loc = await createOneTimeLink(TEST_LOCATION_URL, '24h', 'Load test location');
+          recordResource(loc.resource_id, 'location');
+        });
         results.locLinks++;
       } catch (e) {
         if (results.locFail === 0) console.error(`  Location mint error: ${e.message}`);
@@ -522,8 +551,11 @@ async function main() {
   // Quick smoke test
   console.log('Running smoke test...');
   try {
-    const r = await createOneTimeLink('https://example.com', '24h', 'smoke test');
-    recordResource(r.resource_id, 'smoke');
+    const r = await trackCreate(async () => {
+      const link = await createOneTimeLink('https://example.com', '24h', 'smoke test');
+      recordResource(link.resource_id, 'smoke');
+      return link;
+    });
     console.log(`Smoke test OK: ${r.resource_id}`);
   } catch (e) {
     console.error(`FATAL: Smoke test failed — ${e.message}`);
@@ -615,4 +647,6 @@ if (require.main === module) {
 }
 
 // Exported so the suite covers them without live API traffic.
-module.exports = { readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg };
+module.exports = {
+  readLedger, pruneLedger, ledgerEndpoints, reclaim, parseReclaimArg,
+};

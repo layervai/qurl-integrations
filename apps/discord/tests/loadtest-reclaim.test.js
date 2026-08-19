@@ -215,6 +215,22 @@ describe('reclaim', () => {
     expect(deleteLink).toHaveBeenCalledWith('r_1');
   });
 
+  it('drains an id appended after the first pass had already read the ledger', async () => {
+    // The invariant the header comment leans on: a round still unwinding when
+    // a sweep starts can append behind it, and a single-pass sweep would exit
+    // having left that resource live.
+    const ledger = tempLedger(line('r_1'));
+    deleteLink.mockImplementation(async (id) => {
+      if (id === 'r_1') fs.appendFileSync(ledger, line('r_late'));
+    });
+
+    const result = await reclaim(ledger);
+
+    expect(deleteLink).toHaveBeenCalledWith('r_late');
+    expect(result).toMatchObject({ revoked: 2, failed: 0 });
+    expect(readLedger(ledger)).toEqual([]);
+  });
+
   it('counts a 410 as already-gone, the same as a 404', async () => {
     const ledger = tempLedger(line('r_1'));
     deleteLink.mockRejectedValue(new Error('qURL API DELETE /qurls/r_1 failed (410)'));
