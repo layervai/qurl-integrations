@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -393,8 +392,8 @@ func assertJobPermissions(t *testing.T, jobID string, permissions any, want map[
 		}
 	}
 
-	sort.Strings(extra)
-	sort.Strings(missing)
+	slices.Sort(extra)
+	slices.Sort(missing)
 	if len(extra) > 0 {
 		t.Errorf("%s.permissions grants %v beyond what this job is documented to need", jobID, extra)
 	}
@@ -1279,7 +1278,7 @@ func sortedQualityGateIDs(qualityGates map[string]bool) []string {
 	for id := range qualityGates {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 
