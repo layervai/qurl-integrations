@@ -814,6 +814,43 @@ func TestConnectorRunServingNoteCarriesCRID(t *testing.T) {
 		}
 	})
 
+	// The prose note above is written for a person; an unattended runner reads
+	// the structured events instead. Both must carry the identity, or headless
+	// operators are left scraping wording that is free to change.
+	t.Run("the structured event carries it for unattended runners", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, exampleCRID).stderr.String()
+
+		var starting string
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.Contains(line, "event=connector_starting") {
+				starting = line
+				break
+			}
+		}
+		if starting == "" {
+			t.Fatalf("no connector_starting event was logged:\n%s", stderr)
+		}
+		// Unquoted `crid=<value>` is the shape a consumer parses. slog's
+		// TextHandler quotes a value containing a space, '=', '"' or a
+		// control character, and a CRID is base32 over [a-z2-7], so it
+		// never triggers that — asserting the bare form pins the promise.
+		for _, want := range []string{"crid=" + exampleCRID, "connector_id=cmd-id"} {
+			if !strings.Contains(starting, want) {
+				t.Errorf("connector_starting event missing %q:\n%s", want, starting)
+			}
+		}
+	})
+
+	t.Run("the structured event omits an absent CRID rather than logging it empty", func(t *testing.T) {
+		stderr := connectorServeAttempt(t, "").stderr.String()
+
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.Contains(line, "event=connector_starting") && strings.Contains(line, "crid=") {
+				t.Errorf("an absent CRID was logged anyway, so presence stops meaning anything:\n%s", line)
+			}
+		}
+	})
+
 	t.Run("no CRID leaves the note exactly as it was", func(t *testing.T) {
 		stderr := connectorServeAttempt(t, "").stderr.String()
 

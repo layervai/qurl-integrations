@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/layervai/qurl-integrations/compare/v1.3.0...v1.4.0) (2026-08-19)
+
+
+### Features
+
+* **cli:** log the Connector's CRID as a structured event ([#1163](https://github.com/layervai/qurl-integrations/issues/1163)) ([a3fed6a](https://github.com/layervai/qurl-integrations/commit/a3fed6a7f564094f5b57cb441aa5d9f8b97e4794))
+
 ## [1.3.0](https://github.com/layervai/qurl-integrations/compare/v1.2.0...v1.3.0) (2026-08-19)
 
 
