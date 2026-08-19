@@ -1855,8 +1855,10 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     { writer: 'pruneLedger', primitive: 'writeFileSync' },
   ];
 
-  // The ledger path, as spelled at those three call sites: the module-level
-  // const, and pruneLedger's parameter of the same name.
+  // The ledger path, as spelled at those three call sites: recordResource
+  // reads the module-level const, while preflightLedger and pruneLedger each
+  // take a parameter of the same name — both are exported and aimed at a temp
+  // file by tests/loadtest-reclaim.test.js.
   const LEDGER_TARGET = /^(?:LEDGER_PATH|ledgerPath)$/;
 
   it('writes nothing to disk outside the reclaim ledger', () => {
@@ -1890,13 +1892,13 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // there is no legitimate call to distinguish it from. (Only explicit —
     // readFileSync and the two ledger writes open descriptors of their own.)
     // That call takes 'a', so it creates the ledger as a side effect of
-    // proving it writable; it is a create-and-close, not a pure probe. Its
-    // MODE is pinned nowhere: this is a static check, and preflightLedger is
-    // unexported and reads a module-level LEDGER_PATH, so nothing runtime
-    // reaches it. Read this as "the ledger is the only opener", not as "the
-    // ledger opens 0600" — the sibling gateway-resume-spike.js does pin its
-    // own 0600, and the ledger inherited that file's threat model without
-    // inheriting its test.
+    // proving it writable; it is a create-and-close, not a pure probe. Read
+    // this as "the ledger is the only opener", not as "the ledger opens
+    // 0600": the mode is a runtime property, which no static check can see.
+    // It is pinned in tests/loadtest-reclaim.test.js instead — the sibling
+    // gateway-resume-spike.js pins its own 0600 the same way, and giving
+    // preflightLedger a path parameter and an export is what brought that
+    // mode within reach of a test at all.
     //
     // The cost, stated because this file's convention is to state it: moving
     // the three writes behind one shared ledger-write helper, or swapping
