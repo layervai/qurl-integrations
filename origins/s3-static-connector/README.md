@@ -105,7 +105,7 @@ would look like a missing object. Supply credentials one of these ways:
 
 | Source | How |
 | --- | --- |
-| Environment | Set an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_SESSION_TOKEN` for temporary credentials. The Slack Docker and Compose installers do **not** forward ambient AWS variables by default. As a last-resort opt-in, export the complete pair or trio in the current shell, set `QURL_S3_FORWARD_AWS_CREDENTIALS=true`, and run the generated block. The block rejects incomplete sets and forwards names rather than values, so no value enters Slack or the generated script/Compose file. Docker still stores the resolved values in container configuration, where daemon/API access and `docker inspect` can reveal them; recreating the origin without the opt-in removes that copy. |
+| Environment | Set an `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` pair, plus `AWS_SESSION_TOKEN` for temporary credentials. The Slack Docker and Compose installers do **not** forward ambient AWS variables by default. As a last-resort opt-in, export the complete pair or trio in the current shell, set `QURL_S3_FORWARD_AWS_CREDENTIALS=true`, and run the generated block. The block rejects incomplete sets and forwards names rather than values, so no value enters Slack or the generated script/Compose file. Docker still stores the resolved values in container configuration, where daemon/API access and `docker inspect` can reveal them. To remove them, rerun the generated block without the opt-in; for Compose this rewrites the YAML before recreating the origin, whereas a plain `docker compose up` against the old file retains its valueless credential keys. |
 | Credentials file | Mount one read-only and point the chain at it: `-v /host/aws-credentials:/aws/credentials:ro -e AWS_SHARED_CREDENTIALS_FILE=/aws/credentials` (plus `AWS_PROFILE` if not `default`). The file must be readable by uid `65532`. |
 | IRSA (EKS) | IRSA injects `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`; the web-identity provider exchanges that projected service-account token with STS. Configure the Kubernetes service account and allow STS egress. |
 | EKS Pod Identity | EKS Pod Identity injects `AWS_CONTAINER_CREDENTIALS_FULL_URI` and `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`. Envoy's container provider queries the node-local Pod Identity Agent; it does not use `AWS_WEB_IDENTITY_TOKEN_FILE` or call STS directly from the pod. |
@@ -161,17 +161,19 @@ Envoy signer before nginx starts, and reports the verdict as
 | Upstream | `msg` | Outcome |
 | --- | --- | --- |
 | `2xx` / `304` | `preflight_ok` | serves |
-| `400`, `401`, `403` | `preflight_request_rejected` | **exits 1 without serving**; remediation covers credentials/provider chain, IAM, region, endpoint, and signed-request configuration |
+| `3xx` / `4xx` except `304`, `404`, `429` | `preflight_request_rejected` | **exits 1 without serving**; remediation covers credentials/provider chain, IAM, region, endpoint, and signed-request configuration |
 | `404` | `preflight_object_missing` | serves — the object may not be synced yet; this status does not prove which identity or permissions handled the request |
-| other statuses | `preflight_upstream_error` | serves; `503` means the signer could not reach the bucket endpoint |
+| `429` / `5xx` | `preflight_upstream_error` | serves; throttle and server failures are treated as transient |
+| other statuses | `preflight_upstream_error` | serves and asks the operator to inspect the status and logs |
 | no response | `preflight_no_response` | serves |
 
-Only a `400`/`401`/`403` request rejection is fatal. The HTTP status alone does
-not identify the cause: credentials, IAM, `AWS_REGION`, endpoint selection, or
-other request configuration can all be responsible. It does identify a
-startup condition that nginx would mask as a viewer `404`, so serving would
-send the operator toward the object key instead. Other outcomes either can
-resolve on their own or already reach viewers as a `502`; failing on those
+Any deterministic non-transient `3xx`/`4xx` rejection is fatal except `304`
+(success), `404` (ambiguous missing-object signal), and `429` (transient
+throttle). The HTTP status alone does not identify the cause: credentials, IAM,
+`AWS_REGION`, endpoint selection, or other request configuration can all be
+responsible. It does identify a startup condition that nginx would mask as a
+viewer `404`, so serving would send the operator toward the object key instead.
+No-response, `429`, and `5xx` outcomes can resolve on their own; failing on those
 would spend the orchestrator's restart budget on a transient S3 blip.
 
 The preflight covers startup only. A request that S3 rejects with `400` or `403`

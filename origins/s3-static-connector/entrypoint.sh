@@ -129,7 +129,13 @@ case "$preflight_status" in
   2??|304)
     preflight_log preflight_ok "Signed S3 request succeeded."
     ;;
-  400|401|403)
+  404)
+    preflight_log preflight_object_missing "S3 returned 404 for the requested index object. It may not be synced yet; this status does not prove which identity or permissions handled the request. Serving anyway." >&2
+    ;;
+  429|5??)
+    preflight_log preflight_upstream_error "S3 returned a transient throttle or server error. Serving anyway; requests fail 502 while it lasts." >&2
+    ;;
+  3??|4??)
     # Status alone cannot distinguish credentials from IAM, wrong region,
     # endpoint, or other request configuration. It does establish that S3
     # rejected the signed probe, which nginx would otherwise mask to a viewer 404.
@@ -138,14 +144,11 @@ case "$preflight_status" in
     wait_children
     exit 1
     ;;
-  404)
-    preflight_log preflight_object_missing "S3 returned 404 for the requested index object. It may not be synced yet; this status does not prove which identity or permissions handled the request. Serving anyway." >&2
-    ;;
   "")
     preflight_log preflight_no_response "Could not reach the signer or S3 before the deadline. Serving anyway; requests will fail 502 while it stays unreachable." >&2
     ;;
   *)
-    preflight_log preflight_upstream_error "Unexpected status from the S3 hop; 503 means the signer could not reach the bucket endpoint. Serving anyway; requests fail 502 while it lasts." >&2
+    preflight_log preflight_upstream_error "Unexpected status from the S3 hop. Serving anyway; inspect the upstream status and origin logs." >&2
     ;;
 esac
 

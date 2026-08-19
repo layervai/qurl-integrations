@@ -502,10 +502,11 @@ if [ "$waive_request_preflight_contract" = "true" ]; then
     printf 'WARNING: %s\n' "$message" >&2
   fi
 else
-  # 16. Startup request preflight. A 400/403 means S3 rejected the signed
-  # request, but status alone does not distinguish credentials from IAM, region,
-  # endpoint, or other request configuration. nginx masks the rejection to a
-  # viewer 404, so the origin refuses to serve until the operator fixes it.
+  # 16. Startup request preflight. A deterministic 3xx/4xx response other than
+  # 304, 404, or 429 means S3 rejected the signed request, but status alone does
+  # not distinguish credentials from IAM, region, endpoint, or other request
+  # configuration. nginx masks the rejection to a viewer 404, so the origin
+  # refuses to serve until the operator fixes it.
   origin_running() {
     docker inspect -f '{{.State.Running}}' "$ORIGIN" 2>/dev/null || echo false
   }
@@ -531,7 +532,7 @@ else
     done
   }
 
-  for prefix in forbidden badrequest; do
+  for prefix in wrongregion forbidden badrequest; do
     preflight_case "$prefix"
     expect_eq "preflight refuses to serve on upstream $prefix" "$(origin_running)" "false"
     expect_eq "preflight exits non-zero on upstream $prefix" \
@@ -542,6 +543,13 @@ else
       'credentials/provider chain, IAM permissions'
     expect_origin_log "preflight rejection covers region and request config for upstream $prefix" \
       'AWS_REGION, bucket/endpoint, and signed-request configuration'
+  done
+
+  for prefix in throttle boom; do
+    preflight_case "$prefix"
+    expect_eq "preflight serves through transient upstream $prefix" "$(origin_running)" "true"
+    expect_origin_log "preflight labels transient upstream $prefix" \
+      '"msg":"preflight_upstream_error"'
   done
 
   # A 404 is nonfatal so a deploy that starts before object sync can recover,
