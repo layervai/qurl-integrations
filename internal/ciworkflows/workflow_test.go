@@ -50,6 +50,11 @@ const (
 	cliReleaseVerifierStepName = "Verify the CLI release was created"
 	cliReleaseVerifierScript   = "scripts/verify-cli-release.sh"
 	checkoutActionPrefix       = "actions/checkout@"
+	cliWorkflow                = "cli.yml"
+	cliMatrixJobID             = "matrix"
+	cliMacOSKeychainSetupStep  = "Set up macOS keychain"
+	cliLinuxKeyringSetupStep   = "Set up Linux keyring (gnome-keyring over D-Bus)"
+	cliMatrixTestStep          = "Run tests"
 
 	workflowContractWorkflow = "workflow-contract.yml"
 )
@@ -272,8 +277,325 @@ type step struct {
 	// make an expression-valued cap anywhere in .github/workflows fail to parse
 	// in readWorkflow — taking down every test in this package rather than the
 	// one assertion that cares — and a caller that wants a literal wants a bare
-	// number to report as the *wrong* value, not as a missing one.
+	// number to report as the *wrong* value, not as a missing one. Network
+	// bootstrap assertions also use it to distinguish a bounded setup failure
+	// from the broader job timeout.
 	TimeoutMinutes any `yaml:"timeout-minutes"`
+}
+
+// TestCLIMacOSKeychainSetupIsLive prevents the matrix from inferring whether
+// credential-store coverage matters from source text. QURL_TEST_HARNESS arms
+// TestKeyringLiveSmoke on every OS, so macOS must always unlock the ephemeral
+// keychain before the suite starts.
+func TestCLIMacOSKeychainSetupIsLive(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliWorkflow)
+	job, ok := workflow.Jobs[cliMatrixJobID]
+	if !ok {
+		t.Fatalf("%s is missing the %q job", cliWorkflow, cliMatrixJobID)
+	}
+	var setup *step
+	for i := range job.Steps {
+		if job.Steps[i].Name == cliMacOSKeychainSetupStep {
+			setup = &job.Steps[i]
+			break
+		}
+	}
+	if setup == nil {
+		t.Fatalf("%s is missing %q", cliMatrixJobID, cliMacOSKeychainSetupStep)
+	}
+	if setup.If != "runner.os == 'macOS'" {
+		t.Errorf("%s if = %q, want the macOS runner guard", cliMacOSKeychainSetupStep, setup.If)
+	}
+	if setup.Shell != "bash" {
+		t.Errorf("%s shell = %q, want bash", cliMacOSKeychainSetupStep, setup.Shell)
+	}
+	if setup.ContinueOnError != nil {
+		t.Errorf("%s sets continue-on-error = %v; failed keychain setup must fail the macOS matrix leg", cliMacOSKeychainSetupStep, setup.ContinueOnError)
+	}
+	for _, fragment := range []string{"uuidgen", "security create-keychain", "security default-keychain", "security unlock-keychain"} {
+		if !strings.Contains(setup.Run, fragment) {
+			t.Errorf("%s is missing load-bearing fragment %q", cliMacOSKeychainSetupStep, fragment)
+		}
+	}
+	if strings.Contains(setup.Run, "grep -riq keyring") {
+		t.Errorf("%s infers whether live coverage matters from source text", cliMacOSKeychainSetupStep)
+	}
+}
+
+// TestCLILinuxKeyringSetupIsBoundedAndLive protects the Linux half of the
+// cross-platform credential-store smoke. Two independent ubuntu-latest runs
+// exhausted the entire 25-minute matrix budget inside an unbounded `apt-get
+// update` while the configured Azure mirror stopped delivering package
+// indexes. That skipped the tests altogether and held every CLI change behind
+// an infrastructure hang.
+//
+// The bootstrap may reuse binaries already on the hosted image or install
+// them, but it may never skip the live store test. Its package operation is
+// noninteractive, password-prompt-free, transport/lock/whole-process bounded,
+// retried finitely through an explicit non-Azure fallback, and followed by
+// binary verification before the D-Bus test path is armed.
+func TestCLILinuxKeyringSetupIsBoundedAndLive(t *testing.T) {
+	t.Parallel()
+
+	workflow := readWorkflow(t, cliWorkflow)
+	job, ok := workflow.Jobs[cliMatrixJobID]
+	if !ok {
+		t.Fatalf("%s is missing the %q job", cliWorkflow, cliMatrixJobID)
+	}
+	if got := job.Env["QURL_TEST_HARNESS"]; got != "1" {
+		t.Errorf("%s env QURL_TEST_HARNESS = %q, want 1 so TestKeyringLiveSmoke runs", cliMatrixJobID, got)
+	}
+
+	var setup, tests *step
+	for i := range job.Steps {
+		candidate := &job.Steps[i]
+		switch candidate.Name {
+		case cliLinuxKeyringSetupStep:
+			setup = candidate
+		case cliMatrixTestStep:
+			tests = candidate
+		}
+	}
+	if setup == nil {
+		t.Fatalf("%s is missing %q", cliMatrixJobID, cliLinuxKeyringSetupStep)
+	}
+	if tests == nil {
+		t.Fatalf("%s is missing %q", cliMatrixJobID, cliMatrixTestStep)
+	}
+
+	if setup.If != "runner.os == 'Linux'" {
+		t.Errorf("%s if = %q, want the Linux runner guard", cliLinuxKeyringSetupStep, setup.If)
+	}
+	if setup.Shell != "bash" {
+		t.Errorf("%s shell = %q, want bash", cliLinuxKeyringSetupStep, setup.Shell)
+	}
+	timeoutMinutes, ok := setup.TimeoutMinutes.(int)
+	if !ok || timeoutMinutes <= 0 || timeoutMinutes > 5 {
+		t.Errorf("%s timeout-minutes = %#v, want a literal positive integer no greater than 5", cliLinuxKeyringSetupStep, setup.TimeoutMinutes)
+	}
+	if setup.ContinueOnError != nil {
+		t.Errorf("%s sets continue-on-error = %v; failed keyring setup must fail the Linux matrix leg", cliLinuxKeyringSetupStep, setup.ContinueOnError)
+	}
+
+	requiredSetupFragments := []string{
+		"TODO(upstream-contract)",
+		"for attempt in 1 2",
+		"sudo -n env DEBIAN_FRONTEND=noninteractive",
+		"sudo -n tee /etc/apt/apt-mirrors.txt",
+		`printf '%s\tpriority:%s\n'`,
+		"https://archive.ubuntu.com/ubuntu/",
+		"https://security.ubuntu.com/ubuntu/",
+		"timeout --signal=TERM --kill-after=10s 90s",
+		"Acquire::Retries=2",
+		"Acquire::http::Timeout=20",
+		"Acquire::https::Timeout=20",
+		"DPkg::Lock::Timeout=30",
+		"install -y --no-install-recommends gnome-keyring dbus",
+		"command -v gnome-keyring-daemon",
+		"command -v dbus-run-session",
+		"QURL_CLI_KEYRING_DBUS=1",
+	}
+	for _, fragment := range requiredSetupFragments {
+		if !strings.Contains(setup.Run, fragment) {
+			t.Errorf("%s is missing load-bearing fragment %q", cliLinuxKeyringSetupStep, fragment)
+		}
+	}
+	for _, forbidden := range []string{"apt-get update", "grep -riq keyring", "continue-on-error"} {
+		if strings.Contains(setup.Run, forbidden) {
+			t.Errorf("%s contains %q; setup must not refresh indexes, infer whether coverage matters, or swallow failures", cliLinuxKeyringSetupStep, forbidden)
+		}
+	}
+
+	for _, fragment := range []string{"QURL_CLI_KEYRING_DBUS", "dbus-run-session", "gnome-keyring-daemon --unlock", "go test -count=1 ./apps/cli/..."} {
+		if !strings.Contains(tests.Run, fragment) {
+			t.Errorf("%s is missing %q; Linux must exercise the real keyring rather than skip the suite", cliMatrixTestStep, fragment)
+		}
+	}
+}
+
+// TestCLILinuxKeyringSetupRetryBehavior executes the checked-in workflow
+// script with a fake sudo boundary. The structural test above pins the apt
+// flags; this one proves the control flow they sit inside: a transient failure
+// selects the official mirror fallback before one retry, fallback and repeated
+// install failures are loud and finite, and a pre-provisioned runner still
+// arms the live test without invoking apt.
+func TestCLILinuxKeyringSetupRetryBehavior(t *testing.T) {
+	workflow := readWorkflow(t, cliWorkflow)
+	job := workflow.Jobs[cliMatrixJobID]
+	var script string
+	for i := range job.Steps {
+		candidate := &job.Steps[i]
+		if candidate.Name == cliLinuxKeyringSetupStep {
+			script = candidate.Run
+			break
+		}
+	}
+	if strings.TrimSpace(script) == "" {
+		t.Fatalf("%s has no executable script", cliLinuxKeyringSetupStep)
+	}
+
+	tests := []struct {
+		name             string
+		mode             string
+		preinstalled     bool
+		wantSuccess      bool
+		wantInstallCalls int
+		wantMirrorCalls  int
+		wantErrorMessage string
+	}{
+		{name: "healthy primary mirror installs without fallback", mode: "succeed-first", wantSuccess: true, wantInstallCalls: 1},
+		{name: "slow primary mirror falls back then arms live test", mode: "fail-once", wantSuccess: true, wantInstallCalls: 2, wantMirrorCalls: 1},
+		{name: "fallback selection failure fails loudly", mode: "fallback-fail", wantInstallCalls: 1, wantMirrorCalls: 1, wantErrorMessage: "::error::Unable to select the bounded Ubuntu package mirror fallback"},
+		{name: "repeated install failure fails loudly after bound", mode: "always-fail", wantInstallCalls: 2, wantMirrorCalls: 1, wantErrorMessage: "::error::Linux keyring package install failed after 2 bounded attempts"},
+		{name: "preinstalled binaries avoid apt and still arm live test", mode: "unexpected", preinstalled: true, wantSuccess: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binDir := filepath.Join(dir, "bin")
+			if err := os.Mkdir(binDir, 0o700); err != nil {
+				t.Fatalf("create fake bin: %v", err)
+			}
+			writeExecutable := func(name, body string) {
+				t.Helper()
+				path := filepath.Join(binDir, name)
+				// #nosec G306 -- this test fixture must be executable and lives beneath t.TempDir.
+				if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+					t.Fatalf("write fake %s: %v", name, err)
+				}
+			}
+			writeExecutable("dbus-run-session", "#!/usr/bin/env bash\nexit 0\n")
+			writeExecutable("sleep", "#!/usr/bin/env bash\nexit 0\n")
+			if tc.preinstalled {
+				writeExecutable("gnome-keyring-daemon", "#!/usr/bin/env bash\nexit 0\n")
+			}
+
+			sudoLog := filepath.Join(dir, "sudo.log")
+			mirrorContent := filepath.Join(dir, "mirror-content")
+			writeExecutable("sudo", `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
+if [[ "$*" == *"tee /etc/apt/apt-mirrors.txt"* ]]; then
+  if [ "$FAKE_SUDO_MODE" = "fallback-fail" ]; then
+    exit 43
+  fi
+  cat > "$FAKE_MIRROR_CONTENT"
+  exit 0
+fi
+case "$FAKE_SUDO_MODE" in
+  succeed-first)
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_BIN/gnome-keyring-daemon"
+    chmod 700 "$FAKE_BIN/gnome-keyring-daemon"
+    ;;
+  fail-once)
+    if [ "$(grep -c apt-get "$FAKE_SUDO_LOG")" -lt 2 ]; then
+      exit 42
+    fi
+    if ! grep -q archive.ubuntu.com "$FAKE_MIRROR_CONTENT" ||
+      ! grep -q security.ubuntu.com "$FAKE_MIRROR_CONTENT" ||
+      grep -q azure.archive.ubuntu.com "$FAKE_MIRROR_CONTENT"; then
+      echo "second install ran before selecting only the official mirrors" >&2
+      exit 44
+    fi
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_BIN/gnome-keyring-daemon"
+    chmod 700 "$FAKE_BIN/gnome-keyring-daemon"
+    ;;
+  always-fail)
+    exit 42
+    ;;
+  fallback-fail)
+    exit 42
+    ;;
+  unexpected)
+    echo "sudo was called even though both keyring commands were preinstalled" >&2
+    exit 99
+    ;;
+  *)
+    echo "unknown fake sudo mode" >&2
+    exit 98
+    ;;
+esac
+`)
+
+			githubEnv := filepath.Join(dir, "github_env")
+			if err := os.WriteFile(githubEnv, nil, 0o600); err != nil {
+				t.Fatalf("create GITHUB_ENV: %v", err)
+			}
+			combined, err := runVerifierScriptWithEnv(t, script, map[string]string{
+				"FAKE_BIN":            binDir,
+				"FAKE_MIRROR_CONTENT": mirrorContent,
+				"FAKE_SUDO_LOG":       sudoLog,
+				"FAKE_SUDO_MODE":      tc.mode,
+				"GITHUB_ENV":          githubEnv,
+				"HOME":                filepath.Join(dir, "home"),
+				"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			})
+			if tc.wantSuccess && err != nil {
+				t.Fatalf("setup failed: %v\noutput:\n%s", err, combined)
+			}
+			if !tc.wantSuccess && err == nil {
+				t.Fatalf("setup succeeded, want bounded failure\noutput:\n%s", combined)
+			}
+
+			var sudoCalls []string
+			// #nosec G304 -- sudoLog is a fixed filename beneath t.TempDir.
+			if data, readErr := os.ReadFile(sudoLog); readErr == nil {
+				sudoCalls = strings.Split(strings.TrimSpace(string(data)), "\n")
+			} else if !os.IsNotExist(readErr) {
+				t.Fatalf("read fake sudo log: %v", readErr)
+			}
+			installCalls, mirrorCalls := 0, 0
+			for _, call := range sudoCalls {
+				if strings.Contains(call, "apt-get") {
+					installCalls++
+				}
+				if strings.Contains(call, "tee /etc/apt/apt-mirrors.txt") {
+					mirrorCalls++
+				}
+			}
+			if installCalls != tc.wantInstallCalls {
+				t.Errorf("apt install calls = %d, want %d\noutput:\n%s", installCalls, tc.wantInstallCalls, combined)
+			}
+			if mirrorCalls != tc.wantMirrorCalls {
+				t.Errorf("mirror fallback calls = %d, want %d\noutput:\n%s", mirrorCalls, tc.wantMirrorCalls, combined)
+			}
+			if tc.wantMirrorCalls > 0 && tc.mode != "fallback-fail" {
+				// #nosec G304 -- mirrorContent is a fixed filename beneath t.TempDir.
+				data, readErr := os.ReadFile(mirrorContent)
+				if readErr != nil {
+					t.Fatalf("read fallback mirror content: %v", readErr)
+				}
+				content := string(data)
+				for _, required := range []string{
+					"https://archive.ubuntu.com/ubuntu/\tpriority:1",
+					"https://security.ubuntu.com/ubuntu/\tpriority:2",
+				} {
+					if !strings.Contains(content, required) {
+						t.Errorf("fallback mirror content is missing %q: %q", required, content)
+					}
+				}
+				if strings.Contains(content, "azure.archive.ubuntu.com") {
+					t.Errorf("fallback mirror content still selects Azure: %q", content)
+				}
+			}
+
+			// #nosec G304 -- githubEnv is a fixed filename beneath t.TempDir.
+			envData, readErr := os.ReadFile(githubEnv)
+			if readErr != nil {
+				t.Fatalf("read GITHUB_ENV: %v", readErr)
+			}
+			armed := strings.Contains(string(envData), "QURL_CLI_KEYRING_DBUS=1")
+			if armed != tc.wantSuccess {
+				t.Errorf("live keyring test armed = %t, want %t; GITHUB_ENV = %q", armed, tc.wantSuccess, envData)
+			}
+			if tc.wantErrorMessage != "" && !strings.Contains(combined, tc.wantErrorMessage) {
+				t.Errorf("bounded failure omitted %q\noutput:\n%s", tc.wantErrorMessage, combined)
+			}
+		})
+	}
 }
 
 // TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
