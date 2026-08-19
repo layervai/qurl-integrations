@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -50,6 +51,12 @@ type requiredWorkflowSpec struct {
 	requiredName         string
 	verifierStepName     string
 	unchangedOutput      string
+	// pullRequestBranches is the intended `on.pull_request.branches` filter.
+	// All nine carry "**" today, so a PR stacked on a feature branch runs the
+	// same gates as one targeting main. It is read per spec rather than
+	// assumed, so one that later earns a narrower filter records that decision
+	// here; see TestAppWorkflowsRunOnStackedPRs.
+	pullRequestBranches []string
 }
 
 var requiredWorkflowSpecs = []requiredWorkflowSpec{
@@ -64,6 +71,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "slack / required",
 		verifierStepName:     "Verify Slack CI result",
 		unchangedOutput:      "No Slack-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "discord",
@@ -76,6 +84,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "discord / required",
 		verifierStepName:     "Verify Discord CI result",
 		unchangedOutput:      "No Discord-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "chrome-extension",
@@ -88,6 +97,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "chrome-extension / required",
 		verifierStepName:     "Verify Chrome extension CI result",
 		unchangedOutput:      "No Chrome extension-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "edge-extension",
@@ -100,6 +110,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "edge-extension / required",
 		verifierStepName:     "Verify Edge extension CI result",
 		unchangedOutput:      "No Edge extension-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "teams",
@@ -112,6 +123,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "teams / required",
 		verifierStepName:     "Verify Teams CI result",
 		unchangedOutput:      "No Teams-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "cli",
@@ -124,6 +136,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "cli / required",
 		verifierStepName:     "Verify CLI CI result",
 		unchangedOutput:      "No CLI-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "s3-static-connector",
@@ -136,6 +149,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "s3-static-connector / required",
 		verifierStepName:     "Verify connector CI result",
 		unchangedOutput:      "No connector-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "e2e",
@@ -148,6 +162,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "e2e / required",
 		verifierStepName:     "Verify e2e CI result",
 		unchangedOutput:      "No e2e-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 	{
 		name:                 "shared",
@@ -160,6 +175,7 @@ var requiredWorkflowSpecs = []requiredWorkflowSpec{
 		requiredName:         "shared / required",
 		verifierStepName:     "Verify shared CI result",
 		unchangedOutput:      "No shared-impacting changes detected",
+		pullRequestBranches:  []string{"**"},
 	},
 }
 
@@ -446,6 +462,416 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 	default:
 		t.Fatalf("workflow on has unexpected type %T", value)
 		return nil
+	}
+}
+
+// pullRequestTriggers are the two events that run a workflow against a pull
+// request and honor a base-branch filter. Both are in scope: what matters is
+// not which event fires but that a gate the PR is judged on actually reports,
+// and either one filtered to [main] goes missing on a stacked PR.
+var pullRequestTriggers = []string{"pull_request", "pull_request_target"}
+
+// pullRequestBranchSpec records the intended base-branch filter
+// for a workflow that runs on pull requests but owns no required aggregate, and
+// so has no requiredWorkflowSpecs entry.
+type pullRequestBranchSpec struct {
+	path string
+	// branches is the intended filter. A nil value means the workflow must
+	// declare no `branches:` key at all — the same reach as ["**"], arrived at
+	// by omission rather than by a filter. The two are kept distinct so this
+	// table pins the spelling each workflow actually uses.
+	branches []string
+	// producesRequiredContext records whether any job here reports a context
+	// main's protection requires. It is what decides whether a narrow filter is
+	// survivable, so it is verified against the tree by
+	// TestPullRequestWorkflowsRecordWhetherTheyGateMerges rather than trusted.
+	producesRequiredContext bool
+	why                     string
+}
+
+// otherPullRequestWorkflows covers every remaining workflow with a
+// pull_request trigger. Splitting the record in two is deliberate:
+// requiredWorkflowSpecs already carries a completeness guard
+// (TestRequiredWorkflowSpecsCoverEveryAggregate), and the workflows here are
+// exactly the ones that guard cannot see.
+var otherPullRequestWorkflows = []pullRequestBranchSpec{
+	{
+		path:     "codeql.yml",
+		branches: []string{"main"},
+		why: "Deliberately narrow. CodeQL produces no required context, so a stacked PR " +
+			"that never runs it is not reading green over a gate it skipped — the honest-signal " +
+			"argument that widened the app workflows does not apply. The code is still analyzed " +
+			"before it reaches main: merging a base branch retargets the PRs stacked on it onto " +
+			"main, and the analysis runs then. Against that second look sits a two-language " +
+			"analysis matrix (30-minute timeout) on every stacked PR, and every PR run " +
+			"re-anchors pre-existing alerts onto that PR, where they block merge until a human " +
+			"resolves each conversation.",
+	},
+	{
+		path:     "dependency-review.yml",
+		branches: []string{"main"},
+		why: "Deliberately narrow, on the same reasoning as codeql.yml: no required context, " +
+			"and a stacked PR's dependency delta is reviewed again inside the combined diff once " +
+			"it retargets to main. Cheaper to widen than CodeQL, so this is the entry to revisit " +
+			"first — the cost is not runtime but noise, since `comment-summary-in-pr: always` " +
+			"would post a summary onto every stacked PR.",
+	},
+	{
+		path: "secrets-scan.yml",
+		why:  "Already unfiltered, so it runs on every PR whatever its base. Recorded so that narrowing it to main fails here.",
+	},
+	{
+		path: "scripts.yml",
+		why:  "Already unfiltered. It gates the repo-wide scripts, including the extension lockstep and i18n parity checks, which a stacked PR can break exactly as a main-targeting one can.",
+	},
+	{
+		path:                    "workflow-contract.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and must stay that way — it is what runs this package. A branches filter here would take the whole CI contract off stacked PRs, this test included.",
+	},
+	{
+		path:                    "dependency-age-check-actions.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
+	},
+	{
+		path:                    "dependency-age-check-docker.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
+	},
+	{
+		path:                    "dependency-age-check-go.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
+	},
+	{
+		path:                    "dependency-age-check-pip.yml",
+		producesRequiredContext: true,
+		why:                     "Already unfiltered, and produces a required context.",
+	},
+	{
+		path: "pr-title.yml",
+		why:  "Already unfiltered — it validates the PR title itself, which is worth checking on a stacked PR too.",
+	},
+	{
+		path: "dependabot-pr-title.yml",
+		why:  "Already unfiltered; same reasoning as pr-title.yml.",
+	},
+	{
+		path: "validate-issue-templates.yml",
+		why:  "Already unfiltered, and narrowed by `paths` rather than by base branch.",
+	},
+	{
+		path:                    "claude-code-review.yml",
+		producesRequiredContext: true,
+		why: "Already unfiltered, and on `pull_request_target` rather than `pull_request` because it " +
+			"holds ANTHROPIC_API_KEY and so must load its definition from the default branch. Its " +
+			"`claude-review` context became required in #1185, which is what pulled that trigger into " +
+			"scope here: narrowing it would leave every stacked PR waiting forever on a required check " +
+			"that never registers, the failure this package already caught once on 2026-08-14.",
+	},
+}
+
+// TestAppWorkflowsRunOnStackedPRs pins the `on.pull_request.branches` filter of
+// each workflow that owns a required aggregate.
+//
+// A workflow filtered to `branches: [main]` does not merely skip a PR stacked on
+// a feature branch — GitHub never registers it, so its checks are absent from
+// the PR rather than reported as skipped. The PR then reads fully green having
+// run none of them, and because branch protection guards only main, nothing
+// stops it merging into its base on that showing.
+//
+// The fix landed one workflow at a time — slack.yml (#981), cli.yml (#1109),
+// discord.yml (#1179) — and each time a one-line revert would have undone it
+// with every check still green. This is what notices. It reads the intended
+// value off each spec rather than asserting "**" across the board, so that a
+// workflow which later earns a narrower filter records that decision here
+// instead of being quietly blessed by a blanket assertion.
+func TestAppWorkflowsRunOnStackedPRs(t *testing.T) {
+	for i := range requiredWorkflowSpecs {
+		spec := &requiredWorkflowSpecs[i]
+		t.Run(spec.name, func(t *testing.T) {
+			// An unset field would otherwise mean "declare no filter at all"
+			// and fail further down with a message about the workflow rather
+			// than about the missing entry.
+			if len(spec.pullRequestBranches) == 0 {
+				t.Fatalf("%s has no intended pull_request branches filter recorded", spec.path)
+			}
+			assertPullRequestBranches(t, spec.path, spec.pullRequestBranches)
+		})
+	}
+}
+
+// TestOtherPullRequestWorkflowsRecordTheirBranchFilter does the same for the
+// workflows that own no aggregate. Two of them deliberately stay on main and
+// the rest are already unfiltered; recording both kinds is what makes either a
+// narrowing or an undocumented widening fail here rather than pass unnoticed.
+func TestOtherPullRequestWorkflowsRecordTheirBranchFilter(t *testing.T) {
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		t.Run(strings.TrimSuffix(spec.path, ".yml"), func(t *testing.T) {
+			if strings.TrimSpace(spec.why) == "" {
+				t.Fatalf("%s needs a why explaining its intended filter", spec.path)
+			}
+			assertPullRequestBranches(t, spec.path, spec.branches)
+		})
+	}
+}
+
+// TestEveryPullRequestWorkflowRecordsItsBranchFilter closes the hole the two
+// tables above would otherwise leave: a workflow added later with
+// `branches: [main]` and no entry would be silently unenforced, which is the
+// same shape of gap that let an unregistered aggregate ship in #1081.
+//
+// Scope is both pull-request triggers. It was `pull_request` alone until
+// #1185 made claude-code-review.yml's `claude-review` a required context —
+// the exact condition this comment previously named as the one that would
+// force the widening. GitHub honors `branches:` on `pull_request_target`
+// identically, so that workflow narrowing to [main] would now leave every
+// stacked PR waiting on a required check that never registers.
+func TestEveryPullRequestWorkflowRecordsItsBranchFilter(t *testing.T) {
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	recorded := make(map[string]bool, len(requiredWorkflowSpecs)+len(otherPullRequestWorkflows))
+	for i := range requiredWorkflowSpecs {
+		recorded[requiredWorkflowSpecs[i].path] = true
+	}
+	for i := range otherPullRequestWorkflows {
+		path := otherPullRequestWorkflows[i].path
+		if recorded[path] {
+			t.Errorf("%s is recorded in both requiredWorkflowSpecs and otherPullRequestWorkflows", path)
+		}
+		recorded[path] = true
+	}
+
+	seen := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		triggers := parseWorkflowTriggers(t, readWorkflow(t, name).On)
+		runsOnPullRequests := false
+		for _, trigger := range pullRequestTriggers {
+			if _, ok := triggers[trigger]; ok {
+				runsOnPullRequests = true
+				break
+			}
+		}
+		if !runsOnPullRequests {
+			continue
+		}
+		seen++
+		if !recorded[name] {
+			t.Errorf("%s runs on pull_request but records no intended branches filter", name)
+		}
+	}
+
+	// Couple the counts, so a scan that matches nothing (renamed directory,
+	// changed extension) fails instead of passing every assertion vacuously,
+	// and so an entry for a workflow that no longer runs on pull_request is
+	// caught rather than left to rot.
+	if want := len(recorded); seen != want {
+		t.Errorf("found %d workflows running on pull_request, want %d (one per recorded entry)", seen, want)
+	}
+}
+
+// TestPullRequestWorkflowsRecordWhetherTheyGateMerges checks each recorded
+// producesRequiredContext against the tree, in both directions.
+//
+// The narrow entries' premise is already enforced below, but the converse was
+// only prose: "produces a required context" was a claim no test read, free to
+// rot. That is not hypothetical here — claude-code-review.yml's entry was
+// written saying it produced none, and #1185 falsified it the same day.
+//
+// The check is exact for a job reporting under its own name and deliberately
+// coarse for one reporting through a reusable call, where a context is
+// "<caller job> / <inner job>" and the caller name is all that is visible
+// here. The four dependency-age-check-*.yml workflows all name their caller
+// `age-check`, so any one of the four `age-check / *` contexts marks all four
+// as gating. It therefore catches a workflow gaining a required context, and a
+// recorded claim that has become wholly false, but not the narrower case of
+// one such workflow losing its own context while its siblings keep theirs.
+// Pinning that needs the inner job names, which live in the called workflow —
+// TestReusableCallerJobsCoverTheirDocumentedContexts is where that belongs.
+func TestPullRequestWorkflowsRecordWhetherTheyGateMerges(t *testing.T) {
+	reported := workflowReportedContexts(t)
+	required := documentedRequiredContexts(t)
+
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		t.Run(strings.TrimSuffix(spec.path, ".yml"), func(t *testing.T) {
+			got := reportsRequiredContext(spec.path, reported, required)
+			if got == spec.producesRequiredContext {
+				return
+			}
+			if got {
+				t.Errorf("%s reports a required context but is recorded as producing none; "+
+					"a narrow filter would leave every stacked PR waiting on it", spec.path)
+				return
+			}
+			t.Errorf("%s is recorded as producing a required context but reports none; "+
+				"its why is now stale", spec.path)
+		})
+	}
+}
+
+// reportsRequiredContext reports whether any job in the workflow produces a
+// context main's protection requires. Reusable-workflow calls report as
+// "<caller job> / <inner job>", so a caller matches on the prefix.
+func reportsRequiredContext(path string, reported workflowContexts, required []string) bool {
+	for _, context := range required {
+		if slices.Contains(reported.direct[context], path) {
+			return true
+		}
+		if caller, _, ok := strings.Cut(context, contextSeparator); ok && slices.Contains(reported.reusable[caller], path) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNarrowPullRequestWorkflowsProduceNoRequiredContext enforces the premise
+// the deliberately-narrow entries rest on, rather than leaving it to a comment
+// nobody rereads.
+//
+// Keeping codeql.yml and dependency-review.yml on `[main]` is defensible only
+// because neither produces a required context: a stacked PR that never runs
+// them is not reading green over a gate that blocks its merge, which is the
+// whole argument that widened the app workflows. Were either to become
+// required, the reasoning would be void — an unregistered required check
+// leaves the PR sitting on "Expected — Waiting for status to be reported"
+// forever, the same silent shape as the 2026-08-14 typo. This turns that
+// premise into something CI checks.
+func TestNarrowPullRequestWorkflowsProduceNoRequiredContext(t *testing.T) {
+	narrow := map[string]bool{}
+	for i := range otherPullRequestWorkflows {
+		spec := &otherPullRequestWorkflows[i]
+		// A nil filter reaches every base branch already, and one naming "**"
+		// is not narrow. Anything else keeps the workflow off stacked PRs.
+		if spec.branches != nil && !slices.Contains(spec.branches, "**") {
+			narrow[spec.path] = true
+		}
+	}
+	if len(narrow) == 0 {
+		t.Skip("no deliberately-narrow entries recorded, so there is no premise to enforce")
+	}
+
+	reported := workflowReportedContexts(t)
+	for _, context := range documentedRequiredContexts(t) {
+		for _, file := range reported.direct[context] {
+			if narrow[file] {
+				t.Errorf("%s is recorded as deliberately narrow but reports required context %q; "+
+					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+			}
+		}
+		// Reusable-workflow calls report as "<caller job> / <inner job>".
+		caller, _, ok := strings.Cut(context, contextSeparator)
+		if !ok {
+			continue
+		}
+		for _, file := range reported.reusable[caller] {
+			if narrow[file] {
+				t.Errorf("%s is recorded as deliberately narrow but its caller job reports required context %q; "+
+					"a required check that never registers leaves every stacked PR pending, so its entry needs revisiting", file, context)
+			}
+		}
+	}
+}
+
+// assertPullRequestBranches compares a workflow's declared pull_request
+// branches filter against the intended one. A nil want means the workflow must
+// declare no filter at all.
+func assertPullRequestBranches(t *testing.T, path string, want []string) {
+	t.Helper()
+
+	triggers := parseWorkflowTriggers(t, readWorkflow(t, path).On)
+	checked := 0
+	for _, trigger := range pullRequestTriggers {
+		config, ok := triggers[trigger]
+		if !ok {
+			continue
+		}
+		checked++
+
+		got, declared := pullRequestBranchFilter(t, path, trigger, config)
+		switch {
+		case want == nil && declared:
+			t.Errorf("%s %s declares branches %v, want no filter at all", path, trigger, got)
+		case want == nil:
+		case !declared:
+			t.Errorf("%s %s declares no branches filter, want %v", path, trigger, want)
+		case !slices.Equal(got, want):
+			t.Errorf("%s %s.branches = %v, want %v", path, trigger, got, want)
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("%s must run on one of %v", path, pullRequestTriggers)
+	}
+}
+
+// pullRequestBranchFilter reads the `branches` filter off a parsed pull_request
+// trigger, reporting whether one is declared at all. It accepts both YAML
+// spellings of a single filter — a bare scalar and a sequence — so `main` and
+// `[main]` are not treated as different decisions.
+//
+// The comparison this feeds is still order-sensitive, which matters only once a
+// workflow earns a multi-element filter: ["main", "release/**"] and
+// ["release/**", "main"] have identical reach but are not interchangeable here.
+// That is deliberate — the table records the spelling a reader will find in the
+// YAML — but it is stricter than reach alone, so record the order as written.
+func pullRequestBranchFilter(t *testing.T, path, trigger string, pullRequest any) (branches []string, declared bool) {
+	t.Helper()
+
+	if pullRequest == nil {
+		return nil, false
+	}
+	config, ok := pullRequest.(map[string]any)
+	if !ok {
+		t.Fatalf("%s %s trigger has unexpected type %T", path, trigger, pullRequest)
+	}
+
+	// `branches-ignore` is the one spelling these tables cannot express, and it
+	// fails open rather than loudly: a workflow using it declares no `branches`
+	// key, which reads below as full reach — while `branches-ignore:
+	// ["justin/**"]` would take the workflow off exactly the stacked PRs this
+	// suite exists to keep it on. Refuse it here instead, so adding one forces
+	// the decision into the table. Checked before `branches` and independently
+	// of it: GitHub rejects the two together, but this should not be the thing
+	// that assumes so.
+	if _, ok := config["branches-ignore"]; ok {
+		t.Fatalf("%s %s declares branches-ignore, which these tables cannot record; "+
+			"extend pullRequestBranchSpec to express it before using it", path, trigger)
+	}
+
+	raw, ok := config["branches"]
+	if !ok {
+		return nil, false
+	}
+
+	// No []string arm, unlike parseWorkflowTriggers and parseWorkflowNeeds: those
+	// two also read hand-built literals from their own table tests, whereas this
+	// value is always decoded by yaml.v3 into the `map[string]any` above, which
+	// yields []any for every sequence. A []string arm here would be unreachable.
+	switch typed := raw.(type) {
+	case string:
+		return []string{typed}, true
+	case []any:
+		for _, value := range typed {
+			branch, ok := value.(string)
+			if !ok {
+				t.Fatalf("%s %s.branches contains non-string value %T", path, trigger, value)
+			}
+			branches = append(branches, branch)
+		}
+		return branches, true
+	default:
+		t.Fatalf("%s %s.branches has unexpected type %T", path, trigger, raw)
+		return nil, false
 	}
 }
 
