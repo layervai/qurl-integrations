@@ -1617,12 +1617,12 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // apart and neither PR's CI ever saw the other, so this test's original
     // whole-file ban reached main already contradicted by main.
     //
-    // Exempted by ENCLOSING FUNCTION rather than by dropping the primitives
-    // from the list, which is what keeps the ban total everywhere else: a
-    // writeFileSync added to runRound, to main(), or at module level still
-    // fails here. Relaxing the list instead would have re-opened the exact
-    // hole — writeFileSync and appendFileSync are the two most obvious ways
-    // to reinstate the temp file, and both are ledger primitives.
+    // Exempted by CALL SITE rather than by dropping the primitives from the
+    // list, which is what keeps the ban total everywhere else: a writeFileSync
+    // added to runRound, to main(), or at module level still fails here.
+    // Relaxing the list instead would have re-opened the exact hole —
+    // writeFileSync and appendFileSync are the two most obvious ways to
+    // reinstate the temp file, and both are ledger primitives.
     //
     // Every fs primitive that can put bytes on disk, not just the
     // writeFileSync a straight revert of #1177 would use: appendFileSync and
@@ -1631,21 +1631,42 @@ describe('loadtest script — static checks on call sites no test can reach', ()
     // bytes. openSync is banned outside the ledger rather than by mode: the
     // only descriptor this script opens is preflightLedger's 0600 probe, so
     // anywhere else there is still no legitimate call to distinguish it from.
-    const ledgerWriters = ['preflightLedger', 'recordResource', 'pruneLedger']
-      .map((name) => {
-        const fn = findFunction(name);
-        // Not a soft skip: a renamed writer must fail here rather than
-        // silently widen the exemption to nothing and pass.
-        expect({ writer: name, found: fn !== null }).toEqual({ writer: name, found: true });
-        return fn;
-      });
-    const inLedgerWriter = (node) =>
-      ledgerWriters.some((fn) => node.start >= fn.start && node.end <= fn.end);
+    //
+    // Paired (writer, primitive) rather than a blanket per-function pass. Each
+    // writer legitimately uses exactly ONE of these, so pairing keeps the ban
+    // live inside the ledger too: a copyFileSync added to pruneLedger, or an
+    // appendFileSync to preflightLedger, is still a stray. A per-function
+    // exemption would wave all eight through the moment a function is named.
+    const ledgerWrites = [
+      { writer: 'preflightLedger', primitive: 'openSync' },
+      { writer: 'recordResource', primitive: 'appendFileSync' },
+      { writer: 'pruneLedger', primitive: 'writeFileSync' },
+    ].map(({ writer, primitive }) => {
+      const fn = findFunction(writer);
+      // Boolean, not `fn !== null`: this must fail on a renamed or removed
+      // writer on its own terms rather than inherit findFunction's choice of
+      // miss value. Were that ever undefined, `!== null` would pass here and
+      // the range check below would throw a TypeError instead of asserting.
+      expect({ writer, found: Boolean(fn) }).toEqual({ writer, found: true });
+      const owned = callsNamed(primitive)
+        .filter((node) => node.start >= fn.start && node.end <= fn.end);
+      // Positive assertion, so the exemption cannot go vacuous. Without it,
+      // deleting the ledger's writes leaves every count at 0 and this test
+      // green while it has stopped exempting — and therefore stopped
+      // describing — anything.
+      expect({ writer, primitive, exercised: owned.length > 0 })
+        .toEqual({ writer, primitive, exercised: true });
+      return { fn, primitive };
+    });
+    const isLedgerWrite = (primitive, node) => ledgerWrites.some(
+      (w) => w.primitive === primitive
+        && node.start >= w.fn.start && node.end <= w.fn.end,
+    );
     for (const primitive of [
       'writeFileSync', 'writeFile', 'createWriteStream',
       'appendFileSync', 'appendFile', 'writeSync', 'openSync', 'copyFileSync',
     ]) {
-      const stray = callsNamed(primitive).filter((node) => !inLedgerWriter(node));
+      const stray = callsNamed(primitive).filter((node) => !isLedgerWrite(primitive, node));
       expect({ primitive, calls: stray.length }).toEqual({ primitive, calls: 0 });
     }
     // And nothing to unlink, which is the other half of why no cleanup path
