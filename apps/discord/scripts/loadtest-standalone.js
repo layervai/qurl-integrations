@@ -66,11 +66,32 @@ const { mintLinks } = require('../src/connector');
 const { createOneTimeLink } = require('../src/qurl');
 
 const args = process.argv.slice(2);
-function getArg(name, defaultVal) {
-  const idx = args.indexOf(`--${name}`);
-  if (idx === -1) return defaultVal;
-  return args[idx + 1] || defaultVal;
+
+/**
+ * Read `--name value` or `--name=value` from an argv array.
+ *
+ * Both spellings, because only the space form used to be matched and the
+ * equals form fell through to the default SILENTLY. That is tolerable for
+ * --count, whose effect is visible in the very next line of output, and much
+ * less so for --max-fail-rate, which decides the exit code: an operator who
+ * typed `--max-fail-rate=100` to waive the check would have run at the strict
+ * default and been failed by it two hours later, with nothing in the log
+ * saying which threshold was actually applied. The summary now echoes the
+ * threshold for the same reason.
+ *
+ * Takes argv as an argument rather than closing over the module's, so the flag
+ * SPELLINGS are pinnable by a test — the same seam resolveGuardInputs exists
+ * for, and for the same reason: nothing else here can catch a renamed flag.
+ */
+function readArg(argv, name, defaultVal) {
+  const flag = `--${name}`;
+  const idx = argv.indexOf(flag);
+  if (idx !== -1) return argv[idx + 1] || defaultVal;
+  const inline = argv.find((a) => a.startsWith(`${flag}=`));
+  return inline === undefined ? defaultVal : inline.slice(flag.length + 1) || defaultVal;
 }
+
+const getArg = (name, defaultVal) => readArg(args, name, defaultVal);
 const hasFlag = (name) => args.includes(`--${name}`);
 
 const COUNT = parseInt(getArg('count', '100'));
@@ -481,7 +502,23 @@ function parseMaxFailRate(raw) {
   return { rate: pct / 100 };
 }
 
-const formatPct = (rate) => `${(rate * 100).toFixed(1)}%`;
+const formatPct = (rate, digits = 1) => `${(rate * 100).toFixed(digits)}%`;
+
+/**
+ * Render a rate and the threshold it exceeded so the two never print the same
+ * string. A rate that only just crosses the line — 1001/10000 against 10% —
+ * rounds to the threshold's own spelling, and `10.0% exceeds 10.0%` reads as a
+ * bug in the tool rather than a finding about the run. Widen both together
+ * until they differ.
+ */
+function formatRatePair(rate, threshold) {
+  for (const digits of [1, 2, 3]) {
+    if (formatPct(rate, digits) !== formatPct(threshold, digits)) {
+      return [formatPct(rate, digits), formatPct(threshold, digits)];
+    }
+  }
+  return [formatPct(rate, 4), formatPct(threshold, 4)];
+}
 
 /**
  * The end-of-run report, as data: the measurement block plus the pass/fail
@@ -513,6 +550,10 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
     : `Rounds: ${roundsCompleted}`);
   lines.push(`Total links minted: ${minted}`);
   lines.push(`Total failures: ${failedLinks}`);
+  // Echoed on every run, passing or failing. This is the value that decided
+  // the exit code, and printing it only on the FAILED lines meant a run that
+  // silently took the default had nothing in its log to say so.
+  lines.push(`Failure threshold: ${formatPct(maxFailRate)} (--max-fail-rate)`);
 
   if (roundsCompleted > 0) {
     lines.push(`Avg round time: ${(sum((r) => r.totalMs) / roundsCompleted / 1000).toFixed(1)}s`);
@@ -543,7 +584,7 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
       const mintedRounds = fileRounds.filter((r) => r.fileLinks > 0);
       lines.push(mintedRounds.length > 0
         ? `Avg upload: ${avgUpload}ms, avg mint/round: ${mean(mintedRounds, (r) => r.mintMs).toFixed(0)}ms`
-        : `Avg upload: ${avgUpload}ms, avg mint: n/a — all ${fileFail} mint attempt(s) failed`);
+        : `Avg upload: ${avgUpload}ms, avg mint/round: n/a — all ${fileFail} mint attempt(s) failed`);
     }
   }
 
@@ -555,10 +596,12 @@ function runReport({ allResults, roundsAttempted, maxFailRate }) {
   // catches it when roundsAttempted is itself 0.
   if (roundsCompleted === 0) reasons.push('no round completed');
   if (linkFailRate > maxFailRate) {
-    reasons.push(`link failure rate ${formatPct(linkFailRate)} (${failedLinks}/${attemptedLinks}) exceeds --max-fail-rate ${formatPct(maxFailRate)}`);
+    const [rate, limit] = formatRatePair(linkFailRate, maxFailRate);
+    reasons.push(`link failure rate ${rate} (${failedLinks}/${attemptedLinks}) exceeds --max-fail-rate ${limit}`);
   }
   if (roundFailRate > maxFailRate) {
-    reasons.push(`round failure rate ${formatPct(roundFailRate)} (${roundsFailed}/${roundsAttempted}) exceeds --max-fail-rate ${formatPct(maxFailRate)}`);
+    const [rate, limit] = formatRatePair(roundFailRate, maxFailRate);
+    reasons.push(`round failure rate ${rate} (${roundsFailed}/${roundsAttempted}) exceeds --max-fail-rate ${limit}`);
   }
   for (const reason of reasons) lines.push(`FAILED: ${reason}`);
   return { lines, failed: reasons.length > 0, linkFailRate, roundFailRate };
@@ -723,10 +766,12 @@ if (require.main === module) {
 module.exports = {
   // Reporting decisions, exported for tests/loadtest-reporting.test.js — see
   // the "Run reporting" section for why they are pure rather than inline.
+  readArg,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
   parseMaxFailRate,
+  formatRatePair,
   runReport,
   ERROR_TALLY_LIMIT,
   DEFAULT_MAX_FAIL_RATE_PCT,

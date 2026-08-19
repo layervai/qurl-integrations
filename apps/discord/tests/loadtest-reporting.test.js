@@ -18,10 +18,12 @@
  */
 
 const {
+  readArg,
   roundReportLine,
   tallyFailure,
   errorTallyLines,
   parseMaxFailRate,
+  formatRatePair,
   runReport,
   ERROR_TALLY_LIMIT,
   DEFAULT_MAX_FAIL_RATE_PCT,
@@ -149,6 +151,47 @@ describe('errorTallyLines — failures are deduped by message, not by count', ()
   });
 });
 
+describe('readArg — both flag spellings, so neither falls through silently', () => {
+  // The equals form used to miss entirely and hand back the default. Harmless
+  // for --count, whose value shows up in the very next line of output; not
+  // harmless for --max-fail-rate, which decides the exit code, so an operator
+  // waiving the check with `=100` would have been failed by the strict
+  // default two hours later.
+  it('reads the equals form', () => {
+    expect(readArg(['--max-fail-rate=100'], 'max-fail-rate', '10')).toBe('100');
+  });
+
+  it('reads the space form', () => {
+    expect(readArg(['--max-fail-rate', '100'], 'max-fail-rate', '10')).toBe('100');
+  });
+
+  it('falls back to the default when the flag is absent', () => {
+    expect(readArg(['--location'], 'max-fail-rate', '10')).toBe('10');
+  });
+
+  it('does not match a flag that merely starts with the name', () => {
+    expect(readArg(['--max-fail-rate-extra=5'], 'max-fail-rate', '10')).toBe('10');
+  });
+
+  // A value can legitimately contain '=' — only the flag token is split on it.
+  it('keeps an equals sign inside the value', () => {
+    expect(readArg(['--file=/tmp/a=b.bin'], 'file', null)).toBe('/tmp/a=b.bin');
+  });
+});
+
+describe('formatRatePair — a breach never prints as "X% exceeds X%"', () => {
+  // 1001/10000 is 10.01%: over a 10% threshold, but identical to it at one
+  // decimal place. Printed that way the line reads as a bug in the tool
+  // rather than a finding about the run.
+  it('widens both until they differ', () => {
+    expect(formatRatePair(1001 / 10000, 0.1)).toEqual(['10.01%', '10.00%']);
+  });
+
+  it('stays at one decimal when that already distinguishes them', () => {
+    expect(formatRatePair(1, 0.1)).toEqual(['100.0%', '10.0%']);
+  });
+});
+
 describe('parseMaxFailRate — a malformed threshold fails closed', () => {
   it.each([
     ['the default', String(DEFAULT_MAX_FAIL_RATE_PCT), 0.1],
@@ -183,7 +226,7 @@ describe('runReport — the summary and the exit code', () => {
   // success, which is the shape of a headline result.
   it('refuses to report a mint latency when no qURL was minted', () => {
     const lines = report([round({ fileFail: 100, uploadMs: 250, mintMs: 1, totalMs: 300 })]).lines;
-    expect(lines).toContain('Avg upload: 250ms, avg mint: n/a — all 100 mint attempt(s) failed');
+    expect(lines).toContain('Avg upload: 250ms, avg mint/round: n/a — all 100 mint attempt(s) failed');
     expect(lines.join('\n')).not.toMatch(/avg mint: \d/);
   });
 
@@ -215,9 +258,24 @@ describe('runReport — the summary and the exit code', () => {
       'Rounds: 2',
       'Total links minted: 200',
       'Total failures: 0',
+      'Failure threshold: 10.0% (--max-fail-rate)',
       'Avg round time: 0.6s',
       'Avg upload: 200ms, avg mint/round: 300ms',
     ]);
+  });
+
+  // The threshold that decided the exit code is echoed on every run, so a
+  // typo'd flag that silently took the default is visible in the log.
+  it('states the threshold it judged against, even when passing', () => {
+    expect(report([round({ fileLinks: 10, uploadMs: 1, mintMs: 1, totalMs: 2 })], 1, 0.25).lines)
+      .toContain('Failure threshold: 25.0% (--max-fail-rate)');
+  });
+
+  it('does not print a breach as an equality', () => {
+    const results = [round({ fileLinks: 8999, fileFail: 1001, uploadMs: 1, mintMs: 1, totalMs: 2 })];
+    expect(report(results).lines).toContain(
+      'FAILED: link failure rate 10.01% (1001/10000) exceeds --max-fail-rate 10.00%',
+    );
   });
 
   it('fails a run in which every mint failed', () => {
