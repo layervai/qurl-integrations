@@ -725,8 +725,10 @@ const editedActivityType = "edited"
 //
 // Two workflows declare `edited` today — pr-title.yml and
 // dependabot-pr-title.yml — and neither carries a `branches:` filter, so
-// neither is in scope. issue-priority.yml declares it on an `issues:` trigger,
-// which is a different event's activity type entirely.
+// neither is in scope. That they exist at all is what the second count guard
+// below reads: the scan has to find `edited` somewhere in the tree, or it is no
+// longer looking at `types:`. issue-priority.yml declares it on an `issues:`
+// trigger, which is a different event's activity type entirely.
 //
 // Scope is any declared filter, not just a narrow one. Narrowness is recorded
 // in the tables above, which a commit can edit in the same breath as the
@@ -735,7 +737,7 @@ const editedActivityType = "edited"
 // already ran on the stacked PR — but reading every filter keeps the rule one a
 // reader can apply without first deciding which table an entry belongs to.
 func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
-	filteredTriggers := 0
+	filteredTriggers, editedTriggers := 0, 0
 	for _, name := range workflowFiles(t) {
 		triggers := parseWorkflowTriggers(t, name, readWorkflow(t, name).On)
 		for _, trigger := range pullRequestTriggers {
@@ -743,14 +745,21 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 			if !ok {
 				continue
 			}
-			branches, declared := pullRequestFilter(t, name, trigger, config, branchesFilterKey)
-			if !declared {
-				continue
+			branches, filtered := pullRequestFilter(t, name, trigger, config, branchesFilterKey)
+			if filtered {
+				filteredTriggers++
 			}
-			filteredTriggers++
 
+			// Read `types` on every trigger rather than only the filtered ones
+			// this can fire on. The workflows asking for `edited` are exactly the
+			// unfiltered ones, so counting across the whole scan is what gives
+			// this read an observation of its own — see the second guard below.
 			types, hasTypes := pullRequestFilter(t, name, trigger, config, typesFilterKey)
-			if !hasTypes || !slices.Contains(types, editedActivityType) {
+			asksForEdited := hasTypes && slices.Contains(types, editedActivityType)
+			if asksForEdited {
+				editedTriggers++
+			}
+			if !filtered || !asksForEdited {
 				continue
 			}
 			t.Errorf("%s %s declares branches %v and types %v; %q makes it re-run when a "+
@@ -761,16 +770,41 @@ func TestBranchFilteredWorkflowsExcludeEditedActivityType(t *testing.T) {
 		}
 	}
 
-	// Couple the scan to a nonzero result, on the same reasoning as
-	// TestEveryPullRequestWorkflowRecordsItsBranchFilter's count check: with no
-	// filtered trigger found there is nothing to contradict, and this would
-	// pass vacuously whether the tree had genuinely widened or the scan had
-	// stopped matching. Only the total is read, so counting one workflow twice
-	// when it filters both its triggers costs nothing. The nine specs pin
-	// `["**"]` explicitly, so the tree cannot reach zero without
-	// requiredWorkflowSpecs changing too.
-	if filteredTriggers == 0 {
-		t.Errorf("no pull-request workflow declares a branches filter, so this test asserted nothing")
+	// Couple each read to a count, on the same reasoning as
+	// TestEveryPullRequestWorkflowRecordsItsBranchFilter's: with nothing found
+	// there is nothing to contradict, and this would pass vacuously whether the
+	// tree had genuinely widened or the scan had stopped matching.
+	//
+	// A bare nonzero total is what no longer settles that. pullRequestFilter
+	// takes its key as an argument, so a read aimed at the wrong one still
+	// returns something: pointing the branches read at pathsFilterKey finds
+	// validate-issue-templates.yml — the one pull-request workflow declaring
+	// `paths:` — which holds the total at 1 while the scan has stopped reading
+	// branches at all, and since that workflow declares no `types:` the loop
+	// above then reports nothing.
+	//
+	// The floor is requiredWorkflowSpecs, every entry of which declares a
+	// branches filter: TestAppWorkflowsRunOnStackedPRs fails an unrecorded one
+	// by name, and assertPullRequestFilter holds the workflow to what the entry
+	// records. It stays a floor rather than an equality because a workflow
+	// filtering both its triggers counts twice, and because the two `[main]`
+	// entries in otherPullRequestWorkflows land in this total as well.
+	if want := len(requiredWorkflowSpecs); filteredTriggers < want {
+		t.Errorf("found %d branch-filtered pull-request triggers, want at least %d — one per "+
+			"requiredWorkflowSpecs entry; the scan is reading something other than %q",
+			filteredTriggers, want, branchesFilterKey.name)
+	}
+
+	// The `types` read gets no floor from a table: no branch-filtered workflow
+	// declares `types:` today, so within the subset this test fires on there is
+	// nothing for that read to observe and a miswired key would sit unnoticed
+	// behind the count above. The whole-tree total is the observation instead,
+	// which doubles as the pin on the two workflows the doc comment names — a
+	// claim that was prose no test read.
+	if editedTriggers == 0 {
+		t.Errorf("no pull-request workflow asks for %q, though the doc comment above names two; "+
+			"either the scan is reading something other than %q, or that comment and the "+
+			"retarget stall it describes need rewriting", editedActivityType, typesFilterKey.name)
 	}
 }
 
