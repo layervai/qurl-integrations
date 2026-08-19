@@ -964,6 +964,141 @@ func TestConnectorRunClosedStdinNeverHangs(t *testing.T) {
 	}
 }
 
+// TestConnectorRunEnrollmentFailuresAreCustomerLanguage drives the whole
+// command — the real error rendering and the real exit-code table — with the
+// enrollment/assignment failures the live Hub produces. The errors are
+// injected at the runtime-open seam already wrapped the way the enroll path
+// wraps them, so each row proves the customer rendering survives wrapping
+// rather than only matching a bare sentinel.
+//
+// The request-rejected row is the regression guard for the reported defect: a
+// deliberately invalid enrollment token against the sandbox Hub printed
+// qurl-go's own remedy sentence, which names a Go SDK option and blames the
+// wrong thing.
+func TestConnectorRunEnrollmentFailuresAreCustomerLanguage(t *testing.T) {
+	skipWithoutPinnedState(t)
+
+	const sdk52109 = "qurl: native Hub assignment request rejected (52109); " +
+		"correct WithAgentRuntimeIdentity or the Hub request contract before retrying"
+
+	cases := []struct {
+		name     string
+		err      error
+		wantCode int
+		want     []string
+		banned   []string
+	}{
+		{
+			name:     "request rejected loses the SDK remedy",
+			err:      fmt.Errorf("%s: %w", sdk52109, qurl.ErrAssignmentRequestRejected),
+			wantCode: 8,
+			want:     []string{"refused this Connector's enrollment request", "created for a different Connector"},
+			banned:   []string{"WithAgentRuntimeIdentity", "52109", "request contract"},
+		},
+		{
+			name:     "bootstrap consumed steers to a new token",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentBootstrapConsumed),
+			wantCode: 4,
+			want:     []string{"already been used", "work exactly once", "QURL_CONNECTOR_TOKEN", "--state-dir"},
+		},
+		{
+			name:     "key rejected steers to a new token",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentKeyRejected),
+			wantCode: 4,
+			want:     []string{"didn't accept this machine's enrollment token", "mistyped, expired, revoked"},
+		},
+		{
+			name:     "registration disabled is an entitlement refusal",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentRegistrationDisabled),
+			wantCode: 6,
+			want:     []string{"isn't accepting new Connector enrollments", "administrator"},
+		},
+		{
+			name:     "quota exceeded does not promise a retry will work",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentQuotaExceeded),
+			wantCode: 6,
+			want:     []string{"limit on enrolled Connectors", "retire a Connector"},
+		},
+		{
+			name:     "identity rejected names the override to drop",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentIdentityRejected),
+			wantCode: 4,
+			want:     []string{"refused the Connector identity", "LAYERV_AGENT_ID"},
+		},
+		{
+			name:     "rate limited is the busy story on exit 9",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentRateLimited),
+			wantCode: 9,
+			want:     []string{"couldn't give this Connector its platform assignment", "again in a few minutes"},
+		},
+		{
+			name:     "unavailable shares the busy story on exit 11",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentUnavailable),
+			wantCode: 11,
+			want:     []string{"couldn't give this Connector its platform assignment"},
+		},
+		{
+			name:     "reassignment shares the busy story on exit 11",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentReassignmentRequired),
+			wantCode: 11,
+			want:     []string{"couldn't give this Connector its platform assignment"},
+		},
+		{
+			name:     "recovery required shares the busy story on exit 11",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentRecoveryRequired),
+			wantCode: 11,
+			want:     []string{"couldn't give this Connector its platform assignment"},
+		},
+		{
+			name:     "invalid response is a platform-side fault",
+			err:      fmt.Errorf("native registration: %w", qurl.ErrAssignmentInvalidResponse),
+			wantCode: 10,
+			want:     []string{"can't accept", "problem on the qURL platform side"},
+		},
+		{
+			name:     "expired lease beats the invalid-response reading it also carries",
+			err:      fmt.Errorf("%w: assignment lease must be in the future: %w", qurl.ErrAssignmentInvalidResponse, qurl.ErrAssignmentLeaseExpired),
+			wantCode: 11,
+			want:     []string{"platform assignment has expired"},
+			banned:   []string{"problem on the qURL platform side"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			connectorTestEnv(t)
+			producer := newConnectorProducer(t)
+			res := runCLI(t, &runOpts{
+				args: []string{"--endpoint", producer.URL, "connector", "run",
+					"--id", "billing", "--target", ":8080", "--state-dir", t.TempDir()},
+				env: map[string]string{},
+				connectorOpen: func(context.Context, *agent.Config) (*agent.Runtime, error) {
+					return nil, tc.err
+				},
+			})
+			if res.code != tc.wantCode {
+				t.Fatalf("exit = %d, want %d\nstderr: %s", res.code, tc.wantCode, res.stderr.String())
+			}
+			mustEmptyStdout(t, res)
+			stderr := res.stderr.String()
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr)
+				}
+			}
+			for _, banned := range tc.banned {
+				if strings.Contains(stderr, banned) {
+					t.Errorf("stderr leaked %q to the customer:\n%s", banned, stderr)
+				}
+			}
+			// Every rendering must carry a next step, never a bare restatement.
+			if !strings.Contains(stderr, "Hint:") {
+				t.Errorf("no hint offered:\n%s", stderr)
+			}
+		})
+	}
+}
+
 // TestConnectorGoldens pins the rendered bytes of the connector help and
 // error anatomies. Kept beside the connector suite (not in TestGoldens)
 // because these cases need the real-process-environment pinning and the

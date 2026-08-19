@@ -95,6 +95,29 @@ var sdkSentinels = map[string]struct {
 	"crid.ErrChecksum":                           {crid.ErrChecksum, InvalidInput},
 	"crid.ErrNonCanonical":                       {crid.ErrNonCanonical, InvalidInput},
 	"crid.ErrForbiddenVersion":                   {crid.ErrForbiddenVersion, InvalidInput},
+
+	// The enrollment/assignment taxonomy `qurl connector run` can surface.
+	// Each choice is argued at its case in connectorSentinelCode.
+	// The enrollment token is this surface's credential: refusing it, or the
+	// identity it vouches for, is the Auth row.
+	"qurl.ErrAssignmentKeyRejected":       {qurl.ErrAssignmentKeyRejected, Auth},
+	"qurl.ErrAssignmentBootstrapConsumed": {qurl.ErrAssignmentBootstrapConsumed, Auth},
+	"qurl.ErrAssignmentIdentityRejected":  {qurl.ErrAssignmentIdentityRejected, Auth},
+	// The request, not the credential, was rejected — a valid token minted for
+	// another Connector lands here.
+	"qurl.ErrAssignmentRequestRejected": {qurl.ErrAssignmentRequestRejected, InvalidInput},
+	// Standing entitlement refusals: waiting and retyping both change nothing.
+	"qurl.ErrAssignmentRegistrationDisabled": {qurl.ErrAssignmentRegistrationDisabled, Forbidden},
+	"qurl.ErrAssignmentQuotaExceeded":        {qurl.ErrAssignmentQuotaExceeded, Forbidden},
+	// Still rate limited after the SDK's own bounded retries.
+	"qurl.ErrAssignmentRateLimited": {qurl.ErrAssignmentRateLimited, RateLimited},
+	// The platform is not placing this Connector, or its assignment lapsed.
+	"qurl.ErrAssignmentUnavailable":          {qurl.ErrAssignmentUnavailable, Unavailable},
+	"qurl.ErrAssignmentReassignmentRequired": {qurl.ErrAssignmentReassignmentRequired, Unavailable},
+	"qurl.ErrAssignmentRecoveryRequired":     {qurl.ErrAssignmentRecoveryRequired, Unavailable},
+	"qurl.ErrAssignmentLeaseExpired":         {qurl.ErrAssignmentLeaseExpired, Unavailable},
+	// An authenticated producer-contract violation.
+	"qurl.ErrAssignmentInvalidResponse": {qurl.ErrAssignmentInvalidResponse, ServerError},
 }
 
 // TestSentinelMapping asserts every defined sentinel — CLI and SDK — maps to
