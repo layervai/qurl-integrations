@@ -6,9 +6,13 @@
 # relied on reviewers catching it by hand).
 name: Scripts
 
+# No `merge_group`. #940 added it here for "future merge-queue compatibility",
+# but no queue was ever configured and the required contexts never followed, so
+# it only made a half-wired repo look queue-ready. This check is not even
+# required, so it would have gated nothing in a queue regardless. See the note
+# in workflow-contract.yml, which shed the same trigger in the same change.
 on:
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 concurrency:

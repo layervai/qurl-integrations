@@ -44,6 +44,13 @@ const (
 	contextSeparator = " / "
 	aggregateSuffix  = contextSeparator + "required"
 
+	mergeGroupTrigger        = "merge_group"
+	claudeCodeReviewWorkflow = "claude-code-review.yml"
+	// How GitHub renders a required context that no job ever reports, in the
+	// merge box and in a merge queue alike. It is not a failure state, which is
+	// why every assertion in this file exists.
+	waitingForStatus = "Expected — Waiting for status to be reported"
+
 	liveProtectionEnv = "QURL_LIVE_BRANCH_PROTECTION"
 	// Pinned to the canonical repo rather than derived from the local remote:
 	// the docs in this checkout describe upstream's protection, so a fork
@@ -201,6 +208,106 @@ func TestDocumentedRequiredContextsIncludeWorkflowContractCheck(t *testing.T) {
 	}
 }
 
+// TestMergeGroupTriggersAgreeAcrossRequiredContexts pins the one question every
+// required context has to answer the same way: does the workflow behind it run
+// on `merge_group`?
+//
+// A merge queue evaluates required contexts against its own temporary ref, so a
+// required context whose workflow does not handle that event never reports for
+// a queue entry. The queue then stalls exactly the way the merge box stalled on
+// 2026-08-14 — at waitingForStatus, which is not a failure and so is not
+// noticed — only it strands every entry rather than one PR.
+//
+// This repo's answer is "no", for all of them. Merges here are manual squashes
+// and no queue is configured at all: `gh api
+// repos/layervai/qurl-integrations/branches/main/protection --jq
+// '.required_merge_queue'` returns nothing. Two workflows answered "yes" until
+// 2026-08-19 — workflow-contract.yml from #1092, and scripts.yml from #940
+// explicitly for "future merge-queue compatibility" — and only one of those two
+// backed a required context at all, leaving the other fifteen contexts on the
+// event they were never wired for. Nothing consumed that, so nothing was
+// broken by it; it only meant the repo would have hung on the first queue entry
+// anyone ever tried, with the config reading as though it would not.
+//
+// Enabling a queue is therefore not a matter of adding the trigger back
+// everywhere. `claude-review` comes from claudeCodeReviewWorkflow, which is
+// `pull_request_target`-only by design — it holds ANTHROPIC_API_KEY and so must
+// load from the trusted default branch — and every step of it reads
+// `github.event.pull_request`: the head and base SHAs the review is pinned to,
+// the number it publishes against, the draft and fork guards. A merge group
+// carries no pull request, so that context cannot report on the event at all
+// until the workflow is restructured. Do that first; this test is the last step
+// of enabling a queue, not the first.
+func TestMergeGroupTriggersAgreeAcrossRequiredContexts(t *testing.T) {
+	t.Parallel()
+
+	onMergeGroup := workflowMergeGroupTriggers(t)
+	reported := workflowReportedContexts(t)
+
+	handling, ignoring, unresolved := []string{}, []string{}, []string{}
+	partitioned := map[string]bool{}
+	for _, wanted := range documentedRequiredContexts(t) {
+		files := requiredContextWorkflows(wanted, reported)
+		if len(files) == 0 {
+			unresolved = append(unresolved, wanted)
+			continue
+		}
+		// Several contexts share a workflow — all four age-check callers live
+		// in their own file, and `Validate GitHub Actions pins` shares one with
+		// `age-check / Check GitHub Actions pin ages` — so partition files
+		// rather than contexts, and count each file once.
+		for _, file := range files {
+			if partitioned[file] {
+				continue
+			}
+			partitioned[file] = true
+			if onMergeGroup[file] {
+				handling = append(handling, file)
+			} else {
+				ignoring = append(ignoring, file)
+			}
+		}
+	}
+
+	// A context that resolves to no workflow falls out of both sides, which
+	// would let a genuinely mixed repo read as uniform here. Refuse to
+	// partition a set this test cannot see all of.
+	if len(unresolved) > 0 {
+		sort.Strings(unresolved)
+		t.Fatalf("%d documented required context(s) resolve to no workflow, so this partition covers less than the required set: %s\nTestDocumentedRequiredContextsResolveToWorkflowJobs names the cause; fix that first.",
+			len(unresolved), strings.Join(unresolved, ", "))
+	}
+	sort.Strings(handling)
+	sort.Strings(ignoring)
+
+	switch {
+	case len(handling) > 0 && len(ignoring) > 0:
+		t.Errorf("required-context workflows disagree about %s — %d declare it (%s) and %d do not (%s).\nA merge queue would hang on every entry: it evaluates required contexts against its own ref, so the second group would sit at %q indefinitely. Make the whole set agree in one change; see the %q section of %s.",
+			mergeGroupTrigger, len(handling), strings.Join(handling, ", "), len(ignoring), strings.Join(ignoring, ", "),
+			waitingForStatus, "Merge-result checks", contributingPath)
+	case len(handling) > 0 && len(ignoring) == 0:
+		t.Errorf("every required-context workflow now declares %s (%s), but this repo configures no merge queue and %s documents none.\nIf a queue is intended, land the documentation half in the same operational change that enables it — and check that %s can report on the event at all first, since it is pull_request_target-only and reads github.event.pull_request throughout. Then update this test to assert the queue-ready state.",
+			mergeGroupTrigger, strings.Join(handling, ", "), contributingPath, claudeCodeReviewWorkflow)
+	}
+
+	// A workflow outside the required set cannot hang a queue, because nothing
+	// waits on it. It still fails here: scripts.yml carrying the trigger for a
+	// check branch protection does not require was half of what made the old
+	// state read as merge-queue support, and one straggler is all it takes to
+	// restore that reading.
+	extra := []string{}
+	for file, declared := range onMergeGroup {
+		if declared && !partitioned[file] {
+			extra = append(extra, file)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		t.Errorf("%s declared by workflows that produce no required context, which reads as merge-queue support this repo does not have: %s\nDrop the trigger, or make the whole required set agree with it.",
+			mergeGroupTrigger, strings.Join(extra, ", "))
+	}
+}
+
 // TestContributingCountsMatchTheDocumentedSet checks the two spelled-out counts
 // in the prose. A truncated list reads as plausible; a list of fifteen
 // described as "fifteen in all" that now holds fourteen does not.
@@ -336,18 +443,8 @@ type workflowContexts struct {
 func workflowReportedContexts(t *testing.T) workflowContexts {
 	t.Helper()
 
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	found := workflowContexts{direct: map[string][]string{}, reusable: map[string][]string{}}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		for id, job := range readWorkflow(t, name).Jobs {
 			// A check renders under the job's `name:` when it sets one and
 			// under its job id otherwise.
@@ -370,6 +467,65 @@ func workflowReportedContexts(t *testing.T) workflowContexts {
 		t.Fatal("no direct jobs found in .github/workflows; the scan matched nothing and every resolution check would be vacuous")
 	}
 	return found
+}
+
+// workflowFiles lists the workflow files in .github/workflows. It fails rather
+// than returning an empty list: a renamed directory or a changed extension
+// would otherwise leave every scan built on it with nothing to contradict, and
+// so passing vacuously.
+func workflowFiles(t *testing.T) []string {
+	t.Helper()
+
+	dir := filepath.Join("..", "..", ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows dir: %v", err)
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+			continue
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		t.Fatalf("no workflow files found in %s", dir)
+	}
+	return names
+}
+
+// workflowMergeGroupTriggers reports, for every workflow file, whether it
+// declares the merge_group trigger. Every file gets an entry, so a caller can
+// tell "does not declare it" from "is not a workflow at all".
+func workflowMergeGroupTriggers(t *testing.T) map[string]bool {
+	t.Helper()
+
+	declared := map[string]bool{}
+	for _, name := range workflowFiles(t) {
+		triggers := parseWorkflowTriggers(t, readWorkflow(t, name).On)
+		if len(triggers) == 0 {
+			t.Errorf("%s declares no triggers, so nothing can ever run it", name)
+		}
+		_, ok := triggers[mergeGroupTrigger]
+		declared[name] = ok
+	}
+	return declared
+}
+
+// requiredContextWorkflows resolves a documented required context to the
+// workflow file(s) that would report it, by the same rule
+// TestDocumentedRequiredContextsResolveToWorkflowJobs applies: a direct job
+// name first, then the caller half of a "<caller> / <inner>" reusable call.
+func requiredContextWorkflows(wanted string, reported workflowContexts) []string {
+	if files, ok := reported.direct[wanted]; ok {
+		return files
+	}
+	if caller, _, isPrefixed := strings.Cut(wanted, contextSeparator); isPrefixed {
+		return reported.reusable[caller]
+	}
+	return nil
 }
 
 // documentedRequiredContexts reads the block CONTRIBUTING.md marks as the

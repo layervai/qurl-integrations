@@ -268,6 +268,32 @@ fire `pull_request` workflows for events created by `GITHUB_TOKEN` — the same
 recursion guard `release-please.yml` documents for tag pushes. Those PRs need
 an admin override to merge regardless of the required set.
 
+No workflow here runs on `merge_group`, deliberately. Merges are manual squashes
+and no queue is configured: `gh api
+repos/layervai/qurl-integrations/branches/main/protection --jq
+'.required_merge_queue'` returns nothing. A queue evaluates required contexts
+against its own temporary ref, so a required context whose workflow does not
+handle that event never reports for a queue entry, pinning it at "Expected —
+Waiting for status to be reported" — the 2026-08-14 stall above, strung across
+every entry rather than one pull request. Until 2026-08-19 exactly two workflows
+carried the trigger, `workflow-contract.yml` from #1092 and `scripts.yml` from
+#940 for "future merge-queue compatibility", while the required contexts never
+followed; the configuration read as queue support that would have hung on first
+use. Both lines are gone, and `internal/ciworkflows` now fails when the required
+set stops agreeing, in either direction.
+
+Enabling a queue later is more than restoring those two lines. Every workflow
+behind a required context needs the trigger; the nine aggregates need a
+merge-group path in their `changes` detector, since `dorny/paths-filter` runs
+its pull-request path or its push path here and a queue ref is neither; and
+`claude-review` cannot be given one as written. `claude-code-review.yml` is
+`pull_request_target`-only because it holds `ANTHROPIC_API_KEY` and must load
+from the trusted default branch, and every step reads
+`github.event.pull_request` — the head and base SHAs the review is pinned to,
+the number it publishes against, the draft and fork guards. A merge group
+carries no pull request, so that workflow has to be restructured before the
+required set can agree on `merge_group` at all.
+
 ## Code Conventions
 
 - **Error handling**: Always check errors. Use `errors.Is`/`errors.As`, not type assertions.

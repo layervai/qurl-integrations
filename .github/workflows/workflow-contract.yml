@@ -11,9 +11,14 @@
 # bug, not the tests.
 name: Workflow Contract
 
+# No `merge_group`. This repo merges by hand with squash commits and configures
+# no merge queue, and this workflow carried the trigger from #1092 while
+# the fifteen other required contexts never did — config that read as
+# queue support and would have stalled on first use. internal/ciworkflows
+# asserts every required context's workflow agrees; CONTRIBUTING.md's
+# "Merge-result checks" section has what enabling a queue would actually take.
 on:
   pull_request:
-  merge_group:
   workflow_dispatch:
 
 permissions:

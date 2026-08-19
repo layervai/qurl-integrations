@@ -7,7 +7,7 @@
 // which matches `.github/workflows/slack.yml` alone — so a PR adding a new
 // workflow skipped them entirely and shipped an unregistered aggregate green
 // (#1081). `.github/workflows/workflow-contract.yml` runs this package
-// unfiltered on every PR and merge group instead.
+// unfiltered on every PR instead.
 package ciworkflows
 
 import (
@@ -193,12 +193,17 @@ type step struct {
 	ContinueOnError any `yaml:"continue-on-error"`
 }
 
-// TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup pins the premise
-// that makes these repo-wide tests useful. A paths filter or conditional job
-// would put the check back behind the same green-when-broken hole this package
-// exists to close: a workflow edit outside the filter could violate the
-// contract without causing this check to report at all.
-func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
+// TestWorkflowContractReportsOnEveryPullRequest pins the premise that makes
+// these repo-wide tests useful. A paths filter or conditional job would put the
+// check back behind the same green-when-broken hole this package exists to
+// close: a workflow edit outside the filter could violate the contract without
+// causing this check to report at all.
+//
+// Whether this workflow also runs on merge_group is not asserted here.
+// TestMergeGroupTriggersAgreeAcrossRequiredContexts owns that, because the
+// answer has to be the same for every required context rather than for this
+// one workflow.
+func TestWorkflowContractReportsOnEveryPullRequest(t *testing.T) {
 	workflow := readWorkflow(t, "workflow-contract.yml")
 	triggers := parseWorkflowTriggers(t, workflow.On)
 
@@ -216,9 +221,6 @@ func TestWorkflowContractReportsOnEveryPullRequestAndMergeGroup(t *testing.T) {
 				t.Fatalf("workflow-contract.yml pull_request trigger must not define %s", filter)
 			}
 		}
-	}
-	if _, ok := triggers["merge_group"]; !ok {
-		t.Fatal("workflow-contract.yml must run on merge_group")
 	}
 
 	contract, ok := workflow.Jobs["contract"]
@@ -450,23 +452,13 @@ func parseWorkflowTriggers(t *testing.T, value any) map[string]any {
 // exactly how apps/teams shipped an aggregate-less workflow in #1001 and went
 // unregistered until #1023.
 func TestRequiredWorkflowSpecsCoverEveryAggregate(t *testing.T) {
-	dir := filepath.Join("..", "..", ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read workflows dir: %v", err)
-	}
-
 	registered := make(map[string]bool, len(requiredWorkflowSpecs))
 	for i := range requiredWorkflowSpecs {
 		registered[requiredWorkflowSpecs[i].path] = true
 	}
 
 	seen := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
-			continue
-		}
+	for _, name := range workflowFiles(t) {
 		if _, ok := readWorkflow(t, name).Jobs["required"]; !ok {
 			continue
 		}
