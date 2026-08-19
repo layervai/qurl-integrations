@@ -204,9 +204,9 @@ func TestRunRejectsBadInvocationBeforeCallingSlack(t *testing.T) {
 	}
 }
 
-// TestRunDoesNotEchoTokenEnvName pins the claim the two //nolint:gosec suppressions in
-// writeConfigValidationError rest on: -token-env is echoed back verbatim in the errors
-// an operator hits first, so parseFlags has to reject a name that is not a POSIX
+// TestRunDoesNotEchoTokenEnvName pins the claim the two //nolint:gosec suppression
+// reasons in writeConfigValidationError make: -token-env is echoed back verbatim in the
+// errors an operator hits first, so parseFlags has to reject a name that is not a POSIX
 // environment variable before any of that echo can run.
 // TestRunRejectsBadInvocationBeforeCallingSlack covers names of this shape and now pins
 // that error's wording, but it compares only the first line of stderr — a forged line

@@ -368,13 +368,13 @@ func TestIsEnvVarName(t *testing.T) {
 		{name: "INJECT\nLINE", want: false},
 		// Newline is not the only control character these diagnostics must not carry.
 		// slack-history-upload-smoke's writeConfigValidationError suppresses two gosec
-		// G705 findings on the strength of this rejecting all of them — the suppression
-		// reasons from "cannot carry a control character either" — and slack-dm-smoke
-		// echoes the same flag value behind the same guard. ESC opens a terminal escape
-		// sequence, NUL ends the line early for whatever reads the log, and BEL is
-		// heard rather than seen. Each payload is a valid POSIX name apart from its
-		// single control character, so the row turns red only if the charset rule
-		// itself stops rejecting that rune; one carrying extra punctuation would be
+		// G705 findings and cites this rejecting all of them — "cannot carry a control
+		// character either" — as the reason the write is safe regardless, and
+		// slack-dm-smoke echoes the same flag value behind the same guard. ESC opens a
+		// terminal escape sequence, NUL ends the line early for whatever reads the log,
+		// and BEL is heard rather than seen. Each payload is a valid POSIX name apart
+		// from its single control character, so the row turns red only if the charset
+		// rule itself stops rejecting that rune; one carrying extra punctuation would be
 		// rejected for the punctuation and would survive the loosening it is meant to
 		// catch. slack-history-upload-smoke pins ESC at command depth too, but this is
 		// the shared rule both commands rest on, and NUL and BEL are pinned only here.
